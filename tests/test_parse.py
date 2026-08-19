@@ -353,7 +353,9 @@ def test_point_applescript_replaces_placeholder():
     matt_script = _build_applescript(_plan_payload([matt_slide], Path("/tmp/matt.key"), None))
     assert 'click menu item "Superscript"' not in matt_script
     assert "System Events" not in matt_script
+    assert "offset of" not in matt_script
     assert "set character tokenPos to character 1" in matt_script
+    assert 'using terms from application "Keynote"' in matt_script
     assert "‡" in matt_script
     assert "†" in matt_script
     assert "to (size of character 1)" not in matt_script

@@ -6,13 +6,23 @@ export type Flag = {
   resolved?: string | null;
 };
 
+export type Artifacts = {
+  ok: boolean;
+  missing: string[];
+  suggestedPath?: string | null;
+};
+
 export type Job = {
   id: string;
   kind: string;
+  feature?: string;
   status: "queued" | "running" | "done" | "error";
   logs: string[];
   error?: string | null;
   result?: Record<string, unknown> | null;
+  createdAt?: number;
+  updatedAt?: number;
+  artifacts?: Artifacts;
 };
 
 export type ChosenFile = { path: string; name: string };
@@ -34,6 +44,14 @@ export async function chooseKeynote(prompt: string): Promise<ChosenFile> {
   return res.json();
 }
 
+export async function chooseFolder(prompt: string): Promise<ChosenFile> {
+  const body = new FormData();
+  body.set("prompt", prompt);
+  const res = await fetch("/api/choose-folder", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function reveal(path: string): Promise<void> {
   const body = new FormData();
   body.set("path", path);
@@ -49,8 +67,44 @@ export async function generateDocx(files: File[]): Promise<Job[]> {
   return data.jobs;
 }
 
+export async function listJobs(feature?: string): Promise<Job[]> {
+  const qs = feature ? `?feature=${encodeURIComponent(feature)}` : "";
+  const res = await fetch(`/api/jobs${qs}`);
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.jobs || [];
+}
+
 export async function getJob(id: string): Promise<Job> {
   const res = await fetch(`/api/jobs/${id}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function patchJob(id: string, result: Record<string, unknown>): Promise<Job> {
+  const res = await fetch(`/api/jobs/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ result }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteJob(id: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function relocateJob(
+  id: string,
+  body: { folder?: string; path?: string; leftPath?: string; rightPath?: string }
+): Promise<Job> {
+  const res = await fetch(`/api/jobs/${id}/relocate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -73,13 +127,14 @@ export async function startDiff(
 
 export async function validateKeynote(
   path: string,
-  opts?: { export?: boolean; rangeFrom?: number; rangeTo?: number }
+  opts?: { export?: boolean; rangeFrom?: number; rangeTo?: number; feature?: string }
 ): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
   body.set("export", opts?.export ? "true" : "false");
   if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
   if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
+  if (opts?.feature) body.set("feature", opts.feature);
   const res = await fetch("/api/validate-keynote", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

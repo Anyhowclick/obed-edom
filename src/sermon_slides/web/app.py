@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from pydantic import BaseModel
 from sermon_slides.diff_keynotes import compare_inspects
 from sermon_slides.inspect import diff_work_dir, inspect_keynote, preview_pngs
 from sermon_slides.paths import find_repo_root
@@ -22,6 +23,17 @@ RUNNER = JobRunner()
 ROOT = find_repo_root()
 UPLOADS = ROOT / "output" / ".uploads"
 DASHBOARD_DIST = ROOT / "dashboard" / "dist"
+
+
+class JobPatch(BaseModel):
+    result: dict[str, Any]
+
+
+class RelocateBody(BaseModel):
+    folder: str | None = None
+    path: str | None = None
+    leftPath: str | None = None
+    rightPath: str | None = None
 
 
 def create_app() -> FastAPI:
@@ -67,6 +79,26 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "No file selected")
         return {"path": path, "name": Path(path).name}
 
+    @app.post("/api/choose-folder")
+    def choose_folder(prompt: str = Form("Select the output folder")) -> dict:
+        script = (
+            f'set theFolder to choose folder with prompt "{_as_escape(prompt)}"\n'
+            "POSIX path of theFolder"
+        )
+        proc = subprocess.run(
+            ["osascript", "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(400, (proc.stderr or proc.stdout or "Cancelled").strip())
+        path = (proc.stdout or "").strip().rstrip("/")
+        if not path:
+            raise HTTPException(400, "No folder selected")
+        return {"path": path, "name": Path(path).name}
+
     @app.post("/api/reveal")
     def reveal(path: str = Form(...)) -> dict:
         target = Path(path).expanduser()
@@ -76,15 +108,44 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/jobs")
-    def list_jobs(kind: str | None = None) -> dict:
-        return {"jobs": [j.to_dict() for j in RUNNER.list(kind)]}
+    def list_jobs(kind: str | None = None, feature: str | None = None) -> dict:
+        return {"jobs": [RUNNER.public_dict(j) for j in RUNNER.list(kind, feature)]}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict:
         job = RUNNER.get(job_id)
         if not job:
             raise HTTPException(404, "Unknown job")
-        return job.to_dict()
+        return RUNNER.public_dict(job)
+
+    @app.patch("/api/jobs/{job_id}")
+    def patch_job(job_id: str, payload: JobPatch) -> dict:
+        job = RUNNER.update_result(job_id, payload.result)
+        if not job:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(job)
+
+    @app.post("/api/jobs/{job_id}/relocate")
+    def relocate_job(job_id: str, payload: RelocateBody) -> dict:
+        try:
+            job = RUNNER.relocate(
+                job_id,
+                folder=payload.folder,
+                path=payload.path,
+                left_path=payload.leftPath,
+                right_path=payload.rightPath,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not job:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(job)
+
+    @app.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str) -> dict:
+        if not RUNNER.delete(job_id, purge=True):
+            raise HTTPException(404, "Unknown job")
+        return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/previews/{deck}/{filename}")
     def job_preview(job_id: str, deck: str, filename: str):
@@ -128,7 +189,7 @@ def create_app() -> FastAPI:
             saved.append(dest)
         jobs = []
         for path in saved:
-            job = RUNNER.submit("generate", lambda j, p=path: _run_generate(j, p))
+            job = RUNNER.submit("generate", lambda j, p=path: _run_generate(j, p), feature="generate")
             jobs.append(job.to_dict())
         return {"jobs": jobs}
 
@@ -146,6 +207,7 @@ def create_app() -> FastAPI:
         job = RUNNER.submit(
             "diff",
             lambda j, a=left, b=right, la=left_label, lb=right_label: _run_diff(j, a, b, la, lb),
+            feature="diff",
         )
         return job.to_dict()
 
@@ -170,14 +232,17 @@ def create_app() -> FastAPI:
         export: str = Form("false"),
         range_from: int | None = Form(None),
         range_to: int | None = Form(None),
+        feature: str = Form("inspect"),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
+        tag = feature if feature in {"dsk", "resize", "inspect", "dsk-aux"} else "inspect"
         job = RUNNER.submit(
             "inspect",
             lambda j, p=key, ex=do_export, rf=range_from, rt=range_to: _run_inspect(j, p, ex, rf, rt),
+            feature=tag,
         )
         return job.to_dict()
 

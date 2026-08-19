@@ -1,33 +1,40 @@
 import { useEffect, useState } from "react";
 import {
   chooseKeynote,
+  deleteJob,
   getTemplates,
+  patchJob,
   pollJob,
-  previewUrl,
   stubDsk,
   validateKeynote,
   type ChosenFile,
   type Flag,
-  type Job,
 } from "../api";
 import { FileWell } from "../components/FileWell";
-import { Lightbox, LoadingOverlay, PreviewGrid } from "../components/PreviewGrid";
-import { ValidationPanel } from "../components/ValidationPanel";
+import { InspectResultView } from "../components/InspectResultView";
+import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
+import { useCurrentJob } from "../sessions";
 
 export function DskTab() {
+  const { job, upsert, error: openError } = useCurrentJob("dsk");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [dsk, setDsk] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState("");
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [job, setJob] = useState<Job | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const result = (job?.result || undefined) as { path?: string } | undefined;
 
   useEffect(() => {
     getTemplates().then((t) => setTemplate(t.dskTemplate || t.dskTemplatePath));
   }, []);
+
+  useEffect(() => {
+    const path = result?.path;
+    if (path) setLw({ path, name: path.split("/").pop() || path });
+  }, [job?.id, result?.path]);
 
   async function inspectAll() {
     if (!lw) {
@@ -37,22 +44,26 @@ export function DskTab() {
     setError(null);
     setBusy(true);
     try {
-      const first = await validateKeynote(lw.path, { export: true });
+      const first = await validateKeynote(lw.path, { export: true, feature: "dsk" });
+      upsert(first);
       let done = await pollJob(first.id, (tick) => {
         setLogs(tick.logs);
-        setJob(tick);
+        upsert(tick);
       });
+      upsert(done);
       if (dsk) {
-        const second = await validateKeynote(dsk.path, { export: false });
+        const second = await validateKeynote(dsk.path, { export: false, feature: "dsk-aux" });
         const dskDone = await pollJob(second.id, (tick) => setLogs((prev) => [...prev, ...tick.logs]));
         const a = (done.result || {}) as { flags?: Flag[] };
         const b = (dskDone.result || {}) as { flags?: Flag[] };
-        done = {
-          ...done,
-          result: { ...done.result, flags: [...(a.flags || []), ...(b.flags || [])] },
+        const merged = {
+          ...(done.result || {}),
+          flags: [...(a.flags || []), ...(b.flags || [])],
         };
+        done = await patchJob(done.id, merged);
+        upsert(done);
+        await deleteJob(second.id).catch(() => undefined);
       }
-      setJob(done);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -64,19 +75,13 @@ export function DskTab() {
     setNotice(await stubDsk());
   }
 
-  const result = job?.result as
-    | { flags?: Flag[]; previewFileNames?: string[]; previewFiles?: { lw: string[] } }
-    | undefined;
-  const names = result?.previewFileNames || result?.previewFiles?.lw || [];
-  const urls =
-    job && names.map((name: string, i: number) => ({ src: previewUrl(job.id, "lw", name), label: `LW ${i + 1}` }));
-
   return (
     <div>
       <h1>DSK generator</h1>
       <p className="lede">
         Shadow content from a finalised LW into a DSK deck (from an existing DSK or the template masters).
-        Generation logic is not implemented yet; validation still runs.
+        Generation logic is not implemented yet; validation still runs. Finished checks are kept under
+        Previous runs.
       </p>
       <div className="row">
         <FileWell
@@ -115,10 +120,9 @@ export function DskTab() {
         </button>
       </div>
       {notice && <p className="note">{notice}</p>}
-      {error && <p className="err">{error}</p>}
+      {(error || openError) && <p className="err">{error || openError}</p>}
       {busy && <LoadingOverlay title="Validating Keynote…" logs={logs} />}
-      {urls && urls.length > 0 && <PreviewGrid urls={urls} onOpen={setOpen} />}
-      <ValidationPanel flags={result?.flags || []} />
+      {job && <InspectResultView job={job} labelPrefix="LW" onOpen={setOpen} />}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

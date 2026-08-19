@@ -1,17 +1,9 @@
-import { useState } from "react";
-import {
-  chooseKeynote,
-  pollJob,
-  previewUrl,
-  stubResize,
-  validateKeynote,
-  type ChosenFile,
-  type Flag,
-  type Job,
-} from "../api";
+import { useEffect, useState } from "react";
+import { chooseKeynote, pollJob, stubResize, validateKeynote, type ChosenFile } from "../api";
 import { FileWell } from "../components/FileWell";
-import { Lightbox, LoadingOverlay, PreviewGrid } from "../components/PreviewGrid";
-import { ValidationPanel } from "../components/ValidationPanel";
+import { InspectResultView } from "../components/InspectResultView";
+import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
+import { useCurrentJob } from "../sessions";
 
 function parseRange(raw: string): { from: number; to: number } | null {
   const m = raw.trim().match(/^(\d+)\s*[-–—]\s*(\d+)$/);
@@ -23,14 +15,20 @@ function parseRange(raw: string): { from: number; to: number } | null {
 }
 
 export function ResizeTab() {
+  const { job, upsert, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("5-12");
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
-  const [job, setJob] = useState<Job | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const result = (job?.result || undefined) as { path?: string } | undefined;
+
+  useEffect(() => {
+    const path = result?.path;
+    if (path) setLw({ path, name: path.split("/").pop() || path });
+  }, [job?.id, result?.path]);
 
   async function runValidate() {
     if (!lw) {
@@ -49,12 +47,14 @@ export function ResizeTab() {
         export: true,
         rangeFrom: parsed.from,
         rangeTo: parsed.to,
+        feature: "resize",
       });
+      upsert(created);
       const done = await pollJob(created.id, (tick) => {
         setLogs(tick.logs);
-        setJob(tick);
+        upsert(tick);
       });
-      setJob(done);
+      upsert(done);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -70,19 +70,13 @@ export function ResizeTab() {
     setNotice(await stubResize());
   }
 
-  const result = job?.result as
-    | { flags?: Flag[]; previewFileNames?: string[]; previewFiles?: { lw: string[] }; slideWidth?: number; slideHeight?: number }
-    | undefined;
-  const names = result?.previewFileNames || result?.previewFiles?.lw || [];
-  const urls =
-    job && names.map((name: string, i: number) => ({ src: previewUrl(job.id, "lw", name), label: `Slide ${i + 1}` }));
-
   return (
     <div>
       <h1>CG resizer</h1>
       <p className="lede">
         Read existing FW or LW content (7680 or 3840 × 1080) and resize a slide range into a new 1920×1080
         Keynote, preserving animations and map pins. Resize logic is not implemented yet; validation still runs.
+        Finished checks are kept under Previous runs.
       </p>
       <FileWell
         label="Finalised LW / FW .key"
@@ -110,15 +104,9 @@ export function ResizeTab() {
         </button>
       </div>
       {notice && <p className="note">{notice}</p>}
-      {error && <p className="err">{error}</p>}
+      {(error || openError) && <p className="err">{error || openError}</p>}
       {busy && <LoadingOverlay title="Validating range…" logs={logs} />}
-      {result?.slideWidth && (
-        <p className="note">
-          Source canvas {result.slideWidth}×{result.slideHeight}
-        </p>
-      )}
-      {urls && urls.length > 0 && <PreviewGrid urls={urls} onOpen={setOpen} />}
-      <ValidationPanel flags={result?.flags || []} />
+      {job && <InspectResultView job={job} onOpen={setOpen} />}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );
