@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+import webbrowser
 from pathlib import Path
 
+from sermon_slides.paths import find_repo_root
 from sermon_slides.pipeline import generate
 
 
@@ -25,6 +27,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip PNG export and contrast checks.",
     )
+    dash = sub.add_parser("dashboard", help="Run the local operator dashboard.")
+    dash.add_argument("--host", default="127.0.0.1")
+    dash.add_argument("--port", type=int, default=8765)
+    dash.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "generate":
@@ -48,7 +54,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Slides: {len(result.lw_slides)} LW, {len(result.dsk_slides)} DSK")
         print(f"Flags:  {len(warn)} warning/error, {len(result.flags)} total")
         return 0
+
+    if args.command == "dashboard":
+        return _run_dashboard(args.host, args.port, open_browser=not args.no_browser)
     return 2
+
+
+def _run_dashboard(host: str, port: int, *, open_browser: bool) -> int:
+    dist = find_repo_root() / "dashboard" / "dist"
+    if not dist.is_dir():
+        print(
+            "UI bundle not found. From repo root:\n"
+            "  cd dashboard && npm install && npm run build\n"
+            "Or run the Vite dev server (npm run dev) against this API.",
+            file=sys.stderr,
+        )
+    url = f"http://{host}:{port}"
+    print(f"Dashboard API: {url}")
+    if open_browser:
+        webbrowser.open(url)
+    import uvicorn
+
+    uvicorn.run("sermon_slides.web.app:app", host=host, port=port, reload=False)
+    return 0
 
 
 if __name__ == "__main__":

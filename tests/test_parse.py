@@ -351,7 +351,9 @@ def test_point_applescript_replaces_placeholder():
 
     matt_slide = next(s for s in lw if s.role == "verse" and "Take and eat" in (s.body or ""))
     matt_script = _build_applescript(_plan_payload([matt_slide], Path("/tmp/matt.key"), None))
-    assert 'click menu item "Superscript"' in matt_script
+    assert 'click menu item "Superscript"' not in matt_script
+    assert "System Events" not in matt_script
+    assert "set character tokenPos to character 1" in matt_script
     assert "‡" in matt_script
     assert "†" in matt_script
     assert "to (size of character 1)" not in matt_script

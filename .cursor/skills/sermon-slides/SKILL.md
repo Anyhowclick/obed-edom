@@ -19,6 +19,12 @@ From the repo root:
 python -m sermon_slides generate "/path/to/outline.docx"
 ```
 
+Local operator dashboard (generate, diff, DSK stub, CG resize stub):
+
+```bash
+python -m sermon_slides dashboard
+```
+
 Staff-only parse (no Keynote):
 
 ```bash

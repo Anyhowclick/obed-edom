@@ -105,7 +105,7 @@ def _prepare_styled_runs(runs: list[dict]) -> tuple[str, str, list[dict]]:
 
     Later verse numbers stay ASCII. Unicode superscripts ² and ⁷/⁸ come from
     different code charts, so mixing them makes 27/28 look like mismatched
-    digit sizes. Keynote then applies real Superscript via Find + Format menu.
+    digit sizes. Later numbers copy superscript from the template seed character.
     """
     cleaned: list[dict] = []
     skipping = True
@@ -284,52 +284,31 @@ def _append_seeded_text(
 
 
 def _append_later_superscripts(lines: list[str], idx: int, replacements: list[tuple[str, str]]) -> None:
-    """Select each later verse number and apply Format > Font > Baseline > Superscript.
+    """Copy the template's superscript seed onto later verse-number tokens.
 
-    Keynote AppleScript has no superscript property. Find selects the token,
-    the menu applies 70pt superscript, then the token is restored to digits
-    through that superscripted character (same seed trick as 26).
+    Keynote AppleScript has no superscript property. Character 1 on a VERSES
+    body is already superscript; assigning it onto the token copies that
+    attribute, then we write the real digits through it (same trick as 26).
+
+    Do not use Find, the clipboard, or Format > Font > Baseline > Superscript:
+    that click is compiled inside ``tell application "Keynote"``, where ``menu``
+    is a Keynote class (syntax error: plural class name). GUI scripting also
+    fails from the dashboard worker (HIServices clipboard connection invalid).
     """
     if not replacements:
         return
-    lines += [
-        "            try",
-        '              set savedClip to the clipboard as string',
-        "            on error",
-        '              set savedClip to ""',
-        "            end try",
-    ]
     for token, digits in replacements:
         token_lit = _as_escape(token)
         digits_lit = _as_escape(digits)
         lines += [
             f'            if (object text of text item {idx} as string) contains "{token_lit}" then',
-            "              try",
-            '                tell application "System Events"',
-            '                  tell process "Keynote"',
-            "                    set frontmost to true",
-            '                    keystroke "f" using command down',
-            "                    delay 0.2",
-            '                    keystroke "a" using command down',
-            f'                    set the clipboard to "{token_lit}"',
-            '                    keystroke "v" using command down',
-            "                    delay 0.12",
-            "                    keystroke return",
-            "                    delay 0.12",
-            "                    key code 53",
-            "                    delay 0.12",
-            '                    click menu item "Superscript" of menu 1 of menu item "Baseline" '
-            'of menu 1 of menu item "Font" of menu 1 of menu bar item "Format" of menu bar 1',
-            "                    delay 0.12",
-            "                  end tell",
-            "                end tell",
-            "              end try",
             f"              tell object text of text item {idx}",
             "                set tokenHay to it as string",
             "              end tell",
             f'              set tokenPos to offset of "{token_lit}" in tokenHay',
             "              if tokenPos > 0 then",
             f"                tell object text of text item {idx}",
+            "                  set character tokenPos to character 1",
         ]
         if len(token) > 1:
             lines.append(
@@ -342,11 +321,6 @@ def _append_later_superscripts(lines: list[str], idx: int, replacements: list[tu
             "              end if",
             "            end if",
         ]
-    lines += [
-        "            try",
-        "              set the clipboard to savedClip",
-        "            end try",
-    ]
 
 
 def _plan_payload(slides: list[SlideSpec], output: Path, export_dir: Path | None, overlays: list[dict] | None = None) -> dict:
@@ -492,9 +466,8 @@ def _build_applescript(plan: dict) -> str:
                 end = cursor + n - 1
                 if style_name == "verse_number":
                     lines.append(f"            set color of characters {start} thru {end} to {{{look['color'][0]}, {look['color'][1]}, {look['color'][2]}}}")
-                    # First number keeps the template seed. Later numbers already
-                    # have Format > Superscript. Never copy the effective 46.67pt
-                    # size onto the default baseline.
+                    # First number keeps the template seed. Later numbers copy
+                    # that seed's superscript via character 1, then get digits.
                 elif style_name == "highlight":
                     lines.append(f"            set color of characters {start} thru {end} to {{{look['color'][0]}, {look['color'][1]}, {look['color'][2]}}}")
                     if look.get("font"):
