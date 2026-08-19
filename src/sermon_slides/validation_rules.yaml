@@ -1,0 +1,19 @@
+# Machine-readable house style. See .cursor/skills/sermon-validation/SKILL.md
+trinity_must_be_caps:
+  - God
+  - Father
+  - Son
+trinity_associated:
+  - My
+book_names:
+  Psalms: Psalm
+  Revelation: Revelations
+date_en_dash: true
+highlight_punctuation: true
+center_wall:
+  width: 3840
+  height: 1080
+quotes:
+  living: name_only
+  deceased: name_and_lifespan
+follow_bible_gateway: true

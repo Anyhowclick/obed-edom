@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from sermon_slides.annotate import annotate_outline
-from sermon_slides.bible import check_bible
 from sermon_slides.contrast import check_contrast
 from sermon_slides.keynote import generate_both, generate_deck, output_dir_for
 from sermon_slides.models import Flag, GenerationResult
 from sermon_slides.parse_outline import parse_outline
 from sermon_slides.report import write_review
 from sermon_slides.slide_map import load_masters, map_slides
+from sermon_slides.validate import validate_outline
 
 
 def _cleanup_output(out_dir: Path) -> None:
@@ -30,7 +30,7 @@ def generate(
     outline = parse_outline(docx)
     lw, dsk, map_flags = map_slides(outline)
     flags: list[Flag] = []
-    flags.extend(check_bible(outline))
+    flags.extend(validate_outline(outline))
     flags.extend(map_flags)
 
     out_dir = output_dir_for(docx)

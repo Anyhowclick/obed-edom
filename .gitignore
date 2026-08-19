@@ -13,3 +13,4 @@ Default Templates/*
 !Default Templates/.gitkeep
 Sermon Outlines/*
 !Sermon Outlines/.gitkeep
+dashboard/node_modules/

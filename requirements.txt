@@ -3,3 +3,7 @@ PyYAML>=6.0
 Pillow>=10.0
 python-dotenv>=1.0
 requests>=2.31
+reportlab>=4.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
