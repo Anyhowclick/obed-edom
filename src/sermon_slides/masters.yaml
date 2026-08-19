@@ -1,0 +1,150 @@
+lw:
+  template: Default Templates/Sermon_GW.key
+  series_opener_master: TITLE
+  verse_char_max: 320
+  verse_body_y: 97
+  verse_body_max_bottom: 550
+  verse_body_max_height: 550
+  verse_body_margin: 12
+  verse_body_default_height: 372
+  verse_body_font_size: 70
+  verse_body_shrink_threshold: 260
+  verse_body_min_font_size: 52
+  points_line1_font_size: 180
+  points_line2_font_size: 85
+  points_line3_font_size: 55
+  points_line1_max_chars: 28
+  points_line2_max_chars: 36
+  points_line3_max_chars: 40
+  points_line1_min_font_size: 64
+  points_line2_min_font_size: 52
+  points_line3_min_font_size: 42
+  points_pre_box_width: 1680
+  points_post_box_width: 820
+  points_char_width_em: 0.62
+  cues:
+    TITLE:
+      master: TITLE
+      operator: LW-TITLE
+      note: Title slide uses the TITLE master background (series bumper). Outline text is not placed on LW.
+    FILLER:
+      sermon_master: TITLE
+      sermon_operator: LW-TITLE
+      offering_master: BLANK
+      offering_operator: LW-OFFERING FILLER
+      offering_dsk: Ways To Give QR Code
+      offering_dsk_operator: DSK-PP-QR CODE
+    FILLER-QR:
+      master: BLANK
+      operator: LW-OFFERING FILLER
+      dsk: Ways To Give QR Code
+      dsk_operator: DSK-PP-QR CODE
+    GIVING-OPTIONS:
+      master: BLANK
+      operator: LW-GIVING OPTIONS
+      flag: Sermon_GW has no giving-options master. Drop in the LED giving graphic manually.
+      dsk: Ways To Give DSK CREDIT CARD
+      dsk_operator: DSK-PP-GIVING OPTIONS
+      dsk_flag: Using CREDIT CARD giving master. Switch to BIL / no-card variant in Keynote if needed.
+    VERSE:
+      master: VERSES
+      operator: LW
+    POINT:
+      pre: NON-NUMBERED POINT PRE
+      post: NON-NUMBERED POINT POST
+      operator: LW
+    NUM-POINT:
+      pre: NUMBERED POINT PRE
+      post: NUMBERED POINT POST
+      operator: LW
+  text_items:
+    TITLE: {}
+    BLANK: {}
+    VERSES:
+      reference: 1
+      body: 2
+    NUMBERED POINT PRE:
+      line1: 1
+      line2: 2
+      line3: 3
+      point_number: 4
+    NUMBERED POINT POST:
+      line1: 1
+      line2: 2
+      line3: 3
+      point_number: 4
+      reference: 5
+      body: 6
+    NON-NUMBERED POINT PRE:
+      line1: 1
+      line2: 2
+      line3: 3
+    NON-NUMBERED POINT POST:
+      line1: 1
+      line2: 2
+      line3: 3
+      reference: 4
+      body: 5
+
+dsk:
+  template: Default Templates/2026_Lower-Thirds (ENG).key
+  verse_char_one_line: 80
+  verse_char_max: 220
+  offering_verse_char_one_line: 90
+  offering_verse_char_max: 190
+  offering_verse_body_width: 1540
+  point_char_two_lines: 90
+  point_font_size: 44
+  point_min_font_size: 26
+  point_pre_box_width: 1480
+  point_post_box_width: 700
+  point_char_width_em: 0.58
+  point_post_max_chars: 50
+  cues:
+    VERSE:
+      operator: DSK-PP
+      sermon_verse_standard: Verse Standard (Variation 2)
+      sermon_verse_one_line: Verse 1 Line (Variation 2)
+      offering_verse_standard: Verse (Offering) (Variation 2)
+      offering_verse_one_line: Verse (Offering 1 Line) (Variation 2)
+    POINT:
+      operator: DSK-PP
+      pre: Non-Num Point with Verse-Pre
+      post: Non-Num Point with Verse-Post
+      sermon_point_2: Point (2 Lines)
+      sermon_point_3: Point 3 Lines
+      offering_point_2: Points (Offering 2 Lines)
+      offering_point_3: Points (Offering 3 Lines)
+    NUM-POINT:
+      operator: DSK-PP
+      pre: Num Point with Verse-Pre
+      post: Num Point with Verse-Post
+    FILLER-QR:
+      master: Ways To Give QR Code
+      operator: DSK-PP-QR CODE
+    GIVING-OPTIONS:
+      master: Ways To Give DSK CREDIT CARD
+      operator: DSK-PP-GIVING OPTIONS
+      flag: Using CREDIT CARD giving master. Switch to BIL / no-card variant in Keynote if needed.
+  text_items:
+    verse:
+      body: 1
+      header: 2
+    NUM-POINT-PRE:
+      body: 1
+      point_number: 2
+    NUM-POINT-POST:
+      verse_body: 1
+      reference: 2
+      extra:
+        body: {x: 54, y: 893, width: 350, height: 125}
+        point_number: {x: 54, y: 836, width: 140, height: 50}
+    POINT-PRE:
+      body: 1
+    POINT-POST:
+      verse_body: 1
+      reference: 2
+      body: 3
+      frames:
+        3: {x: 82, y: 870, width: 320, height: 158}
+    graphic: {}

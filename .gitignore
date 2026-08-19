@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.DS_Store
+output/*
+!output/.gitkeep
+*.applescript
+
+# Keep the folders, ignore the (large) files inside.
+Default Templates/*
+!Default Templates/.gitkeep
+Sermon Outlines/*
+!Sermon Outlines/.gitkeep

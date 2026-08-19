@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from sermon_slides.annotate import annotate_outline
+from sermon_slides.bible import check_bible
+from sermon_slides.contrast import check_contrast
+from sermon_slides.keynote import generate_both, generate_deck, output_dir_for
+from sermon_slides.models import Flag, GenerationResult
+from sermon_slides.parse_outline import parse_outline
+from sermon_slides.report import write_review
+from sermon_slides.slide_map import load_masters, map_slides
+
+
+def _cleanup_output(out_dir: Path) -> None:
+    for leftover in out_dir.glob("*.json"):
+        leftover.unlink(missing_ok=True)
+    md = out_dir / "review.md"
+    if md.exists():
+        md.unlink()
+
+
+def generate(
+    docx: Path | str,
+    *,
+    make_keynote: bool = True,
+    check_visuals: bool = True,
+) -> GenerationResult:
+    docx = Path(docx).expanduser().resolve()
+    outline = parse_outline(docx)
+    lw, dsk, map_flags = map_slides(outline)
+    flags: list[Flag] = []
+    flags.extend(check_bible(outline))
+    flags.extend(map_flags)
+
+    out_dir = output_dir_for(docx)
+    review_path = out_dir / "review.pdf"
+    lw_key = None
+    dsk_key = None
+    stem = docx.stem.replace(" ", "_")
+    cued_docx = annotate_outline(outline, lw, dsk, out_dir / f"{stem}_CUED.docx")
+
+    if make_keynote:
+        out_dir, lw_key, dsk_key, lw_result, dsk_result = generate_both(
+            docx, lw, dsk, export=check_visuals
+        )
+        for result, deck in ((lw_result, "LW"), (dsk_result, "DSK")):
+            missing = result.get("missingMasters") or []
+            if missing:
+                flags.append(
+                    Flag(
+                        "error",
+                        "keynote",
+                        f"{deck} missing masters: {', '.join(missing)}",
+                    )
+                )
+            if check_visuals and not result.get("exported"):
+                flags.append(
+                    Flag("warning", "contrast", f"{deck} PNG export did not run; contrast not measured.")
+                )
+
+        if check_visuals and lw_key:
+            lw_flags, overlays = check_contrast(lw, out_dir / "previews" / "lw", "lw")
+            flags.extend(lw_flags)
+            if overlays:
+                masters = load_masters()
+                generate_deck(
+                    lw,
+                    masters["lw"]["template"],
+                    lw_key,
+                    out_dir / "previews" / "lw",
+                    overlays=overlays,
+                )
+                again, _ = check_contrast(lw, out_dir / "previews" / "lw", "lw")
+                flags.extend(
+                    Flag("info", "contrast", f"Re-checked after overlay: {f.message}", location=f.location)
+                    for f in again
+                    if f.severity != "warning"
+                )
+        if check_visuals and dsk_key:
+            dsk_flags, _ = check_contrast(dsk, out_dir / "previews" / "dsk", "dsk")
+            flags.extend(dsk_flags)
+
+    if lw_key is None:
+        candidate = out_dir / f"{stem}_LW.key"
+        if candidate.exists():
+            lw_key = candidate
+    if dsk_key is None:
+        candidate = out_dir / f"{stem}_DSK.key"
+        if candidate.exists():
+            dsk_key = candidate
+
+    write_review(review_path, outline, lw, dsk, flags, lw_key, dsk_key)
+    _cleanup_output(out_dir)
+    return GenerationResult(
+        output_dir=out_dir,
+        lw_key=lw_key,
+        dsk_key=dsk_key,
+        review_path=review_path,
+        flags=flags,
+        lw_slides=lw,
+        dsk_slides=dsk,
+        cued_docx=cued_docx,
+    )
