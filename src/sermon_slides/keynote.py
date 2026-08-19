@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 from sermon_slides.models import SlideSpec
@@ -290,36 +292,43 @@ def _append_later_superscripts(lines: list[str], idx: int, replacements: list[tu
     body is already superscript; assigning it onto the token copies that
     attribute, then we write the real digits through it (same trick as 26).
 
-    Do not use Find, the clipboard, or Format > Font > Baseline > Superscript:
-    that click is compiled inside ``tell application "Keynote"``, where ``menu``
-    is a Keynote class (syntax error: plural class name). GUI scripting also
-    fails from the dashboard worker (HIServices clipboard connection invalid).
+    Do not use Find, ``offset of``, the clipboard, or Format > Font > Baseline
+    > Superscript. ``offset of`` is Standard Additions; inside ``tell Keynote``
+    it can compile as a Keynote class (syntax error: plural class name). GUI
+    scripting also fails from the dashboard worker (HIServices clipboard
+    connection invalid). Scan the text item's characters instead.
     """
     if not replacements:
         return
     for token, digits in replacements:
         token_lit = _as_escape(token)
         digits_lit = _as_escape(digits)
+        token_len = len(token)
+        last_rel = token_len - 1
         lines += [
-            f'            if (object text of text item {idx} as string) contains "{token_lit}" then',
-            f"              tell object text of text item {idx}",
-            "                set tokenHay to it as string",
-            "              end tell",
-            f'              set tokenPos to offset of "{token_lit}" in tokenHay',
+            f"            tell object text of text item {idx}",
+            "              set hayCount to count of characters",
+            "              set tokenPos to 0",
+            f"              if hayCount >= {token_len} then",
+            f"                repeat with scanI from 1 to (hayCount - {token_len} + 1)",
+            f'                  if (characters scanI thru (scanI + {last_rel}) as text) is "{token_lit}" then',
+            "                    set tokenPos to scanI",
+            "                    exit repeat",
+            "                  end if",
+            "                end repeat",
+            "              end if",
             "              if tokenPos > 0 then",
-            f"                tell object text of text item {idx}",
-            "                  set character tokenPos to character 1",
+            "                set character tokenPos to character 1",
         ]
-        if len(token) > 1:
+        if token_len > 1:
             lines.append(
-                f"                  delete characters (tokenPos + 1) thru "
-                f"(tokenPos + {len(token) - 1})"
+                f"                delete characters (tokenPos + 1) thru "
+                f"(tokenPos + {token_len - 1})"
             )
         lines += [
-            f'                  set character tokenPos to "{digits_lit}"',
-            "                end tell",
+            f'                set character tokenPos to "{digits_lit}"',
             "              end if",
-            "            end if",
+            "            end tell",
         ]
 
 
@@ -374,6 +383,7 @@ def _build_applescript(plan: dict) -> str:
     output = plan["output"]
     export_dir = plan.get("exportDir") or ""
     lines = [
+        'using terms from application "Keynote"',
         'tell application "Keynote"',
         "  activate",
         f'  set theFile to POSIX file "{_as_escape(output)}"',
@@ -572,19 +582,30 @@ def _build_applescript(plan: dict) -> str:
         "  end try",
         "  return (createdCount as text) & tab & exported & tab & missingMasters",
         "end tell",
+        "end using terms from",
     ]
     return "\n".join(lines)
 
 
 def run_applescript(plan: dict) -> dict:
     script = _build_applescript(plan)
-    proc = subprocess.run(
-        ["osascript", "-"],
-        input=script,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    # File + LaunchServices, not stdin: uvicorn's worker thread makes
+    # osascript's HIServices/clipboard connection fail, and then Keynote's
+    # dictionary never loads (syntax error on ``properties``).
+    subprocess.run(["open", "-a", "Keynote"], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osascript", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         debug = Path(plan["output"]).with_suffix(".applescript")
         debug.write_text(script, encoding="utf-8")
