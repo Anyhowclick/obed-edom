@@ -303,6 +303,24 @@ def _verse_anchor(prepared: list[dict], run_index: int) -> str:
     return anchor if anchor.strip() else ""
 
 
+def _seed_verse_job(prepared: list[dict]) -> dict | None:
+    """The first verse number, whose character style pass 2 copies from.
+
+    The template applies its verse-number character style ("SuperScript" on LW,
+    "Verse Number" on DSK) to this one only, so it is the donor for the rest.
+    """
+    for run_index, run in enumerate(prepared):
+        text = run.get("text") or ""
+        if not text:
+            continue
+        if (run.get("style") or "normal") == "verse_number":
+            anchor = _verse_anchor(prepared, run_index)
+            if not anchor:
+                return None
+            return {"digits": text.strip(), "len": len(text), "anchor": anchor}
+    return None
+
+
 def _later_verse_jobs(prepared: list[dict]) -> list[dict]:
     """Character positions and digits for verse numbers after the first superscript seed."""
     jobs: list[dict] = []
@@ -336,8 +354,14 @@ def _collect_superscript_jobs(slides: list[SlideSpec]) -> list[dict]:
         for idx, runs in spec.styled_items.items():
             payload = [{"text": r.text, "style": r.style} for r in runs]
             first_super, _, prepared = _prepare_styled_runs(payload)
-            later = _later_verse_jobs(prepared)
+            # Only keep work pass 2 can actually do: pass 1 hands the open deck
+            # over whenever this list is non-empty, so an entry it would skip
+            # would leave the deck open, unexported and never closed.
+            later = [v for v in _later_verse_jobs(prepared) if v["anchor"]]
             if not first_super or not later:
+                continue
+            seed = _seed_verse_job(prepared)
+            if not seed:
                 continue
             marker = ""
             for run in prepared:
@@ -348,6 +372,7 @@ def _collect_superscript_jobs(slides: list[SlideSpec]) -> list[dict]:
                 {
                     "textItem": int(idx),
                     "marker": marker,
+                    "seed": seed,
                     "laterVerses": later,
                 }
             )
@@ -374,22 +399,66 @@ def _superscript_anchor_plan(jobs: list[dict]) -> list[dict]:
     ]
 
 
-def _append_superscript_gui_pass(lines: list[str], plan: list[dict]) -> None:
-    """Select each later verse number through the Find bar and apply Baseline > Superscript.
+def _append_select_digits(lines: list[str], anchor: str, digit_len: int, indent: str) -> None:
+    """Place a selection on the digits that sit just before ``anchor``.
 
-    Keynote's AppleScript dictionary exposes only font, size and color on a
-    character. Superscript is a separate sticky attribute that can be inherited
-    (writing through an existing superscript character) but never created:
-    ``set character N to character 1`` copies text only, ``duplicate`` of a text
-    item raises "Shapes can not be copied", and setting ``size`` just changes the
-    base size that superscript then renders at 2/3. The template carries a
-    superscript seed for the first verse number only, so later ones need the
-    Format > Font > Baseline > Superscript menu, which requires Accessibility.
-
-    Find is the only scripted way to place a text selection, so each verse number
-    is located by the copy that follows it: find that anchor, collapse the
-    selection to its left edge, then extend back over the digits.
+    Find is the only scripted way to place a text selection: find the anchor,
+    collapse the selection to its left edge, then extend back over the digits.
     """
+    lines += [
+        f'{indent}keystroke "f" using {{command down}}',
+        f"{indent}delay 0.7",
+        f'{indent}keystroke "{anchor}"',
+        f"{indent}delay 0.9",
+        f"{indent}key code 36",
+        f"{indent}delay 0.7",
+        f"{indent}key code 53",
+        f"{indent}delay 0.5",
+        f"{indent}key code 123",
+        f"{indent}delay 0.25",
+        f"{indent}repeat {digit_len} times",
+        f"{indent}  key code 123 using {{shift down}}",
+        f"{indent}  delay 0.15",
+        f"{indent}end repeat",
+        f"{indent}delay 0.25",
+    ]
+
+
+def _append_superscript_gui_pass(lines: list[str], seed: dict, plan: list[dict]) -> None:
+    """Copy the seed verse number's character style, then paste it onto the rest.
+
+    Keynote's AppleScript dictionary has no style support at all -- no character
+    styles, and superscript is not a character property. So the deck's own
+    verse-number character style ("SuperScript" on the LW template, "Verse
+    Number" on DSK) can only be applied through the UI, which needs
+    Accessibility. Format > Copy Style on the first verse number and Paste Style
+    onto the later ones carries that named style across, which is why no style
+    name is hardcoded here: whatever the template puts on the first number is
+    what the rest inherit.
+
+    Each anchor is applied once per occurrence, because Find cycles through
+    matches and the same verse box is reused on more than one slide (a magic-move
+    POST slide repeats it). Applying once would style a single instance and leave
+    the others on the baseline.
+    """
+    seed_anchor = _as_escape(seed["anchor"])
+    seed_len = int(seed["len"])
+    lines += [
+        "try",
+        '  tell application "System Events" to tell process "Keynote"',
+    ]
+    _append_select_digits(lines, seed_anchor, seed_len, "    ")
+    lines += [
+        '    click menu item "Copy Style" of menu "Format" '
+        'of menu bar item "Format" of menu bar 1',
+        "    delay 0.6",
+        "    key code 53",
+        "    delay 0.25",
+        "  end tell",
+        "on error errMsg number errNum",
+        '  set guiError to guiError & " [copy " & errNum & ": " & errMsg & "]"',
+        "end try",
+    ]
     for entry in plan:
         anchor = _as_escape(entry["anchor"])
         digit_len = int(entry["len"])
@@ -398,24 +467,12 @@ def _append_superscript_gui_pass(lines: list[str], plan: list[dict]) -> None:
             f"repeat {occurrences} times",
             "  try",
             '    tell application "System Events" to tell process "Keynote"',
-            '      keystroke "f" using {command down}',
-            "      delay 0.7",
-            f'      keystroke "{anchor}"',
-            "      delay 0.9",
-            "      key code 36",
-            "      delay 0.7",
-            "      key code 53",
-            "      delay 0.5",
-            "      key code 123",
-            "      delay 0.25",
-            f"      repeat {digit_len} times",
-            "        key code 123 using {shift down}",
-            "        delay 0.15",
-            "      end repeat",
-            "      delay 0.25",
-            '      click menu item "Superscript" of menu "Baseline" of menu item "Baseline" '
-            'of menu "Font" of menu item "Font" of menu "Format" of menu bar item "Format" of menu bar 1',
-            "      delay 0.5",
+        ]
+        _append_select_digits(lines, anchor, digit_len, "      ")
+        lines += [
+            '      click menu item "Paste Style" of menu "Format" '
+            'of menu bar item "Format" of menu bar 1',
+            "      delay 0.6",
             "      key code 53",
             "      delay 0.25",
             "    end tell",
@@ -429,9 +486,15 @@ def _append_superscript_gui_pass(lines: list[str], plan: list[dict]) -> None:
 def _build_superscript_fix_script(
     key_path: Path, jobs: list[dict], export_dir: Path | None = None
 ) -> str:
-    """Pass 2: reopen the saved deck and superscript later verse numbers via the GUI."""
+    """Pass 2: style later verse numbers in the deck pass 1 left open.
+
+    Pass 1 saves but does not close, so ``open`` here is a bring-to-front on the
+    document that is already loaded rather than a reopen; it only actually loads
+    the file if something else closed it in between.
+    """
     plan = _superscript_anchor_plan(jobs)
-    if not plan:
+    seed = next((job.get("seed") for job in jobs if job.get("seed")), None)
+    if not plan or not seed:
         return ""
     escaped = _as_escape(str(key_path))
     lines = [
@@ -445,7 +508,7 @@ def _build_superscript_fix_script(
         "end tell",
         "end using terms from",
     ]
-    _append_superscript_gui_pass(lines, plan)
+    _append_superscript_gui_pass(lines, seed, plan)
     lines += [
         'using terms from application "Keynote"',
         'tell application "Keynote"',
@@ -485,21 +548,23 @@ def _build_superscript_fix_script(
     lines += [
         "  end tell",
         "  save theDoc",
+        '  set exported to "false"',
     ]
     if export_dir:
-        # Pass 1 exported before the superscript existed, so refresh the previews.
+        # Pass 1 deferred the export so the previews show the styled numbers.
         lines += [
             f'  set exportFolder to POSIX file "{_as_escape(str(export_dir))}"',
             "  try",
             "    export theDoc to exportFolder as slide images with properties "
             "{image format:PNG, skipped slides:false}",
+            '    set exported to "true"',
             "  end try",
         ]
     lines += [
         "  try",
         "    close theDoc saving yes",
         "  end try",
-        '  return sizeReport & " gui=" & guiError',
+        '  return sizeReport & " gui=" & guiError & " exported=" & exported',
         "end tell",
         "end using terms from",
     ]
@@ -535,6 +600,7 @@ def _run_superscript_fix(
         "raw": size_report,
         "boxes": verdict["boxes"],
         "accessibilityDenied": verdict["accessibilityDenied"],
+        "exported": verdict["exported"],
         "stderr": proc.stderr or "",
     }
 
@@ -545,7 +611,8 @@ _AX_DENIED_CODES = ("-1743", "-25211")
 
 def _read_superscript_report(raw: str) -> dict:
     """Per-text-box check that later verse numbers now render at the seed's size."""
-    body, _, gui_error = raw.partition(" gui=")
+    body, _, tail = raw.partition(" gui=")
+    gui_error, _, exported = tail.partition(" exported=")
     boxes: list[dict] = []
     # Leading space is stripped from stdout, so re-pad before splitting on the separator.
     for chunk in f" {body.strip()}".split(" s=")[1:]:
@@ -575,6 +642,7 @@ def _read_superscript_report(raw: str) -> dict:
         "allSuperscript": bool(boxes) and all(b["ok"] for b in boxes),
         "accessibilityDenied": any(code in gui_error for code in _AX_DENIED_CODES),
         "guiError": gui_error,
+        "exported": exported.strip() == "true",
     }
 
 
@@ -629,10 +697,19 @@ def _as_escape(text: str) -> str:
 def _build_applescript(plan: dict) -> str:
     output = plan["output"]
     export_dir = plan.get("exportDir") or ""
+    # Python has already overwritten this path with a fresh template copy, so a
+    # document still open from an earlier run is stale: opening the file would
+    # hand back that stale document and the rebuild fails with -10000. Discard it
+    # without saving -- only ever this deck, which we just regenerated.
+    doc_name = _as_escape(Path(output).name)
     lines = [
         'using terms from application "Keynote"',
         'tell application "Keynote"',
         "  activate",
+        "  try",
+        f'    close (every document whose name is "{doc_name}") saving no',
+        "    delay 0.3",
+        "  end try",
         f'  set theFile to POSIX file "{_as_escape(output)}"',
         "  open theFile",
         "  delay 0.4",
@@ -778,7 +855,10 @@ def _build_applescript(plan: dict) -> str:
         "  save theDoc",
         '  set exported to "false"',
     ]
-    if export_dir:
+    # Pass 2 restyles this deck, then exports and closes it. Exporting here too
+    # would render every slide twice and show the verse numbers pre-superscript.
+    hand_off = bool(plan.get("superscriptJobs")) and bool(plan.get("superscriptFix"))
+    if export_dir and not hand_off:
         lines += [
             f'  set exportFolder to POSIX file "{_as_escape(export_dir)}"',
             "  try",
@@ -786,10 +866,15 @@ def _build_applescript(plan: dict) -> str:
             '    set exported to "true"',
             "  end try",
         ]
+    elif export_dir:
+        lines.append('  set exported to "deferred"')
+    if not hand_off:
+        lines += [
+            "  try",
+            "    close theDoc saving yes",
+            "  end try",
+        ]
     lines += [
-        "  try",
-        "    close theDoc saving yes",
-        "  end try",
         "  return (createdCount as text) & tab & exported & tab & missingMasters",
         "end tell",
         "end using terms from",
@@ -829,14 +914,15 @@ def run_applescript(plan: dict) -> dict:
     raw = (proc.stdout or "").strip()
     parts = raw.split("\t")
     created = int(parts[0]) if parts and parts[0].isdigit() else 0
-    exported = len(parts) > 1 and parts[1].lower() == "true"
+    export_state = parts[1].strip().lower() if len(parts) > 1 else "false"
     missing = []
     if len(parts) > 2:
         missing = [m.strip() for m in parts[2].splitlines() if m.strip()]
     return {
         "ok": not missing and created > 0,
         "slideCount": created,
-        "exported": exported,
+        "exported": export_state == "true",
+        "exportDeferred": export_state == "deferred",
         "missingMasters": missing,
         "raw": raw,
     }
@@ -857,10 +943,15 @@ def generate_deck(
     dest.parent.mkdir(parents=True, exist_ok=True)
     _copy_template(src, dest)
     plan = _plan_payload(slides, dest, export_dir, overlays)
+    # Pass 1 only leaves the deck open (and defers its export) if pass 2 follows.
+    plan["superscriptFix"] = superscript_fix
     result = run_applescript(plan)
     result["key"] = str(dest)
     if superscript_fix:
         super_result = _run_superscript_fix(dest, plan.get("superscriptJobs") or [], export_dir)
+        # Pass 1 handed the export to pass 2, so take the outcome from there.
+        if result.get("exportDeferred"):
+            result["exported"] = bool(super_result.get("exported"))
     else:
         super_result = {"ok": True, "skipped": True, "reason": "overlay_regen"}
     result["superscriptFix"] = super_result
