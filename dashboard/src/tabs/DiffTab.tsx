@@ -4,10 +4,12 @@ import { DiffResultView } from "../components/DiffResultView";
 import { FileWell } from "../components/FileWell";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useCurrentJob } from "../sessions";
+import { useLayout } from "../nav";
 import type { Slot } from "../playlist";
 
 export function DiffTab() {
   const { job, upsert, error: openError } = useCurrentJob("diff");
+  const { focusMode } = useLayout();
   const [left, setLeft] = useState<ChosenFile | null>(null);
   const [right, setRight] = useState<ChosenFile | null>(null);
   const [busy, setBusy] = useState(false);
@@ -78,7 +80,8 @@ export function DiffTab() {
       : "Matching Keynotes…";
 
   return (
-    <div>
+    <div className={focusMode ? "diff-tab focus" : "diff-tab"}>
+      <div className="diff-setup">
       <h1>Diff Checker</h1>
       <p className="lede">
         Match a pastor-finalised LW.key against a DSK first, fix the playlist if needed, then run wording and
@@ -107,6 +110,7 @@ export function DiffTab() {
         <button className="btn" type="button" disabled={!left || !right || busy} onClick={run}>
           Match pairs
         </button>
+      </div>
       </div>
       {(error || openError) && <p className="err">{error || openError}</p>}
       {busy && <LoadingOverlay title={overlayTitle} logs={logs} />}

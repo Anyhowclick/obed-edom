@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
+import { useLayout } from "../nav";
 import { ValidationPanel } from "./ValidationPanel";
 
 type Pair = {
@@ -65,6 +66,7 @@ function cap(label: string, number?: number | null, skipped?: boolean): string {
 type Cols = 1 | 2 | 3;
 
 const COLS_KEY = "obed-edom.diff.cols";
+const SPLIT_KEY = "obed-edom.diff.split";
 
 function loadCols(): Cols {
   try {
@@ -76,7 +78,56 @@ function loadCols(): Cols {
   return 1;
 }
 
-/** LED-wall decks are ~7680×1080; crop thumbs to the center 3840×1080. */
+function loadSplit(fallback: number): number {
+  try {
+    const raw = sessionStorage.getItem(SPLIT_KEY);
+    const n = raw ? Number(raw) : NaN;
+    if (Number.isFinite(n) && n >= 20 && n <= 85) return n;
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
+
+function defaultSplit(leftWide: boolean, rightWide: boolean): number {
+  if (leftWide && !rightWide) return 68;
+  if (!leftWide && rightWide) return 32;
+  return 50;
+}
+
+function PairSplit({ pct, onPct }: { pct: number; onPct: (n: number) => void }) {
+  return (
+    <div
+      className="pair-split"
+      role="separator"
+      aria-orientation="vertical"
+      aria-valuemin={20}
+      aria-valuemax={85}
+      aria-valuenow={Math.round(pct)}
+      aria-label="Resize comparison"
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const parent = event.currentTarget.parentElement?.getBoundingClientRect();
+        if (!parent?.width) return;
+        const startX = event.clientX;
+        const startPct = pct;
+        const onMove = (ev: PointerEvent) => {
+          onPct(Math.min(85, Math.max(20, startPct + ((ev.clientX - startX) / parent.width) * 100)));
+        };
+        const onUp = () => {
+          document.body.classList.remove("dragging-split");
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+        };
+        document.body.classList.add("dragging-split");
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+      }}
+    />
+  );
+}
+
 function isWideDeck(label: string): boolean {
   return /\b(LW|GW|LED|FW)\b/i.test(label);
 }
@@ -135,9 +186,14 @@ export function DiffResultView({
   checking?: boolean;
 }) {
   const result = (job.result || null) as DiffResult | null;
+  const { focusMode, setFocusMode } = useLayout();
   const [slots, setSlots] = useState<Slot[]>([]);
   const [selected, setSelected] = useState(0);
   const [cols, setCols] = useState<Cols>(loadCols);
+  const [split, setSplit] = useState<number | null>(() => {
+    const n = loadSplit(Number.NaN);
+    return Number.isFinite(n) ? n : null;
+  });
   const [dragging, setDragging] = useState<{ side: "left" | "right"; index: number } | null>(null);
 
   useEffect(() => {
@@ -171,6 +227,16 @@ export function DiffResultView({
   const leftWide = isWideDeck(result.leftLabel);
   const rightWide = isWideDeck(result.rightLabel);
   const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
+  const leftPct = split ?? defaultSplit(leftWide, rightWide);
+
+  function setSplitPct(next: number) {
+    setSplit(next);
+    try {
+      sessionStorage.setItem(SPLIT_KEY, String(Math.round(next)));
+    } catch {
+      /* ignore */
+    }
+  }
 
   function setDensity(next: Cols) {
     setCols(next);
@@ -218,6 +284,9 @@ export function DiffResultView({
               ))}
             </div>
           </div>
+          <button className="btn secondary" type="button" onClick={() => setFocusMode(!focusMode)}>
+            {focusMode ? "Exit maximise" : "Maximise"}
+          </button>
           {canEdit && onRunChecks && (
             <button className="btn" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
               Run checks
@@ -244,7 +313,10 @@ export function DiffResultView({
                 onDropRow(row);
               }}
             >
-              <div className={`pair-slides ${pairLayout}${combined ? " combined" : ""}`}>
+              <div
+                className={`pair-slides ${pairLayout}${combined ? " combined" : ""}`}
+                style={{ ["--split-left" as string]: `${leftPct}%` }}
+              >
                 <SlideSlot
                   job={job}
                   side="left"
@@ -255,6 +327,7 @@ export function DiffResultView({
                   onOpen={onOpen}
                   onDragStart={() => pair.leftIndex != null && setDragging({ side: "left", index: pair.leftIndex })}
                 />
+                <PairSplit pct={leftPct} onPct={setSplitPct} />
                 {combined ? (
                   <div className="dsk-stack">
                     {rightIndexes.map((index, i) => (
@@ -326,6 +399,13 @@ export function DiffResultView({
           );
         })}
       </div>
+      {canEdit && onRunChecks && (
+        <div className="actions playlist-footer">
+          <button className="btn" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
+            Run checks
+          </button>
+        </div>
+      )}
       {deckFlags.length > 0 && <ValidationPanel flags={deckFlags} />}
     </>
   );
