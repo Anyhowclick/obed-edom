@@ -403,13 +403,16 @@ def test_point_applescript_replaces_placeholder():
     assert any("AzoSans-Bold" in ln for ln in matt_script.splitlines())
 
 
-def test_later_verse_superscript_needs_the_format_menu():
-    """Pass 2 must stay GUI-driven; Keynote cannot create superscript from a script.
+def test_later_verse_numbers_get_the_template_character_style():
+    """Pass 2 must stay GUI-driven and must carry the template's character style.
 
     Verified against Keynote 14.5 (see the "Later verse numbers" section of
-    .cursor/skills/sermon-slides/SKILL.md). Do not "simplify" this back into a
-    pure-AppleScript pass: every scriptable route below was tried and rejected by
-    Keynote itself, and each failure was silent inside a ``try`` block.
+    .cursor/skills/sermon-slides/SKILL.md). Keynote's AppleScript dictionary has
+    no style support at all, and superscript is not a character property, so the
+    deck's own verse-number style can only be applied through the UI. Do not
+    "simplify" this into a pure-AppleScript pass: every scriptable route asserted
+    against below was tried and rejected by Keynote itself, each failing silently
+    inside a ``try`` block.
     """
     from sermon_slides.keynote import (
         _build_superscript_fix_script,
@@ -423,12 +426,23 @@ def test_later_verse_superscript_needs_the_format_menu():
 
     jobs = _collect_superscript_jobs([matt_slide])
     assert jobs and jobs[0]["laterVerses"]
-    # Find is the only scripted way to place a selection, so every later verse
-    # number needs the copy that follows it as a search anchor.
+    # Find is the only scripted way to place a selection, so every verse number
+    # needs the copy that follows it as a search anchor -- the seed included,
+    # since its style is what the later ones are copied from.
     assert all(v["anchor"] for v in jobs[0]["laterVerses"])
+    assert jobs[0]["seed"]["anchor"]
+    assert jobs[0]["seed"]["digits"] == "26"
 
     fix_script = _build_superscript_fix_script(Path("/tmp/matt.key"), jobs)
-    assert 'click menu item "Superscript" of menu "Baseline"' in fix_script
+    # The style comes from the deck's own first verse number, so no style name is
+    # hardcoded: LW's template calls it "SuperScript", DSK's "Verse Number".
+    assert fix_script.count('click menu item "Copy Style"') == 1
+    assert 'click menu item "Paste Style"' in fix_script
+    assert "SuperScript" not in fix_script
+    assert "Verse Number" not in fix_script
+    # Raw baseline formatting would bypass the character style.
+    assert "Baseline" not in fix_script
+    assert 'menu item "Superscript"' not in fix_script
     assert 'keystroke "f" using {command down}' in fix_script
     assert "key code 123 using {shift down}" in fix_script
 
@@ -444,18 +458,91 @@ def test_later_verse_superscript_needs_the_format_menu():
         assert glyph not in fix_script
 
     # A denied Accessibility grant has to surface, not pass silently.
-    denied = _read_superscript_report("s=7 ti=1 c1=30.0 c37=45.0 c69=45.0 gui= [-1743: not authorized]")
+    denied = _read_superscript_report(
+        "s=7 ti=1 c1=30.0 c37=45.0 c69=45.0 gui= [-1743: not authorized] exported=false"
+    )
     assert denied["accessibilityDenied"] is True
     assert denied["allSuperscript"] is False
+    assert denied["exported"] is False
 
     # Every text box in the report is checked, including the first one.
     applied = _read_superscript_report(
-        "s=8 ti=5 c1=46.67 c37=46.67 c69=46.67 s=9 ti=2 c1=46.67 c37=46.67 c69=46.67 gui="
+        "s=8 ti=5 c1=46.67 c37=46.67 c69=46.67 s=9 ti=2 c1=46.67 c37=46.67 c69=46.67"
+        " gui= exported=true"
     )
     assert len(applied["boxes"]) == 2
     assert applied["allSuperscript"] is True
-    unfixed = _read_superscript_report("s=8 ti=5 c1=46.67 c37=70.0 c69=70.0 gui=")
+    assert applied["exported"] is True
+    unfixed = _read_superscript_report("s=8 ti=5 c1=46.67 c37=70.0 c69=70.0 gui= exported=true")
     assert unfixed["allSuperscript"] is False
+
+
+def test_repeated_verse_box_is_styled_on_every_slide():
+    """Find cycles through matches, so each anchor is applied once per occurrence.
+
+    A magic-move POST slide reuses the same verse box, so the Matthew passage
+    appears on two slides. Applying an anchor once styles a single instance and
+    silently leaves the other on the baseline.
+    """
+    from sermon_slides.keynote import (
+        _build_superscript_fix_script,
+        _collect_superscript_jobs,
+        _superscript_anchor_plan,
+    )
+
+    lw, _, _ = map_slides(parse_outline(OUTLINES / "Sermon BC.docx"))
+    jobs = _collect_superscript_jobs(lw)
+    matt_jobs = [j for j in jobs if "Take and eat" in j["marker"]]
+    assert len(matt_jobs) == 2, "the Matthew verse box should appear on two slides"
+
+    plan = _superscript_anchor_plan(jobs)
+    assert plan
+    for entry in plan:
+        assert entry["occurrences"] == 2
+
+    script = _build_superscript_fix_script(Path("/tmp/matt.key"), jobs)
+    assert "repeat 2 times" in script
+    # One copy of the seed style, then a paste per occurrence of each anchor.
+    assert script.count('click menu item "Copy Style"') == 1
+    assert script.count('click menu item "Paste Style"') == len(plan)
+
+
+def test_pass_one_hands_the_open_deck_to_pass_two():
+    """Pass 1 leaves the deck open and defers its export when pass 2 follows.
+
+    Closing and reopening the same file was pure overhead, and exporting in pass 1
+    rendered every slide twice with the verse numbers still on the baseline.
+    """
+    from sermon_slides.keynote import _build_applescript, _plan_payload
+
+    lw, _, _ = map_slides(parse_outline(OUTLINES / "Sermon BC.docx"))
+    matt_slide = next(s for s in lw if s.role == "verse" and "Take and eat" in (s.body or ""))
+
+    plan = _plan_payload([matt_slide], Path("/tmp/matt.key"), Path("/tmp/shots"))
+    assert plan["superscriptJobs"], "this slide should need pass 2"
+
+    plan["superscriptFix"] = True
+    handed_off = _build_applescript(plan)
+    assert "close theDoc" not in handed_off
+    assert 'set exported to "deferred"' in handed_off
+    assert "export theDoc" not in handed_off
+
+    # Handing off is only safe while pass 2 has work it can do, so every job must
+    # carry the anchors pass 2 needs; otherwise the deck is left open forever.
+    from sermon_slides.keynote import _build_superscript_fix_script
+
+    for job in plan["superscriptJobs"]:
+        assert job["seed"]["anchor"]
+        assert job["laterVerses"]
+        assert all(v["anchor"] for v in job["laterVerses"])
+    assert _build_superscript_fix_script(Path("/tmp/matt.key"), plan["superscriptJobs"])
+
+    # With no pass 2 to follow, pass 1 stays responsible for export and close.
+    plan["superscriptFix"] = False
+    standalone = _build_applescript(plan)
+    assert "close theDoc" in standalone
+    assert "export theDoc" in standalone
+    assert 'set exported to "deferred"' not in standalone
 
 
 def test_review_pdf_and_slide_kinds():

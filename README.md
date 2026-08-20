@@ -6,7 +6,7 @@ Local Mac tool that builds LED-wall (LW) and DSK Keynote decks from sermon/offer
 
 Grant Accessibility to whatever launches generate — Terminal, iTerm, or the dashboard app — in *System Settings > Privacy & Security > Accessibility*.
 
-Multi-verse slides need each verse number raised as a superscript, and Keynote's AppleScript dictionary cannot set superscript on a character. Generate has to click **Format > Font > Baseline > Superscript**, which needs Accessibility. Without it the deck still generates with the right wording, but later verse numbers sit on the baseline and generate reports a flag. See the `sermon-slides` skill for the full details before changing that code.
+Multi-verse slides need each verse number to carry the template's verse-number character style, and Keynote's AppleScript dictionary has no style support at all. Generate has to drive **Format > Copy Style** and **Paste Style** through the UI, which needs Accessibility. Without it the deck still generates with the right wording, but later verse numbers sit on the baseline and generate reports a flag. See the `sermon-slides` skill for the full details before changing that code.
 
 ## Dashboard
 

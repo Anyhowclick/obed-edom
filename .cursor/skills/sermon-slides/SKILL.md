@@ -74,11 +74,17 @@ That is why macOS asks for Accessibility for whatever launched generate
 (Terminal, iTerm, or the dashboard app) in
 *System Settings > Privacy & Security > Accessibility*.
 
-**Why the menu is unavoidable.** Keynote's AppleScript dictionary exposes only
-`font`, `color` and `size` on a character. Superscript is a separate attribute
-that can be *inherited* — writing text through a character that already has it —
-but never *created*. The template carries a superscript seed for the first verse
-number only, so the first one works headlessly and later ones cannot.
+**What pass 2 does.** The template applies its verse-number character style to
+the *first* verse number only — `SuperScript` in `Sermon_GW.key`, `Verse Number`
+in `2026_Lower-Thirds (ENG).key`. Pass 2 selects that first number, runs
+**Format > Copy Style**, then selects each later number and runs **Paste Style**.
+That carries the named character style across, so no style name is hardcoded:
+whatever the template puts on the first number is what the rest inherit.
+
+**Why the UI is unavoidable.** Keynote's AppleScript dictionary has no style
+support at all — `grep -i style` on `Keynote.sdef` returns only `export style`
+and chart types. Superscript is not a character property either; `font`, `color`
+and `size` are the only ones exposed.
 
 Verified against Keynote 14.5. Every scriptable route was tried and rejected by
 Keynote itself, and **each one fails silently inside a `try` block**, so a broken
@@ -91,25 +97,48 @@ pass still looks like it succeeded:
 | `duplicate paragraph` / `word` | `Words can not be copied` |
 | `set size of character N to 46.67` | `size` is the *base* size; superscript renders it at 2/3, so this only shrinks the glyph onto the baseline |
 | Unicode `²⁷` / `²⁸` | Latin-1 `²³` and the superscripts block `⁴-⁹` are different code charts, so digits render mismatched |
+| Character Styles popup in the Format sidebar | The control is an `AXButton` whose menu never opens under `click` or `AXPress` |
 
-Do not "simplify" pass 2 back into pure AppleScript, and do not reintroduce
-placeholder Find tokens (`‡‡`): when the GUI step is skipped, tokens leak onto
-the slide, whereas real digits just lose the raised styling. `tests/test_parse.py::test_later_verse_superscript_needs_the_format_menu`
-locks all of this in.
+**Apply each anchor once per occurrence.** Find cycles through matches, and a
+magic-move POST slide reuses the same verse box, so the Matthew passage lives on
+two slides. Styling once fixes one instance and leaves the other on the baseline
+— which reads as "the fix doesn't work" when it is really a miscount.
+
+Do not "simplify" pass 2 back into pure AppleScript, do not swap Paste Style for
+raw `Baseline > Superscript` (that skips the character style), and do not
+reintroduce placeholder Find tokens (`‡‡`): when the GUI step is skipped, tokens
+leak onto the slide, whereas real digits just lose the raised styling.
+`tests/test_parse.py::test_later_verse_numbers_get_the_template_character_style`
+and `::test_repeated_verse_box_is_styled_on_every_slide` lock this in.
 
 If Accessibility is denied, generate flags it and the digits stay on the
 baseline — the wording is still correct, so the deck is usable.
 
 Other constraints worth keeping:
 
-- Pass 1 exports the PNG previews *before* pass 2 raises the digits, so pass 2
-  re-exports. Removing that leaves stale previews in the dashboard.
+- Pass 1 saves but does **not** close, and defers its PNG export; pass 2 exports
+  and closes. `open` in pass 2 is then a bring-to-front on the already-loaded
+  document. Reinstating pass 1's export renders every slide twice and captures
+  the verse numbers *before* they are styled.
+- Because the deck stays open between passes, pass 1 first closes any document of
+  the same name without saving. Python has already overwritten the file with a
+  fresh template copy, so a document left open by an interrupted run is stale and
+  `open` would hand that back — the rebuild then fails with `-10000`. Keep this
+  guard: without it, one failed run poisons every later run until Keynote is
+  quit. It only ever closes the deck being regenerated.
+- `_collect_superscript_jobs` must only emit jobs pass 2 can act on (a seed
+  anchor plus at least one anchored later verse), because a non-empty job list is
+  what makes pass 1 hand the deck over. An unusable job would leave the deck
+  open, unexported and never closed.
 - GUI scripting must live in its own `tell application "System Events"` block.
   Inside `tell application "Keynote"`, `menu` resolves to a Keynote class and the
   script fails to compile.
 - Keynote is driven from a script *file* via `osascript`, not stdin: from the
   dashboard's worker thread the clipboard/HIServices connection dies and
   Keynote's dictionary never loads.
+- Debugging this is much easier with only the target deck open. With several
+  documents open, `document 1` and the keystroke target can be different windows,
+  which makes a working pass look broken.
 
 ## Operator outline (`_CUED.docx`)
 
