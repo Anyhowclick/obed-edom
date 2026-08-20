@@ -182,10 +182,19 @@ export async function stubDsk(): Promise<string> {
   return data.detail || "Not implemented";
 }
 
-export async function stubResize(): Promise<string> {
-  const res = await fetch("/api/resize", { method: "POST" });
-  const data = await res.json();
-  return data.detail || "Not implemented";
+export async function startResize(
+  path: string,
+  opts?: { goldPath?: string; rangeFrom?: number; rangeTo?: number; export?: boolean }
+): Promise<Job> {
+  const body = new FormData();
+  body.set("path", path);
+  if (opts?.goldPath) body.set("gold_path", opts.goldPath);
+  if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
+  if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
+  body.set("export", opts?.export === false ? "false" : "true");
+  const res = await fetch("/api/resize", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 export function previewUrl(jobId: string, deck: string, filename: string): string {

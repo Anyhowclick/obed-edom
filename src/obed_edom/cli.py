@@ -31,6 +31,16 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--host", default="127.0.0.1")
     dash.add_argument("--port", type=int, default=8765)
     dash.add_argument("--no-browser", action="store_true")
+    remap = sub.add_parser(
+        "remap",
+        help="Copy a wall Keynote and remap map + pins into a 1920×1080 CG deck.",
+    )
+    remap.add_argument("keynote", type=Path, help="Source LW/FW .key (typically 7680×1080).")
+    remap.add_argument("--gold", type=Path, help="Same-weekend CG .key to learn the crop from.")
+    remap.add_argument("--out", type=Path, help="Destination .key (default: output/<stem>_CG.key).")
+    remap.add_argument("--from-slide", type=int, dest="range_from")
+    remap.add_argument("--to-slide", type=int, dest="range_to")
+    remap.add_argument("--no-export", action="store_true", help="Skip PNG preview export after remap.")
     args = parser.parse_args(argv)
 
     if args.command == "generate":
@@ -57,7 +67,49 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "dashboard":
         return _run_dashboard(args.host, args.port, open_browser=not args.no_browser)
+
+    if args.command == "remap":
+        return _run_remap(args)
     return 2
+
+
+def _run_remap(args: argparse.Namespace) -> int:
+    from obed_edom.remap_keynote import remap_and_inspect, remap_keynote
+
+    source = Path(args.keynote).expanduser()
+    if not source.exists():
+        print(f"File not found: {source}", file=sys.stderr)
+        return 1
+    dest = Path(args.out).expanduser() if args.out else find_repo_root() / "output" / f"{source.stem}_CG.key"
+    gold = Path(args.gold).expanduser() if args.gold else None
+    if gold and not gold.exists():
+        print(f"Gold Keynote not found: {gold}", file=sys.stderr)
+        return 1
+    slide_range = None
+    if args.range_from is not None and args.range_to is not None:
+        slide_range = (args.range_from, args.range_to)
+
+    def log(message: str) -> None:
+        print(message)
+
+    if args.no_export:
+        info = remap_keynote(source, dest, gold=gold, slide_range=slide_range, log=log)
+    else:
+        export_dir = dest.parent / "previews" / dest.stem
+        info = remap_and_inspect(
+            source, dest, gold=gold, slide_range=slide_range, export_dir=export_dir, log=log
+        )
+    print(f"Wrote {info['dest']}")
+    counts = info.get("counts") or {}
+    print(
+        f"Applied {info.get('applied')} objects "
+        f"({counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list); "
+        f"missed {info.get('missed')}."
+    )
+    score = info.get("goldScore")
+    if score and score.get("pinRmse") is not None:
+        print(f"Gold pin RMSE: {score['pinRmse']} px over {score.get('pinPairs')} pairs (plan, not post-JXA).")
+    return 0
 
 
 def _run_dashboard(host: str, port: int, *, open_browser: bool) -> int:
