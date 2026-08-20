@@ -2,7 +2,7 @@ import json
 import time
 from pathlib import Path
 
-from sermon_slides.web.jobs import Job, JobRunner, artifact_status
+from obed_edom.web.jobs import Job, JobRunner, artifact_status
 
 
 def _wait(runner: JobRunner, job_id: str, timeout: float = 2.0):

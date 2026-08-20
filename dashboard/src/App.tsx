@@ -27,7 +27,7 @@ export function App() {
     <RunNavContext.Provider value={{ openInFeature, openRun }}>
       <div className="app">
         <aside className="sidebar">
-          <div className="brand">Sermon slides</div>
+          <div className="brand">Obed-Edom</div>
           {TABS.map((item) => (
             <button
               key={item.id}

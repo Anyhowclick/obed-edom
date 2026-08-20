@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from sermon_slides.parse_outline import parse_outline
-from sermon_slides.slide_map import map_slides
-from sermon_slides.validate import validate_inspect, validate_slide_specs, validate_style_text
+from obed_edom.parse_outline import parse_outline
+from obed_edom.slide_map import map_slides
+from obed_edom.validate import validate_inspect, validate_slide_specs, validate_style_text
 
 OUTLINES = Path(__file__).resolve().parents[1] / "Sermon Outlines"
 
@@ -84,4 +84,69 @@ def test_inspect_overflow_from_box_geometry():
     }
     ok_flags = validate_inspect(tight_ok, location_prefix="ok.key")
     assert not any(f.category == "overflow" for f in ok_flags)
+
+
+def test_missing_previews_are_info_not_warning():
+    from obed_edom.contrast import check_contrast
+
+    flags, overlays = check_contrast([], Path("/tmp/no-such-previews"), "lw")
+    assert overlays == []
+    assert flags
+    assert all(f.severity == "info" for f in flags)
+    assert all(f.category == "contrast" for f in flags)
+
+
+def test_same_type_diff_count_is_info_missing_is_warning(tmp_path):
+    from obed_edom.diff_keynotes import compare_inspects
+
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slideHeight": 1080,
+        "slideCount": 2,
+        "slides": [
+            {"number": 1, "items": [{"text": "a"}]},
+            {"number": 2, "items": [{"text": "b"}]},
+        ],
+    }
+    right = {
+        "path": str(tmp_path / "Copy_LW.key"),
+        "slideWidth": 3840,
+        "slideHeight": 1080,
+        "slideCount": 1,
+        "slides": [{"number": 1, "items": [{"text": "a"}]}],
+    }
+    result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="LW")
+    diffs = [f for f in result["flags"] if f.category == "diff"]
+    assert any(f.severity == "info" and "Slide count differs" in f.message for f in diffs)
+    assert any(f.severity == "warning" and "Missing" in f.message for f in diffs)
+    assert not any(f.severity == "error" and f.category == "diff" for f in result["flags"])
+
+
+def test_mixed_type_diff_skips_count_and_missing(tmp_path):
+    from obed_edom.diff_keynotes import compare_inspects
+
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slideHeight": 1080,
+        "slideCount": 2,
+        "slides": [
+            {"number": 1, "items": [{"text": "hello"}]},
+            {"number": 2, "items": [{"text": "extra"}]},
+        ],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slideCount": 1,
+        "slides": [{"number": 1, "items": [{"text": "hello"}]}],
+    }
+    result = compare_inspects(
+        left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="Other"
+    )
+    diffs = [f for f in result["flags"] if f.category == "diff"]
+    assert not any("Slide count differs" in f.message for f in diffs)
+    assert not any("Missing" in f.message for f in diffs)
 

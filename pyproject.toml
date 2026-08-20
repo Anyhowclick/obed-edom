@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sermon-slides"
+name = "obed-edom"
 version = "0.1.0"
 description = "Generate LW and DSK Keynote decks from sermon/offering Word outlines."
 requires-python = ">=3.10"
@@ -28,10 +28,10 @@ test = [
 ]
 
 [project.scripts]
-sermon-slides = "sermon_slides.cli:main"
+obed-edom = "obed_edom.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-sermon_slides = ["*.yaml", "*.js"]
+obed_edom = ["*.yaml", "*.js"]

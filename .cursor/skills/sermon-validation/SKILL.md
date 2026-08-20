@@ -36,4 +36,4 @@ i. Text overflow: if copy cannot fit the mapped Keynote box (character
 
 ## Runtime
 
-Python loads `src/sermon_slides/validation_rules.yaml`. The dashboard `ValidationPanel` displays `Flag` objects from generate, inspect, and diff jobs.
+Python loads `src/obed_edom/validation_rules.yaml`. The dashboard `ValidationPanel` displays `Flag` objects from generate, inspect, and diff jobs.

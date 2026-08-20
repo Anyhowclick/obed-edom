@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from sermon_slides.paths import find_repo_root
+from obed_edom.paths import find_repo_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
 

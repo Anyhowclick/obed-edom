@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from sermon_slides.web.app import app
+from obed_edom.web.app import app
 
 
 def test_health_and_stubs():

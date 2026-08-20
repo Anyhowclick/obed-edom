@@ -10,8 +10,8 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-from sermon_slides.models import OutlineDoc, SlideSpec
-from sermon_slides.parse_outline import CUE_RE, SEMANTIC_TAGS, normalize_cue
+from obed_edom.models import OutlineDoc, SlideSpec
+from obed_edom.parse_outline import CUE_RE, SEMANTIC_TAGS, normalize_cue
 
 # Word ST_Highlight has no "turquoise"; the UI colour Turquoise is stored as cyan.
 LW_HIGHLIGHT = "cyan"

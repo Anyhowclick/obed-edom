@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from sermon_slides.paths import find_repo_root
-from sermon_slides.validate import flag_dict
+from obed_edom.paths import find_repo_root
+from obed_edom.validate import flag_dict
 
 
 @dataclass

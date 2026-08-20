@@ -11,13 +11,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
-from sermon_slides.diff_keynotes import compare_inspects
-from sermon_slides.inspect import diff_work_dir, inspect_keynote, preview_pngs
-from sermon_slides.paths import find_repo_root
-from sermon_slides.pipeline import generate
-from sermon_slides.slide_map import load_masters
-from sermon_slides.validate import validate_inspect
-from sermon_slides.web.jobs import Job, JobRunner, preview_names, serialize_flags
+from obed_edom.diff_keynotes import compare_inspects
+from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_pngs
+from obed_edom.paths import find_repo_root
+from obed_edom.pipeline import generate
+from obed_edom.slide_map import load_masters
+from obed_edom.validate import validate_inspect
+from obed_edom.web.jobs import Job, JobRunner, preview_names, serialize_flags
 
 RUNNER = JobRunner()
 ROOT = find_repo_root()
@@ -37,7 +37,7 @@ class RelocateBody(BaseModel):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Sermon slides dashboard")
+    app = FastAPI(title="Obed-Edom dashboard")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

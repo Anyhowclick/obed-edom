@@ -17,7 +17,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from sermon_slides.models import Flag, OutlineDoc, SlideSpec
+from obed_edom.models import Flag, OutlineDoc, SlideSpec
 
 NAVY = HexColor("#1B2A4A")
 DANGER = HexColor("#B42318")
@@ -144,15 +144,20 @@ def _friendly_bible(flag: Flag) -> str | None:
 
 def _contrast_note(flags: list[Flag]) -> str:
     contrast = [f for f in flags if f.category == "contrast"]
-    if any("could not" in f.message.lower() or "did not run" in f.message.lower() for f in contrast):
+    if any(
+        "could not" in f.message.lower()
+        or "did not run" in f.message.lower()
+        or "no png" in f.message.lower()
+        for f in contrast
+    ):
         return "Preview pictures were not exported, so please check the Keynote files yourself."
     if any(f.severity == "warning" for f in contrast):
         return (
-            "Some LED wall slides sit on a bright photo. We added a dark overlay so the words stay readable. "
-            "Please glance at the LED previews. Do not recolor the text unless something still looks wrong."
+            "Some LED wall slides sit on a bright photo. Darken the background in Keynote "
+            "so the words stay readable. Do not recolor the text unless something still looks wrong."
         )
     if contrast:
-        return "We looked at the preview pictures. Nothing needed a dark overlay."
+        return "We looked at the preview pictures. Contrast looked OK."
     return "Open the previews folder for a quick look before service."
 
 
@@ -305,6 +310,6 @@ def write_review(
         topMargin=0.65 * inch,
         bottomMargin=0.65 * inch,
         title=heading,
-        author="Sermon slides",
+        author="Obed-Edom",
     )
     doc.build(story)
