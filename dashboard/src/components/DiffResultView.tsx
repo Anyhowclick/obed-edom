@@ -1,11 +1,17 @@
+import { useEffect, useMemo, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
+import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
 import { ValidationPanel } from "./ValidationPanel";
 
 type Pair = {
   index: number;
   number: number;
+  leftIndex?: number | null;
+  rightIndex?: number | null;
+  rightIndexes?: number[];
   leftNumber?: number | null;
   rightNumber?: number | null;
+  rightNumbers?: number[];
   leftSkipped?: boolean;
   rightSkipped?: boolean;
   leftText?: string;
@@ -14,9 +20,11 @@ type Pair = {
   rightMarkup?: string;
   leftPng?: string;
   rightPng?: string;
+  rightPngs?: (string | undefined)[];
   heatPng?: string;
   missing?: string;
   sameType?: boolean;
+  score?: number;
   flags?: Flag[];
 };
 
@@ -26,9 +34,12 @@ export type DiffResult = {
   leftLabel: string;
   rightLabel: string;
   sameType?: boolean;
+  phase?: string;
   leftPngs: string[];
   rightPngs: string[];
   heatPngs: string[];
+  leftCatalog?: { index: number; number: number; skipped?: boolean; png?: string | null; text?: string }[];
+  rightCatalog?: { index: number; number: number; skipped?: boolean; png?: string | null; text?: string }[];
   pairs: Pair[];
   flags: Flag[];
 };
@@ -38,13 +49,12 @@ function present(job: Job, label: string): boolean {
 }
 
 function pickPng(named: string | undefined): string | undefined {
-  // Server maps visible-order Keynote exports (left.001.png) onto slide
-  // indices. Guessing by the Keynote slide number attaches the wrong PNG.
   return named;
 }
 
 function pairKey(pair: Pair): string {
-  return `${pair.index}-${pair.leftNumber}-${pair.rightNumber}`;
+  const rights = pair.rightIndexes?.length ? pair.rightIndexes.join("-") : String(pair.rightIndex);
+  return `${pair.index}-${pair.leftIndex}-${rights}-${pair.leftNumber}-${pair.rightNumber}`;
 }
 
 function cap(label: string, number?: number | null, skipped?: boolean): string {
@@ -52,23 +62,57 @@ function cap(label: string, number?: number | null, skipped?: boolean): string {
   return skipped ? `${label} ${number} (skipped)` : `${label} ${number}`;
 }
 
+type Cols = 1 | 2 | 3;
+
+const COLS_KEY = "obed-edom.diff.cols";
+
+function loadCols(): Cols {
+  try {
+    const raw = sessionStorage.getItem(COLS_KEY);
+    if (raw === "1" || raw === "2" || raw === "3") return Number(raw) as Cols;
+  } catch {
+    /* ignore */
+  }
+  return 1;
+}
+
+/** LED-wall decks are ~7680×1080; crop thumbs to the center 3840×1080. */
+function isWideDeck(label: string): boolean {
+  return /\b(LW|GW|LED|FW)\b/i.test(label);
+}
+
 function SlideSlot({
   job,
   side,
   png,
   label,
+  crop,
+  draggable,
   onOpen,
+  onDragStart,
 }: {
   job: Job;
   side: "left" | "right";
   png?: string;
   label: string;
+  crop?: boolean;
+  draggable?: boolean;
   onOpen: (src: string) => void;
+  onDragStart?: () => void;
 }) {
   const artifact = side === "left" ? "left previews" : "right previews";
   const src = png && present(job, artifact) ? diffImageUrl(job.id, side, png) : "";
   return (
-    <div className="slide-slot">
+    <div
+      className={`slide-slot${crop ? " crop-center" : " dsk-frame"}`}
+      draggable={Boolean(draggable && src)}
+      onDragStart={(event) => {
+        if (!draggable) return;
+        event.dataTransfer.setData("text/plain", side);
+        event.dataTransfer.effectAllowed = "move";
+        onDragStart?.();
+      }}
+    >
       <div className="cap">{label}</div>
       {src ? (
         <img src={src} alt={label} onClick={() => onOpen(src)} />
@@ -79,37 +123,195 @@ function SlideSlot({
   );
 }
 
-export function DiffResultView({ job, onOpen }: { job: Job; onOpen: (src: string) => void }) {
+export function DiffResultView({
+  job,
+  onOpen,
+  onRunChecks,
+  checking,
+}: {
+  job: Job;
+  onOpen: (src: string) => void;
+  onRunChecks?: (slots: Slot[]) => void;
+  checking?: boolean;
+}) {
   const result = (job.result || null) as DiffResult | null;
+  const [slots, setSlots] = useState<Slot[]>([]);
+  const [selected, setSelected] = useState(0);
+  const [cols, setCols] = useState<Cols>(loadCols);
+  const [dragging, setDragging] = useState<{ side: "left" | "right"; index: number } | null>(null);
+
+  useEffect(() => {
+    if (!result?.pairs) return;
+    setSlots(slotsFromPairs(result.pairs));
+    setSelected(0);
+  }, [job.id, result?.phase]);
+
+  const pairs = useMemo(() => {
+    if (!result) return [];
+    if (result.leftCatalog && result.rightCatalog && slots.length) {
+      const applyChecks = result.phase === "checked" && slotsEqual(slots, slotsFromPairs(result.pairs));
+      return rebuildPairs(slots, result.leftCatalog, result.rightCatalog, result.leftLabel, result.rightLabel).map(
+        (pair, i) => ({
+          ...pair,
+          flags: applyChecks ? result.pairs[i]?.flags || [] : [],
+          heatPng: applyChecks ? result.pairs[i]?.heatPng : undefined,
+        })
+      );
+    }
+    return result.pairs;
+  }, [result, slots]);
 
   if (job.status === "error") return <p className="err">{job.error}</p>;
-  if (!result || job.status !== "done") return null;
+  if (!result || (job.status !== "done" && !checking)) return null;
 
-  const deckFlags = (result.flags || []).filter((flag) => flag.category !== "diff");
+  const phase = result.phase || "checked";
+  const matching = phase !== "checked";
+  const canEdit = Boolean(result.leftCatalog && result.rightCatalog);
+  const deckFlags = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
+  const leftWide = isWideDeck(result.leftLabel);
+  const rightWide = isWideDeck(result.rightLabel);
+  const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
+
+  function setDensity(next: Cols) {
+    setCols(next);
+    try {
+      sessionStorage.setItem(COLS_KEY, String(next));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function onDropRow(row: number) {
+    if (!dragging) return;
+    setSlots((current) => placeItem(current, dragging.side, dragging.index, row));
+    setSelected(row);
+    setDragging(null);
+  }
 
   return (
     <>
-      <div className="diff-stack">
-        {result.pairs.map((pair) => {
+      <div className="playlist-bar">
+        {canEdit && (
+          <p className="note">
+            {matching
+              ? "First pass matched these pairs. Drag a slide onto another row to fix it. If one wall holds two DSK verses, Combine next DSK. Deck order stays. Then run checks."
+              : "Checks are on the confirmed pairs. You can still rearrange, combine, and run checks again."}
+          </p>
+        )}
+        <div className="actions playlist-controls">
+          <div className="density">
+            <span>Per row</span>
+            <input
+              type="range"
+              min={1}
+              max={3}
+              step={1}
+              value={cols}
+              aria-label="Comparisons per row"
+              onChange={(event) => setDensity(Number(event.target.value) as Cols)}
+            />
+            <div className="seg density-seg">
+              {([1, 2, 3] as Cols[]).map((n) => (
+                <button key={n} type="button" className={cols === n ? "on" : ""} onClick={() => setDensity(n)}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+          {canEdit && onRunChecks && (
+            <button className="btn" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
+              Run checks
+            </button>
+          )}
+        </div>
+      </div>
+      <div className={`diff-stack cols-${cols}`}>
+        {pairs.map((pair, row) => {
           const issues = pair.flags || [];
+          const rightIndexes = pair.rightIndexes?.length ? pair.rightIndexes : pair.rightIndex != null ? [pair.rightIndex] : [];
+          const rightPngs = pair.rightPngs?.length ? pair.rightPngs : [pair.rightPng];
+          const rightNumbers = pair.rightNumbers?.length ? pair.rightNumbers : [pair.rightNumber];
+          const combined = rightIndexes.length > 1;
           return (
-            <article key={pairKey(pair)} className="diff-row" id={`pair-${pair.index}`}>
-              <div className="pair-slides">
+            <article
+              key={pairKey(pair)}
+              className={`diff-row${selected === row ? " on" : ""}${combined ? " combined" : ""}`}
+              id={`pair-${pair.index}`}
+              onClick={() => setSelected(row)}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                onDropRow(row);
+              }}
+            >
+              <div className={`pair-slides ${pairLayout}${combined ? " combined" : ""}`}>
                 <SlideSlot
                   job={job}
                   side="left"
                   png={pickPng(pair.leftPng)}
                   label={cap(result.leftLabel, pair.leftNumber, pair.leftSkipped)}
+                  crop={leftWide}
+                  draggable={pair.leftIndex != null}
                   onOpen={onOpen}
+                  onDragStart={() => pair.leftIndex != null && setDragging({ side: "left", index: pair.leftIndex })}
                 />
-                <SlideSlot
-                  job={job}
-                  side="right"
-                  png={pickPng(pair.rightPng)}
-                  label={cap(result.rightLabel, pair.rightNumber, pair.rightSkipped)}
-                  onOpen={onOpen}
-                />
+                {combined ? (
+                  <div className="dsk-stack">
+                    {rightIndexes.map((index, i) => (
+                      <SlideSlot
+                        key={`r-${index}`}
+                        job={job}
+                        side="right"
+                        png={pickPng(rightPngs[i])}
+                        label={cap(result.rightLabel, rightNumbers[i], false)}
+                        crop={rightWide}
+                        draggable
+                        onOpen={onOpen}
+                        onDragStart={() => setDragging({ side: "right", index })}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <SlideSlot
+                    job={job}
+                    side="right"
+                    png={pickPng(pair.rightPng)}
+                    label={cap(result.rightLabel, pair.rightNumber, pair.rightSkipped)}
+                    crop={rightWide}
+                    draggable={pair.rightIndex != null}
+                    onOpen={onOpen}
+                    onDragStart={() => pair.rightIndex != null && setDragging({ side: "right", index: pair.rightIndex })}
+                  />
+                )}
               </div>
+              {canEdit && (canCombineNext(slots, row) || rightsOf(slots[row] || {}).length > 1) && (
+                <div className="row-acts">
+                  {canCombineNext(slots, row) && (
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSlots((current) => combineNext(current, row));
+                      }}
+                    >
+                      Combine next {result.rightLabel}
+                    </button>
+                  )}
+                  {rightsOf(slots[row] || {}).length > 1 && (
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSlots((current) => splitRights(current, row));
+                      }}
+                    >
+                      Split {result.rightLabel}s
+                    </button>
+                  )}
+                </div>
+              )}
               {issues.length > 0 && (
                 <div className="pair-issues">
                   {issues.map((flag, i) => (

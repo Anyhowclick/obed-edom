@@ -87,6 +87,22 @@ class JobRunner:
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
+    def rerun(self, job_id: str, fn: Callable[[Job], dict[str, Any]]) -> Job | None:
+        """Queue another pass on an existing job, keeping the same id."""
+        with self._cv:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            if job.status == "running":
+                raise RuntimeError("Job is already running")
+            job.status = "queued"
+            job.error = None
+            job.updated_at = time.time()
+            self._fns[job.id] = fn
+            self._queue.append(job.id)
+            self._cv.notify()
+        return job
+
     def list(self, kind: str | None = None, feature: str | None = None) -> list[Job]:
         jobs = list(self._jobs.values())
         if kind:

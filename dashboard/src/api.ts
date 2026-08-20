@@ -118,6 +118,19 @@ export async function relocateJob(
   return res.json();
 }
 
+export async function startDiffCheck(
+  jobId: string,
+  slots: { leftIndex: number | null; rightIndex?: number | null; rightIndexes?: number[] }[]
+): Promise<Job> {
+  const res = await fetch(`/api/diff/${jobId}/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slots }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function startDiff(
   leftPath: string,
   rightPath: string,

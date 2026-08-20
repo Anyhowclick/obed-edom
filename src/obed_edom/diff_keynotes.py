@@ -167,6 +167,18 @@ def _slide_number(slide: dict | None, fallback_index: int) -> int:
     return int(slide.get("number") or slide.get("index", fallback_index) + 1)
 
 
+def _cached_bits(
+    cache: dict[int, list[int] | None],
+    idx: int,
+    slide: dict,
+    png: Path | None,
+    slide_size: tuple[float, float],
+) -> list[int] | None:
+    if idx not in cache:
+        cache[idx] = _bits_from_png(slide, png, slide_size) if png else None
+    return cache[idx]
+
+
 def _pair_quality(
     left_slide: dict,
     right_slide: dict,
@@ -176,18 +188,21 @@ def _pair_quality(
     right_map: dict[int, Path],
     left_size: tuple[float, float],
     right_size: tuple[float, float],
+    left_bits: dict[int, list[int] | None],
+    right_bits: dict[int, list[int] | None],
 ) -> float:
     score = text_score(slide_plain_text(left_slide), slide_plain_text(right_slide))
+    if score >= ALIGN_THRESHOLD:
+        return score
+    if _token_count(left_slide) > SHORT_TITLE_TOKENS and _token_count(right_slide) > SHORT_TITLE_TOKENS:
+        return score
     if not _image_items(left_slide) or not _image_items(right_slide):
         return score
-    left_png, right_png = left_map.get(li), right_map.get(ri)
-    if not left_png or not right_png:
+    lb = _cached_bits(left_bits, li, left_slide, left_map.get(li), left_size)
+    rb = _cached_bits(right_bits, ri, right_slide, right_map.get(ri), right_size)
+    if lb is None or rb is None:
         return score
-    left_bits = _bits_from_png(left_slide, left_png, left_size)
-    right_bits = _bits_from_png(right_slide, right_png, right_size)
-    if left_bits is None or right_bits is None:
-        return score
-    direct, flipped = _hash_distances(left_bits, right_bits)
+    direct, flipped = _hash_distances(lb, rb)
     best = min(direct, flipped)
     if best <= IMAGE_HAMMING:
         return max(score, 0.93)
@@ -218,7 +233,8 @@ def align_slides(
     vis_right = _content_indices(right_slides)
     used_left: set[int] = set()
     used_right: set[int] = set()
-    matches: list[tuple[int, int, float]] = []
+    left_hash: dict[int, list[int] | None] = {}
+    right_hash: dict[int, list[int] | None] = {}
 
     def quality(li: int, ri: int) -> float:
         return _pair_quality(
@@ -230,9 +246,12 @@ def align_slides(
             right_map,
             left_size,
             right_size,
+            left_hash,
+            right_hash,
         )
 
     i = 0
+    ordered: list[tuple[int | None, int | None, float]] = []
     for ri in vis_right:
         best_k, best_sc = None, 0.0
         next_sc = 0.0
@@ -243,39 +262,32 @@ def align_slides(
             if score > best_sc:
                 best_sc, best_k = score, k
 
-        later_dsk_wants_next = False
-        if i < len(vis_left):
-            nxt = vis_left[i]
-            for later_ri in vis_right:
-                if later_ri <= ri or later_ri in used_right:
-                    continue
-                if quality(nxt, later_ri) >= threshold:
-                    later_dsk_wants_next = True
-                    break
-
         if i < len(vis_left) and next_sc >= threshold:
             li = vis_left[i]
-            matches.append((li, ri, next_sc))
+            ordered.append((li, ri, next_sc))
             used_left.add(li)
             used_right.add(ri)
             i += 1
         elif best_k is not None and best_sc >= threshold and best_k > i:
-            i = best_k
+            while i < best_k:
+                li = vis_left[i]
+                ordered.append((li, None, 0.0))
+                used_left.add(li)
+                i += 1
             li = vis_left[i]
-            matches.append((li, ri, best_sc))
+            ordered.append((li, ri, best_sc))
             used_left.add(li)
             used_right.add(ri)
             i += 1
-        elif (
-            i < len(vis_left)
-            and not later_dsk_wants_next
-            and _can_positional_pair(left_slides[vis_left[i]], right_slides[ri])
-        ):
+        elif i < len(vis_left) and not _has_text(left_slides[vis_left[i]]):
             li = vis_left[i]
-            matches.append((li, ri, max(next_sc, 0.5)))
+            ordered.append((li, ri, max(next_sc, 0.5)))
             used_left.add(li)
             used_right.add(ri)
             i += 1
+        else:
+            ordered.append((None, ri, 0.0))
+            used_right.add(ri)
 
     extra: list[tuple[int, int, float]] = []
     for ri in range(n_right):
@@ -308,23 +320,13 @@ def align_slides(
             used_left.add(li)
             used_right.add(best_skip[1])
 
-    ordered: list[tuple[int | None, int | None, float]] = [
-        (li, ri, sc) for li, ri, sc in matches + extra
-    ]
+    ordered.extend((li, ri, sc) for li, ri, sc in extra)
     for ri in range(n_right):
         if ri not in used_right and not _layout_only(right_slides[ri]) and not _skipped(right_slides[ri]):
             ordered.append((None, ri, 0.0))
-    for li in range(n_left):
-        if li not in used_left and not _layout_only(left_slides[li]) and not _skipped(left_slides[li]):
+    for li in vis_left:
+        if li not in used_left:
             ordered.append((li, None, 0.0))
-
-    def _key(slot: tuple[int | None, int | None, float]) -> tuple[int, int, int]:
-        li, ri, _sc = slot
-        if ri is not None:
-            return (0, ri, li if li is not None else -1)
-        return (1, li if li is not None else 0, 0)
-
-    ordered.sort(key=_key)
     return ordered
 
 
@@ -411,7 +413,9 @@ def _png_for_slide(
 
 
 def _average_hash(im: Image.Image, size: int = 8) -> list[int]:
-    small = im.convert("L").resize((size, size), Image.Resampling.LANCZOS)
+    gray = im.convert("L")
+    gray.thumbnail((64, 64), Image.Resampling.BILINEAR)
+    small = gray.resize((size, size), Image.Resampling.BILINEAR)
     pixels = list(small.tobytes())
     avg = sum(pixels) / max(1, len(pixels))
     return [1 if p > avg else 0 for p in pixels]
@@ -522,6 +526,13 @@ def _crop_item(png: Image.Image, item: dict, slide_w: float, slide_h: float) -> 
     return png.crop(box)
 
 
+def _photo_crops(slide: dict, png: Path, size: tuple[float, float]) -> tuple[Image.Image, list[Image.Image]]:
+    im = Image.open(png).convert("RGB")
+    items = [it for it in _image_items(slide) if _overlaps_center_wall(it, size[0], size[1])]
+    crops = [c for c in (_crop_item(im, it, size[0], size[1]) for it in items) if c]
+    return im, crops
+
+
 def image_item_diff(
     left_slide: dict,
     right_slide: dict,
@@ -531,17 +542,19 @@ def image_item_diff(
     right_size: tuple[float, float],
     out_png: Path,
     *,
+    extra_rights: list[tuple[dict, Path, tuple[float, float]]] | None = None,
     hamming_limit: int = IMAGE_HAMMING,
 ) -> dict:
     """Compare photo items after cropping; ignores full-frame layout chrome."""
-    left_im = Image.open(left_png).convert("RGB")
-    right_im = Image.open(right_png).convert("RGB")
-    left_items = [it for it in _image_items(left_slide) if _overlaps_center_wall(it, left_size[0], left_size[1])]
-    right_items = [it for it in _image_items(right_slide) if _overlaps_center_wall(it, right_size[0], right_size[1])]
-    left_crops = [c for c in (_crop_item(left_im, it, left_size[0], left_size[1]) for it in left_items) if c]
-    right_crops = [c for c in (_crop_item(right_im, it, right_size[0], right_size[1]) for it in right_items) if c]
+    left_im, left_crops = _photo_crops(left_slide, left_png, left_size)
+    right_im, right_crops = _photo_crops(right_slide, right_png, right_size)
+    right_has_text = _has_text(right_slide)
+    for extra_slide, extra_png, extra_size in extra_rights or []:
+        _, extra_crops = _photo_crops(extra_slide, extra_png, extra_size)
+        right_crops.extend(extra_crops)
+        right_has_text = right_has_text or _has_text(extra_slide)
     if not left_crops or not right_crops:
-        if _has_text(left_slide) or _has_text(right_slide):
+        if _has_text(left_slide) or right_has_text:
             return {"visual": False, "maxDelta": 0, "changedRatio": 0.0, "kind": "images", "reason": ""}
         left_im = crop_center_wall(left_im, left_size[0], left_size[1])
         right_im = crop_center_wall(right_im, right_size[0], right_size[1])
@@ -636,7 +649,14 @@ def _pair_location(
     left_num: int | None,
     right_label: str,
     right_num: int | None,
+    right_nums: list[int] | None = None,
 ) -> str:
+    nums = [n for n in (right_nums or []) if n]
+    if len(nums) > 1:
+        joined = "+".join(str(n) for n in nums)
+        if left_num:
+            return f"{left_label} slide {left_num} ↔ {right_label} slides {joined}"
+        return f"{right_label} slides {joined}"
     if left_num and right_num:
         return f"{left_label} slide {left_num} ↔ {right_label} slide {right_num}"
     if left_num:
@@ -684,6 +704,45 @@ def _add_flag(bucket: list[Flag], flags: list[Flag], flag: Flag) -> None:
     flags.append(flag)
 
 
+def slide_catalog(slides: list[dict], png_map: dict[int, Path]) -> list[dict]:
+    out: list[dict] = []
+    for i, slide in enumerate(slides):
+        png = png_map.get(i)
+        out.append(
+            {
+                "index": i,
+                "number": _slide_number(slide, i),
+                "skipped": _skipped(slide),
+                "layoutOnly": _layout_only(slide),
+                "png": png.name if png else None,
+                "text": slide_plain_text(slide),
+            }
+        )
+    return out
+
+
+def _right_indexes(ri: object) -> list[int]:
+    if ri is None:
+        return []
+    if isinstance(ri, (list, tuple)):
+        return [int(x) for x in ri if x is not None]
+    return [int(ri)]
+
+
+def slots_from_pairs(pairs: list[dict]) -> list[tuple[int | None, list[int], float]]:
+    out: list[tuple[int | None, list[int], float]] = []
+    for pair in pairs:
+        li = pair.get("leftIndex")
+        ris = pair.get("rightIndexes")
+        if ris is None:
+            ris = _right_indexes(pair.get("rightIndex"))
+        else:
+            ris = _right_indexes(ris)
+        score = float(pair.get("score") or 0.0)
+        out.append((int(li) if li is not None else None, ris, score))
+    return out
+
+
 def compare_inspects(
     left: dict,
     right: dict,
@@ -693,6 +752,8 @@ def compare_inspects(
     *,
     left_label: str = "LW",
     right_label: str = "Other",
+    slots: list[tuple[int | None, int | None | list[int], float]] | None = None,
+    check: bool = True,
 ) -> dict:
     left_pngs = preview_pngs(left_previews)
     right_pngs = preview_pngs(right_previews)
@@ -704,7 +765,7 @@ def compare_inspects(
     n_right = right.get("slideCount") or len(right_slides)
     flags: list[Flag] = []
     same_type = _same_deck_type(left, right, left_label, right_label)
-    if same_type and n_left != n_right:
+    if check and same_type and n_left != n_right:
         flags.append(
             Flag(
                 "info",
@@ -716,43 +777,54 @@ def compare_inspects(
     left_size = (float(left.get("slideWidth") or 0), float(left.get("slideHeight") or 0))
     right_size = (float(right.get("slideWidth") or 0), float(right.get("slideHeight") or 0))
 
-    if same_type:
-        slots: list[tuple[int | None, int | None, float]] = []
-        for i in range(max(n_left, n_right, len(left_slides), len(right_slides))):
-            li = i if i < len(left_slides) else None
-            ri = i if i < len(right_slides) else None
-            slots.append((li, ri, 1.0 if li is not None and ri is not None else 0.0))
-    else:
-        slots = align_slides(
-            left_slides,
-            right_slides,
-            left_pngs=left_pngs,
-            right_pngs=right_pngs,
-            left_size=left_size,
-            right_size=right_size,
-        )
+    if slots is None:
+        if same_type:
+            slots = []
+            for i in range(max(n_left, n_right, len(left_slides), len(right_slides))):
+                li = i if i < len(left_slides) else None
+                ri = i if i < len(right_slides) else None
+                slots.append((li, ri, 1.0 if li is not None and ri is not None else 0.0))
+        else:
+            slots = align_slides(
+                left_slides,
+                right_slides,
+                left_pngs=left_pngs,
+                right_pngs=right_pngs,
+                left_size=left_size,
+                right_size=right_size,
+            )
 
     pairs = []
-    for li, ri, score in slots:
+    for li, raw_ri, score in slots:
+        ris = _right_indexes(raw_ri)
         ls = left_slides[li] if li is not None and li < len(left_slides) else None
-        rs = right_slides[ri] if ri is not None and ri < len(right_slides) else None
-        if _skipped(ls) and _skipped(rs):
+        right_hits = [(i, right_slides[i]) for i in ris if i < len(right_slides)]
+        rs = right_hits[0][1] if right_hits else None
+        ri = right_hits[0][0] if right_hits else None
+        extra_hits = right_hits[1:]
+        all_right_skipped = bool(right_hits) and all(_skipped(slide) for _, slide in right_hits)
+        if _skipped(ls) and (not right_hits or all_right_skipped):
             continue
-        if ls is None and _skipped(rs):
+        if ls is None and all_right_skipped:
             continue
-        if rs is None and _skipped(ls):
+        if not right_hits and _skipped(ls):
             continue
         pair_i = len(pairs)
         left_num = _slide_number(ls, li if li is not None else pair_i)
-        right_num = _slide_number(rs, ri if ri is not None else pair_i)
+        right_nums = [_slide_number(slide, i) for i, slide in right_hits]
+        right_num = right_nums[0] if right_nums else None
         pair_flags: list[Flag] = []
         pair: dict = {
             "index": pair_i,
             "number": pair_i + 1,
+            "leftIndex": li if ls else None,
+            "rightIndex": ri if rs else None,
+            "rightIndexes": [i for i, _ in right_hits] if right_hits else [],
             "leftNumber": left_num if ls else None,
             "rightNumber": right_num if rs else None,
+            "rightNumbers": right_nums,
             "leftSkipped": _skipped(ls),
-            "rightSkipped": _skipped(rs),
+            "rightSkipped": any(_skipped(slide) for _, slide in right_hits),
             "score": score,
             "sameType": same_type,
         }
@@ -761,59 +833,69 @@ def compare_inspects(
             left_num if ls else None,
             right_label,
             right_num if rs else None,
+            right_nums=right_nums,
         ) or f"slide {pair_i + 1}"
 
+        left_png = left_map.get(li) if li is not None else None
+        right_png = right_map.get(ri) if ri is not None else None
+        right_png_paths = [right_map.get(i) for i, _ in right_hits]
+        if left_png:
+            pair["leftPng"] = left_png.name
+        if right_png:
+            pair["rightPng"] = right_png.name
+        if right_png_paths:
+            pair["rightPngs"] = [p.name if p else None for p in right_png_paths]
+        if ls:
+            pair["leftText"] = slide_plain_text(ls)
+            pair["leftMarkup"] = highlighted_markup(ls)
+        if right_hits:
+            pair["rightText"] = "\n".join(slide_plain_text(slide) for _, slide in right_hits)
+            pair["rightMarkup"] = "\n".join(highlighted_markup(slide) for _, slide in right_hits)
+
         if ls is None:
-            if same_type:
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    Flag("warning", "diff", f"Missing on {left_label}.", location=loc),
-                )
-            elif rs and not _layout_only(rs):
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    Flag(
-                        "warning",
-                        "diff",
-                        f"No matching {left_label} slide.",
-                        location=loc,
-                    ),
-                )
+            if check:
+                if same_type:
+                    _add_flag(
+                        pair_flags,
+                        flags,
+                        Flag("warning", "diff", f"Missing on {left_label}.", location=loc),
+                    )
+                elif rs and not all(_layout_only(slide) for _, slide in right_hits):
+                    _add_flag(
+                        pair_flags,
+                        flags,
+                        Flag("warning", "diff", f"No matching {left_label} slide.", location=loc),
+                    )
             pair["missing"] = left_label
-            pair["rightText"] = slide_plain_text(rs) if rs else ""
-            pair["rightMarkup"] = highlighted_markup(rs) if rs else ""
-            right_png = right_map.get(ri) if ri is not None else None
-            if right_png:
-                pair["rightPng"] = right_png.name
             pair["flags"] = pair_flags
             pairs.append(pair)
             continue
         if rs is None:
-            if same_type:
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    Flag("warning", "diff", f"Missing on {right_label}.", location=loc),
-                )
-            elif not _layout_only(ls):
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    Flag("info", "diff", f"No matching {right_label} slide.", location=loc),
-                )
+            if check:
+                if same_type:
+                    _add_flag(
+                        pair_flags,
+                        flags,
+                        Flag("warning", "diff", f"Missing on {right_label}.", location=loc),
+                    )
+                elif not _layout_only(ls):
+                    _add_flag(
+                        pair_flags,
+                        flags,
+                        Flag("info", "diff", f"No matching {right_label} slide.", location=loc),
+                    )
             pair["missing"] = right_label
-            pair["leftText"] = slide_plain_text(ls)
-            pair["leftMarkup"] = highlighted_markup(ls)
-            left_png = left_map.get(li) if li is not None else None
-            if left_png:
-                pair["leftPng"] = left_png.name
             pair["flags"] = pair_flags
             pairs.append(pair)
             continue
 
-        if _skipped(ls) != _skipped(rs):
+        if not check:
+            pair["flags"] = pair_flags
+            pairs.append(pair)
+            continue
+
+        skipped_right = all_right_skipped if extra_hits else _skipped(rs)
+        if _skipped(ls) != skipped_right:
             shown = left_label if not _skipped(ls) else right_label
             hidden = right_label if not _skipped(ls) else left_label
             _add_flag(
@@ -827,14 +909,10 @@ def compare_inspects(
                 ),
             )
 
-        a_text = slide_plain_text(ls)
-        b_text = slide_plain_text(rs)
-        a_mark = highlighted_markup(ls)
-        b_mark = highlighted_markup(rs)
-        pair["leftText"] = a_text
-        pair["rightText"] = b_text
-        pair["leftMarkup"] = a_mark
-        pair["rightMarkup"] = b_mark
+        a_text = pair.get("leftText") or ""
+        b_text = pair.get("rightText") or ""
+        a_mark = pair.get("leftMarkup") or ""
+        b_mark = pair.get("rightMarkup") or ""
         wording = wording_message(a_text, b_text, left_label, right_label)
         if wording:
             _add_flag(pair_flags, flags, Flag("warning", "diff", wording, location=loc))
@@ -844,25 +922,37 @@ def compare_inspects(
                 flags,
                 Flag("warning", "diff", "Highlighting differs.", location=loc),
             )
-        elif _smallcaps_signature(ls) != _smallcaps_signature(rs):
-            _add_flag(
-                pair_flags,
-                flags,
-                Flag("warning", "diff", "Small caps differ.", location=loc),
-            )
+        else:
+            right_sig: list[tuple[str, bool]] = []
+            for _, slide in right_hits:
+                right_sig.extend(_smallcaps_signature(slide))
+            if _smallcaps_signature(ls) != right_sig:
+                _add_flag(
+                    pair_flags,
+                    flags,
+                    Flag("warning", "diff", "Small caps differ.", location=loc),
+                )
 
-        left_png = left_map.get(li) if li is not None else None
-        right_png = right_map.get(ri) if ri is not None else None
-        if left_png:
-            pair["leftPng"] = left_png.name
-        if right_png:
-            pair["rightPng"] = right_png.name
+        extra_photo = [
+            (slide, png, right_size)
+            for (i, slide), png in zip(extra_hits, right_png_paths[1:])
+            if png is not None
+        ]
         if left_png and right_png:
             heat = heat_dir / f"pair-{pair_i + 1:03d}.png"
-            if same_type:
+            if same_type and not extra_photo:
                 vis = visual_diff(left_png, right_png, heat)
             else:
-                vis = image_item_diff(ls, rs, left_png, right_png, left_size, right_size, heat)
+                vis = image_item_diff(
+                    ls,
+                    rs,
+                    left_png,
+                    right_png,
+                    left_size,
+                    right_size,
+                    heat,
+                    extra_rights=extra_photo or None,
+                )
             pair["visual"] = vis
             if vis.get("heatmap"):
                 pair["heatPng"] = Path(str(vis["heatmap"])).name
@@ -887,14 +977,18 @@ def compare_inspects(
         pair["flags"] = pair_flags
         pairs.append(pair)
 
-    flags.extend(validate_inspect(left, location_prefix=left_label))
-    flags.extend(validate_inspect(right, location_prefix=right_label))
+    if check:
+        flags.extend(validate_inspect(left, location_prefix=left_label))
+        flags.extend(validate_inspect(right, location_prefix=right_label))
     return {
         "leftSlideCount": n_left,
         "rightSlideCount": n_right,
         "leftSize": [left.get("slideWidth"), left.get("slideHeight")],
         "rightSize": [right.get("slideWidth"), right.get("slideHeight")],
         "sameType": same_type,
+        "leftCatalog": slide_catalog(left_slides, left_map),
+        "rightCatalog": slide_catalog(right_slides, right_map),
         "pairs": pairs,
         "flags": flags,
     }
+

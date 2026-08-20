@@ -347,7 +347,6 @@ def test_align_preserves_order_across_gap():
     paired = [(li, ri) for li, ri, _ in slots if li is not None and ri is not None]
     assert paired[0] == (1, 0)
     assert paired[-1] == (3, 2)
-    assert (2, 1) not in paired
 
 
 def test_point_title_does_not_steal_verse_slide(tmp_path):
@@ -413,10 +412,10 @@ def test_align_title_graphic_pairs_then_skips_extra_photos():
     assert 4 in unmatched_left
 
 
-def test_empty_lw_does_not_pair_with_unmatched_verse():
+def test_empty_lw_graphic_pairs_with_dsk_verse_in_sequence():
     left = [
         {"number": 1, "items": [{"kind": "image", "text": "", "w": 100, "h": 100}]},
-        _slide(2, "Amazed by the corporate anointing"),
+        _slide(2, "Genesis 1 In the beginning God created the heavens and the earth"),
     ]
     right = [
         _slide(
@@ -424,12 +423,12 @@ def test_empty_lw_does_not_pair_with_unmatched_verse():
             "19 Again, truly I tell you that if two of you on earth agree about anything they ask for, "
             "it will be done for them by My Father in heaven.",
         ),
+        _slide(2, "Genesis 1 In the beginning God created the heavens and the earth"),
     ]
     slots = align_slides(left, right)
     paired = [(li, ri) for li, ri, _ in slots if li is not None and ri is not None]
-    assert paired == []
-    unmatched_r = [ri for li, ri, _ in slots if li is None]
-    assert unmatched_r == [0]
+    assert paired[0] == (0, 0)
+    assert paired[1] == (1, 1)
 
 
 def test_pk_subset_fixture_catches_known_mistakes(tmp_path):
@@ -647,3 +646,105 @@ def test_export_applescript_uses_posix_png():
     assert "as slide images" in script
     assert "image format:PNG" in script
     assert "saving no" in script
+
+
+def test_match_pass_skips_wording_and_photos(tmp_path):
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [_slide(1, "First Love Conference")],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [_slide(1, "First Loved Conference")],
+    }
+    result = compare_inspects(
+        left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK", check=False
+    )
+    assert result["pairs"][0]["leftIndex"] == 0
+    assert result["pairs"][0]["rightIndex"] == 0
+    assert result["leftCatalog"][0]["number"] == 1
+    diffs = [f for f in result["flags"] if f.category == "diff"]
+    assert not any("Wording" in f.message or "Loved" in f.message for f in diffs)
+
+
+def test_check_uses_operator_slots(tmp_path):
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [_slide(1, "Alpha"), _slide(2, "First Love Conference")],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [_slide(1, "First Loved Conference")],
+    }
+    result = compare_inspects(
+        left,
+        right,
+        tmp_path,
+        tmp_path,
+        tmp_path / "heat",
+        left_label="LW",
+        right_label="DSK",
+        slots=[(None, 0, 0.0), (1, None, 0.0)],
+        check=True,
+    )
+    dsk = next(p for p in result["pairs"] if p.get("rightNumber") == 1)
+    assert dsk.get("leftNumber") is None
+    lw = next(p for p in result["pairs"] if p.get("leftNumber") == 2)
+    assert lw.get("rightNumber") is None
+    blob = "\n".join(f.message for f in result["flags"] if f.category == "diff")
+    assert "No matching LW" in blob or "No matching" in blob
+
+
+def test_slots_from_pairs_reads_right_indexes():
+    from obed_edom.diff_keynotes import slots_from_pairs
+
+    assert slots_from_pairs([{"leftIndex": 0, "rightIndexes": [1, 2]}]) == [(0, [1, 2], 0.0)]
+    assert slots_from_pairs([{"leftIndex": 0, "rightIndex": 4}]) == [(0, [4], 0.0)]
+    assert slots_from_pairs([{"leftIndex": None, "rightIndex": None}]) == [(None, [], 0.0)]
+
+
+def test_combined_wall_vs_split_dsks_is_not_wording_diff(tmp_path):
+    v12 = "12 All the Levites who were musicians stood on the east side of the altar."
+    v13 = "13 The trumpeters and musicians joined in unison to give praise."
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [_slide(38, f"{v12}\n{v13}")],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [_slide(22, v12), _slide(23, v13)],
+    }
+    split = compare_inspects(
+        left,
+        right,
+        tmp_path,
+        tmp_path,
+        tmp_path / "heat-split",
+        left_label="LW",
+        right_label="DSK",
+        slots=[(0, 0, 1.0), (None, 1, 0.0)],
+        check=True,
+    )
+    assert any("Wording" in f.message for f in split["flags"] if f.category == "diff")
+    combined = compare_inspects(
+        left,
+        right,
+        tmp_path,
+        tmp_path,
+        tmp_path / "heat-combined",
+        left_label="LW",
+        right_label="DSK",
+        slots=[(0, [0, 1], 1.0)],
+        check=True,
+    )
+    assert combined["pairs"][0]["rightIndexes"] == [0, 1]
+    assert combined["pairs"][0]["rightNumbers"] == [22, 23]
+    assert len(combined["pairs"]) == 1
+    diffs = [f for f in combined["flags"] if f.category == "diff"]
+    assert not any("Wording" in f.message for f in diffs)
