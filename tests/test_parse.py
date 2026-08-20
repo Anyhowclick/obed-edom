@@ -164,6 +164,35 @@ def test_mapping_masters():
     assert all(len(s.body) <= 190 for s in dsk_verses)
     assert min(len(s.body) for s in dsk_verses) >= 40
     assert any(s.body.startswith("31") for s in dsk_verses)
+    # The reference is "Mark 6:30-32 (MSG)" but the quote starts at 31, so the
+    # range must not be left stranded at the head of the body.
+    assert not any(s.body.startswith("30-32") for s in dsk_verses)
+    assert all("(MSG)" not in s.body for s in dsk_verses)
+
+
+def test_ref_tail_never_eats_a_verse_number():
+    """An inline reference leaves "30-32 (MSG)" behind; a lone number is a verse.
+
+    `_resolve_ref` returns only "Book Chapter", so dropping len(ref) strips
+    "Mark 6" and leaves ":30-32 (MSG) 31 …" (the colon is gone by then). The
+    tail therefore has to require a range or a translation: matching a bare
+    number would delete the verse number itself.
+    """
+    from sermon_slides.slide_map import REF_TAIL_RE, VERSE_LEAD_RE
+
+    def dropped(text: str) -> str | None:
+        match = REF_TAIL_RE.match(text)
+        if match and VERSE_LEAD_RE.match(match.group("rest")):
+            return text[match.end("tail") :].strip()
+        return None
+
+    assert dropped("30-32 (MSG) 31 “If God gives") == "31 “If God gives"
+    assert dropped("30-32 31 “If God gives") == "31 “If God gives"
+    assert dropped("6 (MSG) 31 “If God") == "31 “If God"
+    # A bare number is a verse number, not a reference range.
+    assert dropped("26 I will give you a new heart") is None
+    assert dropped("26 27 And I will put my Spirit") is None
+    assert dropped("31 “If God gives such attention") is None
 
 
 def test_list_number_resolver():
