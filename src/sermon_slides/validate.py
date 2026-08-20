@@ -7,7 +7,7 @@ import yaml
 
 from sermon_slides.bible import check_bible
 from sermon_slides.inspect import all_plain_text, highlighted_markup
-from sermon_slides.models import Flag, OutlineDoc, Paragraph, Run
+from sermon_slides.models import Flag, OutlineDoc, Paragraph, Run, SlideSpec
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 RULES_PATH = PACKAGE_DIR / "validation_rules.yaml"
@@ -69,6 +69,7 @@ def validate_inspect(payload: dict, *, location_prefix: str = "") -> list[Flag]:
         loc = f"{prefix} slide {slide.get('number') or slide.get('index', 0) + 1}"
         flags.extend(_highlight_punctuation_flags(slide, loc))
         flags.extend(_quote_flags(slide_plain(slide), loc))
+        flags.extend(_inspect_overflow_flags(slide, loc, payload))
     flags.extend(_center_wall_flags(payload, prefix))
     return flags
 
@@ -80,6 +81,172 @@ def slide_plain(slide: dict) -> str:
         if t:
             parts.append(t)
     return "\n".join(parts)
+
+
+def _overflow_cfg() -> dict:
+    rules = load_rules().get("overflow") or {}
+    return {
+        "enabled": rules.get("enabled", True),
+        "height_slack_px": float(rules.get("height_slack_px", 8)),
+        "char_em": float(rules.get("char_em", 0.58)),
+        "line_height": float(rules.get("line_height", 1.18)),
+    }
+
+
+def _wrap_line_count(text: str, box_width: float, font_size: float, em: float) -> int:
+    if not (text or "").strip():
+        return 0
+    if box_width <= 0 or font_size <= 0:
+        return text.count("\n") + 1
+    cpl = max(8, int(box_width / (font_size * em)))
+    lines = 0
+    for para in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        words = para.split()
+        if not words:
+            lines += 1
+            continue
+        current = 0
+        for word in words:
+            extra = len(word) + (1 if current else 0)
+            if current and current + extra > cpl:
+                lines += 1
+                current = len(word)
+            else:
+                current += extra
+        lines += 1
+    return max(1, lines)
+
+
+def _text_needed_height(text: str, box_width: float, font_size: float, cfg: dict) -> float:
+    lines = _wrap_line_count(text, box_width, font_size, float(cfg["char_em"]))
+    return lines * font_size * float(cfg["line_height"])
+
+
+def _verse_char_limit(spec: SlideSpec, masters: dict) -> int:
+    cfg = masters.get(spec.deck) or {}
+    if spec.deck == "dsk" and spec.context == "offering":
+        return int(cfg.get("offering_verse_char_max", 190))
+    if spec.deck == "dsk":
+        return int(cfg.get("verse_char_max", 220))
+    return int(cfg.get("verse_char_max", 320))
+
+
+def _overflow_message(spec: SlideSpec, n: int, limit: int) -> str:
+    preview = re.sub(r"\s+", " ", spec.body or "").strip()
+    if len(preview) > 72:
+        preview = preview[:72].rstrip() + "…"
+    continued = spec.semantic_tag == "VERSE-CONTINUED"
+    where = "lower-third" if spec.deck == "dsk" else "LED wall"
+    extra = (
+        " This [VERSE-CONTINUED] slide keeps the full verse; how overflow should be handled is not decided yet."
+        if continued
+        else " How overflow should be handled is not decided yet."
+    )
+    return (
+        f"Text may overflow the {where} ({n} characters; box is sized for about {limit})."
+        f"{extra} {preview}"
+    )
+
+
+def validate_slide_specs(lw: list[SlideSpec], dsk: list[SlideSpec], masters: dict | None = None) -> list[Flag]:
+    """Flag copy that will not fit the mapped Keynote box. Does not rewrite decks."""
+    cfg = _overflow_cfg()
+    if not cfg["enabled"]:
+        return []
+    from sermon_slides.slide_map import load_masters
+
+    masters = masters or load_masters()
+    flags: list[Flag] = []
+    for deck_name, slides in (("LW", lw), ("DSK", dsk)):
+        for index, spec in enumerate(slides, start=1):
+            if spec.is_graphic and not spec.body:
+                continue
+            if spec.is_verse:
+                n = len(spec.body or "")
+                limit = _verse_char_limit(spec, masters)
+                over_chars = n > limit
+                height_over = False
+                box_w = 0.0
+                box_h = 0.0
+                font = 0.0
+                needed = 0.0
+                if spec.styled_items:
+                    body_idx = next(iter(spec.styled_items))
+                    box_w = float(spec.text_item_widths.get(body_idx) or 0)
+                    box_h = float(spec.text_item_heights.get(body_idx) or 0)
+                    font = float(spec.text_item_font_sizes.get(body_idx) or 0)
+                    if not font:
+                        palette = "dsk" if spec.deck == "dsk" else "lw"
+                        font = 45.0 if palette == "dsk" else 70.0
+                    if box_w > 0 and box_h > 0 and font > 0 and spec.body:
+                        needed = _text_needed_height(spec.body, box_w, font, cfg)
+                        height_over = needed > box_h + cfg["height_slack_px"]
+                if over_chars or height_over:
+                    loc = f"{deck_name} slide {index} ({spec.master})"
+                    flags.append(
+                        Flag("warning", "overflow", _overflow_message(spec, n, limit), location=loc)
+                    )
+                continue
+            if spec.role in {"pre", "post"} and spec.body:
+                max_lines = 3 if spec.role == "post" else 2
+                lines = [ln for ln in (spec.body or "").split("\n") if ln.strip()]
+                if len(lines) > max_lines:
+                    loc = f"{deck_name} slide {index} ({spec.master})"
+                    flags.append(
+                        Flag(
+                            "warning",
+                            "overflow",
+                            f"Point text may overflow ({len(lines)} lines in a {max_lines}-line box). "
+                            "How overflow should be handled is not decided yet.",
+                            location=loc,
+                        )
+                    )
+    return flags
+
+
+def _inspect_item_font_size(item: dict, payload: dict) -> float:
+    for run in item.get("runs") or []:
+        size = run.get("size")
+        if size:
+            return float(size)
+    if item.get("size"):
+        return float(item["size"])
+    width = float(payload.get("slideWidth") or 1920)
+    return 70.0 if width >= 3000 else 45.0
+
+
+def _inspect_overflow_flags(slide: dict, location: str, payload: dict) -> list[Flag]:
+    cfg = _overflow_cfg()
+    if not cfg["enabled"]:
+        return []
+    flags: list[Flag] = []
+    for item in slide.get("items") or []:
+        if (item.get("kind") or "text") != "text":
+            continue
+        text = (item.get("text") or "").strip()
+        if len(text) < 24:
+            continue
+        box_w = float(item.get("w") or 0)
+        box_h = float(item.get("h") or 0)
+        if box_w < 40 or box_h < 20:
+            continue
+        font = _inspect_item_font_size(item, payload)
+        needed = _text_needed_height(text, box_w, font, cfg)
+        if needed <= box_h + cfg["height_slack_px"]:
+            continue
+        preview = re.sub(r"\s+", " ", text)
+        if len(preview) > 72:
+            preview = preview[:72].rstrip() + "…"
+        flags.append(
+            Flag(
+                "warning",
+                "overflow",
+                f"Text may overflow this box (needs about {int(needed)}px, box is {int(box_h)}px). "
+                f"How overflow should be handled is not decided yet. {preview}",
+                location=location,
+            )
+        )
+    return flags
 
 
 def validate_style_text(text: str, *, location: str = "") -> list[Flag]:

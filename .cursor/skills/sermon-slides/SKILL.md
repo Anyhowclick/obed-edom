@@ -58,6 +58,7 @@ Ignore highlight colour on these for now.
 | `[FILLER-QR]` | LW `BLANK` + DSK QR |
 | `[GIVING-OPTIONS]` | LW `BLANK` (paste graphic) + DSK credit-card giving layout |
 | `[VERSE]` | LW `VERSES` + DSK verse layout; long passages split |
+| `[VERSE-CONTINUED]` | Rest of the previous verse (oral pause mid-verse). This slide shows the verse so far, with a leading verse number so body copy stays on the baseline. Alias: `[VERSE-FROM-PREVIOUS]`. A `[VERSE]` with no verse number after a verse is treated the same. |
 | `[POINT]` | Non-numbered PRE. If the next cue is `[VERSE]`, also POST (point + verse) with 1s Magic Move on PRE, then the usual standalone verse slides. Skip DSK POST when the point is too long for the lower-third column. |
 | `[NUM-POINT]` | Numbered PRE / POST, same pairing rule. Word list numbering supplies the point number. |
 

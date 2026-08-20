@@ -17,17 +17,20 @@ SEMANTIC_TAGS = {
     "FILLER-QR",
     "GIVING-OPTIONS",
     "VERSE",
+    "VERSE-CONTINUED",
     "POINT",
     "NUM-POINT",
 }
+VERSE_TAGS = {"VERSE", "VERSE-CONTINUED"}
 GRAPHIC_TAGS = {"TITLE", "FILLER", "FILLER-QR", "GIVING-OPTIONS"}
 POINT_TAGS = {"POINT", "NUM-POINT"}
 OFFERING_TAGS = {"FILLER-QR", "GIVING-OPTIONS"}
 
-# NUM-POINT / FILLER-QR / GIVING-OPTIONS before their shorter prefixes.
+# Longer verse/point tags before their shorter prefixes.
 CUE_RE = re.compile(
     r"\[("
     r"FILLER[- ]QR|GIVING[- ]OPTIONS|NUM[- ]POINT|"
+    r"VERSE[- ]CONTINUED|VERSE[- ]FROM[- ]PREVIOUS|"
     r"TITLE|FILLER|VERSE|POINT|"
     r"(?:LW|DSK|FW)(?:[-–][^\]]+)?"
     r")\]",
@@ -60,6 +63,10 @@ _SEMANTIC_NORMALIZE = {
     "GIVING-OPTIONS": "GIVING-OPTIONS",
     "GIVING OPTIONS": "GIVING-OPTIONS",
     "VERSE": "VERSE",
+    "VERSE-CONTINUED": "VERSE-CONTINUED",
+    "VERSE CONTINUED": "VERSE-CONTINUED",
+    "VERSE-FROM-PREVIOUS": "VERSE-CONTINUED",
+    "VERSE FROM PREVIOUS": "VERSE-CONTINUED",
     "POINT": "POINT",
     "NUM-POINT": "NUM-POINT",
     "NUM POINT": "NUM-POINT",
@@ -327,7 +334,7 @@ def _new_draft(
         cue_offset=cue.offset,
         cue_end=cue.end,
         source_paragraphs=[cue.paragraph],
-        force_verse=_prev_relative_verse(paragraphs, cue.paragraph) or cue.tag == "VERSE",
+        force_verse=_prev_relative_verse(paragraphs, cue.paragraph) or cue.tag in VERSE_TAGS,
         point_number=point_number,
     )
 
@@ -408,7 +415,7 @@ def _mark_verse_follows(blocks: list[SlideDraft]) -> None:
     for i, draft in enumerate(blocks):
         if draft.cue_tag not in POINT_TAGS:
             continue
-        if i + 1 < len(blocks) and blocks[i + 1].cue_tag == "VERSE":
+        if i + 1 < len(blocks) and blocks[i + 1].cue_tag in VERSE_TAGS:
             draft.verse_follows = True
             draft.following_verse_index = i + 1
 
@@ -499,7 +506,7 @@ def parse_outline(path: Path | str) -> OutlineDoc:
             continue
         if current is None:
             continue
-        if _is_bare_reference(para.text) and current.cue_tag != "VERSE":
+        if _is_bare_reference(para.text) and current.cue_tag not in VERSE_TAGS:
             current.speaker_notes.append(text)
             continue
         if _is_speaker_commentary(para.text, para.runs) and not _is_verse_runs(para.runs):

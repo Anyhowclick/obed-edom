@@ -165,11 +165,30 @@ def _append_plain_text(lines: list[str], idx: int, value: str, size: float | Non
     lines.append("        end try")
 
 
+def _text_seed_mode(first_super: str, spec: dict, palette_name: str) -> str:
+    """How to write a text box so SuperScript does not leak onto body copy.
+
+    keep_super: verse number uses the template seed character.
+    body_only: no verse number (continuation / mid-verse split); drop the seed.
+    replace: point titles and unseeded POST boxes — replace the whole object.
+    """
+    if first_super:
+        return "keep_super"
+    if palette_name in {"lw_point", "dsk_point"}:
+        return "replace"
+    master = spec.get("master") or ""
+    if spec.get("isVerse") or master == "VERSES" or str(master).startswith("Verse"):
+        return "body_only"
+    return "replace"
+
+
 def _append_seeded_text(
     lines: list[str],
     idx: int,
     first_super: str,
     rest: str,
+    *,
+    mode: str = "keep_super",
 ) -> None:
     """Write verse body without turning the whole box into superscript.
 
@@ -177,11 +196,53 @@ def _append_seeded_text(
     whole object text copies that superscript onto every character. Keep the
     seed only when the template actually has a larger body-sized character.
     Point titles and DSK POST verse boxes have no seed — replace the box.
+    Continuation slides have no leading verse number; drop the seed and write
+    onto the body-sized character so Regular copy stays on the baseline.
     """
-    if not first_super:
+    if mode == "replace" or (mode == "keep_super" and not first_super):
         lines.append("        try")
         lines.append(f'          set object text of text item {idx} to "{_as_escape(rest)}"')
         lines.append("        end try")
+        return
+
+    if mode == "body_only":
+        expected = len(rest)
+        fallback = rest
+        lines += [
+            "        try",
+            "          set usedSeed to false",
+            f"          tell object text of text item {idx}",
+            "            set seedCount to count of characters",
+            "            if seedCount >= 2 then",
+            "              set superSize to size of character 1",
+            "              set bodyIdx to 0",
+            "              set seedI to 1",
+            "              repeat while seedI <= seedCount",
+            "                if (size of character seedI) > (superSize + 1) then",
+            "                  set bodyIdx to seedI",
+            "                  exit repeat",
+            "                end if",
+            "                set seedI to seedI + 1",
+            "              end repeat",
+            "              if bodyIdx > 1 then",
+            "                if seedCount > bodyIdx then delete characters (bodyIdx + 1) thru seedCount",
+            "                delete characters 1 thru (bodyIdx - 1)",
+            "                set usedSeed to true",
+            "              end if",
+            "            end if",
+            "          end tell",
+            "          if usedSeed then",
+            f"            tell object text of text item {idx}",
+            f'              set character 1 to "{_as_escape(rest)}"',
+            "              set finalCount to count of characters",
+            f"              if finalCount > {expected} then "
+            f"delete characters {expected + 1} thru finalCount",
+            "            end tell",
+            "          else",
+            f'            set object text of text item {idx} to "{_as_escape(fallback)}"',
+            "          end if",
+            "        end try",
+        ]
         return
 
     expected = len(first_super) + len(rest)
@@ -656,6 +717,7 @@ def _plan_payload(slides: list[SlideSpec], output: Path, export_dir: Path | None
             {
                 "master": s.master,
                 "deck": s.deck,
+                "isVerse": bool(s.is_verse),
                 "textItems": {str(k): v for k, v in s.text_items.items()},
                 "styledItems": {
                     str(idx): _runs_to_payload(runs) for idx, runs in s.styled_items.items()
@@ -750,10 +812,13 @@ def _build_applescript(plan: dict) -> str:
         styled_items = spec.get("styledItems") or {}
         styled_idxs = {int(k) for k in styled_items}
         font_sizes = spec.get("textItemFontSizes") or {}
+        item_palettes = spec.get("itemPalettes") or {}
         for key, runs in styled_items.items():
             idx = int(key)
             first_super, rest, prepared = _prepare_styled_runs(runs)
-            _append_seeded_text(lines, idx, first_super, rest)
+            palette_name = item_palettes.get(str(idx), "")
+            mode = _text_seed_mode(first_super, spec, palette_name)
+            _append_seeded_text(lines, idx, first_super, rest, mode=mode)
         for key, value in sorted((spec.get("textItems") or {}).items(), key=lambda kv: int(kv[0])):
             idx = int(key)
             if idx in styled_idxs:
@@ -761,7 +826,6 @@ def _build_applescript(plan: dict) -> str:
             size = float(font_sizes[str(idx)]) if str(idx) in font_sizes else None
             _append_plain_text(lines, idx, value if value is not None else "", size)
         palette_default = STYLE_PALETTES.get(spec.get("deck") or "dsk", STYLE_PALETTES["dsk"])
-        item_palettes = spec.get("itemPalettes") or {}
         for key, runs in styled_items.items():
             idx = int(key)
             first_super, rest, prepared = _prepare_styled_runs(runs)

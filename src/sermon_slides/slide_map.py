@@ -14,6 +14,7 @@ from sermon_slides.models import (
     StyledRun,
     Transition,
 )
+from sermon_slides.parse_outline import VERSE_TAGS
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 MAGIC_MOVE = Transition(effect="magic_move", duration=1.0, match="word")
@@ -341,7 +342,7 @@ def _dsk_point_text(lines: list[str]) -> str:
 
 
 def _is_verse_draft(draft: SlideDraft) -> bool:
-    if draft.cue_tag == "VERSE" or draft.force_verse or draft.has_verse_numbers:
+    if draft.cue_tag in VERSE_TAGS or draft.force_verse or draft.has_verse_numbers:
         return True
     return bool(draft.body_spans) and any(s.verse_number for s in draft.body_spans)
 
@@ -639,16 +640,96 @@ def _first_verse_number(runs: list[StyledRun]) -> str:
     return ""
 
 
+def _last_verse_number(runs: list[StyledRun]) -> str:
+    for run in reversed(runs):
+        if run.style == "verse_number" and run.text.strip():
+            return run.text.strip()
+    return ""
+
+
+def _runs_from_verse(runs: list[StyledRun], verse_num: str) -> list[StyledRun]:
+    out: list[StyledRun] = []
+    capturing = False
+    for run in runs:
+        if run.style == "verse_number":
+            if capturing:
+                break
+            if run.text.strip() == verse_num:
+                capturing = True
+        if capturing:
+            out.append(StyledRun(text=run.text, style=run.style))
+    return out
+
+
+def _join_continued_runs(prefix: list[StyledRun], suffix: list[StyledRun]) -> list[StyledRun]:
+    if not prefix:
+        return list(suffix)
+    if not suffix:
+        return list(prefix)
+    joined = list(prefix)
+    if joined[-1].text and suffix[0].text:
+        if not joined[-1].text[-1].isspace() and not suffix[0].text[0].isspace():
+            joined.append(StyledRun(text=" ", style="normal"))
+    joined.extend(suffix)
+    return _merge_runs(joined)
+
+
+def _continuation_prefix(outline: OutlineDoc, blocks: list[SlideDraft], index: int) -> list[StyledRun]:
+    """Earlier fragments of the same verse, from the last numbered verse through here."""
+    parts: list[list[StyledRun]] = []
+    for j in range(index - 1, -1, -1):
+        draft = blocks[j]
+        if draft.cue_tag not in VERSE_TAGS and not _is_verse_draft(draft):
+            if parts:
+                break
+            continue
+        ref, _ = _resolve_ref(outline, draft)
+        styled = _styled_verse_runs(draft, ref)
+        verse_num = _last_verse_number(styled)
+        if verse_num:
+            parts.append(_runs_from_verse(styled, verse_num))
+            break
+        parts.append(styled)
+    parts.reverse()
+    joined: list[StyledRun] = []
+    for part in parts:
+        joined = _join_continued_runs(joined, part)
+    return joined
+
+
+def _looks_continued(draft: SlideDraft, blocks: list[SlideDraft], index: int) -> bool:
+    if draft.cue_tag == "VERSE-CONTINUED":
+        return True
+    if draft.cue_tag != "VERSE" or draft.has_verse_numbers:
+        return False
+    return any(
+        blocks[j].cue_tag in VERSE_TAGS or _is_verse_draft(blocks[j])
+        for j in range(index - 1, -1, -1)
+    )
+
+
 def _graphic_spec(**kwargs) -> SlideSpec:
     kwargs.setdefault("is_graphic", True)
     kwargs.setdefault("role", "graphic")
     return SlideSpec(**kwargs)
 
 
-def _verse_chunks(draft: SlideDraft, outline: OutlineDoc, max_chars: int) -> tuple[str, str, list[list[StyledRun]]]:
+def _verse_chunks(
+    draft: SlideDraft,
+    outline: OutlineDoc,
+    max_chars: int,
+    *,
+    prefix_runs: list[StyledRun] | None = None,
+    split: bool = True,
+) -> tuple[str, str, list[list[StyledRun]]]:
     ref, trans = _resolve_ref(outline, draft)
     styled = _styled_verse_runs(draft, ref)
-    chunks = _split_styled_runs(styled, max_chars) or ([styled] if styled else [])
+    if prefix_runs:
+        styled = _join_continued_runs(prefix_runs, styled)
+    if split:
+        chunks = _split_styled_runs(styled, max_chars) or ([styled] if styled else [])
+    else:
+        chunks = [styled] if styled else []
     return ref, trans, chunks
 
 
@@ -661,6 +742,8 @@ def _lw_verse_specs(
     role: str = "verse",
     bind: str = "verse_body",
     extra_source: list[int] | None = None,
+    prefix_runs: list[StyledRun] | None = None,
+    continued: bool = False,
 ) -> list[SlideSpec]:
     cfg = masters["lw"]
     mapping = cfg["text_items"].get("VERSES", {})
@@ -668,7 +751,9 @@ def _lw_verse_specs(
     ref_idx = int(mapping["reference"]) if "reference" in mapping else 1
     verse_height = _lw_verse_body_height(cfg)
     max_chars = int(cfg.get("verse_char_max", 200))
-    ref, trans, chunks = _verse_chunks(draft, outline, max_chars)
+    ref, trans, chunks = _verse_chunks(
+        draft, outline, max_chars, prefix_runs=prefix_runs, split=not continued
+    )
     source = list(draft.source_paragraphs)
     if extra_source:
         for idx in extra_source:
@@ -698,7 +783,7 @@ def _lw_verse_specs(
                 translation=trans,
                 context=outline.context,
                 source_paragraphs=source,
-                semantic_tag="VERSE",
+                semantic_tag="VERSE-CONTINUED" if continued else "VERSE",
                 role=role,  # type: ignore[arg-type]
                 block_index=block_index,
                 bind=bind,
@@ -717,6 +802,8 @@ def _dsk_verse_specs(
     *,
     role: str = "verse",
     bind: str = "verse_body",
+    prefix_runs: list[StyledRun] | None = None,
+    continued: bool = False,
 ) -> list[SlideSpec]:
     cfg = masters["dsk"]
     pp = cfg["cues"]["VERSE"]
@@ -730,7 +817,9 @@ def _dsk_verse_specs(
         one_line_limit = int(cfg.get("verse_char_one_line", 80))
         max_chars = int(cfg.get("verse_char_max", 220))
         body_width = 0
-    ref, trans, chunks = _verse_chunks(draft, outline, max_chars)
+    ref, trans, chunks = _verse_chunks(
+        draft, outline, max_chars, prefix_runs=prefix_runs, split=not continued
+    )
     if "(MSG)" in outline.full_text.upper() and offering:
         trans = "MSG"
     header_text = _passage_header(ref or series_bit, trans, series_bit)
@@ -765,7 +854,7 @@ def _dsk_verse_specs(
                 translation=trans,
                 context=outline.context,
                 source_paragraphs=list(draft.source_paragraphs),
-                semantic_tag="VERSE",
+                semantic_tag="VERSE-CONTINUED" if continued else "VERSE",
                 role=role,  # type: ignore[arg-type]
                 block_index=block_index,
                 bind=bind,
@@ -1183,9 +1272,19 @@ def map_slides(outline: OutlineDoc) -> tuple[list[SlideSpec], list[SlideSpec], l
                     )
             continue
 
-        if tag == "VERSE" or _is_verse_draft(draft):
-            lw.extend(_lw_verse_specs(draft, outline, masters, i))
-            dsk.extend(_dsk_verse_specs(draft, outline, masters, i))
+        if tag in VERSE_TAGS or _is_verse_draft(draft):
+            continued = _looks_continued(draft, blocks, i)
+            prefix = _continuation_prefix(outline, blocks, i) if continued else []
+            lw.extend(
+                _lw_verse_specs(
+                    draft, outline, masters, i, prefix_runs=prefix, continued=continued
+                )
+            )
+            dsk.extend(
+                _dsk_verse_specs(
+                    draft, outline, masters, i, prefix_runs=prefix, continued=continued
+                )
+            )
             continue
 
         # Unknown / legacy tag: treat like a point PRE on both decks.
