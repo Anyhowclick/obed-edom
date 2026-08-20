@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
+import { isPreviewVideo } from "./PreviewGrid";
 import { ValidationPanel } from "./ValidationPanel";
 
 type Pair = {
@@ -175,7 +176,11 @@ function SlideSlot({
     >
       <div className="cap">{label}</div>
       {src ? (
-        <img src={src} alt={label} onClick={() => onOpen(src)} />
+        isPreviewVideo(png || src) ? (
+          <video src={src} muted playsInline preload="metadata" onClick={() => onOpen(src)} />
+        ) : (
+          <img src={src} alt={label} onClick={() => onOpen(src)} />
+        )
       ) : (
         <div className="slide-ph">{label}</div>
       )}

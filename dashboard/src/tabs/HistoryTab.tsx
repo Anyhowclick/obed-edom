@@ -30,8 +30,8 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         return;
       }
       if (feature === "visual") {
-        const left = await chooseFolder("LW preview PNG folder");
-        const right = await chooseFolder("DSK preview PNG folder");
+        const left = await chooseFolder("LW preview folder");
+        const right = await chooseFolder("DSK preview folder");
         upsert(await relocateJob(active.id, { leftPath: left.path, rightPath: right.path }));
         return;
       }

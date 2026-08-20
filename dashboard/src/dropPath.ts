@@ -52,7 +52,7 @@ export async function resolveDroppedFolder(dt: DataTransfer): Promise<ChosenFile
 
 function folderFromDroppedPath(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
-  if (/\.(png|jpe?g|webp|gif|tif|tiff)$/i.test(trimmed)) {
+  if (/\.(png|jpe?g|webp|gif|tif|tiff|mov)$/i.test(trimmed)) {
     return trimmed.replace(/\/[^/]+$/, "") || trimmed;
   }
   return trimmed;

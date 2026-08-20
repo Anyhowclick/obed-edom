@@ -1,3 +1,7 @@
+export function isPreviewVideo(nameOrUrl: string): boolean {
+  return /\.mov(?:$|[?#])/i.test(nameOrUrl);
+}
+
 export function LoadingOverlay({ title, logs }: { title: string; logs: string[] }) {
   return (
     <div className="overlay">
@@ -14,7 +18,11 @@ export function Lightbox({ src, onClose }: { src: string | null; onClose: () => 
   if (!src) return null;
   return (
     <div className="lightbox" onClick={onClose}>
-      <img src={src} alt="" />
+      {isPreviewVideo(src) ? (
+        <video src={src} controls autoPlay muted playsInline onClick={(e) => e.stopPropagation()} />
+      ) : (
+        <img src={src} alt="" />
+      )}
     </div>
   );
 }
@@ -38,7 +46,11 @@ export function PreviewGrid({
           style={{ background: "none", border: 0, padding: 0, color: "inherit" }}
           onClick={() => onOpen(u.src)}
         >
-          <img src={u.src} alt={u.label || ""} />
+          {isPreviewVideo(u.src) ? (
+            <video src={u.src} muted playsInline preload="metadata" />
+          ) : (
+            <img src={u.src} alt={u.label || ""} />
+          )}
           {u.label ? <div className="cap">{u.label}</div> : null}
         </button>
       ))}
