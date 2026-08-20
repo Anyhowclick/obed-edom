@@ -2,6 +2,12 @@
 
 Local Mac tool that builds LED-wall (LW) and DSK Keynote decks from sermon/offering Word outlines. Keynote.app is required for generate, preview export, and the dashboard’s Keynote jobs.
 
+## Accessibility permission
+
+Grant Accessibility to whatever launches generate — Terminal, iTerm, or the dashboard app — in *System Settings > Privacy & Security > Accessibility*.
+
+Multi-verse slides need each verse number raised as a superscript, and Keynote's AppleScript dictionary cannot set superscript on a character. Generate has to click **Format > Font > Baseline > Superscript**, which needs Accessibility. Without it the deck still generates with the right wording, but later verse numbers sit on the baseline and generate reports a flag. See the `sermon-slides` skill for the full details before changing that code.
+
 ## Dashboard
 
 Operator UI on localhost: generate from outlines, read-only Keynote diff, plus DSK/resize tabs (those two are UI stubs until the logic lands).

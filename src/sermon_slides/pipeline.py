@@ -58,6 +58,27 @@ def generate(
                 flags.append(
                     Flag("warning", "contrast", f"{deck} PNG export did not run; contrast not measured.")
                 )
+            super_fix = result.get("superscriptFix") or {}
+            if not super_fix.get("ok") and not super_fix.get("skipped"):
+                if super_fix.get("accessibilityDenied"):
+                    flags.append(
+                        Flag(
+                            "warning",
+                            "keynote",
+                            f"{deck} later verse numbers are not superscript. Keynote has no "
+                            "scriptable superscript, so it needs the Format menu: grant "
+                            "Accessibility to Terminal (or the dashboard app) in System Settings > "
+                            "Privacy & Security > Accessibility, then regenerate.",
+                        )
+                    )
+                else:
+                    flags.append(
+                        Flag(
+                            "warning",
+                            "keynote",
+                            f"{deck} later verse numbers may not be superscript; check them in Keynote.",
+                        )
+                    )
 
         if check_visuals and lw_key:
             lw_flags, overlays = check_contrast(lw, out_dir / "previews" / "lw", "lw")
@@ -70,6 +91,7 @@ def generate(
                     lw_key,
                     out_dir / "previews" / "lw",
                     overlays=overlays,
+                    superscript_fix=False,
                 )
                 again, _ = check_contrast(lw, out_dir / "previews" / "lw", "lw")
                 flags.extend(

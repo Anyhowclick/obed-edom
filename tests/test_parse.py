@@ -262,20 +262,23 @@ def test_prepare_styled_runs():
     assert rest == " one 32 two"
     assert prepared[2]["text"] == "32"
 
-    from sermon_slides.keynote import _tokenize_later_supers
+    from sermon_slides.keynote import _later_verse_jobs
 
-    token_rest, replacements = _tokenize_later_supers(
+    later = _later_verse_jobs(
         [
             {"text": "26", "style": "verse_number"},
             {"text": " a ", "style": "normal"},
             {"text": "27", "style": "verse_number"},
-            {"text": " b ", "style": "normal"},
+            {"text": " Drink from it, all of you.", "style": "normal"},
             {"text": "28", "style": "verse_number"},
+            {"text": " This is My Blood", "style": "normal"},
         ]
-    )[:2]
-    assert replacements == [("‡‡", "27"), ("†‡", "28")]
-    assert len(token_rest) == len(" a 27 b 28")
-    assert "‡" in token_rest and "†" in token_rest
+    )
+    assert [v["digits"] for v in later] == ["27", "28"]
+    assert [v["start"] for v in later] == [6, 35]
+    # Later verses are found through the copy that follows them, not a placeholder token.
+    assert later[0]["anchor"] == " Drink from it, all of y"
+    assert later[1]["anchor"] == " This is My Blood"
 
     first, rest, prepared = _prepare_styled_runs(
         [
@@ -354,14 +357,76 @@ def test_point_applescript_replaces_placeholder():
     assert 'click menu item "Superscript"' not in matt_script
     assert "System Events" not in matt_script
     assert "offset of" not in matt_script
-    assert "set character tokenPos to character 1" in matt_script
+    assert "set seedBox to duplicate mainBox" not in matt_script
+    assert "‡" not in matt_script
+    assert "†" not in matt_script
+    assert "27" in matt_script
+    assert "28" in matt_script
     assert 'using terms from application "Keynote"' in matt_script
-    assert "‡" in matt_script
-    assert "†" in matt_script
     assert "to (size of character 1)" not in matt_script
     assert "²" not in matt_script
     assert "⁷" not in matt_script
     assert "⁸" not in matt_script
+    assert "set font of characters 3 thru 91" not in matt_script
+    assert 'set font of characters 37 thru 38 to "AzoSans-Regular"' not in matt_script
+    assert 'set font of characters 69 thru 70 to "AzoSans-Regular"' not in matt_script
+
+    assert any("AzoSans-Bold" in ln for ln in matt_script.splitlines())
+
+
+def test_later_verse_superscript_needs_the_format_menu():
+    """Pass 2 must stay GUI-driven; Keynote cannot create superscript from a script.
+
+    Verified against Keynote 14.5 (see the "Later verse numbers" section of
+    .cursor/skills/sermon-slides/SKILL.md). Do not "simplify" this back into a
+    pure-AppleScript pass: every scriptable route below was tried and rejected by
+    Keynote itself, and each failure was silent inside a ``try`` block.
+    """
+    from sermon_slides.keynote import (
+        _build_superscript_fix_script,
+        _collect_superscript_jobs,
+        _read_superscript_report,
+    )
+
+    sermon = parse_outline(OUTLINES / "Sermon BC.docx")
+    lw, _, _ = map_slides(sermon)
+    matt_slide = next(s for s in lw if s.role == "verse" and "Take and eat" in (s.body or ""))
+
+    jobs = _collect_superscript_jobs([matt_slide])
+    assert jobs and jobs[0]["laterVerses"]
+    # Find is the only scripted way to place a selection, so every later verse
+    # number needs the copy that follows it as a search anchor.
+    assert all(v["anchor"] for v in jobs[0]["laterVerses"])
+
+    fix_script = _build_superscript_fix_script(Path("/tmp/matt.key"), jobs)
+    assert 'click menu item "Superscript" of menu "Baseline"' in fix_script
+    assert 'keystroke "f" using {command down}' in fix_script
+    assert "key code 123 using {shift down}" in fix_script
+
+    # "Shapes can not be copied" / "Words can not be copied".
+    assert "duplicate" not in fix_script
+    # Copies text only, never the superscript attribute.
+    assert "to character 1 of" not in fix_script
+    assert "set character 37 to character 1" not in fix_script
+    # `size` is the base size that superscript renders at 2/3; it cannot fake one.
+    assert "46.6" not in fix_script
+    # Mixing Latin-1 ²³ with the superscripts block ⁴-⁹ gives mismatched digits.
+    for glyph in "²³⁴⁵⁶⁷⁸⁹":
+        assert glyph not in fix_script
+
+    # A denied Accessibility grant has to surface, not pass silently.
+    denied = _read_superscript_report("s=7 ti=1 c1=30.0 c37=45.0 c69=45.0 gui= [-1743: not authorized]")
+    assert denied["accessibilityDenied"] is True
+    assert denied["allSuperscript"] is False
+
+    # Every text box in the report is checked, including the first one.
+    applied = _read_superscript_report(
+        "s=8 ti=5 c1=46.67 c37=46.67 c69=46.67 s=9 ti=2 c1=46.67 c37=46.67 c69=46.67 gui="
+    )
+    assert len(applied["boxes"]) == 2
+    assert applied["allSuperscript"] is True
+    unfixed = _read_superscript_report("s=8 ti=5 c1=46.67 c37=70.0 c69=70.0 gui=")
+    assert unfixed["allSuperscript"] is False
 
 
 def test_review_pdf_and_slide_kinds():
