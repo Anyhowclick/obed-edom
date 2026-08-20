@@ -18,6 +18,17 @@ from sermon_slides.models import (
 PACKAGE_DIR = Path(__file__).resolve().parent
 MAGIC_MOVE = Transition(effect="magic_move", duration=1.0, match="word")
 
+# What an inline reference leaves behind once "Book Chapter" is removed:
+# "30-32 (MSG)" from "Mark 6:30-32 (MSG) 31 “If God gives…". The colon is
+# already gone by then. A range or a translation is required, because a bare
+# number here is indistinguishable from the verse number itself.
+_REF_RANGE = r"\s*[-–]\s*\d{1,3}"
+_REF_TRANS = r"\s*\([A-Za-z]+\)"
+REF_TAIL_RE = re.compile(
+    rf"^(?P<tail>:?\s*\d{{1,3}}(?:{_REF_RANGE}(?:{_REF_TRANS})?|{_REF_TRANS}))(?P<rest>[\s\S]*)$"
+)
+VERSE_LEAD_RE = re.compile(r"^\s*\d{1,3}\s")
+
 
 def load_masters() -> dict:
     return yaml.safe_load((PACKAGE_DIR / "masters.yaml").read_text())
@@ -566,6 +577,13 @@ def _styled_verse_runs(draft: SlideDraft, ref: str) -> list[StyledRun]:
         if full.lower().startswith(ref.lower()):
             runs = _drop_prefix(runs, len(ref))
             runs = _lstrip_runs(runs)
+            # `ref` is only "Book Chapter", so an inline reference leaves its
+            # verse range and translation behind ("30-32 (MSG) 31 …"). Drop that
+            # tail only when a real verse number follows, so a reference whose
+            # range *is* the first verse ("Ezekiel 36:26 I will give…") keeps it.
+            tail = REF_TAIL_RE.match("".join(r.text for r in runs))
+            if tail and VERSE_LEAD_RE.match(tail.group("rest")):
+                runs = _lstrip_runs(_drop_prefix(runs, tail.end("tail")))
     squeezed: list[StyledRun] = []
     for run in runs:
         text = re.sub(r"\s+", " ", run.text)

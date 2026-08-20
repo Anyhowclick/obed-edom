@@ -19,6 +19,14 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
+[project.optional-dependencies]
+# starlette>=1.6 moved TestClient onto httpx2; without it the dashboard API
+# tests fail to import rather than fail an assertion.
+test = [
+    "pytest>=8.0",
+    "httpx2>=0.1",
+]
+
 [project.scripts]
 sermon-slides = "sermon_slides.cli:main"
 
