@@ -5,8 +5,8 @@ from pathlib import Path
 
 import yaml
 
-from sermon_slides.bible import ABS_REF_RE, _norm_book
-from sermon_slides.models import (
+from obed_edom.bible import ABS_REF_RE, _norm_book
+from obed_edom.models import (
     Flag,
     OutlineDoc,
     SlideDraft,
@@ -14,7 +14,7 @@ from sermon_slides.models import (
     StyledRun,
     Transition,
 )
-from sermon_slides.parse_outline import VERSE_TAGS
+from obed_edom.parse_outline import VERSE_TAGS
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 MAGIC_MOVE = Transition(effect="magic_move", duration=1.0, match="word")

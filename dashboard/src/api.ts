@@ -1,5 +1,5 @@
 export type Flag = {
-  severity: "info" | "warning" | "error";
+  severity: "info" | "warning" | "error" | "success";
   category: string;
   message: string;
   location?: string;

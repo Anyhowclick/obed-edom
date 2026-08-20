@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-Severity = Literal["info", "warning", "error"]
+Severity = Literal["info", "warning", "error", "success"]
 Deck = Literal["lw", "dsk"]
 Context = Literal["sermon", "offering"]
 Role = Literal["graphic", "pre", "post", "verse", "point"]

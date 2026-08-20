@@ -9,7 +9,7 @@ export function ValidationPanel({ flags, onJump }: { flags: Flag[]; onJump?: (lo
       </section>
     );
   }
-  const order = { error: 0, warning: 1, info: 2 } as const;
+  const order = { error: 0, warning: 1, info: 2, success: 3 } as const;
   const sorted = [...flags].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
   return (
     <section className="flags">

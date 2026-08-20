@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sermon_slides.annotate import annotate_outline
-from sermon_slides.contrast import check_contrast
-from sermon_slides.keynote import generate_both, generate_deck, output_dir_for
-from sermon_slides.models import Flag, GenerationResult
-from sermon_slides.parse_outline import parse_outline
-from sermon_slides.report import write_review
-from sermon_slides.slide_map import load_masters, map_slides
-from sermon_slides.validate import validate_outline, validate_slide_specs
+from obed_edom.annotate import annotate_outline
+from obed_edom.contrast import check_contrast
+from obed_edom.keynote import generate_both, output_dir_for
+from obed_edom.models import Flag, GenerationResult
+from obed_edom.parse_outline import parse_outline
+from obed_edom.report import write_review
+from obed_edom.slide_map import map_slides
+from obed_edom.validate import validate_outline, validate_slide_specs
 
 
 def _cleanup_output(out_dir: Path) -> None:
@@ -82,24 +82,8 @@ def generate(
                     )
 
         if check_visuals and lw_key:
-            lw_flags, overlays = check_contrast(lw, out_dir / "previews" / "lw", "lw")
+            lw_flags, _ = check_contrast(lw, out_dir / "previews" / "lw", "lw")
             flags.extend(lw_flags)
-            if overlays:
-                masters = load_masters()
-                generate_deck(
-                    lw,
-                    masters["lw"]["template"],
-                    lw_key,
-                    out_dir / "previews" / "lw",
-                    overlays=overlays,
-                    superscript_fix=False,
-                )
-                again, _ = check_contrast(lw, out_dir / "previews" / "lw", "lw")
-                flags.extend(
-                    Flag("info", "contrast", f"Re-checked after overlay: {f.message}", location=f.location)
-                    for f in again
-                    if f.severity != "warning"
-                )
         if check_visuals and dsk_key:
             dsk_flags, _ = check_contrast(dsk, out_dir / "previews" / "dsk", "dsk")
             flags.extend(dsk_flags)

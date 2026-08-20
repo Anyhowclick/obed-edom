@@ -3,11 +3,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx.oxml.ns import qn
-from sermon_slides.annotate import annotate_outline, extract_operator_cues
-from sermon_slides.bible import _parse_gateway_html, check_bible, fetch_passage
-from sermon_slides.models import StyledRun
-from sermon_slides.parse_outline import parse_outline
-from sermon_slides.slide_map import _split_styled_runs, map_slides
+from obed_edom.annotate import annotate_outline, extract_operator_cues
+from obed_edom.bible import _parse_gateway_html, check_bible, fetch_passage
+from obed_edom.models import StyledRun
+from obed_edom.parse_outline import parse_outline
+from obed_edom.slide_map import _split_styled_runs, map_slides
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTLINES = ROOT / "Sermon Outlines"
@@ -183,7 +183,7 @@ def test_ref_tail_never_eats_a_verse_number():
     tail therefore has to require a range or a translation: matching a bare
     number would delete the verse number itself.
     """
-    from sermon_slides.slide_map import REF_TAIL_RE, VERSE_LEAD_RE
+    from obed_edom.slide_map import REF_TAIL_RE, VERSE_LEAD_RE
 
     def dropped(text: str) -> str | None:
         match = REF_TAIL_RE.match(text)
@@ -202,7 +202,7 @@ def test_ref_tail_never_eats_a_verse_number():
 
 def test_list_number_resolver():
     from docx import Document
-    from sermon_slides.parse_outline import ListNumberResolver
+    from obed_edom.parse_outline import ListNumberResolver
 
     doc = Document(str(OUTLINES / "Sermon BC.docx"))
     resolver = ListNumberResolver(doc)
@@ -216,8 +216,8 @@ def test_list_number_resolver():
 
 
 def test_point_styled_runs_and_fit():
-    from sermon_slides.models import SlideDraft, TextSpan
-    from sermon_slides.slide_map import _fit_point_runs, _point_styled_runs
+    from obed_edom.models import SlideDraft, TextSpan
+    from obed_edom.slide_map import _fit_point_runs, _point_styled_runs
 
     draft = SlideDraft(
         cue_tag="NUM-POINT",
@@ -243,7 +243,7 @@ def test_point_styled_runs_and_fit():
     )
     assert len(one) == 1
     assert pre_size >= 170
-    from sermon_slides.slide_map import _points_text_items
+    from obed_edom.slide_map import _points_text_items
 
     mapping = {"line1": 1, "line2": 2, "line3": 3, "point_number": 4}
     items = _points_text_items(mapping, ["Be Truthful in Love"], point_number=9)
@@ -271,7 +271,7 @@ def test_split_styled_runs():
 
 
 def test_prepare_styled_runs():
-    from sermon_slides.keynote import _prepare_styled_runs
+    from obed_edom.keynote import _prepare_styled_runs
 
     first, rest, prepared = _prepare_styled_runs(
         [
@@ -296,7 +296,7 @@ def test_prepare_styled_runs():
     assert rest == " one 32 two"
     assert prepared[2]["text"] == "32"
 
-    from sermon_slides.keynote import _later_verse_jobs
+    from obed_edom.keynote import _later_verse_jobs
 
     later = _later_verse_jobs(
         [
@@ -330,7 +330,7 @@ def test_point_applescript_replaces_placeholder():
     """Point titles must replace the whole text box, not seed into Bold/Normal."""
     from pathlib import Path
 
-    from sermon_slides.keynote import STYLE_PALETTES, _build_applescript, _plan_payload, _prepare_styled_runs
+    from obed_edom.keynote import STYLE_PALETTES, _build_applescript, _plan_payload, _prepare_styled_runs
 
     assert STYLE_PALETTES["lw"]["verse_number"]["size"] == 70
 
@@ -364,7 +364,7 @@ def test_point_applescript_replaces_placeholder():
     assert "set object text of text item 2 to" in dsk_script
     assert "Ezekiel 36" in dsk_script
 
-    from sermon_slides.slide_map import _styled_verse_runs
+    from obed_edom.slide_map import _styled_verse_runs
 
     matt = next(b for b in sermon.blocks if "Take and eat" in b.body)
     matt_runs = _styled_verse_runs(matt, "Matthew 26")
@@ -412,14 +412,14 @@ def test_later_verse_numbers_get_the_template_character_style():
     """Pass 2 must stay GUI-driven and must carry the template's character style.
 
     Verified against Keynote 14.5 (see the "Later verse numbers" section of
-    .cursor/skills/sermon-slides/SKILL.md). Keynote's AppleScript dictionary has
+    .cursor/skills/obed-edom/SKILL.md). Keynote's AppleScript dictionary has
     no style support at all, and superscript is not a character property, so the
     deck's own verse-number style can only be applied through the UI. Do not
     "simplify" this into a pure-AppleScript pass: every scriptable route asserted
     against below was tried and rejected by Keynote itself, each failing silently
     inside a ``try`` block.
     """
-    from sermon_slides.keynote import (
+    from obed_edom.keynote import (
         _build_superscript_fix_script,
         _collect_superscript_jobs,
         _read_superscript_report,
@@ -489,7 +489,7 @@ def test_repeated_verse_box_is_styled_on_every_slide():
     appears on two slides. Applying an anchor once styles a single instance and
     silently leaves the other on the baseline.
     """
-    from sermon_slides.keynote import (
+    from obed_edom.keynote import (
         _build_superscript_fix_script,
         _collect_superscript_jobs,
         _superscript_anchor_plan,
@@ -518,7 +518,7 @@ def test_pass_one_hands_the_open_deck_to_pass_two():
     Closing and reopening the same file was pure overhead, and exporting in pass 1
     rendered every slide twice with the verse numbers still on the baseline.
     """
-    from sermon_slides.keynote import _build_applescript, _plan_payload
+    from obed_edom.keynote import _build_applescript, _plan_payload
 
     lw, _, _ = map_slides(parse_outline(OUTLINES / "Sermon BC.docx"))
     matt_slide = next(s for s in lw if s.role == "verse" and "Take and eat" in (s.body or ""))
@@ -534,7 +534,7 @@ def test_pass_one_hands_the_open_deck_to_pass_two():
 
     # Handing off is only safe while pass 2 has work it can do, so every job must
     # carry the anchors pass 2 needs; otherwise the deck is left open forever.
-    from sermon_slides.keynote import _build_superscript_fix_script
+    from obed_edom.keynote import _build_superscript_fix_script
 
     for job in plan["superscriptJobs"]:
         assert job["seed"]["anchor"]
@@ -551,8 +551,8 @@ def test_pass_one_hands_the_open_deck_to_pass_two():
 
 
 def test_review_pdf_and_slide_kinds():
-    from sermon_slides.pipeline import generate
-    from sermon_slides.report import slide_kind
+    from obed_edom.pipeline import generate
+    from obed_edom.report import slide_kind
 
     offering = parse_outline(OUTLINES / "Offering JX.docx")
     lw, dsk, _ = map_slides(offering)
@@ -560,7 +560,7 @@ def test_review_pdf_and_slide_kinds():
     assert any(slide_kind(s) == "Ways to give (QR code)" for s in dsk)
     assert any(slide_kind(s) == "Bible verse" for s in dsk)
 
-    with patch("sermon_slides.bible.fetch_passage", return_value=(None, "mocked")):
+    with patch("obed_edom.bible.fetch_passage", return_value=(None, "mocked")):
         result = generate(OUTLINES / "Sermon BC.docx", make_keynote=False, check_visuals=False)
     assert result.review_path.suffix == ".pdf"
     assert result.review_path.exists()
@@ -578,7 +578,7 @@ def test_review_pdf_and_slide_kinds():
 
 
 def test_passage_header():
-    from sermon_slides.slide_map import _passage_header
+    from obed_edom.slide_map import _passage_header
 
     assert _passage_header("Ezekiel 36", "NIV", "Truth and Contentment") == "Ezekiel 36 • Truth and Contentment"
     assert _passage_header("Matthew 6", "MSG", "") == "Matthew 6 (MSG)"
@@ -749,10 +749,10 @@ def test_bible_gateway_parse_and_fetch():
         status_code = 200
         text = GATEWAY_HTML
 
-    from sermon_slides import bible as bible_mod
+    from obed_edom import bible as bible_mod
 
     bible_mod._GATEWAY_CACHE.clear()
-    with patch("sermon_slides.bible.requests.get", return_value=_Resp()):
+    with patch("obed_edom.bible.requests.get", return_value=_Resp()):
         official, source = fetch_passage("Ezekiel", 36, 26, 27, "NIV")
     assert official is not None
     assert "Bible Gateway NIV" in source
@@ -760,7 +760,7 @@ def test_bible_gateway_parse_and_fetch():
 
 
 def test_wrong_gospel_citation_is_flagged():
-    from sermon_slides.report import _action_items, _bible_notes
+    from obed_edom.report import _action_items, _bible_notes
 
     outline = parse_outline(OUTLINES / "Offering JX.docx")
     matt = (
@@ -776,12 +776,12 @@ def test_wrong_gospel_citation_is_flagged():
         texts = {"Matthew": matt, "Mark": mark, "Luke": luke, "John": john}
         return (texts.get(book, "unrelated"), f"Bible Gateway {translation}")
 
-    with patch("sermon_slides.bible.fetch_passage", side_effect=fake_fetch):
+    with patch("obed_edom.bible.fetch_passage", side_effect=fake_fetch):
         flags = check_bible(outline)
     mix = [
         f
         for f in flags
-        if f.severity == "warning" and "Cited as" in f.message and "Matthew" in f.message
+        if f.severity == "error" and "Cited as" in f.message and "Matthew" in f.message
     ]
     assert mix, [f.message for f in flags if f.category == "bible"]
     notes = _bible_notes(flags)
@@ -791,9 +791,9 @@ def test_wrong_gospel_citation_is_flagged():
 
 
 def test_verse_continued_cue_and_full_verse_on_second_slide():
-    from sermon_slides.parse_outline import normalize_cue
-    from sermon_slides.models import SlideSpec
-    from sermon_slides.keynote import _append_seeded_text, _build_applescript, _plan_payload
+    from obed_edom.parse_outline import normalize_cue
+    from obed_edom.models import SlideSpec
+    from obed_edom.keynote import _append_seeded_text, _build_applescript, _plan_payload
 
     cue = normalize_cue("[VERSE-CONTINUED]")
     assert cue.tag == "VERSE-CONTINUED"

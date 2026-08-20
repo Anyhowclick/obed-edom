@@ -7,6 +7,7 @@
   --warn: #f5c16c;
   --err: #f0a3a0;
   --ok: #8fd0b0;
+  --info: #7a8fb5;
   --panel: #152238;
 }
 
@@ -213,7 +214,8 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
 }
 .flag.warning { border-color: var(--warn); }
 .flag.error { border-color: var(--err); }
-.flag.info { border-color: var(--ok); }
+.flag.info { border-color: var(--info); }
+.flag.success { border-color: var(--ok); }
 .flag .meta { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 
 .pair {

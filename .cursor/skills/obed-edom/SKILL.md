@@ -1,34 +1,34 @@
 ---
-name: sermon-slides
+name: obed-edom
 description: >-
   Generates separate LW (LED wall) and DSK Keynote decks from semantic-cue
   sermon/offering Word outlines, writes operator [LW]/[DSK] cues back into a
   copy of the outline, checks Bible references against Bible Gateway, and flags
   contrast issues. Use when the user mentions sermon slides, DSK, LW, FW, LED
   cues, Keynote templates, Offering JX.docx, Sermon BC.docx, TITLE/FILLER/VERSE
-  /POINT/NUM-POINT cues, or running python -m sermon_slides generate.
+  /POINT/NUM-POINT cues, or running python -m obed_edom generate.
 ---
 
-# Sermon slides
+# Obed-Edom
 
 ## Command
 
 From the repo root:
 
 ```bash
-python -m sermon_slides generate "/path/to/outline.docx"
+python -m obed_edom generate "/path/to/outline.docx"
 ```
 
 Local operator dashboard (generate, diff, DSK stub, CG resize stub):
 
 ```bash
-python -m sermon_slides dashboard
+python -m obed_edom dashboard
 ```
 
 Staff-only parse (no Keynote):
 
 ```bash
-python -m sermon_slides generate "/path/to/outline.docx" --no-keynote
+python -m obed_edom generate "/path/to/outline.docx" --no-keynote
 ```
 
 Writes `output/<stem>/`:
@@ -158,5 +158,5 @@ Semantic cues are replaced with show-call tags:
    the later ones sit on the baseline, grant Accessibility (see above) and re-run.
 4. Hand the operator `<stem>_CUED.docx` for the show-call script.
 5. Bible: outline wording stays on the slide. Bible Gateway NIV is an audit (MSG when the outline labels it).
-6. Contrast: dark overlays may have been added on bright LW photos. **Do not auto-recolor text**; note leftovers for manual edit.
+6. Contrast: bright LW photos are flagged only. Darken the background in Keynote if needed. **Do not auto-recolor text**.
 7. If mapping looks wrong, say which cue and expected master, then re-run generate.

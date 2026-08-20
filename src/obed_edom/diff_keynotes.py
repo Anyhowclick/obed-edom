@@ -4,9 +4,36 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps
 
-from sermon_slides.inspect import highlighted_markup, preview_pngs, slide_plain_text
-from sermon_slides.models import Flag
-from sermon_slides.validate import validate_inspect
+from obed_edom.inspect import highlighted_markup, preview_pngs, slide_plain_text
+from obed_edom.models import Flag
+from obed_edom.validate import validate_inspect
+
+LW_WIDTH = 3000
+
+
+def _deck_type(payload: dict, label: str = "") -> str | None:
+    """Classify a Keynote as lw or dsk. Canvas width wins; filename is backup."""
+    width = float(payload.get("slideWidth") or 0)
+    if width > 0:
+        return "lw" if width >= LW_WIDTH else "dsk"
+    path = str(payload.get("path") or "")
+    stem = Path(path).stem.upper().replace("-", "_").replace(" ", "_")
+    if stem.endswith("_LW") or "_LW_" in stem:
+        return "lw"
+    if stem.endswith("_DSK") or "_DSK_" in stem:
+        return "dsk"
+    lab = (label or "").strip().upper()
+    if lab == "LW":
+        return "lw"
+    if lab == "DSK":
+        return "dsk"
+    return None
+
+
+def _same_deck_type(left: dict, right: dict, left_label: str, right_label: str) -> bool:
+    a = _deck_type(left, left_label)
+    b = _deck_type(right, right_label)
+    return bool(a and b and a == b)
 
 
 def _open_rgb(path: Path, size: tuple[int, int] | None = None) -> Image.Image:
@@ -58,10 +85,11 @@ def compare_inspects(
     n_left = left.get("slideCount") or len(left_slides)
     n_right = right.get("slideCount") or len(right_slides)
     flags: list[Flag] = []
-    if n_left != n_right:
+    same_type = _same_deck_type(left, right, left_label, right_label)
+    if same_type and n_left != n_right:
         flags.append(
             Flag(
-                "error",
+                "info",
                 "diff",
                 f"Slide count differs: {left_label} has {n_left}, {right_label} has {n_right}. Compared by index.",
             )
@@ -74,12 +102,28 @@ def compare_inspects(
         ls = left_slides[i] if i < len(left_slides) else None
         rs = right_slides[i] if i < len(right_slides) else None
         if ls is None:
-            flags.append(Flag("error", "diff", f"Missing {left_label} slide {i + 1}", location=f"slide {i + 1}"))
+            if same_type:
+                flags.append(
+                    Flag(
+                        "warning",
+                        "diff",
+                        f"Missing {left_label} slide {i + 1}",
+                        location=f"slide {i + 1}",
+                    )
+                )
             pair["missing"] = left_label
             pairs.append(pair)
             continue
         if rs is None:
-            flags.append(Flag("error", "diff", f"Missing {right_label} slide {i + 1}", location=f"slide {i + 1}"))
+            if same_type:
+                flags.append(
+                    Flag(
+                        "warning",
+                        "diff",
+                        f"Missing {right_label} slide {i + 1}",
+                        location=f"slide {i + 1}",
+                    )
+                )
             pair["missing"] = right_label
             pairs.append(pair)
             continue

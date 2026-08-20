@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import requests
 from dotenv import load_dotenv
 
-from sermon_slides.models import BibleCursor, Flag, OutlineDoc
+from obed_edom.models import BibleCursor, Flag, OutlineDoc
 
 load_dotenv()
 
@@ -598,7 +598,7 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
         if official is None:
             flags.append(
                 Flag(
-                    "info",
+                    "warning",
                     "bible",
                     f"Quoted {ref} ({translation}) not text-checked ({source}). Outline wording will be used on slides.",
                     location=quoted[:80],
@@ -631,7 +631,7 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
         if alt_hit and alt_ref:
             flags.append(
                 Flag(
-                    "warning",
+                    "error",
                     "bible",
                     f"Cited as {ref} but the outline wording matches {alt_ref} on {source} "
                     f"(cited overlap {overlap:.0%}, {alt_hit[0]} overlap {alt_hit[1]:.0%}). "
@@ -643,7 +643,7 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
         elif overlap < MISMATCH_OVERLAP:
             flags.append(
                 Flag(
-                    "warning",
+                    "error",
                     "bible",
                     f"Outline wording for {ref} does not match {source} (overlap {overlap:.0%}). "
                     "Please check the book, chapter, and verses. Slides keep the outline text.",
@@ -654,7 +654,7 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
         else:
             flags.append(
                 Flag(
-                    "info",
+                    "success",
                     "bible",
                     f"Quoted {ref} matches {source} (overlap {overlap:.0%}).",
                     location=quoted[:80],

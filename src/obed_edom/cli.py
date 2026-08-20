@@ -5,13 +5,13 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from sermon_slides.paths import find_repo_root
-from sermon_slides.pipeline import generate
+from obed_edom.paths import find_repo_root
+from obed_edom.pipeline import generate
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="sermon-slides",
+        prog="obed-edom",
         description="Generate LW and DSK Keynote decks plus a cued outline from semantic layout cues.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -75,7 +75,7 @@ def _run_dashboard(host: str, port: int, *, open_browser: bool) -> int:
         webbrowser.open(url)
     import uvicorn
 
-    uvicorn.run("sermon_slides.web.app:app", host=host, port=port, reload=False)
+    uvicorn.run("obed_edom.web.app:app", host=host, port=port, reload=False)
     return 0
 
 

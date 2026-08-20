@@ -8,8 +8,8 @@ from collections import defaultdict
 from docx import Document
 from docx.oxml.ns import qn
 
-from sermon_slides.bible import ABS_REF_RE, REL_VERSE_RE
-from sermon_slides.models import Cue, OutlineDoc, Paragraph, Run, SlideDraft, TextSpan
+from obed_edom.bible import ABS_REF_RE, REL_VERSE_RE
+from obed_edom.models import Cue, OutlineDoc, Paragraph, Run, SlideDraft, TextSpan
 
 SEMANTIC_TAGS = {
     "TITLE",

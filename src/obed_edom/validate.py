@@ -5,9 +5,9 @@ from pathlib import Path
 
 import yaml
 
-from sermon_slides.bible import check_bible
-from sermon_slides.inspect import all_plain_text, highlighted_markup
-from sermon_slides.models import Flag, OutlineDoc, Paragraph, Run, SlideSpec
+from obed_edom.bible import check_bible
+from obed_edom.inspect import all_plain_text, highlighted_markup
+from obed_edom.models import Flag, OutlineDoc, Paragraph, Run, SlideSpec
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 RULES_PATH = PACKAGE_DIR / "validation_rules.yaml"
@@ -153,7 +153,7 @@ def validate_slide_specs(lw: list[SlideSpec], dsk: list[SlideSpec], masters: dic
     cfg = _overflow_cfg()
     if not cfg["enabled"]:
         return []
-    from sermon_slides.slide_map import load_masters
+    from obed_edom.slide_map import load_masters
 
     masters = masters or load_masters()
     flags: list[Flag] = []
@@ -403,7 +403,7 @@ def _highlight_punctuation_flags(slide: dict, location: str) -> list[Flag]:
         for run in item.get("runs") or []:
             text = run.get("text") or ""
             if run.get("color") and PUNCT_ONLY.match(text):
-                from sermon_slides.inspect import _looks_highlight
+                from obed_edom.inspect import _looks_highlight
 
                 if _looks_highlight(run.get("color")):
                     flags.append(

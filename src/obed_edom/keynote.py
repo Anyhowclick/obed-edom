@@ -6,9 +6,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from sermon_slides.models import SlideSpec
-from sermon_slides.paths import find_repo_root, template_path
-from sermon_slides.slide_map import load_masters
+from obed_edom.models import SlideSpec
+from obed_edom.paths import find_repo_root, template_path
+from obed_edom.slide_map import load_masters
 
 
 def _stem(docx: Path) -> str:

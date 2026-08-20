@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from sermon_slides.models import Flag, SlideSpec
+from obed_edom.models import Flag, SlideSpec
 
 # x, y, w, h as fractions of slide size (origin top-left).
 LW_REGIONS = {
@@ -92,7 +92,7 @@ def check_contrast(
     images = _preview_files(preview_dir)
     if not images:
         flags.append(
-            Flag("warning", "contrast", f"No PNG previews found in {preview_dir} for {deck.upper()}.")
+            Flag("info", "contrast", f"No PNG previews found in {preview_dir} for {deck.upper()}.")
         )
         return flags, overlays
 
@@ -106,29 +106,19 @@ def check_contrast(
             with Image.open(images[i]) as im:
                 bg = _mean_color(im, region)
         except OSError as exc:
-            flags.append(Flag("warning", "contrast", f"Could not read {images[i].name}: {exc}"))
+            flags.append(Flag("info", "contrast", f"Could not read {images[i].name}: {exc}"))
             continue
         ratio = contrast_ratio(WHITE, bg)
         luma = _luminance(bg)
         loc = f"{deck.upper()} slide {i + 1} ({spec.master})"
         if luma > BRIGHT_LUMA or ratio < MIN_RATIO_AUTO:
             if spec.deck == "lw" and spec.master not in {"TITLE", "BLANK"}:
-                overlays.append(
-                    {
-                        "slideIndex": i,
-                        "x": region[0],
-                        "y": max(0.0, region[1] - 0.05),
-                        "w": region[2],
-                        "h": min(1.0, region[3] + 0.08),
-                        "opacity": 50,
-                    }
-                )
                 flags.append(
                     Flag(
                         "warning",
                         "contrast",
                         f"Background too bright for white text (ratio {ratio:.1f}:1, luma {luma:.2f}). "
-                        "Added a dark overlay; text colours left unchanged.",
+                        "Darken the photo in Keynote; text colours were not changed.",
                         location=loc,
                     )
                 )
@@ -153,9 +143,9 @@ def check_contrast(
     if images and not any(f.severity == "warning" for f in flags):
         flags.append(
             Flag(
-                "info",
+                "success",
                 "contrast",
-                f"Checked {min(len(images), len(slides))} {deck.upper()} previews; none needed a darkness overlay.",
+                f"Checked {min(len(images), len(slides))} {deck.upper()} previews; contrast looked OK.",
             )
         )
     return flags, overlays
