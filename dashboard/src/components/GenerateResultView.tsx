@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
 import { previewUrl, reveal, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
-import { ValidationPanel } from "./ValidationPanel";
+import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
+
+const LW_PREVIEW_COLS = 2;
+const DSK_PREVIEW_COLS = 3;
 
 export type GenResult = {
   stem: string;
@@ -33,6 +36,17 @@ export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: st
       label: `${deck.toUpperCase()} ${i + 1}`,
     }));
   }, [job, result, deck]);
+
+  function jumpToSlide(location: string) {
+    if (!result) return;
+    const target = parseSlideTarget(location);
+    if (!target) return;
+    const names = result.previewFiles?.[target.deck] || [];
+    const name = names[target.index - 1];
+    if (!name) return;
+    setDeck(target.deck);
+    onOpen(previewUrl(job.id, target.deck, name));
+  }
 
   if (job.status === "error") return <p className="err">{job.error}</p>;
   if (!result || job.status !== "done") return null;
@@ -72,8 +86,12 @@ export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: st
           DSK previews
         </button>
       </div>
-      {urls.length > 0 ? <PreviewGrid urls={urls} onOpen={onOpen} /> : <p className="note">Previews are missing on disk.</p>}
-      <ValidationPanel flags={result.flags || []} />
+      {urls.length > 0 ? (
+        <PreviewGrid urls={urls} onOpen={onOpen} columns={deck === "lw" ? LW_PREVIEW_COLS : DSK_PREVIEW_COLS} />
+      ) : (
+        <p className="note">Previews are missing on disk.</p>
+      )}
+      <ValidationPanel flags={result.flags || []} onJump={jumpToSlide} />
     </>
   );
 }
