@@ -310,8 +310,6 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
   gap: 20px;
   margin: 20px 0;
 }
-.diff-stack.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.diff-stack.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .diff-row {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -319,24 +317,23 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
   background: var(--panel);
   min-width: 0;
 }
-.diff-stack.cols-3 .diff-row { padding: 8px; }
 .diff-row.on { border-color: #d9b36a; }
 .playlist-bar { margin-top: 20px; }
 .playlist-controls { align-items: center; }
-.density {
-  display: flex;
+.playlist-controls .btn:last-child { margin-left: auto; }
+.icon-btn {
+  padding: 8px 10px;
+  min-width: 40px;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 220px;
-  font-size: 13px;
-  color: var(--muted);
+  justify-content: center;
 }
-.density input[type="range"] {
-  width: 120px;
-  accent-color: #d9b36a;
+.icon-expand { display: block; }
+.btn.combine {
+  background: #9ed9b4;
+  color: #12241c;
+  border: 0;
 }
-.density-seg { margin: 0; }
 .pair-slides {
   display: grid;
   grid-template-columns: minmax(0, var(--split-left, 50%)) 10px minmax(0, 1fr);

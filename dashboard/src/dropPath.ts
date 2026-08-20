@@ -21,6 +21,43 @@ export function pathsFromDataTransfer(dt: DataTransfer): string[] {
   return out;
 }
 
+export async function resolveDroppedFolder(dt: DataTransfer): Promise<ChosenFile | { error: string }> {
+  const urls = pathsFromDataTransfer(dt);
+  const fromUrl = urls[0];
+  if (fromUrl) {
+    const folder = folderFromDroppedPath(fromUrl);
+    return { path: folder, name: folder.split("/").pop() || folder };
+  }
+  const files = [...dt.files];
+  for (const file of files) {
+    const native = (file as File & { path?: string }).path;
+    if (native) {
+      const folder = folderFromDroppedPath(native);
+      return { path: folder, name: folder.split("/").pop() || folder };
+    }
+  }
+  const named = files[0];
+  if (!named) {
+    return { error: "Could not read that folder — use Choose on this Mac or paste the path." };
+  }
+  try {
+    const resolved = await resolveDrop(named.name, named.size);
+    return { path: folderFromDroppedPath(resolved.path), name: folderFromDroppedPath(resolved.path).split("/").pop() || resolved.name };
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : "Could not read that folder — use Choose on this Mac or paste the path.",
+    };
+  }
+}
+
+function folderFromDroppedPath(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  if (/\.(png|jpe?g|webp|gif|tif|tiff)$/i.test(trimmed)) {
+    return trimmed.replace(/\/[^/]+$/, "") || trimmed;
+  }
+  return trimmed;
+}
+
 export async function resolveDroppedKeynote(dt: DataTransfer): Promise<ChosenFile | { error: string }> {
   const urls = pathsFromDataTransfer(dt);
   const fromUrl = urls.find((p) => p.toLowerCase().endsWith(".key")) || urls[0];

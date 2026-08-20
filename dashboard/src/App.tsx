@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckTab } from "./tabs/CheckTab";
 import { DiffTab } from "./tabs/DiffTab";
+import { VisualTab } from "./tabs/VisualTab";
 import { DskTab } from "./tabs/DskTab";
 import { GeneratorTab } from "./tabs/GeneratorTab";
 import { HistoryTab } from "./tabs/HistoryTab";
@@ -19,6 +20,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Sermon Base Generator" },
   { id: "check", label: "Sermon Checker" },
   { id: "diff", label: "Diff Checker" },
+  { id: "visual", label: "Visual Checker" },
   { id: "dsk", label: "DSK generator" },
   { id: "resize", label: "CG resizer" },
   { id: "history", label: "Previous runs" },
@@ -55,7 +57,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (tab !== "diff" && focusMode) setFocusMode(false);
+    if (tab !== "diff" && tab !== "visual" && focusMode) setFocusMode(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -102,6 +104,9 @@ export function App() {
           </div>
           <div className={tab === "diff" ? "pane" : "pane off"}>
             <DiffTab />
+          </div>
+          <div className={tab === "visual" ? "pane" : "pane off"}>
+            <VisualTab />
           </div>
           <div className={tab === "dsk" ? "pane" : "pane off"}>
             <DskTab />

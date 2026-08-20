@@ -1,5 +1,5 @@
 import { useState, type DragEvent } from "react";
-import { resolveDroppedKeynote } from "../dropPath";
+import { resolveDroppedFolder, resolveDroppedKeynote } from "../dropPath";
 
 type Props = {
   label: string;
@@ -11,9 +11,10 @@ type Props = {
   onPath?: (path: string) => void;
   onError?: (message: string) => void;
   multiple?: boolean;
+  folder?: boolean;
 };
 
-export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath, onError, multiple }: Props) {
+export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath, onError, multiple, folder }: Props) {
   const [over, setOver] = useState(false);
   const [path, setPath] = useState("");
   const inputId = `file-${label.replace(/[^a-z0-9]+/gi, "-")}`;
@@ -22,7 +23,7 @@ export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath,
     e.preventDefault();
     setOver(false);
     if (onPath) {
-      const resolved = await resolveDroppedKeynote(e.dataTransfer);
+      const resolved = folder ? await resolveDroppedFolder(e.dataTransfer) : await resolveDroppedKeynote(e.dataTransfer);
       if ("path" in resolved) {
         onPath(resolved.path);
         return;
@@ -98,7 +99,7 @@ export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath,
           <input
             type="text"
             value={path}
-            placeholder="/Users/…/deck.key"
+            placeholder={folder ? "/Users/…/previews/lw" : "/Users/…/deck.key"}
             onChange={(e) => setPath(e.target.value)}
             onBlur={() => path.trim() && onPath(path.trim())}
             onKeyDown={(e) => {

@@ -63,20 +63,7 @@ function cap(label: string, number?: number | null, skipped?: boolean): string {
   return skipped ? `${label} ${number} (skipped)` : `${label} ${number}`;
 }
 
-type Cols = 1 | 2 | 3;
-
-const COLS_KEY = "obed-edom.diff.cols";
-const SPLIT_KEY = "obed-edom.diff.split";
-
-function loadCols(): Cols {
-  try {
-    const raw = sessionStorage.getItem(COLS_KEY);
-    if (raw === "1" || raw === "2" || raw === "3") return Number(raw) as Cols;
-  } catch {
-    /* ignore */
-  }
-  return 1;
-}
+const SPLIT_KEY = "obed-edom.diff.split.v2";
 
 function loadSplit(fallback: number): number {
   try {
@@ -89,9 +76,7 @@ function loadSplit(fallback: number): number {
   return fallback;
 }
 
-function defaultSplit(leftWide: boolean, rightWide: boolean): number {
-  if (leftWide && !rightWide) return 68;
-  if (!leftWide && rightWide) return 32;
+function defaultSplit(): number {
   return 50;
 }
 
@@ -125,6 +110,30 @@ function PairSplit({ pct, onPct }: { pct: number; onPct: (n: number) => void }) 
         window.addEventListener("pointerup", onUp);
       }}
     />
+  );
+}
+
+function ExpandIcon({ collapse }: { collapse?: boolean }) {
+  return (
+    <svg className="icon-expand" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      {collapse ? (
+        <path
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6"
+        />
+      ) : (
+        <path
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"
+        />
+      )}
+    </svg>
   );
 }
 
@@ -189,7 +198,6 @@ export function DiffResultView({
   const { focusMode, setFocusMode } = useLayout();
   const [slots, setSlots] = useState<Slot[]>([]);
   const [selected, setSelected] = useState(0);
-  const [cols, setCols] = useState<Cols>(loadCols);
   const [split, setSplit] = useState<number | null>(() => {
     const n = loadSplit(Number.NaN);
     return Number.isFinite(n) ? n : null;
@@ -227,21 +235,12 @@ export function DiffResultView({
   const leftWide = isWideDeck(result.leftLabel);
   const rightWide = isWideDeck(result.rightLabel);
   const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
-  const leftPct = split ?? defaultSplit(leftWide, rightWide);
+  const leftPct = split ?? defaultSplit();
 
   function setSplitPct(next: number) {
     setSplit(next);
     try {
       sessionStorage.setItem(SPLIT_KEY, String(Math.round(next)));
-    } catch {
-      /* ignore */
-    }
-  }
-
-  function setDensity(next: Cols) {
-    setCols(next);
-    try {
-      sessionStorage.setItem(COLS_KEY, String(next));
     } catch {
       /* ignore */
     }
@@ -259,33 +258,22 @@ export function DiffResultView({
       <div className="playlist-bar">
         {canEdit && (
           <p className="note">
-            {matching
-              ? "First pass matched these pairs. Drag a slide onto another row to fix it. If one wall holds two DSK verses, Combine next DSK. Deck order stays. Then run checks."
-              : "Checks are on the confirmed pairs. You can still rearrange, combine, and run checks again."}
+            {phase === "visual"
+              ? "Folders are listed in file order. Drag a slide onto another row to pair it. Combine next DSK when one wall holds two graphics."
+              : matching
+                ? "First pass matched these pairs. Drag a slide onto another row to fix it. If one wall holds two DSK verses, Combine next DSK. Deck order stays. Then run checks."
+                : "Checks are on the confirmed pairs. You can still rearrange, combine, and run checks again."}
           </p>
         )}
         <div className="actions playlist-controls">
-          <div className="density">
-            <span>Per row</span>
-            <input
-              type="range"
-              min={1}
-              max={3}
-              step={1}
-              value={cols}
-              aria-label="Comparisons per row"
-              onChange={(event) => setDensity(Number(event.target.value) as Cols)}
-            />
-            <div className="seg density-seg">
-              {([1, 2, 3] as Cols[]).map((n) => (
-                <button key={n} type="button" className={cols === n ? "on" : ""} onClick={() => setDensity(n)}>
-                  {n}
-                </button>
-              ))}
-            </div>
-          </div>
-          <button className="btn secondary" type="button" onClick={() => setFocusMode(!focusMode)}>
-            {focusMode ? "Exit maximise" : "Maximise"}
+          <button
+            className="btn secondary icon-btn"
+            type="button"
+            title={focusMode ? "Exit maximise" : "Maximise"}
+            aria-label={focusMode ? "Exit maximise" : "Maximise"}
+            onClick={() => setFocusMode(!focusMode)}
+          >
+            <ExpandIcon collapse={focusMode} />
           </button>
           {canEdit && onRunChecks && (
             <button className="btn" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
@@ -294,7 +282,7 @@ export function DiffResultView({
           )}
         </div>
       </div>
-      <div className={`diff-stack cols-${cols}`}>
+      <div className="diff-stack">
         {pairs.map((pair, row) => {
           const issues = pair.flags || [];
           const rightIndexes = pair.rightIndexes?.length ? pair.rightIndexes : pair.rightIndex != null ? [pair.rightIndex] : [];
@@ -361,7 +349,7 @@ export function DiffResultView({
                 <div className="row-acts">
                   {canCombineNext(slots, row) && (
                     <button
-                      className="btn secondary"
+                      className="btn combine"
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();

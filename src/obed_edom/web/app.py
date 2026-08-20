@@ -19,7 +19,7 @@ from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.slide_map import load_masters
 from obed_edom.validate import validate_inspect
-from obed_edom.web.jobs import Job, JobRunner, preview_names, serialize_flags
+from obed_edom.web.jobs import Job, JobRunner, preview_names, serialize_flags, visual_result
 
 RUNNER = JobRunner()
 ROOT = find_repo_root()
@@ -225,6 +225,22 @@ def create_app() -> FastAPI:
             "diff",
             lambda j, a=left, b=right, la=left_label, lb=right_label: _run_diff(j, a, b, la, lb),
             feature="diff",
+        )
+        return job.to_dict()
+
+    @app.post("/api/visual")
+    def visual_endpoint(
+        left_path: str = Form(...),
+        right_path: str = Form(...),
+    ) -> dict:
+        left = Path(left_path).expanduser()
+        right = Path(right_path).expanduser()
+        if not left.is_dir() or not right.is_dir():
+            raise HTTPException(400, "Both paths must be folders of preview PNGs")
+        job = RUNNER.submit(
+            "visual",
+            lambda j, a=left, b=right: visual_result(a, b),
+            feature="visual",
         )
         return job.to_dict()
 

@@ -131,6 +131,15 @@ export async function startDiffCheck(
   return res.json();
 }
 
+export async function startVisual(leftPath: string, rightPath: string): Promise<Job> {
+  const body = new FormData();
+  body.set("left_path", leftPath);
+  body.set("right_path", rightPath);
+  const res = await fetch("/api/visual", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function startDiff(
   leftPath: string,
   rightPath: string,
