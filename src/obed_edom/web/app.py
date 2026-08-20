@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
 from obed_edom.diff_keynotes import compare_inspects, slots_from_pairs
-from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_pngs
+from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_media_type, preview_pngs
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
@@ -175,7 +175,7 @@ def create_app() -> FastAPI:
         if not folder:
             raise HTTPException(404, "No previews")
         path = _safe_file(Path(folder), filename)
-        return FileResponse(path, media_type="image/png")
+        return FileResponse(path, media_type=preview_media_type(path))
 
     @app.get("/api/jobs/{job_id}/file/{kind}")
     def job_file(job_id: str, kind: str):
@@ -237,7 +237,7 @@ def create_app() -> FastAPI:
         left = Path(left_path).expanduser()
         right = Path(right_path).expanduser()
         if not left.is_dir() or not right.is_dir():
-            raise HTTPException(400, "Both paths must be folders of preview PNGs")
+            raise HTTPException(400, "Both paths must be folders of preview images")
         job = RUNNER.submit(
             "visual",
             lambda j, a=left, b=right: visual_result(a, b),
@@ -301,7 +301,8 @@ def create_app() -> FastAPI:
         folder = folders.get(side)
         if not folder:
             raise HTTPException(404, "Unknown side")
-        return FileResponse(_safe_file(Path(folder), filename), media_type="image/png")
+        path = _safe_file(Path(folder), filename)
+        return FileResponse(path, media_type=preview_media_type(path))
 
     @app.post("/api/validate-keynote")
     def validate_keynote(

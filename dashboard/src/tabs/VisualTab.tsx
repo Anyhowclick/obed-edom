@@ -24,7 +24,7 @@ export function VisualTab() {
 
   async function pick(which: "left" | "right") {
     try {
-      const folder = await chooseFolder(which === "left" ? "LW preview PNG folder" : "DSK preview PNG folder");
+      const folder = await chooseFolder(which === "left" ? "LW preview folder" : "DSK preview folder");
       if (which === "left") setLeft(folder);
       else setRight(folder);
     } catch (err) {
@@ -59,14 +59,14 @@ export function VisualTab() {
       <div className="diff-setup">
         <h1>Visual Checker</h1>
         <p className="lede">
-          Drop exported LW and DSK preview folders for a side-by-side look. No wording or photo checks — just the
-          pictures, cropped to the wall. Finished views are kept under Previous runs.
+          Drop exported LW and DSK preview folders for a side-by-side look (PNG, JPEG, or MOV). No wording or
+          photo checks — just the pictures, cropped to the wall. Finished views are kept under Previous runs.
         </p>
         <div className="row">
           <FileWell
             folder
             label="LW preview folder"
-            hint="Drop the folder of LW PNGs or choose on this Mac"
+            hint="Drop the folder of LW PNG, JPEG, or MOV files or choose on this Mac"
             file={left}
             onChoose={() => pick("left")}
             onPath={(path) => setLeft({ path, name: path.split("/").pop() || path })}
@@ -75,7 +75,7 @@ export function VisualTab() {
           <FileWell
             folder
             label="DSK preview folder"
-            hint="Drop the folder of DSK PNGs or choose on this Mac"
+            hint="Drop the folder of DSK PNG, JPEG, or MOV files or choose on this Mac"
             file={right}
             onChoose={() => pick("right")}
             onPath={(path) => setRight({ path, name: path.split("/").pop() || path })}

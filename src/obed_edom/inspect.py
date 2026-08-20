@@ -113,13 +113,50 @@ def inspect_keynote(
     return payload
 
 
-def preview_pngs(folder: Path) -> list[Path]:
-    if not folder.exists():
+PREVIEW_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+PREVIEW_VIDEO_SUFFIXES = {".mov"}
+PREVIEW_MEDIA_SUFFIXES = PREVIEW_IMAGE_SUFFIXES | PREVIEW_VIDEO_SUFFIXES
+
+_PREVIEW_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".mov": "video/quicktime",
+}
+
+
+def preview_media_type(path: Path | str) -> str:
+    ext = Path(path).suffix.lower()
+    return _PREVIEW_MEDIA_TYPES.get(ext, "application/octet-stream")
+
+
+def preview_media(folder: Path, *, suffixes: set[str] | None = None) -> list[Path]:
+    """Preview stills and QuickTime movies in a folder (JPEG/PNG/.mov)."""
+    allowed = {s.lower() for s in (suffixes or PREVIEW_MEDIA_SUFFIXES)}
+    if not folder.is_dir():
         return []
-    files = sorted(folder.glob("*.png")) + sorted(folder.glob("*.PNG"))
-    if not files:
-        files = sorted(p for p in folder.rglob("*.png") if p.is_file())
-    return files
+
+    def collect(paths: list[Path]) -> list[Path]:
+        seen: set[str] = set()
+        out: list[Path] = []
+        for path in sorted(paths, key=lambda p: p.name.lower()):
+            if not path.is_file() or path.suffix.lower() not in allowed:
+                continue
+            key = str(path.resolve()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(path)
+        return out
+
+    files = collect(list(folder.iterdir()))
+    if files:
+        return files
+    return collect([p for p in folder.rglob("*") if p.is_file()])
+
+
+def preview_pngs(folder: Path) -> list[Path]:
+    return preview_media(folder, suffixes={".png"})
 
 
 def _walk_items(node: dict):

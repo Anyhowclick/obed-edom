@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from obed_edom.inspect import preview_media
 from obed_edom.paths import find_repo_root
 from obed_edom.validate import flag_dict
 
@@ -326,12 +327,7 @@ def bind_generate_folder(result: dict[str, Any], folder: Path) -> dict[str, Any]
 
 
 def preview_names(folder: Path) -> list[str]:
-    if not folder.exists():
-        return []
-    files = sorted(folder.glob("*.png")) + sorted(folder.glob("*.PNG"))
-    if not files:
-        files = sorted(p for p in folder.rglob("*.png") if p.is_file())
-    return [p.name for p in files]
+    return [p.name for p in preview_media(folder)]
 
 
 _PNG_NUM = re.compile(r"(\d+)")
@@ -381,11 +377,11 @@ def visual_result(left: Path, right: Path, left_label: str = "LW", right_label: 
     left = left.expanduser()
     right = right.expanduser()
     if not left.is_dir() or not right.is_dir():
-        raise FileNotFoundError("Both paths must be folders of preview PNGs")
+        raise FileNotFoundError("Both paths must be folders of preview images")
     left_cat = _folder_catalog(left)
     right_cat = _folder_catalog(right)
     if not left_cat and not right_cat:
-        raise FileNotFoundError("No PNG previews in those folders")
+        raise FileNotFoundError("No PNG, JPEG, or MOV previews in those folders")
     pairs = []
     for i in range(max(len(left_cat), len(right_cat))):
         ls = left_cat[i] if i < len(left_cat) else None
