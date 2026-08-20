@@ -175,8 +175,13 @@ function describeItem(obj, index, kindHint) {
     } catch (eE) {}
   }
   if (kind === "group") {
+    rec.children = [];
     try {
-      rec.childCount = obj.iWorkItems().length;
+      const kids = obj.iWorkItems();
+      rec.childCount = kids.length;
+      for (let i = 0; i < kids.length; i++) {
+        rec.children.push(describeItem(kids[i], i));
+      }
     } catch (eG) {
       rec.childCount = 0;
     }

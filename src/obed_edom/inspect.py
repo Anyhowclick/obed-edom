@@ -122,9 +122,16 @@ def preview_pngs(folder: Path) -> list[Path]:
     return files
 
 
+def _walk_items(node: dict):
+    items = node.get("items") or node.get("children") or []
+    for item in items:
+        yield item
+        yield from _walk_items(item)
+
+
 def slide_plain_text(slide: dict) -> str:
     parts: list[str] = []
-    for item in slide.get("items") or []:
+    for item in _walk_items(slide):
         text = (item.get("text") or "").strip()
         if text:
             parts.append(text)

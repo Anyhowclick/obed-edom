@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from obed_edom.diff_keynotes import align_slides, compare_inspects, text_score
+from obed_edom.diff_keynotes import ALIGN_THRESHOLD, align_slides, compare_inspects, text_score
 from obed_edom.resolve_drop import pick_drop_path
 
 
@@ -18,6 +18,12 @@ def test_text_score_pairs_near_misses():
     assert text_score("1 Samuel 17:1", "Samuel 17:1") >= 0.7
     assert text_score("Your Faith", "Faith") >= 0.55
     assert text_score("", "hello") == 0.0
+    verse = (
+        "17 One day Jesus was teaching, and Pharisees and teachers of the law were sitting there. "
+        "They had come from every village of Galilee and from Judea and Jerusalem."
+    )
+    assert text_score("3\nFaith", verse) < ALIGN_THRESHOLD
+    assert text_score("3\nFaith", "Your Faith") >= ALIGN_THRESHOLD
 
 
 def test_same_type_diff_count_is_info_missing_is_warning(tmp_path):
@@ -216,8 +222,87 @@ def test_mixed_image_crop_flags_flipped_photo(tmp_path):
     result = compare_inspects(left, right, left_dir, right_dir, tmp_path / "heat", left_label="LW", right_label="DSK")
     diffs = [f for f in result["flags"] if f.category == "diff"]
     assert result["sameType"] is False
-    assert any("Photo" in f.message or "Image content" in f.message or "Visual difference" in f.message for f in diffs)
+    assert any(f.message == "Photo is flipped." or "Photo is flipped" in f.message for f in diffs)
     assert result["pairs"][0].get("heatPng")
+
+
+def test_wall_duplicated_verse_is_not_a_wording_diff(tmp_path):
+    from obed_edom.diff_keynotes import texts_equivalent
+
+    lw = (
+        "Genesis 1\n1 In the beginning God created the heavens and the earth.\n"
+        "Genesis 1\n1 In the beginning God created the heavens and the earth."
+    )
+    dsk = "1 In the beginning God created the heavens and the earth.\nGenesis 1"
+    assert texts_equivalent(lw, dsk)
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [_slide(1, lw)],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [_slide(1, dsk)],
+    }
+    result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK")
+    diffs = [f for f in result["flags"] if f.category == "diff"]
+    assert not any("Wording" in f.message for f in diffs)
+
+
+def _paint_split(im: Image.Image, *, flipped: bool) -> None:
+    for y in range(80, 280):
+        for x in range(80, 280):
+            left_red = x < 180
+            red = left_red if not flipped else not left_red
+            im.putpixel((x, y), (220, 30, 30) if red else (30, 30, 220))
+
+
+def test_extra_lw_photos_do_not_steal_flipped_match(tmp_path):
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    item = {"kind": "image", "text": "", "x": 80, "y": 80, "w": 200, "h": 200}
+
+    def save(folder, number, size, paint):
+        im = Image.new("RGB", size, (10, 10, 10))
+        paint(im)
+        im.save(folder / f"slide-{number:03d}.png")
+
+    save(left_dir, 1, (3840, 1080), lambda im: None)
+    save(left_dir, 2, (3840, 1080), lambda im: [im.putpixel((x, y), (20, 180, 20)) for y in range(80, 280) for x in range(80, 280)])
+    save(left_dir, 3, (3840, 1080), lambda im: _paint_split(im, flipped=False))
+    save(left_dir, 4, (3840, 1080), lambda im: [im.putpixel((x, y), (180, 180, 20)) for y in range(80, 280) for x in range(80, 280)])
+    save(left_dir, 5, (3840, 1080), lambda im: None)
+    save(right_dir, 1, (1920, 1080), lambda im: None)
+    save(right_dir, 2, (1920, 1080), lambda im: _paint_split(im, flipped=True))
+    save(right_dir, 3, (1920, 1080), lambda im: None)
+
+    photo = lambda n: {"number": n, "index": n - 1, "items": [item]}
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slideHeight": 1080,
+        "slides": [_slide(1, "Alpha"), photo(2), photo(3), photo(4), _slide(5, "Omega")],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [_slide(1, "Alpha"), photo(2), _slide(3, "Omega")],
+    }
+    result = compare_inspects(left, right, left_dir, right_dir, tmp_path / "heat", left_label="LW", right_label="DSK")
+    pairs = {(p.get("leftNumber"), p.get("rightNumber")) for p in result["pairs"]}
+    assert (1, 1) in pairs
+    assert (5, 3) in pairs
+    assert (3, 2) in pairs
+    assert (2, 2) not in pairs
+    flip = next(p for p in result["pairs"] if p.get("leftNumber") == 3 and p.get("rightNumber") == 2)
+    msgs = [f.message for f in (flip.get("flags") or [])]
+    assert any("Photo is flipped." in m for m in msgs)
+    diffs = [f for f in result["flags"] if f.category == "diff"]
+    assert any(f.message == "Photo is flipped." for f in diffs)
 
 
 def test_small_caps_signature_diff(tmp_path):
@@ -262,24 +347,89 @@ def test_align_preserves_order_across_gap():
     paired = [(li, ri) for li, ri, _ in slots if li is not None and ri is not None]
     assert paired[0] == (1, 0)
     assert paired[-1] == (3, 2)
-    assert (2, 1) in paired
+    assert (2, 1) not in paired
 
 
-def test_align_does_not_zip_empty_lw_with_dsk_text():
+def test_point_title_does_not_steal_verse_slide(tmp_path):
+    verse = (
+        "17 One day Jesus was teaching, and Pharisees and teachers of the law were sitting there. "
+        "They had come from every village of Galilee and from Judea and Jerusalem."
+    )
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [
+            _slide(1, "Hello"),
+            _slide(2, "3\nFaith"),
+            _slide(3, f"Luke 5\n{verse}"),
+            _slide(4, "Bye"),
+        ],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [
+            _slide(1, "Hello"),
+            _slide(2, f"Your Faith\n{verse}"),
+            _slide(3, "Bye"),
+        ],
+    }
+    result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK")
+    dsk2 = next(p for p in result["pairs"] if p.get("rightNumber") == 2)
+    assert dsk2.get("leftNumber") == 3
+    nums = {(p.get("leftNumber"), p.get("rightNumber")) for p in result["pairs"]}
+    assert (2, 2) not in nums
+    assert (2, None) in nums or any(p.get("leftNumber") == 2 and p.get("rightNumber") is None for p in result["pairs"])
+
+
+def test_align_title_graphic_pairs_then_skips_extra_photos():
+    genesis_lw = (
+        "Genesis 1\n1 In the beginning God created the heavens and the earth.\n"
+        "Genesis 1\n1 In the beginning God created the heavens and the earth."
+    )
+    genesis_dsk = "Genesis 1\n1 In the beginning God created the heavens and the earth.\nElohim (Plural)"
     left = [
-        {"number": 1, "items": [{"kind": "image", "text": "", "w": 100, "h": 100}]},
+        _slide(1, "", master="TITLE"),
         {"number": 2, "items": [{"kind": "image", "text": "", "w": 100, "h": 100}]},
-        _slide(3, "Amazed by the corporate anointing"),
+        _slide(3, "Matthew 18 19 if two of you on earth agree"),
+        _slide(4, genesis_lw),
+        {"number": 12, "items": [{"kind": "image", "text": "", "w": 100, "h": 100}]},
+        _slide(20, "Acts 4 33 With great power the apostles continued to testify"),
     ]
     right = [
         _slide(1, "Book of Romans Seminar"),
-        _slide(3, "Matthew 18 two of you on earth agree"),
+        _slide(2, "Matthew 18 19 if two of you on earth agree"),
+        _slide(3, genesis_dsk),
+        _slide(16, "33 With great power the apostles continued to testify"),
+    ]
+    slots = align_slides(left, right)
+    paired = [(li, ri) for li, ri, _ in slots if li is not None and ri is not None]
+    assert paired[0] == (1, 0)
+    assert (2, 1) in paired
+    assert (3, 2) in paired
+    assert (5, 3) in paired
+    assert (4, 3) not in paired
+    unmatched_left = [li for li, ri, _ in slots if ri is None]
+    assert 4 in unmatched_left
+
+
+def test_empty_lw_does_not_pair_with_unmatched_verse():
+    left = [
+        {"number": 1, "items": [{"kind": "image", "text": "", "w": 100, "h": 100}]},
+        _slide(2, "Amazed by the corporate anointing"),
+    ]
+    right = [
+        _slide(
+            1,
+            "19 Again, truly I tell you that if two of you on earth agree about anything they ask for, "
+            "it will be done for them by My Father in heaven.",
+        ),
     ]
     slots = align_slides(left, right)
     paired = [(li, ri) for li, ri, _ in slots if li is not None and ri is not None]
     assert paired == []
     unmatched_r = [ri for li, ri, _ in slots if li is None]
-    assert unmatched_r == [0, 1]
+    assert unmatched_r == [0]
 
 
 def test_pk_subset_fixture_catches_known_mistakes(tmp_path):
@@ -299,6 +449,10 @@ def test_pk_subset_fixture_catches_known_mistakes(tmp_path):
     assert not any("Slide count differs" in f.message for f in diffs)
     triune = next(p for p in result["pairs"] if p.get("leftNumber") == 6)
     assert triune.get("rightNumber") == 4
+    faith_title = next(p for p in result["pairs"] if p.get("leftNumber") == 53)
+    assert faith_title.get("rightNumber") == 38
+    verse_combo = next(p for p in result["pairs"] if p.get("rightNumber") == 32)
+    assert verse_combo.get("leftNumber") is None
     assert not any("Triune" in f.message for f in diffs)
 
 
@@ -409,6 +563,80 @@ def test_png_for_slide_matches_generate_style_names(tmp_path):
     pngs = sorted(tmp_path.glob("*.png"))
     slide = {"number": 7, "index": 6}
     assert _png_for_slide(pngs, slide, 6) == seven
+
+
+def test_png_maps_visible_export_order_not_slide_numbers(tmp_path):
+    from obed_edom.diff_keynotes import map_preview_pngs
+
+    first = tmp_path / "left.001.png"
+    second = tmp_path / "left.002.png"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    slides = [
+        {"number": 1, "index": 0, "skipped": True, "items": []},
+        {"number": 2, "index": 1, "skipped": False, "items": []},
+        {"number": 3, "index": 2, "skipped": True, "items": []},
+        {"number": 4, "index": 3, "skipped": False, "items": []},
+    ]
+    mapped = map_preview_pngs(slides, [first, second])
+    assert mapped[1] == first
+    assert mapped[3] == second
+    assert 0 not in mapped
+    assert 2 not in mapped
+
+
+def test_lw_pixel_compare_ignores_side_wings(tmp_path):
+    from obed_edom.diff_keynotes import crop_center_wall
+
+    left_dir = tmp_path / "left"
+    right_dir = tmp_path / "right"
+    left_dir.mkdir()
+    right_dir.mkdir()
+    lw = Image.new("RGB", (7680, 1080), (220, 30, 30))
+    lw.paste(Image.new("RGB", (3840, 1080), (30, 180, 30)), (1920, 0))
+    dsk = Image.new("RGB", (1920, 1080), (30, 180, 30))
+    lw.save(left_dir / "slide-001.png")
+    dsk.save(right_dir / "slide-001.png")
+    cropped = crop_center_wall(lw, 7680, 1080)
+    assert cropped.size == (3840, 1080)
+    assert cropped.getpixel((0, 0)) == (30, 180, 30)
+    photo = {"kind": "image", "text": ""}
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [{"number": 1, "items": [photo]}],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [{"number": 1, "items": [photo]}],
+    }
+    result = compare_inspects(left, right, left_dir, right_dir, tmp_path / "heat", left_label="LW", right_label="DSK")
+    diffs = [f for f in result["flags"] if f.category == "diff"]
+    assert not any("Photo" in f.message for f in diffs)
+
+
+def test_grouped_text_is_visible_to_diff():
+    from obed_edom.inspect import slide_plain_text
+
+    slide = {
+        "number": 4,
+        "items": [
+            {
+                "kind": "group",
+                "text": "",
+                "children": [
+                    {"kind": "text", "text": "Genesis 1"},
+                    {"kind": "text", "text": "In the beginning God created the heavens and the earth."},
+                ],
+            }
+        ],
+    }
+    blob = slide_plain_text(slide)
+    assert "Genesis 1" in blob
+    assert "beginning God created" in blob
 
 
 def test_export_applescript_uses_posix_png():

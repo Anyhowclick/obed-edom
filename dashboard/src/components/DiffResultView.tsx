@@ -37,14 +37,10 @@ function present(job: Job, label: string): boolean {
   return !job.artifacts?.missing?.includes(label);
 }
 
-function pickPng(named: string | undefined, number: number | null | undefined, files?: string[]): string | undefined {
-  if (named) return named;
-  if (number == null || !files?.length) return undefined;
-  const hit = files.find((name) => {
-    const nums = name.match(/\d+/g);
-    return nums != null && Number(nums[nums.length - 1]) === number;
-  });
-  return hit || files[number - 1];
+function pickPng(named: string | undefined): string | undefined {
+  // Server maps visible-order Keynote exports (left.001.png) onto slide
+  // indices. Guessing by the Keynote slide number attaches the wrong PNG.
+  return named;
 }
 
 function pairKey(pair: Pair): string {
@@ -102,14 +98,14 @@ export function DiffResultView({ job, onOpen }: { job: Job; onOpen: (src: string
                 <SlideSlot
                   job={job}
                   side="left"
-                  png={pickPng(pair.leftPng, pair.leftNumber, result.leftPngs)}
+                  png={pickPng(pair.leftPng)}
                   label={cap(result.leftLabel, pair.leftNumber, pair.leftSkipped)}
                   onOpen={onOpen}
                 />
                 <SlideSlot
                   job={job}
                   side="right"
-                  png={pickPng(pair.rightPng, pair.rightNumber, result.rightPngs)}
+                  png={pickPng(pair.rightPng)}
                   label={cap(result.rightLabel, pair.rightNumber, pair.rightSkipped)}
                   onOpen={onOpen}
                 />
