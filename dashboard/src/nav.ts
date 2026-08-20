@@ -1,11 +1,13 @@
 import { createContext, useContext } from "react";
 
-export type FeatureId = "generate" | "diff" | "dsk" | "resize";
+export type FeatureId = "generate" | "diff" | "visual" | "check" | "dsk" | "resize";
 export type TabId = FeatureId | "history";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
   generate: "Sermon Base Generator",
   diff: "Diff Checker",
+  visual: "Visual Checker",
+  check: "Sermon Checker",
   dsk: "DSK generator",
   resize: "CG resizer",
 };
@@ -13,6 +15,8 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
 export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   generate: "Open in Generator",
   diff: "Open in Diff Checker",
+  visual: "Open in Visual Checker",
+  check: "Open in Sermon Checker",
   dsk: "Open in DSK generator",
   resize: "Open in CG resizer",
 };
@@ -31,7 +35,53 @@ export function useRunNav() {
   return useContext(RunNavContext);
 }
 
+const SIDEBAR_KEY = "obed-edom.sidebar.collapsed";
+
+export function loadSidebarCollapsed(): boolean {
+  try {
+    return sessionStorage.getItem(SIDEBAR_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveSidebarCollapsed(collapsed: boolean) {
+  try {
+    sessionStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+type Layout = {
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: (next: boolean) => void;
+  focusMode: boolean;
+  setFocusMode: (next: boolean) => void;
+};
+
+export const LayoutContext = createContext<Layout>({
+  sidebarCollapsed: false,
+  setSidebarCollapsed: () => undefined,
+  focusMode: false,
+  setFocusMode: () => undefined,
+});
+
+export function useLayout() {
+  return useContext(LayoutContext);
+}
+
+export const TAB_SHORT: Record<TabId, string> = {
+  generate: "Gen",
+  check: "Chk",
+  diff: "Diff",
+  visual: "Vis",
+  dsk: "DSK",
+  resize: "CG",
+  history: "Runs",
+};
+
 export function asFeature(value: string | undefined): FeatureId | null {
-  if (value === "generate" || value === "diff" || value === "dsk" || value === "resize") return value;
+  if (value === "generate" || value === "diff" || value === "visual" || value === "check" || value === "dsk" || value === "resize") return value;
   return null;
 }

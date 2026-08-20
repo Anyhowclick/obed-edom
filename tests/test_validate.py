@@ -86,6 +86,37 @@ def test_inspect_overflow_from_box_geometry():
     assert not any(f.category == "overflow" for f in ok_flags)
 
 
+def test_validate_inspect_skips_hidden_slides():
+    payload = {
+        "path": "demo.key",
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "skipped": True,
+                "items": [
+                    {
+                        "kind": "text",
+                        "text": "we love god forever",
+                        "w": 1540,
+                        "h": 120,
+                        "size": 45,
+                    }
+                ],
+            },
+            {
+                "number": 2,
+                "skipped": False,
+                "items": [{"kind": "text", "text": "Faith", "w": 400, "h": 80, "size": 45}],
+            },
+        ],
+    }
+    flags = validate_inspect(payload, location_prefix="demo.key")
+    assert not any(f.category == "trinity" for f in flags)
+    assert not any("slide 1" in (f.location or "") for f in flags)
+
+
 def test_missing_previews_are_info_not_warning():
     from obed_edom.contrast import check_contrast
 

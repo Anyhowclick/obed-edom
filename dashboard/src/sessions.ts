@@ -21,7 +21,7 @@ export function jobLabel(job: Job): string {
 export function libraryJobs(jobs: Job[]): Job[] {
   return jobs.filter((job) => {
     const feature = job.feature || job.kind;
-    return feature === "generate" || feature === "diff" || feature === "dsk" || feature === "resize";
+    return feature === "generate" || feature === "diff" || feature === "visual" || feature === "check" || feature === "dsk" || feature === "resize";
   });
 }
 

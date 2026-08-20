@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, type DragEvent } from "react";
+import { resolveDroppedFolder, resolveDroppedKeynote } from "../dropPath";
 
 type Props = {
   label: string;
@@ -8,28 +9,43 @@ type Props = {
   onFiles?: (files: File[]) => void;
   onChoose?: () => void;
   onPath?: (path: string) => void;
+  onError?: (message: string) => void;
   multiple?: boolean;
+  folder?: boolean;
 };
 
-export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath, multiple }: Props) {
+export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath, onError, multiple, folder }: Props) {
   const [over, setOver] = useState(false);
   const [path, setPath] = useState("");
   const inputId = `file-${label.replace(/[^a-z0-9]+/gi, "-")}`;
+
+  async function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    setOver(false);
+    if (onPath) {
+      const resolved = folder ? await resolveDroppedFolder(e.dataTransfer) : await resolveDroppedKeynote(e.dataTransfer);
+      if ("path" in resolved) {
+        onPath(resolved.path);
+        return;
+      }
+      onError?.(resolved.error);
+      return;
+    }
+    const files = [...e.dataTransfer.files];
+    if (files.length && onFiles) onFiles(files);
+  }
+
   return (
     <div className="col">
       <div
         className={`well ${over ? "over" : ""}`}
         onDragOver={(e) => {
           e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
           setOver(true);
         }}
         onDragLeave={() => setOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setOver(false);
-          const files = [...e.dataTransfer.files];
-          if (files.length && onFiles) onFiles(files);
-        }}
+        onDrop={handleDrop}
         onClick={() => {
           if (onChoose) {
             onChoose();
@@ -83,7 +99,7 @@ export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath,
           <input
             type="text"
             value={path}
-            placeholder="/Users/…/deck.key"
+            placeholder={folder ? "/Users/…/previews/lw" : "/Users/…/deck.key"}
             onChange={(e) => setPath(e.target.value)}
             onBlur={() => path.trim() && onPath(path.trim())}
             onKeyDown={(e) => {

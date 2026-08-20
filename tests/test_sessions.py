@@ -129,3 +129,39 @@ def test_delete_when_files_already_gone(tmp_path: Path):
     assert runner.delete(job.id, purge=True)
     assert not (sessions / f"{job.id}.json").exists()
     assert runner.get(job.id) is None
+
+
+def test_visual_result_pairs_png_folders(tmp_path: Path):
+    from obed_edom.web.jobs import visual_result
+
+    left = tmp_path / "lw"
+    right = tmp_path / "dsk"
+    left.mkdir()
+    right.mkdir()
+    (left / "wall.002.png").write_bytes(b"x")
+    (left / "wall.003.png").write_bytes(b"x")
+    (right / "dsk.001.png").write_bytes(b"x")
+    result = visual_result(left, right)
+    assert result["phase"] == "visual"
+    assert result["leftLabel"] == "LW"
+    assert result["pairs"][0]["leftNumber"] == 2
+    assert result["pairs"][0]["rightNumber"] == 1
+    assert result["pairs"][1]["rightNumber"] is None
+    assert result["leftCatalog"][0]["png"] == "wall.002.png"
+
+
+def test_visual_delete_does_not_purge_preview_folders(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    left = output / "lw"
+    left.mkdir(parents=True)
+    marker = left / "keep.png"
+    marker.write_bytes(b"x")
+    right = tmp_path / "dsk"
+    right.mkdir()
+    (right / "a.png").write_bytes(b"x")
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("visual", lambda _j: {"leftPreviews": str(left), "rightPreviews": str(right)}, feature="visual")
+    _wait(runner, job.id)
+    runner.delete(job.id, purge=True)
+    assert marker.is_file()

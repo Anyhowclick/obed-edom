@@ -3,12 +3,64 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 from obed_edom.paths import find_repo_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
+
+
+def _as_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def export_applescript(key_path: Path, export_dir: Path) -> str:
+    """Same export shape generate uses: POSIX file + slide images PNG."""
+    key = _as_escape(str(Path(key_path).resolve()))
+    dest = _as_escape(str(Path(export_dir).resolve()))
+    return "\n".join(
+        [
+            'tell application "Keynote"',
+            '  using terms from application "Keynote"',
+            f'    set theDoc to open POSIX file "{key}"',
+            f'    set exportFolder to POSIX file "{dest}"',
+            "    export theDoc to exportFolder as slide images with properties {image format:PNG, skipped slides:false}",
+            "    try",
+            "      close theDoc saving no",
+            "    end try",
+            "  end using terms from",
+            "end tell",
+        ]
+    )
+
+
+def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
+    """Export PNG previews. Returns an error string, or None on success."""
+    export_dir = Path(export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    script = export_applescript(key_path, export_dir)
+    subprocess.run(["open", "-a", "Keynote"], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osascript", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    if preview_pngs(export_dir):
+        return None
+    err = (proc.stderr or proc.stdout or "").strip() or "Keynote did not write PNG previews."
+    if proc.returncode != 0:
+        return f"Preview export failed: {err}"
+    return err
 
 
 def inspect_keynote(
@@ -48,7 +100,17 @@ def inspect_keynote(
     raw = (proc.stdout or "").strip()
     if not raw:
         raise RuntimeError("Keynote inspect returned no JSON.")
-    return json.loads(raw)
+    payload = json.loads(raw)
+    if export_dir:
+        pngs = preview_pngs(Path(export_dir))
+        if pngs:
+            payload["exported"] = True
+        else:
+            fallback_err = export_slide_images(key_path, Path(export_dir))
+            payload["exported"] = bool(preview_pngs(Path(export_dir)))
+            if not payload["exported"]:
+                payload["exportError"] = fallback_err or payload.get("exportError") or ""
+    return payload
 
 
 def preview_pngs(folder: Path) -> list[Path]:
@@ -60,9 +122,16 @@ def preview_pngs(folder: Path) -> list[Path]:
     return files
 
 
+def _walk_items(node: dict):
+    items = node.get("items") or node.get("children") or []
+    for item in items:
+        yield item
+        yield from _walk_items(item)
+
+
 def slide_plain_text(slide: dict) -> str:
     parts: list[str] = []
-    for item in slide.get("items") or []:
+    for item in _walk_items(slide):
         text = (item.get("text") or "").strip()
         if text:
             parts.append(text)

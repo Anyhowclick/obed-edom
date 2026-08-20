@@ -1,0 +1,126 @@
+{
+  "left": {
+    "path": "/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (GW).key",
+    "slideWidth": 1920,
+    "slideHeight": 1080,
+    "slideCount": 66,
+    "slides": [
+      {
+        "number": 1,
+        "master": "",
+        "items": [
+          {
+            "text": ""
+          }
+        ]
+      },
+      {
+        "number": 2,
+        "master": "",
+        "items": [
+          {
+            "text": ""
+          }
+        ]
+      },
+      {
+        "number": 6,
+        "master": "",
+        "items": [
+          {
+            "text": "Triune God\nFather \u2022 Son \u2022 Holy Spirit"
+          }
+        ]
+      },
+      {
+        "number": 31,
+        "master": "",
+        "items": [
+          {
+            "text": "1 Samuel 10\n10 When he and his servant arrived at Gibeah, a procession of prophets met him; the Spirit\u00a0of God came powerfully\u2028upon him, and he joined in their prophesying."
+          }
+        ]
+      },
+      {
+        "number": 50,
+        "master": "",
+        "items": [
+          {
+            "text": "2\nJames 5 (AMP)\n16 The earnest (heartfelt, continued)\u2028prayer of a righteous man makes tremendous power available\u2028[dynamic in its working].\nPrayer"
+          }
+        ]
+      },
+      {
+        "number": 53,
+        "master": "",
+        "items": [
+          {
+            "text": "3\nFaith"
+          }
+        ]
+      }
+    ]
+  },
+  "right": {
+    "path": "/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key",
+    "slideWidth": 1920,
+    "slideHeight": 1080,
+    "slideCount": 41,
+    "slides": [
+      {
+        "number": 1,
+        "master": "",
+        "items": [
+          {
+            "text": "Book of Romans Seminar"
+          }
+        ]
+      },
+      {
+        "number": 4,
+        "master": "",
+        "items": [
+          {
+            "text": "Triune God\nFather \u2022 Son \u2022 Holy Spirit"
+          }
+        ]
+      },
+      {
+        "number": 19,
+        "master": "",
+        "items": [
+          {
+            "text": "10 When he and his servant arrived at Gibeah, a procession of prophets met him;\u2028the Spirit\u00a0of God came powerfully upon him, and he joined in their prophesying.\nSamuel 10"
+          }
+        ]
+      },
+      {
+        "number": 29,
+        "master": "",
+        "items": [
+          {
+            "text": "16 The earnest (heartfelt, continued) prayer of a righteous man makes tremendous power available [dynamic in its working].\nJames 5 (MSG)\nPrayer"
+          }
+        ]
+      },
+      {
+        "number": 32,
+        "master": "",
+        "items": [
+          {
+            "text": "Your Faith\n17 One day Jesus was teaching, and Pharisees and teachers of the law\u2028were sitting there. They had come from every village of Galilee and from Judea and Jerusalem. And the power of the Lord was with Jesus to heal the sick.\nLuke 5"
+          }
+        ]
+      },
+      {
+        "number": 38,
+        "master": "",
+        "items": [
+          {
+            "text": "Your Faith"
+          }
+        ]
+      }
+    ]
+  }
+}

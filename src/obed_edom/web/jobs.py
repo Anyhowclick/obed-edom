@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import time
@@ -87,6 +88,22 @@ class JobRunner:
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
+    def rerun(self, job_id: str, fn: Callable[[Job], dict[str, Any]]) -> Job | None:
+        """Queue another pass on an existing job, keeping the same id."""
+        with self._cv:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            if job.status == "running":
+                raise RuntimeError("Job is already running")
+            job.status = "queued"
+            job.error = None
+            job.updated_at = time.time()
+            self._fns[job.id] = fn
+            self._queue.append(job.id)
+            self._cv.notify()
+        return job
+
     def list(self, kind: str | None = None, feature: str | None = None) -> list[Job]:
         jobs = list(self._jobs.values())
         if kind:
@@ -130,7 +147,9 @@ class JobRunner:
         if not job:
             return None
         result = dict(job.result or {})
-        if folder:
+        if folder and job.feature == "visual":
+            result = bind_visual_folder(result, Path(folder).expanduser())
+        elif folder:
             result = bind_generate_folder(result, Path(folder).expanduser())
         if path:
             result["path"] = str(Path(path).expanduser())
@@ -138,6 +157,11 @@ class JobRunner:
             result["leftPath"] = str(Path(left_path).expanduser())
         if right_path:
             result["rightPath"] = str(Path(right_path).expanduser())
+        if job.feature == "visual" and (left_path or right_path or folder):
+            result = visual_result(
+                Path(str(result.get("leftPath") or "")),
+                Path(str(result.get("rightPath") or "")),
+            )
         return self.update_result(job_id, result)
 
     def delete(self, job_id: str, *, purge: bool = True) -> bool:
@@ -167,6 +191,8 @@ class JobRunner:
             self._jobs[job.id] = job
 
     def _purge_artifacts(self, job: Job) -> None:
+        if job.feature == "visual":
+            return
         result = job.result or {}
         candidates: list[Path] = []
         output_dir = result.get("outputDir")
@@ -305,3 +331,103 @@ def preview_names(folder: Path) -> list[str]:
     if not files:
         files = sorted(p for p in folder.rglob("*.png") if p.is_file())
     return [p.name for p in files]
+
+
+_PNG_NUM = re.compile(r"(\d+)")
+
+
+def _png_number(name: str, index: int) -> int:
+    found = _PNG_NUM.findall(Path(name).stem)
+    return int(found[-1]) if found else index + 1
+
+
+def _folder_catalog(folder: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for i, name in enumerate(preview_names(folder)):
+        out.append(
+            {
+                "index": i,
+                "number": _png_number(name, i),
+                "skipped": False,
+                "png": name,
+                "text": "",
+            }
+        )
+    return out
+
+
+def bind_visual_folder(result: dict[str, Any], folder: Path) -> dict[str, Any]:
+    folder = folder.expanduser()
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Not a folder: {folder}")
+    lw = folder / "previews" / "lw"
+    dsk = folder / "previews" / "dsk"
+    if not lw.is_dir():
+        lw = folder / "lw"
+    if not dsk.is_dir():
+        dsk = folder / "dsk"
+    if lw.is_dir() and dsk.is_dir():
+        return {"leftPath": str(lw), "rightPath": str(dsk)}
+    updated = dict(result)
+    if lw.is_dir():
+        updated["leftPath"] = str(lw)
+    if dsk.is_dir():
+        updated["rightPath"] = str(dsk)
+    return updated
+
+
+def visual_result(left: Path, right: Path, left_label: str = "LW", right_label: str = "DSK") -> dict[str, Any]:
+    left = left.expanduser()
+    right = right.expanduser()
+    if not left.is_dir() or not right.is_dir():
+        raise FileNotFoundError("Both paths must be folders of preview PNGs")
+    left_cat = _folder_catalog(left)
+    right_cat = _folder_catalog(right)
+    if not left_cat and not right_cat:
+        raise FileNotFoundError("No PNG previews in those folders")
+    pairs = []
+    for i in range(max(len(left_cat), len(right_cat))):
+        ls = left_cat[i] if i < len(left_cat) else None
+        rs = right_cat[i] if i < len(right_cat) else None
+        pair = {
+            "index": i,
+            "number": i + 1,
+            "leftIndex": None if ls is None else ls["index"],
+            "rightIndex": None if rs is None else rs["index"],
+            "rightIndexes": [] if rs is None else [rs["index"]],
+            "leftNumber": None if ls is None else ls["number"],
+            "rightNumber": None if rs is None else rs["number"],
+            "rightNumbers": [] if rs is None else [rs["number"]],
+            "leftSkipped": False,
+            "rightSkipped": False,
+            "leftPng": None if ls is None else ls["png"],
+            "rightPng": None if rs is None else rs["png"],
+            "rightPngs": [] if rs is None else [rs["png"]],
+            "leftText": "",
+            "rightText": "",
+            "score": 1.0 if ls and rs else 0.0,
+            "flags": [],
+        }
+        if ls is None:
+            pair["missing"] = left_label
+        elif rs is None:
+            pair["missing"] = right_label
+        pairs.append(pair)
+    return {
+        "leftPath": str(left),
+        "rightPath": str(right),
+        "leftLabel": left_label,
+        "rightLabel": right_label,
+        "phase": "visual",
+        "sameType": False,
+        "leftPreviews": str(left),
+        "rightPreviews": str(right),
+        "heatDir": "",
+        "leftPngs": [item["png"] for item in left_cat],
+        "rightPngs": [item["png"] for item in right_cat],
+        "heatPngs": [],
+        "leftCatalog": left_cat,
+        "rightCatalog": right_cat,
+        "pairs": pairs,
+        "flags": [],
+    }

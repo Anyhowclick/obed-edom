@@ -52,6 +52,15 @@ export async function chooseFolder(prompt: string): Promise<ChosenFile> {
   return res.json();
 }
 
+export async function resolveDrop(name: string, size?: number): Promise<ChosenFile> {
+  const body = new FormData();
+  body.set("name", name);
+  if (size != null && size > 0) body.set("size", String(size));
+  const res = await fetch("/api/resolve-drop", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function reveal(path: string): Promise<void> {
   const body = new FormData();
   body.set("path", path);
@@ -105,6 +114,28 @@ export async function relocateJob(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function startDiffCheck(
+  jobId: string,
+  slots: { leftIndex: number | null; rightIndex?: number | null; rightIndexes?: number[] }[]
+): Promise<Job> {
+  const res = await fetch(`/api/diff/${jobId}/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slots }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function startVisual(leftPath: string, rightPath: string): Promise<Job> {
+  const body = new FormData();
+  body.set("left_path", leftPath);
+  body.set("right_path", rightPath);
+  const res = await fetch("/api/visual", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }

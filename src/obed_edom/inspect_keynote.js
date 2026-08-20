@@ -6,29 +6,6 @@ function readJSON(path) {
   return JSON.parse(ObjC.unwrap(str));
 }
 
-function exportImages(Keynote, doc, exportDir) {
-  const folder = Path(exportDir);
-  try {
-    Keynote.export(doc, {
-      to: folder,
-      as: "slide images",
-      withProperties: { imageFormat: "PNG", skippedSlides: false },
-    });
-    return true;
-  } catch (err1) {
-    try {
-      doc.export({
-        to: folder,
-        as: "slide images",
-        withProperties: { imageFormat: "PNG" },
-      });
-      return true;
-    } catch (err2) {
-      return false;
-    }
-  }
-}
-
 function num(v, fallback) {
   const n = Number(v);
   return isNaN(n) ? fallback : n;
@@ -87,8 +64,26 @@ function extractRuns(textItem) {
         try {
           size = num(run.size(), 0);
         } catch (e5) {}
+        let smallCaps = false;
+        let capitalization = "";
+        try {
+          capitalization = String(run.capitalization());
+        } catch (eCap) {}
+        try {
+          smallCaps = Boolean(run.smallCaps());
+        } catch (eSmall) {}
+        if (capitalization && /small/i.test(capitalization)) {
+          smallCaps = true;
+        }
         if (text) {
-          runs.push({ text: text, color: color, bold: bold, size: size });
+          runs.push({
+            text: text,
+            color: color,
+            bold: bold,
+            size: size,
+            smallCaps: smallCaps,
+            capitalization: capitalization,
+          });
         }
       }
     }
@@ -96,56 +91,135 @@ function extractRuns(textItem) {
   return runs;
 }
 
+function kindOf(obj) {
+  let raw = "";
+  try {
+    raw = String(obj.class());
+  } catch (e) {}
+  const s = raw.toLowerCase();
+  if (s.indexOf("text") >= 0) return "text";
+  if (s.indexOf("image") >= 0 || s.indexOf("imag") >= 0) return "image";
+  if (s.indexOf("movie") >= 0 || s.indexOf("shmv") >= 0) return "movie";
+  if (s.indexOf("group") >= 0 || s.indexOf("igrp") >= 0) return "group";
+  if (s.indexOf("line") >= 0 || s.indexOf("iwln") >= 0) return "line";
+  if (s.indexOf("table") >= 0) return "table";
+  if (s.indexOf("chart") >= 0) return "chart";
+  if (s.indexOf("audio") >= 0) return "audio";
+  if (s.indexOf("shape") >= 0 || s.indexOf("sshp") >= 0) return "shape";
+  return s || "item";
+}
+
+function fileNameOf(obj) {
+  try {
+    const n = obj.fileName();
+    if (n == null) return "";
+    const s = String(n);
+    if (s && s !== "[object Object]") return s;
+  } catch (e) {}
+  try {
+    const f = obj.file();
+    if (f && f.toString) {
+      const s = String(f);
+      if (s && s !== "[object Object]") return s;
+    }
+  } catch (e2) {}
+  return "";
+}
+
+function describeItem(obj, index, kindHint) {
+  const kind = kindHint || kindOf(obj);
+  const rec = {
+    index: index,
+    kind: kind,
+    text: "",
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+    size: 0,
+    runs: [],
+    fileName: "",
+    locked: false,
+    rotation: 0,
+  };
+  const pos = positionOf(obj);
+  rec.x = pos[0];
+  rec.y = pos[1];
+  const sz = sizeOf(obj);
+  rec.w = sz[0];
+  rec.h = sz[1];
+  rec.fileName = fileNameOf(obj);
+  try {
+    rec.locked = Boolean(obj.locked());
+  } catch (eLock) {}
+  try {
+    rec.rotation = num(obj.rotation(), 0);
+  } catch (eRot) {}
+  if (kind === "text" || kind === "shape") {
+    try {
+      rec.text = String(obj.objectText());
+    } catch (e) {}
+    rec.runs = extractRuns(obj);
+    try {
+      rec.size = num(obj.objectText.size(), 0);
+    } catch (eSize) {}
+  }
+  if (kind === "line") {
+    try {
+      const sp = obj.startPoint();
+      if (sp && sp.length >= 2) rec.start = [num(sp[0], 0), num(sp[1], 0)];
+    } catch (eS) {}
+    try {
+      const ep = obj.endPoint();
+      if (ep && ep.length >= 2) rec.end = [num(ep[0], 0), num(ep[1], 0)];
+    } catch (eE) {}
+  }
+  if (kind === "group") {
+    rec.children = [];
+    try {
+      const kids = obj.iWorkItems();
+      rec.childCount = kids.length;
+      for (let i = 0; i < kids.length; i++) {
+        rec.children.push(describeItem(kids[i], i));
+      }
+    } catch (eG) {
+      rec.childCount = 0;
+    }
+  }
+  return rec;
+}
+
+function collectFrom(slide, name, kind, items, kindCounts) {
+  try {
+    const col = slide[name]();
+    for (let i = 0; i < col.length; i++) {
+      const rec = describeItem(col[i], items.length, kind);
+      rec.kindIndex = i;
+      kindCounts[kind] = (kindCounts[kind] || 0) + 1;
+      items.push(rec);
+    }
+  } catch (e) {}
+}
+
 function collectItems(slide) {
   const items = [];
+  try {
+    const all = slide.iWorkItems();
+    for (let i = 0; i < all.length; i++) {
+      const rec = describeItem(all[i], i);
+      rec.kindIndex = i;
+      items.push(rec);
+    }
+  } catch (e) {}
+  if (items.length) return items;
 
-  function add(kind, obj) {
-    const rec = {
-      kind: kind,
-      text: "",
-      x: 0,
-      y: 0,
-      w: 0,
-      h: 0,
-      size: 0,
-      runs: [],
-    };
-    const pos = positionOf(obj);
-    rec.x = pos[0];
-    rec.y = pos[1];
-    const sz = sizeOf(obj);
-    rec.w = sz[0];
-    rec.h = sz[1];
-    if (kind === "text") {
-      try {
-        rec.text = String(obj.objectText());
-      } catch (e) {}
-      rec.runs = extractRuns(obj);
-      try {
-        rec.size = num(obj.objectText.size(), 0);
-      } catch (eSize) {}
-    }
-    items.push(rec);
-  }
-
-  try {
-    const tis = slide.textItems();
-    for (let i = 0; i < tis.length; i++) {
-      add("text", tis[i]);
-    }
-  } catch (e) {}
-  try {
-    const imgs = slide.images();
-    for (let i = 0; i < imgs.length; i++) {
-      add("image", imgs[i]);
-    }
-  } catch (e) {}
-  try {
-    const shs = slide.shapes();
-    for (let i = 0; i < shs.length; i++) {
-      add("shape", shs[i]);
-    }
-  } catch (e) {}
+  const kindCounts = {};
+  collectFrom(slide, "textItems", "text", items, kindCounts);
+  collectFrom(slide, "images", "image", items, kindCounts);
+  collectFrom(slide, "shapes", "shape", items, kindCounts);
+  collectFrom(slide, "movies", "movie", items, kindCounts);
+  collectFrom(slide, "groups", "group", items, kindCounts);
+  collectFrom(slide, "lines", "line", items, kindCounts);
   return items;
 }
 
@@ -172,18 +246,26 @@ function run(argv) {
     try {
       master = String(slides[i].baseSlide().name());
     } catch (e2) {}
+    let skipped = false;
+    try {
+      skipped = Boolean(slides[i].skipped());
+    } catch (eSkip) {
+      try {
+        skipped = Boolean(slides[i].skipped);
+      } catch (eSkip2) {}
+    }
     outSlides.push({
       index: i,
       number: i + 1,
       master: master,
+      skipped: skipped,
       items: collectItems(slides[i]),
     });
   }
 
   let exported = false;
-  if (plan.exportDir) {
-    exported = exportImages(Keynote, doc, plan.exportDir);
-  }
+  let exportError = "";
+  // PNG export is done in Python via AppleScript after this script returns.
 
   try {
     Keynote.close(doc, { saving: "no" });
@@ -199,6 +281,7 @@ function run(argv) {
     slideHeight: slideHeight,
     slideCount: slides.length,
     exported: exported,
+    exportError: exportError,
     slides: outSlides,
   });
 }

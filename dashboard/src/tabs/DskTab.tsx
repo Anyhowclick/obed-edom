@@ -96,6 +96,7 @@ export function DskTab() {
             }
           }}
           onPath={(path) => setLw({ path, name: path.split("/").pop() || path })}
+          onError={setError}
         />
         <FileWell
           label="Optional DSK.key to modify"
@@ -109,6 +110,7 @@ export function DskTab() {
             }
           }}
           onPath={(path) => setDsk({ path, name: path.split("/").pop() || path })}
+          onError={setError}
         />
       </div>
       <div className="actions">

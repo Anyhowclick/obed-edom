@@ -8,3 +8,9 @@ def test_health_and_stubs():
     assert client.get("/api/health").json()["ok"] is True
     assert client.post("/api/dsk").status_code == 501
     assert client.post("/api/resize").status_code == 501
+
+
+def test_resolve_drop_unknown_name():
+    client = TestClient(app)
+    res = client.post("/api/resolve-drop", data={"name": "definitely-not-a-real-deck-zzzz.key"})
+    assert res.status_code == 404

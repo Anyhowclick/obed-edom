@@ -90,6 +90,7 @@ export function ResizeTab() {
           }
         }}
         onPath={(path) => setLw({ path, name: path.split("/").pop() || path })}
+        onError={setError}
       />
       <label className="field">
         Slide range
