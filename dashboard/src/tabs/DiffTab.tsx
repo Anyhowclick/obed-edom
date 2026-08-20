@@ -38,7 +38,7 @@ export function DiffTab() {
     setError(null);
     setBusy(true);
     try {
-      const created = await startDiff(left.path, right.path, "LW", "Other");
+      const created = await startDiff(left.path, right.path, "LW", /dsk/i.test(right.name) ? "DSK" : "Other");
       upsert(created);
       const done = await pollJob(created.id, (tick) => {
         setLogs(tick.logs);
@@ -62,17 +62,19 @@ export function DiffTab() {
       <div className="row">
         <FileWell
           label="Final LW.key"
-          hint="Choose the approved LED wall deck"
+          hint="Drop from Finder, choose, or paste a path"
           file={left}
           onChoose={() => pick("left")}
           onPath={(path) => setLeft({ path, name: path.split("/").pop() || path })}
+          onError={setError}
         />
         <FileWell
           label="DSK or other .key"
-          hint="Choose the deck to check against LW"
+          hint="Drop from Finder, choose, or paste a path"
           file={right}
           onChoose={() => pick("right")}
           onPath={(path) => setRight({ path, name: path.split("/").pop() || path })}
+          onError={setError}
         />
       </div>
       <div className="actions">

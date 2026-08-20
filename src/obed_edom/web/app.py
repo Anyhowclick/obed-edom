@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from obed_edom.diff_keynotes import compare_inspects
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_pngs
 from obed_edom.paths import find_repo_root
+from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.slide_map import load_masters
 from obed_edom.validate import validate_inspect
@@ -98,6 +99,16 @@ def create_app() -> FastAPI:
         if not path:
             raise HTTPException(400, "No folder selected")
         return {"path": path, "name": Path(path).name}
+
+    @app.post("/api/resolve-drop")
+    def resolve_drop(name: str = Form(...), size: int | None = Form(None)) -> dict:
+        found = resolve_dropped_keynote(name, size)
+        if not found:
+            raise HTTPException(
+                404,
+                "Could not resolve that drop to a path on this Mac. Use Choose on this Mac or paste the path.",
+            )
+        return {"path": str(found), "name": found.name}
 
     @app.post("/api/reveal")
     def reveal(path: str = Form(...)) -> dict:
@@ -238,7 +249,7 @@ def create_app() -> FastAPI:
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
-        tag = feature if feature in {"dsk", "resize", "inspect", "dsk-aux"} else "inspect"
+        tag = feature if feature in {"dsk", "resize", "inspect", "dsk-aux", "check"} else "inspect"
         job = RUNNER.submit(
             "inspect",
             lambda j, p=key, ex=do_export, rf=range_from, rt=range_to: _run_inspect(j, p, ex, rf, rt),
@@ -317,8 +328,18 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
     heat_dir = work / "heat"
     job.log(f"Inspecting {left.name} (read-only)…")
     left_payload = inspect_keynote(left, export_dir=left_dir)
+    left_n = len(preview_pngs(left_dir))
+    if left_n:
+        job.log(f"Exported {left_n} LW preview PNG(s).")
+    else:
+        job.log(left_payload.get("exportError") or "LW preview export produced no PNGs.")
     job.log(f"Inspecting {right.name} (read-only)…")
     right_payload = inspect_keynote(right, export_dir=right_dir)
+    right_n = len(preview_pngs(right_dir))
+    if right_n:
+        job.log(f"Exported {right_n} {right_label} preview PNG(s).")
+    else:
+        job.log(right_payload.get("exportError") or f"{right_label} preview export produced no PNGs.")
     job.log("Comparing text and pixels…")
     compared = compare_inspects(
         left_payload,
@@ -331,11 +352,14 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
     )
     flags = compared.pop("flags")
     pairs = compared["pairs"]
+    for pair in pairs:
+        pair["flags"] = serialize_flags(pair.get("flags") or [])
     return {
         "leftPath": str(left),
         "rightPath": str(right),
         "leftLabel": left_label,
         "rightLabel": right_label,
+        "sameType": compared.get("sameType"),
         "leftPreviews": str(left_dir),
         "rightPreviews": str(right_dir),
         "heatDir": str(heat_dir),
@@ -363,9 +387,13 @@ def _run_inspect(
         slide_range = (range_from, range_to)
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=export_dir, slide_range=slide_range)
+    names = preview_names(export_dir) if export_dir else []
+    if export_dir and names:
+        job.log(f"Exported {len(names)} preview PNG(s).")
+    elif export_dir:
+        job.log(payload.get("exportError") or "Preview export produced no PNGs.")
     flags = validate_inspect(payload, location_prefix=path.name)
     preview_dir = str(export_dir) if export_dir else None
-    names = preview_names(export_dir) if export_dir else []
     return {
         "path": str(path),
         "slideWidth": payload.get("slideWidth"),

@@ -29,7 +29,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         upsert(await relocateJob(active.id, { folder: folder.path }));
         return;
       }
-      if (feature === "dsk" || feature === "resize") {
+      if (feature === "dsk" || feature === "resize" || feature === "check") {
         const file = await chooseKeynote("Keynote this run should point at");
         upsert(await relocateJob(active.id, { path: file.path }));
         return;
@@ -88,6 +88,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                 </div>
                 {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} />}
                 {feature === "diff" && <DiffResultView job={active} onOpen={setOpen} />}
+                {feature === "check" && <InspectResultView job={active} onOpen={setOpen} />}
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
                 {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
               </>

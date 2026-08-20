@@ -48,7 +48,7 @@ export function SessionList({ jobs, activeId, onSelect, onDelete }: Props) {
 }
 
 function groupJobs(jobs: Job[]): [string, Job[]][] {
-  const order = ["generate", "diff", "dsk", "resize"];
+  const order = ["generate", "diff", "check", "dsk", "resize"];
   const map = new Map<string, Job[]>();
   for (const job of jobs) {
     const feature = asFeature(job.feature || job.kind) || job.feature || job.kind;

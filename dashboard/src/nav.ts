@@ -1,11 +1,12 @@
 import { createContext, useContext } from "react";
 
-export type FeatureId = "generate" | "diff" | "dsk" | "resize";
+export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize";
 export type TabId = FeatureId | "history";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
   generate: "Sermon Base Generator",
   diff: "Diff Checker",
+  check: "Sermon Checker",
   dsk: "DSK generator",
   resize: "CG resizer",
 };
@@ -13,6 +14,7 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
 export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   generate: "Open in Generator",
   diff: "Open in Diff Checker",
+  check: "Open in Sermon Checker",
   dsk: "Open in DSK generator",
   resize: "Open in CG resizer",
 };
@@ -32,6 +34,6 @@ export function useRunNav() {
 }
 
 export function asFeature(value: string | undefined): FeatureId | null {
-  if (value === "generate" || value === "diff" || value === "dsk" || value === "resize") return value;
+  if (value === "generate" || value === "diff" || value === "check" || value === "dsk" || value === "resize") return value;
   return null;
 }

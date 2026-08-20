@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from obed_edom.bible import check_bible
-from obed_edom.inspect import all_plain_text, highlighted_markup
+from obed_edom.inspect import highlighted_markup
 from obed_edom.models import Flag, OutlineDoc, Paragraph, Run, SlideSpec
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -58,14 +58,19 @@ def validate_outline(outline: OutlineDoc) -> list[Flag]:
     return flags
 
 
+def _visible_slides(payload: dict) -> list[dict]:
+    return [slide for slide in payload.get("slides") or [] if not slide.get("skipped")]
+
+
 def validate_inspect(payload: dict, *, location_prefix: str = "") -> list[Flag]:
     flags: list[Flag] = []
-    text = all_plain_text(payload)
+    slides = _visible_slides(payload)
+    text = "\n\n".join(slide_plain(s) for s in slides)
     prefix = location_prefix or Path(payload.get("path") or "keynote").name
     if text.strip():
         flags.extend(check_bible(outline_from_text(text, prefix)))
         flags.extend(validate_style_text(text, location=prefix))
-    for slide in payload.get("slides") or []:
+    for slide in slides:
         loc = f"{prefix} slide {slide.get('number') or slide.get('index', 0) + 1}"
         flags.extend(_highlight_punctuation_flags(slide, loc))
         flags.extend(_quote_flags(slide_plain(slide), loc))

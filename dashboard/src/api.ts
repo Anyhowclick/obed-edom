@@ -52,6 +52,15 @@ export async function chooseFolder(prompt: string): Promise<ChosenFile> {
   return res.json();
 }
 
+export async function resolveDrop(name: string, size?: number): Promise<ChosenFile> {
+  const body = new FormData();
+  body.set("name", name);
+  if (size != null && size > 0) body.set("size", String(size));
+  const res = await fetch("/api/resolve-drop", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function reveal(path: string): Promise<void> {
   const body = new FormData();
   body.set("path", path);

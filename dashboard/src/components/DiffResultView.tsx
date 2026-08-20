@@ -1,10 +1,13 @@
-import { useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { ValidationPanel } from "./ValidationPanel";
 
 type Pair = {
   index: number;
   number: number;
+  leftNumber?: number | null;
+  rightNumber?: number | null;
+  leftSkipped?: boolean;
+  rightSkipped?: boolean;
   leftText?: string;
   rightText?: string;
   leftMarkup?: string;
@@ -12,6 +15,9 @@ type Pair = {
   leftPng?: string;
   rightPng?: string;
   heatPng?: string;
+  missing?: string;
+  sameType?: boolean;
+  flags?: Flag[];
 };
 
 export type DiffResult = {
@@ -19,6 +25,7 @@ export type DiffResult = {
   rightPath?: string;
   leftLabel: string;
   rightLabel: string;
+  sameType?: boolean;
   leftPngs: string[];
   rightPngs: string[];
   heatPngs: string[];
@@ -30,84 +37,98 @@ function present(job: Job, label: string): boolean {
   return !job.artifacts?.missing?.includes(label);
 }
 
-export function DiffResultView({ job, onOpen }: { job: Job; onOpen: (src: string) => void }) {
-  const [slide, setSlide] = useState(0);
-  const result = (job.result || null) as DiffResult | null;
-  const pair = result?.pairs?.[slide];
-  const previewsOk = present(job, "left previews") || present(job, "visual diff");
+function pickPng(named: string | undefined, number: number | null | undefined, files?: string[]): string | undefined {
+  if (named) return named;
+  if (number == null || !files?.length) return undefined;
+  const hit = files.find((name) => {
+    const nums = name.match(/\d+/g);
+    return nums != null && Number(nums[nums.length - 1]) === number;
+  });
+  return hit || files[number - 1];
+}
 
-  function jump(location: string) {
-    const m = /slide\s+(\d+)/i.exec(location);
-    if (m) setSlide(Number(m[1]) - 1);
-  }
+function pairKey(pair: Pair): string {
+  return `${pair.index}-${pair.leftNumber}-${pair.rightNumber}`;
+}
+
+function cap(label: string, number?: number | null, skipped?: boolean): string {
+  if (number == null) return `No ${label}`;
+  return skipped ? `${label} ${number} (skipped)` : `${label} ${number}`;
+}
+
+function SlideSlot({
+  job,
+  side,
+  png,
+  label,
+  onOpen,
+}: {
+  job: Job;
+  side: "left" | "right";
+  png?: string;
+  label: string;
+  onOpen: (src: string) => void;
+}) {
+  const artifact = side === "left" ? "left previews" : "right previews";
+  const src = png && present(job, artifact) ? diffImageUrl(job.id, side, png) : "";
+  return (
+    <div className="slide-slot">
+      <div className="cap">{label}</div>
+      {src ? (
+        <img src={src} alt={label} onClick={() => onOpen(src)} />
+      ) : (
+        <div className="slide-ph">{label}</div>
+      )}
+    </div>
+  );
+}
+
+export function DiffResultView({ job, onOpen }: { job: Job; onOpen: (src: string) => void }) {
+  const result = (job.result || null) as DiffResult | null;
 
   if (job.status === "error") return <p className="err">{job.error}</p>;
   if (!result || job.status !== "done") return null;
 
+  const deckFlags = (result.flags || []).filter((flag) => flag.category !== "diff");
+
   return (
     <>
-      {previewsOk && (
-        <div className="thumbs-row">
-          {result.pairs.map((p, i) => {
-            const name = result.heatPngs[i] || result.leftPngs[i];
-            const src = name ? diffImageUrl(job.id, result.heatPngs[i] ? "heat" : "left", name) : "";
-            return src ? (
-              <img
-                key={p.number}
-                className={i === slide ? "on" : ""}
-                src={src}
-                alt={`Slide ${p.number}`}
-                onClick={() => setSlide(i)}
-              />
-            ) : (
-              <button key={p.number} type="button" onClick={() => setSlide(i)}>
-                {p.number}
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {pair && (
-        <div className="pair">
-          <div>
-            <div className="cap">
-              {result.leftLabel} {pair.number}
-            </div>
-            {pair.leftPng && present(job, "left previews") && (
-              <img
-                src={diffImageUrl(job.id, "left", pair.leftPng)}
-                alt=""
-                onClick={() => onOpen(diffImageUrl(job.id, "left", pair.leftPng!))}
-              />
-            )}
-            <pre className="log">{pair.leftMarkup || pair.leftText || "(no text)"}</pre>
-          </div>
-          <div>
-            <div className="cap">
-              {result.rightLabel} {pair.number}
-            </div>
-            {pair.rightPng && present(job, "right previews") && (
-              <img
-                src={diffImageUrl(job.id, "right", pair.rightPng)}
-                alt=""
-                onClick={() => onOpen(diffImageUrl(job.id, "right", pair.rightPng!))}
-              />
-            )}
-            <pre className="log">{pair.rightMarkup || pair.rightText || "(no text)"}</pre>
-          </div>
-          <div>
-            <div className="cap">Visual diff</div>
-            {pair.heatPng && present(job, "visual diff") && (
-              <img
-                src={diffImageUrl(job.id, "heat", pair.heatPng)}
-                alt=""
-                onClick={() => onOpen(diffImageUrl(job.id, "heat", pair.heatPng!))}
-              />
-            )}
-          </div>
-        </div>
-      )}
-      <ValidationPanel flags={result.flags || []} onJump={jump} />
+      <div className="diff-stack">
+        {result.pairs.map((pair) => {
+          const issues = pair.flags || [];
+          return (
+            <article key={pairKey(pair)} className="diff-row" id={`pair-${pair.index}`}>
+              <div className="pair-slides">
+                <SlideSlot
+                  job={job}
+                  side="left"
+                  png={pickPng(pair.leftPng, pair.leftNumber, result.leftPngs)}
+                  label={cap(result.leftLabel, pair.leftNumber, pair.leftSkipped)}
+                  onOpen={onOpen}
+                />
+                <SlideSlot
+                  job={job}
+                  side="right"
+                  png={pickPng(pair.rightPng, pair.rightNumber, result.rightPngs)}
+                  label={cap(result.rightLabel, pair.rightNumber, pair.rightSkipped)}
+                  onOpen={onOpen}
+                />
+              </div>
+              {issues.length > 0 && (
+                <div className="pair-issues">
+                  {issues.map((flag, i) => (
+                    <div key={`${flag.category}-${i}`} className={`flag ${flag.severity}`}>
+                      <div className="meta">{flag.severity}</div>
+                      {flag.message}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+      {deckFlags.length > 0 && <ValidationPanel flags={deckFlags} />}
     </>
   );
 }

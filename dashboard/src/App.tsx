@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CheckTab } from "./tabs/CheckTab";
 import { DiffTab } from "./tabs/DiffTab";
 import { DskTab } from "./tabs/DskTab";
 import { GeneratorTab } from "./tabs/GeneratorTab";
@@ -8,6 +9,7 @@ import { RunNavContext, type FeatureId, type TabId } from "./nav";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Sermon Base Generator" },
+  { id: "check", label: "Sermon Checker" },
   { id: "diff", label: "Diff Checker" },
   { id: "dsk", label: "DSK generator" },
   { id: "resize", label: "CG resizer" },
@@ -42,6 +44,9 @@ export function App() {
         <main className="main">
           <div className={tab === "generate" ? "pane" : "pane off"}>
             <GeneratorTab />
+          </div>
+          <div className={tab === "check" ? "pane" : "pane off"}>
+            <CheckTab />
           </div>
           <div className={tab === "diff" ? "pane" : "pane off"}>
             <DiffTab />
