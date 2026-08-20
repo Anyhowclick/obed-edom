@@ -184,8 +184,11 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
 .thumbs {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
+.thumbs.cols-1 { grid-template-columns: minmax(0, 1fr); }
+.thumbs.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.thumbs.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .thumbs img, .pair img {
   width: 100%;
   border-radius: 6px;
@@ -205,18 +208,63 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
 
 .flags { margin-top: 20px; }
 .flag {
-  border-left: 3px solid var(--muted);
-  padding: 8px 12px;
-  margin: 8px 0;
-  background: var(--panel);
+  border: 1px solid transparent;
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
   white-space: pre-wrap;
   font-size: 14px;
+  font-weight: 500;
 }
-.flag.warning { border-color: var(--warn); }
-.flag.error { border-color: var(--err); }
-.flag.info { border-color: var(--info); }
-.flag.success { border-color: var(--ok); }
-.flag .meta { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.flag.error {
+  background: #4a1216;
+  border-color: #8a2a32;
+  border-left-color: #ff4d4f;
+  color: #ff8a8c;
+}
+.flag.warning {
+  background: #3d2808;
+  border-color: #7a5414;
+  border-left-color: #ffb020;
+  color: #ffd27a;
+}
+.flag.info {
+  background: #10283c;
+  border-color: #1f4d6e;
+  border-left-color: #4ec3ff;
+  color: #9ed8ff;
+}
+.flag.success {
+  background: #123328;
+  border-color: #1f5a46;
+  border-left-color: var(--ok);
+  color: #b6ead4;
+}
+.flag .meta {
+  display: block;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: left;
+  color: inherit;
+  opacity: 0.85;
+}
+.flag.error .meta { color: #ffc4c5; }
+.flag.warning .meta { color: #ffe2a8; }
+.flag.info .meta { color: #c7ecff; }
+.flag .meta.jump {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.flag .meta.jump:hover { opacity: 1; }
 
 .pair {
   display: grid;

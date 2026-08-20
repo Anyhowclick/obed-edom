@@ -1,6 +1,6 @@
 import { previewUrl, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
-import { ValidationPanel } from "./ValidationPanel";
+import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
 
 export type InspectResult = {
   path?: string;
@@ -32,6 +32,13 @@ export function InspectResultView({
       ? names.map((name, i) => ({ src: previewUrl(job.id, "lw", name), label: `${labelPrefix} ${i + 1}` }))
       : [];
 
+  function jumpToSlide(location: string) {
+    const target = parseSlideTarget(location);
+    if (!target) return;
+    const name = names[target.index - 1];
+    if (name) onOpen(previewUrl(job.id, "lw", name));
+  }
+
   if (job.status === "error") return <p className="err">{job.error}</p>;
 
   return (
@@ -41,8 +48,8 @@ export function InspectResultView({
           Source canvas {result.slideWidth}×{result.slideHeight}
         </p>
       )}
-      {urls.length > 0 ? <PreviewGrid urls={urls} onOpen={onOpen} /> : null}
-      <ValidationPanel flags={result?.flags || []} />
+      {urls.length > 0 ? <PreviewGrid urls={urls} onOpen={onOpen} columns={2} /> : null}
+      <ValidationPanel flags={result?.flags || []} onJump={jumpToSlide} />
     </>
   );
 }

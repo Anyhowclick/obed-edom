@@ -22,13 +22,15 @@ export function Lightbox({ src, onClose }: { src: string | null; onClose: () => 
 export function PreviewGrid({
   urls,
   onOpen,
+  columns,
 }: {
   urls: { src: string; label?: string }[];
   onOpen: (src: string) => void;
+  columns?: 1 | 2 | 3;
 }) {
   if (!urls.length) return <p className="note">No preview images.</p>;
   return (
-    <div className="thumbs">
+    <div className={`thumbs${columns ? ` cols-${columns}` : ""}`}>
       {urls.map((u) => (
         <button
           key={u.src}
