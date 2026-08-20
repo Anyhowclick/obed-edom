@@ -66,7 +66,7 @@ export function VisualTab() {
           <FileWell
             folder
             label="LW preview folder"
-            hint="Drop the folder of LW PNGs, choose, or paste a path"
+            hint="Drop the folder of LW PNGs or choose on this Mac"
             file={left}
             onChoose={() => pick("left")}
             onPath={(path) => setLeft({ path, name: path.split("/").pop() || path })}
@@ -75,7 +75,7 @@ export function VisualTab() {
           <FileWell
             folder
             label="DSK preview folder"
-            hint="Drop the folder of DSK PNGs, choose, or paste a path"
+            hint="Drop the folder of DSK PNGs or choose on this Mac"
             file={right}
             onChoose={() => pick("right")}
             onPath={(path) => setRight({ path, name: path.split("/").pop() || path })}
