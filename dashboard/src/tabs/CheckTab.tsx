@@ -58,7 +58,7 @@ export function CheckTab() {
       </p>
       <FileWell
         label="Keynote (.key)"
-        hint="Drop from Finder, choose, or paste a path"
+        hint="Drop from Finder or choose on this Mac"
         file={file}
         onChoose={pick}
         onPath={(path) => setFile({ path, name: path.split("/").pop() || path })}

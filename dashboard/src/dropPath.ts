@@ -38,14 +38,14 @@ export async function resolveDroppedFolder(dt: DataTransfer): Promise<ChosenFile
   }
   const named = files[0];
   if (!named) {
-    return { error: "Could not read that folder — use Choose on this Mac or paste the path." };
+    return { error: "Could not read that folder — use Choose on this Mac." };
   }
   try {
     const resolved = await resolveDrop(named.name, named.size);
     return { path: folderFromDroppedPath(resolved.path), name: folderFromDroppedPath(resolved.path).split("/").pop() || resolved.name };
   } catch (err) {
     return {
-      error: err instanceof Error ? err.message : "Could not read that folder — use Choose on this Mac or paste the path.",
+      error: err instanceof Error ? err.message : "Could not read that folder — use Choose on this Mac.",
     };
   }
 }
@@ -74,7 +74,7 @@ export async function resolveDroppedKeynote(dt: DataTransfer): Promise<ChosenFil
   const named = files.find((f) => f.name.toLowerCase().endsWith(".key")) || files[0];
   if (!named) {
     return {
-      error: "Keynote packages often hide the path — use Choose on this Mac or paste the path.",
+      error: "Keynote packages often hide the path — use Choose on this Mac.",
     };
   }
   try {
@@ -84,7 +84,7 @@ export async function resolveDroppedKeynote(dt: DataTransfer): Promise<ChosenFil
       error:
         err instanceof Error
           ? err.message
-          : "Keynote packages often hide the path — use Choose on this Mac or paste the path.",
+          : "Keynote packages often hide the path — use Choose on this Mac.",
     };
   }
 }

@@ -6,7 +6,8 @@ description: >-
   copy of the outline, checks Bible references against Bible Gateway, and flags
   contrast issues. Use when the user mentions sermon slides, DSK, LW, FW, LED
   cues, Keynote templates, Offering JX.docx, Sermon BC.docx, TITLE/FILLER/VERSE
-  /POINT/NUM-POINT cues, or running python -m obed_edom generate.
+  /POINT/NUM-POINT cues, running python -m obed_edom generate, or changing
+  the operator dashboard under dashboard/src.
 ---
 
 # Obed-Edom
@@ -24,6 +25,17 @@ Local operator dashboard (generate, diff, DSK stub, CG resize stub):
 ```bash
 python -m obed_edom dashboard
 ```
+
+That process serves the prebuilt SPA in `dashboard/dist`, not `dashboard/src`.
+**Always rebuild** after any dashboard UI change (`dashboard/src/**`) before
+considering the work done — do not leave a rebuild for the user:
+
+```bash
+cd dashboard && npm install && npm run build
+```
+
+Then restart `python -m obed_edom dashboard`. Vite `npm run dev` is only for
+hot reload; the Python dashboard still needs a fresh `dashboard/dist`.
 
 Staff-only parse (no Keynote):
 

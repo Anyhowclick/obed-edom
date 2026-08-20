@@ -91,7 +91,7 @@ export function DiffTab() {
       <div className="row">
         <FileWell
           label="Final LW.key"
-          hint="Drop from Finder, choose, or paste a path"
+          hint="Drop from Finder or choose on this Mac"
           file={left}
           onChoose={() => pick("left")}
           onPath={(path) => setLeft({ path, name: path.split("/").pop() || path })}
@@ -99,7 +99,7 @@ export function DiffTab() {
         />
         <FileWell
           label="DSK or other .key"
-          hint="Drop from Finder, choose, or paste a path"
+          hint="Drop from Finder or choose on this Mac"
           file={right}
           onChoose={() => pick("right")}
           onPath={(path) => setRight({ path, name: path.split("/").pop() || path })}

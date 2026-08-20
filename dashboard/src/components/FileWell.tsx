@@ -16,7 +16,6 @@ type Props = {
 
 export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath, onError, multiple, folder }: Props) {
   const [over, setOver] = useState(false);
-  const [path, setPath] = useState("");
   const inputId = `file-${label.replace(/[^a-z0-9]+/gi, "-")}`;
 
   async function handleDrop(e: DragEvent) {
@@ -92,21 +91,6 @@ export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath,
             Choose on this Mac
           </button>
         </div>
-      )}
-      {onPath && (
-        <label className="field">
-          Or paste a path
-          <input
-            type="text"
-            value={path}
-            placeholder={folder ? "/Users/…/previews/lw" : "/Users/…/deck.key"}
-            onChange={(e) => setPath(e.target.value)}
-            onBlur={() => path.trim() && onPath(path.trim())}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && path.trim()) onPath(path.trim());
-            }}
-          />
-        </label>
       )}
     </div>
   );

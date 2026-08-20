@@ -113,7 +113,7 @@ def create_app() -> FastAPI:
         if not found:
             raise HTTPException(
                 404,
-                "Could not resolve that drop to a path on this Mac. Use Choose on this Mac or paste the path.",
+                "Could not resolve that drop to a path on this Mac. Use Choose on this Mac.",
             )
         return {"path": str(found), "name": found.name}
 
