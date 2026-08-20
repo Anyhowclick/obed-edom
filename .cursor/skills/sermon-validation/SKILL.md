@@ -3,7 +3,7 @@ name: sermon-validation
 description: >-
   House-style checks for sermon LW/DSK Keynotes and outlines: verse vs Bible
   Gateway, contrast, Trinity caps, book names, highlighted punctuation, en-dash
-  dates, quote attributions, and center-wall 3840x1080 bounds. Diffs never
+  dates, quote attributions, center-wall 3840x1080 bounds, and text overflow. Diffs never
   rewrite .key files. Use when validating slides, running the dashboard
   ValidationPanel, or reviewing Keynote copy.
 ---
@@ -29,6 +29,10 @@ f. Date period format, note the en dash, not single or em dash (Eg: 3–4 Jun, 1
 g. Quotes: If person is alive, should contain just the name; otherwise the D.O.B-D.O.D. Also verify the name online, flag if incorrectly spelt
 
 h. Ideally, content should not exceed 3840 x 1080 (center wall)
+
+i. Text overflow: if copy cannot fit the mapped Keynote box (character
+   limit or estimated height vs box), raise a warning. Do not rewrite the
+   deck. `[VERSE-CONTINUED]` that exceeds the lower-third is flagged, not split.
 
 ## Runtime
 

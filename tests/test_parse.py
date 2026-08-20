@@ -43,7 +43,10 @@ def test_offering_cues():
     assert tags[0] == "FILLER"
     assert "FILLER-QR" in tags
     assert "GIVING-OPTIONS" in tags
-    assert tags.count("VERSE") >= 2
+    assert tags.count("VERSE") >= 1
+    assert "VERSE" in tags or "VERSE-CONTINUED" in tags
+    verse_like = [s for s in outline.blocks if s.cue_tag in {"VERSE", "VERSE-CONTINUED"}]
+    assert len(verse_like) >= 2
     verse = next(s for s in outline.blocks if s.has_verse_numbers)
     assert "31" in verse.body and "33" in verse.body
 
@@ -161,7 +164,9 @@ def test_mapping_masters():
     assert dsk_verses
     assert all("(MSG)" in s.header for s in dsk_verses)
     assert all(s.text_item_widths.get(1) == 1540 for s in dsk_verses)
-    assert all(len(s.body) <= 190 for s in dsk_verses)
+    assert all(
+        len(s.body) <= 190 for s in dsk_verses if s.semantic_tag != "VERSE-CONTINUED"
+    )
     assert min(len(s.body) for s in dsk_verses) >= 40
     assert any(s.body.startswith("31") for s in dsk_verses)
     # The reference is "Mark 6:30-32 (MSG)" but the quote starts at 31, so the
@@ -785,6 +790,63 @@ def test_wrong_gospel_citation_is_flagged():
     assert any("Matthew" in a for a in actions)
 
 
+def test_verse_continued_cue_and_full_verse_on_second_slide():
+    from sermon_slides.parse_outline import normalize_cue
+    from sermon_slides.models import SlideSpec
+    from sermon_slides.keynote import _append_seeded_text, _build_applescript, _plan_payload
+
+    cue = normalize_cue("[VERSE-CONTINUED]")
+    assert cue.tag == "VERSE-CONTINUED"
+    assert normalize_cue("[VERSE-FROM-PREVIOUS]").tag == "VERSE-CONTINUED"
+
+    offering = parse_outline(OUTLINES / "Offering JX.docx")
+    lw, dsk, _ = map_slides(offering)
+    lw_full = [s for s in lw if s.is_verse and "Steep your life" in s.body]
+    assert len(lw_full) == 1
+    assert lw_full[0].semantic_tag == "VERSE-CONTINUED"
+    assert lw_full[0].body.strip().startswith("33")
+    assert "People who" in lw_full[0].body
+    assert "but you know both God" in lw_full[0].body
+    runs = list(lw_full[0].styled_items.values())[0]
+    assert runs[0].style == "verse_number"
+    first_33 = next(
+        s
+        for s in lw
+        if s.is_verse and s.body.strip().startswith("33") and "Steep" not in s.body
+    )
+    assert "but you know both God" in first_33.body
+
+    dsk_full = [s for s in dsk if s.is_verse and "Steep your life" in s.body]
+    assert len(dsk_full) == 1
+    assert "People who" in dsk_full[0].body
+    assert dsk_full[0].body.strip().startswith("33")
+
+    lines = []
+    _append_seeded_text(lines, 2, "", "Steep your life", mode="body_only")
+    script = "\n".join(lines)
+    assert "delete characters 1 thru (bodyIdx - 1)" in script
+    assert "usedSeed" in script
+
+    fragment = SlideSpec(
+        deck="lw",
+        cue_tag="LW",
+        master="VERSES",
+        body="Steep your life in God-reality",
+        text_items={2: "Steep your life in God-reality"},
+        styled_items={2: [StyledRun(text="Steep your life in God-reality", style="highlight")]},
+        is_verse=True,
+        semantic_tag="VERSE-CONTINUED",
+    )
+    frag_script = _build_applescript(_plan_payload([fragment], Path("/tmp/cont.key"), None))
+    assert "delete characters 1 thru (bodyIdx - 1)" in frag_script
+    assert "usedSeed" in frag_script
+    used = frag_script.index("set usedSeed to false")
+    replace = frag_script.index(
+        'set object text of text item 2 to "Steep your life in God-reality"'
+    )
+    assert "if usedSeed then" in frag_script[used:replace]
+
+
 if __name__ == "__main__":
     test_sermon_cues()
     test_offering_cues()
@@ -797,6 +859,7 @@ if __name__ == "__main__":
     test_passage_header()
     test_bible_gateway_parse_and_fetch()
     test_wrong_gospel_citation_is_flagged()
+    test_verse_continued_cue_and_full_verse_on_second_slide()
     test_annotate_offering_splits()
     test_annotate_sermon_point_and_title()
     test_annotate_verse_cues_at_chunk_starts()

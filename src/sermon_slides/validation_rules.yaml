@@ -17,3 +17,9 @@ quotes:
   living: name_only
   deceased: name_and_lifespan
 follow_bible_gateway: true
+overflow:
+  enabled: true
+  # Extra slack before a box is flagged (Keynote leading vs estimate).
+  height_slack_px: 8
+  char_em: 0.58
+  line_height: 1.18

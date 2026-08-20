@@ -9,7 +9,7 @@ from sermon_slides.models import Flag, GenerationResult
 from sermon_slides.parse_outline import parse_outline
 from sermon_slides.report import write_review
 from sermon_slides.slide_map import load_masters, map_slides
-from sermon_slides.validate import validate_outline
+from sermon_slides.validate import validate_outline, validate_slide_specs
 
 
 def _cleanup_output(out_dir: Path) -> None:
@@ -32,6 +32,7 @@ def generate(
     flags: list[Flag] = []
     flags.extend(validate_outline(outline))
     flags.extend(map_flags)
+    flags.extend(validate_slide_specs(lw, dsk))
 
     out_dir = output_dir_for(docx)
     review_path = out_dir / "review.pdf"

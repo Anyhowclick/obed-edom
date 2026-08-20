@@ -83,8 +83,12 @@ function extractRuns(textItem) {
         try {
           bold = Boolean(run.bold());
         } catch (e4) {}
+        let size = 0;
+        try {
+          size = num(run.size(), 0);
+        } catch (e5) {}
         if (text) {
-          runs.push({ text: text, color: color, bold: bold });
+          runs.push({ text: text, color: color, bold: bold, size: size });
         }
       }
     }
@@ -103,6 +107,7 @@ function collectItems(slide) {
       y: 0,
       w: 0,
       h: 0,
+      size: 0,
       runs: [],
     };
     const pos = positionOf(obj);
@@ -116,6 +121,9 @@ function collectItems(slide) {
         rec.text = String(obj.objectText());
       } catch (e) {}
       rec.runs = extractRuns(obj);
+      try {
+        rec.size = num(obj.objectText.size(), 0);
+      } catch (eSize) {}
     }
     items.push(rec);
   }
