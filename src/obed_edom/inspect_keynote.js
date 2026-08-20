@@ -6,6 +6,8 @@ function readJSON(path) {
   return JSON.parse(ObjC.unwrap(str));
 }
 
+}
+
 function num(v, fallback) {
   const n = Number(v);
   return isNaN(n) ? fallback : n;

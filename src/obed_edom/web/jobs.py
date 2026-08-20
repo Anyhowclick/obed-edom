@@ -262,6 +262,7 @@ def artifact_status(job: Job, output_root: Path) -> dict[str, Any]:
         ("review.pdf", result.get("reviewPath")),
         ("preview dir", result.get("previewDir")),
         ("source Keynote", result.get("path")),
+        ("CG Keynote", result.get("destPath")),
         ("left Keynote", result.get("leftPath")),
         ("right Keynote", result.get("rightPath")),
         ("left previews", result.get("leftPreviews")),

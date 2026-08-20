@@ -17,6 +17,7 @@ from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_pngs
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
+from obed_edom.remap_keynote import remap_and_inspect
 from obed_edom.slide_map import load_masters
 from obed_edom.validate import validate_inspect
 from obed_edom.web.jobs import Job, JobRunner, preview_names, serialize_flags, visual_result
@@ -330,13 +331,28 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/resize")
-    def resize_stub() -> JSONResponse:
-        return JSONResponse(
-            {
-                "detail": "CG resize is not implemented yet. Validation still runs on the chosen Keynote."
-            },
-            status_code=501,
+    def resize_keynote(
+        path: str = Form(...),
+        gold_path: str = Form(""),
+        range_from: int | None = Form(None),
+        range_to: int | None = Form(None),
+        export: str = Form("true"),
+    ) -> dict:
+        key = Path(path).expanduser()
+        if not key.exists():
+            raise HTTPException(400, f"Not found: {path}")
+        gold = Path(gold_path).expanduser() if gold_path.strip() else None
+        if gold is not None and not gold.exists():
+            raise HTTPException(400, f"Gold Keynote not found: {gold_path}")
+        do_export = export.lower() in {"1", "true", "yes", "on"}
+        job = RUNNER.submit(
+            "resize",
+            lambda j, p=key, g=gold, rf=range_from, rt=range_to, ex=do_export: _run_resize(
+                j, p, g, rf, rt, ex
+            ),
+            feature="resize",
         )
+        return job.to_dict()
 
     if DASHBOARD_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
@@ -405,7 +421,7 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
         job.log(f"Exported {right_n} {right_label} preview PNG(s).")
     else:
         job.log(right_payload.get("exportError") or f"{right_label} preview export produced no PNGs.")
-    job.log("Matching slides…")
+        job.log("Matching slides…")
     compared = compare_inspects(
         left_payload,
         right_payload,
@@ -564,6 +580,70 @@ def _run_inspect(
         "previewFiles": {"lw": names, "dsk": []} if names else {"lw": [], "dsk": []},
         "previewDir": preview_dir,
         "previewFileNames": names,
+        "flags": serialize_flags(flags),
+    }
+
+
+def _run_resize(
+    job: Job,
+    path: Path,
+    gold: Path | None,
+    range_from: int | None,
+    range_to: int | None,
+    export: bool,
+) -> dict[str, Any]:
+    dest_dir = ROOT / "output" / ".resize" / job.id
+    dest = dest_dir / f"{path.stem}_CG.key"
+    export_dir = dest_dir / "previews" if export else None
+    slide_range = None
+    if range_from is not None and range_to is not None:
+        slide_range = (range_from, range_to)
+    job.log(f"Remapping {path.name} → 1920×1080…")
+    if gold:
+        job.log(f"Using gold layout {gold.name}.")
+    info = remap_and_inspect(
+        path,
+        dest,
+        gold=gold,
+        slide_range=slide_range,
+        export_dir=export_dir,
+        log=job.log,
+    )
+    inspect = info.get("inspect") or {}
+    names = list(info.get("previewFiles") or [])
+    if export_dir and not names:
+        names = preview_names(export_dir)
+    if export_dir and names:
+        job.log(f"Exported {len(names)} CG preview PNG(s).")
+    payload = info.get("payload") or {
+        "path": str(dest),
+        "slideWidth": inspect.get("slideWidth"),
+        "slideHeight": inspect.get("slideHeight"),
+        "slides": [],
+    }
+    flags = validate_inspect(payload, location_prefix=dest.name)
+    counts = info.get("counts") or {}
+    applied = info.get("applied")
+    missed = info.get("missed")
+    job.log(f"Wrote {dest.name}: applied {applied}, missed {missed}.")
+    score = info.get("goldScore") or {}
+    return {
+        "path": str(path),
+        "destPath": str(dest),
+        "goldPath": str(gold) if gold else None,
+        "slideWidth": inspect.get("slideWidth") or info.get("width"),
+        "slideHeight": inspect.get("slideHeight") or info.get("height"),
+        "slideCount": inspect.get("slideCount"),
+        "exported": inspect.get("exported"),
+        "previews": {"lw": str(export_dir) if export_dir else None, "dsk": None},
+        "previewFiles": {"lw": names, "dsk": []},
+        "previewDir": str(export_dir) if export_dir else None,
+        "previewFileNames": names,
+        "recipe": info.get("recipe"),
+        "counts": counts,
+        "applied": applied,
+        "missed": missed,
+        "goldScore": score,
         "flags": serialize_flags(flags),
     }
 
