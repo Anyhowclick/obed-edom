@@ -95,6 +95,10 @@ function extractRuns(textItem) {
         try {
           size = num(run.size(), 0);
         } catch (e5) {}
+        let font = "";
+        try {
+          font = String(run.font());
+        } catch (eFont) {}
         let smallCaps = false;
         let capitalization = "";
         try {
@@ -112,6 +116,7 @@ function extractRuns(textItem) {
             color: color,
             bold: bold,
             size: size,
+            font: font,
             smallCaps: smallCaps,
             capitalization: capitalization,
           });
@@ -168,6 +173,8 @@ function describeItem(obj, index, kindHint) {
     w: 0,
     h: 0,
     size: 0,
+    font: "",
+    color: null,
     runs: [],
     fileName: "",
     locked: false,
@@ -194,6 +201,21 @@ function describeItem(obj, index, kindHint) {
     try {
       rec.size = num(obj.objectText.size(), 0);
     } catch (eSize) {}
+    try {
+      rec.font = String(obj.objectText.font());
+    } catch (eFont) {}
+    if (!rec.font && rec.runs && rec.runs[0] && rec.runs[0].font) {
+      rec.font = rec.runs[0].font;
+    }
+    try {
+      const c = obj.objectText.color();
+      if (c && c[0] != null) {
+        rec.color = [num(c[0], 0), num(c[1], 0), num(c[2], 0)];
+      }
+    } catch (eCol) {}
+    if (!rec.color && rec.runs && rec.runs[0] && rec.runs[0].color) {
+      rec.color = rec.runs[0].color;
+    }
   }
   if (kind === "line") {
     try {

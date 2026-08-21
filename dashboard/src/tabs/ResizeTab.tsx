@@ -38,7 +38,7 @@ export function ResizeTab() {
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("2");
-  const [includeLists, setIncludeLists] = useState(false);
+  const [includeLists, setIncludeLists] = useState(true);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -131,10 +131,10 @@ export function ResizeTab() {
       <p className="lede">
         MVP: copy the wall deck, copy the CG template’s 16:9 slide layouts
         onto it (MAP BLANK (16:9) is the repurposed background), set 1920×1080,
-        then move existing objects onto that layout. Objects that share a
-        scale+translation (the map cluster) move together; pins follow the
-        group they sit on. Use Empty_Map.key (full map layers), not
-        Only_Map.key.
+        then move existing objects onto that layout. Church names take the
+        template’s sample size and pack from the right so they prefer the
+        gutter beside the map. Use Empty_Map.key (full map layers plus one
+        resized church name), not Only_Map.key.
       </p>
       <FileWell
         label="Finalised LW / FW .key"
@@ -174,7 +174,7 @@ export function ResizeTab() {
           checked={includeLists}
           onChange={(e) => setIncludeLists(e.target.checked)}
         />
-        <span>Also remap church-name text with the same map crop (leave off for a map-only slide)</span>
+        <span>Resize church-name text to the template sample size and pack it beside the map. Leave off for a map-only slide.</span>
       </label>
       <div className="actions">
         <button className="btn secondary" type="button" disabled={!lw || busy} onClick={runValidate}>

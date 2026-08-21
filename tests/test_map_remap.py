@@ -102,11 +102,10 @@ def test_gold_recipe_pairs_pins_and_list():
     with_lists = plan_payload_transforms(wall, recipe, include_lists=True)
     assert summarize_plan(with_lists)["list"] == 1
     name = next(t for t in with_lists if t.role == "list")
-    # Same map affine as the image (identity scale + crop offset), not a squash.
-    assert abs(name.x - 3120) < 1
-    assert abs(name.y - 80) < 1
-    assert abs(name.w - 400) < 1
-    assert abs(name.h - 40) < 1
+    assert name.font_size == 28
+    assert abs(name.w - 400 * (28 / 36)) < 2
+    assert name.x + name.w <= 1920 + 2
+    assert name.y >= 0
 
 
 def test_full_frame_template_cover_crops_wall_map():
@@ -373,3 +372,301 @@ def test_learn_recipe_uses_template_slide_with_matching_map_layers():
     assert abs(recipe["mapDst"]["h"] - 771) < 1
     pin = next(t for t in plan_payload_transforms(wall, recipe) if t.role == "pin")
     assert abs(pin.x - (3563 - 3041)) < 1
+
+
+def test_list_sample_uses_one_line_church_name_font():
+    from obed_edom.map_remap import template_list_sample
+
+    slides = [
+        {
+            "items": [
+                _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                _item(kind="text", text="CHC Prai\nCHC Aliwal\nCHC Bohol", x=1400, y=40, w=400, h=200, size=42),
+            ]
+        }
+    ]
+    font, sample = template_list_sample(slides)
+    assert font == 20
+    assert sample is not None
+    assert abs(sample.x - 39) < 1
+
+
+def test_church_lists_use_sample_font_and_pack_in_gutter():
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="text", text="Global Missions", x=2147, y=52, w=537, h=124, size=100),
+                    _item(kind="text", text="CHC Zui Si\nCHC Zwechipen", x=6946, y=9, w=474, h=954, size=42),
+                    _item(kind="text", text="CHC Aaliana\nCHC Aliwal", x=262, y=9, w=423, h=954, size=42),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="text", text="Global Missions", x=135, y=67, w=271, h=64, size=50),
+                    _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["listFontSize"] == 20
+    assert recipe["titleFontSize"] == 50
+    assert abs(recipe["titleDst"]["x"] - 135) < 1
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    lists = [t for t in transforms if t.role == "list"]
+    assert len(lists) == 2
+    assert all(t.font_size == 20 for t in lists)
+    assert all(abs(t.h - 954 * (20 / 42)) < 2 for t in lists)
+    title = next(t for t in transforms if t.role == "title")
+    assert abs(title.x - 135) < 1
+    assert title.font_size == 50
+    # Rightmost wall column is placed first, against the right edge.
+    rightmost = max(lists, key=lambda t: t.x)
+    assert rightmost.x + rightmost.w <= 1920 + 1
+    assert rightmost.x >= 1920 - 16 - rightmost.w - 1
+    # Both columns fit in the ~640px gutter to the right of the map.
+    map_right = 11 + 1248
+    assert all(t.x + 1 >= map_right for t in lists)
+
+
+def test_pack_columns_steps_left_when_taller_than_frame():
+    from obed_edom.map_remap import pack_columns_from_right
+
+    boxes = [Rect(0, 0, 200, 500), Rect(0, 0, 200, 500), Rect(0, 0, 180, 400)]
+    placed = pack_columns_from_right(boxes, 1920, 1080, Rect(11, 18, 1248, 771))
+    assert len(placed) == 3
+    assert placed[0].x > placed[2].x
+    assert placed[0].y < placed[1].y
+
+
+def test_match_character_style_prefers_font_family_then_size():
+    from obed_edom.map_remap import match_character_style
+
+    styles = [
+        {"font": "Amplitude-Regular", "size": 20, "text": "CHC Aaliana"},
+        {"font": "AmplitudeCond-Medium", "size": 50, "text": "Global Missions"},
+    ]
+    taiwan = match_character_style(
+        _item(kind="text", text="Taiwan", size=100, font="AmplitudeCond-Medium"),
+        styles,
+    )
+    assert taiwan is not None
+    assert taiwan["size"] == 50
+    assert taiwan["font"] == "AmplitudeCond-Medium"
+    chc = match_character_style(
+        _item(kind="text", text="CHC Tai Chung", size=40, font="Amplitude-Bold"),
+        styles,
+    )
+    assert chc is not None
+    assert chc["size"] == 20
+    assert chc["font"] == "Amplitude-Regular"
+
+
+def test_match_character_style_uses_colour_when_face_matches():
+    from obed_edom.map_remap import match_character_style
+
+    red = [0.987, 0.222, 0.201]
+    white = [1.0, 1.0, 1.0]
+    styles = [
+        {"font": "Amplitude-Regular", "size": 20, "color": red, "text": "CHC Aaliana"},
+        {"font": "Amplitude-Regular", "size": 32, "color": white, "text": "UPDATE"},
+    ]
+    picked = match_character_style(
+        _item(kind="text", text="UPDATE", size=83, font="Amplitude-Regular", color=white),
+        styles,
+    )
+    assert picked is not None
+    assert picked["size"] == 32
+    assert picked["color"] == white
+
+
+def test_reuse_duplicates_donor_then_only_text_delta():
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    wall = {
+        "slides": [
+            {
+                "number": 2,
+                "items": [
+                    map_img,
+                    *pins,
+                    _item(kind="text", text="CHC Zui Si\nCHC Zwechipen", x=6946, y=9, w=474, h=954, size=42),
+                ],
+            },
+            {
+                "number": 3,
+                "items": [
+                    dict(map_img),
+                    *[dict(p) for p in pins],
+                    _item(kind="text", text="CHC Aaliana", x=262, y=9, w=215, h=58, size=42),
+                ],
+            },
+            {
+                "number": 4,
+                "items": [
+                    dict(map_img),
+                    *[dict(p) for p in pins],
+                    _item(kind="text", text="CHC Aaliana", x=262, y=9, w=180, h=40, size=30),
+                ],
+            },
+            {
+                "number": 8,
+                "items": [
+                    dict(map_img),
+                    *[dict(p) for p in pins],
+                    _item(kind="text", text="Global Missions", x=2147, y=52, w=537, h=124, size=100),
+                ],
+            },
+            {
+                "number": 9,
+                "items": [
+                    dict(map_img),
+                    *[dict(p) for p in pins],
+                    _item(kind="text", text="Global Missions", x=2147, y=52, w=537, h=124, size=100),
+                ],
+            },
+        ]
+    }
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[3]["from"] == 2
+    assert jobs[3]["persist"] >= 40
+    assert any(r["kind"] == "text" for r in jobs[3]["remove"])
+    assert any(a.get("matchText") == "CHC Aaliana" for a in jobs[3]["add"])
+    assert jobs[3]["mutate"] == []
+    assert jobs[4]["from"] == 3
+    assert jobs[4]["add"] == []
+    assert jobs[4]["mutate"][0]["matchText"] == "CHC Aaliana"
+    assert jobs[9]["from"] == 8
+    assert jobs[9]["add"] == []
+    assert jobs[9]["remove"] == []
+
+
+def test_unpaired_text_uses_closest_character_style():
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=-8400, y=-4070, w=20000, h=14934),
+                    _item(kind="image", fileName="pasted-image.pdf", x=2695, y=-15, w=787, h=1154),
+                    _item(kind="image", fileName="IMG_7198.JPG", x=3121, y=-78, w=2720, h=1240),
+                    _item(
+                        kind="text",
+                        text="Taiwan",
+                        x=2458,
+                        y=51,
+                        w=248,
+                        h=124,
+                        size=100,
+                        font="AmplitudeCond-Medium",
+                    ),
+                    _item(
+                        kind="text",
+                        text="CHC Tai Chung",
+                        x=2751,
+                        y=280,
+                        w=257,
+                        h=52,
+                        size=40,
+                        font="Amplitude-Bold",
+                    ),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=-11221, y=-4069, w=20000, h=14934),
+                    _item(kind="image", fileName="pasted-image.pdf", x=-153, y=-11, w=787, h=1154),
+                ],
+            },
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20, font="Amplitude-Regular"),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            },
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    styles = recipe.get("characterStyles") or []
+    assert any(s["size"] == 50 and "AmplitudeCond" in s["font"] for s in styles)
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    taiwan = next(t for t in transforms if t.role == "other" and abs((t.font_size or 0) - 50) < 0.1)
+    assert taiwan.font == "AmplitudeCond-Medium"
+    # Photo crop translate is ~-2848; Taiwan stays with the photo, not packed as a list.
+    assert taiwan.x < 2458
+    chc = next(t for t in transforms if t.font_size == 20)
+    assert chc.font == "Amplitude-Regular"
+    photo = next(t for t in transforms if 2000 < t.w < 4000)
+    assert abs(photo.x - (3121 - 2848)) < 40
+
+
+def test_resized_leftover_image_gets_its_own_affine():
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 5,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=1992, y=52, w=124, h=124),
+                    _item(kind="shape", x=3563, y=255, w=11, h=11),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 3,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template)
+    globe = next(t for t in transforms if abs(t.w - 80) < 2 and abs(t.h - 80) < 2)
+    # 124→80 at (31, 59)
+    assert abs(globe.w - 80) < 2
+    assert abs(globe.x - 31) < 2
+    pin = next(t for t in transforms if t.role == "pin")
+    assert abs(pin.x - (3563 - 3041)) < 2

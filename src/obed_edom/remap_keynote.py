@@ -15,6 +15,7 @@ from obed_edom.map_remap import (
     CG_WIDTH,
     learn_recipe,
     plan_payload_transforms,
+    plan_slide_reuses,
     score_against_gold,
     summarize_plan,
 )
@@ -106,15 +107,50 @@ def remap_keynote(
 
     recipe = recipe_for(wall, template_data)
     transforms = plan_payload_transforms(
-        wall, recipe, slide_range=slide_range, include_lists=include_lists
+        wall,
+        recipe,
+        slide_range=slide_range,
+        include_lists=include_lists,
+        template=template_data,
     )
+    reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
     counts = summarize_plan(transforms)
     say(
         f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
         f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list, "
         f"{counts.get('hide', 0)} hidden names"
-        f"{'' if include_lists else ' (church names hidden, not packed)'}."
+        f"{'' if include_lists else ' (church names hidden; tick the list checkbox to pack them)'}."
     )
+    if include_lists and recipe.get("listFontSize"):
+        say(
+            f"Church names → {recipe.get('listFontSize')}pt, packed from the right "
+            f"(gutter first; extras may overlap the map)."
+        )
+    styles = recipe.get("characterStyles") or []
+    if styles:
+        bits = []
+        for s in styles:
+            bit = f"{s.get('font') or 'sample'} {s.get('size')}pt"
+            rgb = s.get("color")
+            if rgb and len(rgb) >= 3:
+                bit += f" rgb({int(rgb[0]*255)},{int(rgb[1]*255)},{int(rgb[2]*255)})"
+            bits.append(bit)
+        say("Unpaired text picks the closest CG character style: " + "; ".join(bits) + ".")
+    if reuses:
+        bits = []
+        for job in reuses:
+            extra = []
+            if job.get("remove"):
+                extra.append(f"drop {len(job['remove'])}")
+            if job.get("add"):
+                extra.append(f"add {len(job['add'])}")
+            if job.get("mutate"):
+                extra.append(f"tweak {len(job['mutate'])}")
+            bits.append(
+                f"slide {job['slide']}←{job['from']}"
+                + (f" ({', '.join(extra)})" if extra else " (identical map/dots)")
+            )
+        say("Duplicating remapped slides for unchanged map/dots: " + "; ".join(bits) + ".")
     origin_pins = [
         t for t in transforms if t.role == "pin" and abs(t.x) < 2 and abs(t.y) < 2
     ]
@@ -139,6 +175,7 @@ def remap_keynote(
             "width": int(recipe.get("destWidth") or CG_WIDTH),
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
             "transforms": [t.as_dict() for t in transforms],
+            "reuses": reuses,
         }
         if slide_range:
             plan["range"] = [slide_range[0], slide_range[1]]
@@ -160,6 +197,8 @@ def remap_keynote(
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
     say(f"Applied {applied}, missed {missed}.")
+    if jxa.get("cloned"):
+        say(f"Duplicated {jxa.get('cloned')} remapped slide(s) instead of re-placing the map and dots.")
     layouts = jxa.get("layouts") or {}
     if layouts.get("imported"):
         say(f"Imported 16:9 layouts: {', '.join(str(n) for n in layouts['imported'])}.")

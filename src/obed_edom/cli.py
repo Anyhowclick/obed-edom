@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     remap.add_argument(
         "--include-lists",
         action="store_true",
-        help="Also move church-name text with the same map crop (skip for a map-only slide).",
+        help="Also resize church-name text to the template sample size and pack it off the map.",
     )
     args = parser.parse_args(argv)
 

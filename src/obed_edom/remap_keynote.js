@@ -169,10 +169,24 @@ function applyGeom(obj, spec, positionOnly) {
       ok = true;
     } catch (eE) {}
   }
+  if (!positionOnly && spec.font) {
+    try {
+      obj.objectText.font = spec.font;
+    } catch (eFn) {}
+  }
   if (!positionOnly && spec.fontSize) {
     try {
       obj.objectText.size = spec.fontSize;
     } catch (eF) {}
+  }
+  if (!positionOnly && spec.color && spec.color.length >= 3) {
+    try {
+      obj.objectText.color = spec.color;
+    } catch (eC1) {
+      try {
+        obj.objectText.attributeRuns[0].color = spec.color;
+      } catch (eC2) {}
+    }
   }
   if (spec.role !== "hide" && spec.x != null && spec.y != null) {
     if (setPos(obj, spec.x, spec.y)) {
@@ -185,6 +199,183 @@ function applyGeom(obj, spec, positionOnly) {
     } catch (eK) {}
   }
   return ok;
+}
+
+function deleteObj(Keynote, obj) {
+  if (!obj) return false;
+  try {
+    Keynote.delete(obj);
+    return true;
+  } catch (e) {
+    try {
+      obj.delete();
+      return true;
+    } catch (e2) {
+      return false;
+    }
+  }
+}
+
+function deleteRefs(Keynote, slide, refs) {
+  const ordered = (refs || []).slice().sort(function (a, b) {
+    const ka = String(a.kind || "");
+    const kb = String(b.kind || "");
+    if (ka !== kb) return ka < kb ? -1 : 1;
+    return Number(b.kindIndex) - Number(a.kindIndex);
+  });
+  let n = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    if (deleteObj(Keynote, getItem(slide, ordered[i]))) n += 1;
+  }
+  return n;
+}
+
+function findTextItem(slide, needle) {
+  const want = String(needle || "").trim();
+  if (!want) return null;
+  const col = collectionNamed(slide, "textItems");
+  for (let i = 0; i < countOf(col); i++) {
+    const obj = itemAt(col, i);
+    if (!obj) continue;
+    try {
+      if (String(obj.objectText()).trim() === want) return obj;
+    } catch (e) {}
+  }
+  return null;
+}
+
+function keystroke(cmd) {
+  const SE = Application("System Events");
+  SE.keystroke(cmd, { using: "command down" });
+}
+
+function applySpec(obj, spec) {
+  if (!obj || !spec || spec.x == null) return false;
+  const a = applyGeom(obj, spec, false);
+  applyGeom(obj, spec, true);
+  return a;
+}
+
+function runAppleScript(doc, body) {
+  let target = "front document";
+  try {
+    target =
+      'document "' + String(doc.name()).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  } catch (eN) {}
+  const script =
+    'tell application "Keynote"\ntell ' + target + "\n" + body + "\nend tell\nend tell\n";
+  const ns = $.NSString.stringWithString(script);
+  ns.writeToFileAtomicallyEncodingError(
+    "/tmp/obed-edom-keynote.applescript",
+    true,
+    $.NSUTF8StringEncoding,
+    null
+  );
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  app.doShellScript("/usr/bin/osascript /tmp/obed-edom-keynote.applescript");
+}
+
+function applyReuse(doc, Keynote, job, missReasons) {
+  const from = Number(job.from);
+  const to = Number(job.slide);
+  let slides = doc.slides();
+  if (from < 1 || to < 1 || from > countOf(slides) || to > countOf(slides)) {
+    return { ok: false, duplicated: 0, applied: 0, missed: 1 };
+  }
+  const nBefore = countOf(slides);
+  try {
+    Keynote.activate();
+    runAppleScript(doc, "duplicate slide " + from + " to before slide " + to);
+  } catch (eDup) {
+    if (missReasons.length < 8) missReasons.push("duplicate slide " + from + " failed: " + eDup);
+    return { ok: false, duplicated: 0, applied: 0, missed: 1 };
+  }
+  slides = doc.slides();
+  if (countOf(slides) !== nBefore + 1) {
+    return { ok: false, duplicated: 0, applied: 0, missed: 1 };
+  }
+  // copy sits at `to`; the original wall slide shifted to `to + 1`.
+  let copy = slides[to - 1];
+  let orig = slides[to];
+  const removed = deleteRefs(Keynote, copy, job.remove || []);
+  slides = doc.slides();
+  copy = slides[to - 1];
+  orig = slides[to];
+  const add = job.add || [];
+  if (add.length) {
+    deleteRefs(Keynote, orig, job.strip || []);
+    delay(0.3);
+    try {
+      Keynote.activate();
+      doc.currentSlide = orig;
+      delay(0.25);
+      keystroke("a");
+      delay(0.2);
+      keystroke("c");
+      delay(0.25);
+      doc.currentSlide = copy;
+      delay(0.25);
+      keystroke("v");
+      delay(0.6);
+    } catch (ePaste) {
+      if (missReasons.length < 8) missReasons.push("paste delta slide " + to + ": " + ePaste);
+    }
+    slides = doc.slides();
+    copy = slides[to - 1];
+    orig = slides[to];
+  }
+  let applied = 0;
+  let missed = 0;
+  const delta = add.concat(job.mutate || []);
+  for (let i = 0; i < delta.length; i++) {
+    const spec = delta[i];
+    let obj = null;
+    if (spec.matchText) obj = findTextItem(copy, spec.matchText);
+    if (!obj && spec.role === "hide") continue;
+    if (!obj) obj = getItem(copy, spec);
+    if (!obj || spec.x == null) {
+      if (!obj && spec.x != null) missed += 1;
+      continue;
+    }
+    if (applySpec(obj, spec)) applied += 1;
+    else missed += 1;
+  }
+  try {
+    runAppleScript(doc, "delete slide " + (to + 1));
+  } catch (eDel) {
+    slides = doc.slides();
+    const leftover = slides[to];
+    if (leftover) deleteObj(Keynote, leftover);
+  }
+  return { ok: true, duplicated: 1, removed: removed, applied: applied, missed: missed };
+}
+
+function slidesInPlan(transforms, reuses) {
+  const set = {};
+  for (let t = 0; t < transforms.length; t++) {
+    const n = Number(transforms[t].slide);
+    if (!isNaN(n)) set[n] = true;
+  }
+  for (let i = 0; i < (reuses || []).length; i++) {
+    const n = Number(reuses[i].slide);
+    const f = Number(reuses[i].from);
+    if (!isNaN(n)) set[n] = true;
+    if (!isNaN(f)) set[f] = true;
+  }
+  return Object.keys(set)
+    .map(Number)
+    .sort(function (a, b) {
+      return a - b;
+    });
+}
+
+function transformsForSlide(transforms, slideNo) {
+  const out = [];
+  for (let t = 0; t < transforms.length; t++) {
+    if (Number(transforms[t].slide) === slideNo) out.push(transforms[t]);
+  }
+  return out;
 }
 
 function setSlideSize(doc, width, height) {
@@ -445,16 +636,57 @@ function run(argv) {
       } catch (eT) {}
     }
   }
-  const slides = doc.slides();
-  const first = applyTransforms(slides, transforms, collections, missReasons, false);
-  if (first.applied === 0) {
+  const reuses = plan.reuses || [];
+  const reuseBy = {};
+  for (let i = 0; i < reuses.length; i++) {
+    reuseBy[Number(reuses[i].slide)] = reuses[i];
+  }
+  const order = slidesInPlan(transforms, reuses);
+  let cloned = 0;
+  let appliedFirst = 0;
+  let missedFirst = 0;
+  for (let i = 0; i < order.length; i++) {
+    const n = order[i];
+    if (reuseBy[n]) {
+      const r = applyReuse(doc, Keynote, reuseBy[n], missReasons);
+      if (r.ok) {
+        cloned += r.duplicated || 0;
+        appliedFirst += r.applied || 0;
+        missedFirst += r.missed || 0;
+      } else {
+        const r2 = applyTransforms(
+          doc.slides(),
+          transformsForSlide(transforms, n),
+          collections,
+          missReasons,
+          false
+        );
+        appliedFirst += r2.applied;
+        missedFirst += r2.missed;
+        applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
+      }
+      continue;
+    }
+    const r = applyTransforms(
+      doc.slides(),
+      transformsForSlide(transforms, n),
+      collections,
+      missReasons,
+      false
+    );
+    appliedFirst += r.applied;
+    missedFirst += r.missed;
+    applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
+  }
+  if (appliedFirst === 0 && cloned === 0) {
     try {
       Keynote.close(doc, { saving: "no" });
     } catch (eAbort) {}
     return JSON.stringify({
       dest: plan.dest,
+      cloned: cloned,
       applied: 0,
-      missed: first.missed,
+      missed: missedFirst,
       width: actualWidth,
       height: actualHeight,
       sizeProp: sizeProp,
@@ -464,13 +696,10 @@ function run(argv) {
       saved: false,
     });
   }
-  const missAfter = [];
-  // Size yanks position to (0,0). Restore x/y only on the second pass.
-  const second = applyTransforms(slides, transforms, null, missAfter, true);
-  const mapReadback = readMapGeom(slides, transforms);
+  const mapReadback = readMapGeom(doc.slides(), transforms);
   let skippedSlides = 0;
   if (range && range.length >= 2) {
-    skippedSlides = skipOutsideRange(slides, Number(range[0]), Number(range[1]));
+    skippedSlides = skipOutsideRange(doc.slides(), Number(range[0]), Number(range[1]));
   }
   try {
     Keynote.save(doc);
@@ -484,8 +713,9 @@ function run(argv) {
   } catch (eClose) {}
   return JSON.stringify({
     dest: plan.dest,
-    applied: second.applied || first.applied,
-    missed: second.missed,
+    cloned: cloned,
+    applied: appliedFirst,
+    missed: missedFirst,
     width: actualWidth,
     height: actualHeight,
     sizeProp: sizeProp,

@@ -609,7 +609,7 @@ def _run_resize(
             f"{'' if slide_range[0] == slide_range[1] else '–' + str(slide_range[1])})…")
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
     if not include_lists:
-        job.log("Church-name text left in place (map + pins only).")
+        job.log("Church-name text hidden (enable the list checkbox to pack them at the template size).")
     info = remap_and_inspect(
         path,
         dest,
