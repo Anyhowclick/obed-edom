@@ -14,6 +14,7 @@ from obed_edom.map_remap import (
     pair_by_size,
     plan_payload_transforms,
     recipe_from_cover,
+    restack_move_order,
     score_against_gold,
     summarize_plan,
 )
@@ -219,6 +220,8 @@ def test_template_layout_translates_map_cluster_and_pins():
     orange = next(t for t in transforms if t.role == "map" and abs(t.w - 306) < 1)
     assert abs(orange.x - (4073 - 3041)) < 1
     assert abs(orange.y - (748 + 30)) < 1
+    maps = [t for t in transforms if t.role == "map"]
+    assert maps[0].w >= maps[-1].w
     hides = [t for t in transforms if t.role == "hide"]
     assert len(hides) == 1
     assert abs(hides[0].x - 262) < 1
@@ -276,6 +279,28 @@ def test_classifies_pasted_map_art():
     assert not is_map_item(_item(kind="image", fileName="LED blank-1.png", w=7680, h=1080))
 
 
+def test_australia_overlay_restacks_above_base_map():
+    asia = _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
+    australia = _item(kind="image", fileName="pasted-image.pdf", x=1032, y=778, w=306, h=295)
+    globe = _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80)
+    pin = _item(kind="shape", x=1100, y=900, w=11, h=11)
+    title = _item(kind="text", text="Global Missions", x=135, y=67, w=271, h=64, role="title")
+    order = restack_move_order([asia, australia, globe, pin, title])
+    assert order.index(0) < order.index(1)
+    assert order.index(1) < order.index(3)
+    assert order.index(3) < order.index(2)
+    assert order[-1] == 4
+
+
+def test_same_size_country_overlays_follow_z_index():
+    """India/Japan are often full-frame transparent PDFs the same size as the white map."""
+    japan = _item(kind="image", fileName="pasted-image.pdf", x=900, y=80, w=220, h=180, zIndex=5)
+    india = _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771, zIndex=4)
+    white = _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771, zIndex=0)
+    order = restack_move_order([japan, india, white])
+    assert order == [2, 1, 0]
+
+
 def test_resolve_slide_range_single_and_span():
     from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slide_range
 
@@ -284,6 +309,18 @@ def test_resolve_slide_range_single_and_span():
     assert resolve_slide_range(1, 9) == (1, 9)
     assert resolve_slide_range(None, None) is None
     assert resolve_slide_range(None, None, default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE)) == (2, 2)
+
+
+def test_parse_slide_spec_lists_and_gaps():
+    from obed_edom.map_remap import format_slide_range, parse_slide_spec, resolve_slides, wants_slide
+
+    assert parse_slide_spec("2") == frozenset({2})
+    assert parse_slide_spec("2, 4-6") == frozenset({2, 4, 5, 6})
+    assert parse_slide_spec("1–3, 8") == frozenset({1, 2, 3, 8})
+    assert format_slide_range({2, 4, 5, 6}) == "2, 4–6"
+    assert resolve_slides(spec="2,4-6") == frozenset({2, 4, 5, 6})
+    assert wants_slide(3, frozenset({2, 4, 5, 6})) is False
+    assert wants_slide(4, frozenset({2, 4, 5, 6})) is True
 
 
 def test_plan_only_the_requested_slide():
@@ -470,9 +507,7 @@ def test_match_character_style_prefers_font_family_then_size():
         _item(kind="text", text="CHC Tai Chung", size=40, font="Amplitude-Bold"),
         styles,
     )
-    assert chc is not None
-    assert chc["size"] == 20
-    assert chc["font"] == "Amplitude-Regular"
+    assert chc is None
 
 
 def test_match_character_style_uses_colour_when_face_matches():
@@ -556,7 +591,7 @@ def test_reuse_duplicates_donor_then_only_text_delta():
     assert jobs[9]["remove"] == []
 
 
-def test_unpaired_text_uses_closest_character_style():
+def test_unpaired_text_resizes_when_swatch_face_differs():
     wall = {
         "slideWidth": 7680,
         "slideHeight": 1080,
@@ -628,8 +663,11 @@ def test_unpaired_text_uses_closest_character_style():
     assert taiwan.font == "AmplitudeCond-Medium"
     # Photo crop translate is ~-2848; Taiwan stays with the photo, not packed as a list.
     assert taiwan.x < 2458
-    chc = next(t for t in transforms if t.font_size == 20)
-    assert chc.font == "Amplitude-Regular"
+    chc = next(t for t in transforms if t.kind == "text" and t.font != "AmplitudeCond-Medium")
+    assert chc.font is None
+    assert chc.color is None
+    assert chc.font_size != 20
+    assert chc.font_size is not None and chc.font_size < 25
     photo = next(t for t in transforms if 2000 < t.w < 4000)
     assert abs(photo.x - (3121 - 2848)) < 40
 
@@ -670,3 +708,82 @@ def test_resized_leftover_image_gets_its_own_affine():
     assert abs(globe.x - 31) < 2
     pin = next(t for t in transforms if t.role == "pin")
     assert abs(pin.x - (3563 - 3041)) < 2
+
+
+def test_title_badge_follows_globe_not_map():
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 5,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=1992, y=52, w=124, h=124),
+                    _item(kind="shape", x=1960, y=30, w=520, h=160),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=2147,
+                        y=52,
+                        w=537,
+                        h=124,
+                        size=100,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 3,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template)
+    badge = next(t for t in transforms if t.kind == "shape" and t.w > 50)
+    assert badge.x > -40
+    assert badge.x < 500
+    title = next(t for t in transforms if t.role == "title")
+    assert abs(title.x - 135) < 1
+
+
+def test_reuse_strips_builds_missing_on_dest():
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [
+        _item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11, buildCount=1 if i == 0 else 0)
+        for i in range(40)
+    ]
+    dest_pins = [
+        _item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11, buildCount=0) for i in range(40)
+    ]
+    wall = {
+        "slides": [
+            {"number": 2, "items": [map_img, *pins]},
+            {"number": 5, "items": [dict(map_img), *dest_pins]},
+        ]
+    }
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[5]["from"] == 2
+    assert any(r["kind"] == "shape" for r in jobs[5]["stripBuilds"])

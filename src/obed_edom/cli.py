@@ -5,7 +5,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slide_range
+from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slides
 from obed_edom.paths import find_repo_root
 from obed_edom.pipeline import generate
 
@@ -45,10 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     remap.add_argument("--gold", type=Path, help="Deprecated alias for --template.")
     remap.add_argument("--out", type=Path, help="Destination .key (default: output/<stem>_CG.key).")
     remap.add_argument(
+        "--slides",
+        dest="slides",
+        help="Slides to remap, e.g. 2 or 2,4-6 (default: 2).",
+    )
+    remap.add_argument(
         "--from-slide",
         type=int,
         dest="range_from",
-        help="First slide, or the only slide (default: 2, the wall map+pins slide).",
+        help="First slide, or the only slide (default: 2). Prefer --slides for gaps.",
     )
     remap.add_argument(
         "--to-slide",
@@ -111,9 +116,12 @@ def _run_remap(args: argparse.Namespace) -> int:
         print(f"CG template not found: {template}", file=sys.stderr)
         return 1
     try:
-        slide_range = resolve_slide_range(
-            args.range_from, args.range_to, default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE)
-        ) or (MVP_MAP_SLIDE, MVP_MAP_SLIDE)
+        slide_range = resolve_slides(
+            spec=getattr(args, "slides", None),
+            range_from=args.range_from,
+            range_to=args.range_to,
+            default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE),
+        ) or frozenset({MVP_MAP_SLIDE})
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return 1

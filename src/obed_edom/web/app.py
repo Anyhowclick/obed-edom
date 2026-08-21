@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from obed_edom.diff_keynotes import compare_inspects, slots_from_pairs
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_media_type, preview_pngs
-from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slide_range
+from obed_edom.map_remap import MVP_MAP_SLIDE, format_slide_range, resolve_slides
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
@@ -311,6 +311,7 @@ def create_app() -> FastAPI:
         export: str = Form("false"),
         range_from: int | None = Form(None),
         range_to: int | None = Form(None),
+        slides: str = Form(""),
         feature: str = Form("inspect"),
     ) -> dict:
         key = Path(path).expanduser()
@@ -318,9 +319,13 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"Not found: {path}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
         tag = feature if feature in {"dsk", "resize", "inspect", "dsk-aux", "check"} else "inspect"
+        try:
+            sel = resolve_slides(spec=slides or None, range_from=range_from, range_to=range_to)
+        except ValueError as err:
+            raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "inspect",
-            lambda j, p=key, ex=do_export, rf=range_from, rt=range_to: _run_inspect(j, p, ex, rf, rt),
+            lambda j, p=key, ex=do_export, sl=sel: _run_inspect(j, p, ex, sl),
             feature=tag,
         )
         return job.to_dict()
@@ -339,6 +344,7 @@ def create_app() -> FastAPI:
         gold_path: str = Form(""),
         range_from: int | None = Form(None),
         range_to: int | None = Form(None),
+        slides: str = Form(""),
         export: str = Form("true"),
         include_lists: str = Form("false"),
     ) -> dict:
@@ -353,10 +359,19 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"CG template not found: {raw_template}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
         do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
+        try:
+            sel = resolve_slides(
+                spec=slides or None,
+                range_from=range_from,
+                range_to=range_to,
+                default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE),
+            ) or frozenset({MVP_MAP_SLIDE})
+        except ValueError as err:
+            raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, rf=range_from, rt=range_to, ex=do_export, lists=do_lists: _run_resize(
-                j, p, t, rf, rt, ex, lists
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists: _run_resize(
+                j, p, t, sl, ex, lists
             ),
             feature="resize",
         )
@@ -560,13 +575,11 @@ def _run_inspect(
     job: Job,
     path: Path,
     export: bool,
-    range_from: int | None,
-    range_to: int | None,
+    slide_range: frozenset[int] | None,
 ) -> dict[str, Any]:
     export_dir = None
     if export:
         export_dir = ROOT / "output" / ".inspect" / job.id
-    slide_range = resolve_slide_range(range_from, range_to)
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=export_dir, slide_range=slide_range)
     names = preview_names(export_dir) if export_dir else []
@@ -594,19 +607,14 @@ def _run_resize(
     job: Job,
     path: Path,
     template: Path,
-    range_from: int | None,
-    range_to: int | None,
+    slide_range: frozenset[int],
     export: bool,
     include_lists: bool = False,
 ) -> dict[str, Any]:
     dest_dir = ROOT / "output" / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
-    slide_range = resolve_slide_range(
-        range_from, range_to, default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE)
-    ) or (MVP_MAP_SLIDE, MVP_MAP_SLIDE)
-    job.log(f"Remapping {path.name} → 1920×1080 (slide {slide_range[0]}"
-            f"{'' if slide_range[0] == slide_range[1] else '–' + str(slide_range[1])})…")
+    job.log(f"Remapping {path.name} → 1920×1080 (slide {format_slide_range(slide_range)})…")
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
     if not include_lists:
         job.log("Church-name text hidden (enable the list checkbox to pack them at the template size).")

@@ -13,10 +13,12 @@ from obed_edom.inspect import inspect_keynote, preview_pngs
 from obed_edom.map_remap import (
     CG_HEIGHT,
     CG_WIDTH,
+    format_slide_range,
     learn_recipe,
     plan_payload_transforms,
     plan_slide_reuses,
     score_against_gold,
+    slides_for_plan,
     summarize_plan,
 )
 
@@ -68,7 +70,7 @@ def remap_keynote(
     dest: Path | str,
     *,
     template: Path | str,
-    slide_range: tuple[int, int] | None = None,
+    slide_range: tuple[int, int] | frozenset[int] | None = None,
     include_lists: bool = False,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
@@ -90,15 +92,16 @@ def remap_keynote(
     wall = wall_payload if wall_payload is not None else inspect_keynote(source, slide_range=slide_range)
     if wall_payload is None:
         if slide_range:
-            if slide_range[0] == slide_range[1]:
-                say(f"Inspected {source.name} slide {slide_range[0]}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}.")
-            else:
-                say(
-                    f"Inspected {source.name} slides {slide_range[0]}–{slide_range[1]}: "
-                    f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
-                )
+            label = format_slide_range(slide_range)
+            say(
+                f"Inspected {source.name} slide {label}: "
+                f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
+            )
         else:
-            say(f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, {wall.get('slideCount')} slides.")
+            say(
+                f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, "
+                f"{wall.get('slideCount')} slides."
+            )
     if template_payload is not None:
         template_data = template_payload
     else:
@@ -177,8 +180,10 @@ def remap_keynote(
             "transforms": [t.as_dict() for t in transforms],
             "reuses": reuses,
         }
-        if slide_range:
-            plan["range"] = [slide_range[0], slide_range[1]]
+        wanted = slides_for_plan(slide_range)
+        if wanted:
+            plan["slides"] = wanted
+            plan["range"] = [wanted[0], wanted[-1]]
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
@@ -228,7 +233,7 @@ def remap_keynote(
         "width": jxa.get("width"),
         "height": jxa.get("height"),
         "collections": jxa.get("collections"),
-        "slideRange": list(slide_range) if slide_range else None,
+        "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),
         "templateScore": score_against_gold(transforms, template_data),
@@ -241,7 +246,7 @@ def remap_and_inspect(
     dest: Path | str,
     *,
     template: Path | str,
-    slide_range: tuple[int, int] | None = None,
+    slide_range: tuple[int, int] | frozenset[int] | None = None,
     include_lists: bool = False,
     export_dir: Path | str | None = None,
     log: Callable[[str], None] | None = None,

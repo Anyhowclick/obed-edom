@@ -31,6 +31,10 @@ MAP_LAYER_MAX_W = 2500.0
 MAP_LAYER_MAX_H = 1200.0
 # Orange/country overlays sit on the rim of the white map; center-in-box misses them.
 MAP_NEAR_PAD = 400.0
+# Title plate / globe sit beside the map; keep that cluster on one affine.
+TITLE_NEAR_PAD = 120.0
+# Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
+TEXT_DOWN_SCALE = 0.42
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ class ItemTransform:
     opacity: float | None = None
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
+    z_index: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -130,6 +135,10 @@ class ItemTransform:
             payload["opacity"] = self.opacity
         if self.match_text:
             payload["matchText"] = self.match_text
+        if self.z_index is not None:
+            payload["zIndex"] = self.z_index
+        if self.role in {"title", "list", "other"}:
+            payload["front"] = True
         return payload
 
 
@@ -208,6 +217,12 @@ def point_in_rect(x: float, y: float, rect: Rect, pad: float = 0.0) -> bool:
     return (rect.x - pad) <= x <= (rect.x + rect.w + pad) and (rect.y - pad) <= y <= (
         rect.y + rect.h + pad
     )
+
+
+def dist_to_rect(x: float, y: float, rect: Rect) -> float:
+    dx = max(rect.x - x, 0.0, x - (rect.x + rect.w))
+    dy = max(rect.y - y, 0.0, y - (rect.y + rect.h))
+    return math.hypot(dx, dy)
 
 
 def rects_near(a: Rect, b: Rect, pad: float = 0.0) -> bool:
@@ -336,30 +351,36 @@ def match_character_style(
     *,
     size_ratio: float = 0.5,
 ) -> dict[str, Any] | None:
-    """Pick the template swatch whose face, colour, then size best matches wall text."""
+    """Return a CG swatch only when the wall face matches (family + weight).
+
+    Colour then size break ties among matching faces. No swatch → caller resizes
+    with the map affine and leaves the wall font/colour alone.
+    """
     if not styles:
         return None
     family, weight = split_font(item.get("font") or "")
+    if not family:
+        return None
     wall_size = _f(item.get("size"))
     predicted = wall_size * size_ratio if wall_size > 0 else 0.0
     wall_rgb = item_rgb(item)
-
-    def penalty(style: dict[str, Any]) -> tuple[int, int, float, float]:
+    candidates: list[dict[str, Any]] = []
+    for style in styles:
         sf, sw = split_font(style.get("font") or "")
-        if family and sf == family:
-            fam = 0
-        elif family and sf and (family in sf or sf in family):
-            fam = 2
-        elif family and sf:
-            fam = 4
-        else:
-            fam = 2
-        wt = 0 if (weight and sw == weight) else 1
+        if sf != family:
+            continue
+        if (weight or "") != (sw or ""):
+            continue
+        candidates.append(style)
+    if not candidates:
+        return None
+
+    def penalty(style: dict[str, Any]) -> tuple[float, float]:
         colour = color_distance(wall_rgb, norm_rgb(style.get("color")))
         size_pen = abs(_f(style.get("size")) - predicted) if predicted else 0.0
-        return (fam, wt, colour, size_pen)
+        return (colour, size_pen)
 
-    return min(styles, key=penalty)
+    return min(candidates, key=penalty)
 
 
 def slide_has_column_lists(slide: dict) -> bool:
@@ -861,14 +882,12 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
             map_dst = map_dst_for_cg(map_src, raw_dst, dest_w, dest_h)
             # Cover replaces the template box; keep a single group with that affine.
             if abs(map_dst.w - raw_dst.w) > 80 or abs(map_dst.x - raw_dst.x) > 80:
-                grouped = [
-                    {
-                        "affine": affine_from_rects(map_src, map_dst),
-                        "src": map_src,
-                        "dst": map_dst,
-                        "members": grouped[0]["members"],
-                    }
-                ]
+                grouped[0] = {
+                    "affine": affine_from_rects(map_src, map_dst),
+                    "src": map_src,
+                    "dst": map_dst,
+                    "members": grouped[0]["members"],
+                }
         else:
             w_maps = [it for it in w_slide.get("items") or [] if is_map_item(it)]
             g_maps = [it for it in g_slide.get("items") or [] if is_map_item(it)]
@@ -999,10 +1018,90 @@ def _affine_for_item(item: dict, groups: list[tuple[Affine, Rect]]) -> Affine | 
         return None
     rect = item_rect(item)
     cx, cy = rect.center()
+    best: Affine | None = None
+    best_key: tuple[float, float] | None = None
     for aff, src in groups:
-        if rects_near(rect, src, MAP_NEAR_PAD) or point_in_rect(cx, cy, src, MAP_NEAR_PAD):
-            return aff
-    return groups[0][0]
+        d = dist_to_rect(cx, cy, src)
+        area = max(src.w * src.h, 1.0)
+        key = (d, area)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = aff
+    return best
+
+
+def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
+    """Recipe groups plus a title-plate cluster so the badge stays with Global Missions."""
+    groups = list(_groups_from_recipe(recipe))
+    title = next((it for it in slide.get("items") or [] if is_title_item(it)), None)
+    dst = _rect_from_dict(recipe.get("titleDst"))
+    if title is None or dst is None or dst.w <= 0:
+        return groups
+    src = item_rect(title)
+    cluster_items = [title]
+    for item in slide.get("items") or []:
+        if item is title or is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
+            continue
+        if rects_near(item_rect(item), src, TITLE_NEAR_PAD):
+            cluster_items.append(item)
+    cluster = union_rect(cluster_items) or src
+    groups.append((affine_from_rects(src, dst), cluster))
+    return groups
+
+
+def is_title_globe(w: float, h: float, x: float, y: float) -> bool:
+    """Small square icon parked with the 16:9 title, not a country overlay."""
+    if w < 40 or h < 40 or w > 200 or h > 200:
+        return False
+    if abs(w - h) > max(8.0, 0.25 * min(w, h)):
+        return False
+    return x < 500 and y < 400
+
+
+def restack_move_order(items: list[dict]) -> list[int]:
+    """Move-to-front order: first ends at the back.
+
+    Applying geom brings each object forward, so a large Asia plate can cover
+    Australia (a ~300px overlay) while the Australia pins stay visible on top.
+    Apply in this order (do not AppleScript-move items — that deletes them).
+    """
+    maps: list[int] = []
+    globes: list[int] = []
+    pins: list[int] = []
+    plates: list[int] = []
+    texts: list[int] = []
+    titles: list[int] = []
+    for i, item in enumerate(items):
+        kind = str(item.get("kind") or "")
+        role = str(item.get("role") or "")
+        w, h = _f(item.get("w")), _f(item.get("h"))
+        x, y = _f(item.get("x")), _f(item.get("y"))
+        if kind == "image":
+            if is_title_globe(w, h, x, y):
+                globes.append(i)
+            else:
+                maps.append(i)
+        elif kind == "movie":
+            pins.append(i)
+        elif kind == "shape":
+            if 0 < w <= PIN_KIND_MAX and 0 < h <= PIN_KIND_MAX:
+                pins.append(i)
+            elif x < 700 and y < 400:
+                plates.append(i)
+        elif kind == "text":
+            text = str(item.get("text") or "")
+            if role == "title" or TITLE_RE.search(text):
+                titles.append(i)
+            else:
+                texts.append(i)
+    maps.sort(
+        key=lambda i: (
+            0 if items[i].get("zIndex") is not None else 1,
+            int(items[i]["zIndex"]) if items[i].get("zIndex") is not None else 0,
+            -(_f(items[i].get("w")) * _f(items[i].get("h"))),
+        )
+    )
+    return maps + pins + globes + plates + texts + titles
 
 
 def classify_item(item: dict, map_src: Rect | None = None) -> str:
@@ -1048,8 +1147,10 @@ def _style_text_box(
             mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
         return mapped, dst_size, font_name, colour
     if aff is not None:
-        mapped = aff.apply_rect(src)
-        font = max(8.0, wall_font * aff.s) if wall_font else None
+        origin = aff.apply_rect(Rect(src.x, src.y, 1.0, 1.0))
+        scale = min(aff.s, TEXT_DOWN_SCALE)
+        mapped = Rect(origin.x, origin.y, max(8.0, src.w * scale), max(8.0, src.h * scale))
+        font = max(8.0, wall_font * scale) if wall_font else None
         return mapped, font, font_name, colour
     return src, (wall_font or None), font_name, colour
 
@@ -1077,7 +1178,7 @@ def plan_slide_transforms(
     *,
     include_lists: bool = False,
 ) -> list[ItemTransform]:
-    groups = _groups_from_recipe(recipe)
+    groups = _groups_for_slide(slide, recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     if not groups and (map_src is None or map_dst is None):
@@ -1163,7 +1264,12 @@ def plan_slide_transforms(
         if role == "list" and include_lists and recipe.get("listPaired"):
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
-            mapped, font, font_name, colour = _style_text_box(item, None, style)
+            size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
+            mapped, font, font_name, colour = _style_text_box(item, None, style or size_only)
+            if not style:
+                font_name, colour = None, None
+            if dst is not None:
+                mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
             if dst is not None:
                 mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
             out.append(
@@ -1186,9 +1292,11 @@ def plan_slide_transforms(
             continue
         if role == "list" and pack_lists:
             src = item_rect(item)
-            font_dst = _f(recipe.get("listFontSize"))
             wall_font = _f(item.get("size"))
             style = match_character_style(item, styles)
+            font_dst = _f(style.get("size")) if style else 0.0
+            if not font_dst:
+                font_dst = _f(recipe.get("listFontSize"))
             if font_dst and wall_font > 0:
                 ratio = font_dst / wall_font
                 mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
@@ -1282,8 +1390,23 @@ def plan_slide_transforms(
         )
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    role_order = {"map": 0, "pin": 1, "title": 2, "list": 3, "hide": 4, "line": 5, "other": 6}
-    out.sort(key=lambda t: role_order.get(t.role, 9))
+    for fallback_i, item in enumerate(slide.get("items") or []):
+        if item.get("zIndex") is None:
+            continue
+        kind = str(item.get("kind") or "item")
+        ki = _item_kind_index(item, _item_index(item, fallback_i))
+        for spec in out:
+            if spec.kind == kind and spec.kind_index == ki:
+                spec.z_index = int(item["zIndex"])
+                break
+    role_order = {"map": 0, "pin": 1, "other": 2, "list": 3, "hide": 4, "line": 5, "title": 6}
+    out.sort(
+        key=lambda t: (
+            role_order.get(t.role, 9),
+            t.z_index if t.z_index is not None else 10_000,
+            -(t.w * t.h) if t.role == "map" else 0.0,
+        )
+    )
     return out
 
 
@@ -1304,6 +1427,92 @@ def resolve_slide_range(
     if start_i < 1 or end_i < start_i:
         raise ValueError(f"Invalid slide range {start_i}-{end_i}")
     return (start_i, end_i)
+
+
+_SLIDE_PART = re.compile(r"^(\d+)(?:\s*[-–—]\s*(\d+))?$")
+
+SlideRange = frozenset[int] | tuple[int, int] | None
+
+
+def expand_slide_range(slide_range: SlideRange) -> frozenset[int] | None:
+    if slide_range is None:
+        return None
+    if isinstance(slide_range, tuple):
+        lo, hi = int(slide_range[0]), int(slide_range[1])
+        return frozenset(range(lo, hi + 1))
+    return frozenset(int(n) for n in slide_range)
+
+
+def wants_slide(number: int, slide_range: SlideRange) -> bool:
+    selected = expand_slide_range(slide_range)
+    return True if selected is None else number in selected
+
+
+def slides_for_plan(slide_range: SlideRange) -> list[int] | None:
+    selected = expand_slide_range(slide_range)
+    return None if selected is None else sorted(selected)
+
+
+def format_slide_range(slide_range: Iterable[int] | tuple[int, int]) -> str:
+    """`{2,4,5,6}` → `2, 4–6`."""
+    if isinstance(slide_range, tuple) and len(slide_range) == 2:
+        nums = expand_slide_range(slide_range) or frozenset()
+    else:
+        nums = frozenset(int(n) for n in slide_range)
+    ordered = sorted(nums)
+    if not ordered:
+        return ""
+    parts: list[str] = []
+    start = prev = ordered[0]
+    for n in ordered[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        parts.append(str(start) if start == prev else f"{start}–{prev}")
+        start = prev = n
+    parts.append(str(start) if start == prev else f"{start}–{prev}")
+    return ", ".join(parts)
+
+
+def parse_slide_spec(
+    raw: str | None,
+    *,
+    default: frozenset[int] | tuple[int, int] | None = None,
+) -> frozenset[int] | None:
+    """`2, 4-6` → {2, 4, 5, 6}. Blank → `default`."""
+    if raw is None or not str(raw).strip():
+        return expand_slide_range(default) if isinstance(default, tuple) else default
+    out: set[int] = set()
+    for chunk in str(raw).split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        match = _SLIDE_PART.match(token)
+        if not match:
+            raise ValueError(f"Invalid slide range {raw!r}")
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start
+        if start < 1 or end < start:
+            raise ValueError(f"Invalid slide range {token!r}")
+        out.update(range(start, end + 1))
+    if not out:
+        return expand_slide_range(default) if isinstance(default, tuple) else default
+    return frozenset(out)
+
+
+def resolve_slides(
+    *,
+    spec: str | None = None,
+    range_from: int | None = None,
+    range_to: int | None = None,
+    default: frozenset[int] | tuple[int, int] | None = None,
+) -> frozenset[int] | None:
+    if spec and str(spec).strip():
+        return parse_slide_spec(spec)
+    bounds = resolve_slide_range(range_from, range_to)
+    if bounds is not None:
+        return expand_slide_range(bounds)
+    return expand_slide_range(default) if isinstance(default, tuple) else default
 
 
 # Shared map + pins across duplicated wall slides; below this, remap from scratch.
@@ -1376,7 +1585,7 @@ def _spec_key(spec: ItemTransform) -> tuple[str, int]:
 def plan_slide_reuses(
     payload: dict[str, Any],
     transforms: list[ItemTransform],
-    slide_range: tuple[int, int] | None = None,
+    slide_range: SlideRange = None,
 ) -> list[dict[str, Any]]:
     """Reuse a post-transform donor slide; only strip extras and apply the delta.
 
@@ -1387,7 +1596,7 @@ def plan_slide_reuses(
     slides: list[dict] = []
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
-        if slide_range and (number < slide_range[0] or number > slide_range[1]):
+        if not wants_slide(number, slide_range):
             continue
         slides.append(slide)
     by_slide: dict[int, list[ItemTransform]] = {}
@@ -1407,6 +1616,7 @@ def plan_slide_reuses(
             prev_items = _live_items(prev)
             prev_keys = {item_content_key(it): it for it in prev_items}
             persist = [curr_keys[k] for k in curr_keys if k in prev_keys]
+            persist_pairs = [(curr_keys[k], prev_keys[k]) for k in curr_keys if k in prev_keys]
             if len(persist) < REUSE_MIN_PERSIST:
                 continue
             prev_by_id: dict[tuple[Any, ...], dict] = {}
@@ -1432,11 +1642,11 @@ def plan_slide_reuses(
             cost = len(remove) + len(add)
             rank = (len(persist), -cost)
             if best is None or rank > (best[0], -best[1]):
-                best = (len(persist), cost, prev_n, prev, persist, remove, add, mutate)  # type: ignore[assignment]
+                best = (len(persist), cost, prev_n, prev, persist, remove, add, mutate, persist_pairs)  # type: ignore[assignment]
         if best is None:
             done.append((number, slide))
             continue
-        persist_n, cost, from_n, _prev, persist, remove, add, mutate = best  # type: ignore[misc]
+        persist_n, cost, from_n, _prev, persist, remove, add, mutate, persist_pairs = best  # type: ignore[misc]
         specs = by_slide.get(number) or []
         spec_map = {_spec_key(t): t for t in specs}
 
@@ -1476,6 +1686,11 @@ def plan_slide_reuses(
                     payload["matchText"] = text
             if payload.get("role") != "hide":
                 mutate_specs.append(payload)
+        strip_builds = [
+            _ref(prev)
+            for curr, prev in persist_pairs
+            if int(curr.get("buildCount") or 0) == 0 and int(prev.get("buildCount") or 0) > 0
+        ]
         jobs.append(
             {
                 "slide": number,
@@ -1483,6 +1698,7 @@ def plan_slide_reuses(
                 "persist": persist_n,
                 "remove": [_ref(it) for it in remove],
                 "strip": [_ref(it) for it in persist],
+                "stripBuilds": strip_builds,
                 "add": add_specs,
                 "mutate": mutate_specs,
             }
@@ -1495,14 +1711,14 @@ def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
     *,
-    slide_range: tuple[int, int] | None = None,
+    slide_range: SlideRange = None,
     include_lists: bool = False,
     template: dict[str, Any] | None = None,
 ) -> list[ItemTransform]:
     transforms: list[ItemTransform] = []
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
-        if slide_range and (number < slide_range[0] or number > slide_range[1]):
+        if not wants_slide(number, slide_range):
             continue
         slide_recipe = recipe
         if template and (template.get("slides") or []):
