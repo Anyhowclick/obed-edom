@@ -89,11 +89,14 @@ class ItemTransform:
     h: float
     locked: bool = False
     font_size: float | None = None
+    font: str | None = None
     start: tuple[float, float] | None = None
     end: tuple[float, float] | None = None
     role: str = "other"
     kind_index: int | None = None
     opacity: float | None = None
+    color: tuple[float, float, float] | None = None
+    match_text: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -108,17 +111,25 @@ class ItemTransform:
         }
         # Map and pins send size so we can restore after Keynote's slide-size scale.
         # Apply size before position (Keynote resets position when size changes).
-        if self.role in {"map", "list", "pin", "title"}:
+        if self.role in {"map", "list", "pin", "title", "other"}:
             payload["w"] = round(self.w, 2)
             payload["h"] = round(self.h, 2)
         if self.font_size is not None:
             payload["fontSize"] = round(self.font_size, 2)
+        if self.font:
+            payload["font"] = self.font
+        if self.color is not None:
+            bits = rgb16(self.color)
+            if bits:
+                payload["color"] = bits
         if self.start is not None:
             payload["start"] = [round(self.start[0], 2), round(self.start[1], 2)]
         if self.end is not None:
             payload["end"] = [round(self.end[0], 2), round(self.end[1], 2)]
         if self.opacity is not None:
             payload["opacity"] = self.opacity
+        if self.match_text:
+            payload["matchText"] = self.match_text
         return payload
 
 
@@ -149,6 +160,48 @@ def item_center(item: dict) -> tuple[float, float]:
 
 def file_name(item: dict) -> str:
     return str(item.get("fileName") or "")
+
+
+def norm_rgb(color: Any) -> tuple[float, float, float] | None:
+    if not isinstance(color, (list, tuple)) or len(color) < 3:
+        return None
+    try:
+        r, g, b = float(color[0]), float(color[1]), float(color[2])
+    except (TypeError, ValueError):
+        return None
+    if max(r, g, b) > 2.0:
+        r, g, b = r / 65535.0, g / 65535.0, b / 65535.0
+    return (
+        max(0.0, min(1.0, r)),
+        max(0.0, min(1.0, g)),
+        max(0.0, min(1.0, b)),
+    )
+
+
+def item_rgb(item: dict) -> tuple[float, float, float] | None:
+    rgb = norm_rgb(item.get("color"))
+    if rgb:
+        return rgb
+    runs = item.get("runs") or []
+    if runs:
+        return norm_rgb(runs[0].get("color"))
+    return None
+
+
+def rgb16(color: Any) -> list[int] | None:
+    rgb = norm_rgb(color)
+    if rgb is None:
+        return None
+    return [int(round(c * 65535)) for c in rgb]
+
+
+def color_distance(
+    left: tuple[float, float, float] | None,
+    right: tuple[float, float, float] | None,
+) -> float:
+    if left is None or right is None:
+        return 0.0
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right, strict=True)))
 
 
 def point_in_rect(x: float, y: float, rect: Rect, pad: float = 0.0) -> bool:
@@ -221,6 +274,99 @@ def is_title_item(item: dict) -> bool:
     if (item.get("kind") or "") != "text":
         return False
     return bool(TITLE_RE.search((item.get("text") or "").strip()))
+
+
+def is_placeholder_text(item: dict) -> bool:
+    """Empty layout text boxes (MAP BLANK's 0×0 AzoSans seeds)."""
+    if (item.get("kind") or "") != "text":
+        return False
+    if (item.get("text") or "").strip():
+        return False
+    return _f(item.get("w")) <= 1 and _f(item.get("h")) <= 1
+
+
+def is_style_sample(item: dict) -> bool:
+    """A CG text swatch staff can drop on Empty_Map (font + size, not a 0×0 leftover)."""
+    if (item.get("kind") or "") != "text" or is_placeholder_text(item):
+        return False
+    if _f(item.get("size")) <= 0:
+        return False
+    return bool((item.get("font") or "").strip() or (item.get("text") or "").strip())
+
+
+def split_font(name: str) -> tuple[str, str]:
+    raw = (name or "").strip()
+    if not raw:
+        return "", ""
+    if "-" in raw:
+        family, weight = raw.rsplit("-", 1)
+        return family.lower(), weight.lower()
+    return raw.lower(), ""
+
+
+def template_character_styles(slides: list[dict]) -> list[dict[str, Any]]:
+    """Deduped (font, size, colour) palette from the template's sample text."""
+    styles: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, tuple[float, ...] | None]] = set()
+    for slide in slides:
+        for item in slide.get("items") or []:
+            if not is_style_sample(item):
+                continue
+            font = (item.get("font") or "").strip()
+            size = round(_f(item.get("size")), 2)
+            rgb = item_rgb(item)
+            key = (font.lower(), size, tuple(round(c, 3) for c in rgb) if rgb else None)
+            if key in seen:
+                continue
+            seen.add(key)
+            rec: dict[str, Any] = {
+                "font": font,
+                "size": size,
+                "text": (item.get("text") or "").strip()[:40],
+            }
+            if rgb:
+                rec["color"] = [round(c, 4) for c in rgb]
+            styles.append(rec)
+    return styles
+
+
+def match_character_style(
+    item: dict,
+    styles: list[dict[str, Any]],
+    *,
+    size_ratio: float = 0.5,
+) -> dict[str, Any] | None:
+    """Pick the template swatch whose face, colour, then size best matches wall text."""
+    if not styles:
+        return None
+    family, weight = split_font(item.get("font") or "")
+    wall_size = _f(item.get("size"))
+    predicted = wall_size * size_ratio if wall_size > 0 else 0.0
+    wall_rgb = item_rgb(item)
+
+    def penalty(style: dict[str, Any]) -> tuple[int, int, float, float]:
+        sf, sw = split_font(style.get("font") or "")
+        if family and sf == family:
+            fam = 0
+        elif family and sf and (family in sf or sf in family):
+            fam = 2
+        elif family and sf:
+            fam = 4
+        else:
+            fam = 2
+        wt = 0 if (weight and sw == weight) else 1
+        colour = color_distance(wall_rgb, norm_rgb(style.get("color")))
+        size_pen = abs(_f(style.get("size")) - predicted) if predicted else 0.0
+        return (fam, wt, colour, size_pen)
+
+    return min(styles, key=penalty)
+
+
+def slide_has_column_lists(slide: dict) -> bool:
+    lists = [it for it in slide.get("items") or [] if is_list_item(it)]
+    if len(lists) >= 2:
+        return True
+    return any("\n" in (it.get("text") or "") for it in lists)
 
 
 def template_list_sample(slides: list[dict]) -> tuple[float | None, Rect | None]:
@@ -297,6 +443,14 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         recipe["titleDst"] = item_rect(title).as_dict()
         if title.get("size"):
             recipe["titleFontSize"] = round(_f(title.get("size")), 2)
+        if title.get("font"):
+            recipe["titleFont"] = str(title.get("font") or "")
+        title_rgb = item_rgb(title)
+        if title_rgb:
+            recipe["titleColor"] = [round(c, 4) for c in title_rgb]
+    styles = template_character_styles(template_slides)
+    if styles:
+        recipe["characterStyles"] = styles
     return recipe
 
 
@@ -416,12 +570,28 @@ def pair_pins(wall: list[dict], gold: list[dict]) -> list[tuple[dict, dict]]:
     return pair_by_order(wall_s, gold_s)
 
 
-def is_layout_image(item: dict) -> bool:
-    """Images that can be paired wall→template (not full-bleed photo chrome)."""
-    if (item.get("kind") or "") != "image":
+def is_chrome_bg(item: dict) -> bool:
+    """LED-panel `map BG.png` tiles (1920×1080). The full-wall map art is not chrome."""
+    if not MAP_NAME_RE.search(file_name(item)):
         return False
     w, h = _f(item.get("w")), _f(item.get("h"))
-    if w <= 0 or h <= 0 or w > MAP_LAYER_MAX_W or h > MAP_LAYER_MAX_H:
+    return abs(w - CG_WIDTH) <= 80 and abs(h - CG_HEIGHT) <= 80
+
+
+def is_pairable_image(item: dict) -> bool:
+    """Any real image except layout chrome — including huge photos the template cropped."""
+    if (item.get("kind") or "") != "image" or is_chrome_bg(item):
+        return False
+    w, h = _f(item.get("w")), _f(item.get("h"))
+    return w > 0 and h > 0
+
+
+def is_layout_image(item: dict) -> bool:
+    """Images that can be paired wall→template (not full-bleed photo chrome)."""
+    if not is_pairable_image(item):
+        return False
+    w, h = _f(item.get("w")), _f(item.get("h"))
+    if w > MAP_LAYER_MAX_W or h > MAP_LAYER_MAX_H:
         return False
     return True
 
@@ -444,14 +614,67 @@ def pair_by_size(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
     return pairs
 
 
+def pair_resized_leftovers(
+    wall: list[dict],
+    dest: list[dict],
+    existing: list[tuple[dict, dict]],
+) -> list[tuple[dict, dict]]:
+    """When the template resized one leftover image (e.g. 124×124 globe → 80×80)."""
+    used_w = {id(a) for a, _ in existing}
+    used_d = {id(b) for _, b in existing}
+    w_left = [it for it in wall if id(it) not in used_w]
+    d_left = [it for it in dest if id(it) not in used_d]
+    if not w_left or not d_left:
+        return []
+    if len(d_left) != 1:
+        return []
+    tmpl = d_left[0]
+    tw, th = _f(tmpl.get("w")), _f(tmpl.get("h"))
+    if tw <= 0 or th <= 0:
+        return []
+    tmpl_ar = tw / th
+    tmpl_area = tw * th
+
+    def score(item: dict) -> float:
+        w, h = _f(item.get("w")), _f(item.get("h"))
+        if w <= 0 or h <= 0:
+            return 1e9
+        return abs((w / h) - tmpl_ar) * 10.0 + abs(math.log((w * h) / tmpl_area))
+
+    best = min(w_left, key=score)
+    return [(best, tmpl)]
+
+
+def pair_largest_shapes(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
+    """Title plates / badges: the largest non-pin shape on each slide."""
+
+    def big(items: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for it in items:
+            if (it.get("kind") or "") != "shape":
+                continue
+            w, h = _f(it.get("w")), _f(it.get("h"))
+            if w > PIN_KIND_MAX or h > PIN_KIND_MAX:
+                out.append(it)
+        out.sort(key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
+        return out
+
+    w_s, d_s = big(wall), big(dest)
+    if w_s and d_s:
+        return [(w_s[0], d_s[0])]
+    return []
+
+
 def merge_affine_groups(pairs: list[tuple[dict, dict]]) -> list[dict[str, Any]]:
     """Collapse object-pairs that share (s, tx, ty) into layout groups."""
     groups: list[dict[str, Any]] = []
     for src_item, dst_item in pairs:
         aff = affine_from_rects(item_rect(src_item), item_rect(dst_item))
+        src = item_rect(src_item)
+        t_tol = max(2.0, 0.02 * max(src.w, src.h, 1.0))
         matched = None
         for group in groups:
-            if group["affine"].similar(aff):
+            if group["affine"].similar(aff, t_tol=t_tol):
                 matched = group
                 break
         if matched is None:
@@ -570,12 +793,14 @@ def _first_slide_with(slides: list[dict], pred) -> dict | None:
 
 
 def _score_template_slide(wall_slide: dict, template_slide: dict) -> int:
-    """Prefer the CG slide whose images share sizes with the wall map cluster."""
-    wall_imgs = [it for it in wall_slide.get("items") or [] if is_layout_image(it)]
-    tmpl_imgs = [it for it in template_slide.get("items") or [] if is_layout_image(it)]
-    pairs = len(pair_by_size(wall_imgs, tmpl_imgs)) if wall_imgs and tmpl_imgs else 0
-    if pairs:
-        return pairs * 100
+    """Prefer the CG slide whose images share sizes with the wall slide."""
+    wall_imgs = [it for it in wall_slide.get("items") or [] if is_pairable_image(it)]
+    tmpl_imgs = [it for it in template_slide.get("items") or [] if is_pairable_image(it)]
+    size_pairs = pair_by_size(wall_imgs, tmpl_imgs) if wall_imgs and tmpl_imgs else []
+    leftover = pair_resized_leftovers(wall_imgs, tmpl_imgs, size_pairs) if wall_imgs and tmpl_imgs else []
+    score = len(size_pairs) * 100 + len(leftover) * 50
+    if score:
+        return score
     return len([it for it in template_slide.get("items") or [] if is_map_item(it)])
 
 
@@ -604,20 +829,30 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
     dest_h = int(template.get("slideHeight") or CG_HEIGHT)
     wall_slides = wall.get("slides") or []
     template_slides = template.get("slides") or []
-    w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(wall_slides, is_pin_item)
+    if len(wall_slides) == 1:
+        w_slide = wall_slides[0]
+    else:
+        w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(
+            wall_slides, is_pin_item
+        )
     g_slide = _best_matching_slide(w_slide, template_slides)
     map_src = None
     map_dst = None
     list_src = None
     list_dst = None
+    list_paired = False
     pin_pairs_n = 0
     pin_rmse = None
     pin_size_scale = None
     grouped: list[dict[str, Any]] = []
     if w_slide and g_slide:
-        w_imgs = [it for it in w_slide.get("items") or [] if is_layout_image(it)]
-        g_imgs = [it for it in g_slide.get("items") or [] if is_layout_image(it)]
+        w_imgs = [it for it in w_slide.get("items") or [] if is_pairable_image(it)]
+        g_imgs = [it for it in g_slide.get("items") or [] if is_pairable_image(it)]
         size_pairs = pair_by_size(w_imgs, g_imgs)
+        size_pairs.extend(pair_resized_leftovers(w_imgs, g_imgs, size_pairs))
+        size_pairs.extend(
+            pair_largest_shapes(w_slide.get("items") or [], g_slide.get("items") or [])
+        )
         grouped = merge_affine_groups(size_pairs) if size_pairs else []
         if grouped:
             biggest = grouped[0]["members"][0]
@@ -668,6 +903,7 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
             w_list = [it for it in w_slide.get("items") or [] if is_list_item(it)]
             g_list = [it for it in g_slide.get("items") or [] if is_list_item(it)]
             named = pair_list(w_list, g_list)
+            list_paired = bool(named)
             list_src = union_rect([a for a, _ in named] or w_list)
             list_dst = union_rect([b for _, b in named] or g_list)
     if map_src is None:
@@ -706,6 +942,8 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
     if list_src and list_dst and list_src.w > 1 and list_src.h > 1:
         recipe["listSrc"] = list_src.as_dict()
         recipe["listDst"] = list_dst.as_dict()
+    if list_paired:
+        recipe["listPaired"] = True
     if grouped:
         recipe["groups"] = [
             {
@@ -764,7 +1002,7 @@ def _affine_for_item(item: dict, groups: list[tuple[Affine, Rect]]) -> Affine | 
     for aff, src in groups:
         if rects_near(rect, src, MAP_NEAR_PAD) or point_in_rect(cx, cy, src, MAP_NEAR_PAD):
             return aff
-    return None
+    return groups[0][0]
 
 
 def classify_item(item: dict, map_src: Rect | None = None) -> str:
@@ -789,6 +1027,31 @@ def _item_kind_index(item: dict, fallback: int) -> int:
     if item.get("kindIndex") is not None:
         return int(item["kindIndex"])
     return fallback
+
+
+def _style_text_box(
+    item: dict,
+    aff: Affine | None,
+    style: dict[str, Any] | None,
+) -> tuple[Rect, float | None, str | None, tuple[float, float, float] | None]:
+    src = item_rect(item)
+    wall_font = _f(item.get("size"))
+    dst_size = _f(style.get("size")) if style else 0.0
+    font_name = (str(style.get("font") or "") or None) if style else None
+    colour = norm_rgb(style.get("color")) if style else None
+    if style and dst_size > 0 and wall_font > 0:
+        ratio = dst_size / wall_font
+        if aff is not None:
+            origin = aff.apply_rect(Rect(src.x, src.y, 1.0, 1.0))
+            mapped = Rect(origin.x, origin.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+        else:
+            mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+        return mapped, dst_size, font_name, colour
+    if aff is not None:
+        mapped = aff.apply_rect(src)
+        font = max(8.0, wall_font * aff.s) if wall_font else None
+        return mapped, font, font_name, colour
+    return src, (wall_font or None), font_name, colour
 
 
 def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any]) -> None:
@@ -820,20 +1083,40 @@ def plan_slide_transforms(
     if not groups and (map_src is None or map_dst is None):
         return []
     number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+    styles = list(recipe.get("characterStyles") or [])
+    pack_lists = bool(
+        include_lists and recipe.get("listFontSize") and slide_has_column_lists(slide)
+    )
     out: list[ItemTransform] = []
     for fallback_i, item in enumerate(slide.get("items") or []):
-        aff = _affine_for_item(item, groups)
-        cluster = groups[0][1] if groups else map_src
-        role = classify_item(item, cluster)
-        if role == "other" and aff is None:
-            continue
-        if role == "other" and aff is not None:
-            # Extra overlay that sits on a layout group but isn't named as map/pin.
-            role = "map" if is_layout_image(item) else "other"
-        if role == "other":
+        if is_placeholder_text(item):
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
+        if is_chrome_bg(item):
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "image"),
+                    x=_f(item.get("x")),
+                    y=_f(item.get("y")),
+                    w=_f(item.get("w")),
+                    h=_f(item.get("h")),
+                    locked=bool(item.get("locked")),
+                    role="hide",
+                    kind_index=kind_index,
+                    opacity=0.0,
+                )
+            )
+            continue
+        aff = _affine_for_item(item, groups)
+        cluster = groups[0][1] if groups else map_src
+        role = classify_item(item, cluster)
+        if role == "other" and aff is not None and is_layout_image(item):
+            role = "map"
+        if role == "other" and aff is None and (item.get("kind") or "") != "text":
+            continue
         if role == "list" and not include_lists:
             out.append(
                 ItemTransform(
@@ -870,15 +1153,42 @@ def plan_slide_transforms(
                         if recipe.get("titleFontSize")
                         else (_f(item.get("size")) or None)
                     ),
+                    font=str(recipe["titleFont"]) if recipe.get("titleFont") else None,
+                    color=norm_rgb(recipe.get("titleColor")),
                     role="title",
                     kind_index=kind_index,
                 )
             )
             continue
-        if role == "list":
+        if role == "list" and include_lists and recipe.get("listPaired"):
+            dst = _rect_from_dict(recipe.get("listDst"))
+            style = match_character_style(item, styles)
+            mapped, font, font_name, colour = _style_text_box(item, None, style)
+            if dst is not None:
+                mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "text"),
+                    x=mapped.x,
+                    y=mapped.y,
+                    w=mapped.w,
+                    h=mapped.h,
+                    locked=bool(item.get("locked")),
+                    font_size=font,
+                    font=font_name,
+                    color=colour,
+                    role="list",
+                    kind_index=kind_index,
+                )
+            )
+            continue
+        if role == "list" and pack_lists:
             src = item_rect(item)
             font_dst = _f(recipe.get("listFontSize"))
             wall_font = _f(item.get("size"))
+            style = match_character_style(item, styles)
             if font_dst and wall_font > 0:
                 ratio = font_dst / wall_font
                 mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
@@ -906,7 +1216,30 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
+                    font=(style.get("font") or None) if style else None,
+                    color=norm_rgb(style.get("color")) if style else None,
                     role="list",
+                    kind_index=kind_index,
+                )
+            )
+            continue
+        if role in {"list", "other"} and (item.get("kind") or "") == "text":
+            style = match_character_style(item, styles)
+            mapped, font, font_name, colour = _style_text_box(item, aff, style)
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind="text",
+                    x=mapped.x,
+                    y=mapped.y,
+                    w=mapped.w,
+                    h=mapped.h,
+                    locked=bool(item.get("locked")),
+                    font_size=font,
+                    font=font_name,
+                    color=colour,
+                    role="other" if role == "other" else "list",
                     kind_index=kind_index,
                 )
             )
@@ -947,7 +1280,7 @@ def plan_slide_transforms(
                 kind_index=kind_index,
             )
         )
-    if include_lists and recipe.get("listFontSize"):
+    if pack_lists:
         _pack_list_transforms(out, recipe)
     role_order = {"map": 0, "pin": 1, "title": 2, "list": 3, "hide": 4, "line": 5, "other": 6}
     out.sort(key=lambda t: role_order.get(t.role, 9))
@@ -973,19 +1306,215 @@ def resolve_slide_range(
     return (start_i, end_i)
 
 
+# Shared map + pins across duplicated wall slides; below this, remap from scratch.
+REUSE_MIN_PERSIST = 40
+
+
+def item_content_key(item: dict) -> tuple[Any, ...]:
+    """Pre-transform identity including geometry (unchanged map/dots match)."""
+    kind = str(item.get("kind") or "")
+    x = round(_f(item.get("x")))
+    y = round(_f(item.get("y")))
+    w = round(_f(item.get("w")))
+    h = round(_f(item.get("h")))
+    if kind == "image":
+        return (kind, file_name(item), w, h, x, y)
+    if kind == "text":
+        return (kind, (item.get("text") or "").strip(), round(_f(item.get("size"))), w, h, x, y)
+    if kind == "movie":
+        return (kind, file_name(item), w, h, x, y)
+    return (kind, w, h, x, y)
+
+
+def item_identity(item: dict) -> tuple[Any, ...]:
+    """Identity that survives a size/position tweak (same church name, new point size)."""
+    kind = str(item.get("kind") or "")
+    if kind == "text":
+        return ("text", (item.get("text") or "").strip())
+    if kind == "image":
+        return (
+            "image",
+            file_name(item),
+            round(_f(item.get("w"))),
+            round(_f(item.get("h"))),
+            round(_f(item.get("x"))),
+            round(_f(item.get("y"))),
+        )
+    if kind == "movie":
+        return ("movie", file_name(item), round(_f(item.get("w"))), round(_f(item.get("h"))))
+    return (kind, round(_f(item.get("w"))), round(_f(item.get("h"))), round(_f(item.get("x"))), round(_f(item.get("y"))))
+
+
+def _live_items(slide: dict) -> list[dict]:
+    counts: dict[str, int] = {}
+    out: list[dict] = []
+    for i, item in enumerate(slide.get("items") or []):
+        if is_placeholder_text(item):
+            continue
+        rec = dict(item)
+        kind = str(rec.get("kind") or "")
+        if rec.get("kindIndex") is None:
+            rec["kindIndex"] = counts.get(kind, 0)
+        counts[kind] = max(counts.get(kind, 0), int(rec["kindIndex"]) + 1)
+        rec["_index"] = i
+        out.append(rec)
+    return out
+
+
+def _ref(item: dict) -> dict[str, Any]:
+    return {
+        "kind": str(item.get("kind") or "item"),
+        "kindIndex": int(item.get("kindIndex") or 0),
+        "itemIndex": int(item.get("index") if item.get("index") is not None else item.get("_index") or 0),
+    }
+
+
+def _spec_key(spec: ItemTransform) -> tuple[str, int]:
+    return (str(spec.kind), int(spec.kind_index if spec.kind_index is not None else spec.item_index))
+
+
+def plan_slide_reuses(
+    payload: dict[str, Any],
+    transforms: list[ItemTransform],
+    slide_range: tuple[int, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Reuse a post-transform donor slide; only strip extras and apply the delta.
+
+    Wall slides are compared *before* remap. If map+dots are unchanged, JXA
+    duplicates the already-remapped donor, deletes objects the new slide lacks,
+    pastes leftover objects from the original slide, and transforms that delta.
+    """
+    slides: list[dict] = []
+    for slide in payload.get("slides") or []:
+        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+        if slide_range and (number < slide_range[0] or number > slide_range[1]):
+            continue
+        slides.append(slide)
+    by_slide: dict[int, list[ItemTransform]] = {}
+    for spec in transforms:
+        by_slide.setdefault(spec.slide_number, []).append(spec)
+    jobs: list[dict[str, Any]] = []
+    done: list[tuple[int, dict]] = []
+    for slide in slides:
+        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+        if not done:
+            done.append((number, slide))
+            continue
+        curr_items = _live_items(slide)
+        curr_keys = {item_content_key(it): it for it in curr_items}
+        best: tuple[int, int, int, dict, list, list, list] | None = None
+        for prev_n, prev in done:
+            prev_items = _live_items(prev)
+            prev_keys = {item_content_key(it): it for it in prev_items}
+            persist = [curr_keys[k] for k in curr_keys if k in prev_keys]
+            if len(persist) < REUSE_MIN_PERSIST:
+                continue
+            prev_by_id: dict[tuple[Any, ...], dict] = {}
+            for it in prev_items:
+                ident = item_identity(it)
+                if ident[0] == "text" and not ident[1]:
+                    continue
+                prev_by_id.setdefault(ident, it)
+            remove = [prev_keys[k] for k in prev_keys if k not in curr_keys]
+            incoming = [curr_keys[k] for k in curr_keys if k not in prev_keys]
+            mutate: list[tuple[dict, dict]] = []
+            add: list[dict] = []
+            mutate_prev_keys: set[tuple[Any, ...]] = set()
+            for it in incoming:
+                ident = item_identity(it)
+                donor_it = prev_by_id.get(ident)
+                if donor_it is not None and ident[0] == "text" and ident[1]:
+                    mutate.append((donor_it, it))
+                    mutate_prev_keys.add(item_content_key(donor_it))
+                else:
+                    add.append(it)
+            remove = [it for it in remove if item_content_key(it) not in mutate_prev_keys]
+            cost = len(remove) + len(add)
+            rank = (len(persist), -cost)
+            if best is None or rank > (best[0], -best[1]):
+                best = (len(persist), cost, prev_n, prev, persist, remove, add, mutate)  # type: ignore[assignment]
+        if best is None:
+            done.append((number, slide))
+            continue
+        persist_n, cost, from_n, _prev, persist, remove, add, mutate = best  # type: ignore[misc]
+        specs = by_slide.get(number) or []
+        spec_map = {_spec_key(t): t for t in specs}
+
+        def _xf(item: dict, match: str | None = None) -> dict[str, Any] | None:
+            spec = spec_map.get((str(item.get("kind") or ""), int(item.get("kindIndex") or 0)))
+            if spec is None:
+                return None
+            payload = spec.as_dict()
+            payload["slide"] = number
+            text = match if match is not None else (item.get("text") or "").strip()
+            if text:
+                payload["matchText"] = text
+            return payload
+
+        add_specs: list[dict[str, Any]] = []
+        for it in add:
+            payload = _xf(it)
+            if payload is None:
+                payload = {
+                    "slide": number,
+                    "kind": str(it.get("kind") or "item"),
+                    "kindIndex": int(it.get("kindIndex") or 0),
+                    "itemIndex": int(it.get("index") if it.get("index") is not None else it.get("_index") or 0),
+                }
+                text = (it.get("text") or "").strip()
+                if text:
+                    payload["matchText"] = text
+            add_specs.append(payload)
+        add_specs = [p for p in add_specs if p.get("role") != "hide"]
+        mutate_specs = []
+        for _donor_it, it in mutate:
+            payload = _xf(it, (it.get("text") or "").strip())
+            if payload is None:
+                payload = {**_ref(it), "slide": number}
+                text = (it.get("text") or "").strip()
+                if text:
+                    payload["matchText"] = text
+            if payload.get("role") != "hide":
+                mutate_specs.append(payload)
+        jobs.append(
+            {
+                "slide": number,
+                "from": from_n,
+                "persist": persist_n,
+                "remove": [_ref(it) for it in remove],
+                "strip": [_ref(it) for it in persist],
+                "add": add_specs,
+                "mutate": mutate_specs,
+            }
+        )
+        done.append((number, slide))
+    return jobs
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
     *,
     slide_range: tuple[int, int] | None = None,
     include_lists: bool = False,
+    template: dict[str, Any] | None = None,
 ) -> list[ItemTransform]:
     transforms: list[ItemTransform] = []
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if slide_range and (number < slide_range[0] or number > slide_range[1]):
             continue
-        transforms.extend(plan_slide_transforms(slide, recipe, include_lists=include_lists))
+        slide_recipe = recipe
+        if template and (template.get("slides") or []):
+            slide_recipe = learn_recipe(
+                {
+                    "slideWidth": payload.get("slideWidth"),
+                    "slideHeight": payload.get("slideHeight"),
+                    "slides": [slide],
+                },
+                template,
+            )
+        transforms.extend(plan_slide_transforms(slide, slide_recipe, include_lists=include_lists))
     return transforms
 
 
