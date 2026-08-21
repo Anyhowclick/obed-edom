@@ -6,6 +6,7 @@ import { DskTab } from "./tabs/DskTab";
 import { GeneratorTab } from "./tabs/GeneratorTab";
 import { HistoryTab } from "./tabs/HistoryTab";
 import { ResizeTab } from "./tabs/ResizeTab";
+import { SettingsTab } from "./tabs/SettingsTab";
 import {
   LayoutContext,
   RunNavContext,
@@ -24,6 +25,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "dsk", label: "DSK Generator" },
   { id: "resize", label: "CG resizer" },
   { id: "history", label: "History" },
+  { id: "settings", label: "Settings" },
 ];
 
 export function App() {
@@ -116,6 +118,9 @@ export function App() {
           </div>
           <div className={tab === "history" ? "pane" : "pane off"}>
             <HistoryTab active={tab === "history"} />
+          </div>
+          <div className={tab === "settings" ? "pane" : "pane off"}>
+            <SettingsTab />
           </div>
         </main>
       </div>

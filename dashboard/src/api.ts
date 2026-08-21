@@ -5,6 +5,7 @@ export type Flag = {
   location?: string;
   resolved?: string | null;
   rule?: string;
+  title?: string;
   slide?: number | null;
   deck?: string;
   evidence?: string;
@@ -135,10 +136,59 @@ export async function startDiffCheck(
   return res.json();
 }
 
-export async function startVisual(leftPath: string, rightPath: string): Promise<Job> {
+export async function saveVisualSlots(
+  jobId: string,
+  slots: { leftIndex: number | null; rightIndex?: number | null; rightIndexes?: number[] }[]
+): Promise<Job> {
+  const res = await fetch(`/api/visual/${jobId}/slots`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slots }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function startVisualCheck(
+  jobId: string,
+  slots: { leftIndex: number | null; rightIndex?: number | null; rightIndexes?: number[] }[]
+): Promise<Job> {
+  const res = await fetch(`/api/visual/${jobId}/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slots }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export type Settings = {
+  reuseThreshold: number;
+  reusePairings: boolean;
+  reusePreviews: boolean;
+};
+
+export async function getSettings(): Promise<Settings> {
+  const res = await fetch("/api/settings");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function putSettings(next: Partial<Settings>): Promise<Settings> {
+  const res = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(next),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function startVisual(leftPath: string, rightPath: string, fresh = false): Promise<Job> {
   const body = new FormData();
   body.set("left_path", leftPath);
   body.set("right_path", rightPath);
+  if (fresh) body.set("fresh", "true");
   const res = await fetch("/api/visual", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -148,13 +198,15 @@ export async function startDiff(
   leftPath: string,
   rightPath: string,
   leftLabel = "LW",
-  rightLabel = "Other"
+  rightLabel = "Other",
+  fresh = false
 ): Promise<Job> {
   const body = new FormData();
   body.set("left_path", leftPath);
   body.set("right_path", rightPath);
   body.set("left_label", leftLabel);
   body.set("right_label", rightLabel);
+  if (fresh) body.set("fresh", "true");
   const res = await fetch("/api/diff", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

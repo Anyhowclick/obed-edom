@@ -244,30 +244,34 @@ function describeItem(obj, index, kindHint) {
   return rec;
 }
 
-function collectFrom(slide, name, kind, items, kindCounts) {
+function collectFrom(slide, name, kind, items, kindCounts, identity) {
   try {
     const col = slide[name]();
     let n = col.length;
     if (typeof n === "function") n = n.call(col);
     n = Number(n) || 0;
+    const objs = [];
     for (let i = 0; i < n; i++) {
       const rec = describeItem(col[i], items.length, kind);
       rec.kindIndex = i;
       kindCounts[kind] = (kindCounts[kind] || 0) + 1;
       items.push(rec);
+      objs.push(col[i]);
     }
+    if (identity) identity.push({ kind: kind, objs: objs });
   } catch (e) {}
 }
 
 function collectItems(slide) {
   const items = [];
   const kindCounts = {};
-  collectFrom(slide, "textItems", "text", items, kindCounts);
-  collectFrom(slide, "images", "image", items, kindCounts);
-  collectFrom(slide, "shapes", "shape", items, kindCounts);
-  collectFrom(slide, "movies", "movie", items, kindCounts);
-  collectFrom(slide, "groups", "group", items, kindCounts);
-  collectFrom(slide, "lines", "line", items, kindCounts);
+  const identity = [];
+  collectFrom(slide, "textItems", "text", items, kindCounts, identity);
+  collectFrom(slide, "images", "image", items, kindCounts, identity);
+  collectFrom(slide, "shapes", "shape", items, kindCounts, identity);
+  collectFrom(slide, "movies", "movie", items, kindCounts, identity);
+  collectFrom(slide, "groups", "group", items, kindCounts, identity);
+  collectFrom(slide, "lines", "line", items, kindCounts, identity);
   if (!items.length) {
     try {
       const all = slide.iWorkItems();
@@ -281,12 +285,16 @@ function collectItems(slide) {
       }
     } catch (e) {}
   }
-  attachBuildCounts(slide, items);
-  attachZOrder(slide, items);
+  const byKindIndex = {};
+  for (let k = 0; k < items.length; k++) {
+    byKindIndex[items[k].kind + ":" + items[k].kindIndex] = items[k];
+  }
+  attachBuildCounts(slide, items, identity, byKindIndex);
+  attachZOrder(slide, items, identity, byKindIndex);
   return items;
 }
 
-function attachZOrder(slide, items) {
+function attachZOrder(slide, items, identity, byKindIndex) {
   let all = null;
   try {
     all = slide.iWorkItems();
@@ -300,12 +308,12 @@ function attachZOrder(slide, items) {
       obj = all[i];
     } catch (eO) {}
     if (!obj) continue;
-    const hit = matchItemRecord(slide, obj, items);
+    const hit = matchItemRecord(identity, byKindIndex, obj);
     if (hit && hit.zIndex == null) hit.zIndex = i;
   }
 }
 
-function attachBuildCounts(slide, items) {
+function attachBuildCounts(slide, items, identity, byKindIndex) {
   let builds = null;
   try {
     builds = slide.builds();
@@ -319,7 +327,7 @@ function attachBuildCounts(slide, items) {
       obj = builds[i].object();
     } catch (eO) {}
     if (!obj) continue;
-    const hit = matchItemRecord(slide, obj, items);
+    const hit = matchItemRecord(identity, byKindIndex, obj);
     if (hit) hit.buildCount = (hit.buildCount || 0) + 1;
   }
 }
@@ -335,37 +343,44 @@ function countOfSafe(col) {
   }
 }
 
-function matchItemRecord(slide, obj, items) {
-  const names = [
-    ["textItems", "text"],
-    ["images", "image"],
-    ["shapes", "shape"],
-    ["movies", "movie"],
-    ["groups", "group"],
-    ["lines", "line"],
-  ];
-  for (let c = 0; c < names.length; c++) {
-    const colName = names[c][0];
-    const kind = names[c][1];
-    let col = null;
-    try {
-      col = slide[colName]();
-    } catch (e) {
-      continue;
-    }
-    const n = countOfSafe(col);
-    for (let i = 0; i < n; i++) {
+function matchItemRecord(identity, byKindIndex, obj) {
+  if (!identity || !identity.length) return null;
+  for (let c = 0; c < identity.length; c++) {
+    const objs = identity[c].objs;
+    const kind = identity[c].kind;
+    for (let i = 0; i < objs.length; i++) {
       try {
-        if (col[i] !== obj) continue;
+        if (objs[i] !== obj) continue;
       } catch (e2) {
         continue;
       }
-      for (let k = 0; k < items.length; k++) {
-        if (items[k].kind === kind && items[k].kindIndex === i) return items[k];
-      }
+      return byKindIndex[kind + ":" + i] || null;
     }
   }
   return null;
+}
+
+function exportImages(Keynote, doc, exportDir) {
+  const folder = Path(exportDir);
+  try {
+    Keynote.export(doc, {
+      to: folder,
+      as: "slide images",
+      withProperties: { imageFormat: "PNG", skippedSlides: false },
+    });
+    return true;
+  } catch (err1) {
+    try {
+      doc.export({
+        to: folder,
+        as: "slide images",
+        withProperties: { imageFormat: "PNG" },
+      });
+      return true;
+    } catch (err2) {
+      return false;
+    }
+  }
 }
 
 function canvasSize(doc) {
@@ -437,7 +452,14 @@ function run(argv) {
 
   let exported = false;
   let exportError = "";
-  // PNG export is done in Python via AppleScript after this script returns.
+  if (plan.exportDir) {
+    try {
+      exported = exportImages(Keynote, doc, plan.exportDir);
+      if (!exported) exportError = "Keynote export as slide images failed.";
+    } catch (eExp) {
+      exportError = String(eExp);
+    }
+  }
 
   try {
     Keynote.close(doc, { saving: "no" });

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps
 
-from obed_edom.inspect import highlighted_markup, preview_pngs, slide_plain_text
+from obed_edom.images import open_rgb
+from obed_edom.inspect import (
+    PREVIEW_VIDEO_SUFFIXES,
+    highlighted_markup,
+    preview_media,
+    preview_pngs,
+    slide_plain_text,
+)
 from obed_edom.models import Flag
 from obed_edom.rendered import CENTER_WALL, center_wall_box, render_slide
 from obed_edom.text_diff import (
@@ -364,6 +372,49 @@ def _combine_split_verses(
     return out
 
 
+def realign_gaps(
+    slots: list[dict],
+    left_slides: list[dict],
+    right_slides: list[dict],
+    *,
+    left_pngs: list[Path] | None = None,
+    right_pngs: list[Path] | None = None,
+    left_size: tuple[float, float] = (0.0, 0.0),
+    right_size: tuple[float, float] = (0.0, 0.0),
+    use_ocr: bool = True,
+) -> list[dict]:
+    """Re-run alignment only on leftover rows that sit between surviving pairs."""
+    from obed_edom.baseline import normalize_slot, slot_dict, unpaired_gaps  # noqa: PLC0415
+
+    gaps = unpaired_gaps(slots)
+    if not gaps:
+        return [normalize_slot(slot) for slot in slots]
+    out: list[dict] = []
+    cursor = 0
+    for start, end, lefts, rights in gaps:
+        out.extend(normalize_slot(slot) for slot in slots[cursor:start])
+        sub_left = [left_slides[i] for i in lefts]
+        sub_right = [right_slides[j] for j in rights]
+        aligned = align_slides(
+            sub_left,
+            sub_right,
+            left_pngs=left_pngs,
+            right_pngs=right_pngs,
+            left_size=left_size,
+            right_size=right_size,
+            use_ocr=use_ocr,
+        )
+        for sub_li, sub_ri, score in aligned:
+            li = lefts[sub_li] if sub_li is not None and 0 <= sub_li < len(lefts) else None
+            ris = [rights[k] for k in _right_indexes(sub_ri) if 0 <= k < len(rights)]
+            if li is None and not ris:
+                continue
+            out.append(slot_dict(li, ris, score))
+        cursor = end
+    out.extend(normalize_slot(slot) for slot in slots[cursor:])
+    return out
+
+
 def build_repeat_indices(
     left_slides: list[dict], matched: set[int], window: int = 6
 ) -> set[int]:
@@ -388,8 +439,8 @@ def build_repeat_indices(
 
 
 def visual_diff(a_png: Path, b_png: Path, out_png: Path, threshold: int = 18) -> dict:
-    a = Image.open(a_png).convert("RGB")
-    b = Image.open(b_png).convert("RGB")
+    a = open_rgb(a_png)
+    b = open_rgb(b_png)
     size = (min(a.width, b.width), min(a.height, b.height))
     a = a.resize(size, Image.Resampling.LANCZOS)
     b = b.resize(size, Image.Resampling.LANCZOS)
@@ -523,7 +574,7 @@ def _overlaps_center_wall(item: dict, slide_w: float, slide_h: float) -> bool:
 
 def _slide_probe(slide: dict, png: Path, slide_size: tuple[float, float]) -> Image.Image | None:
     try:
-        im = Image.open(png).convert("RGB")
+        im = open_rgb(png)
     except OSError:
         return None
     items = [
@@ -674,7 +725,7 @@ def _crop_item(png: Image.Image, item: dict, slide_w: float, slide_h: float) -> 
 
 
 def _photo_crops(slide: dict, png: Path, size: tuple[float, float]) -> tuple[Image.Image, list[Image.Image]]:
-    im = Image.open(png).convert("RGB")
+    im = open_rgb(png)
     items = [it for it in content_photos(slide, size) if _overlaps_center_wall(it, size[0], size[1])]
     crops = [c for c in (_crop_item(im, it, size[0], size[1]) for it in items) if c]
     return im, crops
@@ -880,6 +931,41 @@ def slots_from_pairs(pairs: list[dict]) -> list[tuple[int | None, list[int], flo
     return out
 
 
+def _flag_on_pair(flag: Flag, pair: dict) -> bool:
+    slide = flag.slide
+    if slide is None:
+        return False
+    deck = (flag.deck or "").lower()
+    rights = list(pair.get("rightNumbers") or [])
+    if pair.get("rightNumber") is not None and pair["rightNumber"] not in rights:
+        rights.append(pair["rightNumber"])
+    if deck in {"lw", "left"}:
+        return pair.get("leftNumber") == slide
+    if deck in {"dsk", "right"}:
+        return slide in rights
+    return pair.get("leftNumber") == slide or slide in rights
+
+
+def attach_slide_flags(pairs: list[dict], flags: list[Flag]) -> list[Flag]:
+    """Copy slide-scoped findings onto the pair row they belong to."""
+    leftover: list[Flag] = []
+    for flag in flags:
+        if flag.slide is None:
+            leftover.append(flag)
+            continue
+        hit = False
+        for pair in pairs:
+            if not _flag_on_pair(flag, pair):
+                continue
+            bucket = pair.setdefault("flags", [])
+            if flag not in bucket:
+                bucket.append(flag)
+            hit = True
+        if not hit:
+            leftover.append(flag)
+    return leftover
+
+
 def compare_inspects(
     left: dict,
     right: dict,
@@ -893,8 +979,8 @@ def compare_inspects(
     check: bool = True,
     use_ocr: bool = True,
 ) -> dict:
-    left_pngs = preview_pngs(left_previews)
-    right_pngs = preview_pngs(right_previews)
+    left_pngs = preview_media(left_previews) or preview_pngs(left_previews)
+    right_pngs = preview_media(right_previews) or preview_pngs(right_previews)
     left_slides = left.get("slides") or []
     right_slides = right.get("slides") or []
     left_map = map_preview_pngs(left_slides, left_pngs)
@@ -916,7 +1002,18 @@ def compare_inspects(
     left_size = (float(left.get("slideWidth") or 0), float(left.get("slideHeight") or 0))
     right_size = (float(right.get("slideWidth") or 0), float(right.get("slideHeight") or 0))
 
+    def render_deck(
+        slides: list[dict], pngs: dict[int, Path], size: tuple[float, float]
+    ) -> dict[int, object]:
+        out: dict[int, object] = {}
+        for index, slide in enumerate(slides):
+            if _skipped(slide):
+                continue
+            out[index] = render_slide(slide, pngs.get(index), size, use_ocr=use_ocr)
+        return out
+
     if slots is None:
+        t_align = time.perf_counter()
         if same_type:
             slots = []
             for i in range(max(n_left, n_right, len(left_slides), len(right_slides))):
@@ -933,6 +1030,12 @@ def compare_inspects(
                 right_size=right_size,
                 use_ocr=use_ocr,
             )
+        align_seconds = time.perf_counter() - t_align
+    else:
+        align_seconds = 0.0
+
+    left_shots = render_deck(left_slides, left_map, left_size) if check else {}
+    right_shots = render_deck(right_slides, right_map, right_size) if check else {}
 
     matched_left = {
         int(li)
@@ -1082,11 +1185,15 @@ def compare_inspects(
                 ),
             )
 
-        a_render = render_slide(ls, left_png, left_size, use_ocr=use_ocr)
-        b_renders = [
-            render_slide(slide, png, right_size, use_ocr=use_ocr)
-            for (_, slide), png in zip(right_hits, right_png_paths)
-        ]
+        a_render = left_shots.get(li) if li is not None else None
+        if a_render is None:
+            a_render = render_slide(ls, left_png, left_size, use_ocr=use_ocr)
+        b_renders = []
+        for (idx, slide), png in zip(right_hits, right_png_paths):
+            shot = right_shots.get(idx)
+            if shot is None:
+                shot = render_slide(slide, png, right_size, use_ocr=use_ocr)
+            b_renders.append(shot)
         a_text = a_render.text
         b_text = "\n".join(r.text for r in b_renders)
         pair["leftRendered"] = a_text
@@ -1169,6 +1276,10 @@ def compare_inspects(
                 ),
             )
         if left_png and right_png and not photo_findings:
+            if left_png.suffix.lower() in PREVIEW_VIDEO_SUFFIXES or right_png.suffix.lower() in PREVIEW_VIDEO_SUFFIXES:
+                pair["flags"] = pair_flags
+                pairs.append(pair)
+                continue
             heat = heat_dir / f"pair-{pair_i + 1:03d}.png"
             if same_type and not extra_photo:
                 vis = visual_diff(left_png, right_png, heat)
@@ -1222,7 +1333,12 @@ def compare_inspects(
 
     if check:
         evidence_dir = heat_dir.parent / "evidence"
-        flags.extend(
+        left_text = {i: shot.text for i, shot in left_shots.items()}
+        right_text = {i: shot.text for i, shot in right_shots.items()}
+        left_ocr = {i: shot.ocr for i, shot in left_shots.items() if getattr(shot, "ocr_used", False)}
+        right_ocr = {i: shot.ocr for i, shot in right_shots.items() if getattr(shot, "ocr_used", False)}
+        inspect_flags: list[Flag] = []
+        inspect_flags.extend(
             validate_inspect(
                 left,
                 location_prefix=left_label,
@@ -1230,9 +1346,11 @@ def compare_inspects(
                 previews=left_pngs,
                 evidence_dir=evidence_dir,
                 use_ocr=use_ocr,
+                rendered=left_text,
+                ocr=left_ocr,
             )
         )
-        flags.extend(
+        inspect_flags.extend(
             validate_inspect(
                 right,
                 location_prefix=right_label,
@@ -1240,8 +1358,12 @@ def compare_inspects(
                 previews=right_pngs,
                 evidence_dir=evidence_dir,
                 use_ocr=use_ocr,
+                rendered=right_text,
+                ocr=right_ocr,
             )
         )
+        flags.extend(inspect_flags)
+        attach_slide_flags(pairs, inspect_flags)
     return {
         "leftSlideCount": n_left,
         "rightSlideCount": n_right,
@@ -1252,5 +1374,6 @@ def compare_inspects(
         "rightCatalog": slide_catalog(right_slides, right_map),
         "pairs": pairs,
         "flags": flags,
+        "alignSeconds": align_seconds,
     }
 

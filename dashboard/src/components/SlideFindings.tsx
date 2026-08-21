@@ -11,6 +11,17 @@ export function countInfo(flags: Flag[]): number {
   return flags.filter((flag) => flag.severity === "info").length;
 }
 
+export function flagTitle(flag: Flag): string {
+  if (flag.title) return flag.title;
+  const raw = flag.rule || flag.category || "";
+  return raw
+    .replace(/[._]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 export function FlagCard({
   flag,
   jobId,
@@ -22,7 +33,7 @@ export function FlagCard({
   onJump?: (location: string) => void;
   onOpen?: (src: string) => void;
 }) {
-  const heading = [flag.severity, flag.rule || flag.category, flag.location].filter(Boolean).join(" · ");
+  const heading = [flagTitle(flag), flag.location].filter(Boolean).join(" · ");
   const canJump = Boolean(onJump && flag.location);
   const evidence = jobId && flag.evidence ? evidenceUrl(jobId, flag.evidence) : "";
   return (
@@ -34,7 +45,7 @@ export function FlagCard({
       ) : (
         <div className="meta">{heading}</div>
       )}
-      {flag.message}
+      {flag.message ? <div className="flag-body">{flag.message}</div> : null}
       {evidence && (
         <img
           className="flag-evidence"

@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from obed_edom.inspect import slide_plain_text
+from obed_edom.inspect import PREVIEW_VIDEO_SUFFIXES, slide_plain_text
 from obed_edom.ocr import ocr_lines, vision_error, word_shapes
 
 CENTER_WALL = (3840, 1080)
@@ -45,13 +45,16 @@ def _pixel_wall_box(
     slide_w, slide_h = slide_size
     if slide_w <= CENTER_WALL[0] or slide_h <= 0:
         return None
+    size = None
     try:
-        from PIL import Image  # noqa: PLC0415
+        from obed_edom.images import image_size  # noqa: PLC0415
 
-        with Image.open(png) as im:
-            width, height = im.size
+        size = image_size(png)
     except Exception:  # noqa: BLE001
+        size = None
+    if not size:
         return None
+    width, height = size
     x0, y0, x1, y1 = center_wall_box(slide_w, slide_h)
     sx = width / slide_w
     sy = height / slide_h
@@ -125,8 +128,10 @@ def render_slide(
     extracted_lines = [ln for ln in extracted.split("\n") if ln.strip()]
     ocr_text_lines: list[str] = []
     if use_ocr and png:
-        box = _pixel_wall_box(Path(png), slide_size)
-        ocr_text_lines = [line.text for line in ocr_lines(png, box=box)]
+        path = Path(png)
+        if path.suffix.lower() not in PREVIEW_VIDEO_SUFFIXES:
+            box = _pixel_wall_box(path, slide_size)
+            ocr_text_lines = [line.text for line in ocr_lines(path, box=box)]
 
     covered = normal_line(" ".join(extracted_lines))
     merged = list(extracted_lines)

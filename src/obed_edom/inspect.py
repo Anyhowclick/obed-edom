@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -64,22 +65,59 @@ def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
     return err
 
 
+def _truthy_cache(use_cache: bool | None, slide_range) -> bool:
+    if slide_range:
+        return False
+    if use_cache is not None:
+        return bool(use_cache)
+    from obed_edom.settings import load_settings  # noqa: PLC0415
+
+    return bool(load_settings()["reusePreviews"])
+
+
 def inspect_keynote(
     key_path: Path | str,
     *,
     export_dir: Path | str | None = None,
     slide_range: tuple[int, int] | frozenset[int] | None = None,
+    use_cache: bool | None = None,
 ) -> dict[str, Any]:
     """Open a .key read-only, dump text/bounds, optionally export PNGs, close without saving."""
     key_path = Path(key_path).expanduser().resolve()
     if not key_path.exists():
         raise FileNotFoundError(f"Keynote not found: {key_path}")
-    if export_dir:
-        export_dir = Path(export_dir)
-        export_dir.mkdir(parents=True, exist_ok=True)
+    timing: dict[str, float] = {}
+    digest = ""
+    want_cache = _truthy_cache(use_cache, slide_range)
+    dest = Path(export_dir) if export_dir else None
+    if dest:
+        dest.mkdir(parents=True, exist_ok=True)
+
+    if want_cache:
+        from obed_edom.baseline import deck_digest, inspect_cache_path, preview_cache_dir  # noqa: PLC0415
+
+        t_hash = time.perf_counter()
+        digest = deck_digest(key_path)
+        timing["digest"] = time.perf_counter() - t_hash
+        json_path = inspect_cache_path(digest)
+        png_dir = preview_cache_dir(digest)
+        pngs_ok = dest is None or bool(preview_pngs(png_dir))
+        if json_path.is_file() and pngs_ok:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            payload["_cached"] = True
+            payload["_digest"] = digest
+            payload["_timing"] = timing
+            if dest is not None:
+                payload["previewDir"] = str(png_dir)
+                payload["exported"] = bool(preview_pngs(png_dir))
+            return payload
+        if dest is not None:
+            dest = png_dir
+            dest.mkdir(parents=True, exist_ok=True)
+
     plan: dict[str, Any] = {"path": str(key_path), "close": True, "save": False}
-    if export_dir:
-        plan["exportDir"] = str(Path(export_dir).resolve())
+    if dest:
+        plan["exportDir"] = str(dest.resolve())
     wanted = slides_for_plan(slide_range)
     if wanted:
         plan["slides"] = wanted
@@ -88,12 +126,14 @@ def inspect_keynote(
         json.dump(plan, handle)
         plan_path = handle.name
     try:
+        t_jxa = time.perf_counter()
         proc = subprocess.run(
             ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path],
             capture_output=True,
             text=True,
             check=False,
         )
+        timing["jxa"] = time.perf_counter() - t_jxa
     finally:
         Path(plan_path).unlink(missing_ok=True)
     if proc.returncode != 0:
@@ -104,15 +144,28 @@ def inspect_keynote(
     if not raw:
         raise RuntimeError("Keynote inspect returned no JSON.")
     payload = json.loads(raw)
-    if export_dir:
-        pngs = preview_pngs(Path(export_dir))
+    if dest:
+        t_export = time.perf_counter()
+        pngs = preview_pngs(dest)
         if pngs:
             payload["exported"] = True
         else:
-            fallback_err = export_slide_images(key_path, Path(export_dir))
-            payload["exported"] = bool(preview_pngs(Path(export_dir)))
+            fallback_err = export_slide_images(key_path, dest)
+            payload["exported"] = bool(preview_pngs(dest))
             if not payload["exported"]:
                 payload["exportError"] = fallback_err or payload.get("exportError") or ""
+        timing["export"] = time.perf_counter() - t_export
+        payload["previewDir"] = str(dest.resolve())
+    payload["_timing"] = timing
+    payload["_cached"] = False
+    payload["_digest"] = digest
+    if want_cache and digest and not slide_range:
+        from obed_edom.baseline import inspect_cache_path  # noqa: PLC0415
+
+        stored = {key: value for key, value in payload.items() if not str(key).startswith("_")}
+        json_path = inspect_cache_path(digest)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(stored), encoding="utf-8")
     return payload
 
 
@@ -160,6 +213,50 @@ def preview_media(folder: Path, *, suffixes: set[str] | None = None) -> list[Pat
 
 def preview_pngs(folder: Path) -> list[Path]:
     return preview_media(folder, suffixes={".png"})
+
+
+_PREVIEW_NUM = re.compile(r"(\d+)")
+
+
+def preview_slide_number(name: str, index: int) -> int:
+    found = _PREVIEW_NUM.findall(Path(name).stem)
+    return int(found[-1]) if found else index + 1
+
+
+def preview_inspect(folder: Path | str) -> dict[str, Any]:
+    """Synthetic inspect payload from a folder of stills (and skipped movies)."""
+    folder = Path(folder)
+    files = preview_media(folder)
+    width, height = 1920.0, 1080.0
+    for path in files:
+        if path.suffix.lower() in PREVIEW_VIDEO_SUFFIXES:
+            continue
+        try:
+            from obed_edom.images import image_size  # noqa: PLC0415
+
+            size = image_size(path)
+        except Exception:  # noqa: BLE001
+            size = None
+        if size:
+            width, height = float(size[0]), float(size[1])
+            break
+    slides: list[dict[str, Any]] = []
+    for i, path in enumerate(files):
+        slides.append(
+            {
+                "index": i,
+                "number": preview_slide_number(path.name, i),
+                "skipped": False,
+                "items": [],
+            }
+        )
+    return {
+        "path": str(folder),
+        "slideWidth": width,
+        "slideHeight": height,
+        "slideCount": len(slides),
+        "slides": slides,
+    }
 
 
 def _walk_items(node: dict):

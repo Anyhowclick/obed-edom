@@ -52,6 +52,13 @@ def rule_severity(rule: str, default: str = "warning") -> str | None:
     return default
 
 
+def rule_title(rule: str) -> str:
+    named = (load_rules().get("titles") or {}).get(rule)
+    if named:
+        return str(named)
+    return " ".join(part[:1].upper() + part[1:] for part in rule.replace(".", " ").replace("_", " ").split() if part)
+
+
 def make_flag(
     rule: str,
     category: str,
@@ -89,6 +96,7 @@ def flag_dict(flag: Flag) -> dict:
         "location": flag.location,
         "resolved": flag.resolved,
         "rule": flag.rule,
+        "title": rule_title(flag.rule) if flag.rule else "",
         "slide": flag.slide,
         "deck": flag.deck,
         "evidence": flag.evidence,
@@ -109,10 +117,6 @@ def validate_outline(outline: OutlineDoc) -> list[Flag]:
     return flags
 
 
-def _visible_slides(payload: dict) -> list[dict]:
-    return [slide for slide in payload.get("slides") or [] if not slide.get("skipped")]
-
-
 def validate_inspect(
     payload: dict,
     *,
@@ -122,6 +126,8 @@ def validate_inspect(
     evidence_dir: Path | None = None,
     use_ocr: bool = True,
     check_passages: bool = True,
+    rendered: dict[int, str] | None = None,
+    ocr: dict[int, str] | None = None,
 ) -> list[Flag]:
     """House-style checks for one inspected Keynote. Never modifies the deck."""
     from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
@@ -129,32 +135,33 @@ def validate_inspect(
 
     flags: list[Flag] = []
     all_slides = payload.get("slides") or []
-    slides = _visible_slides(payload)
     prefix = location_prefix or Path(payload.get("path") or "keynote").name
     deck = deck or ("lw" if float(payload.get("slideWidth") or 0) >= 3000 else "dsk")
     png_map = map_preview_pngs(all_slides, list(previews or []))
     size = (float(payload.get("slideWidth") or 0), float(payload.get("slideHeight") or 0))
 
-    rendered: dict[int, str] = {}
-    seen: dict[int, str] = {}
+    rendered_map: dict[int, str] = dict(rendered or {})
+    seen: dict[int, str] = dict(ocr or {})
     for index, slide in enumerate(all_slides):
         if slide.get("skipped"):
             continue
+        if index in rendered_map:
+            continue
         shot = render_slide(slide, png_map.get(index), size, use_ocr=use_ocr)
-        rendered[index] = shot.text
+        rendered_map[index] = shot.text
         if shot.ocr_used:
             seen[index] = shot.ocr
 
-    text = "\n\n".join(rendered[i] for i in sorted(rendered) if rendered[i].strip())
-    if text.strip():
-        flags.extend(validate_style_text(text, location=prefix, deck=deck))
-
+    rules = load_rules()
     for index, slide in enumerate(all_slides):
         if slide.get("skipped"):
             continue
         num = int(slide.get("number") or slide.get("index", index) + 1)
         loc = f"{prefix} slide {num}"
-        body = rendered.get(index, "")
+        body = rendered_map.get(index, "")
+        flags.extend(_trinity_flags(body, loc, rules, deck, slide=num))
+        flags.extend(_book_name_flags(body, loc, rules, deck, slide=num))
+        flags.extend(_date_flags(body, loc, deck, slide=num))
         flags.extend(_highlight_punctuation_flags(slide, loc, num, deck))
         flags.extend(_quote_flags(body, loc, slide=num, deck=deck))
         flags.extend(_glossary_flags(body, loc, num, deck))
@@ -167,7 +174,7 @@ def validate_inspect(
     )
     if check_passages:
         flags.extend(
-            check_slide_passages(payload, rendered, prefix, deck, ocr=seen, pngs=png_map)
+            check_slide_passages(payload, rendered_map, prefix, deck, ocr=seen, pngs=png_map)
         )
     if use_ocr and png_map:
         problem = ocr_unavailable()
@@ -422,13 +429,15 @@ def _inspect_overflow_flags(
     return flags
 
 
-def validate_style_text(text: str, *, location: str = "", deck: str = "") -> list[Flag]:
+def validate_style_text(
+    text: str, *, location: str = "", deck: str = "", slide: int | None = None
+) -> list[Flag]:
     rules = load_rules()
     flags: list[Flag] = []
-    flags.extend(_trinity_flags(text, location, rules, deck))
-    flags.extend(_book_name_flags(text, location, rules, deck))
-    flags.extend(_date_flags(text, location, deck))
-    flags.extend(_quote_flags(text, location, deck=deck))
+    flags.extend(_trinity_flags(text, location, rules, deck, slide=slide))
+    flags.extend(_book_name_flags(text, location, rules, deck, slide=slide))
+    flags.extend(_date_flags(text, location, deck, slide=slide))
+    flags.extend(_quote_flags(text, location, deck=deck, slide=slide))
     return flags
 
 
@@ -437,7 +446,9 @@ def _keep(flags: list[Flag], flag: Flag | None) -> None:
         flags.append(flag)
 
 
-def _trinity_flags(text: str, location: str, rules: dict, deck: str = "") -> list[Flag]:
+def _trinity_flags(
+    text: str, location: str, rules: dict, deck: str = "", *, slide: int | None = None
+) -> list[Flag]:
     flags: list[Flag] = []
     for match in LOWER_GOD.finditer(text):
         _keep(
@@ -446,7 +457,8 @@ def _trinity_flags(text: str, location: str, rules: dict, deck: str = "") -> lis
                 "style.trinity",
                 "trinity",
                 "Trinity word should be caps: God",
-                location=f"{location}:{match.start()}" if location else str(match.start()),
+                location=location,
+                slide=slide,
                 deck=deck,
             ),
         )
@@ -462,6 +474,7 @@ def _trinity_flags(text: str, location: str, rules: dict, deck: str = "") -> lis
                     "trinity",
                     "Trinity word should be caps: Father",
                     location=location,
+                    slide=slide,
                     deck=deck,
                 ),
             )
@@ -469,8 +482,12 @@ def _trinity_flags(text: str, location: str, rules: dict, deck: str = "") -> lis
         _keep(
             flags,
             make_flag(
-                "style.trinity", "trinity", "Trinity word should be caps: Son",
-                location=location, deck=deck,
+                "style.trinity",
+                "trinity",
+                "Trinity word should be caps: Son",
+                location=location,
+                slide=slide,
+                deck=deck,
             ),
         )
     if re.search(r"\b(says?|declares?|speaks?)\s+the\s+Lord\b", text, re.I):
@@ -483,13 +500,16 @@ def _trinity_flags(text: str, location: str, rules: dict, deck: str = "") -> lis
                     "If God is speaking, associated 'My' should be caps (heuristic).",
                     default="info",
                     location=location,
+                    slide=slide,
                     deck=deck,
                 ),
             )
     return flags
 
 
-def _book_name_flags(text: str, location: str, rules: dict, deck: str = "") -> list[Flag]:
+def _book_name_flags(
+    text: str, location: str, rules: dict, deck: str = "", *, slide: int | None = None
+) -> list[Flag]:
     flags: list[Flag] = []
     mapping = (rules.get("book_names") or {}) if rules else {}
     # Psalms → Psalm (as a book label, not the word in a sentence like "the psalms")
@@ -499,7 +519,7 @@ def _book_name_flags(text: str, location: str, rules: dict, deck: str = "") -> l
             flags,
             make_flag(
                 "style.book_name", "book_name", f"Use '{want}', not 'Psalms'.",
-                location=location, deck=deck,
+                location=location, slide=slide, deck=deck,
             ),
         )
     # House style: Revelations, not Revelation
@@ -509,13 +529,13 @@ def _book_name_flags(text: str, location: str, rules: dict, deck: str = "") -> l
             flags,
             make_flag(
                 "style.book_name", "book_name", f"Use '{want}', not 'Revelation'.",
-                location=location, deck=deck,
+                location=location, slide=slide, deck=deck,
             ),
         )
     return flags
 
 
-def _date_flags(text: str, location: str, deck: str = "") -> list[Flag]:
+def _date_flags(text: str, location: str, deck: str = "", *, slide: int | None = None) -> list[Flag]:
     flags: list[Flag] = []
     for match in HYPHEN_YEAR_SPAN.finditer(text):
         _keep(
@@ -525,6 +545,7 @@ def _date_flags(text: str, location: str, deck: str = "") -> list[Flag]:
                 "date",
                 f"Date period should use an en dash: {match.group(1)}–{match.group(2)}",
                 location=location,
+                slide=slide,
                 deck=deck,
             ),
         )
@@ -536,6 +557,7 @@ def _date_flags(text: str, location: str, deck: str = "") -> list[Flag]:
                 "date",
                 f"Date period should use an en dash, not an em dash: {match.group(1)}–{match.group(2)}",
                 location=location,
+                slide=slide,
                 deck=deck,
             ),
         )
@@ -547,6 +569,7 @@ def _date_flags(text: str, location: str, deck: str = "") -> list[Flag]:
                 "date",
                 f"Date period should use an en dash: {match.group(1)}–{match.group(2)} {match.group(3)}",
                 location=location,
+                slide=slide,
                 deck=deck,
             ),
         )
@@ -765,11 +788,12 @@ def _bounds_evidence(
     if not png or not Path(png).is_file():
         return ""
     try:
-        from PIL import Image, ImageDraw  # noqa: PLC0415
+        from PIL import ImageDraw  # noqa: PLC0415
+
+        from obed_edom.images import open_rgb  # noqa: PLC0415
 
         slide_w, slide_h = slide_size
-        with Image.open(png) as raw:
-            im = raw.convert("RGB")
+        im = open_rgb(png).copy()
         sx = im.width / slide_w if slide_w else 1
         sy = im.height / slide_h if slide_h else 1
         pad = 60

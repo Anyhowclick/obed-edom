@@ -647,7 +647,7 @@ def test_gw_filename_is_lw_even_at_1920(tmp_path):
     result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="Other")
     assert result["sameType"] is False
     diffs = [f for f in result["flags"] if f.category == "diff"]
-    assert any("Wording differs" in f.message or "Text differs" in f.message for f in diffs)
+    assert any(f.rule in {"text.major", "text.word"} for f in diffs)
     assert not any("Slide count differs" in f.message for f in diffs)
 
 
@@ -701,7 +701,7 @@ def test_anagram_is_still_a_wording_diff(tmp_path):
         "slides": [_slide(1, "good is The Lord")],
     }
     result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK")
-    assert any("Wording differs" in f.message for f in result["flags"] if f.category == "diff")
+    assert any(f.rule == "text.major" for f in result["flags"] if f.category == "diff")
 
 
 def test_both_skipped_omitted_skip_mismatch_warned(tmp_path):
@@ -925,3 +925,93 @@ def test_combined_wall_vs_split_dsks_is_not_wording_diff(tmp_path):
     assert len(combined["pairs"]) == 1
     diffs = [f for f in combined["flags"] if f.category == "diff"]
     assert not any("Wording" in f.message for f in diffs)
+
+
+def test_realign_gaps_pairs_leftover_neighbours():
+    from obed_edom.baseline import slot_dict
+    from obed_edom.diff_keynotes import realign_gaps
+
+    left = [_slide(1, "Alpha"), _slide(2, "Bravo verse about mercy"), _slide(3, "Omega")]
+    right = [_slide(1, "Alpha"), _slide(2, "Bravo verse about mercy"), _slide(3, "Omega")]
+    slots = [
+        slot_dict(0, [0], 1.0),
+        slot_dict(1, []),
+        slot_dict(None, [1]),
+        slot_dict(2, [2], 1.0),
+    ]
+    filled = realign_gaps(slots, left, right, use_ocr=False)
+    mids = [s for s in filled if s["leftIndex"] == 1]
+    assert mids and mids[0]["rightIndexes"] == [1]
+
+
+def test_attach_slide_flags_puts_bible_on_pair():
+    from obed_edom.diff_keynotes import attach_slide_flags
+    from obed_edom.models import Flag
+
+    pairs = [{"leftNumber": 50, "rightNumbers": [29], "rightNumber": 29, "flags": []}]
+    flag = Flag(
+        "error",
+        "bible",
+        "mismatch",
+        location="DSK slide 29",
+        rule="bible.mismatch",
+        slide=29,
+        deck="dsk",
+    )
+    leftover = attach_slide_flags(pairs, [flag])
+    assert leftover == []
+    assert pairs[0]["flags"] == [flag]
+
+
+def test_compare_inspects_skips_mov_heatmap(tmp_path: Path):
+    from PIL import Image
+
+    from obed_edom.diff_keynotes import compare_inspects
+    from obed_edom.inspect import preview_inspect
+
+    left = tmp_path / "lw"
+    right = tmp_path / "dsk"
+    left.mkdir()
+    right.mkdir()
+    Image.new("RGB", (32, 32), (10, 10, 10)).save(left / "wall.001.png")
+    Image.new("RGB", (32, 32), (10, 10, 10)).save(right / "dsk.001.png")
+    (left / "clip.002.mov").write_bytes(b"l")
+    (right / "clip.002.mov").write_bytes(b"r")
+    heat = tmp_path / "heat"
+    heat.mkdir()
+    result = compare_inspects(
+        preview_inspect(left),
+        preview_inspect(right),
+        left,
+        right,
+        heat,
+        left_label="LW",
+        right_label="DSK",
+        slots=[
+            (0, [0], 1.0),
+            (1, [1], 1.0),
+        ],
+        check=True,
+        use_ocr=False,
+    )
+    assert len(result["pairs"]) == 2
+    mov_pair = next(p for p in result["pairs"] if p.get("leftNumber") == 2)
+    assert not mov_pair.get("heatPng")
+    still_pair = next(p for p in result["pairs"] if p.get("leftNumber") == 1)
+    assert still_pair.get("heatPng") or still_pair.get("visual") is not None
+
+
+def test_ocr_unavailable_and_count_stay_deck_wide():
+    from obed_edom.diff_keynotes import attach_slide_flags
+    from obed_edom.models import Flag
+
+    pairs = [{"leftNumber": 1, "rightNumbers": [1], "flags": []}]
+    leftover = attach_slide_flags(
+        pairs,
+        [
+            Flag("info", "ocr", "no vision", location="LW", rule="ocr.unavailable", deck="lw"),
+            Flag("info", "diff", "count", rule="diff.count"),
+        ],
+    )
+    assert len(leftover) == 2
+    assert pairs[0]["flags"] == []

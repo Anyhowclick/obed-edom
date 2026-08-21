@@ -46,7 +46,17 @@ export type DiffResult = {
   rightCatalog?: { index: number; number: number; skipped?: boolean; png?: string | null; text?: string }[];
   pairs: Pair[];
   flags: Flag[];
+  reuse?: { used?: boolean; carried: number; changed: number; added: number; removed: number; source?: string };
 };
+
+function flagOnPair(flag: Flag, pair: Pair): boolean {
+  if (flag.slide == null) return false;
+  const deck = (flag.deck || "").toLowerCase();
+  const rights = pair.rightNumbers?.length ? pair.rightNumbers : pair.rightNumber != null ? [pair.rightNumber] : [];
+  if (deck === "lw" || deck === "left") return pair.leftNumber === flag.slide;
+  if (deck === "dsk" || deck === "right") return rights.includes(flag.slide);
+  return pair.leftNumber === flag.slide || rights.includes(flag.slide);
+}
 
 function present(job: Job, label: string): boolean {
   return !job.artifacts?.missing?.includes(label);
@@ -208,11 +218,15 @@ export function DiffResultView({
   job,
   onOpen,
   onRunChecks,
+  onSaveSlots,
+  onStartFresh,
   checking,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onRunChecks?: (slots: Slot[]) => void;
+  onSaveSlots?: (slots: Slot[]) => void | Promise<void>;
+  onStartFresh?: () => void;
   checking?: boolean;
 }) {
   const result = (job.result || null) as DiffResult | null;
@@ -226,6 +240,8 @@ export function DiffResultView({
     return Number.isFinite(n) ? n : null;
   });
   const [dragging, setDragging] = useState<{ side: "left" | "right"; index: number } | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saving, setSaving] = useState(false);
   const stackRef = useRef<HTMLDivElement>(null);
   const selectedTopRef = useRef<number | null>(null);
 
@@ -266,7 +282,8 @@ export function DiffResultView({
   const phase = result.phase || "checked";
   const matching = phase !== "checked";
   const canEdit = Boolean(result.leftCatalog && result.rightCatalog);
-  const deckFlags = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
+  const rawDeck = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
+  const deckFlags = rawDeck.filter((flag) => !pairs.some((pair) => flagOnPair(flag, pair)));
   const leftWide = isWideDeck(result.leftLabel);
   const rightWide = isWideDeck(result.rightLabel);
   const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
@@ -290,8 +307,35 @@ export function DiffResultView({
     setDragging(null);
   }
 
+  async function handleSave() {
+    if (!onSaveSlots) return;
+    setSaving(true);
+    try {
+      await onSaveSlots(slots);
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <>
+        {result.reuse?.used !== false && result.reuse && (result.reuse.carried > 0 || result.reuse.added > 0) && (
+          <div className="reuse-banner">
+            <span>
+              Reused {result.reuse.carried} pairing{result.reuse.carried === 1 ? "" : "s"} from an earlier run.
+              {result.reuse.changed ? ` ${result.reuse.changed} slide${result.reuse.changed === 1 ? "" : "s"} changed.` : ""}
+              {result.reuse.added ? ` ${result.reuse.added} added.` : ""}
+              {result.reuse.removed ? ` ${result.reuse.removed} removed.` : ""}
+            </span>
+            {onStartFresh && (
+              <button className="btn secondary" type="button" disabled={checking} onClick={onStartFresh}>
+                Start fresh
+              </button>
+            )}
+          </div>
+        )}
         {canEdit && (
           <p className="note playlist-note">
             {phase === "visual"
@@ -308,15 +352,16 @@ export function DiffResultView({
                 Run checks
               </button>
             )}
-            <button
-              className={`btn secondary toggle${showInfo ? " on" : ""}`}
-              type="button"
-              aria-pressed={showInfo}
-              title="Info findings are notes rather than problems"
-              onClick={() => setShowInfo(!showInfo)}
-            >
-              {showInfo ? "Hide info findings" : "Show info findings"}
-            </button>
+            {canEdit && onSaveSlots && (
+              <button
+                className={`btn save-pairing${savedFlash ? " saved" : ""}`}
+                type="button"
+                disabled={checking || saving}
+                onClick={() => void handleSave()}
+              >
+                {savedFlash ? "Pairing saved!" : "Save pairing"}
+              </button>
+            )}
             {(leftWide || rightWide) && (
               <button
                 className={`btn secondary toggle${sidePanels ? " on" : ""}`}
@@ -328,6 +373,15 @@ export function DiffResultView({
                 {sidePanels ? "Center wall only" : "Show side panels"}
               </button>
             )}
+            <button
+              className={`btn secondary toggle${showInfo ? " on" : ""}`}
+              type="button"
+              aria-pressed={showInfo}
+              title="Info findings are notes rather than problems"
+              onClick={() => setShowInfo(!showInfo)}
+            >
+              {showInfo ? "Hide info findings" : "Show info findings"}
+            </button>
             <button
               className="btn secondary icon-btn"
               type="button"
@@ -341,7 +395,14 @@ export function DiffResultView({
         </div>
       <div className="diff-stack" ref={stackRef}>
         {pairs.map((pair, row) => {
-          const issues = pair.flags || [];
+          const extra = rawDeck.filter(
+            (flag) =>
+              flagOnPair(flag, pair) &&
+              !(pair.flags || []).some(
+                (own) => own.rule === flag.rule && own.slide === flag.slide && own.message === flag.message
+              )
+          );
+          const issues = [...(pair.flags || []), ...extra];
           const rightIndexes = pair.rightIndexes?.length ? pair.rightIndexes : pair.rightIndex != null ? [pair.rightIndex] : [];
           const rightPngs = pair.rightPngs?.length ? pair.rightPngs : [pair.rightPng];
           const rightNumbers = pair.rightNumbers?.length ? pair.rightNumbers : [pair.rightNumber];

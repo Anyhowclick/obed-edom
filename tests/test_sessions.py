@@ -73,6 +73,31 @@ def test_delete_does_not_escape_output_root(tmp_path: Path):
     assert marker.is_file()
 
 
+def test_delete_does_not_purge_preview_cache(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    cache = output / ".cache" / "previews" / "abc"
+    cache.mkdir(parents=True)
+    marker = cache / "slide-001.png"
+    marker.write_bytes(b"png")
+    work = output / ".diff" / "job1"
+    work.mkdir(parents=True)
+    (work / "heat").mkdir()
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit(
+        "diff",
+        lambda _j: {
+            "leftPreviews": str(cache),
+            "workDir": str(work),
+        },
+        feature="diff",
+    )
+    _wait(runner, job.id)
+    runner.delete(job.id, purge=True)
+    assert marker.is_file()
+    assert not work.exists()
+
+
 def test_artifact_status_missing_and_suggested(tmp_path: Path):
     output = tmp_path / "output"
     gone = output / "old_name"
@@ -165,3 +190,32 @@ def test_visual_delete_does_not_purge_preview_folders(tmp_path: Path):
     _wait(runner, job.id)
     runner.delete(job.id, purge=True)
     assert marker.is_file()
+
+
+def test_visual_delete_purges_work_dir(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    left = output / "lw"
+    left.mkdir(parents=True)
+    (left / "keep.png").write_bytes(b"x")
+    right = tmp_path / "dsk"
+    right.mkdir()
+    (right / "a.png").write_bytes(b"x")
+    work = output / ".visual" / "job1"
+    heat = work / "heat"
+    heat.mkdir(parents=True)
+    (heat / "pair-001.png").write_bytes(b"h")
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit(
+        "visual",
+        lambda _j: {
+            "leftPreviews": str(left),
+            "rightPreviews": str(right),
+            "workDir": str(work),
+        },
+        feature="visual",
+    )
+    _wait(runner, job.id)
+    runner.delete(job.id, purge=True)
+    assert (left / "keep.png").is_file()
+    assert not work.exists()

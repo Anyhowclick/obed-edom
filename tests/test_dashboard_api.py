@@ -26,3 +26,20 @@ def test_resolve_drop_unknown_name():
     client = TestClient(app)
     res = client.post("/api/resolve-drop", data={"name": "definitely-not-a-real-deck-zzzz.key"})
     assert res.status_code == 404
+
+
+def test_settings_roundtrip(tmp_path, monkeypatch):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    client = TestClient(app)
+    got = client.get("/api/settings").json()
+    assert got["reusePairings"] is True
+    assert got["reusePreviews"] is True
+    put = client.put("/api/settings", json={"reuseThreshold": 0.8, "reusePairings": False})
+    assert put.status_code == 200
+    body = put.json()
+    assert body["reuseThreshold"] == 0.8
+    assert body["reusePairings"] is False
+    assert body["reusePreviews"] is True
+    assert client.get("/api/settings").json()["reuseThreshold"] == 0.8

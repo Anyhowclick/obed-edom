@@ -448,7 +448,6 @@ def classify_text_diff(
     only_l = sorted({t for t in canon_a if t not in set(canon_b)})
     only_r = sorted({t for t in canon_b if t not in set(canon_a)})
     lines = [
-        "Wording differs.",
         f"{left_label}: {_brief(left)}",
         f"{right_label}: {_brief(right)}",
     ]

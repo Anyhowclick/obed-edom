@@ -77,6 +77,41 @@ rules:
   overflow.text: warning
   ocr.unavailable: info
 
+# Human titles for the dashboard heading "Title · Slide".
+titles:
+  text.case: Text Case
+  text.symbol: Text Symbol
+  text.reference: Text Reference
+  text.word: Text Word
+  text.major: Wording differs.
+  text.order: Text Order
+  text.verse_split: Text Verse Split
+  text.unreadable: Text Unreadable
+  photo.source: Photo Source
+  photo.rotated: Photo Rotated
+  photo.flipped: Photo Flipped
+  photo.count: Photo Count
+  photo.differs: Photo Differs
+  diff.count: Diff Count
+  diff.missing: Diff Missing
+  diff.unmatched: Diff Unmatched
+  diff.skip_mismatch: Diff Skip Mismatch
+  bounds.straddles: Bounds Straddles
+  bounds.offcanvas: Bounds Offcanvas
+  bible.mismatch: Bible Mismatch
+  bible.wrong_reference: Bible Wrong Reference
+  bible.unchecked: Bible Unchecked
+  bible.relative: Bible Relative
+  style.smallcaps: Style Smallcaps
+  style.trinity: Trinity Word Style
+  style.book_name: Style Book Name
+  style.date: Style Date
+  style.highlight: Style Highlight
+  style.quote: Style Quote
+  style.glossary: House spelling
+  overflow.text: Overflow Text
+  ocr.unavailable: Ocr Unavailable
+
 # Proper nouns that must be spelled this way. Checked against rendered text, so
 # it also catches names baked into images.
 glossary:

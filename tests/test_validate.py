@@ -169,6 +169,66 @@ def test_rule_severity_map_can_silence_a_rule(monkeypatch):
     assert flag is not None and flag.severity == "error"
 
 
+def test_flag_dict_includes_yaml_title():
+    from obed_edom.validate import flag_dict, make_flag
+
+    flag = make_flag("style.glossary", "glossary", "near miss", location="LW slide 1", slide=1, deck="lw")
+    assert flag is not None
+    body = flag_dict(flag)
+    assert body["title"] == "House spelling"
+    trinity = make_flag("style.trinity", "trinity", "caps", location="LW slide 3", slide=3, deck="lw")
+    assert trinity is not None
+    assert flag_dict(trinity)["title"] == "Trinity Word Style"
+
+
+def test_rule_title_uses_yaml_and_fallback(monkeypatch):
+    from obed_edom import validate
+
+    monkeypatch.setattr(
+        validate,
+        "load_rules",
+        lambda: {"titles": {"style.trinity": "Trinity Word Style", "text.major": "Wording differs."}},
+    )
+    assert validate.rule_title("style.trinity") == "Trinity Word Style"
+    assert validate.rule_title("text.major") == "Wording differs."
+    assert validate.rule_title("bible.wrong_reference") == "Bible Wrong Reference"
+
+
+def test_inspect_trinity_names_a_slide():
+    payload = {
+        "path": "demo.key",
+        "slideWidth": 1920,
+        "slides": [
+            {"number": 3, "items": [{"kind": "text", "text": "we love god forever"}]},
+        ],
+    }
+    flags = validate_inspect(
+        payload, location_prefix="LW", deck="lw", use_ocr=False, check_passages=False
+    )
+    trinity = [f for f in flags if f.rule == "style.trinity"]
+    assert trinity
+    assert trinity[0].slide == 3
+    assert trinity[0].location == "LW slide 3"
+
+
+def test_inspect_date_names_a_slide():
+    payload = {
+        "path": "demo.key",
+        "slideWidth": 1920,
+        "slides": [
+            {"number": 4, "items": [{"kind": "text", "text": "Lived 1980-2012."}]},
+        ],
+    }
+    flags = validate_inspect(
+        payload, location_prefix="DSK", deck="dsk", use_ocr=False, check_passages=False
+    )
+    dates = [f for f in flags if f.rule == "style.date"]
+    assert dates
+    assert dates[0].slide == 4
+    assert dates[0].location == "DSK slide 4"
+    assert dates[0].deck == "dsk"
+
+
 def test_missing_previews_are_info_not_warning():
     from obed_edom.contrast import check_contrast
 
