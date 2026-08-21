@@ -8,7 +8,7 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
   diff: "Diff Checker",
   visual: "Visual Checker",
   check: "Sermon Checker",
-  dsk: "DSK generator",
+  dsk: "DSK Generator",
   resize: "CG resizer",
 };
 
@@ -17,7 +17,7 @@ export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   diff: "Open in Diff Checker",
   visual: "Open in Visual Checker",
   check: "Open in Sermon Checker",
-  dsk: "Open in DSK generator",
+  dsk: "Open in DSK Generator",
   resize: "Open in CG resizer",
 };
 
@@ -78,7 +78,7 @@ export const TAB_SHORT: Record<TabId, string> = {
   visual: "Vis",
   dsk: "DSK",
   resize: "CG",
-  history: "Runs",
+  history: "Hist",
 };
 
 export function asFeature(value: string | undefined): FeatureId | null {

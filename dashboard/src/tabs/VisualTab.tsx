@@ -60,7 +60,7 @@ export function VisualTab() {
         <h1>Visual Checker</h1>
         <p className="lede">
           Drop exported LW and DSK preview folders for a side-by-side look (PNG, JPEG, or MOV). No wording or
-          photo checks — just the pictures, cropped to the wall. Finished views are kept under Previous runs.
+          photo checks — just the pictures, cropped to the wall. Finished views are kept under History.
         </p>
         <div className="row">
           <FileWell

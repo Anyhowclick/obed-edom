@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { chooseKeynote, pollJob, reveal, startResize, validateKeynote, type ChosenFile } from "../api";
+import { chooseKeynote, pollJob, reveal, startResize, type ChosenFile } from "../api";
 import { FileWell } from "../components/FileWell";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
@@ -61,36 +61,6 @@ export function ResizeTab() {
   const parsedSlides = parseSlideSpec(range);
   const rangeError = range.trim() && !parsedSlides ? "Enter slides like 2 or 2, 4-6." : null;
 
-  async function runValidate() {
-    if (!lw) {
-      setError("Choose a finalised LW or FW .key.");
-      return;
-    }
-    if (rangeError) {
-      setError(rangeError);
-      return;
-    }
-    setError(null);
-    setBusy(true);
-    try {
-      const created = await validateKeynote(lw.path, {
-        export: true,
-        slides: parsedSlides,
-        feature: "resize",
-      });
-      upsert(created);
-      const done = await pollJob(created.id, (tick) => {
-        setLogs(tick.logs);
-        upsert(tick);
-      });
-      upsert(done);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function runResize() {
     if (!lw) {
       setError("Choose a finalised LW or FW .key.");
@@ -142,34 +112,36 @@ export function ResizeTab() {
         gutter beside the map. Use Empty_Map.key (full map layers plus one
         resized church name), not Only_Map.key.
       </p>
-      <FileWell
-        label="Finalised LW / FW .key"
-        hint="Choose the source LED or full-wall deck"
-        file={lw}
-        onChoose={async () => {
-          try {
-            setLw(await chooseKeynote("LW or FW Keynote"));
-          } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-          }
-        }}
-        onPath={(path) => setLw({ path, name: path.split("/").pop() || path })}
-        onError={setError}
-      />
-      <FileWell
-        label="CG_Template.key"
-        hint="Required 16:9 deck (Empty_Map.key). Its slide layouts are copied over; object positions teach the crop."
-        file={template}
-        onChoose={async () => {
-          try {
-            setTemplate(await chooseKeynote("CG template Keynote"));
-          } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-          }
-        }}
-        onPath={(path) => setTemplate({ path, name: path.split("/").pop() || path })}
-        onError={setError}
-      />
+      <div className="row">
+        <FileWell
+          label="Finalised LW / FW .key"
+          hint="Choose the source LED or full-wall deck"
+          file={lw}
+          onChoose={async () => {
+            try {
+              setLw(await chooseKeynote("LW or FW Keynote"));
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e));
+            }
+          }}
+          onPath={(path) => setLw({ path, name: path.split("/").pop() || path })}
+          onError={setError}
+        />
+        <FileWell
+          label="CG_Template.key"
+          hint="Required 16:9 deck (Empty_Map.key). Its slide layouts are copied over; object positions teach the crop."
+          file={template}
+          onChoose={async () => {
+            try {
+              setTemplate(await chooseKeynote("CG template Keynote"));
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e));
+            }
+          }}
+          onPath={(path) => setTemplate({ path, name: path.split("/").pop() || path })}
+          onError={setError}
+        />
+      </div>
       <label className="field">
         Slide (2 or 2, 4-6)
         <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="2, 4-6" />
@@ -183,9 +155,6 @@ export function ResizeTab() {
         <span>Resize church-name text to the template sample size and pack it beside the map. Leave off for a map-only slide.</span>
       </label>
       <div className="actions">
-        <button className="btn secondary" type="button" disabled={!lw || busy} onClick={runValidate}>
-          Run validation
-        </button>
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>
           Resize to 1920×1080
         </button>

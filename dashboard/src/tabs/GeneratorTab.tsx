@@ -44,7 +44,7 @@ export function GeneratorTab() {
       <h1>Sermon Base Generator</h1>
       <p className="lede">
         Drop sermon or offering outlines. Each file is generated in sequence (Keynote is single-instance)
-        into LW and DSK decks plus preview PNGs. Finished runs are kept under Previous runs.
+        into LW and DSK decks plus preview PNGs. Finished runs are kept under History.
       </p>
       <FileWell
         label="Sermon outline (.docx)"

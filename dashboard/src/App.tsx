@@ -21,9 +21,9 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "check", label: "Sermon Checker" },
   { id: "diff", label: "Diff Checker" },
   { id: "visual", label: "Visual Checker" },
-  { id: "dsk", label: "DSK generator" },
+  { id: "dsk", label: "DSK Generator" },
   { id: "resize", label: "CG resizer" },
-  { id: "history", label: "Previous runs" },
+  { id: "history", label: "History" },
 ];
 
 export function App() {

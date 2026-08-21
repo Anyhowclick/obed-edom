@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
@@ -142,6 +142,18 @@ function isWideDeck(label: string): boolean {
   return /\b(LW|GW|LED|FW)\b/i.test(label);
 }
 
+function scrollParent(el: Element): HTMLElement {
+  let node = el.parentElement;
+  while (node) {
+    const style = getComputedStyle(node);
+    if (/(auto|scroll)/.test(`${style.overflow}${style.overflowY}`) && node.scrollHeight > node.clientHeight + 1) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return (document.scrollingElement || document.documentElement) as HTMLElement;
+}
+
 function SlideSlot({
   job,
   side,
@@ -208,6 +220,8 @@ export function DiffResultView({
     return Number.isFinite(n) ? n : null;
   });
   const [dragging, setDragging] = useState<{ side: "left" | "right"; index: number } | null>(null);
+  const stackRef = useRef<HTMLDivElement>(null);
+  const selectedTopRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!result?.pairs) return;
@@ -230,6 +244,16 @@ export function DiffResultView({
     return result.pairs;
   }, [result, slots]);
 
+  useLayoutEffect(() => {
+    const before = selectedTopRef.current;
+    if (before == null) return;
+    selectedTopRef.current = null;
+    const row = stackRef.current?.querySelector(".diff-row.on");
+    if (!row) return;
+    const scroller = scrollParent(row);
+    scroller.scrollTop += row.getBoundingClientRect().top - before;
+  }, [split]);
+
   if (job.status === "error") return <p className="err">{job.error}</p>;
   if (!result || (job.status !== "done" && !checking)) return null;
 
@@ -243,6 +267,8 @@ export function DiffResultView({
   const leftPct = split ?? defaultSplit();
 
   function setSplitPct(next: number) {
+    const row = stackRef.current?.querySelector(".diff-row.on");
+    if (row) selectedTopRef.current = row.getBoundingClientRect().top;
     setSplit(next);
     try {
       sessionStorage.setItem(SPLIT_KEY, String(Math.round(next)));
@@ -260,9 +286,8 @@ export function DiffResultView({
 
   return (
     <>
-      <div className="playlist-bar">
         {canEdit && (
-          <p className="note">
+          <p className="note playlist-note">
             {phase === "visual"
               ? "Folders are listed in file order. Drag a slide onto another row to pair it. Combine next DSK when one wall holds two graphics."
               : matching
@@ -270,24 +295,25 @@ export function DiffResultView({
                 : "Checks are on the confirmed pairs. You can still rearrange, combine, and run checks again."}
           </p>
         )}
-        <div className="actions playlist-controls">
-          <button
-            className="btn secondary icon-btn"
-            type="button"
-            title={focusMode ? "Exit maximise" : "Maximise"}
-            aria-label={focusMode ? "Exit maximise" : "Maximise"}
-            onClick={() => setFocusMode(!focusMode)}
-          >
-            <ExpandIcon collapse={focusMode} />
-          </button>
-          {canEdit && onRunChecks && (
-            <button className="btn" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
-              Run checks
+        <div className="playlist-bar">
+          <div className="actions playlist-controls">
+            {canEdit && onRunChecks && (
+              <button className="btn run-checks" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
+                Run checks
+              </button>
+            )}
+            <button
+              className="btn secondary icon-btn"
+              type="button"
+              title={focusMode ? "Exit maximise" : "Maximise"}
+              aria-label={focusMode ? "Exit maximise" : "Maximise"}
+              onClick={() => setFocusMode(!focusMode)}
+            >
+              <ExpandIcon collapse={focusMode} />
             </button>
-          )}
+          </div>
         </div>
-      </div>
-      <div className="diff-stack">
+      <div className="diff-stack" ref={stackRef}>
         {pairs.map((pair, row) => {
           const issues = pair.flags || [];
           const rightIndexes = pair.rightIndexes?.length ? pair.rightIndexes : pair.rightIndex != null ? [pair.rightIndex] : [];
@@ -392,13 +418,6 @@ export function DiffResultView({
           );
         })}
       </div>
-      {canEdit && onRunChecks && (
-        <div className="actions playlist-footer">
-          <button className="btn" type="button" disabled={checking} onClick={() => onRunChecks(slots)}>
-            Run checks
-          </button>
-        </div>
-      )}
       {deckFlags.length > 0 && <ValidationPanel flags={deckFlags} />}
     </>
   );

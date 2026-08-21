@@ -77,11 +77,11 @@ export function DskTab() {
 
   return (
     <div>
-      <h1>DSK generator</h1>
+      <h1>DSK Generator</h1>
       <p className="lede">
         Shadow content from a finalised LW into a DSK deck (from an existing DSK or the template masters).
         Generation logic is not implemented yet; validation still runs. Finished checks are kept under
-        Previous runs.
+        History.
       </p>
       <div className="row">
         <FileWell

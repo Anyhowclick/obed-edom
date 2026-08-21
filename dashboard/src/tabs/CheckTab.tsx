@@ -54,7 +54,7 @@ export function CheckTab() {
       <h1>Sermon Checker</h1>
       <p className="lede">
         Drop one LW or DSK Keynote. House-style checks run read-only (Bible wording, contrast, overflow, and the
-        rest). Finished checks are kept under Previous runs.
+        rest). Finished checks are kept under History.
       </p>
       <FileWell
         label="Keynote (.key)"

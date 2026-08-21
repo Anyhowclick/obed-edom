@@ -85,8 +85,7 @@ export function DiffTab() {
       <h1>Diff Checker</h1>
       <p className="lede">
         Match a pastor-finalised LW.key against a DSK first, fix the playlist if needed, then run wording and
-        photo checks. Read-only: nothing is saved back to those files. Finished compares are kept under Previous
-        runs.
+        photo checks. Read-only: nothing is saved back to those files. Finished compares are kept under History.
       </p>
       <div className="row">
         <FileWell

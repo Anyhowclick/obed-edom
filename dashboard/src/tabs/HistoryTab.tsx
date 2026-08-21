@@ -55,7 +55,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
 
   return (
     <div>
-      <h1>Previous runs</h1>
+      <h1>History</h1>
       <p className="lede">
         Finished runs appear here. They are pointers to files under output/ — if you rename or delete those
         files in Finder, the catalog stays until you Relocate or Delete.
