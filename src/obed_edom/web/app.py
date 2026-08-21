@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from obed_edom.diff_keynotes import compare_inspects, slots_from_pairs
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_media_type, preview_pngs
+from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slide_range
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
@@ -334,22 +335,28 @@ def create_app() -> FastAPI:
     @app.post("/api/resize")
     def resize_keynote(
         path: str = Form(...),
+        template_path: str = Form(""),
         gold_path: str = Form(""),
         range_from: int | None = Form(None),
         range_to: int | None = Form(None),
         export: str = Form("true"),
+        include_lists: str = Form("false"),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
-        gold = Path(gold_path).expanduser() if gold_path.strip() else None
-        if gold is not None and not gold.exists():
-            raise HTTPException(400, f"Gold Keynote not found: {gold_path}")
+        raw_template = (template_path or gold_path).strip()
+        if not raw_template:
+            raise HTTPException(400, "CG template .key is required.")
+        template = Path(raw_template).expanduser()
+        if not template.exists():
+            raise HTTPException(400, f"CG template not found: {raw_template}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
+        do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, g=gold, rf=range_from, rt=range_to, ex=do_export: _run_resize(
-                j, p, g, rf, rt, ex
+            lambda j, p=key, t=template, rf=range_from, rt=range_to, ex=do_export, lists=do_lists: _run_resize(
+                j, p, t, rf, rt, ex, lists
             ),
             feature="resize",
         )
@@ -559,9 +566,7 @@ def _run_inspect(
     export_dir = None
     if export:
         export_dir = ROOT / "output" / ".inspect" / job.id
-    slide_range = None
-    if range_from is not None and range_to is not None:
-        slide_range = (range_from, range_to)
+    slide_range = resolve_slide_range(range_from, range_to)
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=export_dir, slide_range=slide_range)
     names = preview_names(export_dir) if export_dir else []
@@ -588,25 +593,29 @@ def _run_inspect(
 def _run_resize(
     job: Job,
     path: Path,
-    gold: Path | None,
+    template: Path,
     range_from: int | None,
     range_to: int | None,
     export: bool,
+    include_lists: bool = False,
 ) -> dict[str, Any]:
     dest_dir = ROOT / "output" / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
-    slide_range = None
-    if range_from is not None and range_to is not None:
-        slide_range = (range_from, range_to)
-    job.log(f"Remapping {path.name} → 1920×1080…")
-    if gold:
-        job.log(f"Using gold layout {gold.name}.")
+    slide_range = resolve_slide_range(
+        range_from, range_to, default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE)
+    ) or (MVP_MAP_SLIDE, MVP_MAP_SLIDE)
+    job.log(f"Remapping {path.name} → 1920×1080 (slide {slide_range[0]}"
+            f"{'' if slide_range[0] == slide_range[1] else '–' + str(slide_range[1])})…")
+    job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
+    if not include_lists:
+        job.log("Church-name text left in place (map + pins only).")
     info = remap_and_inspect(
         path,
         dest,
-        gold=gold,
+        template=template,
         slide_range=slide_range,
+        include_lists=include_lists,
         export_dir=export_dir,
         log=job.log,
     )
@@ -627,11 +636,11 @@ def _run_resize(
     applied = info.get("applied")
     missed = info.get("missed")
     job.log(f"Wrote {dest.name}: applied {applied}, missed {missed}.")
-    score = info.get("goldScore") or {}
+    score = info.get("templateScore") or info.get("goldScore") or {}
     return {
         "path": str(path),
         "destPath": str(dest),
-        "goldPath": str(gold) if gold else None,
+        "templatePath": str(template),
         "slideWidth": inspect.get("slideWidth") or info.get("width"),
         "slideHeight": inspect.get("slideHeight") or info.get("height"),
         "slideCount": inspect.get("slideCount"),
@@ -644,7 +653,8 @@ def _run_resize(
         "counts": counts,
         "applied": applied,
         "missed": missed,
-        "goldScore": score,
+        "includeLists": include_lists,
+        "templateScore": score,
         "flags": serialize_flags(flags),
     }
 

@@ -13,6 +13,15 @@ def test_health_and_stubs():
     assert missing_file.status_code == 400
 
 
+def test_resize_requires_template(tmp_path):
+    client = TestClient(app)
+    wall = tmp_path / "wall.key"
+    wall.write_text("placeholder")
+    res = client.post("/api/resize", data={"path": str(wall)})
+    assert res.status_code == 400
+    assert "template" in res.json()["detail"].lower()
+
+
 def test_resolve_drop_unknown_name():
     client = TestClient(app)
     res = client.post("/api/resolve-drop", data={"name": "definitely-not-a-real-deck-zzzz.key"})

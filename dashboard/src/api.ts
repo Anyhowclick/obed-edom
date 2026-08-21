@@ -184,14 +184,21 @@ export async function stubDsk(): Promise<string> {
 
 export async function startResize(
   path: string,
-  opts?: { goldPath?: string; rangeFrom?: number; rangeTo?: number; export?: boolean }
+  opts: {
+    templatePath: string;
+    rangeFrom?: number;
+    rangeTo?: number;
+    export?: boolean;
+    includeLists?: boolean;
+  }
 ): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
-  if (opts?.goldPath) body.set("gold_path", opts.goldPath);
-  if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
-  if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
-  body.set("export", opts?.export === false ? "false" : "true");
+  body.set("template_path", opts.templatePath);
+  if (opts.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
+  if (opts.rangeTo != null) body.set("range_to", String(opts.rangeTo));
+  body.set("export", opts.export === false ? "false" : "true");
+  body.set("include_lists", opts.includeLists ? "true" : "false");
   const res = await fetch("/api/resize", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

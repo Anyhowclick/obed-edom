@@ -147,9 +147,18 @@ function run(argv) {
   let slideWidth = 1920;
   let slideHeight = 1080;
   try {
-    slideWidth = doc.slideWidth();
-    slideHeight = doc.slideHeight();
-  } catch (e) {}
+    const w = Number(doc.width());
+    const h = Number(doc.height());
+    if (w > 0 && h > 0) {
+      slideWidth = w;
+      slideHeight = h;
+    }
+  } catch (e) {
+    try {
+      slideWidth = doc.slideWidth();
+      slideHeight = doc.slideHeight();
+    } catch (e2) {}
+  }
 
   if (plan.overlays && plan.overlays.length) {
     applyOverlays(doc, plan.overlays, slideWidth, slideHeight);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { chooseKeynote, pollJob, startResize, validateKeynote, type ChosenFile } from "../api";
+import { chooseKeynote, pollJob, reveal, startResize, validateKeynote, type ChosenFile } from "../api";
 import { FileWell } from "../components/FileWell";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
@@ -8,6 +8,12 @@ import { useCurrentJob } from "../sessions";
 function parseRange(raw: string): { from: number; to: number } | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
+  const single = trimmed.match(/^(\d+)$/);
+  if (single) {
+    const n = Number(single[1]);
+    if (n < 1) return null;
+    return { from: n, to: n };
+  }
   const m = trimmed.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
   if (!m) return null;
   const from = Number(m[1]);
@@ -23,14 +29,16 @@ type ResizeResult = {
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
   goldScore?: { pinPairs?: number; pinRmse?: number | null };
+  templateScore?: { pinPairs?: number; pinRmse?: number | null };
   recipe?: { source?: string };
 };
 
 export function ResizeTab() {
   const { job, upsert, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
-  const [gold, setGold] = useState<ChosenFile | null>(null);
-  const [range, setRange] = useState("");
+  const [template, setTemplate] = useState<ChosenFile | null>(null);
+  const [range, setRange] = useState("2");
+  const [includeLists, setIncludeLists] = useState(false);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +51,7 @@ export function ResizeTab() {
   }, [job?.id, result?.path]);
 
   const parsedRange = parseRange(range);
-  const rangeError = range.trim() && !parsedRange ? "Slide range must look like 1-9, or leave blank for all slides." : null;
+  const rangeError = range.trim() && !parsedRange ? "Enter a slide number (2) or a range (1-9)." : null;
 
   async function runValidate() {
     if (!lw) {
@@ -81,6 +89,10 @@ export function ResizeTab() {
       setError("Choose a finalised LW or FW .key.");
       return;
     }
+    if (!template) {
+      setError("Choose CG_Template.key (the 16:9 map layout).");
+      return;
+    }
     if (rangeError) {
       setError(rangeError);
       return;
@@ -89,9 +101,10 @@ export function ResizeTab() {
     setBusy(true);
     try {
       const created = await startResize(lw.path, {
-        goldPath: gold?.path,
+        templatePath: template.path,
         rangeFrom: parsedRange?.from,
         rangeTo: parsedRange?.to,
+        includeLists,
       });
       upsert(created);
       const done = await pollJob(created.id, (tick) => {
@@ -110,15 +123,18 @@ export function ResizeTab() {
   }
 
   const counts = result?.counts;
-  const score = result?.goldScore;
+  const score = result?.templateScore || result?.goldScore;
 
   return (
     <div>
       <h1>CG resizer</h1>
       <p className="lede">
-        Copy a 7680×1080 wall deck and remap the map plus pin-drop movies into 1920×1080, keeping object
-        identity so builds stay. Optional gold CG (same weekend) learns the crop; otherwise the map covers
-        16:9 (center crop).
+        MVP: copy the wall deck, copy the CG template’s 16:9 slide layouts
+        onto it (MAP BLANK (16:9) is the repurposed background), set 1920×1080,
+        then move existing objects onto that layout. Objects that share a
+        scale+translation (the map cluster) move together; pins follow the
+        group they sit on. Use Empty_Map.key (full map layers), not
+        Only_Map.key.
       </p>
       <FileWell
         label="Finalised LW / FW .key"
@@ -135,40 +151,55 @@ export function ResizeTab() {
         onError={setError}
       />
       <FileWell
-        label="Gold CG .key (optional)"
-        hint="Same-weekend 1920×1080 map, if you have one"
-        file={gold}
+        label="CG_Template.key"
+        hint="Required 16:9 deck (Empty_Map.key). Its slide layouts are copied over; object positions teach the crop."
+        file={template}
         onChoose={async () => {
           try {
-            setGold(await chooseKeynote("Gold CG Keynote"));
+            setTemplate(await chooseKeynote("CG template Keynote"));
           } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
           }
         }}
-        onPath={(path) => setGold({ path, name: path.split("/").pop() || path })}
+        onPath={(path) => setTemplate({ path, name: path.split("/").pop() || path })}
         onError={setError}
       />
       <label className="field">
-        Slide range (blank = all)
-        <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="1-9" />
+        Slide (number or range)
+        <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="2" />
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={includeLists}
+          onChange={(e) => setIncludeLists(e.target.checked)}
+        />
+        <span>Also remap church-name text with the same map crop (leave off for a map-only slide)</span>
       </label>
       <div className="actions">
         <button className="btn secondary" type="button" disabled={!lw || busy} onClick={runValidate}>
           Run validation
         </button>
-        <button className="btn" type="button" disabled={!lw || busy} onClick={runResize}>
+        <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>
           Resize to 1920×1080
         </button>
       </div>
       {result?.destPath && (
-        <p className="note">
-          Wrote {result.destPath}
-          {counts ? ` — ${counts.pin ?? 0} pins, ${counts.map ?? 0} map, ${counts.list ?? 0} list` : ""}
-          {typeof result.applied === "number" ? ` (applied ${result.applied}` : ""}
-          {typeof result.missed === "number" ? `, missed ${result.missed})` : result.applied != null ? ")" : ""}
-          {score?.pinRmse != null ? `. Gold pin RMSE ${score.pinRmse}px` : ""}
-          {result.recipe?.source ? `. Recipe: ${result.recipe.source}` : ""}
-        </p>
+        <>
+          <p className="note path-note">
+            Wrote {result.destPath}
+            {counts ? ` — ${counts.pin ?? 0} pins, ${counts.map ?? 0} map, ${counts.list ?? 0} list` : ""}
+            {typeof result.applied === "number" ? ` (applied ${result.applied}` : ""}
+            {typeof result.missed === "number" ? `, missed ${result.missed})` : result.applied != null ? ")" : ""}
+            {score?.pinRmse != null ? `. Template pin RMSE ${score.pinRmse}px` : ""}
+            {result.recipe?.source ? `. Recipe: ${result.recipe.source}` : ""}
+          </p>
+          <div className="actions">
+            <button className="btn secondary" type="button" onClick={() => reveal(result.destPath!)}>
+              Show CG.key
+            </button>
+          </div>
+        </>
       )}
       {(error || openError || rangeError) && <p className="err">{error || openError || rangeError}</p>}
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}

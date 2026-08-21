@@ -5,6 +5,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
+from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slide_range
 from obed_edom.paths import find_repo_root
 from obed_edom.pipeline import generate
 
@@ -36,11 +37,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Copy a wall Keynote and remap map + pins into a 1920×1080 CG deck.",
     )
     remap.add_argument("keynote", type=Path, help="Source LW/FW .key (typically 7680×1080).")
-    remap.add_argument("--gold", type=Path, help="Same-weekend CG .key to learn the crop from.")
+    remap.add_argument(
+        "--template",
+        type=Path,
+        help="Required 16:9 CG template (Empty_Map.key). Its slide layouts are copied onto the wall copy; object positions teach the crop.",
+    )
+    remap.add_argument("--gold", type=Path, help="Deprecated alias for --template.")
     remap.add_argument("--out", type=Path, help="Destination .key (default: output/<stem>_CG.key).")
-    remap.add_argument("--from-slide", type=int, dest="range_from")
-    remap.add_argument("--to-slide", type=int, dest="range_to")
+    remap.add_argument(
+        "--from-slide",
+        type=int,
+        dest="range_from",
+        help="First slide, or the only slide (default: 2, the wall map+pins slide).",
+    )
+    remap.add_argument(
+        "--to-slide",
+        type=int,
+        dest="range_to",
+        help="Last slide (defaults to --from-slide).",
+    )
     remap.add_argument("--no-export", action="store_true", help="Skip PNG preview export after remap.")
+    remap.add_argument(
+        "--include-lists",
+        action="store_true",
+        help="Also move church-name text with the same map crop (skip for a map-only slide).",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "generate":
@@ -81,23 +102,39 @@ def _run_remap(args: argparse.Namespace) -> int:
         print(f"File not found: {source}", file=sys.stderr)
         return 1
     dest = Path(args.out).expanduser() if args.out else find_repo_root() / "output" / f"{source.stem}_CG.key"
-    gold = Path(args.gold).expanduser() if args.gold else None
-    if gold and not gold.exists():
-        print(f"Gold Keynote not found: {gold}", file=sys.stderr)
+    template = args.template or args.gold
+    if template is None:
+        print("CG template .key is required (--template CG_Template.key).", file=sys.stderr)
         return 1
-    slide_range = None
-    if args.range_from is not None and args.range_to is not None:
-        slide_range = (args.range_from, args.range_to)
+    template = Path(template).expanduser()
+    if not template.exists():
+        print(f"CG template not found: {template}", file=sys.stderr)
+        return 1
+    try:
+        slide_range = resolve_slide_range(
+            args.range_from, args.range_to, default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE)
+        ) or (MVP_MAP_SLIDE, MVP_MAP_SLIDE)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
 
     def log(message: str) -> None:
         print(message)
 
     if args.no_export:
-        info = remap_keynote(source, dest, gold=gold, slide_range=slide_range, log=log)
+        info = remap_keynote(
+            source, dest, template=template, slide_range=slide_range, include_lists=args.include_lists, log=log
+        )
     else:
         export_dir = dest.parent / "previews" / dest.stem
         info = remap_and_inspect(
-            source, dest, gold=gold, slide_range=slide_range, export_dir=export_dir, log=log
+            source,
+            dest,
+            template=template,
+            slide_range=slide_range,
+            include_lists=args.include_lists,
+            export_dir=export_dir,
+            log=log,
         )
     print(f"Wrote {info['dest']}")
     counts = info.get("counts") or {}
@@ -106,9 +143,9 @@ def _run_remap(args: argparse.Namespace) -> int:
         f"({counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list); "
         f"missed {info.get('missed')}."
     )
-    score = info.get("goldScore")
+    score = info.get("templateScore") or info.get("goldScore")
     if score and score.get("pinRmse") is not None:
-        print(f"Gold pin RMSE: {score['pinRmse']} px over {score.get('pinPairs')} pairs (plan, not post-JXA).")
+        print(f"Template pin RMSE: {score['pinRmse']} px over {score.get('pinPairs')} pairs (plan, not post-JXA).")
     return 0
 
 
