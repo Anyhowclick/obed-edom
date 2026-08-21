@@ -230,18 +230,18 @@ function deleteRefs(Keynote, slide, refs) {
   return n;
 }
 
-function findTextItem(slide, needle) {
-  const want = String(needle || "").trim();
-  if (!want) return null;
+function textLookup(slide) {
+  const map = {};
   const col = collectionNamed(slide, "textItems");
   for (let i = 0; i < countOf(col); i++) {
     const obj = itemAt(col, i);
     if (!obj) continue;
     try {
-      if (String(obj.objectText()).trim() === want) return obj;
+      const key = String(obj.objectText()).trim();
+      if (key && map[key] == null) map[key] = obj;
     } catch (e) {}
   }
-  return null;
+  return map;
 }
 
 function keystroke(cmd) {
@@ -254,6 +254,38 @@ function applySpec(obj, spec) {
   const a = applyGeom(obj, spec, false);
   applyGeom(obj, spec, true);
   return a;
+}
+
+function stripBuildsOf(Keynote, slide, obj) {
+  if (!obj) return 0;
+  let n = 0;
+  for (let guard = 0; guard < 40; guard++) {
+    const builds = collectionNamed(slide, "builds");
+    let found = null;
+    for (let i = countOf(builds) - 1; i >= 0; i--) {
+      const b = itemAt(builds, i);
+      if (!b) continue;
+      try {
+        const target = b.object();
+        if (target === obj) {
+          found = b;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!found) break;
+    if (deleteObj(Keynote, found)) n += 1;
+    else break;
+  }
+  return n;
+}
+
+function stripBuildRefs(Keynote, slide, refs) {
+  let n = 0;
+  for (let i = 0; i < (refs || []).length; i++) {
+    n += stripBuildsOf(Keynote, slide, getItem(slide, refs[i]));
+  }
+  return n;
 }
 
 function runAppleScript(doc, body) {
@@ -299,11 +331,26 @@ function applyReuse(doc, Keynote, job, missReasons) {
   let copy = slides[to - 1];
   let orig = slides[to];
   const removed = deleteRefs(Keynote, copy, job.remove || []);
+  stripBuildRefs(Keynote, copy, job.stripBuilds || []);
   slides = doc.slides();
   copy = slides[to - 1];
   orig = slides[to];
   const add = job.add || [];
+  let applied = 0;
+  let missed = 0;
   if (add.length) {
+    // Rearrange the delta on the original slide (kindIndex from wall inspect),
+    // then paste those already-placed objects onto the remapped donor copy.
+    for (let i = 0; i < add.length; i++) {
+      const spec = add[i];
+      const obj = getItem(orig, spec);
+      if (!obj || spec.x == null) {
+        if (spec.x != null) missed += 1;
+        continue;
+      }
+      if (applySpec(obj, spec)) applied += 1;
+      else missed += 1;
+    }
     deleteRefs(Keynote, orig, job.strip || []);
     delay(0.3);
     try {
@@ -325,21 +372,20 @@ function applyReuse(doc, Keynote, job, missReasons) {
     copy = slides[to - 1];
     orig = slides[to];
   }
-  let applied = 0;
-  let missed = 0;
-  const delta = add.concat(job.mutate || []);
-  for (let i = 0; i < delta.length; i++) {
-    const spec = delta[i];
-    let obj = null;
-    if (spec.matchText) obj = findTextItem(copy, spec.matchText);
-    if (!obj && spec.role === "hide") continue;
-    if (!obj) obj = getItem(copy, spec);
-    if (!obj || spec.x == null) {
-      if (!obj && spec.x != null) missed += 1;
-      continue;
+  const mutate = job.mutate || [];
+  if (mutate.length) {
+    const byText = textLookup(copy);
+    for (let i = 0; i < mutate.length; i++) {
+      const spec = mutate[i];
+      let obj = spec.matchText ? byText[String(spec.matchText).trim()] : null;
+      if (!obj) obj = getItem(copy, spec);
+      if (!obj || spec.x == null) {
+        if (!obj && spec.x != null) missed += 1;
+        continue;
+      }
+      if (applySpec(obj, spec)) applied += 1;
+      else missed += 1;
     }
-    if (applySpec(obj, spec)) applied += 1;
-    else missed += 1;
   }
   try {
     runAppleScript(doc, "delete slide " + (to + 1));
@@ -392,11 +438,36 @@ function setSlideSize(doc, width, height) {
   return "";
 }
 
-function skipOutsideRange(slides, fromSlide, toSlide) {
+function wantedSet(nums) {
+  const set = {};
+  for (let i = 0; i < (nums || []).length; i++) set[Number(nums[i])] = true;
+  return set;
+}
+
+function wantedFromPlan(plan, fallbackN) {
+  if (plan.slides && plan.slides.length) {
+    return plan.slides.map(Number).filter(function (n) {
+      return n >= 1;
+    });
+  }
+  if (plan.range && plan.range.length >= 2) {
+    const a = Number(plan.range[0]);
+    const b = Number(plan.range[1]);
+    const out = [];
+    for (let n = a; n <= b; n++) out.push(n);
+    return out;
+  }
+  const out = [];
+  for (let n = 1; n <= fallbackN; n++) out.push(n);
+  return out;
+}
+
+function skipOutsideRange(slides, wanted) {
+  const set = wantedSet(wanted);
   const n = countOf(slides);
   let skipped = 0;
   for (let i = 0; i < n; i++) {
-    const hide = i + 1 < fromSlide || i + 1 > toSlide;
+    const hide = !set[i + 1];
     try {
       slides[i].skipped = hide;
       if (hide) skipped += 1;
@@ -553,13 +624,13 @@ function importCgLayouts(dest, tmpl, Keynote) {
   return imported;
 }
 
-function applyCgLayouts(dest, origCount, fromSlide, toSlide) {
+function applyCgLayouts(dest, origCount, wanted) {
   const slides = dest.slides();
   const n = Math.min(countOf(slides), origCount);
-  const start = fromSlide ? Math.max(0, fromSlide - 1) : 0;
-  const end = toSlide ? Math.min(toSlide, n) : n;
+  const set = wantedSet(wanted);
   const applied = [];
-  for (let i = start; i < end; i++) {
+  for (let i = 0; i < n; i++) {
+    if (!set[i + 1]) continue;
     try {
       const cur = String(slides[i].baseLayout().name());
       const want = cgLayoutName(cur);
@@ -613,18 +684,13 @@ function run(argv) {
     actualHeight = Number(doc.height()) || height;
   } catch (eSz) {}
   const origN = countOf(doc.slides());
-  const range = plan.range || null;
+  const wanted = wantedFromPlan(plan, origN);
   if (plan.template) {
     let templateDoc = null;
     try {
       templateDoc = Keynote.open(Path(plan.template));
       layoutReport.imported = importCgLayouts(doc, templateDoc, Keynote);
-      layoutReport.applied = applyCgLayouts(
-        doc,
-        origN,
-        range ? Number(range[0]) : 1,
-        range ? Number(range[1]) : origN
-      );
+      layoutReport.applied = applyCgLayouts(doc, origN, wanted);
       layoutReport.extraDeleted = deleteTrailingSlides(doc, Keynote, origN);
       layoutReport.names = layoutNames(doc);
     } catch (eLay) {
@@ -698,9 +764,7 @@ function run(argv) {
   }
   const mapReadback = readMapGeom(doc.slides(), transforms);
   let skippedSlides = 0;
-  if (range && range.length >= 2) {
-    skippedSlides = skipOutsideRange(doc.slides(), Number(range[0]), Number(range[1]));
-  }
+  skippedSlides = skipOutsideRange(doc.slides(), wanted);
   try {
     Keynote.save(doc);
   } catch (eSave) {

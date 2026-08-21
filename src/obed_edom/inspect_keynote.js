@@ -179,6 +179,8 @@ function describeItem(obj, index, kindHint) {
     fileName: "",
     locked: false,
     rotation: 0,
+    buildCount: 0,
+    zIndex: null,
   };
   const pos = positionOf(obj);
   rec.x = pos[0];
@@ -266,20 +268,104 @@ function collectItems(slide) {
   collectFrom(slide, "movies", "movie", items, kindCounts);
   collectFrom(slide, "groups", "group", items, kindCounts);
   collectFrom(slide, "lines", "line", items, kindCounts);
-  if (items.length) return items;
-
-  try {
-    const all = slide.iWorkItems();
-    let n = all.length;
-    if (typeof n === "function") n = n.call(all);
-    n = Number(n) || 0;
-    for (let i = 0; i < n; i++) {
-      const rec = describeItem(all[i], i);
-      rec.kindIndex = i;
-      items.push(rec);
-    }
-  } catch (e) {}
+  if (!items.length) {
+    try {
+      const all = slide.iWorkItems();
+      let n = all.length;
+      if (typeof n === "function") n = n.call(all);
+      n = Number(n) || 0;
+      for (let i = 0; i < n; i++) {
+        const rec = describeItem(all[i], i);
+        rec.kindIndex = i;
+        items.push(rec);
+      }
+    } catch (e) {}
+  }
+  attachBuildCounts(slide, items);
+  attachZOrder(slide, items);
   return items;
+}
+
+function attachZOrder(slide, items) {
+  let all = null;
+  try {
+    all = slide.iWorkItems();
+  } catch (e) {
+    return;
+  }
+  const n = countOfSafe(all);
+  for (let i = 0; i < n; i++) {
+    let obj = null;
+    try {
+      obj = all[i];
+    } catch (eO) {}
+    if (!obj) continue;
+    const hit = matchItemRecord(slide, obj, items);
+    if (hit && hit.zIndex == null) hit.zIndex = i;
+  }
+}
+
+function attachBuildCounts(slide, items) {
+  let builds = null;
+  try {
+    builds = slide.builds();
+  } catch (e) {
+    return;
+  }
+  const n = countOfSafe(builds);
+  for (let i = 0; i < n; i++) {
+    let obj = null;
+    try {
+      obj = builds[i].object();
+    } catch (eO) {}
+    if (!obj) continue;
+    const hit = matchItemRecord(slide, obj, items);
+    if (hit) hit.buildCount = (hit.buildCount || 0) + 1;
+  }
+}
+
+function countOfSafe(col) {
+  try {
+    let n = col.length;
+    if (typeof n === "function") n = n.call(col);
+    n = Number(n);
+    return isNaN(n) ? 0 : n;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function matchItemRecord(slide, obj, items) {
+  const names = [
+    ["textItems", "text"],
+    ["images", "image"],
+    ["shapes", "shape"],
+    ["movies", "movie"],
+    ["groups", "group"],
+    ["lines", "line"],
+  ];
+  for (let c = 0; c < names.length; c++) {
+    const colName = names[c][0];
+    const kind = names[c][1];
+    let col = null;
+    try {
+      col = slide[colName]();
+    } catch (e) {
+      continue;
+    }
+    const n = countOfSafe(col);
+    for (let i = 0; i < n; i++) {
+      try {
+        if (col[i] !== obj) continue;
+      } catch (e2) {
+        continue;
+      }
+      for (let k = 0; k < items.length; k++) {
+        if (items[k].kind === kind && items[k].kindIndex === i) return items[k];
+      }
+    }
+  }
+  return null;
 }
 
 function canvasSize(doc) {
@@ -308,11 +394,22 @@ function run(argv) {
   const slideHeight = size[1];
 
   const range = plan.range || null;
+  const wanted = plan.slides && plan.slides.length ? plan.slides : null;
   const start = range ? Math.max(0, range[0] - 1) : 0;
   const end = range ? Math.min(slides.length, range[1]) : slides.length;
+  const indices = [];
+  if (wanted) {
+    for (let w = 0; w < wanted.length; w++) {
+      const i = Number(wanted[w]) - 1;
+      if (i >= 0 && i < slides.length) indices.push(i);
+    }
+  } else {
+    for (let i = start; i < end; i++) indices.push(i);
+  }
 
   const outSlides = [];
-  for (let i = start; i < end; i++) {
+  for (let s = 0; s < indices.length; s++) {
+    const i = indices[s];
     let master = "";
     try {
       master = String(slides[i].baseLayout().name());

@@ -158,11 +158,12 @@ export async function startDiff(
 
 export async function validateKeynote(
   path: string,
-  opts?: { export?: boolean; rangeFrom?: number; rangeTo?: number; feature?: string }
+  opts?: { export?: boolean; rangeFrom?: number; rangeTo?: number; slides?: number[]; feature?: string }
 ): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
   body.set("export", opts?.export ? "true" : "false");
+  if (opts?.slides?.length) body.set("slides", opts.slides.join(","));
   if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
   if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
   if (opts?.feature) body.set("feature", opts.feature);
@@ -188,6 +189,7 @@ export async function startResize(
     templatePath: string;
     rangeFrom?: number;
     rangeTo?: number;
+    slides?: number[];
     export?: boolean;
     includeLists?: boolean;
   }
@@ -195,6 +197,7 @@ export async function startResize(
   const body = new FormData();
   body.set("path", path);
   body.set("template_path", opts.templatePath);
+  if (opts.slides?.length) body.set("slides", opts.slides.join(","));
   if (opts.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
   if (opts.rangeTo != null) body.set("range_to", String(opts.rangeTo));
   body.set("export", opts.export === false ? "false" : "true");

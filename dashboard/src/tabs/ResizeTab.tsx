@@ -5,21 +5,29 @@ import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useCurrentJob } from "../sessions";
 
-function parseRange(raw: string): { from: number; to: number } | null {
+function parseSlideSpec(raw: string): number[] | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  const single = trimmed.match(/^(\d+)$/);
-  if (single) {
-    const n = Number(single[1]);
-    if (n < 1) return null;
-    return { from: n, to: n };
+  const out = new Set<number>();
+  for (const chunk of trimmed.split(",")) {
+    const token = chunk.trim();
+    if (!token) continue;
+    const single = token.match(/^(\d+)$/);
+    if (single) {
+      const n = Number(single[1]);
+      if (n < 1) return null;
+      out.add(n);
+      continue;
+    }
+    const m = token.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (!m) return null;
+    const from = Number(m[1]);
+    const to = Number(m[2]);
+    if (from < 1 || to < from) return null;
+    for (let n = from; n <= to; n++) out.add(n);
   }
-  const m = trimmed.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
-  if (!m) return null;
-  const from = Number(m[1]);
-  const to = Number(m[2]);
-  if (from < 1 || to < from) return null;
-  return { from, to };
+  if (!out.size) return null;
+  return [...out].sort((a, b) => a - b);
 }
 
 type ResizeResult = {
@@ -50,8 +58,8 @@ export function ResizeTab() {
     if (path) setLw({ path, name: path.split("/").pop() || path });
   }, [job?.id, result?.path]);
 
-  const parsedRange = parseRange(range);
-  const rangeError = range.trim() && !parsedRange ? "Enter a slide number (2) or a range (1-9)." : null;
+  const parsedSlides = parseSlideSpec(range);
+  const rangeError = range.trim() && !parsedSlides ? "Enter slides like 2 or 2, 4-6." : null;
 
   async function runValidate() {
     if (!lw) {
@@ -67,8 +75,7 @@ export function ResizeTab() {
     try {
       const created = await validateKeynote(lw.path, {
         export: true,
-        rangeFrom: parsedRange?.from,
-        rangeTo: parsedRange?.to,
+        slides: parsedSlides,
         feature: "resize",
       });
       upsert(created);
@@ -102,8 +109,7 @@ export function ResizeTab() {
     try {
       const created = await startResize(lw.path, {
         templatePath: template.path,
-        rangeFrom: parsedRange?.from,
-        rangeTo: parsedRange?.to,
+        slides: parsedSlides,
         includeLists,
       });
       upsert(created);
@@ -165,8 +171,8 @@ export function ResizeTab() {
         onError={setError}
       />
       <label className="field">
-        Slide (number or range)
-        <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="2" />
+        Slide (2 or 2, 4-6)
+        <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="2, 4-6" />
       </label>
       <label className="check">
         <input

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from obed_edom.map_remap import slides_for_plan
 from obed_edom.paths import find_repo_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
@@ -67,7 +68,7 @@ def inspect_keynote(
     key_path: Path | str,
     *,
     export_dir: Path | str | None = None,
-    slide_range: tuple[int, int] | None = None,
+    slide_range: tuple[int, int] | frozenset[int] | None = None,
 ) -> dict[str, Any]:
     """Open a .key read-only, dump text/bounds, optionally export PNGs, close without saving."""
     key_path = Path(key_path).expanduser().resolve()
@@ -79,8 +80,10 @@ def inspect_keynote(
     plan: dict[str, Any] = {"path": str(key_path), "close": True, "save": False}
     if export_dir:
         plan["exportDir"] = str(Path(export_dir).resolve())
-    if slide_range:
-        plan["range"] = [int(slide_range[0]), int(slide_range[1])]
+    wanted = slides_for_plan(slide_range)
+    if wanted:
+        plan["slides"] = wanted
+        plan["range"] = [wanted[0], wanted[-1]]
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(plan, handle)
         plan_path = handle.name
