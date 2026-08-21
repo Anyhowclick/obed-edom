@@ -4,6 +4,7 @@ import html as html_lib
 import re
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -292,6 +293,16 @@ def _parse_gateway_html(html: str) -> str:
     else:
         chunk = html
     chunk = re.sub(r"(?is)<sup[^>]*class=['\"][^'\"]*footnote[^'\"]*['\"][^>]*>.*?</sup>", "", chunk)
+    chunk = re.sub(
+        r"(?is)<sup[^>]*class=['\"][^'\"]*crossreference[^'\"]*['\"][^>]*>.*?</sup>", "", chunk
+    )
+    # Bible Gateway sets the divine name in small caps. Flattening it to "Lord"
+    # would lose the very distinction the house style cares about.
+    chunk = re.sub(
+        r"(?is)<span[^>]*class=['\"][^'\"]*small-caps[^'\"]*['\"][^>]*>(.*?)</span>",
+        lambda m: re.sub(r"(?is)<[^>]+>", "", m.group(1)).upper(),
+        chunk,
+    )
     chunk = re.sub(r"(?is)<h[1-6][^>]*>.*?</h[1-6]>", " ", chunk)
     chunk = re.sub(r"(?is)<span[^>]*class=['\"][^'\"]*chapternum[^'\"]*['\"][^>]*>.*?</span>", " ", chunk)
     chunk = re.sub(r"(?is)<sup[^>]*class=['\"][^'\"]*versenum[^'\"]*['\"][^>]*>(.*?)</sup>", r" \1 ", chunk)
@@ -306,6 +317,40 @@ def _parse_gateway_html(html: str) -> str:
     return chunk
 
 
+def _disk_cache_path(key: tuple[str, int, int, int, str]) -> Path | None:
+    """Passages never change; keep them between runs so re-checks are offline."""
+    try:
+        from obed_edom.paths import find_repo_root  # noqa: PLC0415
+
+        folder = find_repo_root() / "output" / ".cache" / "bible"
+    except Exception:  # noqa: BLE001
+        return None
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", "-".join(str(part) for part in key))
+    return folder / f"{slug}.txt"
+
+
+def _read_disk_cache(key: tuple[str, int, int, int, str]) -> str | None:
+    path = _disk_cache_path(key)
+    if not path or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _write_disk_cache(key: tuple[str, int, int, int, str], text: str) -> None:
+    path = _disk_cache_path(key)
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def fetch_passage(book: str, chapter: int, verse: int, verse_end: int | None, translation: str) -> tuple[str | None, str]:
     """Return (text, source_label) from Bible Gateway. Never invents wording."""
     wanted = (translation or "NIV").upper()
@@ -315,6 +360,11 @@ def fetch_passage(book: str, chapter: int, verse: int, verse_end: int | None, tr
     cache_key = (book, chapter, verse, end, wanted)
     if cache_key in _GATEWAY_CACHE:
         return _GATEWAY_CACHE[cache_key]
+    on_disk = _read_disk_cache(cache_key)
+    if on_disk:
+        result = (on_disk, f"Bible Gateway {wanted}")
+        _GATEWAY_CACHE[cache_key] = result
+        return result
 
     ref = f"{book} {chapter}:{verse}"
     if end != verse:
@@ -337,6 +387,7 @@ def fetch_passage(book: str, chapter: int, verse: int, verse_end: int | None, tr
             return result
         result = (text, f"Bible Gateway {wanted}")
         _GATEWAY_CACHE[cache_key] = result
+        _write_disk_cache(cache_key, text)
         return result
     except Exception as exc:  # noqa: BLE001
         result = (None, f"Bible Gateway error: {exc}")
@@ -397,7 +448,6 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
     for hit in hits:
         loc = _line_at(text, hit.start)
         if hit.kind == "absolute":
-            prev = cursor.label()
             if (
                 pending_relative
                 and pending_relative.kind == "few_chapters"
@@ -434,24 +484,9 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
             cursor.verse_end = hit.verse_end
             if hit.translation:
                 cursor.translation = hit.translation
-            flags.append(
-                Flag(
-                    "info",
-                    "bible",
-                    f"Set passage cursor to {cursor.label()} ({cursor.translation}).",
-                    location=loc,
-                    resolved=cursor.label(),
-                )
-            )
-            if prev and hit.book and prev.split()[0] != hit.book and pending_relative is None:
-                flags.append(
-                    Flag(
-                        "info",
-                        "bible",
-                        f"Book changed from {prev} to {cursor.label()}.",
-                        location=loc,
-                    )
-                )
+            # The cursor position and each book change used to be reported. On a
+            # deck that is one info per reference per slide and says nothing an
+            # operator can act on, so the cursor is now tracked silently.
             # Track spoken vs heading range mismatches in nearby lines.
             if hit.verse and hit.verse_end:
                 if "turn" in loc.lower() or "bibles" in loc.lower():
@@ -663,3 +698,253 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
             )
 
     return flags
+
+
+# A verse number is a small number that starts a sentence on the same line.
+# "120 priests" is followed by a lowercase word, so it never qualifies, and a
+# point number sits alone on its own line, so it is stripped before this runs.
+_VERSE_NUMBER = re.compile(r"(?:^|[^\S\n\r])?(\d{1,3})[^\S\n\r]*(?=[A-Z“\"‘'(])", re.MULTILINE)
+_NUMBER_ONLY_LINE = re.compile(r"^\s*\d{1,3}\s*$")
+_LABEL_LINE = re.compile(
+    rf"^\s*(?P<book>{BOOK_PATTERN})\.?\s+(?P<chapter>\d{{1,3}})"
+    rf"(?:\s*\((?P<translation>[A-Za-z]+)\))?\s*$",
+    re.IGNORECASE,
+)
+MAX_VERSE_SPAN = 12
+
+
+@dataclass(frozen=True)
+class SlideReference:
+    book: str
+    chapter: int
+    start: int
+    end: int
+    translation: str
+    body: str
+
+
+def slide_reference(text: str) -> SlideReference | None:
+    """Pull the cited passage and quoted verses out of one slide's rendered text."""
+    if not (text or "").strip():
+        return None
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    book = chapter = translation = None
+    body_lines: list[str] = []
+    for line in lines:
+        match = _LABEL_LINE.match(line.strip())
+        if match and book is None:
+            book = _norm_book(match.group("book"))
+            chapter = int(match.group("chapter"))
+            if match.group("translation"):
+                translation = match.group("translation").upper()
+            continue
+        # A line holding nothing but a number is the point number on the wall,
+        # not a verse marker.
+        if _NUMBER_ONLY_LINE.match(line):
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+    if book is None or chapter is None:
+        inline = ABS_REF_RE.search(text)
+        if not inline:
+            return None
+        book = _norm_book(inline.group("book"))
+        chapter = int(inline.group("chapter"))
+        if inline.group("translation"):
+            translation = inline.group("translation").upper()
+        body = ABS_REF_RE.sub(" ", text).strip()
+    numbers = [int(n) for n in _VERSE_NUMBER.findall(body)]
+    numbers = [n for n in numbers if 1 <= n <= 176]
+    if not numbers:
+        return None
+    start, end = min(numbers), max(numbers)
+    if end - start > MAX_VERSE_SPAN:
+        end = start
+    return SlideReference(book, chapter, start, end, translation or "NIV", body)
+
+
+def _ref_label(book: str, chapter: int, start: int, end: int) -> str:
+    return f"{book} {chapter}:{start}" + (f"-{end}" if end != start else "")
+
+
+def _better_reference(
+    quoted: str, ref: SlideReference, baseline: float
+) -> tuple[str, float] | None:
+    """Look for the passage the wording actually came from.
+
+    A wrong chapter is the common slip (2 Corinthians 2 for 2 Corinthians 1),
+    and the Gospels get confused with each other.
+    """
+    candidates: list[tuple[str, int]] = []
+    for delta in (-1, 1):
+        if ref.chapter + delta >= 1:
+            candidates.append((ref.book, ref.chapter + delta))
+    if ref.book in GOSPEL_BOOKS:
+        candidates.extend((other, ref.chapter) for other in GOSPEL_BOOKS if other != ref.book)
+    best: tuple[str, float] | None = None
+    for book, chapter in candidates:
+        text, _ = fetch_passage(book, chapter, ref.start, ref.end, ref.translation)
+        if not text:
+            continue
+        score = _token_overlap(quoted, text)
+        if score >= MATCH_OVERLAP and score > baseline + 0.2 and (best is None or score > best[1]):
+            best = (_ref_label(book, chapter, ref.start, ref.end), score)
+    return best
+
+
+def _smallcaps_flag(
+    quoted: str,
+    official: str,
+    location: str,
+    slide: int,
+    deck: str,
+    png: object = None,
+    slide_size: tuple[float, float] = (0.0, 0.0),
+) -> Flag | None:
+    """NIV sets the divine name as LORD; check the slide really does too.
+
+    Neither Keynote's text nor OCR reports small caps as uppercase, so the
+    answer comes from measuring the letter shapes on the rendered preview.
+    """
+    if "LORD" not in official:
+        return None
+    if re.search(r"\bLORD\b", quoted):
+        return None
+    if not re.search(r"\bLord\b", quoted):
+        return None
+    from obed_edom.rendered import word_is_small_caps  # noqa: PLC0415
+
+    if word_is_small_caps(png, "Lord", slide_size) is not False:
+        return None
+    return Flag(
+        "warning",
+        "bible",
+        'This passage sets the divine name as "LORD" in small caps, but the slide '
+        'renders it as ordinary "Lord".',
+        location=location,
+        slide=slide,
+        deck=deck,
+        rule="style.smallcaps",
+    )
+
+
+def check_slide_passages(
+    payload: dict,
+    rendered: dict[int, str],
+    prefix: str = "",
+    deck: str = "",
+    ocr: dict[int, str] | None = None,
+    pngs: dict[int, object] | None = None,
+) -> list[Flag]:
+    """Verify each slide's quoted verses against Bible Gateway.
+
+    Replaces the old cursor commentary: one finding per slide, only when the
+    wording and the citation disagree.
+    """
+    from obed_edom.validate import make_flag  # noqa: PLC0415
+
+    flags: list[Flag] = []
+    slides = payload.get("slides") or []
+    size = (float(payload.get("slideWidth") or 0), float(payload.get("slideHeight") or 0))
+    seen: set[tuple[str, int, int, int, str]] = set()
+    for index, slide in enumerate(slides):
+        if slide.get("skipped"):
+            continue
+        text = rendered.get(index) or ""
+        ref = slide_reference(text)
+        if not ref:
+            continue
+        key = (ref.book, ref.chapter, ref.start, ref.end, ref.translation)
+        if key in seen:
+            continue
+        seen.add(key)
+        num = int(slide.get("number") or slide.get("index", index) + 1)
+        location = f"{prefix} slide {num}".strip()
+        label = _ref_label(ref.book, ref.chapter, ref.start, ref.end)
+        official, source = fetch_passage(
+            ref.book, ref.chapter, ref.start, ref.end, ref.translation
+        )
+        quoted = _quote_without_refs(ref.body)
+        if official is None:
+            # No text at all usually means the verse does not exist in that
+            # chapter, which is itself the mistake: look for the real chapter.
+            better = _better_reference(quoted, ref, 0.0) if "no passage text" in source else None
+            if better:
+                flag = make_flag(
+                    "bible.wrong_reference",
+                    "bible",
+                    f"{label} has no such verse, but the wording on this slide matches "
+                    f"{better[0]} ({better[1]:.0%}). Check the reference label.",
+                    default="error",
+                    location=location,
+                    slide=num,
+                    deck=deck,
+                    resolved=better[0],
+                )
+            else:
+                flag = make_flag(
+                    "bible.unchecked",
+                    "bible",
+                    f"Could not verify {label} ({ref.translation}): {source}.",
+                    default="info",
+                    location=location,
+                    slide=num,
+                    deck=deck,
+                    resolved=label,
+                )
+            if flag:
+                flags.append(flag)
+            continue
+        overlap = _token_overlap(quoted, official)
+        if overlap < MATCH_OVERLAP:
+            better = _better_reference(quoted, ref, overlap)
+            if better:
+                flag = make_flag(
+                    "bible.wrong_reference",
+                    "bible",
+                    f"Cited as {label} but the wording on this slide matches {better[0]} "
+                    f"({better[1]:.0%} against {overlap:.0%}). Check the reference label.",
+                    default="error",
+                    location=location,
+                    slide=num,
+                    deck=deck,
+                    resolved=better[0],
+                )
+                if flag:
+                    flags.append(flag)
+                continue
+        if overlap < MISMATCH_OVERLAP:
+            flag = make_flag(
+                "bible.mismatch",
+                "bible",
+                f"Wording for {label} does not match {source} (overlap {overlap:.0%}). "
+                "Check the book, chapter and verses.",
+                default="error",
+                location=location,
+                slide=num,
+                deck=deck,
+                resolved=label,
+            )
+            if flag:
+                flags.append(flag)
+            continue
+        seen_text = (ocr or {}).get(index)
+        if seen_text:
+            caps = _smallcaps_flag(
+                seen_text,
+                official,
+                location,
+                num,
+                deck,
+                png=(pngs or {}).get(index),
+                slide_size=size,
+            )
+            if caps and rule_allows("style.smallcaps"):
+                flags.append(caps)
+    return flags
+
+
+def rule_allows(rule: str) -> bool:
+    from obed_edom.validate import rule_severity  # noqa: PLC0415
+
+    return rule_severity(rule) is not None

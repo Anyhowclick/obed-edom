@@ -4,6 +4,10 @@ export type Flag = {
   message: string;
   location?: string;
   resolved?: string | null;
+  rule?: string;
+  slide?: number | null;
+  deck?: string;
+  evidence?: string;
 };
 
 export type Artifacts = {
@@ -213,6 +217,10 @@ export function previewUrl(jobId: string, deck: string, filename: string): strin
 
 export function diffImageUrl(jobId: string, side: "left" | "right" | "heat", filename: string): string {
   return `/api/diff/${jobId}/image/${side}/${encodeURIComponent(filename)}`;
+}
+
+export function evidenceUrl(jobId: string, filename: string): string {
+  return `/api/jobs/${jobId}/evidence/${encodeURIComponent(filename)}`;
 }
 
 export async function pollJob(id: string, onTick: (job: Job) => void): Promise<Job> {

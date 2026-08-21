@@ -1,24 +1,34 @@
 from __future__ import annotations
 
-import difflib
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageOps
 
 from obed_edom.inspect import highlighted_markup, preview_pngs, slide_plain_text
 from obed_edom.models import Flag
-from obed_edom.validate import validate_inspect
+from obed_edom.rendered import CENTER_WALL, center_wall_box, render_slide
+from obed_edom.text_diff import (
+    classify_text_diff,
+    collapse_repeat as _collapse_repeat,
+    comparable_tokens,
+    fingerprint,
+    is_rotation as _is_rotation,
+    standalone_numbers,
+    text_score,
+    texts_equivalent,
+)
+from obed_edom.validate import make_flag, validate_inspect
 
 LW_WIDTH = 3000
-CENTER_WALL = (3840, 1080)
 ALIGN_THRESHOLD = 0.58
 IMAGE_HAMMING = 12
 GRAPHIC_TOKENS = 2
 SHORT_TITLE_TOKENS = 8
 _PNG_NUM = re.compile(r"(\d+)")
 _SOFT_WS = re.compile(r"[\s\u2028\u2029\xa0]+")
-_EDGE_PUNCT = re.compile(r"^[\s.,;:!?…'\"“”‘’()\[\]—–-]+|[\s.,;:!?…'\"“”‘’()\[\]—–-]+$")
 
 
 def _deck_type(payload: dict, label: str = "") -> str | None:
@@ -55,81 +65,6 @@ def _same_deck_type(left: dict, right: dict, left_label: str, right_label: str) 
     return bool(a and b and a == b)
 
 
-def fingerprint(text: str) -> str:
-    return " ".join(_SOFT_WS.sub(" ", (text or "").replace("\xa0", " ")).lower().split())
-
-
-def comparable_tokens(text: str) -> list[str]:
-    """Whitespace-folded tokens, original case. Ignores wrap/nbsp/line-separator."""
-    folded = _SOFT_WS.sub(" ", (text or "").replace("\xa0", " ")).strip()
-    out: list[str] = []
-    for raw in folded.split() if folded else []:
-        core = _EDGE_PUNCT.sub("", raw)
-        out.append(core or raw)
-    return out
-
-
-def _is_rotation(a: list[str], b: list[str]) -> bool:
-    if len(a) != len(b) or not a:
-        return False
-    doubled = a + a
-    n = len(a)
-    return any(doubled[i : i + n] == b for i in range(n))
-
-
-def _collapse_repeat(tokens: list[str]) -> list[str]:
-    """LW often duplicates a verse on both sides of the wall."""
-    n = len(tokens)
-    if n >= 4 and n % 2 == 0 and tokens[: n // 2] == tokens[n // 2 :]:
-        return tokens[: n // 2]
-    return tokens
-
-
-def texts_equivalent(left: str, right: str) -> bool:
-    """True when copy matches aside from wrap, nbsp, wall-duplication, and ref order."""
-    a, b = _collapse_repeat(comparable_tokens(left)), _collapse_repeat(comparable_tokens(right))
-    if a == b or _is_rotation(a, b):
-        return True
-    sa, sb = " ".join(a), " ".join(b)
-    if not sa or not sb:
-        return False
-    short, long = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
-    if short not in long:
-        return False
-    rest = " ".join(long.replace(short, " ", 1).split())
-    return rest in {"", short}
-
-
-def text_score(left: str, right: str) -> float:
-    """Similarity for pairing. Case-folded fingerprints; does not rewrite originals."""
-    a = fingerprint(left)
-    b = fingerprint(right)
-    if not a or not b:
-        return 1.0 if a == b and a else 0.0
-    if a == b:
-        return 1.0
-    seq = difflib.SequenceMatcher(None, a, b).ratio()
-    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-    if len(shorter) >= 8 and shorter in longer:
-        seq = max(seq, 0.9)
-    wa, wb = a.split(), b.split()
-    ta, tb = set(wa), set(wb)
-    if not ta or not tb:
-        return seq
-    short_n, long_n = (len(wa), len(wb)) if len(wa) <= len(wb) else (len(wb), len(wa))
-    similar_len = long_n <= max(8, short_n * 4)
-    if not similar_len:
-        return seq
-    cov = len(ta & tb) / min(len(ta), len(tb))
-    if min(len(ta), len(tb)) >= 2:
-        seq = max(seq, cov * 0.95)
-    small, large = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
-    content = {t for t in small if not t.isdigit() and len(t) > 1}
-    if content and len(content) <= 4 and content <= large:
-        seq = max(seq, 0.82)
-    return seq
-
-
 def _has_text(slide: dict) -> bool:
     return bool(slide_plain_text(slide).strip())
 
@@ -145,7 +80,14 @@ def _layout_only(slide: dict) -> bool:
     """Blank TITLE/FILLER chrome. Real photos or copy on those masters still count."""
     if _has_text(slide):
         return False
-    return not any((item.get("kind") or "") == "image" for item in _iter_items(slide))
+    # Keynote reports every group as childCount 0, so a slide whose only content
+    # is a group of screenshots looks empty here. Its bounding box does not lie.
+    return not any(
+        (item.get("kind") or "") in {"image", "group"}
+        and float(item.get("w") or 0) > 0
+        and float(item.get("h") or 0) > 0
+        for item in _iter_items(slide)
+    )
 
 
 def _token_count(slide: dict) -> int:
@@ -190,10 +132,18 @@ def _pair_quality(
     right_size: tuple[float, float],
     left_bits: dict[int, list[int] | None],
     right_bits: dict[int, list[int] | None],
+    left_ocr: Callable[[int], str] | None = None,
+    right_ocr: Callable[[int], str] | None = None,
 ) -> float:
     score = text_score(slide_plain_text(left_slide), slide_plain_text(right_slide))
     if score >= ALIGN_THRESHOLD:
         return score
+    # Copy set inside a group or baked into a graphic is invisible to Keynote's
+    # API, so those slides look blank and can never find each other on text.
+    if left_ocr and right_ocr and not (_has_text(left_slide) and _has_text(right_slide)):
+        score = max(score, text_score(left_ocr(li), right_ocr(ri)))
+        if score >= ALIGN_THRESHOLD:
+            return score
     if _token_count(left_slide) > SHORT_TITLE_TOKENS and _token_count(right_slide) > SHORT_TITLE_TOKENS:
         return score
     if not _image_items(left_slide) or not _image_items(right_slide):
@@ -218,6 +168,7 @@ def align_slides(
     right_pngs: list[Path] | None = None,
     left_size: tuple[float, float] = (0.0, 0.0),
     right_size: tuple[float, float] = (0.0, 0.0),
+    use_ocr: bool = True,
 ) -> list[tuple[int | None, int | None, float]]:
     """Walk visible slides. Extra LW photos stay unmatched when a later LW fits.
 
@@ -236,6 +187,24 @@ def align_slides(
     left_hash: dict[int, list[int] | None] = {}
     right_hash: dict[int, list[int] | None] = {}
 
+    def reader(
+        slides: list[dict], pngs: dict[int, Path], size: tuple[float, float]
+    ) -> Callable[[int], str]:
+        cache: dict[int, str] = {}
+
+        def read(idx: int) -> str:
+            if idx not in cache:
+                png = pngs.get(idx)
+                cache[idx] = (
+                    render_slide(slides[idx], png, size, use_ocr=True).ocr if png else ""
+                )
+            return cache[idx]
+
+        return read
+
+    left_read = reader(left_slides, left_map, left_size) if use_ocr else None
+    right_read = reader(right_slides, right_map, right_size) if use_ocr else None
+
     def quality(li: int, ri: int) -> float:
         return _pair_quality(
             left_slides[li],
@@ -248,6 +217,8 @@ def align_slides(
             right_size,
             left_hash,
             right_hash,
+            left_read,
+            right_read,
         )
 
     i = 0
@@ -327,7 +298,93 @@ def align_slides(
     for li in vis_left:
         if li not in used_left:
             ordered.append((li, None, 0.0))
-    return ordered
+    return _combine_split_verses(ordered, left_slides, right_slides)
+
+
+def _covers(whole: str, parts: str) -> bool:
+    """True when one wall slide carries everything the DSK split over two."""
+    if texts_equivalent(whole, parts):
+        return True
+    have = {t.lower() for t in comparable_tokens(whole)}
+    want = [t.lower() for t in comparable_tokens(parts)]
+    if len(want) < 6:
+        return False
+    return sum(1 for t in want if t in have) / len(want) >= 0.9
+
+
+def _combine_split_verses(
+    ordered: list[tuple[int | None, int | None, float]],
+    left_slides: list[dict],
+    right_slides: list[dict],
+) -> list[tuple[int | None, int | None | list[int], float]]:
+    """Fold an unmatched DSK slide into the wall slide that already shows it.
+
+    The wall fits two verses side by side where the lower third needs two
+    slides, so the second DSK slide is not missing, it is part of the same pair.
+    """
+    out: list[tuple[int | None, int | None | list[int], float]] = []
+    i = 0
+    while i < len(ordered):
+        li, ri, score = ordered[i]
+        if li is None or ri is None:
+            out.append((li, ri, score))
+            i += 1
+            continue
+        merged = [ri]
+        whole = slide_plain_text(left_slides[li])
+        j = i + 1
+        stranded: list[int] = []
+        while j < len(ordered):
+            next_li, next_ri, next_score = ordered[j]
+            if next_ri is None:
+                break
+            # A following DSK slide can also be sitting in a weak pair of its
+            # own; take it only when this wall slide clearly already shows it.
+            if next_li is not None and next_score >= ALIGN_THRESHOLD:
+                break
+            # Only verses fold in. A text-less photo slide adds no tokens, so
+            # the coverage test would absorb it and hide whatever is on it.
+            if not comparable_tokens(slide_plain_text(right_slides[next_ri])):
+                break
+            candidate = merged + [next_ri]
+            parts = "\n".join(slide_plain_text(right_slides[k]) for k in candidate)
+            if not _covers(whole, parts):
+                break
+            merged = candidate
+            if next_li is not None:
+                stranded.append(next_li)
+            j += 1
+        if len(merged) > 1:
+            out.append((li, merged, score))
+            out.extend((left_index, None, 0.0) for left_index in stranded)
+            i = j
+            continue
+        out.append((li, ri, score))
+        i += 1
+    return out
+
+
+def build_repeat_indices(
+    left_slides: list[dict], matched: set[int], window: int = 6
+) -> set[int]:
+    """Wall slides that only repeat a nearby matched slide's copy.
+
+    Magic Move keeps a point title on screen while the verses change, so the
+    wall carries the same title several times. The DSK carries it once, and
+    calling each repeat a missing slide is noise.
+    """
+    visible = [i for i, slide in enumerate(left_slides) if not _skipped(slide)]
+    prints = {i: fingerprint(slide_plain_text(left_slides[i])) for i in visible}
+    repeats: set[int] = set()
+    for position, index in enumerate(visible):
+        if index in matched or not prints[index]:
+            continue
+        lo = max(0, position - window)
+        hi = min(len(visible), position + window + 1)
+        neighbours = visible[lo:position] + visible[position + 1 : hi]
+        if any(other in matched and prints[other] == prints[index] for other in neighbours):
+            repeats.add(index)
+    return repeats
 
 
 def visual_diff(a_png: Path, b_png: Path, out_png: Path, threshold: int = 18) -> dict:
@@ -437,17 +494,6 @@ def _hash_distances(left_bits: list[int], right_bits: list[int]) -> tuple[int, i
     return direct, flipped
 
 
-def center_wall_box(slide_w: float, slide_h: float) -> tuple[float, float, float, float]:
-    """Slide-space box for the 3840×1080 center wall. Sides outside it are decorative."""
-    wall_w, wall_h = CENTER_WALL
-    if slide_w <= 0 or slide_h <= 0:
-        return (0.0, 0.0, 0.0, 0.0)
-    if slide_w <= wall_w:
-        return (0.0, 0.0, slide_w, min(slide_h, wall_h))
-    x0 = (slide_w - wall_w) / 2.0
-    return (x0, 0.0, x0 + wall_w, min(slide_h, wall_h))
-
-
 def crop_center_wall(im: Image.Image, slide_w: float, slide_h: float) -> Image.Image:
     """Keep the center wall; drop LW side wings for pixel/hash compares."""
     x0, y0, x1, y1 = center_wall_box(slide_w, slide_h)
@@ -482,7 +528,7 @@ def _slide_probe(slide: dict, png: Path, slide_size: tuple[float, float]) -> Ima
         return None
     items = [
         it
-        for it in _image_items(slide)
+        for it in content_photos(slide, slide_size)
         if _overlaps_center_wall(it, slide_size[0], slide_size[1])
     ]
     crops = [c for c in (_crop_item(im, it, slide_size[0], slide_size[1]) for it in items) if c]
@@ -504,6 +550,107 @@ def _image_items(slide: dict) -> list[dict]:
         for item in _iter_items(slide)
         if (item.get("kind") or "") == "image" and item.get("w") and item.get("h")
     ]
+
+
+# Backgrounds and chrome that every deck carries. Comparing them across decks
+# only ever produces noise, because LW and DSK use different furniture.
+_CHROME_NAMES = re.compile(r"(filler|blank|background|bg[_\- ]|lower[_\- ]?third|logo|frame)", re.I)
+_LABEL_MAX_HEIGHT = 120
+
+
+def _is_chrome(item: dict, slide_size: tuple[float, float]) -> bool:
+    name = str(item.get("fileName") or "")
+    if _CHROME_NAMES.search(name):
+        return True
+    width = float(item.get("w") or 0)
+    height = float(item.get("h") or 0)
+    slide_w, slide_h = slide_size
+    if slide_h and height >= slide_h - 1 and width >= min(slide_w, 1920) - 1:
+        return True
+    # The reference chip behind "2 Chronicles 5" is a pasted image on DSK only.
+    return bool(height and height <= _LABEL_MAX_HEIGHT and width and width <= 600)
+
+
+def content_photos(slide: dict, slide_size: tuple[float, float]) -> list[dict]:
+    """Photos an operator would call content, with backgrounds and chrome removed."""
+    return [item for item in _image_items(slide) if not _is_chrome(item, slide_size)]
+
+
+@dataclass(frozen=True)
+class PhotoFinding:
+    rule: str
+    message: str
+    default: str = "warning"
+
+
+def _photo_name(item: dict) -> str:
+    return Path(str(item.get("fileName") or "")).name
+
+
+def _rotation(item: dict) -> float:
+    try:
+        return round(float(item.get("rotation") or 0.0) % 360, 1)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def photo_findings_for_pair(
+    left_slide: dict,
+    right_slides: list[dict],
+    left_label: str,
+    right_label: str,
+    left_size: tuple[float, float] = (0.0, 0.0),
+    right_size: tuple[float, float] = (0.0, 0.0),
+) -> list[PhotoFinding]:
+    """Compare photos by what Keynote records about them, not by pixels.
+
+    File names catch a stale asset that a pixel hash would call "slightly
+    different", and the rotation field catches a tilt exactly.
+    """
+    left_photos = content_photos(left_slide, left_size)
+    right_photos: list[dict] = []
+    for slide in right_slides:
+        right_photos.extend(content_photos(slide, right_size))
+    if not left_photos or not right_photos:
+        return []
+
+    findings: list[PhotoFinding] = []
+    left_names = [n for n in (_photo_name(i) for i in left_photos) if n]
+    right_names = [n for n in (_photo_name(i) for i in right_photos) if n]
+    if left_names and right_names:
+        missing = [n for n in right_names if n not in left_names]
+        replaced = [n for n in left_names if n not in right_names]
+        if missing and replaced:
+            findings.append(
+                PhotoFinding(
+                    "photo.source",
+                    f"Different image file: {left_label} uses "
+                    f"{', '.join(sorted(set(replaced))[:3])}, {right_label} uses "
+                    f"{', '.join(sorted(set(missing))[:3])}. Check the DSK is on the latest photo.",
+                )
+            )
+
+    left_rot = sorted(_rotation(i) for i in left_photos)
+    right_rot = sorted(_rotation(i) for i in right_photos)
+    if left_rot != right_rot and (any(left_rot) or any(right_rot)):
+        findings.append(
+            PhotoFinding(
+                "photo.rotated",
+                f"Photo is rotated on one deck only: {left_label} at "
+                f"{', '.join(f'{r:g}°' for r in left_rot)}, {right_label} at "
+                f"{', '.join(f'{r:g}°' for r in right_rot)}.",
+            )
+        )
+    if len(left_photos) != len(right_photos):
+        findings.append(
+            PhotoFinding(
+                "photo.count",
+                f"{left_label} has {len(left_photos)} photo(s), {right_label} has "
+                f"{len(right_photos)}.",
+                default="info",
+            )
+        )
+    return findings
 
 
 def _crop_item(png: Image.Image, item: dict, slide_w: float, slide_h: float) -> Image.Image | None:
@@ -528,7 +675,7 @@ def _crop_item(png: Image.Image, item: dict, slide_w: float, slide_h: float) -> 
 
 def _photo_crops(slide: dict, png: Path, size: tuple[float, float]) -> tuple[Image.Image, list[Image.Image]]:
     im = Image.open(png).convert("RGB")
-    items = [it for it in _image_items(slide) if _overlaps_center_wall(it, size[0], size[1])]
+    items = [it for it in content_photos(slide, size) if _overlaps_center_wall(it, size[0], size[1])]
     crops = [c for c in (_crop_item(im, it, size[0], size[1]) for it in items) if c]
     return im, crops
 
@@ -682,24 +829,14 @@ def _brief(text: str, limit: int = 140) -> str:
 
 
 def wording_message(left: str, right: str, left_label: str, right_label: str) -> str | None:
-    if texts_equivalent(left, right):
-        return None
-    la, ra = set(comparable_tokens(left)), set(comparable_tokens(right))
-    only_l = sorted(la - ra)
-    only_r = sorted(ra - la)
-    lines = [
-        "Wording differs.",
-        f"{left_label}: {_brief(left)}",
-        f"{right_label}: {_brief(right)}",
-    ]
-    if only_l:
-        lines.append(f"Only in {left_label}: " + ", ".join(only_l[:8]))
-    if only_r:
-        lines.append(f"Only in {right_label}: " + ", ".join(only_r[:8]))
-    return "\n".join(lines)
+    """Back-compat wrapper. New callers should use classify_text_diff directly."""
+    finding = classify_text_diff(left, right, left_label, right_label)
+    return finding.message if finding else None
 
 
-def _add_flag(bucket: list[Flag], flags: list[Flag], flag: Flag) -> None:
+def _add_flag(bucket: list[Flag], flags: list[Flag], flag: Flag | None) -> None:
+    if flag is None:
+        return
     bucket.append(flag)
     flags.append(flag)
 
@@ -754,6 +891,7 @@ def compare_inspects(
     right_label: str = "Other",
     slots: list[tuple[int | None, int | None | list[int], float]] | None = None,
     check: bool = True,
+    use_ocr: bool = True,
 ) -> dict:
     left_pngs = preview_pngs(left_previews)
     right_pngs = preview_pngs(right_previews)
@@ -766,13 +904,14 @@ def compare_inspects(
     flags: list[Flag] = []
     same_type = _same_deck_type(left, right, left_label, right_label)
     if check and same_type and n_left != n_right:
-        flags.append(
-            Flag(
-                "info",
-                "diff",
-                f"Slide count differs: {left_label} has {n_left}, {right_label} has {n_right}. Compared by index.",
-            )
+        count_flag = make_flag(
+            "diff.count",
+            "diff",
+            f"Slide count differs: {left_label} has {n_left}, {right_label} has {n_right}. Compared by index.",
+            default="info",
         )
+        if count_flag:
+            flags.append(count_flag)
 
     left_size = (float(left.get("slideWidth") or 0), float(left.get("slideHeight") or 0))
     right_size = (float(right.get("slideWidth") or 0), float(right.get("slideHeight") or 0))
@@ -792,7 +931,15 @@ def compare_inspects(
                 right_pngs=right_pngs,
                 left_size=left_size,
                 right_size=right_size,
+                use_ocr=use_ocr,
             )
+
+    matched_left = {
+        int(li)
+        for li, raw_ri, _ in slots
+        if li is not None and _right_indexes(raw_ri)
+    }
+    build_repeats = build_repeat_indices(left_slides, matched_left) if not same_type else set()
 
     pairs = []
     for li, raw_ri, score in slots:
@@ -858,13 +1005,24 @@ def compare_inspects(
                     _add_flag(
                         pair_flags,
                         flags,
-                        Flag("warning", "diff", f"Missing on {left_label}.", location=loc),
+                        make_flag(
+                            "diff.missing", "diff", f"Missing on {left_label}.", location=loc,
+                            slide=right_num, deck="dsk",
+                        ),
                     )
                 elif rs and not all(_layout_only(slide) for _, slide in right_hits):
                     _add_flag(
                         pair_flags,
                         flags,
-                        Flag("warning", "diff", f"No matching {left_label} slide.", location=loc),
+                        make_flag(
+                            "diff.unmatched",
+                            "diff",
+                            f"No matching {left_label} slide.",
+                            default="info",
+                            location=loc,
+                            slide=right_num,
+                            deck="dsk",
+                        ),
                     )
             pair["missing"] = left_label
             pair["flags"] = pair_flags
@@ -876,14 +1034,27 @@ def compare_inspects(
                     _add_flag(
                         pair_flags,
                         flags,
-                        Flag("warning", "diff", f"Missing on {right_label}.", location=loc),
+                        make_flag(
+                            "diff.missing", "diff", f"Missing on {right_label}.", location=loc,
+                            slide=left_num, deck="lw",
+                        ),
                     )
-                elif not _layout_only(ls):
+                elif not _layout_only(ls) and li not in build_repeats:
                     _add_flag(
                         pair_flags,
                         flags,
-                        Flag("info", "diff", f"No matching {right_label} slide.", location=loc),
+                        make_flag(
+                            "diff.unmatched",
+                            "diff",
+                            f"No matching {right_label} slide.",
+                            default="info",
+                            location=loc,
+                            slide=left_num,
+                            deck="lw",
+                        ),
                     )
+            if li in build_repeats:
+                pair["buildRepeat"] = True
             pair["missing"] = right_label
             pair["flags"] = pair_flags
             pairs.append(pair)
@@ -901,36 +1072,73 @@ def compare_inspects(
             _add_flag(
                 pair_flags,
                 flags,
-                Flag(
-                    "warning",
+                make_flag(
+                    "diff.skip_mismatch",
                     "diff",
                     f"Shown on {shown} but skipped on {hidden}.",
                     location=loc,
+                    slide=left_num,
+                    deck="lw",
                 ),
             )
 
-        a_text = pair.get("leftText") or ""
-        b_text = pair.get("rightText") or ""
+        a_render = render_slide(ls, left_png, left_size, use_ocr=use_ocr)
+        b_renders = [
+            render_slide(slide, png, right_size, use_ocr=use_ocr)
+            for (_, slide), png in zip(right_hits, right_png_paths)
+        ]
+        a_text = a_render.text
+        b_text = "\n".join(r.text for r in b_renders)
+        pair["leftRendered"] = a_text
+        pair["rightRendered"] = b_text
+        pair["ocr"] = a_render.ocr_used or any(r.ocr_used for r in b_renders)
         a_mark = pair.get("leftMarkup") or ""
         b_mark = pair.get("rightMarkup") or ""
-        wording = wording_message(a_text, b_text, left_label, right_label)
-        if wording:
-            _add_flag(pair_flags, flags, Flag("warning", "diff", wording, location=loc))
-        elif _highlighted_words(a_mark) != _highlighted_words(b_mark):
+        finding = classify_text_diff(
+            a_text,
+            b_text,
+            left_label,
+            right_label,
+            ignore_left_tokens=standalone_numbers(a_text),
+        )
+        if finding:
             _add_flag(
                 pair_flags,
                 flags,
-                Flag("warning", "diff", "Highlighting differs.", location=loc),
+                make_flag(
+                    finding.rule,
+                    "diff",
+                    finding.message,
+                    default=finding.default,
+                    location=loc,
+                    slide=left_num,
+                    deck="lw",
+                ),
+            )
+        elif _highlighted_words(a_mark) and _highlighted_words(a_mark) != _highlighted_words(b_mark):
+            _add_flag(
+                pair_flags,
+                flags,
+                make_flag(
+                    "style.highlight", "diff", "Highlighting differs.", location=loc,
+                    slide=left_num, deck="lw",
+                ),
             )
         else:
             right_sig: list[tuple[str, bool]] = []
             for _, slide in right_hits:
                 right_sig.extend(_smallcaps_signature(slide))
-            if _smallcaps_signature(ls) != right_sig:
+            left_sig = _smallcaps_signature(ls)
+            # Only meaningful when Keynote actually returned run styling; on most
+            # decks it returns none and both sides come back empty.
+            if (left_sig or right_sig) and left_sig != right_sig:
                 _add_flag(
                     pair_flags,
                     flags,
-                    Flag("warning", "diff", "Small caps differ.", location=loc),
+                    make_flag(
+                        "style.smallcaps", "diff", "Small caps differ.", location=loc,
+                        slide=left_num, deck="lw",
+                    ),
                 )
 
         extra_photo = [
@@ -938,7 +1146,29 @@ def compare_inspects(
             for (i, slide), png in zip(extra_hits, right_png_paths[1:])
             if png is not None
         ]
-        if left_png and right_png:
+        photo_findings = photo_findings_for_pair(
+            ls,
+            [slide for _, slide in right_hits],
+            left_label,
+            right_label,
+            left_size,
+            right_size,
+        )
+        for photo in photo_findings:
+            _add_flag(
+                pair_flags,
+                flags,
+                make_flag(
+                    photo.rule,
+                    "diff",
+                    photo.message,
+                    default=photo.default,
+                    location=loc,
+                    slide=left_num,
+                    deck="lw",
+                ),
+            )
+        if left_png and right_png and not photo_findings:
             heat = heat_dir / f"pair-{pair_i + 1:03d}.png"
             if same_type and not extra_photo:
                 vis = visual_diff(left_png, right_png, heat)
@@ -956,30 +1186,62 @@ def compare_inspects(
             pair["visual"] = vis
             if vis.get("heatmap"):
                 pair["heatPng"] = Path(str(vis["heatmap"])).name
-            if vis.get("visual") and texts_equivalent(a_text, b_text):
+            if vis.get("visual"):
+                same_copy = finding is None
                 if vis.get("reason") == "flipped":
-                    photo_msg = "Photo is flipped."
+                    rule, message, default = "photo.flipped", "Photo is flipped.", "warning"
                 elif same_type:
-                    photo_msg = "Photo or layout differs."
+                    rule, message, default = "photo.differs", "Photo or layout differs.", "warning"
                 else:
-                    photo_msg = "Photo differs."
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    Flag("warning", "diff", photo_msg, location=loc),
-                )
-            elif vis.get("visual"):
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    Flag("info", "diff", "Photo or layout differs.", location=loc),
-                )
+                    rule, message, default = (
+                        "photo.differs",
+                        "The copy matches but the photos do not. Check the DSK is on the "
+                        "latest image, and that it is not flipped or tilted.",
+                        "warning",
+                    )
+                if not same_copy and rule == "photo.differs":
+                    # The copy already differs; a pixel difference adds nothing.
+                    rule = ""
+                if rule:
+                    _add_flag(
+                        pair_flags,
+                        flags,
+                        make_flag(
+                            rule,
+                            "diff",
+                            message,
+                            default=default,
+                            location=loc,
+                            slide=left_num,
+                            deck="lw",
+                            evidence=pair.get("heatPng") or "",
+                        ),
+                    )
         pair["flags"] = pair_flags
         pairs.append(pair)
 
     if check:
-        flags.extend(validate_inspect(left, location_prefix=left_label))
-        flags.extend(validate_inspect(right, location_prefix=right_label))
+        evidence_dir = heat_dir.parent / "evidence"
+        flags.extend(
+            validate_inspect(
+                left,
+                location_prefix=left_label,
+                deck="lw",
+                previews=left_pngs,
+                evidence_dir=evidence_dir,
+                use_ocr=use_ocr,
+            )
+        )
+        flags.extend(
+            validate_inspect(
+                right,
+                location_prefix=right_label,
+                deck="dsk",
+                previews=right_pngs,
+                evidence_dir=evidence_dir,
+                use_ocr=use_ocr,
+            )
+        )
     return {
         "leftSlideCount": n_left,
         "rightSlideCount": n_right,

@@ -23,3 +23,67 @@ overflow:
   height_slack_px: 8
   char_em: 0.58
   line_height: 1.18
+
+# Severity per rule: off | info | warning | error. Retunes noise without code
+# changes. Anything not listed keeps the severity the rule ships with.
+rules:
+  # LW vs DSK copy
+  text.case: warning
+  text.symbol: warning
+  text.reference: warning
+  text.word: warning
+  text.major: warning
+  # Reference labels sit above the body on one deck and below on the other.
+  text.order: info
+  # The wall fits more verses than the lower third, so the split differs often.
+  text.verse_split: info
+  # One side has no readable text at all, usually a preview that failed to OCR.
+  text.unreadable: off
+
+  # Photos
+  photo.source: warning
+  photo.rotated: warning
+  photo.flipped: warning
+  photo.count: info
+  # Only fires when the copy already matched, so it is the last line of defence
+  # for a reshot, flipped or tilted image whose tilt is baked into the file.
+  photo.differs: warning
+
+  # Pairing
+  diff.count: info
+  diff.missing: warning
+  diff.unmatched: info
+  diff.skip_mismatch: warning
+
+  # Geometry. Objects fully inside a side panel are intentional on a 7680 wall.
+  bounds.straddles: warning
+  bounds.offcanvas: warning
+  bounds.canvas: off
+
+  # Scripture
+  bible.mismatch: error
+  bible.wrong_reference: error
+  bible.unchecked: info
+  bible.relative: warning
+
+  # House style
+  style.smallcaps: warning
+  style.trinity: warning
+  style.book_name: warning
+  style.date: warning
+  style.highlight: warning
+  style.quote: info
+  style.glossary: warning
+  overflow.text: warning
+  ocr.unavailable: info
+
+# Proper nouns that must be spelled this way. Checked against rendered text, so
+# it also catches names baked into images.
+glossary:
+  - First Love Conference
+  - Asia Pentecostal Summit
+  - Book of Romans Seminar
+  - Great Commandment
+  - Great Commission
+  - Cultural Mandate
+  - Holy Spirit

@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
+import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { isPreviewVideo } from "./PreviewGrid";
+import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
 
 type Pair = {
@@ -160,6 +162,7 @@ function SlideSlot({
   png,
   label,
   crop,
+  wide,
   draggable,
   onOpen,
   onDragStart,
@@ -169,6 +172,7 @@ function SlideSlot({
   png?: string;
   label: string;
   crop?: boolean;
+  wide?: boolean;
   draggable?: boolean;
   onOpen: (src: string) => void;
   onDragStart?: () => void;
@@ -177,7 +181,7 @@ function SlideSlot({
   const src = png && present(job, artifact) ? diffImageUrl(job.id, side, png) : "";
   return (
     <div
-      className={`slide-slot${crop ? " crop-center" : " dsk-frame"}`}
+      className={`slide-slot${crop ? (wide ? " full-wall" : " crop-center") : " dsk-frame"}`}
       draggable={Boolean(draggable && src)}
       onDragStart={(event) => {
         if (!draggable) return;
@@ -213,6 +217,8 @@ export function DiffResultView({
 }) {
   const result = (job.result || null) as DiffResult | null;
   const { focusMode, setFocusMode } = useLayout();
+  const [showInfo, setShowInfo] = useSessionToggle(SHOW_INFO_KEY, false);
+  const [sidePanels, setSidePanels] = useSessionToggle(SIDE_PANELS_KEY, false);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [selected, setSelected] = useState(0);
   const [split, setSplit] = useState<number | null>(() => {
@@ -303,6 +309,26 @@ export function DiffResultView({
               </button>
             )}
             <button
+              className={`btn secondary toggle${showInfo ? " on" : ""}`}
+              type="button"
+              aria-pressed={showInfo}
+              title="Info findings are notes rather than problems"
+              onClick={() => setShowInfo(!showInfo)}
+            >
+              {showInfo ? "Hide info findings" : "Show info findings"}
+            </button>
+            {(leftWide || rightWide) && (
+              <button
+                className={`btn secondary toggle${sidePanels ? " on" : ""}`}
+                type="button"
+                aria-pressed={sidePanels}
+                title="Show the full 7680×1080 wall instead of the 3840×1080 center"
+                onClick={() => setSidePanels(!sidePanels)}
+              >
+                {sidePanels ? "Center wall only" : "Show side panels"}
+              </button>
+            )}
+            <button
               className="btn secondary icon-btn"
               type="button"
               title={focusMode ? "Exit maximise" : "Maximise"}
@@ -342,6 +368,7 @@ export function DiffResultView({
                   png={pickPng(pair.leftPng)}
                   label={cap(result.leftLabel, pair.leftNumber, pair.leftSkipped)}
                   crop={leftWide}
+                  wide={sidePanels}
                   draggable={pair.leftIndex != null}
                   onOpen={onOpen}
                   onDragStart={() => pair.leftIndex != null && setDragging({ side: "left", index: pair.leftIndex })}
@@ -357,6 +384,7 @@ export function DiffResultView({
                         png={pickPng(rightPngs[i])}
                         label={cap(result.rightLabel, rightNumbers[i], false)}
                         crop={rightWide}
+                        wide={sidePanels}
                         draggable
                         onOpen={onOpen}
                         onDragStart={() => setDragging({ side: "right", index })}
@@ -370,6 +398,7 @@ export function DiffResultView({
                     png={pickPng(pair.rightPng)}
                     label={cap(result.rightLabel, pair.rightNumber, pair.rightSkipped)}
                     crop={rightWide}
+                    wide={sidePanels}
                     draggable={pair.rightIndex != null}
                     onOpen={onOpen}
                     onDragStart={() => pair.rightIndex != null && setDragging({ side: "right", index: pair.rightIndex })}
@@ -405,20 +434,22 @@ export function DiffResultView({
                 </div>
               )}
               {issues.length > 0 && (
-                <div className="pair-issues">
-                  {issues.map((flag, i) => (
-                    <div key={`${flag.category}-${i}`} className={`flag ${flag.severity}`}>
-                      <div className="meta">{flag.severity}</div>
-                      {flag.message}
-                    </div>
-                  ))}
-                </div>
+                <SlideFindings flags={issues} jobId={job.id} showInfo={showInfo} onOpen={onOpen} />
               )}
             </article>
           );
         })}
       </div>
-      {deckFlags.length > 0 && <ValidationPanel flags={deckFlags} />}
+      {deckFlags.length > 0 && (
+        <ValidationPanel
+          flags={deckFlags}
+          jobId={job.id}
+          onOpen={onOpen}
+          showInfo={showInfo}
+          onShowInfo={setShowInfo}
+          title="Deck-wide findings"
+        />
+      )}
     </>
   );
 }

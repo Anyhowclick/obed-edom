@@ -178,6 +178,16 @@ def create_app() -> FastAPI:
         path = _safe_file(Path(folder), filename)
         return FileResponse(path, media_type=preview_media_type(path))
 
+    @app.get("/api/jobs/{job_id}/evidence/{filename}")
+    def job_evidence(job_id: str, filename: str):
+        """Cropped pictures of the object a geometry finding is about."""
+        job = RUNNER.get(job_id)
+        folder = (job.result or {}).get("evidenceDir") if job else None
+        if not folder:
+            raise HTTPException(404, "No evidence")
+        path = _safe_file(Path(folder), filename)
+        return FileResponse(path, media_type=preview_media_type(path))
+
     @app.get("/api/jobs/{job_id}/file/{kind}")
     def job_file(job_id: str, kind: str):
         job = RUNNER.get(job_id)
@@ -473,6 +483,7 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
         "leftPreviews": str(left_dir),
         "rightPreviews": str(right_dir),
         "heatDir": str(heat_dir),
+        "evidenceDir": str(work / "evidence"),
         "leftInspect": str(inspect_left),
         "rightInspect": str(inspect_right),
         "leftPngs": [p.name for p in preview_pngs(left_dir)],
@@ -587,10 +598,17 @@ def _run_inspect(
         job.log(f"Exported {len(names)} preview PNG(s).")
     elif export_dir:
         job.log(payload.get("exportError") or "Preview export produced no PNGs.")
-    flags = validate_inspect(payload, location_prefix=path.name)
+    evidence_dir = (export_dir / "evidence") if export_dir else None
+    flags = validate_inspect(
+        payload,
+        location_prefix=path.name,
+        previews=preview_pngs(export_dir) if export_dir else None,
+        evidence_dir=evidence_dir,
+    )
     preview_dir = str(export_dir) if export_dir else None
     return {
         "path": str(path),
+        "evidenceDir": str(evidence_dir) if evidence_dir else None,
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
         "slideCount": payload.get("slideCount"),

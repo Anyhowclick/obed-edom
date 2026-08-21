@@ -117,6 +117,58 @@ def test_validate_inspect_skips_hidden_slides():
     assert not any("slide 1" in (f.location or "") for f in flags)
 
 
+def _wall(*items) -> dict:
+    return {
+        "path": "wall.key",
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [{"number": 1, "items": list(items)}],
+    }
+
+
+def test_bounds_ignores_side_panels_and_backdrops():
+    """A 7680 wall legitimately uses both wings; only cut objects are mistakes."""
+    from obed_edom.validate import _bounds_flags
+
+    payload = _wall(
+        {"kind": "image", "text": "", "x": 0, "y": 0, "w": 7680, "h": 1080},
+        {"kind": "image", "text": "", "x": 0, "y": 0, "w": 1920, "h": 1080},
+        {"kind": "image", "text": "", "x": 5760, "y": 0, "w": 1920, "h": 1080},
+        {"kind": "text", "text": "Faith", "x": 2200, "y": 400, "w": 1200, "h": 200},
+    )
+    assert _bounds_flags(payload, "LW", deck="lw") == []
+
+
+def test_bounds_flags_straddling_object_with_evidence(tmp_path):
+    from PIL import Image
+
+    from obed_edom.validate import _bounds_flags
+
+    png = tmp_path / "slide-001.png"
+    Image.new("RGB", (7680, 1080), (20, 20, 20)).save(png)
+    payload = _wall({"kind": "text", "text": "Faith", "x": 1400, "y": 400, "w": 1400, "h": 200})
+    evidence_dir = tmp_path / "evidence"
+    flags = _bounds_flags(
+        payload, "LW", deck="lw", png_map={0: png}, evidence_dir=evidence_dir
+    )
+    assert [f.rule for f in flags] == ["bounds.straddles"]
+    assert flags[0].slide == 1
+    assert "x=1920" in flags[0].message
+    assert flags[0].evidence
+    assert (evidence_dir / flags[0].evidence).exists()
+
+
+def test_rule_severity_map_can_silence_a_rule(monkeypatch):
+    from obed_edom import validate
+
+    monkeypatch.setattr(validate, "load_rules", lambda: {"rules": {"text.word": "off"}})
+    assert validate.rule_severity("text.word") is None
+    assert validate.make_flag("text.word", "diff", "nope") is None
+    monkeypatch.setattr(validate, "load_rules", lambda: {"rules": {"text.word": "error"}})
+    flag = validate.make_flag("text.word", "diff", "yep", default="warning")
+    assert flag is not None and flag.severity == "error"
+
+
 def test_missing_previews_are_info_not_warning():
     from obed_edom.contrast import check_contrast
 

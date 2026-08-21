@@ -102,6 +102,10 @@ class Flag:
     message: str
     location: str = ""
     resolved: str | None = None
+    rule: str = ""
+    slide: int | None = None
+    deck: str = ""
+    evidence: str = ""
 
 
 @dataclass

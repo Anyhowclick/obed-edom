@@ -114,14 +114,15 @@ def test_mixed_skips_lw_title_and_flags_loved_typo(tmp_path):
 
 
 def test_mixed_flags_known_text_mistakes(tmp_path):
+    """Each documented mistake gets its own rule, not one blunt warning."""
     cases = [
-        ("(plural)", "(Plural)"),
-        ("John 3:16 (AMP)", "John 3:16 (MSG)"),
-        ("love and faith", "love & faith"),
-        ("1 Samuel 17:1", "Samuel 17:1"),
-        ("Faith", "Your Faith"),
+        ("(plural)", "(Plural)", "text.case"),
+        ("John 3:16 (AMP)", "John 3:16 (MSG)", "text.reference"),
+        ("love and faith", "love & faith", "text.symbol"),
+        ("1 Samuel 17:1", "Samuel 17:1", "text.reference"),
+        ("Faith", "Your Faith", "text.word"),
     ]
-    for lw_text, dsk_text in cases:
+    for lw_text, dsk_text, rule in cases:
         left = {
             "path": str(tmp_path / "Sermon_LW.key"),
             "slideWidth": 3840,
@@ -133,8 +134,8 @@ def test_mixed_flags_known_text_mistakes(tmp_path):
             "slides": [_slide(1, dsk_text)],
         }
         result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK")
-        diffs = [f for f in result["flags"] if f.category == "diff"]
-        assert any("Wording differs" in f.message or "Text differs" in f.message for f in diffs), (lw_text, dsk_text, diffs)
+        rules = [f.rule for f in result["flags"] if f.category == "diff"]
+        assert rule in rules, (lw_text, dsk_text, rules)
 
 
 def test_mixed_does_not_full_frame_heatmap_without_images(tmp_path):
@@ -455,6 +456,181 @@ def test_pk_subset_fixture_catches_known_mistakes(tmp_path):
     assert not any("Triune" in f.message for f in diffs)
 
 
+def test_photo_slide_is_not_absorbed_into_a_verse_pair():
+    """Only verses fold into a 1-vs-many pair; a photo slide must stay visible."""
+    v12 = "12 All the Levites who were musicians stood on the east side of the altar."
+    left = [_slide(1, v12), _slide(2, "Closing")]
+    right = [
+        _slide(1, v12),
+        {"number": 2, "items": [{"kind": "image", "text": "", "w": 800, "h": 600}]},
+        _slide(3, "Closing"),
+    ]
+    slots = align_slides(left, right, use_ocr=False)
+    merged = [ri for _, ri, _ in slots if isinstance(ri, list) and len(ri) > 1]
+    assert not merged, slots
+
+
+def test_pair_quality_falls_back_to_ocr_when_extraction_is_blank():
+    """Copy inside a group is invisible to Keynote, so pairing must read pixels."""
+    from obed_edom.diff_keynotes import _pair_quality
+
+    graphic = {"number": 1, "items": [{"kind": "group", "text": "", "w": 900, "h": 400}]}
+    lw_seen = "Overall Consecration Spiritual Actions Faith Prayer Praise and Worship"
+    dsk_seen = "Praise and Worship Prayer Faith Spiritual Actions Overall Consecration"
+    args = (graphic, graphic, 0, 0, {}, {}, (3840.0, 1080.0), (1920.0, 1080.0), {}, {})
+    assert _pair_quality(*args) == 0.0
+    assert _pair_quality(*args, lambda _: lw_seen, lambda _: dsk_seen) >= ALIGN_THRESHOLD
+
+
+PK_PASSAGES = {
+    ("Genesis", 1, 1, 1): "In the beginning God created the heavens and the earth.",
+    ("1 Samuel", 10, 10, 10): (
+        "When he and his servant arrived at Gibeah, a procession of prophets met him."
+    ),
+    ("James", 5, 16, 16): (
+        "The earnest, heartfelt, continued prayer of a righteous man makes tremendous "
+        "power available."
+    ),
+    ("2 Corinthians", 1, 20, 20): (
+        "For no matter how many promises God has made, they are Yes in Christ."
+    ),
+}
+
+
+def _stub_gateway(monkeypatch):
+    """Serve the fixture's passages locally; 2 Corinthians 2:20 does not exist."""
+
+    def fake_fetch(book, chapter, verse, verse_end, translation):
+        text = PK_PASSAGES.get((book, chapter, verse, verse_end or verse))
+        if text is None:
+            return None, "no passage text"
+        return text, f"Bible Gateway {(translation or 'NIV').upper()}"
+
+    monkeypatch.setattr("obed_edom.bible.fetch_passage", fake_fetch)
+
+
+def test_pk_mistakes_fixture_catches_every_documented_mistake(tmp_path, monkeypatch):
+    """One finding per mistake in DSK List of Mistakes.docx, and little else.
+
+    Slide text in the fixture is written as the wall reads, so this exercises the
+    classifiers without needing rendered PNGs. The small-caps mistake needs pixel
+    geometry and is covered by test_smallcaps_needs_pixel_evidence.
+    """
+    import json
+
+    _stub_gateway(monkeypatch)
+    data = json.loads(
+        (Path(__file__).resolve().parent / "fixtures/diff/pk_mistakes.json").read_text()
+    )
+    result = compare_inspects(
+        data["left"],
+        data["right"],
+        tmp_path,
+        tmp_path,
+        tmp_path / "heat",
+        left_label="LW",
+        right_label="DSK",
+        use_ocr=False,
+    )
+    assert result["sameType"] is False
+    flags = result["flags"]
+    by_slide = {}
+    for flag in flags:
+        by_slide.setdefault(flag.rule, []).append(flag.message)
+    blob = "\n".join(f.message for f in flags)
+
+    # 1 First Loved
+    assert "style.glossary" in by_slide or "text.word" in by_slide
+    assert "First Love" in blob
+    # 2 (Plural)
+    assert "text.case" in by_slide
+    assert "Plural" in blob
+    # 3 tilted photo
+    assert "photo.rotated" in by_slide
+    # 4 dated photo
+    assert "photo.source" in by_slide
+    assert "conference_2019.jpg" in blob
+    # 5 Samuel, 7 (MSG), 9 wrong chapter label
+    refs = "\n".join(by_slide.get("text.reference") or [])
+    assert "1 Samuel" in refs
+    assert "MSG" in refs and "AMP" in refs
+    # 8 Your Faith
+    assert "text.word" in by_slide
+    assert "Your Faith" in blob or "Your" in blob
+    # 9 the citation the wording actually came from
+    wrong = by_slide.get("bible.wrong_reference") or []
+    assert wrong and "2 Corinthians 1:20" in wrong[0]
+    # 10 ampersand
+    assert "text.symbol" in by_slide
+
+    # Every pair matched, and nothing shouts about wording in the blunt old way.
+    assert all(p.get("leftNumber") and p.get("rightNumber") for p in result["pairs"])
+    assert not any(f.rule == "text.major" for f in flags)
+    assert len(flags) <= 30, [(f.rule, f.message) for f in flags]
+
+
+def test_pk_mistakes_findings_land_on_the_right_slides(tmp_path, monkeypatch):
+    import json
+
+    _stub_gateway(monkeypatch)
+    data = json.loads(
+        (Path(__file__).resolve().parent / "fixtures/diff/pk_mistakes.json").read_text()
+    )
+    result = compare_inspects(
+        data["left"],
+        data["right"],
+        tmp_path,
+        tmp_path,
+        tmp_path / "heat",
+        left_label="LW",
+        right_label="DSK",
+        use_ocr=False,
+    )
+    rules_on = {p["number"]: {f.rule for f in p.get("flags") or []} for p in result["pairs"]}
+    assert "text.case" in rules_on[2]
+    assert "photo.rotated" in rules_on[3]
+    assert "photo.source" in rules_on[4]
+    assert "text.symbol" in rules_on[9]
+    assert all(flag.slide for flag in result["flags"] if flag.rule.startswith("text."))
+
+
+def test_smallcaps_needs_pixel_evidence(monkeypatch):
+    """Neither Keynote nor OCR reports small caps, so the glyph heights decide."""
+    from obed_edom import bible
+
+    payload = {
+        "path": "/tmp/Sermon_DSK.key",
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [{"number": 4, "index": 3, "items": [{"kind": "text", "text": ""}]}],
+    }
+    quoted = "Psalm 23\n1 The Lord is my shepherd, I lack nothing."
+    monkeypatch.setattr(
+        bible,
+        "fetch_passage",
+        lambda *a, **k: ("The LORD is my shepherd, I lack nothing.", "Bible Gateway NIV"),
+    )
+    rendered = {0: quoted}
+
+    monkeypatch.setattr("obed_edom.rendered.word_is_small_caps", lambda *a, **k: False)
+    flags = bible.check_slide_passages(
+        payload, rendered, "DSK", "dsk", ocr={0: quoted}, pngs={0: object()}
+    )
+    assert [f.rule for f in flags] == ["style.smallcaps"]
+    assert flags[0].slide == 4
+
+    monkeypatch.setattr("obed_edom.rendered.word_is_small_caps", lambda *a, **k: True)
+    assert not bible.check_slide_passages(
+        payload, rendered, "DSK", "dsk", ocr={0: quoted}, pngs={0: object()}
+    )
+
+    # Unknown (no preview, or Vision unavailable) must stay quiet.
+    monkeypatch.setattr("obed_edom.rendered.word_is_small_caps", lambda *a, **k: None)
+    assert not bible.check_slide_passages(
+        payload, rendered, "DSK", "dsk", ocr={0: quoted}, pngs={0: object()}
+    )
+
+
 def test_gw_filename_is_lw_even_at_1920(tmp_path):
     left = {
         "path": str(tmp_path / "Sermon_PK (GW).key"),
@@ -731,7 +907,8 @@ def test_combined_wall_vs_split_dsks_is_not_wording_diff(tmp_path):
         slots=[(0, 0, 1.0), (None, 1, 0.0)],
         check=True,
     )
-    assert any("Wording" in f.message for f in split["flags"] if f.category == "diff")
+    # Split apart, the wall slide carries a verse the paired DSK slide does not.
+    assert any(f.rule == "text.verse_split" for f in split["flags"] if f.category == "diff")
     combined = compare_inspects(
         left,
         right,

@@ -79,7 +79,7 @@ export function ResizeTab() {
     try {
       const created = await startResize(lw.path, {
         templatePath: template.path,
-        slides: parsedSlides,
+        slides: parsedSlides ?? undefined,
         includeLists,
       });
       upsert(created);
