@@ -156,8 +156,32 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
       0 0 18px rgba(240, 90, 80, 0.7);
   }
 }
+.btn.save-pairing {
+  background: linear-gradient(180deg, #e8a04a 0%, #c56e1c 100%);
+  color: #fff8f4;
+  box-shadow: 0 0 0 1px rgba(255, 200, 140, 0.28);
+}
+.btn.save-pairing:hover:not(:disabled) {
+  background: linear-gradient(180deg, #f0b05c 0%, #d47a28 100%);
+}
+.btn.save-pairing.saved {
+  animation: save-pairing-glow 0.7s ease-in-out 3;
+}
+@keyframes save-pairing-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px rgba(255, 210, 140, 0.3),
+      0 0 10px rgba(232, 160, 74, 0.35);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(255, 220, 160, 0.55),
+      0 0 22px rgba(255, 180, 80, 0.8);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .btn.run-checks { animation: none; }
+  .btn.save-pairing.saved { animation: none; }
 }
 .actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
 
@@ -360,6 +384,38 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
 }
 .diff-row.on { border-color: #d9b36a; }
 .playlist-note { margin: 20px 0 10px; }
+.reuse-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 14px;
+}
+.reuse-banner .btn { flex-shrink: 0; }
+.settings-tab { max-width: 720px; }
+.settings-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  background: var(--panel);
+  display: grid;
+  gap: 14px;
+}
+.settings-row, .settings-block {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 15px;
+}
+.settings-block { flex-direction: column; align-items: stretch; }
+.settings-block input[type="range"] { width: 100%; }
+.ok { color: var(--ok); }
 .playlist-bar {
   position: sticky;
   top: calc(-1 * var(--main-pad-y, 0px));
@@ -447,6 +503,14 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   object-fit: cover;
   object-position: center;
 }
+/* The whole 7680x1080 wall, side panels included. */
+.slide-slot.full-wall img,
+.slide-slot.full-wall video,
+.slide-slot.full-wall .slide-ph {
+  aspect-ratio: 64 / 9;
+  object-fit: contain;
+  object-position: center;
+}
 .slide-slot.dsk-frame img,
 .slide-slot.dsk-frame video,
 .slide-slot.dsk-frame .slide-ph {
@@ -464,6 +528,45 @@ body.dragging-split { cursor: col-resize; user-select: none; }
 .pair-issues { margin-top: 8px; }
 .pair-issues .flag { margin: 8px 0 0; }
 .pair-ok { margin: 10px 0 0; }
+.info-chip {
+  display: inline-block;
+  margin: 8px 0 0 8px;
+  padding: 3px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.info-chip:hover { color: var(--ink); border-style: solid; }
+.btn.toggle.on {
+  border-color: #d9b36a;
+  color: #d9b36a;
+}
+/* The cropped object a bounds finding is talking about. */
+.flag-evidence {
+  display: block;
+  margin-top: 8px;
+  max-width: 100%;
+  max-height: 240px;
+  border-radius: 6px;
+  background: #000;
+  cursor: pointer;
+}
+.slide-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.slide-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--panel);
+}
+.slide-card.flagged { border-color: #6b5a2e; }
 input[type="text"], input[type="number"] {
   background: var(--panel);
   border: 1px solid var(--line);

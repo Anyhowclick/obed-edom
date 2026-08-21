@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from obed_edom.inspect import preview_media, preview_media_type, preview_pngs
+from obed_edom.inspect import preview_inspect, preview_media, preview_media_type, preview_pngs
 from obed_edom.web.jobs import visual_result
 
 
@@ -61,3 +61,18 @@ def test_visual_result_accepts_mov(tmp_path: Path):
     assert result["leftPngs"] == ["clip.mov"]
     assert preview_media_type("clip.mov") == "video/quicktime"
     assert preview_media_type("wall.001.jpg") == "image/jpeg"
+
+
+def test_preview_inspect_uses_filename_numbers(tmp_path: Path):
+    from PIL import Image
+
+    folder = tmp_path / "lw"
+    folder.mkdir()
+    Image.new("RGB", (64, 36), (0, 0, 0)).save(folder / "wall.050.png")
+    (folder / "clip.029.mov").write_bytes(b"mov")
+    payload = preview_inspect(folder)
+    assert payload["slideWidth"] == 64
+    assert payload["slideHeight"] == 36
+    numbers = [s["number"] for s in payload["slides"]]
+    assert numbers == [29, 50]
+    assert all(s["items"] == [] for s in payload["slides"])

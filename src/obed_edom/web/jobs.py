@@ -193,6 +193,25 @@ class JobRunner:
 
     def _purge_artifacts(self, job: Job) -> None:
         if job.feature == "visual":
+            work_dir = (job.result or {}).get("workDir")
+            if not work_dir:
+                return
+            candidates: list[Path] = [Path(work_dir)]
+            root = self._output_root.resolve()
+            seen: set[Path] = set()
+            for path in candidates:
+                try:
+                    resolved = path.resolve()
+                    resolved.relative_to(root)
+                except (OSError, ValueError):
+                    continue
+                if resolved == root or resolved in seen:
+                    continue
+                seen.add(resolved)
+                if resolved.is_dir():
+                    shutil.rmtree(resolved, ignore_errors=True)
+                elif resolved.is_file():
+                    resolved.unlink(missing_ok=True)
             return
         result = job.result or {}
         candidates: list[Path] = []
@@ -202,10 +221,14 @@ class JobRunner:
         preview_dir = result.get("previewDir")
         if preview_dir:
             candidates.append(Path(preview_dir))
+        work_dir = result.get("workDir")
+        if work_dir:
+            candidates.append(Path(work_dir))
         left = result.get("leftPreviews")
         if left:
             candidates.append(Path(left).parent)
         root = self._output_root.resolve()
+        cache_root = (self._output_root / ".cache").resolve()
         seen: set[Path] = set()
         for path in candidates:
             try:
@@ -215,6 +238,11 @@ class JobRunner:
                 continue
             if resolved == root or resolved in seen:
                 continue
+            try:
+                resolved.relative_to(cache_root)
+                continue
+            except ValueError:
+                pass
             seen.add(resolved)
             if resolved.is_dir():
                 shutil.rmtree(resolved, ignore_errors=True)
@@ -353,6 +381,69 @@ def _folder_catalog(folder: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _pair_record(i: int, ls: dict | None, rights: list[dict], left_label: str, right_label: str) -> dict[str, Any]:
+    rs = rights[0] if rights else None
+    pair: dict[str, Any] = {
+        "index": i,
+        "number": i + 1,
+        "leftIndex": None if ls is None else ls["index"],
+        "rightIndex": None if rs is None else rs["index"],
+        "rightIndexes": [r["index"] for r in rights],
+        "leftNumber": None if ls is None else ls["number"],
+        "rightNumber": None if rs is None else rs["number"],
+        "rightNumbers": [r["number"] for r in rights],
+        "leftSkipped": False,
+        "rightSkipped": False,
+        "leftPng": None if ls is None else ls["png"],
+        "rightPng": None if rs is None else rs["png"],
+        "rightPngs": [r["png"] for r in rights],
+        "leftText": "",
+        "rightText": "",
+        "score": 1.0 if ls and rights else 0.0,
+        "flags": [],
+    }
+    if ls is None:
+        pair["missing"] = left_label
+    elif not rights:
+        pair["missing"] = right_label
+    return pair
+
+
+def _index_pairs(
+    left_cat: list[dict], right_cat: list[dict], left_label: str, right_label: str
+) -> list[dict[str, Any]]:
+    pairs = []
+    for i in range(max(len(left_cat), len(right_cat))):
+        ls = left_cat[i] if i < len(left_cat) else None
+        rs = right_cat[i] if i < len(right_cat) else None
+        pairs.append(_pair_record(i, ls, [] if rs is None else [rs], left_label, right_label))
+    return pairs
+
+
+def _pairs_from_visual_slots(
+    left_cat: list[dict],
+    right_cat: list[dict],
+    slots: list[dict[str, Any]],
+    left_label: str,
+    right_label: str,
+) -> list[dict[str, Any]]:
+    left = {int(s["index"]): s for s in left_cat}
+    right = {int(s["index"]): s for s in right_cat}
+    pairs = []
+    for i, slot in enumerate(slots):
+        li = slot.get("leftIndex")
+        ris = slot.get("rightIndexes")
+        if ris is None:
+            ri = slot.get("rightIndex")
+            ris = [] if ri is None else [ri]
+        ls = left.get(int(li)) if li is not None else None
+        rights = [right[int(x)] for x in ris if int(x) in right]
+        pairs.append(_pair_record(i, ls, rights, left_label, right_label))
+        if rights:
+            pairs[-1]["score"] = float(slot.get("score") or 1.0)
+    return pairs
+
+
 def bind_visual_folder(result: dict[str, Any], folder: Path) -> dict[str, Any]:
     folder = folder.expanduser()
     if not folder.is_dir():
@@ -373,7 +464,14 @@ def bind_visual_folder(result: dict[str, Any], folder: Path) -> dict[str, Any]:
     return updated
 
 
-def visual_result(left: Path, right: Path, left_label: str = "LW", right_label: str = "DSK") -> dict[str, Any]:
+def visual_result(
+    left: Path,
+    right: Path,
+    left_label: str = "LW",
+    right_label: str = "DSK",
+    *,
+    slots: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     left = left.expanduser()
     right = right.expanduser()
     if not left.is_dir() or not right.is_dir():
@@ -382,34 +480,10 @@ def visual_result(left: Path, right: Path, left_label: str = "LW", right_label: 
     right_cat = _folder_catalog(right)
     if not left_cat and not right_cat:
         raise FileNotFoundError("No PNG, JPEG, or MOV previews in those folders")
-    pairs = []
-    for i in range(max(len(left_cat), len(right_cat))):
-        ls = left_cat[i] if i < len(left_cat) else None
-        rs = right_cat[i] if i < len(right_cat) else None
-        pair = {
-            "index": i,
-            "number": i + 1,
-            "leftIndex": None if ls is None else ls["index"],
-            "rightIndex": None if rs is None else rs["index"],
-            "rightIndexes": [] if rs is None else [rs["index"]],
-            "leftNumber": None if ls is None else ls["number"],
-            "rightNumber": None if rs is None else rs["number"],
-            "rightNumbers": [] if rs is None else [rs["number"]],
-            "leftSkipped": False,
-            "rightSkipped": False,
-            "leftPng": None if ls is None else ls["png"],
-            "rightPng": None if rs is None else rs["png"],
-            "rightPngs": [] if rs is None else [rs["png"]],
-            "leftText": "",
-            "rightText": "",
-            "score": 1.0 if ls and rs else 0.0,
-            "flags": [],
-        }
-        if ls is None:
-            pair["missing"] = left_label
-        elif rs is None:
-            pair["missing"] = right_label
-        pairs.append(pair)
+    if slots is None:
+        pairs = _index_pairs(left_cat, right_cat, left_label, right_label)
+    else:
+        pairs = _pairs_from_visual_slots(left_cat, right_cat, slots, left_label, right_label)
     return {
         "leftPath": str(left),
         "rightPath": str(right),

@@ -5,9 +5,10 @@ from pathlib import Path
 
 import yaml
 
-from obed_edom.bible import check_bible
+from obed_edom.bible import check_bible, check_slide_passages
 from obed_edom.inspect import highlighted_markup
 from obed_edom.models import Flag, OutlineDoc, Paragraph, Run, SlideSpec
+from obed_edom.rendered import ocr_unavailable
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 RULES_PATH = PACKAGE_DIR / "validation_rules.yaml"
@@ -30,8 +31,61 @@ LOWER_GOD = re.compile(r"(?<![A-Za-z])god(?![A-Za-z])")
 LOWER_FATHER = re.compile(r"(?<![A-Za-z])father(?![A-Za-z])")
 
 
+_RULES_CACHE: dict | None = None
+
+
 def load_rules() -> dict:
-    return yaml.safe_load(RULES_PATH.read_text(encoding="utf-8")) or {}
+    global _RULES_CACHE
+    if _RULES_CACHE is None:
+        _RULES_CACHE = yaml.safe_load(RULES_PATH.read_text(encoding="utf-8")) or {}
+    return _RULES_CACHE
+
+
+def rule_severity(rule: str, default: str = "warning") -> str | None:
+    """Configured severity for a rule id, or None when the rule is switched off."""
+    configured = (load_rules().get("rules") or {}).get(rule, default)
+    text = str(configured).strip().lower()
+    if text in {"off", "none", "false", "silent"}:
+        return None
+    if text in {"info", "warning", "error", "success"}:
+        return text
+    return default
+
+
+def rule_title(rule: str) -> str:
+    named = (load_rules().get("titles") or {}).get(rule)
+    if named:
+        return str(named)
+    return " ".join(part[:1].upper() + part[1:] for part in rule.replace(".", " ").replace("_", " ").split() if part)
+
+
+def make_flag(
+    rule: str,
+    category: str,
+    message: str,
+    *,
+    default: str = "warning",
+    location: str = "",
+    slide: int | None = None,
+    deck: str = "",
+    evidence: str = "",
+    resolved: str | None = None,
+) -> Flag | None:
+    """Build a Flag honouring the configured severity. None when the rule is off."""
+    severity = rule_severity(rule, default)
+    if severity is None:
+        return None
+    return Flag(
+        severity,  # type: ignore[arg-type]
+        category,
+        message,
+        location=location,
+        resolved=resolved,
+        rule=rule,
+        slide=slide,
+        deck=deck,
+        evidence=evidence,
+    )
 
 
 def flag_dict(flag: Flag) -> dict:
@@ -41,6 +95,11 @@ def flag_dict(flag: Flag) -> dict:
         "message": flag.message,
         "location": flag.location,
         "resolved": flag.resolved,
+        "rule": flag.rule,
+        "title": rule_title(flag.rule) if flag.rule else "",
+        "slide": flag.slide,
+        "deck": flag.deck,
+        "evidence": flag.evidence,
     }
 
 
@@ -58,25 +117,136 @@ def validate_outline(outline: OutlineDoc) -> list[Flag]:
     return flags
 
 
-def _visible_slides(payload: dict) -> list[dict]:
-    return [slide for slide in payload.get("slides") or [] if not slide.get("skipped")]
+def validate_inspect(
+    payload: dict,
+    *,
+    location_prefix: str = "",
+    deck: str = "",
+    previews: list[Path] | None = None,
+    evidence_dir: Path | None = None,
+    use_ocr: bool = True,
+    check_passages: bool = True,
+    rendered: dict[int, str] | None = None,
+    ocr: dict[int, str] | None = None,
+) -> list[Flag]:
+    """House-style checks for one inspected Keynote. Never modifies the deck."""
+    from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
+    from obed_edom.rendered import render_slide  # noqa: PLC0415
 
-
-def validate_inspect(payload: dict, *, location_prefix: str = "") -> list[Flag]:
     flags: list[Flag] = []
-    slides = _visible_slides(payload)
-    text = "\n\n".join(slide_plain(s) for s in slides)
+    all_slides = payload.get("slides") or []
     prefix = location_prefix or Path(payload.get("path") or "keynote").name
-    if text.strip():
-        flags.extend(check_bible(outline_from_text(text, prefix)))
-        flags.extend(validate_style_text(text, location=prefix))
-    for slide in slides:
-        loc = f"{prefix} slide {slide.get('number') or slide.get('index', 0) + 1}"
-        flags.extend(_highlight_punctuation_flags(slide, loc))
-        flags.extend(_quote_flags(slide_plain(slide), loc))
-        flags.extend(_inspect_overflow_flags(slide, loc, payload))
-    flags.extend(_center_wall_flags(payload, prefix))
+    deck = deck or ("lw" if float(payload.get("slideWidth") or 0) >= 3000 else "dsk")
+    png_map = map_preview_pngs(all_slides, list(previews or []))
+    size = (float(payload.get("slideWidth") or 0), float(payload.get("slideHeight") or 0))
+
+    rendered_map: dict[int, str] = dict(rendered or {})
+    seen: dict[int, str] = dict(ocr or {})
+    for index, slide in enumerate(all_slides):
+        if slide.get("skipped"):
+            continue
+        if index in rendered_map:
+            continue
+        shot = render_slide(slide, png_map.get(index), size, use_ocr=use_ocr)
+        rendered_map[index] = shot.text
+        if shot.ocr_used:
+            seen[index] = shot.ocr
+
+    rules = load_rules()
+    for index, slide in enumerate(all_slides):
+        if slide.get("skipped"):
+            continue
+        num = int(slide.get("number") or slide.get("index", index) + 1)
+        loc = f"{prefix} slide {num}"
+        body = rendered_map.get(index, "")
+        flags.extend(_trinity_flags(body, loc, rules, deck, slide=num))
+        flags.extend(_book_name_flags(body, loc, rules, deck, slide=num))
+        flags.extend(_date_flags(body, loc, deck, slide=num))
+        flags.extend(_highlight_punctuation_flags(slide, loc, num, deck))
+        flags.extend(_quote_flags(body, loc, slide=num, deck=deck))
+        flags.extend(_glossary_flags(body, loc, num, deck))
+        flags.extend(_inspect_overflow_flags(slide, loc, payload, num, deck))
+
+    flags.extend(
+        _bounds_flags(
+            payload, prefix, deck=deck, png_map=png_map, evidence_dir=evidence_dir
+        )
+    )
+    if check_passages:
+        flags.extend(
+            check_slide_passages(payload, rendered_map, prefix, deck, ocr=seen, pngs=png_map)
+        )
+    if use_ocr and png_map:
+        problem = ocr_unavailable()
+        if problem:
+            unavailable = make_flag(
+                "ocr.unavailable",
+                "ocr",
+                f"{problem} Text baked into images or grouped on the slide was not checked.",
+                default="info",
+                location=prefix,
+                deck=deck,
+            )
+            if unavailable:
+                flags.append(unavailable)
+    return dedupe_flags(flags)
+
+
+def dedupe_flags(flags: list[Flag]) -> list[Flag]:
+    """One finding per slide per message.
+
+    A wall slide holds the same text box twice, once per side of the center
+    panel, so every box-level rule would otherwise report itself twice.
+    """
+    seen: set[tuple] = set()
+    out: list[Flag] = []
+    for flag in flags:
+        key = (flag.rule, flag.slide, flag.deck, flag.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(flag)
+    return out
+
+
+def _glossary_flags(text: str, location: str, slide: int, deck: str) -> list[Flag]:
+    """Catch near-misses of house proper nouns, e.g. First Loved Conference."""
+    entries = load_rules().get("glossary") or []
+    if not text.strip() or not entries:
+        return []
+    flags: list[Flag] = []
+    for entry in entries:
+        wanted = str(entry).strip()
+        if not wanted or wanted.lower() in text.lower():
+            continue
+        words = wanted.split()
+        if len(words) < 2:
+            continue
+        # Anchor on the distinctive tail so "First Loved Conference" is compared
+        # with "First Love Conference" but unrelated slides are left alone.
+        anchor = re.escape(words[-1])
+        head = re.escape(words[0])
+        near = re.search(rf"{head}\w*(?:\s+\S+){{0,2}}\s+{anchor}", text, re.I)
+        if not near:
+            continue
+        found = near.group(0)
+        if fold_spaces(found).lower() == fold_spaces(wanted).lower():
+            continue
+        flag = make_flag(
+            "style.glossary",
+            "glossary",
+            f'House spelling is "{wanted}", this slide reads "{found}".',
+            location=location,
+            slide=slide,
+            deck=deck,
+        )
+        if flag:
+            flags.append(flag)
     return flags
+
+
+def fold_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip()
 
 
 def slide_plain(slide: dict) -> str:
@@ -220,7 +390,9 @@ def _inspect_item_font_size(item: dict, payload: dict) -> float:
     return 70.0 if width >= 3000 else 45.0
 
 
-def _inspect_overflow_flags(slide: dict, location: str, payload: dict) -> list[Flag]:
+def _inspect_overflow_flags(
+    slide: dict, location: str, payload: dict, number: int | None = None, deck: str = ""
+) -> list[Flag]:
     cfg = _overflow_cfg()
     if not cfg["enabled"]:
         return []
@@ -242,167 +414,210 @@ def _inspect_overflow_flags(slide: dict, location: str, payload: dict) -> list[F
         preview = re.sub(r"\s+", " ", text)
         if len(preview) > 72:
             preview = preview[:72].rstrip() + "…"
-        flags.append(
-            Flag(
-                "warning",
+        _keep(
+            flags,
+            make_flag(
+                "overflow.text",
                 "overflow",
                 f"Text may overflow this box (needs about {int(needed)}px, box is {int(box_h)}px). "
                 f"How overflow should be handled is not decided yet. {preview}",
                 location=location,
-            )
+                slide=number,
+                deck=deck,
+            ),
         )
     return flags
 
 
-def validate_style_text(text: str, *, location: str = "") -> list[Flag]:
+def validate_style_text(
+    text: str, *, location: str = "", deck: str = "", slide: int | None = None
+) -> list[Flag]:
     rules = load_rules()
     flags: list[Flag] = []
-    flags.extend(_trinity_flags(text, location, rules))
-    flags.extend(_book_name_flags(text, location, rules))
-    flags.extend(_date_flags(text, location))
-    flags.extend(_quote_flags(text, location))
+    flags.extend(_trinity_flags(text, location, rules, deck, slide=slide))
+    flags.extend(_book_name_flags(text, location, rules, deck, slide=slide))
+    flags.extend(_date_flags(text, location, deck, slide=slide))
+    flags.extend(_quote_flags(text, location, deck=deck, slide=slide))
     return flags
 
 
-def _trinity_flags(text: str, location: str, rules: dict) -> list[Flag]:
+def _keep(flags: list[Flag], flag: Flag | None) -> None:
+    if flag is not None:
+        flags.append(flag)
+
+
+def _trinity_flags(
+    text: str, location: str, rules: dict, deck: str = "", *, slide: int | None = None
+) -> list[Flag]:
     flags: list[Flag] = []
     for match in LOWER_GOD.finditer(text):
-        flags.append(
-            Flag(
-                "warning",
+        _keep(
+            flags,
+            make_flag(
+                "style.trinity",
                 "trinity",
                 "Trinity word should be caps: God",
-                location=f"{location}:{match.start()}" if location else str(match.start()),
-            )
+                location=location,
+                slide=slide,
+                deck=deck,
+            ),
         )
     # Avoid every “father”; flag lowercase “father” near God/Lord/pray.
     window = 40
     for match in LOWER_FATHER.finditer(text):
         ctx = text[max(0, match.start() - window) : match.end() + window].lower()
         if any(w in ctx for w in ("god", "lord", "heaven", "pray", "almighty")):
-            flags.append(
-                Flag(
-                    "warning",
+            _keep(
+                flags,
+                make_flag(
+                    "style.trinity",
                     "trinity",
                     "Trinity word should be caps: Father",
                     location=location,
-                )
+                    slide=slide,
+                    deck=deck,
+                ),
             )
     if re.search(r"\bthe son\b", text) and not re.search(r"\bthe Son\b", text):
-        flags.append(
-            Flag("warning", "trinity", "Trinity word should be caps: Son", location=location)
+        _keep(
+            flags,
+            make_flag(
+                "style.trinity",
+                "trinity",
+                "Trinity word should be caps: Son",
+                location=location,
+                slide=slide,
+                deck=deck,
+            ),
         )
     if re.search(r"\b(says?|declares?|speaks?)\s+the\s+Lord\b", text, re.I):
         if re.search(r"\bmy\b", text) and not re.search(r"\bMy\b", text):
-            flags.append(
-                Flag(
-                    "info",
+            _keep(
+                flags,
+                make_flag(
+                    "style.trinity",
                     "trinity",
                     "If God is speaking, associated 'My' should be caps (heuristic).",
+                    default="info",
                     location=location,
-                )
+                    slide=slide,
+                    deck=deck,
+                ),
             )
     return flags
 
 
-def _book_name_flags(text: str, location: str, rules: dict) -> list[Flag]:
+def _book_name_flags(
+    text: str, location: str, rules: dict, deck: str = "", *, slide: int | None = None
+) -> list[Flag]:
     flags: list[Flag] = []
     mapping = (rules.get("book_names") or {}) if rules else {}
     # Psalms → Psalm (as a book label, not the word in a sentence like "the psalms")
     if re.search(r"\bPsalms\s+\d", text) or re.search(r"\bPsalms\b", text):
         want = mapping.get("Psalms", "Psalm")
-        flags.append(
-            Flag(
-                "warning",
-                "book_name",
-                f"Use '{want}', not 'Psalms'.",
-                location=location,
-            )
+        _keep(
+            flags,
+            make_flag(
+                "style.book_name", "book_name", f"Use '{want}', not 'Psalms'.",
+                location=location, slide=slide, deck=deck,
+            ),
         )
     # House style: Revelations, not Revelation
     if re.search(r"\bRevelation\s+\d", text) and not re.search(r"\bRevelations\s+\d", text):
         want = mapping.get("Revelation", "Revelations")
-        flags.append(
-            Flag(
-                "warning",
-                "book_name",
-                f"Use '{want}', not 'Revelation'.",
-                location=location,
-            )
+        _keep(
+            flags,
+            make_flag(
+                "style.book_name", "book_name", f"Use '{want}', not 'Revelation'.",
+                location=location, slide=slide, deck=deck,
+            ),
         )
     return flags
 
 
-def _date_flags(text: str, location: str) -> list[Flag]:
+def _date_flags(text: str, location: str, deck: str = "", *, slide: int | None = None) -> list[Flag]:
     flags: list[Flag] = []
     for match in HYPHEN_YEAR_SPAN.finditer(text):
-        flags.append(
-            Flag(
-                "warning",
+        _keep(
+            flags,
+            make_flag(
+                "style.date",
                 "date",
                 f"Date period should use an en dash: {match.group(1)}–{match.group(2)}",
                 location=location,
-            )
+                slide=slide,
+                deck=deck,
+            ),
         )
     for match in EMDASH_YEAR_SPAN.finditer(text):
-        flags.append(
-            Flag(
-                "warning",
+        _keep(
+            flags,
+            make_flag(
+                "style.date",
                 "date",
                 f"Date period should use an en dash, not an em dash: {match.group(1)}–{match.group(2)}",
                 location=location,
-            )
+                slide=slide,
+                deck=deck,
+            ),
         )
     for match in HYPHEN_DAY_MONTH.finditer(text):
-        flags.append(
-            Flag(
-                "warning",
+        _keep(
+            flags,
+            make_flag(
+                "style.date",
                 "date",
                 f"Date period should use an en dash: {match.group(1)}–{match.group(2)} {match.group(3)}",
                 location=location,
-            )
+                slide=slide,
+                deck=deck,
+            ),
         )
     return flags
 
 
-def _quote_flags(text: str, location: str) -> list[Flag]:
+def _quote_flags(text: str, location: str, *, slide: int | None = None, deck: str = "") -> list[Flag]:
     flags: list[Flag] = []
     for match in QUOTE_ATTR.finditer(text):
         attr = match.group(1).strip()
         if NAME_WITH_SPAN.match(attr):
-            flags.append(
-                Flag(
-                    "info",
-                    "quote",
-                    f"Attribution has lifespan (deceased form): {attr}. Confirm the person is not living, and verify the name spelling.",
-                    location=location,
-                )
+            message = (
+                f"Attribution has lifespan (deceased form): {attr}. "
+                "Confirm the person is not living, and verify the name spelling."
             )
         else:
-            flags.append(
-                Flag(
-                    "info",
-                    "quote",
-                    f"Attribution is name-only (living form): {attr}. If deceased, use Name 1950–2012. Name spelling not verified online in v1.",
-                    location=location,
-                )
+            message = (
+                f"Attribution is name-only (living form): {attr}. "
+                "If deceased, use Name 1950–2012."
             )
+        _keep(
+            flags,
+            make_flag(
+                "style.quote", "quote", message, default="info",
+                location=location, slide=slide, deck=deck,
+            ),
+        )
     return flags
 
 
-def _highlight_punctuation_flags(slide: dict, location: str) -> list[Flag]:
+def _highlight_punctuation_flags(
+    slide: dict, location: str, number: int | None = None, deck: str = ""
+) -> list[Flag]:
     flags: list[Flag] = []
     markup = highlighted_markup(slide)
     for match in re.finditer(r"\*([^*]+)\*", markup):
         inner = match.group(1)
         if PUNCT_ONLY.match(inner):
-            flags.append(
-                Flag(
-                    "warning",
+            _keep(
+                flags,
+                make_flag(
+                    "style.highlight",
                     "highlight",
                     f"Don’t highlight punctuation: {inner!r} (default size & colour).",
                     location=location,
-                )
+                    slide=number,
+                    deck=deck,
+                ),
             )
     for item in slide.get("items") or []:
         for run in item.get("runs") or []:
@@ -411,63 +626,197 @@ def _highlight_punctuation_flags(slide: dict, location: str) -> list[Flag]:
                 from obed_edom.inspect import _looks_highlight
 
                 if _looks_highlight(run.get("color")):
-                    flags.append(
-                        Flag(
-                            "warning",
+                    _keep(
+                        flags,
+                        make_flag(
+                            "style.highlight",
                             "highlight",
                             f"Don’t highlight punctuation: {text!r}.",
                             location=location,
-                        )
+                            slide=number,
+                            deck=deck,
+                        ),
                     )
     return flags
 
 
-def _center_wall_flags(payload: dict, location: str) -> list[Flag]:
+# A sliver of a bounding box past an edge is shadow and letter overhang, not a
+# cut-off object. Only flag when a viewer would actually see something missing.
+CUT_FRACTION = 0.05
+CUT_MIN_PX = 24
+
+
+def _cut_share(lo: float, hi: float, edge_lo: float, edge_hi: float) -> float:
+    """Fraction of an object's width/height that falls outside a boundary pair."""
+    span = hi - lo
+    if span <= 0:
+        return 0.0
+    inside = max(0.0, min(hi, edge_hi) - max(lo, edge_lo))
+    return max(0.0, (span - inside) / span)
+
+
+def _is_backdrop(item: dict, slide_w: float, slide_h: float, wall_w: float) -> bool:
+    """Full-bleed art and panel-sized fillers are meant to run to the edges."""
+    name = str(item.get("fileName") or "")
+    if re.search(r"(filler|blank|background|bg[_\- ])", name, re.I):
+        return True
+    w = float(item.get("w") or 0)
+    h = float(item.get("h") or 0)
+    if slide_h and h >= slide_h - 1:
+        return True
+    # A 1920-wide panel graphic on a 7680 wall is one physical screen.
+    panel = slide_w / 4 if slide_w >= wall_w * 2 else slide_w
+    return bool(panel and abs(w - panel) < 2 and h >= slide_h - 2)
+
+
+def _bounds_flags(
+    payload: dict,
+    location: str,
+    *,
+    deck: str = "",
+    png_map: dict[int, Path] | None = None,
+    evidence_dir: Path | None = None,
+) -> list[Flag]:
+    """Flag objects the wall will visibly cut. Objects inside a side panel are fine."""
     rules = load_rules()
     wall = rules.get("center_wall") or {}
-    max_w = int(wall.get("width") or 3840)
-    max_h = int(wall.get("height") or 1080)
+    max_w = float(wall.get("width") or 3840)
+    max_h = float(wall.get("height") or 1080)
     width = float(payload.get("slideWidth") or 0)
     height = float(payload.get("slideHeight") or 0)
     flags: list[Flag] = []
     if width and height:
-        flags.append(
-            Flag(
-                "info",
-                "bounds",
-                f"Canvas is {int(width)}×{int(height)} (center wall target {max_w}×{max_h}).",
-                location=location,
-            )
+        canvas = make_flag(
+            "bounds.canvas",
+            "bounds",
+            f"Canvas is {int(width)}×{int(height)} (center wall target {int(max_w)}×{int(max_h)}).",
+            default="info",
+            location=location,
+            deck=deck,
         )
+        if canvas:
+            flags.append(canvas)
+    if not width or not height:
+        return flags
+
+    edges: list[float] = []
     if width > max_w:
         left = (width - max_w) / 2
-        right = left + max_w
-        for slide in payload.get("slides") or []:
-            num = slide.get("number") or slide.get("index", 0) + 1
-            for item in slide.get("items") or []:
-                x = float(item.get("x") or 0)
-                w = float(item.get("w") or 0)
-                y = float(item.get("y") or 0)
-                h = float(item.get("h") or 0)
-                if w <= 0 and h <= 0:
-                    continue
-                if x < left - 1 or x + w > right + 1 or y < -1 or y + h > max_h + 1:
-                    flags.append(
-                        Flag(
-                            "warning",
-                            "bounds",
-                            f"Object may exceed the {max_w}×{max_h} center wall "
-                            f"({item.get('kind')} at x={int(x)}, y={int(y)}, {int(w)}×{int(h)}).",
-                            location=f"{location} slide {num}",
-                        )
-                    )
-    elif height > max_h:
-        flags.append(
-            Flag(
-                "warning",
-                "bounds",
-                f"Slide height {int(height)} exceeds center wall {max_h}.",
-                location=location,
+        edges = [left, left + max_w]
+
+    for index, slide in enumerate(payload.get("slides") or []):
+        if slide.get("skipped"):
+            continue
+        num = int(slide.get("number") or slide.get("index", index) + 1)
+        for item_index, item in enumerate(slide.get("items") or []):
+            w = float(item.get("w") or 0)
+            h = float(item.get("h") or 0)
+            if w <= 0 or h <= 0:
+                continue
+            if _is_backdrop(item, width, height, max_w):
+                continue
+            x = float(item.get("x") or 0)
+            y = float(item.get("y") or 0)
+            kind = item.get("kind") or "object"
+
+            straddled = next(
+                (
+                    edge
+                    for edge in edges
+                    if x < edge - CUT_MIN_PX and x + w > edge + CUT_MIN_PX
+                ),
+                None,
             )
-        )
+            if straddled is not None:
+                share = min(_cut_share(x, x + w, edges[0], edges[1]), 1.0)
+                if share >= CUT_FRACTION:
+                    evidence = _bounds_evidence(
+                        png_map, index, slide, item, (width, height), straddled, evidence_dir,
+                        f"bounds-{deck or 'deck'}-{num}-{item_index}.png",
+                    )
+                    flag = make_flag(
+                        "bounds.straddles",
+                        "bounds",
+                        f"This {kind} is split across the wall edge at x={int(straddled)}; "
+                        f"about {share:.0%} of it lands on a different screen.",
+                        location=f"{location} slide {num}",
+                        slide=num,
+                        deck=deck,
+                        evidence=evidence,
+                    )
+                    if flag:
+                        flags.append(flag)
+                    continue
+
+            vertical = _cut_share(y, y + h, 0.0, height)
+            if vertical >= CUT_FRACTION and min(-y, y + h - height) > -CUT_MIN_PX:
+                cut = max(0.0, -y) + max(0.0, y + h - height)
+                if cut >= CUT_MIN_PX:
+                    evidence = _bounds_evidence(
+                        png_map, index, slide, item, (width, height), None, evidence_dir,
+                        f"bounds-{deck or 'deck'}-{num}-{item_index}.png",
+                    )
+                    flag = make_flag(
+                        "bounds.offcanvas",
+                        "bounds",
+                        f"This {kind} runs {int(cut)}px past the top or bottom of the slide "
+                        f"({vertical:.0%} of it is off screen).",
+                        location=f"{location} slide {num}",
+                        slide=num,
+                        deck=deck,
+                        evidence=evidence,
+                    )
+                    if flag:
+                        flags.append(flag)
     return flags
+
+
+def _bounds_evidence(
+    png_map: dict[int, Path] | None,
+    slide_index: int,
+    slide: dict,
+    item: dict,
+    slide_size: tuple[float, float],
+    edge: float | None,
+    evidence_dir: Path | None,
+    name: str,
+) -> str:
+    """Crop the preview around the object and mark the wall edge. Returns a filename."""
+    if not png_map or evidence_dir is None:
+        return ""
+    png = png_map.get(slide_index)
+    if not png or not Path(png).is_file():
+        return ""
+    try:
+        from PIL import ImageDraw  # noqa: PLC0415
+
+        from obed_edom.images import open_rgb  # noqa: PLC0415
+
+        slide_w, slide_h = slide_size
+        im = open_rgb(png).copy()
+        sx = im.width / slide_w if slide_w else 1
+        sy = im.height / slide_h if slide_h else 1
+        pad = 60
+        x0 = int(max(0, float(item.get("x") or 0) * sx - pad))
+        y0 = int(max(0, float(item.get("y") or 0) * sy - pad))
+        x1 = int(min(im.width, (float(item.get("x") or 0) + float(item.get("w") or 0)) * sx + pad))
+        y1 = int(min(im.height, (float(item.get("y") or 0) + float(item.get("h") or 0)) * sy + pad))
+        if x1 <= x0 or y1 <= y0:
+            return ""
+        crop = im.crop((x0, y0, x1, y1))
+        draw = ImageDraw.Draw(crop)
+        box = (
+            float(item.get("x") or 0) * sx - x0,
+            float(item.get("y") or 0) * sy - y0,
+            (float(item.get("x") or 0) + float(item.get("w") or 0)) * sx - x0,
+            (float(item.get("y") or 0) + float(item.get("h") or 0)) * sy - y0,
+        )
+        draw.rectangle(box, outline=(255, 200, 60), width=4)
+        if edge is not None:
+            ex = edge * sx - x0
+            draw.line([(ex, 0), (ex, crop.height)], fill=(255, 70, 70), width=5)
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        crop.save(evidence_dir / name)
+        return name
+    except Exception:  # noqa: BLE001
+        return ""

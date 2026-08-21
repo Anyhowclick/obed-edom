@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 
 export type FeatureId = "generate" | "diff" | "visual" | "check" | "dsk" | "resize";
-export type TabId = FeatureId | "history";
+export type TabId = FeatureId | "history" | "settings";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
   generate: "Sermon Base Generator",
@@ -79,6 +79,7 @@ export const TAB_SHORT: Record<TabId, string> = {
   dsk: "DSK",
   resize: "CG",
   history: "Hist",
+  settings: "Set",
 };
 
 export function asFeature(value: string | undefined): FeatureId | null {

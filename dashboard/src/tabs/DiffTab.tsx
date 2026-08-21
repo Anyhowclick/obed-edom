@@ -33,7 +33,7 @@ export function DiffTab() {
     }
   }
 
-  async function run() {
+  async function run(fresh = false) {
     if (!left || !right) {
       setError("Choose both Keynote files.");
       return;
@@ -41,7 +41,7 @@ export function DiffTab() {
     setError(null);
     setBusy(true);
     try {
-      const created = await startDiff(left.path, right.path, "LW", /dsk/i.test(right.name) ? "DSK" : "Other");
+      const created = await startDiff(left.path, right.path, "LW", /dsk/i.test(right.name) ? "DSK" : "Other", fresh);
       upsert(created);
       const done = await pollJob(created.id, (tick) => {
         setLogs(tick.logs);
@@ -106,14 +106,22 @@ export function DiffTab() {
         />
       </div>
       <div className="actions">
-        <button className="btn" type="button" disabled={!left || !right || busy} onClick={run}>
+        <button className="btn" type="button" disabled={!left || !right || busy} onClick={() => run()}>
           Match pairs
         </button>
       </div>
       </div>
       {(error || openError) && <p className="err">{error || openError}</p>}
       {busy && <LoadingOverlay title={overlayTitle} logs={logs} />}
-      {job && <DiffResultView job={job} onOpen={setOpen} onRunChecks={runChecks} checking={busy} />}
+      {job && (
+        <DiffResultView
+          job={job}
+          onOpen={setOpen}
+          onRunChecks={runChecks}
+          onStartFresh={() => run(true)}
+          checking={busy}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

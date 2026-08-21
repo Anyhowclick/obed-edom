@@ -1,0 +1,197 @@
+{
+  "_comment": "One pair per mistake in DSK List of Mistakes.docx. Slide text is written as the rendered slide reads, i.e. what extraction plus OCR recovers, so the fixture needs no PNGs.",
+  "left": {
+    "path": "/tmp/Sermon_PK (GW).key",
+    "slideWidth": 3840,
+    "slideHeight": 1080,
+    "slideCount": 9,
+    "slides": [
+      {
+        "number": 1,
+        "index": 0,
+        "items": [{ "kind": "text", "text": "First Love Conference, Ghana\nBook of Romans Seminar" }]
+      },
+      {
+        "number": 2,
+        "index": 1,
+        "items": [
+          {
+            "kind": "text",
+            "text": "Genesis 1\n1 In the beginning God created the heavens and the earth.\nElohim (plural)"
+          }
+        ]
+      },
+      {
+        "number": 3,
+        "index": 2,
+        "items": [
+          { "kind": "text", "text": "Healing Team Ministry" },
+          {
+            "kind": "image",
+            "text": "",
+            "x": 900,
+            "y": 200,
+            "w": 800,
+            "h": 600,
+            "fileName": "healing_team.jpg",
+            "rotation": 0
+          }
+        ]
+      },
+      {
+        "number": 4,
+        "index": 3,
+        "items": [
+          { "kind": "text", "text": "Mission Trip Report" },
+          {
+            "kind": "image",
+            "text": "",
+            "x": 900,
+            "y": 200,
+            "w": 800,
+            "h": 600,
+            "fileName": "conference_2026.jpg",
+            "rotation": 0
+          }
+        ]
+      },
+      {
+        "number": 5,
+        "index": 4,
+        "items": [
+          {
+            "kind": "text",
+            "text": "1 Samuel 10\n10 When he and his servant arrived at Gibeah, a procession of prophets met him."
+          }
+        ]
+      },
+      {
+        "number": 6,
+        "index": 5,
+        "items": [
+          {
+            "kind": "text",
+            "text": "James 5 (AMP)\n16 The earnest, heartfelt, continued prayer of a righteous man makes tremendous power available."
+          }
+        ]
+      },
+      {
+        "number": 7,
+        "index": 6,
+        "items": [{ "kind": "text", "text": "3\nFaith" }]
+      },
+      {
+        "number": 8,
+        "index": 7,
+        "items": [
+          {
+            "kind": "text",
+            "text": "2 Corinthians 1\n20 For no matter how many promises God has made, they are Yes in Christ."
+          }
+        ]
+      },
+      {
+        "number": 9,
+        "index": 8,
+        "items": [{ "kind": "text", "text": "Praise and Worship Together" }]
+      }
+    ]
+  },
+  "right": {
+    "path": "/tmp/Sermon_PK (DSK)_with mistakes.key",
+    "slideWidth": 1920,
+    "slideHeight": 1080,
+    "slideCount": 9,
+    "slides": [
+      {
+        "number": 1,
+        "index": 0,
+        "items": [{ "kind": "text", "text": "First Loved Conference, Ghana\nBook of Romans Seminar" }]
+      },
+      {
+        "number": 2,
+        "index": 1,
+        "items": [
+          {
+            "kind": "text",
+            "text": "1 In the beginning God created the heavens and the earth.\nGenesis 1\nElohim (Plural)"
+          }
+        ]
+      },
+      {
+        "number": 3,
+        "index": 2,
+        "items": [
+          { "kind": "text", "text": "Healing Team Ministry" },
+          {
+            "kind": "image",
+            "text": "",
+            "x": 500,
+            "y": 200,
+            "w": 800,
+            "h": 600,
+            "fileName": "healing_team.jpg",
+            "rotation": 8
+          }
+        ]
+      },
+      {
+        "number": 4,
+        "index": 3,
+        "items": [
+          { "kind": "text", "text": "Mission Trip Report" },
+          {
+            "kind": "image",
+            "text": "",
+            "x": 500,
+            "y": 200,
+            "w": 800,
+            "h": 600,
+            "fileName": "conference_2019.jpg",
+            "rotation": 0
+          }
+        ]
+      },
+      {
+        "number": 5,
+        "index": 4,
+        "items": [
+          {
+            "kind": "text",
+            "text": "10 When he and his servant arrived at Gibeah, a procession of prophets met him.\nSamuel 10"
+          }
+        ]
+      },
+      {
+        "number": 6,
+        "index": 5,
+        "items": [
+          {
+            "kind": "text",
+            "text": "16 The earnest, heartfelt, continued prayer of a righteous man makes tremendous power available.\nJames 5 (MSG)"
+          }
+        ]
+      },
+      {
+        "number": 7,
+        "index": 6,
+        "items": [{ "kind": "text", "text": "Your Faith" }]
+      },
+      {
+        "number": 8,
+        "index": 7,
+        "items": [
+          {
+            "kind": "text",
+            "text": "20 For no matter how many promises God has made, they are Yes in Christ.\n2 Corinthians 2"
+          }
+        ]
+      },
+      {
+        "number": 9,
+        "index": 8,
+        "items": [{ "kind": "text", "text": "Praise & Worship Together" }]
+      }
+    ]
+  }
+}

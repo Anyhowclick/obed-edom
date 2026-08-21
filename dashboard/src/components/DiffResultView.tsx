@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
+import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { isPreviewVideo } from "./PreviewGrid";
+import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
 
 type Pair = {
@@ -44,7 +46,17 @@ export type DiffResult = {
   rightCatalog?: { index: number; number: number; skipped?: boolean; png?: string | null; text?: string }[];
   pairs: Pair[];
   flags: Flag[];
+  reuse?: { used?: boolean; carried: number; changed: number; added: number; removed: number; source?: string };
 };
+
+function flagOnPair(flag: Flag, pair: Pair): boolean {
+  if (flag.slide == null) return false;
+  const deck = (flag.deck || "").toLowerCase();
+  const rights = pair.rightNumbers?.length ? pair.rightNumbers : pair.rightNumber != null ? [pair.rightNumber] : [];
+  if (deck === "lw" || deck === "left") return pair.leftNumber === flag.slide;
+  if (deck === "dsk" || deck === "right") return rights.includes(flag.slide);
+  return pair.leftNumber === flag.slide || rights.includes(flag.slide);
+}
 
 function present(job: Job, label: string): boolean {
   return !job.artifacts?.missing?.includes(label);
@@ -160,6 +172,7 @@ function SlideSlot({
   png,
   label,
   crop,
+  wide,
   draggable,
   onOpen,
   onDragStart,
@@ -169,6 +182,7 @@ function SlideSlot({
   png?: string;
   label: string;
   crop?: boolean;
+  wide?: boolean;
   draggable?: boolean;
   onOpen: (src: string) => void;
   onDragStart?: () => void;
@@ -177,7 +191,7 @@ function SlideSlot({
   const src = png && present(job, artifact) ? diffImageUrl(job.id, side, png) : "";
   return (
     <div
-      className={`slide-slot${crop ? " crop-center" : " dsk-frame"}`}
+      className={`slide-slot${crop ? (wide ? " full-wall" : " crop-center") : " dsk-frame"}`}
       draggable={Boolean(draggable && src)}
       onDragStart={(event) => {
         if (!draggable) return;
@@ -204,15 +218,21 @@ export function DiffResultView({
   job,
   onOpen,
   onRunChecks,
+  onSaveSlots,
+  onStartFresh,
   checking,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onRunChecks?: (slots: Slot[]) => void;
+  onSaveSlots?: (slots: Slot[]) => void | Promise<void>;
+  onStartFresh?: () => void;
   checking?: boolean;
 }) {
   const result = (job.result || null) as DiffResult | null;
   const { focusMode, setFocusMode } = useLayout();
+  const [showInfo, setShowInfo] = useSessionToggle(SHOW_INFO_KEY, false);
+  const [sidePanels, setSidePanels] = useSessionToggle(SIDE_PANELS_KEY, false);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [selected, setSelected] = useState(0);
   const [split, setSplit] = useState<number | null>(() => {
@@ -220,6 +240,8 @@ export function DiffResultView({
     return Number.isFinite(n) ? n : null;
   });
   const [dragging, setDragging] = useState<{ side: "left" | "right"; index: number } | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saving, setSaving] = useState(false);
   const stackRef = useRef<HTMLDivElement>(null);
   const selectedTopRef = useRef<number | null>(null);
 
@@ -260,7 +282,8 @@ export function DiffResultView({
   const phase = result.phase || "checked";
   const matching = phase !== "checked";
   const canEdit = Boolean(result.leftCatalog && result.rightCatalog);
-  const deckFlags = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
+  const rawDeck = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
+  const deckFlags = rawDeck.filter((flag) => !pairs.some((pair) => flagOnPair(flag, pair)));
   const leftWide = isWideDeck(result.leftLabel);
   const rightWide = isWideDeck(result.rightLabel);
   const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
@@ -284,8 +307,35 @@ export function DiffResultView({
     setDragging(null);
   }
 
+  async function handleSave() {
+    if (!onSaveSlots) return;
+    setSaving(true);
+    try {
+      await onSaveSlots(slots);
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 2000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <>
+        {result.reuse?.used !== false && result.reuse && (result.reuse.carried > 0 || result.reuse.added > 0) && (
+          <div className="reuse-banner">
+            <span>
+              Reused {result.reuse.carried} pairing{result.reuse.carried === 1 ? "" : "s"} from an earlier run.
+              {result.reuse.changed ? ` ${result.reuse.changed} slide${result.reuse.changed === 1 ? "" : "s"} changed.` : ""}
+              {result.reuse.added ? ` ${result.reuse.added} added.` : ""}
+              {result.reuse.removed ? ` ${result.reuse.removed} removed.` : ""}
+            </span>
+            {onStartFresh && (
+              <button className="btn secondary" type="button" disabled={checking} onClick={onStartFresh}>
+                Start fresh
+              </button>
+            )}
+          </div>
+        )}
         {canEdit && (
           <p className="note playlist-note">
             {phase === "visual"
@@ -302,6 +352,36 @@ export function DiffResultView({
                 Run checks
               </button>
             )}
+            {canEdit && onSaveSlots && (
+              <button
+                className={`btn save-pairing${savedFlash ? " saved" : ""}`}
+                type="button"
+                disabled={checking || saving}
+                onClick={() => void handleSave()}
+              >
+                {savedFlash ? "Pairing saved!" : "Save pairing"}
+              </button>
+            )}
+            {(leftWide || rightWide) && (
+              <button
+                className={`btn secondary toggle${sidePanels ? " on" : ""}`}
+                type="button"
+                aria-pressed={sidePanels}
+                title="Show the full 7680×1080 wall instead of the 3840×1080 center"
+                onClick={() => setSidePanels(!sidePanels)}
+              >
+                {sidePanels ? "Center wall only" : "Show side panels"}
+              </button>
+            )}
+            <button
+              className={`btn secondary toggle${showInfo ? " on" : ""}`}
+              type="button"
+              aria-pressed={showInfo}
+              title="Info findings are notes rather than problems"
+              onClick={() => setShowInfo(!showInfo)}
+            >
+              {showInfo ? "Hide info findings" : "Show info findings"}
+            </button>
             <button
               className="btn secondary icon-btn"
               type="button"
@@ -315,7 +395,14 @@ export function DiffResultView({
         </div>
       <div className="diff-stack" ref={stackRef}>
         {pairs.map((pair, row) => {
-          const issues = pair.flags || [];
+          const extra = rawDeck.filter(
+            (flag) =>
+              flagOnPair(flag, pair) &&
+              !(pair.flags || []).some(
+                (own) => own.rule === flag.rule && own.slide === flag.slide && own.message === flag.message
+              )
+          );
+          const issues = [...(pair.flags || []), ...extra];
           const rightIndexes = pair.rightIndexes?.length ? pair.rightIndexes : pair.rightIndex != null ? [pair.rightIndex] : [];
           const rightPngs = pair.rightPngs?.length ? pair.rightPngs : [pair.rightPng];
           const rightNumbers = pair.rightNumbers?.length ? pair.rightNumbers : [pair.rightNumber];
@@ -342,6 +429,7 @@ export function DiffResultView({
                   png={pickPng(pair.leftPng)}
                   label={cap(result.leftLabel, pair.leftNumber, pair.leftSkipped)}
                   crop={leftWide}
+                  wide={sidePanels}
                   draggable={pair.leftIndex != null}
                   onOpen={onOpen}
                   onDragStart={() => pair.leftIndex != null && setDragging({ side: "left", index: pair.leftIndex })}
@@ -357,6 +445,7 @@ export function DiffResultView({
                         png={pickPng(rightPngs[i])}
                         label={cap(result.rightLabel, rightNumbers[i], false)}
                         crop={rightWide}
+                        wide={sidePanels}
                         draggable
                         onOpen={onOpen}
                         onDragStart={() => setDragging({ side: "right", index })}
@@ -370,6 +459,7 @@ export function DiffResultView({
                     png={pickPng(pair.rightPng)}
                     label={cap(result.rightLabel, pair.rightNumber, pair.rightSkipped)}
                     crop={rightWide}
+                    wide={sidePanels}
                     draggable={pair.rightIndex != null}
                     onOpen={onOpen}
                     onDragStart={() => pair.rightIndex != null && setDragging({ side: "right", index: pair.rightIndex })}
@@ -405,20 +495,22 @@ export function DiffResultView({
                 </div>
               )}
               {issues.length > 0 && (
-                <div className="pair-issues">
-                  {issues.map((flag, i) => (
-                    <div key={`${flag.category}-${i}`} className={`flag ${flag.severity}`}>
-                      <div className="meta">{flag.severity}</div>
-                      {flag.message}
-                    </div>
-                  ))}
-                </div>
+                <SlideFindings flags={issues} jobId={job.id} showInfo={showInfo} onOpen={onOpen} />
               )}
             </article>
           );
         })}
       </div>
-      {deckFlags.length > 0 && <ValidationPanel flags={deckFlags} />}
+      {deckFlags.length > 0 && (
+        <ValidationPanel
+          flags={deckFlags}
+          jobId={job.id}
+          onOpen={onOpen}
+          showInfo={showInfo}
+          onShowInfo={setShowInfo}
+          title="Deck-wide findings"
+        />
+      )}
     </>
   );
 }

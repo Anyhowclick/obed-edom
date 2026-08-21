@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -12,13 +13,24 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
-from obed_edom.diff_keynotes import compare_inspects, slots_from_pairs
-from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_media_type, preview_pngs
+from obed_edom.baseline import (
+    deck_slide_digests,
+    delete_pairing,
+    folder_digests,
+    load_pairing,
+    pair_index_gaps,
+    reuse_slots,
+    save_pairing,
+    slot_dict,
+)
+from obed_edom.diff_keynotes import compare_inspects, realign_gaps, slots_from_pairs
+from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
 from obed_edom.map_remap import MVP_MAP_SLIDE, format_slide_range, resolve_slides
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import remap_and_inspect
+from obed_edom.settings import load_settings, save_settings
 from obed_edom.slide_map import load_masters
 from obed_edom.validate import validate_inspect
 from obed_edom.web.jobs import Job, JobRunner, preview_names, serialize_flags, visual_result
@@ -45,6 +57,12 @@ class DiffSlotsBody(BaseModel):
     pairs: list[dict[str, Any]] | None = None
 
 
+class SettingsBody(BaseModel):
+    reuseThreshold: float | None = None
+    reusePairings: bool | None = None
+    reusePreviews: bool | None = None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Obed-Edom dashboard")
     app.add_middleware(
@@ -57,6 +75,21 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict:
         return {"ok": True}
+
+    @app.get("/api/settings")
+    def get_settings() -> dict:
+        return load_settings()
+
+    @app.put("/api/settings")
+    def put_settings(payload: SettingsBody) -> dict:
+        current = load_settings()
+        if payload.reuseThreshold is not None:
+            current["reuseThreshold"] = payload.reuseThreshold
+        if payload.reusePairings is not None:
+            current["reusePairings"] = payload.reusePairings
+        if payload.reusePreviews is not None:
+            current["reusePreviews"] = payload.reusePreviews
+        return save_settings(current)
 
     @app.get("/api/templates")
     def templates() -> dict:
@@ -178,6 +211,16 @@ def create_app() -> FastAPI:
         path = _safe_file(Path(folder), filename)
         return FileResponse(path, media_type=preview_media_type(path))
 
+    @app.get("/api/jobs/{job_id}/evidence/{filename}")
+    def job_evidence(job_id: str, filename: str):
+        """Cropped pictures of the object a geometry finding is about."""
+        job = RUNNER.get(job_id)
+        folder = (job.result or {}).get("evidenceDir") if job else None
+        if not folder:
+            raise HTTPException(404, "No evidence")
+        path = _safe_file(Path(folder), filename)
+        return FileResponse(path, media_type=preview_media_type(path))
+
     @app.get("/api/jobs/{job_id}/file/{kind}")
     def job_file(job_id: str, kind: str):
         job = RUNNER.get(job_id)
@@ -218,14 +261,18 @@ def create_app() -> FastAPI:
         right_path: str = Form(...),
         left_label: str = Form("LW"),
         right_label: str = Form("Other"),
+        fresh: str = Form("false"),
     ) -> dict:
         left = Path(left_path).expanduser()
         right = Path(right_path).expanduser()
         if not left.exists() or not right.exists():
             raise HTTPException(400, "Both Keynote paths must exist")
+        start_fresh = _form_flag(fresh)
         job = RUNNER.submit(
             "diff",
-            lambda j, a=left, b=right, la=left_label, lb=right_label: _run_diff(j, a, b, la, lb),
+            lambda j, a=left, b=right, la=left_label, lb=right_label, fr=start_fresh: _run_diff(
+                j, a, b, la, lb, fresh=fr
+            ),
             feature="diff",
         )
         return job.to_dict()
@@ -234,14 +281,16 @@ def create_app() -> FastAPI:
     def visual_endpoint(
         left_path: str = Form(...),
         right_path: str = Form(...),
+        fresh: str = Form("false"),
     ) -> dict:
         left = Path(left_path).expanduser()
         right = Path(right_path).expanduser()
         if not left.is_dir() or not right.is_dir():
             raise HTTPException(400, "Both paths must be folders of preview images")
+        start_fresh = _form_flag(fresh)
         job = RUNNER.submit(
             "visual",
-            lambda j, a=left, b=right: visual_result(a, b),
+            lambda j, a=left, b=right, fr=start_fresh: _run_visual(j, a, b, fresh=fr),
             feature="visual",
         )
         return job.to_dict()
@@ -271,6 +320,37 @@ def create_app() -> FastAPI:
             ]
         result["pairs"] = pairs
         result["phase"] = "match"
+        _remember_pairing(job, result, source="operator", force=True)
+        updated = RUNNER.update_result(job_id, result)
+        return RUNNER.public_dict(updated) if updated else result
+
+    @app.post("/api/visual/{job_id}/slots")
+    def save_visual_slots(job_id: str, payload: DiffSlotsBody) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        result = dict(job.result)
+        if payload.slots is None and payload.pairs is None:
+            raise HTTPException(400, "slots or pairs required")
+        if payload.slots is not None:
+            result["slots"] = payload.slots
+            rebuilt = visual_result(
+                Path(str(result.get("leftPath") or "")),
+                Path(str(result.get("rightPath") or "")),
+                str(result.get("leftLabel") or "LW"),
+                str(result.get("rightLabel") or "DSK"),
+                slots=payload.slots,
+            )
+            result["pairs"] = rebuilt["pairs"]
+            result["leftCatalog"] = rebuilt.get("leftCatalog") or result.get("leftCatalog")
+            result["rightCatalog"] = rebuilt.get("rightCatalog") or result.get("rightCatalog")
+        else:
+            result["pairs"] = payload.pairs
+            result["slots"] = _slots_from_pairs(payload.pairs or [])
+        result["phase"] = "visual"
+        _remember_pairing(job, result, source="operator", force=True)
         updated = RUNNER.update_result(job_id, result)
         return RUNNER.public_dict(updated) if updated else result
 
@@ -283,6 +363,21 @@ def create_app() -> FastAPI:
             save_diff_slots(job_id, payload)
         try:
             updated = RUNNER.rerun(job_id, _run_diff_check)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not updated:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(updated)
+
+    @app.post("/api/visual/{job_id}/check")
+    def start_visual_check(job_id: str, payload: DiffSlotsBody = Body(default=DiffSlotsBody())) -> dict:
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if payload and (payload.slots is not None or payload.pairs is not None):
+            save_visual_slots(job_id, payload)
+        try:
+            updated = RUNNER.rerun(job_id, _run_visual_check)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         if not updated:
@@ -425,26 +520,134 @@ def _run_generate(job: Job, docx: Path) -> dict[str, Any]:
     }
 
 
-def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: str) -> dict[str, Any]:
+def _form_flag(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _slots_from_pairs(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for pair in pairs:
+        rights = pair.get("rightIndexes")
+        if rights is None:
+            ri = pair.get("rightIndex")
+            rights = [] if ri is None else [ri]
+        out.append(slot_dict(pair.get("leftIndex"), list(rights), float(pair.get("score") or 0)))
+    return out
+
+
+def _remember_pairing(job: Job, result: dict[str, Any], *, source: str, force: bool = False) -> None:
+    left = result.get("leftPath")
+    right = result.get("rightPath")
+    if not left or not right:
+        return
+    kind = "visual" if job.feature == "visual" or job.kind == "visual" else "diff"
+    slots = result.get("slots") or _slots_from_pairs(result.get("pairs") or [])
+    save_pairing(
+        kind,
+        left,
+        right,
+        list(result.get("leftDigests") or []),
+        list(result.get("rightDigests") or []),
+        slots,
+        source=source,
+        job_id=job.id,
+        force=force,
+    )
+
+
+def _log_inspect(job: Job, name: str, payload: dict[str, Any]) -> None:
+    timing = payload.get("_timing") or {}
+    if payload.get("_cached"):
+        digest_s = timing.get("digest")
+        extra = f" ({digest_s:.1f}s hash)" if isinstance(digest_s, (int, float)) else ""
+        job.log(f"Reused cached inspect of {name}{extra}.")
+        return
+    parts = []
+    if "jxa" in timing:
+        parts.append(f"read {timing['jxa']:.1f}s")
+    if "export" in timing:
+        parts.append(f"export {timing['export']:.1f}s")
+    extra = f" ({', '.join(parts)})" if parts else ""
+    job.log(f"Inspected {name}{extra}.")
+
+
+def _run_diff(
+    job: Job,
+    left: Path,
+    right: Path,
+    left_label: str,
+    right_label: str,
+    *,
+    fresh: bool = False,
+) -> dict[str, Any]:
+    settings = load_settings()
     work = diff_work_dir(job.id)
-    left_dir = work / "left"
-    right_dir = work / "right"
     heat_dir = work / "heat"
+    heat_dir.mkdir(parents=True, exist_ok=True)
+    if fresh:
+        delete_pairing("diff", left, right)
+
     job.log(f"Inspecting {left.name} (read-only)…")
-    left_payload = inspect_keynote(left, export_dir=left_dir)
+    left_payload = inspect_keynote(left, export_dir=work / "left")
+    _log_inspect(job, left.name, left_payload)
+    left_dir = Path(left_payload.get("previewDir") or work / "left")
     left_n = len(preview_pngs(left_dir))
     if left_n:
         job.log(f"Exported {left_n} LW preview PNG(s).")
     else:
         job.log(left_payload.get("exportError") or "LW preview export produced no PNGs.")
+
     job.log(f"Inspecting {right.name} (read-only)…")
-    right_payload = inspect_keynote(right, export_dir=right_dir)
+    right_payload = inspect_keynote(right, export_dir=work / "right")
+    _log_inspect(job, right.name, right_payload)
+    right_dir = Path(right_payload.get("previewDir") or work / "right")
     right_n = len(preview_pngs(right_dir))
     if right_n:
         job.log(f"Exported {right_n} {right_label} preview PNG(s).")
     else:
         job.log(right_payload.get("exportError") or f"{right_label} preview export produced no PNGs.")
-        job.log("Matching slides…")
+
+    left_digests = deck_slide_digests(left_payload)
+    right_digests = deck_slide_digests(right_payload)
+    reuse_report = None
+    slots = None
+    if settings["reusePairings"] and not fresh:
+        baseline = load_pairing("diff", left, right)
+        if baseline:
+            reused = reuse_slots(
+                baseline, left_digests, right_digests, float(settings["reuseThreshold"])
+            )
+            if reused:
+                job.log(
+                    f"Reusing {reused.carried} pairing(s) from an earlier run "
+                    f"({reused.changed} changed, {reused.added} added, {reused.removed} removed)…"
+                )
+                t_gaps = time.perf_counter()
+                left_size = (
+                    float(left_payload.get("slideWidth") or 0),
+                    float(left_payload.get("slideHeight") or 0),
+                )
+                right_size = (
+                    float(right_payload.get("slideWidth") or 0),
+                    float(right_payload.get("slideHeight") or 0),
+                )
+                filled = realign_gaps(
+                    reused.slots,
+                    left_payload.get("slides") or [],
+                    right_payload.get("slides") or [],
+                    left_pngs=preview_pngs(left_dir),
+                    right_pngs=preview_pngs(right_dir),
+                    left_size=left_size,
+                    right_size=right_size,
+                )
+                slots = slots_from_pairs(filled)
+                job.log(f"Filled changed gaps in {time.perf_counter() - t_gaps:.1f}s.")
+                reuse_report = {key: value for key, value in reused.as_dict().items() if key != "slots"}
+            else:
+                job.log("Earlier pairing no longer matches this content; starting fresh.")
+
+    job.log("Matching slides…")
+    t_match = time.perf_counter()
     compared = compare_inspects(
         left_payload,
         right_payload,
@@ -453,8 +656,10 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
         heat_dir,
         left_label=left_label,
         right_label=right_label,
+        slots=slots,
         check=False,
     )
+    job.log(f"Matched slides in {time.perf_counter() - t_match:.1f}s.")
     inspect_left = work / "left-inspect.json"
     inspect_right = work / "right-inspect.json"
     inspect_left.write_text(json.dumps(left_payload), encoding="utf-8")
@@ -463,7 +668,7 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
     pairs = compared["pairs"]
     for pair in pairs:
         pair["flags"] = serialize_flags(pair.get("flags") or [])
-    return {
+    result = {
         "leftPath": str(left),
         "rightPath": str(right),
         "leftLabel": left_label,
@@ -473,6 +678,8 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
         "leftPreviews": str(left_dir),
         "rightPreviews": str(right_dir),
         "heatDir": str(heat_dir),
+        "evidenceDir": str(work / "evidence"),
+        "workDir": str(work),
         "leftInspect": str(inspect_left),
         "rightInspect": str(inspect_right),
         "leftPngs": [p.name for p in preview_pngs(left_dir)],
@@ -480,10 +687,55 @@ def _run_diff(job: Job, left: Path, right: Path, left_label: str, right_label: s
         "heatPngs": [p.name for p in preview_pngs(heat_dir)],
         "leftCatalog": compared.get("leftCatalog") or [],
         "rightCatalog": compared.get("rightCatalog") or [],
+        "leftDigests": left_digests,
+        "rightDigests": right_digests,
         "summary": compared,
         "pairs": pairs,
+        "slots": _slots_from_pairs(pairs),
         "flags": serialize_flags(flags),
     }
+    if reuse_report:
+        result["reuse"] = reuse_report
+    source = "operator" if reuse_report and reuse_report.get("source") == "operator" else "auto"
+    _remember_pairing(job, result, source=source, force=True)
+    return result
+
+
+def _run_visual(job: Job, left: Path, right: Path, *, fresh: bool = False) -> dict[str, Any]:
+    settings = load_settings()
+    if fresh:
+        delete_pairing("visual", left, right)
+    job.log("Reading preview folders…")
+    t0 = time.perf_counter()
+    left_digests = folder_digests(left)
+    right_digests = folder_digests(right)
+    job.log(f"Hashed previews in {time.perf_counter() - t0:.1f}s.")
+    reuse_report = None
+    slots = None
+    if settings["reusePairings"] and not fresh:
+        baseline = load_pairing("visual", left, right)
+        if baseline:
+            reused = reuse_slots(
+                baseline, left_digests, right_digests, float(settings["reuseThreshold"])
+            )
+            if reused:
+                slots = pair_index_gaps(reused.slots)
+                reuse_report = {key: value for key, value in reused.as_dict().items() if key != "slots"}
+                job.log(
+                    f"Reusing {reused.carried} pairing(s) from an earlier run "
+                    f"({reused.changed} changed, {reused.added} added, {reused.removed} removed)."
+                )
+            else:
+                job.log("Earlier pairing no longer matches these folders; starting fresh.")
+    result = visual_result(left, right, slots=slots)
+    result["leftDigests"] = left_digests
+    result["rightDigests"] = right_digests
+    result["slots"] = _slots_from_pairs(result.get("pairs") or [])
+    if reuse_report:
+        result["reuse"] = reuse_report
+    source = "operator" if reuse_report and reuse_report.get("source") == "operator" else "auto"
+    _remember_pairing(job, result, source=source, force=True)
+    return result
 
 
 def _pairs_from_catalog(result: dict[str, Any], slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -541,6 +793,7 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
     right_payload = json.loads(right_inspect.read_text(encoding="utf-8"))
     slots = slots_from_pairs(result.get("pairs") or [])
     job.log("Checking wording, photos, and house style…")
+    t_check = time.perf_counter()
     compared = compare_inspects(
         left_payload,
         right_payload,
@@ -552,6 +805,7 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
         slots=slots,
         check=True,
     )
+    job.log(f"Checked pairs in {time.perf_counter() - t_check:.1f}s.")
     flags = compared.pop("flags")
     pairs = compared["pairs"]
     for pair in pairs:
@@ -571,26 +825,84 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
     return result
 
 
+def _run_visual_check(job: Job) -> dict[str, Any]:
+    result = dict(job.result or {})
+    left = Path(str(result.get("leftPath") or result.get("leftPreviews") or ""))
+    right = Path(str(result.get("rightPath") or result.get("rightPreviews") or ""))
+    if not left.is_dir() or not right.is_dir():
+        raise FileNotFoundError("Preview folders are missing; choose them again.")
+    work = ROOT / "output" / ".visual" / job.id
+    heat_dir = work / "heat"
+    heat_dir.mkdir(parents=True, exist_ok=True)
+    job.log("Reading previews and checking wording, photos, and house style…")
+    t0 = time.perf_counter()
+    left_payload = preview_inspect(left)
+    right_payload = preview_inspect(right)
+    slots = slots_from_pairs(result.get("pairs") or [])
+    compared = compare_inspects(
+        left_payload,
+        right_payload,
+        left,
+        right,
+        heat_dir,
+        left_label=str(result.get("leftLabel") or "LW"),
+        right_label=str(result.get("rightLabel") or "DSK"),
+        slots=slots,
+        check=True,
+    )
+    job.log(f"Checked pairs in {time.perf_counter() - t0:.1f}s.")
+    flags = compared.pop("flags")
+    pairs = compared["pairs"]
+    for pair in pairs:
+        pair["flags"] = serialize_flags(pair.get("flags") or [])
+    result.update(
+        {
+            "phase": "checked",
+            "sameType": compared.get("sameType"),
+            "leftPreviews": str(left),
+            "rightPreviews": str(right),
+            "heatDir": str(heat_dir),
+            "evidenceDir": str(work / "evidence"),
+            "workDir": str(work),
+            "heatPngs": [p.name for p in preview_pngs(heat_dir)],
+            "leftCatalog": compared.get("leftCatalog") or result.get("leftCatalog") or [],
+            "rightCatalog": compared.get("rightCatalog") or result.get("rightCatalog") or [],
+            "summary": compared,
+            "pairs": pairs,
+            "slots": _slots_from_pairs(pairs),
+            "flags": serialize_flags(flags),
+        }
+    )
+    return result
+
+
 def _run_inspect(
     job: Job,
     path: Path,
     export: bool,
     slide_range: frozenset[int] | None,
 ) -> dict[str, Any]:
-    export_dir = None
-    if export:
-        export_dir = ROOT / "output" / ".inspect" / job.id
+    job_dir = ROOT / "output" / ".inspect" / job.id if export else None
     job.log(f"Inspecting {path.name} (read-only, no save)…")
-    payload = inspect_keynote(path, export_dir=export_dir, slide_range=slide_range)
-    names = preview_names(export_dir) if export_dir else []
-    if export_dir and names:
+    payload = inspect_keynote(path, export_dir=job_dir, slide_range=slide_range)
+    _log_inspect(job, path.name, payload)
+    preview_path = Path(payload.get("previewDir") or job_dir) if job_dir else None
+    names = preview_names(preview_path) if preview_path else []
+    if preview_path and names:
         job.log(f"Exported {len(names)} preview PNG(s).")
-    elif export_dir:
+    elif job_dir:
         job.log(payload.get("exportError") or "Preview export produced no PNGs.")
-    flags = validate_inspect(payload, location_prefix=path.name)
-    preview_dir = str(export_dir) if export_dir else None
+    evidence_dir = (job_dir / "evidence") if job_dir else None
+    flags = validate_inspect(
+        payload,
+        location_prefix=path.name,
+        previews=preview_pngs(preview_path) if preview_path else None,
+        evidence_dir=evidence_dir,
+    )
+    preview_dir = str(preview_path) if preview_path else None
     return {
         "path": str(path),
+        "evidenceDir": str(evidence_dir) if evidence_dir else None,
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
         "slideCount": payload.get("slideCount"),
