@@ -425,6 +425,15 @@ input[type="text"], input[type="number"] {
   width: 100%;
 }
 label.field { display: block; margin: 8px 0; font-size: 14px; color: var(--muted); }
+label.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+label.check input { margin-top: 3px; }
 .note { color: var(--muted); font-size: 14px; }
 .err { color: var(--err); }
 .seg { display: flex; gap: 6px; margin: 12px 0; }

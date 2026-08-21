@@ -13,11 +13,8 @@ from obed_edom.inspect import inspect_keynote, preview_pngs
 from obed_edom.map_remap import (
     CG_HEIGHT,
     CG_WIDTH,
-    Rect,
     learn_recipe,
-    map_rect_from_slide,
     plan_payload_transforms,
-    recipe_from_cover,
     score_against_gold,
     summarize_plan,
 )
@@ -61,38 +58,22 @@ def copy_keynote(source: Path, dest: Path) -> Path:
     return dest
 
 
-def recipe_for(
-    wall: dict[str, Any],
-    gold: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if gold:
-        return learn_recipe(wall, gold)
-    map_src = None
-    for slide in wall.get("slides") or []:
-        map_src = map_rect_from_slide(slide)
-        if map_src:
-            break
-    if map_src is None:
-        map_src = Rect(
-            0,
-            0,
-            float(wall.get("slideWidth") or 7680),
-            float(wall.get("slideHeight") or 1080),
-        )
-    return recipe_from_cover(map_src)
+def recipe_for(wall: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
+    return learn_recipe(wall, template)
 
 
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
     *,
-    gold: Path | str | None = None,
+    template: Path | str,
     slide_range: tuple[int, int] | None = None,
+    include_lists: bool = False,
     wall_payload: dict[str, Any] | None = None,
-    gold_payload: dict[str, Any] | None = None,
+    template_payload: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Copy `source` to `dest`, remap map+pins in place, set canvas to 1920×1080."""
+    """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop."""
     def say(message: str) -> None:
         if log:
             log(message)
@@ -101,50 +82,118 @@ def remap_keynote(
     dest = Path(dest).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(source)
-    gold_path = Path(gold).expanduser().resolve() if gold else None
-    if gold_path and not gold_path.exists():
-        raise FileNotFoundError(gold_path)
+    template_path = Path(template).expanduser().resolve()
+    if not template_path.exists():
+        raise FileNotFoundError(template_path)
 
     wall = wall_payload if wall_payload is not None else inspect_keynote(source, slide_range=slide_range)
     if wall_payload is None:
-        say(f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, {wall.get('slideCount')} slides.")
-    gold_data = None
-    if gold_payload is not None:
-        gold_data = gold_payload
-    elif gold_path:
-        say(f"Inspecting gold {gold_path.name}…")
-        gold_data = inspect_keynote(gold_path, slide_range=slide_range)
+        if slide_range:
+            if slide_range[0] == slide_range[1]:
+                say(f"Inspected {source.name} slide {slide_range[0]}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}.")
+            else:
+                say(
+                    f"Inspected {source.name} slides {slide_range[0]}–{slide_range[1]}: "
+                    f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
+                )
+        else:
+            say(f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, {wall.get('slideCount')} slides.")
+    if template_payload is not None:
+        template_data = template_payload
+    else:
+        say(f"Inspecting CG template {template_path.name}…")
+        template_data = inspect_keynote(template_path)
 
-    recipe = recipe_for(wall, gold_data)
-    transforms = plan_payload_transforms(wall, recipe, slide_range=slide_range)
+    recipe = recipe_for(wall, template_data)
+    transforms = plan_payload_transforms(
+        wall, recipe, slide_range=slide_range, include_lists=include_lists
+    )
     counts = summarize_plan(transforms)
     say(
-        f"Recipe {recipe.get('source')}: {counts.get('map', 0)} map, "
-        f"{counts.get('pin', 0)} pin, {counts.get('list', 0)} list objects."
+        f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
+        f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list, "
+        f"{counts.get('hide', 0)} hidden names"
+        f"{'' if include_lists else ' (church names hidden, not packed)'}."
     )
+    origin_pins = [
+        t for t in transforms if t.role == "pin" and abs(t.x) < 2 and abs(t.y) < 2
+    ]
+    if len(origin_pins) > 10:
+        raise RuntimeError(
+            f"Planner put {len(origin_pins)} pins at (0,0); refusing to apply. "
+            f"Wall canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}. "
+            f"mapSrc={recipe.get('mapSrc')} mapDst={recipe.get('mapDst')}. "
+            "Use the original 7680 wall .key, not a previous CG output."
+        )
     say(f"Copying {source.name} → {dest.name}…")
     copy_keynote(source, dest)
-    say("Applying positions in Keynote (object identity kept)…")
-    jxa = _run_jxa(
-        {
+    layout_dir = Path(tempfile.mkdtemp(prefix="obed-layouts-"))
+    layout_src = layout_dir / template_path.name
+    try:
+        say(f"Copying 16:9 slide layouts from {template_path.name} onto the wall copy…")
+        copy_keynote(template_path, layout_src)
+        say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
+        plan: dict[str, Any] = {
             "dest": str(dest),
+            "template": str(layout_src),
             "width": int(recipe.get("destWidth") or CG_WIDTH),
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
             "transforms": [t.as_dict() for t in transforms],
         }
-    )
+        if slide_range:
+            plan["range"] = [slide_range[0], slide_range[1]]
+        jxa = _run_jxa(plan)
+    finally:
+        shutil.rmtree(layout_dir, ignore_errors=True)
+    applied = int(jxa.get("applied") or 0)
+    missed = int(jxa.get("missed") or 0)
+    if jxa.get("collections"):
+        say(f"Keynote collections: {jxa.get('collections')}")
+    if applied == 0:
+        detail = ""
+        if jxa.get("collections"):
+            detail += f" collections={jxa.get('collections')}"
+        if jxa.get("missReasons"):
+            detail += f" misses={jxa.get('missReasons')}"
+        raise RuntimeError(
+            "Keynote remap moved 0 objects; the copy was left at the wall canvas size."
+            f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
+        )
+    say(f"Applied {applied}, missed {missed}.")
+    layouts = jxa.get("layouts") or {}
+    if layouts.get("imported"):
+        say(f"Imported 16:9 layouts: {', '.join(str(n) for n in layouts['imported'])}.")
+    applied_layouts = layouts.get("applied") or []
+    if applied_layouts:
+        sample = applied_layouts[0]
+        say(
+            f"Applied {sample.get('to') or 'CG layout'} to "
+            f"{len(applied_layouts)} slide(s)."
+        )
+    if jxa.get("mapReadback"):
+        say(f"Map object after apply: {jxa.get('mapReadback')}")
+    actual_w = jxa.get("width")
+    actual_h = jxa.get("height")
+    if actual_w and actual_h:
+        say(f"Canvas after remap: {actual_w}×{actual_h}.")
+    if jxa.get("skippedSlides"):
+        say(f"Skipped {jxa.get('skippedSlides')} other slide(s) so the preview is this slide only.")
     result: dict[str, Any] = {
         "source": str(source),
         "dest": str(dest),
+        "template": str(template_path),
         "recipe": recipe,
-        "counts": summarize_plan(transforms),
-        "applied": jxa.get("applied"),
-        "missed": jxa.get("missed"),
+        "counts": counts,
+        "applied": applied,
+        "missed": missed,
         "width": jxa.get("width"),
         "height": jxa.get("height"),
+        "collections": jxa.get("collections"),
+        "slideRange": list(slide_range) if slide_range else None,
+        "skippedSlides": jxa.get("skippedSlides"),
+        "layouts": jxa.get("layouts"),
+        "templateScore": score_against_gold(transforms, template_data),
     }
-    if gold_data:
-        result["goldScore"] = score_against_gold(transforms, gold_data)
     return result
 
 
@@ -152,15 +201,23 @@ def remap_and_inspect(
     source: Path | str,
     dest: Path | str,
     *,
-    gold: Path | str | None = None,
+    template: Path | str,
     slide_range: tuple[int, int] | None = None,
+    include_lists: bool = False,
     export_dir: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    info = remap_keynote(source, dest, gold=gold, slide_range=slide_range, log=log)
+    info = remap_keynote(
+        source,
+        dest,
+        template=template,
+        slide_range=slide_range,
+        include_lists=include_lists,
+        log=log,
+    )
     if log:
         log("Inspecting remapped deck…")
-    payload = inspect_keynote(dest, export_dir=export_dir)
+    payload = inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range)
     info["inspect"] = {
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),

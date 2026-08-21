@@ -6,19 +6,48 @@ function readJSON(path) {
   return JSON.parse(ObjC.unwrap(str));
 }
 
-}
-
 function num(v, fallback) {
   const n = Number(v);
   return isNaN(n) ? fallback : n;
 }
 
+function lenOf(v) {
+  if (v == null) return 0;
+  try {
+    let n = v.length;
+    if (typeof n === "function") n = n.call(v);
+    n = Number(n);
+    return isNaN(n) ? 0 : n;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function xyFrom(p) {
+  if (p == null) return null;
+  if (lenOf(p) >= 2) {
+    return [num(p[0], 0), num(p[1], 0)];
+  }
+  let x = NaN;
+  let y = NaN;
+  try {
+    let xv = p.x;
+    if (typeof xv === "function") xv = xv.call(p);
+    x = Number(xv);
+  } catch (eX) {}
+  try {
+    let yv = p.y;
+    if (typeof yv === "function") yv = yv.call(p);
+    y = Number(yv);
+  } catch (eY) {}
+  if (!isNaN(x) && !isNaN(y)) return [x, y];
+  return null;
+}
+
 function positionOf(obj) {
   try {
-    const p = obj.position();
-    if (p && p.length >= 2) {
-      return [num(p[0], 0), num(p[1], 0)];
-    }
+    const pair = xyFrom(obj.position());
+    if (pair) return pair;
   } catch (e) {}
   return [0, 0];
 }
@@ -168,12 +197,12 @@ function describeItem(obj, index, kindHint) {
   }
   if (kind === "line") {
     try {
-      const sp = obj.startPoint();
-      if (sp && sp.length >= 2) rec.start = [num(sp[0], 0), num(sp[1], 0)];
+      const pair = xyFrom(obj.startPoint());
+      if (pair) rec.start = pair;
     } catch (eS) {}
     try {
-      const ep = obj.endPoint();
-      if (ep && ep.length >= 2) rec.end = [num(ep[0], 0), num(ep[1], 0)];
+      const pair = xyFrom(obj.endPoint());
+      if (pair) rec.end = pair;
     } catch (eE) {}
   }
   if (kind === "group") {
@@ -194,7 +223,10 @@ function describeItem(obj, index, kindHint) {
 function collectFrom(slide, name, kind, items, kindCounts) {
   try {
     const col = slide[name]();
-    for (let i = 0; i < col.length; i++) {
+    let n = col.length;
+    if (typeof n === "function") n = n.call(col);
+    n = Number(n) || 0;
+    for (let i = 0; i < n; i++) {
       const rec = describeItem(col[i], items.length, kind);
       rec.kindIndex = i;
       kindCounts[kind] = (kindCounts[kind] || 0) + 1;
@@ -205,16 +237,6 @@ function collectFrom(slide, name, kind, items, kindCounts) {
 
 function collectItems(slide) {
   const items = [];
-  try {
-    const all = slide.iWorkItems();
-    for (let i = 0; i < all.length; i++) {
-      const rec = describeItem(all[i], i);
-      rec.kindIndex = i;
-      items.push(rec);
-    }
-  } catch (e) {}
-  if (items.length) return items;
-
   const kindCounts = {};
   collectFrom(slide, "textItems", "text", items, kindCounts);
   collectFrom(slide, "images", "image", items, kindCounts);
@@ -222,7 +244,35 @@ function collectItems(slide) {
   collectFrom(slide, "movies", "movie", items, kindCounts);
   collectFrom(slide, "groups", "group", items, kindCounts);
   collectFrom(slide, "lines", "line", items, kindCounts);
+  if (items.length) return items;
+
+  try {
+    const all = slide.iWorkItems();
+    let n = all.length;
+    if (typeof n === "function") n = n.call(all);
+    n = Number(n) || 0;
+    for (let i = 0; i < n; i++) {
+      const rec = describeItem(all[i], i);
+      rec.kindIndex = i;
+      items.push(rec);
+    }
+  } catch (e) {}
   return items;
+}
+
+function canvasSize(doc) {
+  // slideWidth() throws "Can't convert types" on current Keynote; width() works.
+  try {
+    const w = Number(doc.width());
+    const h = Number(doc.height());
+    if (!isNaN(w) && !isNaN(h) && w > 0 && h > 0) return [w, h];
+  } catch (e) {}
+  try {
+    const w = Number(doc.slideWidth());
+    const h = Number(doc.slideHeight());
+    if (!isNaN(w) && !isNaN(h) && w > 0 && h > 0) return [w, h];
+  } catch (e2) {}
+  return [1920, 1080];
 }
 
 function run(argv) {
@@ -231,12 +281,9 @@ function run(argv) {
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.path));
   const slides = doc.slides();
-  let slideWidth = 1920;
-  let slideHeight = 1080;
-  try {
-    slideWidth = doc.slideWidth();
-    slideHeight = doc.slideHeight();
-  } catch (e) {}
+  const size = canvasSize(doc);
+  const slideWidth = size[0];
+  const slideHeight = size[1];
 
   const range = plan.range || null;
   const start = range ? Math.max(0, range[0] - 1) : 0;
@@ -246,8 +293,12 @@ function run(argv) {
   for (let i = start; i < end; i++) {
     let master = "";
     try {
-      master = String(slides[i].baseSlide().name());
-    } catch (e2) {}
+      master = String(slides[i].baseLayout().name());
+    } catch (e2) {
+      try {
+        master = String(slides[i].baseSlide().name());
+      } catch (e3) {}
+    }
     let skipped = false;
     try {
       skipped = Boolean(slides[i].skipped());
