@@ -102,11 +102,10 @@ def test_gold_recipe_pairs_pins_and_list():
     with_lists = plan_payload_transforms(wall, recipe, include_lists=True)
     assert summarize_plan(with_lists)["list"] == 1
     name = next(t for t in with_lists if t.role == "list")
-    # Same map affine as the image (identity scale + crop offset), not a squash.
-    assert abs(name.x - 3120) < 1
-    assert abs(name.y - 80) < 1
-    assert abs(name.w - 400) < 1
-    assert abs(name.h - 40) < 1
+    assert name.font_size == 28
+    assert abs(name.w - 400 * (28 / 36)) < 2
+    assert name.x + name.w <= 1920 + 2
+    assert name.y >= 0
 
 
 def test_full_frame_template_cover_crops_wall_map():
@@ -373,3 +372,81 @@ def test_learn_recipe_uses_template_slide_with_matching_map_layers():
     assert abs(recipe["mapDst"]["h"] - 771) < 1
     pin = next(t for t in plan_payload_transforms(wall, recipe) if t.role == "pin")
     assert abs(pin.x - (3563 - 3041)) < 1
+
+
+def test_list_sample_uses_one_line_church_name_font():
+    from obed_edom.map_remap import template_list_sample
+
+    slides = [
+        {
+            "items": [
+                _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                _item(kind="text", text="CHC Prai\nCHC Aliwal\nCHC Bohol", x=1400, y=40, w=400, h=200, size=42),
+            ]
+        }
+    ]
+    font, sample = template_list_sample(slides)
+    assert font == 20
+    assert sample is not None
+    assert abs(sample.x - 39) < 1
+
+
+def test_church_lists_use_sample_font_and_pack_in_gutter():
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="text", text="Global Missions", x=2147, y=52, w=537, h=124, size=100),
+                    _item(kind="text", text="CHC Zui Si\nCHC Zwechipen", x=6946, y=9, w=474, h=954, size=42),
+                    _item(kind="text", text="CHC Aaliana\nCHC Aliwal", x=262, y=9, w=423, h=954, size=42),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="text", text="Global Missions", x=135, y=67, w=271, h=64, size=50),
+                    _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["listFontSize"] == 20
+    assert recipe["titleFontSize"] == 50
+    assert abs(recipe["titleDst"]["x"] - 135) < 1
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    lists = [t for t in transforms if t.role == "list"]
+    assert len(lists) == 2
+    assert all(t.font_size == 20 for t in lists)
+    assert all(abs(t.h - 954 * (20 / 42)) < 2 for t in lists)
+    title = next(t for t in transforms if t.role == "title")
+    assert abs(title.x - 135) < 1
+    assert title.font_size == 50
+    # Rightmost wall column is placed first, against the right edge.
+    rightmost = max(lists, key=lambda t: t.x)
+    assert rightmost.x + rightmost.w <= 1920 + 1
+    assert rightmost.x >= 1920 - 16 - rightmost.w - 1
+    # Both columns fit in the ~640px gutter to the right of the map.
+    map_right = 11 + 1248
+    assert all(t.x + 1 >= map_right for t in lists)
+
+
+def test_pack_columns_steps_left_when_taller_than_frame():
+    from obed_edom.map_remap import pack_columns_from_right
+
+    boxes = [Rect(0, 0, 200, 500), Rect(0, 0, 200, 500), Rect(0, 0, 180, 400)]
+    placed = pack_columns_from_right(boxes, 1920, 1080, Rect(11, 18, 1248, 771))
+    assert len(placed) == 3
+    assert placed[0].x > placed[2].x
+    assert placed[0].y < placed[1].y

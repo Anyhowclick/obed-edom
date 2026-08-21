@@ -113,8 +113,13 @@ def remap_keynote(
         f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
         f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list, "
         f"{counts.get('hide', 0)} hidden names"
-        f"{'' if include_lists else ' (church names hidden, not packed)'}."
+        f"{'' if include_lists else ' (church names hidden; tick the list checkbox to pack them)'}."
     )
+    if include_lists and recipe.get("listFontSize"):
+        say(
+            f"Church names → {recipe.get('listFontSize')}pt, packed from the right "
+            f"(gutter first; extras may overlap the map)."
+        )
     origin_pins = [
         t for t in transforms if t.role == "pin" and abs(t.x) < 2 and abs(t.y) < 2
     ]

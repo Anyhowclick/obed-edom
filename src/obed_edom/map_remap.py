@@ -108,7 +108,7 @@ class ItemTransform:
         }
         # Map and pins send size so we can restore after Keynote's slide-size scale.
         # Apply size before position (Keynote resets position when size changes).
-        if self.role in {"map", "list", "pin"}:
+        if self.role in {"map", "list", "pin", "title"}:
             payload["w"] = round(self.w, 2)
             payload["h"] = round(self.h, 2)
         if self.font_size is not None:
@@ -212,6 +212,92 @@ def is_list_item(item: dict) -> bool:
     if CHURCH_LIST_RE.search(text):
         return True
     return text.count("\n") >= 3
+
+
+TITLE_RE = re.compile(r"global missions|全球使命", re.I)
+
+
+def is_title_item(item: dict) -> bool:
+    if (item.get("kind") or "") != "text":
+        return False
+    return bool(TITLE_RE.search((item.get("text") or "").strip()))
+
+
+def template_list_sample(slides: list[dict]) -> tuple[float | None, Rect | None]:
+    """Prefer a one-line church-name seed (Empty_Map's resized CHC Aaliana) over a column."""
+    candidates: list[tuple[int, float, Rect]] = []
+    for slide in slides:
+        for item in slide.get("items") or []:
+            if not is_list_item(item):
+                continue
+            size = _f(item.get("size"))
+            if size <= 0:
+                continue
+            text = (item.get("text") or "").strip()
+            lines = text.count("\n") + 1
+            candidates.append((lines, size, item_rect(item)))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda row: (row[0], row[1]))
+    return candidates[0][1], candidates[0][2]
+
+
+def template_title_item(slides: list[dict]) -> dict | None:
+    for slide in slides:
+        for item in slide.get("items") or []:
+            if is_title_item(item) and _f(item.get("w")) > 0:
+                return item
+    return None
+
+
+def pack_columns_from_right(
+    boxes: list[Rect],
+    dest_w: float,
+    dest_h: float,
+    map_dst: Rect | None = None,
+    *,
+    gap: float = 10.0,
+    margin: float = 16.0,
+) -> list[Rect]:
+    """Stack boxes into columns anchored to the right edge (top to bottom, then left).
+
+    The first columns sit in the gutter beside the map when they fit. Extra
+    columns step left and may overlap the map — staff can nudge those by hand.
+    """
+    if not boxes:
+        return []
+    top = margin
+    bottom = max(margin + 8.0, dest_h - margin)
+    placed: list[Rect] = []
+    col_left: float | None = None
+    y = top
+    for box in boxes:
+        w = max(8.0, box.w)
+        h = max(8.0, box.h)
+        if col_left is None:
+            col_left = dest_w - margin - w
+            y = top
+        elif y + h > bottom + 0.5:
+            col_left = col_left - gap - w
+            y = top
+        x = max(margin - w * 0.15, col_left)
+        placed.append(Rect(x, y, w, h))
+        y += h + gap
+    return placed
+
+
+def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> dict[str, Any]:
+    font, sample = template_list_sample(template_slides)
+    if font:
+        recipe["listFontSize"] = round(font, 2)
+        if sample:
+            recipe["listSample"] = sample.as_dict()
+    title = template_title_item(template_slides)
+    if title:
+        recipe["titleDst"] = item_rect(title).as_dict()
+        if title.get("size"):
+            recipe["titleFontSize"] = round(_f(title.get("size")), 2)
+    return recipe
 
 
 def map_rect_from_slide(slide: dict) -> Rect | None:
@@ -605,7 +691,7 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
                 "members": 0,
             }
         ]
-        return recipe
+        return _attach_text_style(recipe, template_slides)
     recipe: dict[str, Any] = {
         "destWidth": dest_w,
         "destHeight": dest_h,
@@ -630,7 +716,7 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
             }
             for g in grouped
         ]
-    return recipe
+    return _attach_text_style(recipe, template_slides)
 
 
 def cg_layout_name(name: str) -> str:
@@ -686,6 +772,8 @@ def classify_item(item: dict, map_src: Rect | None = None) -> str:
         return "map"
     if is_pin_item(item, map_src):
         return "pin"
+    if is_title_item(item):
+        return "title"
     if is_list_item(item):
         return "list"
     return "other"
@@ -701,6 +789,23 @@ def _item_kind_index(item: dict, fallback: int) -> int:
     if item.get("kindIndex") is not None:
         return int(item["kindIndex"])
     return fallback
+
+
+def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any]) -> None:
+    lists = [t for t in transforms if t.role == "list"]
+    if not lists:
+        return
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    map_dst = _rect_from_dict(recipe.get("mapDst"))
+    order = sorted(range(len(lists)), key=lambda i: (-lists[i].x, lists[i].y))
+    boxes = [Rect(lists[i].x, lists[i].y, lists[i].w, lists[i].h) for i in order]
+    placed = pack_columns_from_right(boxes, dest_w, dest_h, map_dst)
+    for idx, rect in zip(order, placed, strict=True):
+        lists[idx].x = rect.x
+        lists[idx].y = rect.y
+        lists[idx].w = rect.w
+        lists[idx].h = rect.h
 
 
 def plan_slide_transforms(
@@ -746,17 +851,72 @@ def plan_slide_transforms(
                 )
             )
             continue
+        if role == "title":
+            dst = _rect_from_dict(recipe.get("titleDst"))
+            if dst is None:
+                continue
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "text"),
+                    x=dst.x,
+                    y=dst.y,
+                    w=dst.w,
+                    h=dst.h,
+                    locked=bool(item.get("locked")),
+                    font_size=(
+                        float(recipe["titleFontSize"])
+                        if recipe.get("titleFontSize")
+                        else (_f(item.get("size")) or None)
+                    ),
+                    role="title",
+                    kind_index=kind_index,
+                )
+            )
+            continue
+        if role == "list":
+            src = item_rect(item)
+            font_dst = _f(recipe.get("listFontSize"))
+            wall_font = _f(item.get("size"))
+            if font_dst and wall_font > 0:
+                ratio = font_dst / wall_font
+                mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+                font: float | None = font_dst
+            elif aff is not None:
+                mapped = aff.apply_rect(src)
+                font = max(8.0, wall_font * aff.s) if wall_font else None
+            elif map_src and map_dst:
+                mapped = map_rect(src, map_src, map_dst)
+                font = (
+                    max(8.0, wall_font * (map_dst.h / map_src.h))
+                    if wall_font and map_src.h
+                    else None
+                )
+            else:
+                continue
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "text"),
+                    x=mapped.x,
+                    y=mapped.y,
+                    w=mapped.w,
+                    h=mapped.h,
+                    locked=bool(item.get("locked")),
+                    font_size=font,
+                    role="list",
+                    kind_index=kind_index,
+                )
+            )
+            continue
         if aff is None and map_src and map_dst:
             mapped = map_rect(item_rect(item), map_src, map_dst)
-            font_scale = map_dst.h / map_src.h if map_src.h else 1.0
         elif aff is not None:
             mapped = aff.apply_rect(item_rect(item))
-            font_scale = aff.s
         else:
             continue
-        font = None
-        if role == "list" and item.get("size"):
-            font = max(8.0, _f(item.get("size")) * font_scale)
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -781,14 +941,15 @@ def plan_slide_transforms(
                 w=mapped.w,
                 h=mapped.h,
                 locked=bool(item.get("locked")),
-                font_size=font,
                 start=start,
                 end=end,
                 role=role,
                 kind_index=kind_index,
             )
         )
-    role_order = {"map": 0, "pin": 1, "list": 2, "hide": 3, "line": 4, "other": 5}
+    if include_lists and recipe.get("listFontSize"):
+        _pack_list_transforms(out, recipe)
+    role_order = {"map": 0, "pin": 1, "title": 2, "list": 3, "hide": 4, "line": 5, "other": 6}
     out.sort(key=lambda t: role_order.get(t.role, 9))
     return out
 
@@ -858,7 +1019,7 @@ def score_against_gold(
 
 
 def summarize_plan(transforms: list[ItemTransform]) -> dict[str, int]:
-    counts: dict[str, int] = {"map": 0, "pin": 0, "list": 0, "line": 0, "other": 0}
+    counts: dict[str, int] = {"map": 0, "pin": 0, "list": 0, "title": 0, "line": 0, "other": 0}
     for spec in transforms:
         counts[spec.role] = counts.get(spec.role, 0) + 1
     counts["total"] = len(transforms)
