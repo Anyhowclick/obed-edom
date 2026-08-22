@@ -105,13 +105,10 @@ export function ResizeTab() {
     <div>
       <h1>CG resizer</h1>
       <p className="lede">
-        Copies the wall deck, copies the CG template’s 16:9 slide layouts onto it
-        (<code>MAP BLANK (16:9)</code> is the repurposed background), sets
-        1920×1080, then moves the existing objects onto that layout. The template
-        teaches the crop: every object in it should sit at its final CG size and
-        position, and more anchors that agree makes the fit more reliable. Give
-        it one slide per map framing you use — a page whose framing it has never
-        seen is scaled to fit and reported instead.
+        Turns a wall deck into 1920×1080 CGs. Your template deck shows where
+        things should end up: put each object where you want it, at the size you
+        want it, and add a slide for each map layout you use. Anything it hasn’t
+        seen before is shrunk to fit and listed for you to check.
       </p>
       <div className="row">
         <FileWell
@@ -130,7 +127,7 @@ export function ResizeTab() {
         />
         <FileWell
           label="CG_Template.key"
-          hint="Required 16:9 deck (Empty_Map.key). Its slide layouts are copied over; object positions teach the crop."
+          hint="The 16:9 deck showing where things should end up"
           file={template}
           onChoose={async () => {
             try {
@@ -158,12 +155,7 @@ export function ResizeTab() {
           checked={includeLists}
           onChange={(e) => setIncludeLists(e.target.checked)}
         />
-        <span>
-          Bring the church-name lists across, resized to the template’s sample
-          size and placed wherever the CG frame is still empty. Labels sitting on
-          the map always come across and keep their place, whichever way this is
-          set. Leave off to drop the side-panel name columns entirely.
-        </span>
+        <span>Bring the church-name lists across. Map labels come across either way.</span>
       </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>
