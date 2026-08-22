@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,9 +25,25 @@ from obed_edom.baseline import (
     save_pairing,
     slot_dict,
 )
-from obed_edom.diff_keynotes import compare_inspects, realign_gaps, slots_from_pairs
+from obed_edom.diff_keynotes import (
+    compare_inspects,
+    realign_gaps,
+    slide_catalog,
+    slots_from_pairs,
+)
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
 from obed_edom.map_remap import MVP_MAP_SLIDE, format_slide_range, resolve_slides
+from obed_edom.models import Flag
+from obed_edom.outline_check import (
+    SemanticOutlineError,
+    correspondence,
+    corroborate,
+    load_playlist,
+    outline_report,
+    rows_for_slots,
+    slots_from_cues,
+)
+from obed_edom.outline_check import visible as visible_slides
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
@@ -275,27 +293,68 @@ def create_app() -> FastAPI:
             jobs.append(job.to_dict())
         return {"jobs": jobs}
 
+    def _outline_arg(raw: str) -> Path | None:
+        """Validate an optional cued outline up front, so the job does not fail late."""
+        if not (raw or "").strip():
+            return None
+        outline = Path(raw.strip()).expanduser()
+        if not outline.exists():
+            raise HTTPException(400, f"Outline not found: {raw}")
+        try:
+            load_playlist(outline)
+        except SemanticOutlineError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, f"Could not read {outline.name}: {exc}") from exc
+        return outline
+
     @app.post("/api/diff")
     def diff_endpoint(
         left_path: str = Form(...),
         right_path: str = Form(...),
         left_label: str = Form("LW"),
         right_label: str = Form("Other"),
+        outline_path: str = Form(""),
+        lw_final: str = Form("true"),
         fresh: str = Form("false"),
     ) -> dict:
         left = Path(left_path).expanduser()
         right = Path(right_path).expanduser()
         if not left.exists() or not right.exists():
             raise HTTPException(400, "Both Keynote paths must exist")
+        outline = _outline_arg(outline_path)
         start_fresh = _form_flag(fresh)
+        final = _form_flag(lw_final)
         job = RUNNER.submit(
             "diff",
-            lambda j, a=left, b=right, la=left_label, lb=right_label, fr=start_fresh: _run_diff(
-                j, a, b, la, lb, fresh=fr
+            lambda j, a=left, b=right, la=left_label, lb=right_label, fr=start_fresh, o=outline, fin=final: (
+                _run_diff(j, a, b, la, lb, fresh=fr, outline=o, lw_final=fin)
             ),
-            feature="diff",
+            feature="check",
         )
         return job.to_dict()
+
+    @app.post("/api/outline")
+    def outline_endpoint(path: str = Form(...)) -> dict:
+        outline = _outline_arg(path)
+        if outline is None:
+            raise HTTPException(400, "An outline .docx is required.")
+        job = RUNNER.submit(
+            "outline",
+            lambda j, p=outline: _run_outline(j, p),
+            feature="check",
+        )
+        return job.to_dict()
+
+    @app.get("/api/jobs/{job_id}/outline.pdf")
+    def outline_pdf(job_id: str):
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "No result")
+        path = (job.result or {}).get("outlineReport")
+        if not path or not Path(path).is_file():
+            raise HTTPException(404, "No outline report")
+        return FileResponse(path, media_type="application/pdf", filename=Path(path).name)
 
     @app.post("/api/visual")
     def visual_endpoint(
@@ -428,19 +487,25 @@ def create_app() -> FastAPI:
         range_to: int | None = Form(None),
         slides: str = Form(""),
         feature: str = Form("inspect"),
+        outline_path: str = Form(""),
+        lw_final: str = Form("true"),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
         tag = feature if feature in {"dsk", "resize", "inspect", "dsk-aux", "check"} else "inspect"
+        outline = _outline_arg(outline_path)
+        final = _form_flag(lw_final)
         try:
             sel = resolve_slides(spec=slides or None, range_from=range_from, range_to=range_to)
         except ValueError as err:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "inspect",
-            lambda j, p=key, ex=do_export, sl=sel: _run_inspect(j, p, ex, sl),
+            lambda j, p=key, ex=do_export, sl=sel, o=outline, fin=final: _run_inspect(
+                j, p, ex, sl, outline=o, lw_final=fin
+            ),
             feature=tag,
         )
         return job.to_dict()
@@ -613,6 +678,15 @@ def _log_inspect(job: Job, name: str, payload: dict[str, Any]) -> None:
     job.log(f"Inspected {name}{extra}.")
 
 
+def _deck_of(label: str, payload: dict[str, Any]) -> str:
+    """Which deck a side is, so cues are counted against the right family."""
+    if re.search(r"\b(LW|GW|LED|FW)\b", label or "", re.I):
+        return "lw"
+    if re.search(r"\bDSK\b", label or "", re.I):
+        return "dsk"
+    return "lw" if float(payload.get("slideWidth") or 0) >= 3000 else "dsk"
+
+
 def _run_diff(
     job: Job,
     left: Path,
@@ -621,6 +695,8 @@ def _run_diff(
     right_label: str,
     *,
     fresh: bool = False,
+    outline: Path | None = None,
+    lw_final: bool = True,
 ) -> dict[str, Any]:
     settings = load_settings()
     work = diff_work_dir(job.id)
@@ -653,6 +729,22 @@ def _run_diff(
     right_digests = deck_slide_digests(right_payload)
     reuse_report = None
     slots = None
+
+    left_deck = _deck_of(left_label, left_payload)
+    right_deck = _deck_of(right_label, right_payload)
+    playlist = None
+    if outline is not None:
+        playlist, _paragraphs = load_playlist(outline)
+        job.log(
+            f"Read {playlist.count('lw')} LW and {playlist.count('dsk')} DSK cues "
+            f"from {outline.name}."
+        )
+        job.log(
+            "LW is marked finalised, so it outranks the outline on wording."
+            if lw_final
+            else "LW is not finalised, so the outline leads on wording."
+        )
+
     if settings["reusePairings"] and not fresh:
         baseline = load_pairing("diff", left, right)
         if baseline:
@@ -688,6 +780,21 @@ def _run_diff(
             else:
                 job.log("Earlier pairing no longer matches this content; starting fresh.")
 
+    if slots is None and playlist is not None:
+        # The cues are the show-call playlist, so start the operator there
+        # rather than at a guess. They can still drag rows afterwards.
+        lw_payload = left_payload if left_deck == "lw" else right_payload
+        dsk_payload = right_payload if right_deck == "dsk" else left_payload
+        seeded = slots_from_cues(
+            playlist,
+            slide_catalog(lw_payload.get("slides") or [], {}),
+            slide_catalog(dsk_payload.get("slides") or [], {}),
+            left_deck=left_deck,
+        )
+        if seeded:
+            slots = seeded
+            job.log(f"Seeded {len(seeded)} pair(s) from the outline cues.")
+
     job.log("Matching slides…")
     t_match = time.perf_counter()
     compared = compare_inspects(
@@ -708,6 +815,8 @@ def _run_diff(
     inspect_right.write_text(json.dumps(right_payload), encoding="utf-8")
     flags = compared.pop("flags")
     pairs = compared["pairs"]
+    if playlist is not None:
+        _attach_outline_rows(playlist, pairs)
     for pair in pairs:
         pair["flags"] = serialize_flags(pair.get("flags") or [])
     result = {
@@ -715,6 +824,10 @@ def _run_diff(
         "rightPath": str(right),
         "leftLabel": left_label,
         "rightLabel": right_label,
+        "outlinePath": str(outline) if outline else None,
+        "lwFinal": bool(lw_final),
+        "leftDeck": left_deck,
+        "rightDeck": right_deck,
         "phase": "match",
         "sameType": compared.get("sameType"),
         "leftPreviews": str(left_dir),
@@ -850,6 +963,7 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
     job.log(f"Checked pairs in {time.perf_counter() - t_check:.1f}s.")
     flags = compared.pop("flags")
     pairs = compared["pairs"]
+    outline_flags = _apply_outline(job, result, compared, pairs)
     for pair in pairs:
         pair["flags"] = serialize_flags(pair.get("flags") or [])
     result.update(
@@ -862,9 +976,72 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
             "summary": compared,
             "pairs": pairs,
             "flags": serialize_flags(flags),
+            "outlineFlags": serialize_flags(outline_flags),
         }
     )
     return result
+
+
+def _attach_outline_rows(playlist, pairs: list[dict]) -> list:
+    """Give every pair the cue row that calls it, so the UI can show the script."""
+    rows = rows_for_slots(playlist, slots_from_pairs(pairs))
+    for pair, row in zip(pairs, rows):
+        pair["outlineRow"] = (
+            None
+            if row is None
+            else {"index": row.index, "tags": row.tags, "script": row.script, "paragraph": row.paragraph}
+        )
+    return rows
+
+
+def _apply_outline(
+    job: Job, result: dict[str, Any], compared: dict[str, Any], pairs: list[dict]
+) -> list[Flag]:
+    """Run both outline tracks and attach what belongs to a pair.
+
+    Row-scoped findings go straight onto `pair["flags"]`, so the dashboard needs
+    no extra matching. Whatever is about the outline as a whole comes back to
+    sit in its own panel.
+    """
+    raw = result.get("outlinePath")
+    if not raw or not Path(raw).is_file():
+        return []
+    try:
+        playlist, _paragraphs = load_playlist(Path(raw))
+    except Exception as exc:  # noqa: BLE001
+        job.log(f"Could not read the outline cues: {exc}")
+        return []
+
+    left_deck = result.get("leftDeck") or "lw"
+    right_deck = result.get("rightDeck") or "dsk"
+    catalogs: dict[str, list[dict]] = {}
+    for deck, key in ((left_deck, "leftCatalog"), (right_deck, "rightCatalog")):
+        catalog = compared.get(key) or result.get(key) or []
+        if catalog and deck not in catalogs:
+            catalogs[deck] = catalog
+
+    job.log("Checking the outline cues against the decks…")
+    flags = correspondence(playlist, catalogs)
+
+    rows = _attach_outline_rows(playlist, pairs)
+    for pair, row in zip(pairs, rows):
+        if row is None or not row.script:
+            continue
+        lw_text = pair.get("leftRendered" if left_deck == "lw" else "rightRendered") or ""
+        dsk_text = pair.get("rightRendered" if right_deck == "dsk" else "leftRendered") or ""
+        number = pair.get("leftNumber") if left_deck == "lw" else pair.get("rightNumber")
+        found = corroborate(
+            row.script,
+            lw_text,
+            dsk_text,
+            location=f"{result.get('leftLabel') or 'LW'} slide {number}",
+            slide=number,
+            typed=bool(pair.get("typed", True)),
+            lw_final=bool(result.get("lwFinal", True)),
+        )
+        if found:
+            pair.setdefault("flags", []).extend(found)
+    return flags
 
 
 def _run_visual_check(job: Job) -> dict[str, Any]:
@@ -918,11 +1095,38 @@ def _run_visual_check(job: Job) -> dict[str, Any]:
     return result
 
 
+def _run_outline(job: Job, path: Path) -> dict[str, Any]:
+    job.log(f"Reading cues from {path.name}…")
+    report = outline_report(path)
+    job.log(
+        f"{report['lwCues']} LW and {report['dskCues']} DSK cues across "
+        f"{len(report['rows'])} advance(s)."
+    )
+    job.log("Checking scripture references and house style…")
+    dest = ROOT / "output" / ".outline" / job.id / f"{path.stem}_findings.pdf"
+    written = _write_outline_pdf(job, dest, report)
+    return {**report, "kind": "outline", "outlineReport": str(written) if written else None}
+
+
+def _write_outline_pdf(job: Job, dest: Path, report: dict[str, Any]) -> Path | None:
+    try:
+        from obed_edom.report import write_outline_findings  # noqa: PLC0415
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        return write_outline_findings(dest, report)
+    except Exception as exc:  # noqa: BLE001
+        job.log(f"Could not write the findings PDF ({exc}).")
+        return None
+
+
 def _run_inspect(
     job: Job,
     path: Path,
     export: bool,
     slide_range: frozenset[int] | None,
+    *,
+    outline: Path | None = None,
+    lw_final: bool = True,
 ) -> dict[str, Any]:
     job_dir = ROOT / "output" / ".inspect" / job.id if export else None
     job.log(f"Inspecting {path.name} (read-only, no save)…")
@@ -942,8 +1146,15 @@ def _run_inspect(
         evidence_dir=evidence_dir,
     )
     preview_dir = str(preview_path) if preview_path else None
+    deck = _deck_of(path.name, payload)
+    outline_flags = _check_single_deck_outline(
+        job, outline, payload, deck, flags, lw_final=lw_final
+    )
     return {
         "path": str(path),
+        "outlinePath": str(outline) if outline else None,
+        "lwFinal": bool(lw_final),
+        "deck": deck,
         "evidenceDir": str(evidence_dir) if evidence_dir else None,
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
@@ -954,7 +1165,59 @@ def _run_inspect(
         "previewDir": preview_dir,
         "previewFileNames": names,
         "flags": serialize_flags(flags),
+        "outlineFlags": serialize_flags(outline_flags),
     }
+
+
+def _check_single_deck_outline(
+    job: Job,
+    outline: Path | None,
+    payload: dict[str, Any],
+    deck: str,
+    flags: list[Flag],
+    *,
+    lw_final: bool = True,
+) -> list[Flag]:
+    """One deck plus its script: count cues, then compare wording.
+
+    With one deck the hierarchy collapses to two levels. A DSK is always below
+    the script; a finalised LW is above it, so a difference there means the
+    script is out of date rather than the wall being wrong.
+    """
+    if outline is None:
+        return []
+    try:
+        playlist, _paragraphs = load_playlist(outline)
+    except Exception as exc:  # noqa: BLE001
+        job.log(f"Could not read the outline cues: {exc}")
+        return []
+    slides = payload.get("slides") or []
+    catalog = slide_catalog(slides, {})
+    job.log(
+        f"Checking {playlist.count(deck)} {deck.upper()} cue(s) against "
+        f"{len(visible_slides(catalog))} slide(s)."
+    )
+    out = correspondence(playlist, {deck: catalog})
+
+    rows = [row for row in playlist.rows if getattr(row, deck) is not None]
+    for row, slide in zip(rows, visible_slides(catalog)):
+        if not row.script:
+            continue
+        text = slide.get("text") or ""
+        found = corroborate(
+            row.script,
+            text if deck == "lw" else "",
+            text if deck == "dsk" else "",
+            location=f"{deck.upper()} slide {slide.get('number')}",
+            slide=slide.get("number"),
+            typed=bool(text.strip()),
+            lw_final=lw_final,
+        )
+        for flag in found:
+            # An "outline is out of date" verdict is about the script, so it
+            # belongs in the outline panel rather than beside a slide.
+            flags.append(flag if flag.deck == "outline" else replace(flag, deck=deck))
+    return out
 
 
 def _run_resize(

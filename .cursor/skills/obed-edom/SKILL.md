@@ -72,14 +72,21 @@ Ignore highlight colour on these for now.
 | `[FILLER]` (offering) | LW `BLANK` + DSK `Ways To Give QR Code` |
 | `[FILLER-QR]` | LW `BLANK` + DSK QR |
 | `[GIVING-OPTIONS]` | LW `BLANK` (paste graphic) + DSK credit-card giving layout |
-| `[VERSE]` | LW `VERSES` + DSK verse layout; long passages split |
-| `[VERSE-CONTINUED]` | Rest of the previous verse (oral pause mid-verse). This slide shows the verse so far, with a leading verse number so body copy stays on the baseline. Alias: `[VERSE-FROM-PREVIOUS]`. A `[VERSE]` with no verse number after a verse is treated the same. |
-| `[POINT]` | Non-numbered PRE. If the next cue is `[VERSE]`, also POST (point + verse) with 1s Magic Move on PRE, then the usual standalone verse slides. Skip DSK POST when the point is too long for the lower-third column. |
-| `[NUM-POINT]` | Numbered PRE / POST, same pairing rule. Word list numbering supplies the point number. |
+| `[VERSE]` | LW `VERSES` + DSK verse layout; long passages split. Never produces a point + verse slide, even straight after a point. |
+| `[VERSE-CONTINUED]` | Rest of the previous verse (oral pause mid-verse). This slide shows the verse so far, with a leading verse number so body copy stays on the baseline. A `[VERSE]` with no verse number after a verse is treated the same. `[VERSE-FROM-PREVIOUS]` is a deprecated spelling: it still maps, but raises `cue.deprecated_alias`. |
+| `[VERSE-AFTER-POINT]` | The point + verse slide, on the LW / DSK POST masters. Valid only directly after `[POINT]` or `[NUM-POINT]`; that point gets the 1s Magic Move into it. Skip DSK POST when the point is too long for the lower-third column (`dsk.point_post_max_chars`). Alias: `[VERSE AFTER POINT]`. Orphaned, it is flagged and falls back to a plain verse. |
+| `[POINT]` | Non-numbered PRE. Magic Move only when the next cue is `[VERSE-AFTER-POINT]`. |
+| `[NUM-POINT]` | Numbered PRE, same rule. Word list numbering supplies the point number. |
 
 `[Pray]`, `[Instructions]`, neighbour-turn lines → stage directions, not slides.
 
 Do not invent extra layouts (images, etc.). Flag unknown cues instead of guessing.
+
+**One cue is one slide advance on that deck.** Nothing advances by itself, so the
+`[LW…]` cue count equals the LW slide count and likewise for `[DSK…]`. The Sermon
+Checker depends on this to catch a slide with no cue, or a cue with no slide. Do not
+reintroduce an implicit slide: that is what `[VERSE-AFTER-POINT]` replaced.
+`tests/test_parse.py::test_every_slide_has_exactly_one_cue` locks it in.
 
 ## Later verse numbers need Accessibility
 

@@ -117,6 +117,57 @@ def validate_outline(outline: OutlineDoc) -> list[Flag]:
     return flags
 
 
+def validate_outline_paragraphs(outline: OutlineDoc) -> list[Flag]:
+    """Outline findings pinned to the paragraph they are about.
+
+    `validate_outline` reports against the whole document, which is fine for a
+    review PDF but leaves the dashboard nothing to sit a finding beside. Style
+    rules run per paragraph here; the Bible check stays whole-document because
+    its cursor is what resolves a relative reference like "Instead, v33", and
+    its hits are mapped back afterwards.
+
+    Scoped with `deck="outline"` and a 1-based paragraph in `slide`, so the
+    existing Flag plumbing carries them with no new fields.
+    """
+    flags: list[Flag] = []
+    for para in outline.paragraphs:
+        text = (para.text or "").strip()
+        if not text:
+            continue
+        for flag in validate_style_text(
+            para.text,
+            location=f"outline paragraph {para.index + 1}",
+            deck="outline",
+            slide=para.index + 1,
+        ):
+            flags.append(flag)
+    flags.extend(_bible_flags_by_paragraph(outline))
+    return dedupe_flags(flags)
+
+
+def _bible_flags_by_paragraph(outline: OutlineDoc) -> list[Flag]:
+    """Re-pin whole-document Bible findings onto their paragraph.
+
+    `check_bible` sets `location` to the line it found, and `full_text` is a
+    newline join of the paragraphs, so the line is the paragraph.
+    """
+    lookup: dict[str, int] = {}
+    for para in outline.paragraphs:
+        key = (para.text or "").strip()
+        if key and key not in lookup:
+            lookup[key] = para.index
+    out: list[Flag] = []
+    for flag in check_bible(outline):
+        index = lookup.get((flag.location or "").strip())
+        if index is None:
+            out.append(Flag(**{**flag.__dict__, "deck": "outline"}))
+            continue
+        out.append(
+            Flag(**{**flag.__dict__, "deck": "outline", "slide": index + 1})
+        )
+    return out
+
+
 def validate_inspect(
     payload: dict,
     *,

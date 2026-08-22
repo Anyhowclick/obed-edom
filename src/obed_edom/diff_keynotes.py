@@ -1286,17 +1286,44 @@ def compare_inspects(
         pair["ocr"] = a_render.ocr_used or any(r.ocr_used for r in b_renders)
         a_mark = pair.get("leftMarkup") or ""
         b_mark = pair.get("rightMarkup") or ""
+
+        def compare(left_source: str, right_source: str):
+            text = left_source
+            dropped = None
+            if point_titles:
+                text, dropped = strip_carried_point_title(text, right_source, point_titles)
+            return (
+                classify_text_diff(
+                    text,
+                    right_source,
+                    left_label,
+                    right_label,
+                    ignore_left_tokens=point_number_lines(text),
+                ),
+                dropped,
+                text,
+            )
+
+        # What Keynote reports is the copy someone typed, so diff that first: it
+        # names "&" against "and" precisely, where the OCR-merged text would only
+        # say the slide reads differently. OCR still gets a pass afterwards for
+        # text the scripting API cannot see, minus anything inside a picture.
+        a_typed = a_render.extracted
+        b_typed = "\n".join(r.extracted for r in b_renders)
+        # Exported JPEGs and .movs carry no selectable text, so anything read
+        # from them is an OCR guess. Downstream checks demote on this.
+        pair["typed"] = bool(a_typed.strip() or b_typed.strip())
+        finding = carried = None
         compare_text = a_text
-        carried = None
-        if point_titles:
-            compare_text, carried = strip_carried_point_title(a_text, b_text, point_titles)
-        finding = classify_text_diff(
-            compare_text,
-            b_text,
-            left_label,
-            right_label,
-            ignore_left_tokens=point_number_lines(compare_text),
-        )
+        if a_typed.strip() and b_typed.strip():
+            finding, carried, compare_text = compare(a_typed, b_typed)
+        if finding is None:
+            a_seen = a_render.outside_photos or a_text
+            b_seen = "\n".join(r.outside_photos or r.text for r in b_renders)
+            found, dropped, text = compare(a_seen, b_seen)
+            finding = found
+            carried = carried or dropped
+            compare_text = text
         if carried:
             _add_flag(
                 pair_flags,

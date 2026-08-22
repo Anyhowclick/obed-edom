@@ -103,6 +103,59 @@ def dedup_lines(lines: list[str]) -> list[str]:
     return out
 
 
+def _slide_box_of(
+    line, wall: tuple[float, float, float, float], slide_size: tuple[float, float]
+) -> tuple[float, float, float, float]:
+    """An OCR line's box in slide coordinates.
+
+    Vision normalises to the image it was handed, which is the center-wall crop
+    on a wide LW export, so the crop's slide rect is what the fractions span.
+    """
+    if wall[2] > wall[0]:
+        x0, y0, x1, y1 = wall
+    else:
+        x0, y0, x1, y1 = 0.0, 0.0, slide_size[0], slide_size[1]
+    width = x1 - x0
+    height = y1 - y0
+    return (
+        x0 + line.x0 * width,
+        y0 + line.y0 * height,
+        x0 + line.x1 * width,
+        y0 + line.y1 * height,
+    )
+
+
+def _outside_photos(lines, slide: dict, slide_size: tuple[float, float]) -> list[str]:
+    """OCR lines that are not sitting inside a pasted graphic.
+
+    Text baked into a screenshot belongs to the `photo.*` rules, which compare
+    the picture itself. Reading it as slide copy turns a stylised logo into a
+    wording difference every time OCR spells it differently.
+    """
+    if not lines:
+        return []
+    from obed_edom.photo_regions import content_regions  # noqa: PLC0415
+
+    try:
+        regions = content_regions(slide, slide_size)
+    except Exception:  # noqa: BLE001
+        regions = []
+    if not regions:
+        return [line.text for line in lines]
+    wall = center_wall_box(*slide_size)
+    kept: list[str] = []
+    for line in lines:
+        bx0, by0, bx1, by1 = _slide_box_of(line, wall, slide_size)
+        cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+        inside = any(
+            region.x <= cx <= region.x + region.w and region.y <= cy <= region.y + region.h
+            for region in regions
+        )
+        if not inside:
+            kept.append(line.text)
+    return kept
+
+
 @dataclass(frozen=True)
 class RenderedSlide:
     text: str
@@ -110,6 +163,9 @@ class RenderedSlide:
     ocr: str
     ocr_used: bool = False
     lines: tuple[str, ...] = field(default_factory=tuple)
+    # `text` minus OCR that lands inside a pasted graphic. Used for the wording
+    # diff so a stylised logo does not read as rewritten copy.
+    outside_photos: str = ""
 
     @property
     def has_text(self) -> bool:
@@ -127,12 +183,28 @@ def render_slide(
     extracted = slide_plain_text(slide)
     extracted_lines = [ln for ln in extracted.split("\n") if ln.strip()]
     ocr_text_lines: list[str] = []
+    clean_ocr_lines: list[str] = []
     if use_ocr and png:
         path = Path(png)
         if path.suffix.lower() not in PREVIEW_VIDEO_SUFFIXES:
             box = _pixel_wall_box(path, slide_size)
-            ocr_text_lines = [line.text for line in ocr_lines(path, box=box)]
+            found = ocr_lines(path, box=box)
+            ocr_text_lines = [line.text for line in found]
+            clean_ocr_lines = _outside_photos(found, slide, slide_size)
 
+    lines = dedup_lines(_merge_ocr(extracted_lines, ocr_text_lines))
+    clean = dedup_lines(_merge_ocr(extracted_lines, clean_ocr_lines))
+    return RenderedSlide(
+        text="\n".join(lines),
+        extracted=extracted,
+        ocr="\n".join(dedup_lines(ocr_text_lines)),
+        ocr_used=bool(ocr_text_lines),
+        lines=tuple(lines),
+        outside_photos="\n".join(clean),
+    )
+
+
+def _merge_ocr(extracted_lines: list[str], ocr_text_lines: list[str]) -> list[str]:
     covered = normal_line(" ".join(extracted_lines))
     merged = list(extracted_lines)
     for line in ocr_text_lines:
@@ -153,14 +225,7 @@ def render_slide(
             merged[superset] = line
             continue
         merged.append(line)
-    lines = dedup_lines(merged)
-    return RenderedSlide(
-        text="\n".join(lines),
-        extracted=extracted,
-        ocr="\n".join(dedup_lines(ocr_text_lines)),
-        ocr_used=bool(ocr_text_lines),
-        lines=tuple(lines),
-    )
+    return merged
 
 
 def point_number_lines(source: RenderedSlide | str) -> set[str]:

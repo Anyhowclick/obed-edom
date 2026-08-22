@@ -211,22 +211,46 @@ export async function startDiff(
   rightPath: string,
   leftLabel = "LW",
   rightLabel = "Other",
-  fresh = false
+  fresh = false,
+  outlinePath?: string,
+  lwFinal = true
 ): Promise<Job> {
   const body = new FormData();
   body.set("left_path", leftPath);
   body.set("right_path", rightPath);
   body.set("left_label", leftLabel);
   body.set("right_label", rightLabel);
+  if (outlinePath) body.set("outline_path", outlinePath);
+  body.set("lw_final", lwFinal ? "true" : "false");
   if (fresh) body.set("fresh", "true");
   const res = await fetch("/api/diff", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
 
+export async function startOutline(path: string): Promise<Job> {
+  const body = new FormData();
+  body.set("path", path);
+  const res = await fetch("/api/outline", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function outlinePdfUrl(jobId: string): string {
+  return `/api/jobs/${jobId}/outline.pdf`;
+}
+
 export async function validateKeynote(
   path: string,
-  opts?: { export?: boolean; rangeFrom?: number; rangeTo?: number; slides?: number[]; feature?: string }
+  opts?: {
+    export?: boolean;
+    rangeFrom?: number;
+    rangeTo?: number;
+    slides?: number[];
+    feature?: string;
+    outlinePath?: string;
+    lwFinal?: boolean;
+  }
 ): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
@@ -235,6 +259,8 @@ export async function validateKeynote(
   if (opts?.rangeFrom != null) body.set("range_from", String(opts.rangeFrom));
   if (opts?.rangeTo != null) body.set("range_to", String(opts.rangeTo));
   if (opts?.feature) body.set("feature", opts.feature);
+  if (opts?.outlinePath) body.set("outline_path", opts.outlinePath);
+  if (opts?.lwFinal != null) body.set("lw_final", opts.lwFinal ? "true" : "false");
   const res = await fetch("/api/validate-keynote", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

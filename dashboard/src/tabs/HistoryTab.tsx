@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { chooseFolder, chooseKeynote, relocateJob } from "../api";
+import { CheckResultView } from "../components/CheckResultView";
 import { DiffResultView } from "../components/DiffResultView";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { InspectResultView } from "../components/InspectResultView";
@@ -100,9 +101,9 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                   </button>
                 </div>
                 {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} />}
-                {feature === "diff" && <DiffResultView job={active} onOpen={setOpen} />}
+                {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} />}
                 {feature === "visual" && <DiffResultView job={active} onOpen={setOpen} />}
-                {feature === "check" && <InspectResultView job={active} onOpen={setOpen} />}
+                {feature === "check" && <CheckResultView job={active} onOpen={setOpen} />}
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
                 {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
               </>

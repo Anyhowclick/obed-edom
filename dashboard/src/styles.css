@@ -647,3 +647,83 @@ label.check input { margin-top: 3px; }
   opacity: 0.7;
 }
 .thumbs-row img.on { opacity: 1; outline: 2px solid #d9b36a; }
+
+/* Outline: operator cues and the script behind a slide advance. */
+.cue-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+/* Turquoise for the wall, yellow for the lower third, matching Word. */
+.cue-chip.lw { background: #2a6f74; color: #d8f6f4; }
+.cue-chip.dsk { background: #6b5a2e; color: #f7e6b8; }
+.cue-chip.none { background: transparent; color: var(--muted); font-style: italic; }
+
+.outline-strip {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #2a6f74;
+  border-radius: 6px;
+  background: rgba(21, 34, 56, 0.6);
+}
+.outline-cues { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.cue-hold { color: var(--muted); font-size: 12px; font-style: italic; }
+.outline-script {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+/* Case 1: the cued outline read top to bottom, findings alongside. */
+.outline-summary { margin: 0; }
+.outline-reader { display: flex; flex-direction: column; gap: 4px; max-width: 96ch; }
+.outline-para {
+  padding: 6px 10px;
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+}
+.outline-para.flagged {
+  border-left-color: var(--warn);
+  background: rgba(21, 34, 56, 0.6);
+}
+.outline-text {
+  margin: 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+}
+.outline-num {
+  color: var(--info);
+  font-size: 11px;
+  min-width: 2.2em;
+  text-align: right;
+  user-select: none;
+}
+.outline-para .pair-issues { margin-left: 2.6em; }
+
+/* "Has the wall been finalised?" — decides whether LW or the script leads. */
+.final-ask {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 4px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  max-width: 78ch;
+  cursor: pointer;
+}
+.final-ask input { margin-top: 3px; flex: 0 0 auto; }
+.final-ask span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.final-ask strong { color: var(--ink); display: block; margin-bottom: 2px; }

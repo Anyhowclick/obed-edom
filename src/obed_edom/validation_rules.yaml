@@ -57,6 +57,29 @@ rules:
   # Same picture, framed or cropped differently. Not a content edit.
   photo.framing: info
 
+  # Outline cue grammar. One cue is one slide advance on that deck, so counts
+  # are comparable without reading a word — these survive JPEG/MOV exports.
+  cue.deprecated_alias: warning
+  cue.lw_count: warning
+  cue.dsk_count: warning
+  cue.uncued_slide: warning
+  cue.no_slide: warning
+  cue.unknown: warning
+  # A lone [DSK-PP] means the wall holds; useful context, not a problem.
+  cue.hold: info
+
+  # Outline vs decks. A finalised wall ranks LW, outline, DSK; before sign-off
+  # the script leads instead, and outline.lw_deviates / both_deviate apply.
+  outline.dsk_deviates: warning
+  # The wall was signed off past both the script and DSK.
+  outline.dsk_stale: warning
+  # The decks are right and the show-call script is behind them.
+  outline.stale: info
+  outline.lw_deviates: warning
+  outline.both_deviate: warning
+  outline.three_way: info
+  outline.text_unavailable: info
+
   # Pairing
   diff.count: info
   diff.missing: warning
@@ -104,6 +127,20 @@ titles:
   photo.region: Photo Region
   photo.marker: Photo Marker
   photo.framing: Photo Framing
+  cue.deprecated_alias: Retired cue spelling
+  cue.lw_count: LW cue count
+  cue.dsk_count: DSK cue count
+  cue.uncued_slide: Slide has no cue
+  cue.no_slide: Cue has no slide
+  cue.unknown: Unknown cue
+  cue.hold: Deck holds here
+  outline.dsk_deviates: DSK differs from the outline
+  outline.dsk_stale: DSK missed a change made on the wall
+  outline.stale: Outline is out of date
+  outline.lw_deviates: LW differs from the outline
+  outline.both_deviate: Outline and decks disagree
+  outline.three_way: Outline, LW and DSK all differ
+  outline.text_unavailable: No selectable text
   diff.count: Diff Count
   diff.missing: Diff Missing
   diff.unmatched: Diff Unmatched

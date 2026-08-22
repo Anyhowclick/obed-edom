@@ -1107,3 +1107,84 @@ def test_recap_list_is_not_a_carried_title(tmp_path):
     recap = next(p for p in result["pairs"] if p.get("leftNumber") == 3)
     rules = [f.rule for f in (recap.get("flags") or []) if f.category == "diff"]
     assert "text.point_carry" not in rules
+
+
+def test_enclosed_numerals_are_a_numbering_style_not_a_wording_change():
+    """A wall sets ① ② ③ where the lower third types 1 2 3."""
+    from obed_edom.text_diff import classify_text_diff
+
+    wall = "\u2460 Praise and Worship\n\u2461 Prayer\n\u2462 Faith"
+    lower = "1 Praise and Worship\n2 Prayer\n3 Faith"
+    assert classify_text_diff(wall, lower, "LW", "DSK") is None
+
+
+def test_ampersand_is_named_even_when_ocr_adds_logo_noise(tmp_path):
+    """The typed copy is diffed first, so "&" reads as a symbol swap.
+
+    Diffing the OCR-merged text instead buries it: a stylised logo and circled
+    numerals come back spelled differently every run, and the classifier falls
+    through to its blunt last resort.
+    """
+    from obed_edom.rendered import RenderedSlide
+    from obed_edom.text_diff import classify_text_diff
+
+    typed_lw = "\u2460 Praise and Worship\n\u2461 Prayer\n\u2462 Faith"
+    typed_dsk = "1 Praise & Worship\n2 Prayer\n3 Faith"
+    noise_lw = f"{typed_lw}\nATMOSPHERE\nO 3 5"
+    noise_dsk = f"{typed_dsk}\nATM\u00dcSPH\u00c9RE\n8 4"
+
+    blunt = classify_text_diff(noise_lw, noise_dsk, "LW", "DSK")
+    assert blunt is not None and blunt.rule == "text.major"
+
+    precise = classify_text_diff(typed_lw, typed_dsk, "LW", "DSK")
+    assert precise is not None
+    assert precise.rule == "text.symbol"
+    assert '"and"' in precise.message and '"&"' in precise.message
+    # The numbering style must not dilute the one difference that matters.
+    assert "\u2460" not in precise.message
+
+    # RenderedSlide keeps the typed copy separate, which is what makes the
+    # two-layer diff in compare_inspects possible.
+    shot = RenderedSlide(text=noise_lw, extracted=typed_lw, ocr="ATMOSPHERE\nO 3 5", ocr_used=True)
+    assert shot.extracted == typed_lw
+
+
+def test_typed_copy_is_preferred_over_ocr_merged_text(tmp_path):
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slideHeight": 1080,
+        "slides": [_slide(1, "Praise and Worship")],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [_slide(1, "Praise & Worship")],
+    }
+    result = compare_inspects(
+        left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK"
+    )
+    pair = result["pairs"][0]
+    rules = [f.rule for f in (pair.get("flags") or [])]
+    assert "text.symbol" in rules
+    assert "text.major" not in rules
+
+
+def test_ocr_inside_a_pasted_graphic_is_left_to_the_photo_rules(tmp_path):
+    """Text baked into a screenshot belongs to photo.*, not to the wording diff."""
+    from obed_edom.ocr import OcrLine
+    from obed_edom.rendered import _outside_photos
+
+    slide = {
+        "number": 1,
+        "items": [
+            {"kind": "text", "text": "Praise and Worship", "x": 0, "y": 0, "w": 800, "h": 120},
+            {"kind": "image", "fileName": "screenshot.png", "x": 200, "y": 400, "w": 900, "h": 400},
+        ],
+    }
+    size = (1920.0, 1080.0)
+    inside = OcrLine(text="ATMOSPHERE", confidence=0.9, x0=0.30, y0=0.50, x1=0.55, y1=0.60)
+    outside = OcrLine(text="Praise and Worship", confidence=0.9, x0=0.01, y0=0.02, x1=0.40, y1=0.09)
+    kept = _outside_photos([inside, outside], slide, size)
+    assert kept == ["Praise and Worship"]

@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
+import type { OutlineRow } from "../outline";
 import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
+import { OutlineStrip } from "./OutlineStrip";
 import { isPreviewVideo } from "./PreviewGrid";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
@@ -30,13 +32,17 @@ type Pair = {
   sameType?: boolean;
   score?: number;
   flags?: Flag[];
+  outlineRow?: OutlineRow | null;
 };
 
 export type DiffResult = {
   leftPath?: string;
   rightPath?: string;
+  outlinePath?: string | null;
   leftLabel: string;
   rightLabel: string;
+  leftDeck?: string;
+  rightDeck?: string;
   sameType?: boolean;
   phase?: string;
   leftPngs: string[];
@@ -46,12 +52,17 @@ export type DiffResult = {
   rightCatalog?: { index: number; number: number; skipped?: boolean; png?: string | null; text?: string }[];
   pairs: Pair[];
   flags: Flag[];
+  outlineFlags?: Flag[];
+  rows?: OutlineRow[];
   reuse?: { used?: boolean; carried: number; changed: number; added: number; removed: number; source?: string };
 };
 
 function flagOnPair(flag: Flag, pair: Pair): boolean {
   if (flag.slide == null) return false;
   const deck = (flag.deck || "").toLowerCase();
+  // Outline findings count paragraphs, not slides, so the fallback below would
+  // match them against unrelated slide numbers.
+  if (deck === "outline") return false;
   const rights = pair.rightNumbers?.length ? pair.rightNumbers : pair.rightNumber != null ? [pair.rightNumber] : [];
   if (deck === "lw" || deck === "left") return pair.leftNumber === flag.slide;
   if (deck === "dsk" || deck === "right") return rights.includes(flag.slide);
@@ -270,6 +281,7 @@ export function DiffResultView({
           ...pair,
           flags: applyChecks ? result.pairs[i]?.flags || [] : [],
           heatPng: applyChecks ? result.pairs[i]?.heatPng : undefined,
+          outlineRow: result.pairs[i]?.outlineRow,
         })
       );
     }
@@ -294,6 +306,9 @@ export function DiffResultView({
   const canEdit = Boolean(result.leftCatalog && result.rightCatalog);
   const rawDeck = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
   const deckFlags = rawDeck.filter((flag) => !pairs.some((pair) => flagOnPair(flag, pair)));
+  // Cue-grammar findings are about the script, so they sit under the pairs
+  // rather than competing with them.
+  const outlineFlags = result.outlineFlags || [];
   const leftWide = isWideDeck(result.leftLabel);
   const rightWide = isWideDeck(result.rightLabel);
   const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
@@ -504,6 +519,18 @@ export function DiffResultView({
                   )}
                 </div>
               )}
+              {pair.outlineRow && (
+                <OutlineStrip
+                  row={pair.outlineRow}
+                  holds={
+                    pair.outlineRow.tags.length === 1
+                      ? /^dsk/i.test(pair.outlineRow.tags[0])
+                        ? result.leftLabel
+                        : result.rightLabel
+                      : undefined
+                  }
+                />
+              )}
               {issues.length > 0 && (
                 <SlideFindings flags={issues} jobId={job.id} showInfo={showInfo} onOpen={onOpen} />
               )}
@@ -519,6 +546,16 @@ export function DiffResultView({
           showInfo={showInfo}
           onShowInfo={setShowInfo}
           title="Deck-wide findings"
+        />
+      )}
+      {outlineFlags.length > 0 && (
+        <ValidationPanel
+          flags={outlineFlags}
+          jobId={job.id}
+          onOpen={onOpen}
+          showInfo={showInfo}
+          onShowInfo={setShowInfo}
+          title="Outline findings"
         />
       )}
     </>

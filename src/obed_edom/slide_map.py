@@ -14,7 +14,8 @@ from obed_edom.models import (
     StyledRun,
     Transition,
 )
-from obed_edom.parse_outline import VERSE_TAGS
+from obed_edom.parse_outline import VERSE_TAGS, deprecated_alias
+from obed_edom.validate import make_flag
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 MAGIC_MOVE = Transition(effect="magic_move", duration=1.0, match="word")
@@ -881,6 +882,7 @@ def _lw_point_spec(
     *,
     post: bool,
     verse_draft: SlideDraft | None = None,
+    magic_move: bool = False,
 ) -> SlideSpec:
     cfg = masters["lw"]
     numbered = draft.cue_tag == "NUM-POINT"
@@ -934,8 +936,11 @@ def _lw_point_spec(
             font_sizes[int(body_idx)] = _lw_body_font_size(cfg, len(body))
             item_palettes[int(body_idx)] = "lw"
         is_verse = True
-        bind = "verse_body"
-        for para in verse_draft.source_paragraphs:
+        # The POST is cued by its own [VERSE-AFTER-POINT], so its operator tag
+        # belongs at that cue rather than at a verse-body offset.
+        bind = "cue"
+        source = list(verse_draft.source_paragraphs)
+        for para in draft.source_paragraphs:
             if para not in source:
                 source.append(para)
         anchor = _first_verse_number(chunk)
@@ -961,7 +966,7 @@ def _lw_point_spec(
         bind=bind,
         chunk_index=0,
         anchor_verse=anchor,
-        transition=MAGIC_MOVE if not post else None,
+        transition=MAGIC_MOVE if magic_move else None,
     )
 
 
@@ -973,6 +978,7 @@ def _dsk_point_spec(
     *,
     post: bool,
     verse_draft: SlideDraft | None = None,
+    magic_move: bool = False,
 ) -> SlideSpec:
     cfg = masters["dsk"]
     numbered = draft.cue_tag == "NUM-POINT"
@@ -1067,8 +1073,9 @@ def _dsk_point_spec(
         if ref_idx is not None:
             text_items[int(ref_idx)] = header
         is_verse = True
-        bind = "verse_body"
-        for para in verse_draft.source_paragraphs:
+        bind = "cue"
+        source = list(verse_draft.source_paragraphs)
+        for para in draft.source_paragraphs:
             if para not in source:
                 source.append(para)
         anchor = _first_verse_number(chunk)
@@ -1098,7 +1105,19 @@ def _dsk_point_spec(
         bind=bind,
         chunk_index=0,
         anchor_verse=anchor,
-        transition=MAGIC_MOVE if not post else None,
+        transition=MAGIC_MOVE if magic_move else None,
+    )
+
+
+def _point_for_verse_after(blocks: list[SlideDraft], index: int) -> int | None:
+    """Index of the point block this [VERSE-AFTER-POINT] Magic Moves out of."""
+    return next(
+        (
+            j
+            for j in range(index - 1, -1, -1)
+            if blocks[j].verse_follows and blocks[j].following_verse_index == index
+        ),
+        None,
     )
 
 
@@ -1139,6 +1158,18 @@ def map_slides(outline: OutlineDoc) -> tuple[list[SlideSpec], list[SlideSpec], l
             if draft.verse_follows and draft.following_verse_index is not None
             else None
         )
+        canonical = deprecated_alias(draft.cue_raw) if draft.cue_raw else None
+        if canonical:
+            stale = make_flag(
+                "cue.deprecated_alias",
+                "mapping",
+                f"{draft.cue_raw} is retired; write [{canonical}] instead. "
+                "It reads too much like [VERSE-AFTER-POINT], which pairs a verse "
+                "with a point title rather than continuing a passage.",
+                location=f"block {i + 1}",
+            )
+            if stale:
+                flags.append(stale)
 
         if tag == "TITLE" or (tag == "FILLER" and context == "sermon"):
             rule = lw_cfg["TITLE"] if tag == "TITLE" else lw_cfg["FILLER"]
@@ -1260,17 +1291,40 @@ def map_slides(outline: OutlineDoc) -> tuple[list[SlideSpec], list[SlideSpec], l
             continue
 
         if tag in {"POINT", "NUM-POINT"}:
-            lw.append(_lw_point_spec(draft, outline, masters, i, post=False))
-            dsk.append(_dsk_point_spec(draft, outline, masters, i, post=False))
-            if following is not None:
-                lw.append(
-                    _lw_point_spec(draft, outline, masters, i, post=True, verse_draft=following)
-                )
-                if _dsk_post_point_fits(draft, masters):
-                    dsk.append(
-                        _dsk_point_spec(draft, outline, masters, i, post=True, verse_draft=following)
-                    )
+            # One cue, one slide. The point-plus-verse slide comes from the
+            # [VERSE-AFTER-POINT] that follows, and this PRE Magic Moves into it.
+            magic = following is not None
+            lw.append(_lw_point_spec(draft, outline, masters, i, post=False, magic_move=magic))
+            dsk.append(_dsk_point_spec(draft, outline, masters, i, post=False, magic_move=magic))
             continue
+
+        if tag == "VERSE-AFTER-POINT":
+            point_index = _point_for_verse_after(blocks, i)
+            if point_index is None:
+                flags.append(
+                    Flag(
+                        "warning",
+                        "mapping",
+                        "[VERSE-AFTER-POINT] has no point cue before it; "
+                        "mapped as a plain verse. Use [VERSE] unless it follows a "
+                        "[POINT] or [NUM-POINT].",
+                        location=f"block {i + 1}",
+                    )
+                )
+            else:
+                point_draft = blocks[point_index]
+                lw.append(
+                    _lw_point_spec(
+                        point_draft, outline, masters, i, post=True, verse_draft=draft
+                    )
+                )
+                if _dsk_post_point_fits(point_draft, masters):
+                    dsk.append(
+                        _dsk_point_spec(
+                            point_draft, outline, masters, i, post=True, verse_draft=draft
+                        )
+                    )
+                continue
 
         if tag in VERSE_TAGS or _is_verse_draft(draft):
             continued = _looks_continued(draft, blocks, i)
