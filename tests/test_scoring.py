@@ -148,6 +148,119 @@ def test_skipped_gold_slides_are_not_scored():
     assert set(score["slides"]) == {1}
 
 
+def test_geometry_alignment_survives_a_translated_deck():
+    """The Chinese CG shares no words with the English wall, only shapes."""
+    from obed_edom.map_remap import align_by_geometry
+
+    def slide(number, pins, maps=1, skipped=False, text=""):
+        items = [_map(0, 0, 1000, 600, kindIndex=0) for _ in range(maps)]
+        items += [_pin(100 + i * 20, 100, kindIndex=i) for i in range(pins)]
+        if text:
+            items.append(_item(kind="text", text=text, x=0, y=800, w=400, h=60))
+        return {"number": number, "skipped": skipped, "items": items}
+
+    wall = [
+        slide(1, 4, text="Malaysia report"),
+        slide(2, 9, text="Japan report"),
+        slide(3, 2, text="China report"),
+    ]
+    gold = [
+        slide(5, 4, text="马来西亚报告"),
+        slide(6, 0, maps=0),  # a page the CG added
+        slide(7, 9, text="日本报告"),
+        slide(8, 2, text="中国报告"),
+    ]
+    assert align_by_geometry(wall, gold) == {1: 5, 2: 7, 3: 8}
+
+
+def test_geometry_alignment_stays_in_order():
+    """Pairings must not cross, or a page matches a look-alike elsewhere."""
+    from obed_edom.map_remap import align_by_geometry
+
+    def slide(number, pins):
+        return {
+            "number": number,
+            "items": [
+                _map(0, 0, 1000, 600, kindIndex=0),
+                *[_pin(100 + i * 20, 100, kindIndex=i) for i in range(pins)],
+            ],
+        }
+
+    # Two wall pages report 5 churches each; the gold has them in the same order.
+    wall = [slide(1, 5), slide(2, 8), slide(3, 5)]
+    gold = [slide(1, 5), slide(2, 8), slide(3, 5)]
+    assert align_by_geometry(wall, gold) == {1: 1, 2: 2, 3: 3}
+
+
+def test_geometry_alignment_skips_hidden_slides():
+    from obed_edom.map_remap import align_by_geometry
+
+    def slide(number, pins, skipped=False):
+        return {
+            "number": number,
+            "skipped": skipped,
+            "items": [
+                _map(0, 0, 1000, 600, kindIndex=0),
+                *[_pin(100 + i * 20, 100, kindIndex=i) for i in range(pins)],
+            ],
+        }
+
+    wall = [slide(1, 4), slide(2, 7)]
+    gold = [slide(1, 4), slide(2, 7, skipped=True), slide(3, 7)]
+    assert align_by_geometry(wall, gold) == {1: 1, 2: 3}
+
+
+def test_offscreen_leftovers_are_neither_planned_nor_scored():
+    """15.6% of one wall deck sits entirely off-canvas.
+
+    Both decks carry the same parked leftovers, so scoring them dominated the
+    result — one report page had 10 pins of which only 1 was visible. Worse, the
+    affine can drag an off-canvas object into the CG frame, putting it in output
+    it was never in.
+    """
+    slide = {
+        "number": 1,
+        "items": [
+            _map(0, 0, 1000, 600, kindIndex=0),
+            _pin(100, 100, kindIndex=0),
+            _pin(1892, -510, kindIndex=1),  # parked above the top edge
+            _pin(-900, 200, kindIndex=2),  # parked off to the left
+        ],
+    }
+    wall = _wall([slide])
+    transforms = plan_payload_transforms(wall, _identity_recipe())
+    assert sum(1 for t in transforms if t.role == "pin") == 1
+
+    gold = {
+        "slideWidth": 1920.0,
+        "slideHeight": 1080.0,
+        "slides": [
+            {
+                "number": 1,
+                "items": [_map(0, 0, 1000, 600), _pin(100, 100), _pin(1892, -510)],
+            }
+        ],
+    }
+    score = score_against_gold(transforms, gold, wall=wall)
+    row = score["slides"][1]["pin"]
+    assert row["predicted"] == 1
+    assert row["gold"] == 1
+    assert row["goldRmse"] == 0.0
+
+
+def test_partly_visible_content_is_kept():
+    """A cropped photo's visible part is real content."""
+    slide = {
+        "number": 1,
+        "items": [
+            _map(0, 0, 1000, 600, kindIndex=0),
+            _pin(-20, 100, kindIndex=0),  # half off the left edge
+        ],
+    }
+    transforms = plan_payload_transforms(_wall([slide]), _identity_recipe())
+    assert sum(1 for t in transforms if t.role == "pin") == 1
+
+
 def test_skipped_wall_slides_are_not_planned():
     slides = [
         {"number": 1, "items": [_pin(100, 100, kindIndex=0)]},

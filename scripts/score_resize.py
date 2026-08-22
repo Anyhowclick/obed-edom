@@ -20,6 +20,7 @@ from typing import Any
 
 from obed_edom.baseline import deck_digest, inspect_cache_path, preview_cache_dir
 from obed_edom.map_remap import (
+    align_by_geometry,
     learn_recipe,
     plan_payload_transforms,
     resolve_slides,
@@ -132,7 +133,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"    text placement: {reason}; blind packing used")
 
-        score = score_against_gold(transforms, gold, wall=wall)
+        # Slide N against slide N only holds when the decks run in step. The
+        # report deck is 158 wall slides against 207 CG slides, so pair by shape.
+        slide_map = align_by_geometry(wall.get("slides") or [], gold.get("slides") or [])
+        pairs_off_diagonal = sum(1 for w, g in slide_map.items() if w != g)
+        if slide_map and pairs_off_diagonal:
+            print(
+                f"    slide alignment: {len(slide_map)} pairs by geometry, "
+                f"{pairs_off_diagonal} not on the diagonal"
+            )
+        score = score_against_gold(transforms, gold, wall=wall, slide_map=slide_map or None)
         if not score["slides"]:
             print("    no comparable slides")
             continue
