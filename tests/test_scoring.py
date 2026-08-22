@@ -351,6 +351,67 @@ def test_a_sparse_template_is_still_believed():
     assert on_canvas_fraction(slide, _identity_recipe(), 1920.0, 1080.0) == 1.0
 
 
+def test_map_labels_are_not_dragged_off_the_map():
+    """A label belongs to its plate. Blind packing moved the words to the frame
+    edge and left the red plate behind on the map, which reads as a broken deck.
+    Deferring the decision keeps labels at their mapped position."""
+    from obed_edom.map_remap import plan_slide_transforms
+
+    # Two labels sitting on plates, plus a genuine free-floating name column.
+    label_a = _item(kind="text", text="CHC Bian Lan", x=500, y=300, w=220, h=44, kindIndex=0, size=20)
+    label_b = _item(kind="text", text="CHC Zui Si", x=700, y=500, w=200, h=44, kindIndex=1, size=20)
+    column = _item(
+        kind="text",
+        text="CHC Aaliana\nCHC Bais\nCHC Cavinte\nCHC Dahunan",
+        x=1500,
+        y=100,
+        w=300,
+        h=400,
+        kindIndex=2,
+        size=20,
+    )
+    slide = {
+        "number": 1,
+        "items": [_map(0, 0, 1000, 600, kindIndex=0), label_a, label_b, column],
+    }
+    recipe = dict(_identity_recipe())
+    recipe["listFontSize"] = 20.0
+
+    packed = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=False)
+    deferred = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=True)
+
+    # Blind packing walks them to the right edge; deferring leaves them put.
+    packed_xs = sorted(t.x for t in packed if t.role == "list")
+    deferred_xs = sorted(t.x for t in deferred if t.role == "list")
+    assert packed_xs != deferred_xs
+    assert deferred_xs == [500.0, 700.0, 1500.0]
+
+
+def test_a_framing_that_keeps_the_map_whole_wins_a_tie():
+    """The same map often appears at several framings; one crops it."""
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    # Both hold the same art, so they pair equally well. The first crops it off
+    # the left edge; the second keeps it inside the frame.
+    crops = {"number": 1, "items": [_map(-700, 100, 1200, 700, kindIndex=0)]}
+    whole = {"number": 2, "items": [_map(300, 100, 1200, 700, kindIndex=0)]}
+
+    picked = _best_matching_slide(
+        wall_slide, [crops, whole], wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+    )
+    assert picked is whole
+
+    # Order must not decide it.
+    picked = _best_matching_slide(
+        wall_slide, [whole, crops], wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+    )
+    assert picked is whole
+
+
 def test_skipped_wall_slides_are_not_planned():
     slides = [
         {"number": 1, "items": [_pin(100, 100, kindIndex=0)]},

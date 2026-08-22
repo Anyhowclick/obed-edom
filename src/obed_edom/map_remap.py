@@ -969,19 +969,74 @@ def _score_template_slide(wall_slide: dict, template_slide: dict) -> int:
     return len([it for it in template_slide.get("items") or [] if is_map_item(it)])
 
 
-def _best_matching_slide(wall_slide: dict | None, candidates: list[dict]) -> dict | None:
+def _framing_coverage(
+    wall_slide: dict,
+    template_slide: dict,
+    wall_w: float,
+    wall_h: float,
+    dest_w: float,
+    dest_h: float,
+) -> float:
+    """Fraction of the wall's visible extent this framing keeps inside the frame.
+
+    The same map often appears on several template slides at different framings —
+    one showing it whole, another cropping in. Those pair equally well, so
+    pairing quality ties and the winner is whichever was listed first. Coverage
+    breaks the tie the way an operator would: prefer the framing that keeps the
+    map whole over one that cuts it off.
+    """
+    wall_imgs = [
+        it
+        for it in wall_slide.get("items") or []
+        if is_pairable_image(it) and is_visible(it, wall_w, wall_h)
+    ]
+    tmpl_imgs = [
+        it
+        for it in template_slide.get("items") or []
+        if is_pairable_image(it) and is_visible(it, dest_w, dest_h)
+    ]
+    if not wall_imgs or not tmpl_imgs:
+        return 0.0
+    groups = merge_affine_groups(best_image_pairs(wall_imgs, tmpl_imgs))
+    if not groups:
+        return 0.0
+    aff = groups[0]["affine"]
+    src = visible_content_union(wall_slide, wall_w, wall_h)
+    if src is None or src.w <= 0 or src.h <= 0:
+        return 0.0
+    mapped = aff.apply_rect(src)
+    x0 = max(0.0, mapped.x)
+    y0 = max(0.0, mapped.y)
+    x1 = min(dest_w, mapped.x + mapped.w)
+    y1 = min(dest_h, mapped.y + mapped.h)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return ((x1 - x0) * (y1 - y0)) / (mapped.w * mapped.h)
+
+
+def _best_matching_slide(
+    wall_slide: dict | None,
+    candidates: list[dict],
+    *,
+    wall_size: tuple[float, float] | None = None,
+    dest_size: tuple[float, float] | None = None,
+) -> dict | None:
     if not wall_slide:
         return _first_slide_with(candidates, is_map_item) or _first_slide_with(
             candidates, is_pin_item
         )
     best: dict | None = None
-    best_score = -1
+    best_key: tuple[int, float] | None = None
     for slide in candidates:
         score = _score_template_slide(wall_slide, slide)
-        if score > best_score:
-            best_score = score
+        coverage = 0.0
+        if wall_size and dest_size and score > 0:
+            coverage = _framing_coverage(wall_slide, slide, *wall_size, *dest_size)
+        key = (score, coverage)
+        if best_key is None or key > best_key:
+            best_key = key
             best = slide
-    if best is not None and best_score > 0:
+    if best is not None and best_key and best_key[0] > 0:
         return best
     return _first_slide_with(candidates, is_map_item) or _first_slide_with(
         candidates, is_pin_item
@@ -1000,7 +1055,12 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(
             wall_slides, is_pin_item
         )
-    g_slide = _best_matching_slide(w_slide, template_slides)
+    g_slide = _best_matching_slide(
+        w_slide,
+        template_slides,
+        wall_size=(_f(wall.get("slideWidth"), 7680), _f(wall.get("slideHeight"), 1080)),
+        dest_size=(float(dest_w), float(dest_h)),
+    )
     map_src = None
     map_dst = None
     list_src = None
@@ -1280,6 +1340,7 @@ def plan_slide_transforms(
     *,
     include_lists: bool = False,
     wall_size: tuple[float, float] | None = None,
+    defer_list_packing: bool = False,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
@@ -1288,8 +1349,16 @@ def plan_slide_transforms(
         return []
     number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
     styles = list(recipe.get("characterStyles") or [])
+    # Blind right-to-left packing moves every list box, including labels that
+    # belong to artwork. A map label dragged into a column at the frame edge
+    # leaves its red plate behind on the map and reads as a bug in the deck, so
+    # when a rendered slide is available the placement decision is deferred to
+    # repack_free_text, which can tell a free-floating column from a label.
     pack_lists = bool(
-        include_lists and recipe.get("listFontSize") and slide_has_column_lists(slide)
+        include_lists
+        and not defer_list_packing
+        and recipe.get("listFontSize")
+        and slide_has_column_lists(slide)
     )
     from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
 
@@ -2131,10 +2200,15 @@ def plan_payload_transforms(
                     slide_recipe = fitted
                     if fitted_slides is not None:
                         fitted_slides.append(number)
+        has_preview = bool(previews and previews.get(number) is not None)
         planned = plan_slide_transforms(
-            slide, slide_recipe, include_lists=include_lists, wall_size=(wall_w, wall_h)
+            slide,
+            slide_recipe,
+            include_lists=include_lists,
+            wall_size=(wall_w, wall_h),
+            defer_list_packing=include_lists and has_preview,
         )
-        if include_lists and previews and previews.get(number) is not None:
+        if include_lists and has_preview:
             rows = repack_free_text(
                 planned,
                 slide,
