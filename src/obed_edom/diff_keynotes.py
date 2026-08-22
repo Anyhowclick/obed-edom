@@ -696,8 +696,12 @@ def _is_chrome(item: dict, slide_size: tuple[float, float]) -> bool:
     width = float(item.get("w") or 0)
     height = float(item.get("h") or 0)
     slide_w, slide_h = slide_size
-    if slide_h and height >= slide_h - 1 and width >= min(slide_w, 1920) - 1:
-        return True
+    if slide_h and height >= slide_h - 1:
+        # A background fills the whole canvas, and a full-height panel that never
+        # reaches the center wall is a side wing. A photo spanning the wall is
+        # neither, even on a 7680-wide LW where a wing is 1920 across.
+        if width >= slide_w - 1 or not _overlaps_center_wall(item, slide_w, slide_h):
+            return True
     # The reference chip behind "2 Chronicles 5" is a pasted image on DSK only.
     return bool(height and height <= _LABEL_MAX_HEIGHT and width and width <= 600)
 
@@ -958,6 +962,37 @@ def _highlighted_words(markup: str) -> set[str]:
 
 def _brief(text: str, limit: int = 140) -> str:
     return _SOFT_WS.sub(" ", (text or "").replace("\xa0", " ")).strip()[:limit]
+
+
+TYPED_COVERAGE = 0.6
+FILTER_TOLERANCE = 0.25
+
+
+def _share(part: str, whole: str) -> float:
+    seen = len(comparable_tokens(whole))
+    if not seen:
+        return 1.0
+    return len(comparable_tokens(part)) / seen
+
+
+def _covers_slide(part: str, whole: str) -> bool:
+    """Does this flavour of the copy account for most of what the slide shows?
+
+    Keynote reports loose text items only, so a verse inside a group comes back
+    as the point number on its own. Diffing that against the other deck's full
+    copy reports the extraction rather than the slide.
+    """
+    return _share(part, whole) >= TYPED_COVERAGE
+
+
+def _filter_symmetric(a_clean: str, a_text: str, b_clean: str, b_text: str) -> bool:
+    """Is dropping photo-baked OCR fair to both decks?
+
+    A verse set over a full-bleed photo sits inside a region on the wall and
+    outside one on the lower third. Filtering one deck and not the other reports
+    the filter instead of the slide.
+    """
+    return abs(_share(a_clean, a_text) - _share(b_clean, b_text)) <= FILTER_TOLERANCE
 
 
 def wording_message(left: str, right: str, left_label: str, right_label: str) -> str | None:
@@ -1308,18 +1343,23 @@ def compare_inspects(
         # names "&" against "and" precisely, where the OCR-merged text would only
         # say the slide reads differently. OCR still gets a pass afterwards for
         # text the scripting API cannot see, minus anything inside a picture.
-        a_typed = a_render.extracted
-        b_typed = "\n".join(r.extracted for r in b_renders)
+        a_typed = a_render.typed
+        b_typed = "\n".join(r.typed for r in b_renders)
         # Exported JPEGs and .movs carry no selectable text, so anything read
         # from them is an OCR guess. Downstream checks demote on this.
         pair["typed"] = bool(a_typed.strip() or b_typed.strip())
+        both_typed = bool(a_typed.strip() and b_typed.strip())
         finding = carried = None
         compare_text = a_text
-        if a_typed.strip() and b_typed.strip():
+        if both_typed and _covers_slide(a_typed, a_text) and _covers_slide(b_typed, b_text):
             finding, carried, compare_text = compare(a_typed, b_typed)
         if finding is None:
-            a_seen = a_render.outside_photos or a_text
-            b_seen = "\n".join(r.outside_photos or r.text for r in b_renders)
+            a_clean = a_render.outside_photos
+            b_clean = "\n".join(r.outside_photos for r in b_renders)
+            if _filter_symmetric(a_clean, a_text, b_clean, b_text):
+                a_seen, b_seen = a_clean or a_text, b_clean or b_text
+            else:
+                a_seen, b_seen = a_text, b_text
             found, dropped, text = compare(a_seen, b_seen)
             finding = found
             carried = carried or dropped

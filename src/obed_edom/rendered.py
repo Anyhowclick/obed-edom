@@ -171,6 +171,15 @@ class RenderedSlide:
     def has_text(self) -> bool:
         return bool(self.text.strip())
 
+    @property
+    def typed(self) -> str:
+        """`extracted` with the wall's mirrored boxes folded, as `text` already is.
+
+        The LW repeats a verse box either side of the center panel, so the raw
+        extraction reads as the verse written twice.
+        """
+        return "\n".join(dedup_lines([ln for ln in self.extracted.split("\n") if ln.strip()]))
+
 
 def render_slide(
     slide: dict,

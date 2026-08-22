@@ -229,7 +229,12 @@ export function CheckTab() {
           </label>
         )}
         <div className="actions">
-          <button className="btn" type="button" disabled={mode === "none" || busy} onClick={() => run()}>
+          <button
+            className="btn run-checks"
+            type="button"
+            disabled={mode === "none" || busy}
+            onClick={() => run()}
+          >
             {paired ? "Match pairs" : "Check (read-only)"}
           </button>
         </div>
