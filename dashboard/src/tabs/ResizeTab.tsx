@@ -105,12 +105,13 @@ export function ResizeTab() {
     <div>
       <h1>CG resizer</h1>
       <p className="lede">
-        MVP: copy the wall deck, copy the CG template’s 16:9 slide layouts
-        onto it (MAP BLANK (16:9) is the repurposed background), set 1920×1080,
-        then move existing objects onto that layout. Church names take the
-        template’s sample size and pack from the right so they prefer the
-        gutter beside the map. Use Empty_Map.key (full map layers plus one
-        resized church name), not Only_Map.key.
+        Copies the wall deck, copies the CG template’s 16:9 slide layouts onto it
+        (<code>MAP BLANK (16:9)</code> is the repurposed background), sets
+        1920×1080, then moves the existing objects onto that layout. The template
+        teaches the crop: every object in it should sit at its final CG size and
+        position, and more anchors that agree makes the fit more reliable. Give
+        it one slide per map framing you use — a page whose framing it has never
+        seen is scaled to fit and reported instead.
       </p>
       <div className="row">
         <FileWell
@@ -152,7 +153,12 @@ export function ResizeTab() {
           checked={includeLists}
           onChange={(e) => setIncludeLists(e.target.checked)}
         />
-        <span>Resize church-name text to the template sample size and pack it beside the map. Leave off for a map-only slide.</span>
+        <span>
+          Bring the church-name lists across, resized to the template’s sample
+          size and placed wherever the CG frame is still empty. Labels sitting on
+          the map always come across and keep their place, whichever way this is
+          set. Leave off to drop the side-panel name columns entirely.
+        </span>
       </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>

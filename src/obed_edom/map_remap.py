@@ -1341,6 +1341,7 @@ def plan_slide_transforms(
     include_lists: bool = False,
     wall_size: tuple[float, float] | None = None,
     defer_list_packing: bool = False,
+    free_text_keys: set[tuple[str, int]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
@@ -1403,7 +1404,14 @@ def plan_slide_transforms(
             role = "map"
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
             continue
-        if role == "list" and not include_lists:
+        # Leaving the lists out means dropping side-panel name columns, never
+        # blanking the labels on the map: both look like lists to is_list_item,
+        # and hiding a label leaves its plate behind with no name on it. When a
+        # rendered slide told us which is which, honour that; blind, keep the
+        # old behaviour of dropping them all, since the flag is an explicit
+        # instruction and the operator can see the result.
+        loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
+        if role == "list" and not include_lists and loose:
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -2060,18 +2068,36 @@ def repack_free_text(
     already keeps it with the thing it labels. Returns one report row per moved
     box so the caller can flag the crowded ones.
     """
+    analysis = analyse_free_text(slide, recipe, preview=preview, wall_w=wall_w, wall_h=wall_h)
+    if analysis is None:
+        return []
+    return _place_free_text(transforms, slide, recipe, analysis)
+
+
+def analyse_free_text(
+    slide: dict,
+    recipe: dict[str, Any],
+    *,
+    preview: Any,
+    wall_w: float,
+    wall_h: float,
+) -> dict[str, Any] | None:
+    """Work out, from a rendered wall slide, which list text is free to move.
+
+    Done once per slide and shared, because two decisions depend on it: whether
+    an unticked "include lists" should drop a piece of text, and where to put it
+    if it is kept. Deciding twice by different rules is how a label ends up
+    hidden on one path and relocated on the other.
+    """
     from obed_edom.free_space import (  # noqa: PLC0415
         Box,
         background_fraction,
-        occupancy_from_image,
-        place_boxes,
         predict_cg_raster,
     )
-    from PIL import ImageDraw  # noqa: PLC0415
 
     aff = frame_affine(recipe)
     if aff is None or preview is None or aff.s <= 0:
-        return []
+        return None
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
 
@@ -2102,8 +2128,25 @@ def repack_free_text(
         )
         if clear >= FREE_TEXT_BACKGROUND_MIN:
             movable.add((str(item.get("kind")), int(item.get("kindIndex") or 0)))
+    return {"frame": frame, "bg": bg, "affine": aff, "free": movable, "dest": (dest_w, dest_h)}
+
+
+def _place_free_text(
+    transforms: list[ItemTransform],
+    slide: dict,
+    recipe: dict[str, Any],
+    analysis: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from obed_edom.free_space import Box, occupancy_from_image, place_boxes  # noqa: PLC0415
+    from PIL import ImageDraw  # noqa: PLC0415
+
+    movable: set[tuple[str, int]] = analysis["free"]
     if not movable:
         return []
+    frame = analysis["frame"]
+    bg = analysis["bg"]
+    aff: Affine = analysis["affine"]
+    dest_w, dest_h = analysis["dest"]
 
     cx = frame.width / dest_w
     cy = frame.height / dest_h
@@ -2200,23 +2243,26 @@ def plan_payload_transforms(
                     slide_recipe = fitted
                     if fitted_slides is not None:
                         fitted_slides.append(number)
-        has_preview = bool(previews and previews.get(number) is not None)
+        preview = (previews or {}).get(number)
+        # One raster read per slide, shared by the drop decision and the
+        # placement decision so they can never disagree.
+        analysis = (
+            analyse_free_text(
+                slide, slide_recipe, preview=preview, wall_w=wall_w, wall_h=wall_h
+            )
+            if preview is not None
+            else None
+        )
         planned = plan_slide_transforms(
             slide,
             slide_recipe,
             include_lists=include_lists,
             wall_size=(wall_w, wall_h),
-            defer_list_packing=include_lists and has_preview,
+            defer_list_packing=include_lists and analysis is not None,
+            free_text_keys=analysis["free"] if analysis else None,
         )
-        if include_lists and has_preview:
-            rows = repack_free_text(
-                planned,
-                slide,
-                slide_recipe,
-                preview=previews.get(number),
-                wall_w=wall_w,
-                wall_h=wall_h,
-            )
+        if include_lists and analysis is not None:
+            rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)
         transforms.extend(planned)

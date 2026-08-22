@@ -75,7 +75,11 @@ def main(argv: list[str] | None = None) -> int:
     remap.add_argument(
         "--include-lists",
         action="store_true",
-        help="Also resize church-name text to the template sample size and pack it off the map.",
+        help=(
+            "Bring church-name lists across, resized to the template sample size "
+            "and placed where the CG frame is empty. Map labels come across "
+            "either way; off drops the side-panel name columns."
+        ),
     )
     remap.add_argument(
         "--source-previews",
