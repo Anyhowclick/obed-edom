@@ -34,6 +34,26 @@ BIBLE_BOOK_WORDS = {
 
 # Typographic variants that mean the same thing to a reader but not to ==.
 _SYMBOL_WORDS = {"&": "and", "+": "and", "w/": "with"}
+
+
+def _enclosed_numerals() -> dict[str, str]:
+    """Circled point numbers read as plain digits.
+
+    A wall sets its point list as ① ② ③. OCR of the same glyphs is unreliable,
+    and the lower third often types 1. 2. 3. instead, so folding them keeps a
+    numbering style out of the wording diff.
+    """
+    out: dict[str, str] = {}
+    for base, count in (
+        (0x2460, 20),  # ① .. ⑳
+        (0x2776, 10),  # ❶ .. ❿
+        (0x278A, 10),  # ➊ .. ➓
+    ):
+        for offset in range(count):
+            out[chr(base + offset)] = str(offset + 1)
+    return out
+
+
 _SYMBOL_CHARS = str.maketrans(
     {
         "\u2018": "'",
@@ -44,6 +64,7 @@ _SYMBOL_CHARS = str.maketrans(
         "\u2014": "-",
         "\u2026": "...",
         "\u00a0": " ",
+        **_enclosed_numerals(),
     }
 )
 
@@ -267,13 +288,22 @@ def _split_reference_label(tokens: list[str]) -> tuple[list[str], list[str]]:
 
 
 _QUOTE_CHARS = set("\"'“”‘’")
+_ENCLOSED_NUMERALS = _enclosed_numerals()
+
+
+def _numeral_form_only(left: str, right: str) -> bool:
+    """A circled point number against a plain digit is a numbering style."""
+    if not any(ch in _ENCLOSED_NUMERALS for ch in left + right):
+        return False
+    plain = ["".join(_ENCLOSED_NUMERALS.get(ch, ch) for ch in token) for token in (left, right)]
+    return plain[0] == plain[1]
 
 
 def _substantive_symbol(left: str, right: str) -> bool:
     """True for swaps a reader notices: & for and, a hyphen for an en dash."""
     if set(left) <= _QUOTE_CHARS and set(right) <= _QUOTE_CHARS:
         return False
-    return True
+    return not _numeral_form_only(left, right)
 
 
 def _is_point_number(token: str) -> bool:

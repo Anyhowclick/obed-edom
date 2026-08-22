@@ -18,10 +18,11 @@ SEMANTIC_TAGS = {
     "GIVING-OPTIONS",
     "VERSE",
     "VERSE-CONTINUED",
+    "VERSE-AFTER-POINT",
     "POINT",
     "NUM-POINT",
 }
-VERSE_TAGS = {"VERSE", "VERSE-CONTINUED"}
+VERSE_TAGS = {"VERSE", "VERSE-CONTINUED", "VERSE-AFTER-POINT"}
 GRAPHIC_TAGS = {"TITLE", "FILLER", "FILLER-QR", "GIVING-OPTIONS"}
 POINT_TAGS = {"POINT", "NUM-POINT"}
 OFFERING_TAGS = {"FILLER-QR", "GIVING-OPTIONS"}
@@ -30,7 +31,7 @@ OFFERING_TAGS = {"FILLER-QR", "GIVING-OPTIONS"}
 CUE_RE = re.compile(
     r"\[("
     r"FILLER[- ]QR|GIVING[- ]OPTIONS|NUM[- ]POINT|"
-    r"VERSE[- ]CONTINUED|VERSE[- ]FROM[- ]PREVIOUS|"
+    r"VERSE[- ]CONTINUED|VERSE[- ]FROM[- ]PREVIOUS|VERSE[- ]AFTER[- ]POINT|"
     r"TITLE|FILLER|VERSE|POINT|"
     r"(?:LW|DSK|FW)(?:[-–][^\]]+)?"
     r")\]",
@@ -67,10 +68,33 @@ _SEMANTIC_NORMALIZE = {
     "VERSE CONTINUED": "VERSE-CONTINUED",
     "VERSE-FROM-PREVIOUS": "VERSE-CONTINUED",
     "VERSE FROM PREVIOUS": "VERSE-CONTINUED",
+    "VERSE-AFTER-POINT": "VERSE-AFTER-POINT",
+    "VERSE AFTER POINT": "VERSE-AFTER-POINT",
     "POINT": "POINT",
     "NUM-POINT": "NUM-POINT",
     "NUM POINT": "NUM-POINT",
 }
+
+# Spellings that still parse but should no longer be written. `VERSE-FROM-PREVIOUS`
+# reads almost identically to `VERSE-AFTER-POINT` on a printed script while doing
+# something unrelated: one continues a passage, the other pairs a verse with a point.
+DEPRECATED_ALIASES = {
+    "VERSE-FROM-PREVIOUS": "VERSE-CONTINUED",
+    "VERSE FROM PREVIOUS": "VERSE-CONTINUED",
+}
+
+
+def _cue_inner(raw: str) -> str:
+    inner = raw.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    inner = inner.replace("–", "-").replace("—", "-")
+    return re.sub(r"\s+", " ", inner).strip().upper()
+
+
+def deprecated_alias(raw: str) -> str | None:
+    """Canonical cue name when `raw` is a retired spelling, else None."""
+    return DEPRECATED_ALIASES.get(_cue_inner(raw))
 
 
 def _is_green(highlight: str | None) -> bool:
@@ -124,9 +148,7 @@ def load_paragraphs(path: Path) -> list[Paragraph]:
 
 
 def normalize_cue(raw: str) -> Cue:
-    inner = raw.strip()[1:-1]
-    inner = inner.replace("–", "-").replace("—", "-")
-    inner = re.sub(r"\s+", " ", inner).strip().upper()
+    inner = _cue_inner(raw)
     semantic_tag = _SEMANTIC_NORMALIZE.get(inner)
     if semantic_tag:
         return Cue(raw=raw, tag=semantic_tag, paragraph=0, offset=0, semantic=True, deck=None)
@@ -412,10 +434,15 @@ def _literal_point_number(text: str) -> int | None:
 
 
 def _mark_verse_follows(blocks: list[SlideDraft]) -> None:
+    """Link a point to the [VERSE-AFTER-POINT] that Magic Moves out of it.
+
+    Only that cue produces the point-plus-verse slide. A plain [VERSE] after a
+    point is a verse-only slide, so the point stays a static PRE.
+    """
     for i, draft in enumerate(blocks):
         if draft.cue_tag not in POINT_TAGS:
             continue
-        if i + 1 < len(blocks) and blocks[i + 1].cue_tag in VERSE_TAGS:
+        if i + 1 < len(blocks) and blocks[i + 1].cue_tag == "VERSE-AFTER-POINT":
             draft.verse_follows = True
             draft.following_verse_index = i + 1
 

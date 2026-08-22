@@ -7,7 +7,10 @@ import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
 
 export type InspectResult = {
   path?: string;
+  outlinePath?: string | null;
+  deck?: string;
   flags?: Flag[];
+  outlineFlags?: Flag[];
   previewFileNames?: string[];
   previewFiles?: { lw: string[] };
   slideWidth?: number;
@@ -41,6 +44,7 @@ export function InspectResultView({
   );
   const previewsOk = present(job, "LW previews") && present(job, "preview dir");
   const flags = result?.flags || [];
+  const outlineFlags = result?.outlineFlags || [];
 
   // Group by slide so a finding sits next to the slide it is about, the way
   // the Diff Checker already shows them.
@@ -115,6 +119,16 @@ export function InspectResultView({
         onShowInfo={setShowInfo}
         title={flagged ? "Deck-wide findings" : "Validation"}
       />
+      {outlineFlags.length > 0 && (
+        <ValidationPanel
+          flags={outlineFlags}
+          jobId={job.id}
+          onOpen={onOpen}
+          showInfo={showInfo}
+          onShowInfo={setShowInfo}
+          title="Outline findings"
+        />
+      )}
     </>
   );
 }

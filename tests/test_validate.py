@@ -297,3 +297,54 @@ def test_mixed_type_diff_skips_count_and_missing(tmp_path):
     assert not any("Slide count differs" in f.message for f in diffs)
     assert not any("Missing" in f.message for f in diffs)
 
+
+
+def test_new_cue_and_outline_rules_ship_with_severities():
+    """The checker's rule ids must be tunable from the YAML like every other."""
+    from obed_edom.validate import load_rules, rule_severity, rule_title
+
+    rules = load_rules()["rules"]
+    expected = {
+        "cue.deprecated_alias": "warning",
+        "cue.lw_count": "warning",
+        "cue.dsk_count": "warning",
+        "cue.uncued_slide": "warning",
+        "cue.no_slide": "warning",
+        "cue.unknown": "warning",
+        "cue.hold": "info",
+        "outline.dsk_deviates": "warning",
+        "outline.dsk_stale": "warning",
+        "outline.stale": "info",
+        "outline.lw_deviates": "warning",
+        "outline.both_deviate": "warning",
+        "outline.three_way": "info",
+    }
+    for rule, severity in expected.items():
+        assert rules.get(rule) == severity, rule
+        assert rule_severity(rule) == severity
+        # A generated title reads like "Cue Lw Count"; these are hand-written.
+        assert rule_title(rule) != rule
+
+
+def test_outline_findings_are_pinned_to_their_paragraph(tmp_path):
+    """The reader sits a finding next to the line it is about."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from outline_fixtures import build_outline
+
+    from obed_edom.validate import validate_outline_paragraphs
+
+    path = build_outline(
+        tmp_path / "style.docx",
+        [
+            "[LW][DSK-PP] A quiet opening line.",
+            "[LW][DSK-PP] We read Psalms 23 together.",
+        ],
+    )
+    flags = validate_outline_paragraphs(parse_outline(path))
+    book = next(f for f in flags if f.category == "book_name")
+    assert book.deck == "outline"
+    assert book.slide is not None
+    para = parse_outline(path).paragraphs[book.slide - 1]
+    assert "Psalms 23" in para.text

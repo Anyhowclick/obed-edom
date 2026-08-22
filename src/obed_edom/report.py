@@ -214,6 +214,79 @@ def _styles() -> dict[str, ParagraphStyle]:
     }
 
 
+SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2, "success": 3}
+
+
+def write_outline_findings(path: Path, report: dict) -> Path:
+    """A printable copy of the outline findings, in reading order.
+
+    Operators mark up a paper script, so the findings are listed against the
+    paragraph they belong to rather than grouped by rule.
+    """
+    path = Path(path).with_suffix(".pdf")
+    styles = _styles()
+    name = str(report.get("name") or "Outline")
+    flags = list(report.get("outlineFlags") or [])
+
+    story: list = [Paragraph(_plain(name), styles["title"])]
+    story.append(
+        Paragraph(
+            _plain(
+                f"{report.get('lwCues', 0)} LW and {report.get('dskCues', 0)} DSK cues "
+                f"across {len(report.get('rows') or [])} slide advances."
+            ),
+            styles["subtitle"],
+        )
+    )
+
+    by_paragraph: dict[int, list[dict]] = {}
+    loose: list[dict] = []
+    for flag in flags:
+        number = flag.get("slide")
+        if number is None:
+            loose.append(flag)
+        else:
+            by_paragraph.setdefault(int(number), []).append(flag)
+
+    def line(flag: dict) -> Paragraph:
+        head = flag.get("title") or flag.get("rule") or flag.get("category") or "Finding"
+        text = f"<b>{_plain(str(head))}</b> &#8212; {_plain(str(flag.get('message') or ''))}"
+        style = styles["danger"] if flag.get("severity") in {"error", "warning"} else styles["item"]
+        return Paragraph(text, style)
+
+    story.append(Paragraph("Findings in the script", styles["h1"]))
+    if not flags:
+        story.append(Paragraph("Nothing to flag.", styles["body"]))
+    for para in report.get("paragraphs") or []:
+        found = by_paragraph.get(int(para.get("number") or 0))
+        if not found:
+            continue
+        story.append(Paragraph(_plain(f"Paragraph {para.get('number')}"), styles["h1"]))
+        story.append(Paragraph(_plain((para.get("text") or "").strip()[:400]), styles["body"]))
+        for flag in sorted(found, key=lambda f: SEVERITY_ORDER.get(f.get("severity"), 9)):
+            story.append(line(flag))
+            story.append(Spacer(1, 3))
+
+    if loose:
+        story.append(Paragraph("Whole outline", styles["h1"]))
+        for flag in sorted(loose, key=lambda f: SEVERITY_ORDER.get(f.get("severity"), 9)):
+            story.append(line(flag))
+            story.append(Spacer(1, 3))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    SimpleDocTemplate(
+        str(path),
+        pagesize=letter,
+        leftMargin=0.7 * inch,
+        rightMargin=0.7 * inch,
+        topMargin=0.65 * inch,
+        bottomMargin=0.65 * inch,
+        title=name,
+        author="Obed-Edom",
+    ).build(story)
+    return path
+
+
 def write_review(
     path: Path,
     outline: OutlineDoc,

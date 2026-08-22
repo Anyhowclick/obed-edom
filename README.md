@@ -2,6 +2,65 @@
 
 Local Mac tool that builds LED-wall (LW) and DSK Keynote decks from sermon/offering Word outlines. Keynote.app is required for generate, preview export, and the dashboard’s Keynote jobs.
 
+## Outline cues
+
+An outline carries **semantic cues** that say what a block *is*. Generate turns each
+one into the slides below and writes **operator cues** back into `<stem>_CUED.docx`
+for show-call.
+
+**One cue is one slide advance on that deck.** Nothing advances on its own, so the
+number of `[LW…]` cues equals the LW slide count and likewise for `[DSK…]`. The
+Sermon Checker relies on this to spot a slide with no cue, or a cue with no slide.
+
+| Semantic cue | LW master | DSK master | Operator cue | Slides |
+|---|---|---|---|---|
+| `[TITLE]` | `TITLE` | — | `[LW-TITLE]` | 1 LW |
+| `[FILLER]` (sermon) | `TITLE` | — | `[LW-TITLE]` | 1 LW |
+| `[FILLER]` (offering) | `BLANK` | `Ways To Give QR Code` | `[LW-OFFERING FILLER]` `[DSK-PP-QR CODE]` | 1 + 1 |
+| `[FILLER-QR]` | `BLANK` | `Ways To Give QR Code` | `[LW-OFFERING FILLER]` `[DSK-PP-QR CODE]` | 1 + 1 |
+| `[GIVING-OPTIONS]` | `BLANK` | `Ways To Give DSK CREDIT CARD` | `[LW-GIVING OPTIONS]` `[DSK-PP-GIVING OPTIONS]` | 1 + 1 |
+| `[VERSE]` | `VERSES` | `Verse Standard` / `Verse 1 Line` | `[LW]` `[DSK-PP]` | 1 + 1 per chunk |
+| `[VERSE-CONTINUED]` | `VERSES` | verse master | `[LW]` `[DSK-PP]` | 1 + 1 |
+| `[POINT]` | `NON-NUMBERED POINT PRE` | `Non-Num Point with Verse-Pre` | `[LW]` `[DSK-PP]` | 1 + 1 |
+| `[NUM-POINT]` | `NUMBERED POINT PRE` | `Num Point with Verse-Pre` | `[LW]` `[DSK-PP]` | 1 + 1 |
+| `[VERSE-AFTER-POINT]` | `… POINT POST` | `… Point with Verse-Post` | `[LW]` `[DSK-PP]` | 1 + 1 |
+
+Long passages split across several `[VERSE]` slides; each chunk gets its own operator
+cue at the verse number where it starts.
+
+### `[VERSE-CONTINUED]` vs `[VERSE-AFTER-POINT]`
+
+These read alike and do unrelated things.
+
+- **`[VERSE-CONTINUED]`** continues a *passage*. The preacher pauses mid-quote to
+  comment, then resumes, so the next slide re-shows the verse with a leading verse
+  number. It stays on the ordinary verse master.
+- **`[VERSE-AFTER-POINT]`** pairs a verse with a *point title*. It builds the
+  point-plus-verse slide on the POST master, and the point before it Magic Moves
+  into it. Use it only directly after `[POINT]` or `[NUM-POINT]`.
+
+A plain `[VERSE]` after a point is a verse-only slide: the point stays a static PRE
+with no Magic Move. Cue both when you want the point-plus-verse slide *and* the
+verse on its own.
+
+`[VERSE-FROM-PREVIOUS]` is **deprecated** — write `[VERSE-CONTINUED]`. It still maps,
+but generate raises `cue.deprecated_alias`.
+
+`[Pray]`, `[Instructions]` and `[Turn to your neighbours…]` are stage directions, not
+cues, and never become slides.
+
+### Naming conventions
+
+The two families are spelled differently, and both are matched case-insensitively.
+
+- **Semantic cues are hyphenated**: `NUM-POINT`, `GIVING-OPTIONS`, `VERSE-AFTER-POINT`.
+  A spaced form (`[VERSE AFTER POINT]`) is accepted and folded to the hyphenated one.
+- **Operator cues are a deck prefix then space-separated words**:
+  `LW-OFFERING FILLER`, `DSK-PP-QR CODE`.
+
+Either a hyphen or an en dash may follow the deck prefix, because generate writes
+`[DSK-PP]` while hand-authored outlines often carry `[DSK–PP]`.
+
 ## Accessibility permission
 
 Grant Accessibility to whatever launches generate — Terminal, iTerm, or the dashboard app — in *System Settings > Privacy & Security > Accessibility*.

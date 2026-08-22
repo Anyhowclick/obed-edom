@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { CheckTab } from "./tabs/CheckTab";
-import { DiffTab } from "./tabs/DiffTab";
 import { VisualTab } from "./tabs/VisualTab";
 import { DskTab } from "./tabs/DskTab";
 import { GeneratorTab } from "./tabs/GeneratorTab";
@@ -20,7 +19,6 @@ import {
 const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Sermon Base Generator" },
   { id: "check", label: "Sermon Checker" },
-  { id: "diff", label: "Diff Checker" },
   { id: "visual", label: "Visual Checker" },
   { id: "dsk", label: "DSK Generator" },
   { id: "resize", label: "CG resizer" },
@@ -59,13 +57,15 @@ export function App() {
   }
 
   useEffect(() => {
-    if (tab !== "diff" && tab !== "visual" && focusMode) setFocusMode(false);
+    if (tab !== "check" && tab !== "visual" && focusMode) setFocusMode(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
   function openInFeature(feature: FeatureId, jobId: string) {
     setOpenRun({ feature, jobId });
-    setTab(feature);
+    // The Diff Checker folded into the Sermon Checker, so runs saved under the
+    // old feature still have somewhere to open.
+    setTab(feature === "diff" ? "check" : feature);
   }
 
   return (
@@ -103,9 +103,6 @@ export function App() {
           </div>
           <div className={tab === "check" ? "pane" : "pane off"}>
             <CheckTab />
-          </div>
-          <div className={tab === "diff" ? "pane" : "pane off"}>
-            <DiffTab />
           </div>
           <div className={tab === "visual" ? "pane" : "pane off"}>
             <VisualTab />

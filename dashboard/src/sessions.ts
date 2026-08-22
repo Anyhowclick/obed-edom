@@ -109,13 +109,18 @@ export function useJobSessions(feature?: string) {
   };
 }
 
+/** Runs saved before the Diff Checker folded into the Sermon Checker. */
+function absorbs(feature: FeatureId, saved: FeatureId): boolean {
+  return saved === feature || (feature === "check" && saved === "diff");
+}
+
 export function useCurrentJob(feature: FeatureId) {
   const { openRun } = useRunNav();
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!openRun || openRun.feature !== feature) return;
+    if (!openRun || !absorbs(feature, openRun.feature)) return;
     getJob(openRun.jobId)
       .then(setJob)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));

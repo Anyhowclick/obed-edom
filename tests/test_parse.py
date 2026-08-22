@@ -9,6 +9,12 @@ from obed_edom.bible import _parse_gateway_html, check_bible, fetch_passage
 from obed_edom.models import StyledRun
 from obed_edom.parse_outline import parse_outline
 from obed_edom.slide_map import _split_styled_runs, map_slides
+from outline_fixtures import (
+    build_outline,
+    duplicate_as_plain_verse,
+    operator_cue_counts,
+    verse_after_point_variant,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTLINES = ROOT / "Sermon Outlines"
@@ -30,16 +36,36 @@ def test_sermon_cues():
     assert "POINT" in tags
     truthful = next(s for s in outline.blocks if "Truthful" in (s.green_title or s.body))
     assert truthful.cue_tag == "NUM-POINT"
-    assert truthful.verse_follows
     assert truthful.point_number == 1
     examine = next(s for s in outline.blocks if "Examine" in s.body)
     assert examine.cue_tag == "POINT"
-    assert not examine.verse_follows
     communion = next(s for s in outline.blocks if "Communion" in s.body)
     assert communion.cue_tag == "POINT"
-    assert communion.verse_follows
     v27 = next(s for s in outline.blocks if s.cue_tag == "VERSE" and "27" in s.body)
     assert "Spirit" in v27.body
+    # A plain [VERSE] after a point is a verse-only slide, so the point stays a
+    # static PRE. Only [VERSE-AFTER-POINT] Magic Moves out of it.
+    assert not any(s.verse_follows for s in outline.blocks)
+
+
+def test_verse_after_point_links_to_its_point(tmp_path):
+    variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
+    outline = parse_outline(variant)
+    truthful = next(s for s in outline.blocks if "Truthful" in (s.green_title or s.body))
+    assert truthful.verse_follows
+    assert outline.blocks[truthful.following_verse_index].cue_tag == "VERSE-AFTER-POINT"
+    # Examine is followed by another point, so nothing moves out of it.
+    examine = next(s for s in outline.blocks if "Examine" in s.body)
+    assert not examine.verse_follows
+
+
+@pytest.mark.parametrize("cue", ["[VERSE-AFTER-POINT]", "[VERSE AFTER POINT]"])
+def test_verse_after_point_spelling(tmp_path, cue):
+    path = build_outline(
+        tmp_path / f"{cue.strip('[]').replace(' ', '_')}.docx",
+        ["[NUM-POINT] Be Truthful in Love", f"{cue} Ezekiel 36:27 And I will put my Spirit in you."],
+    )
+    assert [b.cue_tag for b in parse_outline(path).blocks] == ["NUM-POINT", "VERSE-AFTER-POINT"]
 
 
 def test_offering_cues():
@@ -76,49 +102,24 @@ def test_mapping_masters():
     assert any(r.style == "highlight" and "Truthful" in r.text for r in title_runs)
     assert any(r.style == "normal" and "Love" in r.text for r in title_runs)
     assert truthful_pre.item_palettes.get(1) == "lw_point"
-    assert truthful_pre.transition is not None
-    assert truthful_pre.transition.effect == "magic_move"
-    assert truthful_pre.transition.duration == 1
-    assert truthful_pre.transition.match == "word"
-    truthful_post = next(s for s in lw if s.master == "NUMBERED POINT POST")
-    assert "27" in truthful_post.body or any(
-        "27" in "".join(r.text for r in runs) for runs in truthful_post.styled_items.values()
-    )
     pre_size = truthful_pre.text_item_font_sizes.get(1, 180)
-    post_size = truthful_post.text_item_font_sizes.get(1, 180)
     assert pre_size >= 170
-    post_title = truthful_post.text_items.get(1, "")
-    assert "Truthful" in post_title
-    assert "\n" in post_title
 
-    examine = next(s for s in lw if s.master == "NON-NUMBERED POINT PRE" and "Examine" in (s.body or ""))
-    assert examine.transition is not None
-    assert not any(
-        s.master == "NON-NUMBERED POINT POST" and "Examine" in (s.body or "") for s in lw
-    )
+    # This outline writes a plain [VERSE] after each point, so there is nothing
+    # to Magic Move into and no point-plus-verse slide.
+    assert truthful_pre.transition is None
+    assert not any(s.role == "post" for s in lw)
+    assert not any(s.role == "post" for s in dsk)
 
     communion_pre = next(
         s for s in lw if s.master == "NON-NUMBERED POINT PRE" and "Communion" in (s.body or "")
     )
-    assert communion_pre.transition is not None
     pre_text = communion_pre.text_items.get(1, "")
     assert "Powerful Presence" in pre_text
     assert pre_text.count("\n") == 1
     assert pre_text.split("\n")[0].endswith("Communion")
     assert not (communion_pre.text_items.get(2) or "").strip()
     assert not (communion_pre.text_items.get(3) or "").strip()
-    communion_post = next(
-        s for s in lw if s.master == "NON-NUMBERED POINT POST" and "Communion" in (s.body or "")
-    )
-    post_text = communion_post.text_items.get(1, "")
-    assert post_text.count("\n") == 2
-    assert "Powerful Presence" in post_text
-    assert not (communion_post.text_items.get(2) or "").strip()
-    assert not (communion_post.text_items.get(3) or "").strip()
-    assert any(s.master == "NON-NUMBERED POINT POST" for s in lw)
-    assert not any(
-        s.role == "post" and "Communion" in (s.body or "") for s in dsk
-    )
 
     assert any(s.master == "VERSES" for s in lw)
     v26 = next(s for s in lw if s.is_verse and s.role == "verse" and "new heart" in s.body)
@@ -130,21 +131,7 @@ def test_mapping_masters():
     assert any(r.style == "highlight" and "new heart" in r.text for runs in v26.styled_items.values() for r in runs)
 
     dsk_pre = next(s for s in dsk if s.master == "Num Point with Verse-Pre")
-    assert dsk_pre.transition is not None
-    assert dsk_pre.transition.match == "word"
-    dsk_post = next(s for s in dsk if s.master == "Num Point with Verse-Post")
-    extra_text = " ".join(e.get("text") or "" for e in dsk_post.extra_text_items)
-    assert "Truthful" in extra_text
-    assert any(e.get("text") == "1" for e in dsk_post.extra_text_items)
-    verse_box = dsk_post.text_items.get(1, "")
-    header_box = dsk_post.text_items.get(2, "")
-    assert "27" in verse_box or any(
-        "27" in "".join(r.text for r in runs) for runs in dsk_post.styled_items.values()
-    )
-    assert "Ezekiel" in header_box
-    assert "Spirit" not in header_box
-    assert "Truthful" not in verse_box
-    assert 3 not in dsk_post.text_items
+    assert dsk_pre.transition is None
     v27 = next(s for s in dsk if s.is_verse and s.role == "verse" and "keep my laws" in s.body)
     assert v27.master == "Verse Standard (Variation 2)"
     assert "NIV" not in v27.header
@@ -179,6 +166,117 @@ def test_mapping_masters():
     # range must not be left stranded at the head of the body.
     assert not any(s.body.startswith("30-32") for s in dsk_verses)
     assert all("(MSG)" not in s.body for s in dsk_verses)
+
+
+def test_verse_after_point_masters(tmp_path):
+    """[VERSE-AFTER-POINT] is what builds the point-plus-verse slide."""
+    variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
+    lw, dsk, _ = map_slides(parse_outline(variant))
+
+    truthful_pre = next(
+        s for s in lw if s.master == "NUMBERED POINT PRE" and "Truthful" in s.text_items.get(1, "")
+    )
+    assert truthful_pre.transition is not None
+    assert truthful_pre.transition.effect == "magic_move"
+    assert truthful_pre.transition.duration == 1
+    assert truthful_pre.transition.match == "word"
+
+    truthful_post = next(s for s in lw if s.master == "NUMBERED POINT POST")
+    assert truthful_post.transition is None
+    assert "27" in truthful_post.body or any(
+        "27" in "".join(r.text for r in runs) for runs in truthful_post.styled_items.values()
+    )
+    post_title = truthful_post.text_items.get(1, "")
+    assert "Truthful" in post_title
+    assert "\n" in post_title
+    # The POST carries its own cue now, so its operator tag sits there.
+    assert truthful_post.bind == "cue"
+
+    # Examine is followed by another point, so it neither moves nor gains a POST.
+    examine = next(
+        s for s in lw if s.master == "NON-NUMBERED POINT PRE" and "Examine" in (s.body or "")
+    )
+    assert examine.transition is None
+    assert not any(
+        s.master == "NON-NUMBERED POINT POST" and "Examine" in (s.body or "") for s in lw
+    )
+
+    communion_post = next(
+        s for s in lw if s.master == "NON-NUMBERED POINT POST" and "Communion" in (s.body or "")
+    )
+    post_text = communion_post.text_items.get(1, "")
+    assert post_text.count("\n") == 2
+    assert "Powerful Presence" in post_text
+    assert not (communion_post.text_items.get(2) or "").strip()
+    assert not (communion_post.text_items.get(3) or "").strip()
+    # Too long for the lower-third column, so DSK skips this one.
+    assert not any(s.role == "post" and "Communion" in (s.body or "") for s in dsk)
+
+    dsk_pre = next(s for s in dsk if s.master == "Num Point with Verse-Pre")
+    assert dsk_pre.transition is not None
+    assert dsk_pre.transition.match == "word"
+    dsk_post = next(s for s in dsk if s.master == "Num Point with Verse-Post")
+    extra_text = " ".join(e.get("text") or "" for e in dsk_post.extra_text_items)
+    assert "Truthful" in extra_text
+    assert any(e.get("text") == "1" for e in dsk_post.extra_text_items)
+    verse_box = dsk_post.text_items.get(1, "")
+    header_box = dsk_post.text_items.get(2, "")
+    assert "27" in verse_box or any(
+        "27" in "".join(r.text for r in runs) for runs in dsk_post.styled_items.values()
+    )
+    assert "Ezekiel" in header_box
+    assert "Spirit" not in header_box
+    assert "Truthful" not in verse_box
+    assert 3 not in dsk_post.text_items
+
+
+def test_orphan_verse_after_point_is_flagged(tmp_path):
+    path = build_outline(
+        tmp_path / "orphan.docx",
+        ["[VERSE-AFTER-POINT] Ezekiel 36:26 I will give you a new heart."],
+    )
+    lw, _dsk, flags = map_slides(parse_outline(path))
+    assert any("no point cue before it" in f.message for f in flags)
+    # Falls back to a plain verse rather than dropping the content.
+    assert any(s.master == "VERSES" for s in lw)
+    assert not any(s.role == "post" for s in lw)
+
+
+@pytest.mark.parametrize(
+    "name", ["Sermon BC.docx", "Offering JX.docx"]
+)
+def test_every_slide_has_exactly_one_cue(tmp_path, name):
+    """The invariant the outline checker relies on: one cue, one slide."""
+    outline = parse_outline(OUTLINES / name)
+    lw, dsk, _ = map_slides(outline)
+    cued = annotate_outline(outline, lw, dsk, tmp_path / f"{Path(name).stem}_CUED.docx")
+    assert operator_cue_counts(cued) == (len(lw), len(dsk))
+
+
+def test_every_slide_has_exactly_one_cue_with_verse_after_point(tmp_path):
+    variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
+    outline = parse_outline(variant)
+    lw, dsk, _ = map_slides(outline)
+    cued = annotate_outline(outline, lw, dsk, tmp_path / "BC_VAP_CUED.docx")
+    assert any(s.role == "post" for s in lw), "the variant should exercise POST slides"
+    assert operator_cue_counts(cued) == (len(lw), len(dsk))
+
+
+def test_deprecated_verse_from_previous_alias(tmp_path):
+    """The retired spelling still maps, but says so."""
+    path = build_outline(
+        tmp_path / "deprecated.docx",
+        [
+            "[VERSE] Ezekiel 36:26 I will give you a new heart and a new spirit.",
+            "[VERSE-FROM-PREVIOUS] and put a new spirit in you.",
+        ],
+    )
+    outline = parse_outline(path)
+    assert [b.cue_tag for b in outline.blocks] == ["VERSE", "VERSE-CONTINUED"]
+    _lw, _dsk, flags = map_slides(outline)
+    stale = [f for f in flags if f.rule == "cue.deprecated_alias"]
+    assert len(stale) == 1
+    assert "[VERSE-CONTINUED]" in stale[0].message
 
 
 def test_ref_tail_never_eats_a_verse_number():
@@ -332,7 +430,7 @@ def test_prepare_styled_runs():
     assert prepared[0]["style"] == "verse_number"
 
 
-def test_point_applescript_replaces_placeholder():
+def test_point_applescript_replaces_placeholder(tmp_path):
     """Point titles must replace the whole text box, not seed into Bold/Normal."""
     from pathlib import Path
 
@@ -340,7 +438,11 @@ def test_point_applescript_replaces_placeholder():
 
     assert STYLE_PALETTES["lw"]["verse_number"]["size"] == 70
 
-    sermon = parse_outline(OUTLINES / "Sermon BC.docx")
+    # POST slides need a cue that asks for them, and the Matthew passage is
+    # wanted both beside its point and on its own.
+    variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
+    duplicate_as_plain_verse(variant, "Take and eat")
+    sermon = parse_outline(variant)
     lw, dsk, _ = map_slides(sermon)
     pre = next(s for s in lw if s.master == "NUMBERED POINT PRE" and "Truthful" in s.body)
     post = next(s for s in lw if s.master == "NUMBERED POINT POST")
@@ -488,11 +590,11 @@ def test_later_verse_numbers_get_the_template_character_style():
     assert unfixed["allSuperscript"] is False
 
 
-def test_repeated_verse_box_is_styled_on_every_slide():
+def test_repeated_verse_box_is_styled_on_every_slide(tmp_path):
     """Find cycles through matches, so each anchor is applied once per occurrence.
 
-    A magic-move POST slide reuses the same verse box, so the Matthew passage
-    appears on two slides. Applying an anchor once styles a single instance and
+    Cueing a passage as both [VERSE-AFTER-POINT] and [VERSE] puts the same verse
+    box on two slides. Applying an anchor once styles a single instance and
     silently leaves the other on the baseline.
     """
     from obed_edom.keynote import (
@@ -501,7 +603,9 @@ def test_repeated_verse_box_is_styled_on_every_slide():
         _superscript_anchor_plan,
     )
 
-    lw, _, _ = map_slides(parse_outline(OUTLINES / "Sermon BC.docx"))
+    variant = verse_after_point_variant(OUTLINES / "Sermon BC.docx", tmp_path / "BC_VAP.docx")
+    duplicate_as_plain_verse(variant, "Take and eat")
+    lw, _, _ = map_slides(parse_outline(variant))
     jobs = _collect_superscript_jobs(lw)
     matt_jobs = [j for j in jobs if "Take and eat" in j["marker"]]
     assert len(matt_jobs) == 2, "the Matthew verse box should appear on two slides"

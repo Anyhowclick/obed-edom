@@ -12,7 +12,24 @@ description: >-
 
 # Sermon validation
 
-Never change Keynote files to “fix” a finding. Flag only.
+Never change Keynote files to “fix” a finding. Flag only. That extends to the
+outline: a stale script is reported, never rewritten.
+
+## Source of truth
+
+Once staff have run the deck with the Pastor, **LW is the service**, so the
+ranking is **LW → outline → DSK** and a script that disagrees with the wall is
+out of date rather than right. Before sign-off the script still leads:
+**outline → LW → DSK**. The Sermon Checker asks which it is (defaulting to
+finalised) and passes `lw_final` through to `outline_check.corroborate`.
+
+DSK is last in both orderings, so `outline.dsk_deviates` means the same thing
+either way. Only the two verdicts that would otherwise accuse the wall change:
+with a finalised wall they become `outline.dsk_stale` and `outline.stale`.
+
+An outline carries one cue per slide advance, so cue counts can be compared
+with the decks without reading a word — that check survives decks exported as
+JPEGs or `.mov`s. Wording checks cannot, so on those they drop to `info`.
 
 ## Checks
 
@@ -62,6 +79,18 @@ Every `Flag` carries a stable `rule` id, plus `slide`, `deck` and an optional
 | `diff.count` / `diff.missing` / `diff.unmatched` / `diff.skip_mismatch` | Pairing |
 | `bounds.straddles` | Object crosses a wall boundary, so it is visibly cut. Carries evidence |
 | `bounds.offcanvas` | Object sits outside the canvas |
+| `cue.lw_count` / `cue.dsk_count` | The outline's cue count for a deck disagrees with its slide count |
+| `cue.uncued_slide` | A deck slide no cue accounts for |
+| `cue.no_slide` | A cue with no slide left on that deck |
+| `cue.hold` | A lone `[DSK…]` row: the wall holds while the lower third splits |
+| `cue.unknown` | A bracketed token that is neither a cue nor a stage direction |
+| `cue.deprecated_alias` | `[VERSE-FROM-PREVIOUS]`; write `[VERSE-CONTINUED]` |
+| `outline.dsk_deviates` | DSK disagrees with both the outline and LW |
+| `outline.dsk_stale` | Finalised wall only: LW moved past the outline and DSK, so the change never reached the lower third |
+| `outline.stale` | Finalised wall only: the decks agree and the show-call script is behind them |
+| `outline.lw_deviates` | Unfinalised wall only: LW departs from the script while DSK follows it |
+| `outline.both_deviate` | Unfinalised wall only: both decks agree against the script |
+| `outline.three_way` | Outline, LW and DSK all read differently |
 | `bible.wrong_reference` | Wording matches a neighbouring chapter or book, not the cited one |
 | `bible.mismatch` | Wording disagrees with Bible Gateway for the cited reference |
 | `bible.unchecked` | Reference could not be fetched |
