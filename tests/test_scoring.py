@@ -261,6 +261,96 @@ def test_partly_visible_content_is_kept():
     assert sum(1 for t in transforms if t.role == "pin") == 1
 
 
+def test_a_framing_that_throws_content_off_screen_falls_back_to_fitting():
+    """Report pages are framed per country, so next week's will match nothing.
+
+    Applying the closest wrong framing put objects 2000px out. Fitting the
+    visible content keeps everything present and roughly placed instead.
+    """
+    from obed_edom.map_remap import fit_to_frame_recipe, on_canvas_fraction
+
+    slide = {
+        "number": 1,
+        "items": [
+            _map(6000, 200, 1200, 700, kindIndex=0),
+            _pin(6400, 400, kindIndex=0),
+            _pin(6800, 500, kindIndex=1),
+        ],
+    }
+    wall = {"slideWidth": 7680.0, "slideHeight": 1080.0, "slides": [slide]}
+    # A template that describes a different part of the wall entirely.
+    wrong = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 1200.0, "h": 700.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1200.0, "h": 700.0},
+        "groups": [
+            {
+                "s": 1.0,
+                "tx": 0.0,
+                "ty": 0.0,
+                "src": {"x": 0.0, "y": 0.0, "w": 1200.0, "h": 700.0},
+                "dst": {"x": 0.0, "y": 0.0, "w": 1200.0, "h": 700.0},
+            }
+        ],
+    }
+    assert on_canvas_fraction(slide, wrong, 7680.0, 1080.0) == 0.0
+
+    fitted = fit_to_frame_recipe(slide, 7680.0, 1080.0, 1920.0, 1080.0)
+    assert fitted is not None
+    assert fitted["source"] == "fit-to-frame"
+    assert on_canvas_fraction(slide, fitted, 7680.0, 1080.0) == 1.0
+
+    # Everything the fit places lands inside the frame.
+    planned = plan_payload_transforms(wall, fitted)
+    assert planned
+    for t in planned:
+        assert 0 <= t.x <= 1920
+        assert 0 <= t.y <= 1080
+
+
+def test_the_planner_switches_to_fitting_and_says_which_slides():
+    """Wiring check. The threshold is forced, since learn_recipe is hard to fool
+    with synthetic geometry — the real trigger came from a live report deck."""
+    slide = {
+        "number": 1,
+        "items": [_map(0, 0, 1200, 700, kindIndex=0), _pin(100, 100, kindIndex=0)],
+    }
+    wall = {"slideWidth": 7680.0, "slideHeight": 1080.0, "slides": [slide]}
+    template = {
+        "slideWidth": 1920.0,
+        "slideHeight": 1080.0,
+        "slides": [{"number": 1, "items": [_map(0, 0, 1200, 700, kindIndex=0)]}],
+    }
+    fitted_slides: list[int] = []
+    plan_payload_transforms(
+        wall,
+        _identity_recipe(),
+        template=template,
+        fitted_slides=fitted_slides,
+        min_on_canvas=1.01,
+    )
+    assert fitted_slides == [1]
+
+    # Left alone at the real threshold, since this framing does fit.
+    untouched: list[int] = []
+    plan_payload_transforms(
+        wall, _identity_recipe(), template=template, fitted_slides=untouched
+    )
+    assert untouched == []
+
+
+def test_a_sparse_template_is_still_believed():
+    """One anchor image is the documented advice, so it must not trip the fallback."""
+    from obed_edom.map_remap import on_canvas_fraction
+
+    slide = {
+        "number": 1,
+        "items": [_map(0, 0, 1000, 600, kindIndex=0), _pin(100, 100, kindIndex=0)],
+    }
+    assert on_canvas_fraction(slide, _identity_recipe(), 1920.0, 1080.0) == 1.0
+
+
 def test_skipped_wall_slides_are_not_planned():
     slides = [
         {"number": 1, "items": [_pin(100, 100, kindIndex=0)]},

@@ -35,6 +35,12 @@ MAP_NEAR_PAD = 400.0
 TITLE_NEAR_PAD = 120.0
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
 TEXT_DOWN_SCALE = 0.42
+# Fraction of a page's visible objects that must still land on the CG canvas for
+# the learned affine to be believed. Judged on the outcome rather than on how
+# many objects agreed, because a good template can be deliberately sparse — one
+# anchor image per layout is the documented advice — and counting agreements
+# would punish exactly that.
+MIN_ON_CANVAS_FRACTION = 0.5
 # A text box counts as sitting on bare background when at least this much of the
 # pixels under it are the background colour. Its own glyphs are in the sample, so
 # this never approaches 1.0; landmass under a box drops it far below.
@@ -1091,6 +1097,9 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         "pinPairs": pin_pairs_n,
         "pinRmse": round(pin_rmse, 2) if pin_rmse is not None else None,
         "pinSizeScale": round(pin_size_scale, 4) if pin_size_scale is not None else None,
+        # How many objects agreed on one affine. Low means no template slide
+        # describes this page, and the caller should fall back to fitting.
+        "pairQuality": max((len(g["members"]) for g in grouped), default=0),
     }
     if list_src and list_dst and list_src.w > 1 and list_src.h > 1:
         recipe["listSrc"] = list_src.as_dict()
@@ -1804,6 +1813,134 @@ def plan_slide_reuses(
     return jobs
 
 
+def visible_content_union(slide: dict, slide_w: float, slide_h: float) -> Rect | None:
+    """Bounding box of everything the audience can see on this slide."""
+    rects: list[Rect] = []
+    for item in slide.get("items") or []:
+        if is_placeholder_text(item) or item.get("duplicateOf"):
+            continue
+        if is_chrome_bg(item) or is_backdrop(item, slide_w, slide_h):
+            continue
+        if not is_visible(item, slide_w, slide_h):
+            continue
+        rect = item_rect(item)
+        if rect.w <= 0 or rect.h <= 0:
+            continue
+        # Clip to the canvas: a map bleeding 1600px off the top should not drag
+        # the fit down to nothing.
+        x0 = max(0.0, rect.x)
+        y0 = max(0.0, rect.y)
+        x1 = min(slide_w, rect.x + rect.w)
+        y1 = min(slide_h, rect.y + rect.h)
+        if x1 > x0 and y1 > y0:
+            rects.append(Rect(x0, y0, x1 - x0, y1 - y0))
+    return union_rect_of(rects)
+
+
+def union_rect_of(rects: list[Rect]) -> Rect | None:
+    if not rects:
+        return None
+    x0 = min(r.x for r in rects)
+    y0 = min(r.y for r in rects)
+    x1 = max(r.x + r.w for r in rects)
+    y1 = max(r.y + r.h for r in rects)
+    return Rect(x0, y0, x1 - x0, y1 - y0)
+
+
+def on_canvas_fraction(
+    slide: dict,
+    recipe: dict[str, Any],
+    wall_w: float,
+    wall_h: float,
+) -> float:
+    """How much of this page's visible content the recipe keeps on the CG canvas.
+
+    A template framing that does not describe a page does not fail subtly: it
+    throws most of the page off the edge. Measuring that is a direct test of
+    whether the learned affine applies here, and unlike counting agreeing object
+    pairs it does not penalise a deliberately sparse template.
+    """
+    groups = _groups_from_recipe(recipe)
+    map_src = _rect_from_dict(recipe.get("mapSrc"))
+    map_dst = _rect_from_dict(recipe.get("mapDst"))
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    seen = inside = 0
+    for item in slide.get("items") or []:
+        if is_placeholder_text(item) or item.get("duplicateOf"):
+            continue
+        if not is_visible(item, wall_w, wall_h) or is_chrome_bg(item):
+            continue
+        rect = item_rect(item)
+        if rect.w <= 0 or rect.h <= 0:
+            continue
+        aff = _affine_for_item(item, groups)
+        if aff is not None:
+            mapped = aff.apply_rect(rect)
+        elif map_src and map_dst:
+            mapped = map_rect(rect, map_src, map_dst)
+        else:
+            continue
+        seen += 1
+        cx, cy = mapped.center()
+        if 0 <= cx <= dest_w and 0 <= cy <= dest_h:
+            inside += 1
+    if not seen:
+        return 1.0
+    return inside / seen
+
+
+def fit_to_frame_recipe(
+    slide: dict,
+    wall_w: float,
+    wall_h: float,
+    dest_w: float,
+    dest_h: float,
+    *,
+    margin: float = 24.0,
+) -> dict[str, Any] | None:
+    """Last resort: shrink what is visible until it fits the CG frame.
+
+    Report-card pages are framed per country by hand, so a template can only
+    teach framings it has already seen and next week's countries will not match
+    any of them. Rather than apply the closest wrong affine — which put objects
+    2000px from where they belonged — scale the visible content to fit and flag
+    the slide. The operator gets everything present, readable and roughly placed,
+    which is a far better starting point than confidently wrong geometry.
+    """
+    src = visible_content_union(slide, wall_w, wall_h)
+    if src is None or src.w <= 0 or src.h <= 0:
+        return None
+    usable_w = max(1.0, dest_w - 2 * margin)
+    usable_h = max(1.0, dest_h - 2 * margin)
+    scale = min(usable_w / src.w, usable_h / src.h)
+    dst = Rect(
+        margin + (usable_w - src.w * scale) / 2.0,
+        margin + (usable_h - src.h * scale) / 2.0,
+        src.w * scale,
+        src.h * scale,
+    )
+    return {
+        "destWidth": dest_w,
+        "destHeight": dest_h,
+        "mapSrc": src.as_dict(),
+        "mapDst": dst.as_dict(),
+        "minPin": MIN_PIN_PX,
+        "pinSizeScale": round(scale, 4),
+        "source": "fit-to-frame",
+        "groups": [
+            {
+                "s": round(scale, 6),
+                "tx": round(dst.x - src.x * scale, 3),
+                "ty": round(dst.y - src.y * scale, 3),
+                "src": src.as_dict(),
+                "dst": dst.as_dict(),
+                "members": 0,
+            }
+        ],
+    }
+
+
 def frame_affine(recipe: dict[str, Any]) -> Affine | None:
     """How the wall canvas maps into the CG frame.
 
@@ -1936,6 +2073,8 @@ def plan_payload_transforms(
     previews: dict[int, Any] | None = None,
     placement_report: list[dict[str, Any]] | None = None,
     skipped_slides: list[int] | None = None,
+    fitted_slides: list[int] | None = None,
+    min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
 
@@ -1968,6 +2107,23 @@ def plan_payload_transforms(
                 },
                 template,
             )
+            # No template framing describes this page. Applying the closest one
+            # anyway put objects 2000px out; fitting what is visible does not.
+            if on_canvas_fraction(slide, slide_recipe, wall_w, wall_h) < min_on_canvas:
+                fitted = fit_to_frame_recipe(
+                    slide,
+                    wall_w,
+                    wall_h,
+                    _f(slide_recipe.get("destWidth"), CG_WIDTH),
+                    _f(slide_recipe.get("destHeight"), CG_HEIGHT),
+                )
+                if fitted:
+                    for carry in ("characterStyles", "listFontSize", "listSample"):
+                        if slide_recipe.get(carry) is not None:
+                            fitted[carry] = slide_recipe[carry]
+                    slide_recipe = fitted
+                    if fitted_slides is not None:
+                        fitted_slides.append(number)
         planned = plan_slide_transforms(
             slide, slide_recipe, include_lists=include_lists, wall_size=(wall_w, wall_h)
         )

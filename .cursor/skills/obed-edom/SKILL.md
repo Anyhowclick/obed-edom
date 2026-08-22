@@ -192,12 +192,27 @@ gutters you made disappear.
 | One text swatch per character style | Font, size and colour are copied onto unpaired wall text. Needs real text in a real box; the wording is irrelevant. |
 | The resized title plate | Gives the title cluster its own affine, separate from the map. |
 
-Leave out: anything you are not teaching. Stray leftovers only add noise. Also
-avoid keeping a full-canvas 1:1 "cover" reference on a second slide alongside a
-scaled layout — the two teach contradictory transforms.
+**More anchors is better, not worse.** The affine is trusted in proportion to how
+many objects agree on it: the deck that works well has 10 of 18 paired objects
+agreeing, and that agreement is what picks the pairing strategy. A single anchor
+gives one pair and no corroboration, so include the overlays and pins rather
+than trimming to a minimum. What must not be there is anything at the *wrong*
+geometry — wall-native sizes, or objects parked off-canvas.
 
-Overlays and pins sitting near an anchor inherit its affine, so they need not
-all be present. Sparse is fine; wrong-sized is not.
+One thing to keep out: a full-canvas 1:1 "cover" reference on a second slide
+alongside a scaled layout, since the two teach contradictory transforms.
+
+### One slide per framing you actually use
+
+Template slides compete per wall slide, and selection is good at this: given the
+20 framings harvested from a finished report deck, it picked the human's framing
+on 25 of 29 pages, and all four misses were the same map size shifted 120px.
+
+So a deck whose pages are framed differently — report cards, where each country
+is cropped to suit — wants one template slide per framing. What it cannot do is
+predict a framing it has never seen, and next week's countries are new. Pages
+with no matching framing fall back to fitting their visible content into the
+frame and are reported, so nothing is lost and the operator knows where to look.
 
 ### Before you run
 
