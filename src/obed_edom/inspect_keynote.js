@@ -64,68 +64,16 @@ function sizeOf(obj) {
   return [w, h];
 }
 
-function extractRuns(textItem) {
-  const runs = [];
-  try {
-    const rich = textItem.objectText;
-    if (rich && rich.attributeRuns) {
-      const ar = rich.attributeRuns();
-      for (let i = 0; i < ar.length; i++) {
-        const run = ar[i];
-        let text = "";
-        let color = null;
-        let bold = false;
-        try {
-          text = String(run());
-        } catch (e1) {
-          try {
-            text = String(run.content());
-          } catch (e2) {}
-        }
-        try {
-          const c = run.color();
-          if (c && c.length >= 3) {
-            color = [num(c[0], 0), num(c[1], 0), num(c[2], 0)];
-          }
-        } catch (e3) {}
-        try {
-          bold = Boolean(run.bold());
-        } catch (e4) {}
-        let size = 0;
-        try {
-          size = num(run.size(), 0);
-        } catch (e5) {}
-        let font = "";
-        try {
-          font = String(run.font());
-        } catch (eFont) {}
-        let smallCaps = false;
-        let capitalization = "";
-        try {
-          capitalization = String(run.capitalization());
-        } catch (eCap) {}
-        try {
-          smallCaps = Boolean(run.smallCaps());
-        } catch (eSmall) {}
-        if (capitalization && /small/i.test(capitalization)) {
-          smallCaps = true;
-        }
-        if (text) {
-          runs.push({
-            text: text,
-            color: color,
-            bold: bold,
-            size: size,
-            font: font,
-            smallCaps: smallCaps,
-            capitalization: capitalization,
-          });
-        }
-      }
-    }
-  } catch (err) {}
-  return runs;
-}
+// Per-run character style is not reachable from Keynote's scripting API, so
+// there is deliberately no runs[] here. `objectText.attributeRuns()` raises
+// "Can't convert types.", and paragraphs()/characters()/words() hand back plain
+// JS strings, which carry no colour, size or font. A string also answers
+// .bold() — that is String.prototype.bold(), an HTML wrapper that is always
+// truthy — so a run-style probe reads as working while reporting nonsense.
+// Whole-item size/font/color below do work. Anything needing per-character
+// style (highlight, small caps) has to come off a rendered preview; see
+// bible.py's small-caps ink-height check for the established pattern.
+// scripts/probe_runs.js reproduces all of the above.
 
 function kindOf(obj) {
   let raw = "";
@@ -175,12 +123,10 @@ function describeItem(obj, index, kindHint) {
     size: 0,
     font: "",
     color: null,
-    runs: [],
     fileName: "",
     locked: false,
     rotation: 0,
     buildCount: 0,
-    zIndex: null,
   };
   const pos = positionOf(obj);
   rec.x = pos[0];
@@ -199,25 +145,18 @@ function describeItem(obj, index, kindHint) {
     try {
       rec.text = String(obj.objectText());
     } catch (e) {}
-    rec.runs = extractRuns(obj);
     try {
       rec.size = num(obj.objectText.size(), 0);
     } catch (eSize) {}
     try {
       rec.font = String(obj.objectText.font());
     } catch (eFont) {}
-    if (!rec.font && rec.runs && rec.runs[0] && rec.runs[0].font) {
-      rec.font = rec.runs[0].font;
-    }
     try {
       const c = obj.objectText.color();
       if (c && c[0] != null) {
         rec.color = [num(c[0], 0), num(c[1], 0), num(c[2], 0)];
       }
     } catch (eCol) {}
-    if (!rec.color && rec.runs && rec.runs[0] && rec.runs[0].color) {
-      rec.color = rec.runs[0].color;
-    }
   }
   if (kind === "line") {
     try {
@@ -262,6 +201,35 @@ function collectFrom(slide, name, kind, items, kindCounts, identity) {
   } catch (e) {}
 }
 
+// A text box is a shape, so Keynote lists text-bearing shapes in both
+// `textItems` and `shapes`: on a real wall deck a third of text objects came
+// back twice, and the remapper then planned two moves for one object. Mark the
+// shape copy rather than removing it, because remap_keynote.js resolves objects
+// by (collection, kindIndex) and those indices must keep matching Keynote's.
+function markDuplicateShapes(items) {
+  const texts = [];
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === "text" && items[i].text) texts.push(items[i]);
+  }
+  let found = 0;
+  for (let i = 0; i < items.length; i++) {
+    const rec = items[i];
+    if (rec.kind !== "shape" || !rec.text) continue;
+    for (let t = 0; t < texts.length; t++) {
+      const twin = texts[t];
+      if (twin.text !== rec.text) continue;
+      if (Math.round(twin.x) !== Math.round(rec.x)) continue;
+      if (Math.round(twin.y) !== Math.round(rec.y)) continue;
+      if (Math.round(twin.w) !== Math.round(rec.w)) continue;
+      if (Math.round(twin.h) !== Math.round(rec.h)) continue;
+      rec.duplicateOf = { kind: "text", kindIndex: twin.kindIndex };
+      found++;
+      break;
+    }
+  }
+  return found;
+}
+
 function collectItems(slide) {
   const items = [];
   const kindCounts = {};
@@ -290,28 +258,14 @@ function collectItems(slide) {
     byKindIndex[items[k].kind + ":" + items[k].kindIndex] = items[k];
   }
   attachBuildCounts(slide, items, identity, byKindIndex);
-  attachZOrder(slide, items, identity, byKindIndex);
+  markDuplicateShapes(items);
   return items;
 }
 
-function attachZOrder(slide, items, identity, byKindIndex) {
-  let all = null;
-  try {
-    all = slide.iWorkItems();
-  } catch (e) {
-    return;
-  }
-  const n = countOfSafe(all);
-  for (let i = 0; i < n; i++) {
-    let obj = null;
-    try {
-      obj = all[i];
-    } catch (eO) {}
-    if (!obj) continue;
-    const hit = matchItemRecord(identity, byKindIndex, obj);
-    if (hit && hit.zIndex == null) hit.zIndex = i;
-  }
-}
+// There is deliberately no z-order pass. `slide.iWorkItems()` reports 0 on
+// slides that hold 19 real objects, so stacking cannot be read at all — every
+// zIndex came back null on real decks. The remapper's stacking policy is the
+// role_order sort in map_remap.plan_slide_transforms, not recovered z.
 
 function attachBuildCounts(slide, items, identity, byKindIndex) {
   let builds = null;

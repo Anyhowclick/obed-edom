@@ -7,7 +7,10 @@ description: >-
   contrast issues. Use when the user mentions sermon slides, DSK, LW, FW, LED
   cues, Keynote templates, Offering JX.docx, Sermon BC.docx, TITLE/FILLER/VERSE
   /POINT/NUM-POINT cues, running python -m obed_edom generate, or changing
-  the operator dashboard under dashboard/src.
+  the operator dashboard under dashboard/src. Also covers the CG resizer that
+  crops wall decks to 16:9 (base asset templates, affine recipes, church-name
+  list placement, scoring against a finished CG) and the verified limits of
+  Keynote's scripting API for run styles, z-order and duplicate items.
 ---
 
 # Obed-Edom
@@ -162,6 +165,117 @@ Other constraints worth keeping:
 - Debugging this is much easier with only the target deck open. With several
   documents open, `document 1` and the keystroke target can be different windows,
   which makes a working pass look broken.
+
+## CG resizer (wall 7680×1080 → CG 1920×1080)
+
+Copies the wall deck and moves objects in place, so builds survive. A 16:9
+"base asset" Keynote teaches the target positions: objects are paired wall to
+template, each pair implies a scale-and-offset, and pairs that agree form a
+group that everything nearby inherits.
+
+```bash
+python -m obed_edom remap "Wall.key" --template "Base_CG_Assets.key" \
+  --slides 2 --include-lists [--source-previews FOLDER]
+```
+
+### What goes in the base asset template
+
+The one rule that matters: **every object must sit at its final CG size and
+position.** Scale is derived from each pair, so an object left at wall-native
+size teaches "translate, don't scale" — and if that contradicts the rest, the
+gutters you made disappear.
+
+| Put in | Why |
+|---|---|
+| One slide per wall layout, named `<wall layout name> (16:9)` | `applyCgLayouts` swaps layouts on an exact suffix match. `MAP BLANK` needs `MAP BLANK (16:9)`. |
+| The map art at its final CG size | This is what sets the scale, and **the map's size decides how much room the name lists get.** Shrink it to create gutters. |
+| One text swatch per character style | Font, size and colour are copied onto unpaired wall text. Needs real text in a real box; the wording is irrelevant. |
+| The resized title plate | Gives the title cluster its own affine, separate from the map. |
+
+Leave out: anything you are not teaching. Stray leftovers only add noise. Also
+avoid keeping a full-canvas 1:1 "cover" reference on a second slide alongside a
+scaled layout — the two teach contradictory transforms.
+
+Overlays and pins sitting near an anchor inherit its affine, so they need not
+all be present. Sparse is fine; wrong-sized is not.
+
+### Before you run
+
+- **Delete skipped slides.** They are read but never remapped, and Keynote
+  reads and exports every slide regardless — on one gold CG they held 21% of
+  all items. Deleting them is the cheapest speed-up available.
+- **Delete side-panel content you do not want carried over.** Anything outside
+  the centre 1920×1080 has nowhere to go after the crop.
+- **Feed the original wall deck**, never a previous CG output. Generate refuses
+  when it sees more than ten pins at (0,0), which is the usual symptom.
+- **Quit Keynote between large runs.** It wedges after a few GB, and a document
+  left open from an interrupted run is stale — `open` hands that copy back and
+  the run fails with `-10000`.
+
+### What happens to loose text
+
+Text is sorted by what sits under it on the wall. Text overlapping artwork is
+a label, so it keeps its position relative to that artwork. Text sitting on
+bare background is free, so it is re-placed into whatever background the CG has
+left, measured from a rendered wall slide rather than from rectangles — the map
+image covers the whole frame while most of it is ocean.
+
+Nothing is ever dropped. When there is no clean gap the box goes where it
+covers least and is reported with an overlap percentage, for the operator to
+break up by hand. Previews come from any earlier inspect of the same deck for
+free; `--source-previews` overrides, and without either, packing falls back to
+the old right-to-left fill.
+
+### Judging a change
+
+`scripts/score_resize.py` compares planned output to a finished CG deck offline,
+from the inspect cache. Read `goldRmse` — our placement of an object versus
+where the gold deck's own transform would put that same object. Zero means the
+same layout was chosen.
+
+Do not read a quality score into `list` or `title` rows. Lists get reflowed into
+a different number of columns by hand, and `titleDst` is a deliberate override,
+so in both cases there is no object-for-object correspondence to measure. For
+lists, judge by whether every box was placed and by the overlap percentages.
+
+`templateScore` in the remap result is a self-consistency check, not a quality
+score: the recipe was learned from that same template, so anything other than
+roughly zero means the planner failed to apply the affine it derived.
+
+## LW deck facts worth knowing
+
+- **Verses are duplicated across the centre panels.** The wall is long, so the
+  same verse is set twice for readability. Any text extraction must collapse
+  those, or every verse is counted twice.
+- **Bilingual services can put English on one side and Chinese on the other.**
+  So two same-size boxes side by side are not always a mirror: identical text is
+  a mirror and should collapse, differing text is likely a translation pair and
+  should be reported rather than silently halved.
+- **Masters carry no cue information.** On a real finalised LW deck all 66
+  slides were `BLANK`, `BLACK BLANK` or a filler master — there was no `VERSES`
+  or `NUMBERED POINT PRE` anywhere. Font and size identify slide kinds instead
+  (verse reference vs verse body vs point), which is why those live in
+  `masters.yaml` rather than in code.
+
+## Keynote scripting limits (verified, do not re-litigate)
+
+- **Per-run character style is unreachable.** `objectText.attributeRuns()`
+  raises "Can't convert types."; `paragraphs()`, `characters()` and `words()`
+  return plain strings carrying no colour, size or font. A string also answers
+  `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
+  look like it works while reporting nonsense. Anything needing per-character
+  style must come off a rendered preview. `scripts/probe_runs.js` reproduces it.
+- **Z-order is unreadable.** `slide.iWorkItems()` reports 0 on slides holding 19
+  real objects. Stacking is therefore a deliberate policy — the `role_order`
+  sort in `plan_slide_transforms` — not something recovered from the deck.
+- **A text box is also a shape.** Keynote lists text-bearing shapes in both
+  `textItems` and `shapes`; a third of text objects came back twice on a real
+  wall deck. `inspect_keynote.js` marks the duplicate rather than dropping it,
+  because objects are resolved by (collection, kindIndex) and those indices must
+  keep matching Keynote's.
+- **The inspect cache is keyed by deck digest**, which says nothing about the
+  code that produced it. Bump `INSPECT_VERSION` in `baseline.py` when the
+  payload shape changes, or old payloads are reused forever.
 
 ## Operator outline (`_CUED.docx`)
 

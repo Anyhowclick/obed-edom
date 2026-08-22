@@ -35,6 +35,10 @@ MAP_NEAR_PAD = 400.0
 TITLE_NEAR_PAD = 120.0
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
 TEXT_DOWN_SCALE = 0.42
+# A text box counts as sitting on bare background when at least this much of the
+# pixels under it are the background colour. Its own glyphs are in the sample, so
+# this never approaches 1.0; landmass under a box drops it far below.
+FREE_TEXT_BACKGROUND_MIN = 0.55
 
 
 @dataclass(frozen=True)
@@ -101,7 +105,6 @@ class ItemTransform:
     opacity: float | None = None
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
-    z_index: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -135,10 +138,6 @@ class ItemTransform:
             payload["opacity"] = self.opacity
         if self.match_text:
             payload["matchText"] = self.match_text
-        if self.z_index is not None:
-            payload["zIndex"] = self.z_index
-        if self.role in {"title", "list", "other"}:
-            payload["front"] = True
         return payload
 
 
@@ -188,13 +187,7 @@ def norm_rgb(color: Any) -> tuple[float, float, float] | None:
 
 
 def item_rgb(item: dict) -> tuple[float, float, float] | None:
-    rgb = norm_rgb(item.get("color"))
-    if rgb:
-        return rgb
-    runs = item.get("runs") or []
-    if runs:
-        return norm_rgb(runs[0].get("color"))
-    return None
+    return norm_rgb(item.get("color"))
 
 
 def rgb16(color: Any) -> list[int] | None:
@@ -298,6 +291,57 @@ def is_placeholder_text(item: dict) -> bool:
     if (item.get("text") or "").strip():
         return False
     return _f(item.get("w")) <= 1 and _f(item.get("h")) <= 1
+
+
+def is_backdrop(item: dict, slide_w: float, slide_h: float) -> bool:
+    """A full-canvas image or shape: the slide's background, not content on it."""
+    if (item.get("kind") or "") not in {"image", "shape"}:
+        return False
+    w, h = _f(item.get("w")), _f(item.get("h"))
+    if w <= 0 or h <= 0 or slide_w <= 0 or slide_h <= 0:
+        return False
+    return w >= slide_w * 0.98 and h >= slide_h * 0.98
+
+
+def occluder_rects(slide: dict, slide_w: float, slide_h: float) -> list[Rect]:
+    """Artwork a text box could be sitting on top of.
+
+    Backdrops and LED chrome tiles are excluded: they cover everything, so
+    counting them would make every text box look anchored to something.
+    """
+    out: list[Rect] = []
+    for item in slide.get("items") or []:
+        if (item.get("kind") or "") not in {"image", "movie", "shape", "group"}:
+            continue
+        if item.get("duplicateOf") or is_chrome_bg(item):
+            continue
+        if is_backdrop(item, slide_w, slide_h):
+            continue
+        rect = item_rect(item)
+        if rect.w > 0 and rect.h > 0:
+            out.append(rect)
+    return out
+
+
+def sits_on_background(item: dict, occluders: list[Rect]) -> bool:
+    """True when there is nothing under this text but the slide background.
+
+    This is the test for whether a text box may be moved. On the wall these
+    boxes sat in open space on the side panels, so the crop to 16:9 leaves them
+    nowhere to be; they should be re-placed into whatever space is left. Text
+    that overlaps artwork is a label for it and has to keep that relationship,
+    even if the result is cramped.
+    """
+    if (item.get("kind") or "") != "text":
+        return False
+    rect = item_rect(item)
+    if rect.w <= 0 or rect.h <= 0:
+        return False
+    return not any(_rects_overlap(rect, other) for other in occluders)
+
+
+def _rects_overlap(a: Rect, b: Rect) -> bool:
+    return a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h
 
 
 def is_style_sample(item: dict) -> bool:
@@ -635,6 +679,68 @@ def pair_by_size(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
     return pairs
 
 
+def pair_by_area_rank(
+    wall: list[dict],
+    dest: list[dict],
+    *,
+    ar_tolerance: float = 0.15,
+) -> list[tuple[dict, dict]]:
+    """1:1 by descending area. Survives a template whose artwork was resized.
+
+    `pair_by_size` needs identical dimensions, so it finds nothing the moment the
+    template's map is scaled down — which is exactly the edit an operator makes
+    to leave room for the name lists. Rank by area instead: the same stack of map
+    layers keeps its size order whatever the scale.
+
+    Pairs whose aspect ratios disagree are dropped. A misranked pair would
+    otherwise teach a bogus affine, and one bad affine on the base map moves
+    every pin that inherits it.
+    """
+    w_sorted = sorted(wall, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
+    d_sorted = sorted(dest, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
+    pairs: list[tuple[dict, dict]] = []
+    for item, other in zip(w_sorted, d_sorted, strict=False):
+        sw, sh = _f(item.get("w")), _f(item.get("h"))
+        dw, dh = _f(other.get("w")), _f(other.get("h"))
+        if sw <= 0 or sh <= 0 or dw <= 0 or dh <= 0:
+            continue
+        src_ar, dst_ar = sw / sh, dw / dh
+        if abs(src_ar - dst_ar) / max(src_ar, dst_ar) > ar_tolerance:
+            continue
+        pairs.append((item, other))
+    return pairs
+
+
+def pairing_quality(pairs: list[tuple[dict, dict]]) -> tuple[int, int]:
+    """How much one affine explains a pairing: (largest group, total pairs).
+
+    A pairing that is telling the truth collapses into one dominant affine —
+    every map layer moved the same way. A wrong pairing scatters into many small
+    groups. This is a better guide than counting matches, because counting
+    exact-size matches rewards a template nobody has adjusted.
+    """
+    if not pairs:
+        return (0, 0)
+    groups = merge_affine_groups(pairs)
+    if not groups:
+        return (0, len(pairs))
+    return (max(len(g["members"]) for g in groups), len(pairs))
+
+
+def best_image_pairs(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
+    """Pair wall artwork to template artwork, whichever way explains it best.
+
+    Exact-size pairing wins ties because identical dimensions are unambiguous;
+    area-rank pairing takes over once the template has been scaled.
+    """
+    exact = pair_by_size(wall, dest)
+    exact = exact + pair_resized_leftovers(wall, dest, exact)
+    ranked = pair_by_area_rank(wall, dest)
+    if pairing_quality(ranked) > pairing_quality(exact):
+        return ranked
+    return exact
+
+
 def pair_resized_leftovers(
     wall: list[dict],
     dest: list[dict],
@@ -814,14 +920,21 @@ def _first_slide_with(slides: list[dict], pred) -> dict | None:
 
 
 def _score_template_slide(wall_slide: dict, template_slide: dict) -> int:
-    """Prefer the CG slide whose images share sizes with the wall slide."""
+    """Prefer the CG slide that best explains the wall slide with one transform.
+
+    This used to score exact width/height matches, which quietly punished the
+    operator for doing the right thing: scaling the template's map down to leave
+    room for the name lists reduced the match count, so a leftover slide holding
+    full-size artwork — teaching "translate, don't scale" — could win instead and
+    throw away the gutters. Scoring by how well a single affine explains the
+    pairing has no such incentive, and treats a scaled template as first class.
+    """
     wall_imgs = [it for it in wall_slide.get("items") or [] if is_pairable_image(it)]
     tmpl_imgs = [it for it in template_slide.get("items") or [] if is_pairable_image(it)]
-    size_pairs = pair_by_size(wall_imgs, tmpl_imgs) if wall_imgs and tmpl_imgs else []
-    leftover = pair_resized_leftovers(wall_imgs, tmpl_imgs, size_pairs) if wall_imgs and tmpl_imgs else []
-    score = len(size_pairs) * 100 + len(leftover) * 50
-    if score:
-        return score
+    if wall_imgs and tmpl_imgs:
+        dominant, total = pairing_quality(best_image_pairs(wall_imgs, tmpl_imgs))
+        if dominant:
+            return dominant * 100 + total
     return len([it for it in template_slide.get("items") or [] if is_map_item(it)])
 
 
@@ -869,8 +982,7 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
     if w_slide and g_slide:
         w_imgs = [it for it in w_slide.get("items") or [] if is_pairable_image(it)]
         g_imgs = [it for it in g_slide.get("items") or [] if is_pairable_image(it)]
-        size_pairs = pair_by_size(w_imgs, g_imgs)
-        size_pairs.extend(pair_resized_leftovers(w_imgs, g_imgs, size_pairs))
+        size_pairs = list(best_image_pairs(w_imgs, g_imgs))
         size_pairs.extend(
             pair_largest_shapes(w_slide.get("items") or [], g_slide.get("items") or [])
         )
@@ -1049,61 +1161,6 @@ def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine,
     return groups
 
 
-def is_title_globe(w: float, h: float, x: float, y: float) -> bool:
-    """Small square icon parked with the 16:9 title, not a country overlay."""
-    if w < 40 or h < 40 or w > 200 or h > 200:
-        return False
-    if abs(w - h) > max(8.0, 0.25 * min(w, h)):
-        return False
-    return x < 500 and y < 400
-
-
-def restack_move_order(items: list[dict]) -> list[int]:
-    """Move-to-front order: first ends at the back.
-
-    Applying geom brings each object forward, so a large Asia plate can cover
-    Australia (a ~300px overlay) while the Australia pins stay visible on top.
-    Apply in this order (do not AppleScript-move items — that deletes them).
-    """
-    maps: list[int] = []
-    globes: list[int] = []
-    pins: list[int] = []
-    plates: list[int] = []
-    texts: list[int] = []
-    titles: list[int] = []
-    for i, item in enumerate(items):
-        kind = str(item.get("kind") or "")
-        role = str(item.get("role") or "")
-        w, h = _f(item.get("w")), _f(item.get("h"))
-        x, y = _f(item.get("x")), _f(item.get("y"))
-        if kind == "image":
-            if is_title_globe(w, h, x, y):
-                globes.append(i)
-            else:
-                maps.append(i)
-        elif kind == "movie":
-            pins.append(i)
-        elif kind == "shape":
-            if 0 < w <= PIN_KIND_MAX and 0 < h <= PIN_KIND_MAX:
-                pins.append(i)
-            elif x < 700 and y < 400:
-                plates.append(i)
-        elif kind == "text":
-            text = str(item.get("text") or "")
-            if role == "title" or TITLE_RE.search(text):
-                titles.append(i)
-            else:
-                texts.append(i)
-    maps.sort(
-        key=lambda i: (
-            0 if items[i].get("zIndex") is not None else 1,
-            int(items[i]["zIndex"]) if items[i].get("zIndex") is not None else 0,
-            -(_f(items[i].get("w")) * _f(items[i].get("h"))),
-        )
-    )
-    return maps + pins + globes + plates + texts + titles
-
-
 def classify_item(item: dict, map_src: Rect | None = None) -> str:
     if is_map_item(item, map_src):
         return "map"
@@ -1188,9 +1245,11 @@ def plan_slide_transforms(
     pack_lists = bool(
         include_lists and recipe.get("listFontSize") and slide_has_column_lists(slide)
     )
+    from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
+
     out: list[ItemTransform] = []
     for fallback_i, item in enumerate(slide.get("items") or []):
-        if is_placeholder_text(item):
+        if is_placeholder_text(item) or is_duplicate_item(item):
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
@@ -1390,20 +1449,15 @@ def plan_slide_transforms(
         )
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    for fallback_i, item in enumerate(slide.get("items") or []):
-        if item.get("zIndex") is None:
-            continue
-        kind = str(item.get("kind") or "item")
-        ki = _item_kind_index(item, _item_index(item, fallback_i))
-        for spec in out:
-            if spec.kind == kind and spec.kind_index == ki:
-                spec.z_index = int(item["zIndex"])
-                break
+    # Apply order *is* stacking order, and the wall's real stacking cannot be
+    # read (see inspect_keynote.js: slide.iWorkItems() reports 0). So this sort
+    # is the stacking policy, not a reconstruction: base maps first and largest
+    # first, so country overlays land on top of the plate they belong to, then
+    # pins, then loose text, with the title cluster last so it is never buried.
     role_order = {"map": 0, "pin": 1, "other": 2, "list": 3, "hide": 4, "line": 5, "title": 6}
     out.sort(
         key=lambda t: (
             role_order.get(t.role, 9),
-            t.z_index if t.z_index is not None else 10_000,
             -(t.w * t.h) if t.role == "map" else 0.0,
         )
     )
@@ -1555,10 +1609,12 @@ def item_identity(item: dict) -> tuple[Any, ...]:
 
 
 def _live_items(slide: dict) -> list[dict]:
+    from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
+
     counts: dict[str, int] = {}
     out: list[dict] = []
     for i, item in enumerate(slide.get("items") or []):
-        if is_placeholder_text(item):
+        if is_placeholder_text(item) or is_duplicate_item(item):
             continue
         rec = dict(item)
         kind = str(rec.get("kind") or "")
@@ -1707,6 +1763,128 @@ def plan_slide_reuses(
     return jobs
 
 
+def frame_affine(recipe: dict[str, Any]) -> Affine | None:
+    """How the wall canvas maps into the CG frame.
+
+    Individual objects may ride their own group affine, but predicting what the
+    CG will look like needs the one transform that governs the frame as a whole.
+    """
+    src = _rect_from_dict(recipe.get("mapSrc"))
+    dst = _rect_from_dict(recipe.get("mapDst"))
+    if src and dst and src.w > 0 and src.h > 0:
+        return affine_from_rects(src, dst)
+    for group in recipe.get("groups") or []:
+        gsrc = _rect_from_dict(group.get("src"))
+        gdst = _rect_from_dict(group.get("dst"))
+        if gsrc and gdst and gsrc.w > 0 and gsrc.h > 0:
+            return affine_from_rects(gsrc, gdst)
+    return None
+
+
+def repack_free_text(
+    transforms: list[ItemTransform],
+    slide: dict,
+    recipe: dict[str, Any],
+    *,
+    preview: Any,
+    wall_w: float,
+    wall_h: float,
+) -> list[dict[str, Any]]:
+    """Re-place background-only text into whatever space the CG frame has left.
+
+    The wall keeps its church-name lists on side panels outside the centre
+    1920x1080, so cropping to 16:9 leaves them with nowhere to be and the old
+    right-to-left packing walked them across the map. This instead measures where
+    the CG is actually empty and puts them there.
+
+    Emptiness is measured on pixels, not rectangles: the map image covers the
+    whole frame while most of it is ocean. The CG raster is predicted by cropping
+    the wall's own preview through the frame affine, which works because the two
+    canvases are the same height, so no second Keynote render is needed.
+
+    Text overlapping artwork is left alone — it is a label, and its group affine
+    already keeps it with the thing it labels. Returns one report row per moved
+    box so the caller can flag the crowded ones.
+    """
+    from obed_edom.free_space import (  # noqa: PLC0415
+        Box,
+        background_fraction,
+        occupancy_from_image,
+        place_boxes,
+        predict_cg_raster,
+    )
+    from PIL import ImageDraw  # noqa: PLC0415
+
+    aff = frame_affine(recipe)
+    if aff is None or preview is None or aff.s <= 0:
+        return []
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+
+    frame, bg = predict_cg_raster(
+        preview,
+        wall_w=wall_w,
+        wall_h=wall_h,
+        scale=aff.s,
+        tx=aff.tx,
+        ty=aff.ty,
+        dest_w=dest_w,
+        dest_h=dest_h,
+    )
+    # Decide what may move from the pixels beneath it on the wall, not from
+    # overlapping rectangles. Fall back to the rect test only where no raster is
+    # available, since transparent artwork makes rects far too pessimistic.
+    px = preview.width / wall_w if wall_w else 1.0
+    py = preview.height / wall_h if wall_h else 1.0
+    movable: set[tuple[str, int]] = set()
+    for item in slide.get("items") or []:
+        if not is_list_item(item):
+            continue
+        rect = item_rect(item)
+        clear = background_fraction(
+            preview,
+            Box(rect.x * px, rect.y * py, rect.w * px, rect.h * py),
+            bg=bg,
+        )
+        if clear >= FREE_TEXT_BACKGROUND_MIN:
+            movable.add((str(item.get("kind")), int(item.get("kindIndex") or 0)))
+    if not movable:
+        return []
+
+    cx = frame.width / dest_w
+    cy = frame.height / dest_h
+    eraser = ImageDraw.Draw(frame)
+    for item in slide.get("items") or []:
+        if (str(item.get("kind")), int(item.get("kindIndex") or 0)) not in movable:
+            continue
+        rect = aff.apply_rect(item_rect(item))
+        eraser.rectangle(
+            [rect.x * cx, rect.y * cy, (rect.x + rect.w) * cx, (rect.y + rect.h) * cy], fill=bg
+        )
+
+    space = occupancy_from_image(frame, slide_w=dest_w, slide_h=dest_h, bg=bg)
+    targets = [t for t in transforms if _spec_key(t) in movable]
+    if not targets:
+        return []
+    # Right-to-left, top-to-bottom: the order the lists read on the wall.
+    targets.sort(key=lambda t: (-t.x, t.y))
+    placed = place_boxes(space, [Box(t.x, t.y, t.w, t.h) for t in targets])
+    report: list[dict[str, Any]] = []
+    for spec, spot in zip(targets, placed, strict=True):
+        spec.x, spec.y = spot.box.x, spot.box.y
+        report.append(
+            {
+                "slide": spec.slide_number,
+                "kind": spec.kind,
+                "kindIndex": spec.kind_index,
+                "overlap": round(spot.overlap, 3),
+                "x": round(spot.box.x, 1),
+                "y": round(spot.box.y, 1),
+            }
+        )
+    return report
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -1714,11 +1892,30 @@ def plan_payload_transforms(
     slide_range: SlideRange = None,
     include_lists: bool = False,
     template: dict[str, Any] | None = None,
+    previews: dict[int, Any] | None = None,
+    placement_report: list[dict[str, Any]] | None = None,
+    skipped_slides: list[int] | None = None,
 ) -> list[ItemTransform]:
+    """Plan every slide's moves.
+
+    `previews` maps slide number to a rendered wall image. Supplying it switches
+    loose text from blind right-to-left packing onto measured empty space; rows
+    describing what moved land in `placement_report` for flagging. Slides hidden
+    with Skip Slide are not planned, and their numbers land in `skipped_slides`.
+    """
+    wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
+    wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
     transforms: list[ItemTransform] = []
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not wants_slide(number, slide_range):
+            continue
+        # A skipped slide is hidden from the show, so remapping it is wasted
+        # Keynote time. It is left at wall geometry rather than deleted, so
+        # un-skipping it in Keynote and re-running still works.
+        if slide.get("skipped"):
+            if skipped_slides is not None:
+                skipped_slides.append(number)
             continue
         slide_recipe = recipe
         if template and (template.get("slides") or []):
@@ -1730,37 +1927,233 @@ def plan_payload_transforms(
                 },
                 template,
             )
-        transforms.extend(plan_slide_transforms(slide, slide_recipe, include_lists=include_lists))
+        planned = plan_slide_transforms(slide, slide_recipe, include_lists=include_lists)
+        if include_lists and previews and previews.get(number) is not None:
+            rows = repack_free_text(
+                planned,
+                slide,
+                slide_recipe,
+                preview=previews.get(number),
+                wall_w=wall_w,
+                wall_h=wall_h,
+            )
+            if placement_report is not None:
+                placement_report.extend(rows)
+        transforms.extend(planned)
     return transforms
+
+
+SCORED_ROLES = ("map", "pin", "list", "title")
+
+
+def gold_frame_affine(wall_slide: dict, gold_slide: dict) -> Affine | None:
+    """The transform the human actually used, read off the base map on each side."""
+    wall_maps = [it for it in wall_slide.get("items") or [] if is_map_item(it)]
+    gold_maps = [it for it in gold_slide.get("items") or [] if is_map_item(it)]
+    src = primary_map_rect(wall_maps) or union_rect(wall_maps)
+    dst = primary_map_rect(gold_maps) or union_rect(gold_maps)
+    if not src or not dst or src.w <= 0 or src.h <= 0:
+        return None
+    return affine_from_rects(src, dst)
+
+
+def _wall_item_lookup(wall_slide: dict) -> dict[tuple[str, int], dict]:
+    out: dict[tuple[str, int], dict] = {}
+    for i, item in enumerate(wall_slide.get("items") or []):
+        if is_placeholder_text(item) or item.get("duplicateOf"):
+            continue
+        key = (str(item.get("kind") or "item"), _item_kind_index(item, _item_index(item, i)))
+        out.setdefault(key, item)
+    return out
+
+
+def _greedy_match(
+    predicted: list[tuple[float, float]],
+    gold: list[tuple[float, float]],
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Pair each prediction with its nearest unused gold point, closest pairs first.
+
+    Sorting by position instead (what this used to do) silently mispairs whole
+    rows whenever the two sides hold different counts, which is the normal case:
+    a deck may gain or lose a pin between the wall and the finished CG.
+    """
+    candidates = sorted(
+        (
+            ((px - gx) ** 2 + (py - gy) ** 2, i, j)
+            for i, (px, py) in enumerate(predicted)
+            for j, (gx, gy) in enumerate(gold)
+        ),
+    )
+    used_pred: set[int] = set()
+    used_gold: set[int] = set()
+    out: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for _, i, j in candidates:
+        if i in used_pred or j in used_gold:
+            continue
+        used_pred.add(i)
+        used_gold.add(j)
+        out.append((predicted[i], gold[j]))
+    return out
+
+
+def fit_similarity(
+    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
+) -> tuple[float, float, float] | None:
+    """Best uniform scale + translation taking predicted points onto gold ones.
+
+    Raw distance to a gold deck answers two questions at once and so answers
+    neither: "are the pins right relative to the map" and "did we put the map
+    where the human did". Deliberately shrinking the template map to make room
+    for the name lists changes the second and leaves the first untouched, yet
+    raw RMSE reports it as a large regression.
+
+    Fitting a transform first splits them. The residual afterwards is geometric
+    fidelity, which is what the resizer controls; the fitted scale and offset
+    describe the layout choice, which the template controls.
+    """
+    n = len(pairs)
+    if n < 2:
+        return None
+    px = sum(p[0] for p, _ in pairs) / n
+    py = sum(p[1] for p, _ in pairs) / n
+    gx = sum(g[0] for _, g in pairs) / n
+    gy = sum(g[1] for _, g in pairs) / n
+    num = sum((p[0] - px) * (g[0] - gx) + (p[1] - py) * (g[1] - gy) for p, g in pairs)
+    den = sum((p[0] - px) ** 2 + (p[1] - py) ** 2 for p, _ in pairs)
+    if den <= 1e-9:
+        return None
+    s = num / den
+    return s, gx - s * px, gy - s * py
+
+
+def residual_rmse(
+    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
+    fit: tuple[float, float, float],
+) -> float:
+    s, tx, ty = fit
+    moved = [((s * p[0] + tx, s * p[1] + ty), g) for p, g in pairs]
+    return rmse_points(moved)
 
 
 def score_against_gold(
     predicted: list[ItemTransform],
     gold: dict[str, Any],
+    *,
+    wall: dict[str, Any] | None = None,
+    slide_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
-    """RMSE of remapped pin centers vs gold pins on the first overlapping map slide."""
+    """Placement error per role against a human-made CG deck.
+
+    Feed this the *gold* CG, not the template the recipe was learned from.
+    Scoring against the template compares predictions to the template's own
+    content — a different week's pins — which reports a large error on output
+    that is in fact correct.
+
+    Pass `wall` to get the number worth trusting. Both our output and the gold
+    derive from the same wall objects, so the wall gives an exact
+    correspondence: project each wall object through the gold's own transform and
+    compare our placement of that same object. `goldRmse` is that figure.
+
+    Without `wall` the only correspondence available is proximity, and that is
+    unreliable here: 138 pins share about 886px, roughly 6px apart, while a
+    layout difference offsets everything by up to 190px — so every pin matches
+    one about thirty places away and the result is noise. `nearestRmse` is
+    reported for continuity but should not be used to judge a change.
+
+    Results stay per slide and per role rather than averaged, so a
+    slide-alignment mistake shows up as one enormous row instead of quietly
+    inflating everything.
+    """
     by_slide: dict[int, list[ItemTransform]] = {}
     for spec in predicted:
-        if spec.role != "pin":
-            continue
         by_slide.setdefault(spec.slide_number, []).append(spec)
-    best: dict[str, Any] = {"pinPairs": 0, "pinRmse": None}
-    for slide in gold.get("slides") or []:
-        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
-        pred = by_slide.get(number) or []
-        gold_pins = [it for it in slide.get("items") or [] if is_pin_item(it)]
-        if not pred or not gold_pins:
+    wall_slides = {
+        int(s.get("number") or (int(s.get("index") or 0) + 1)): s
+        for s in (wall or {}).get("slides") or []
+    }
+    slides: dict[int, dict[str, Any]] = {}
+    all_pairs: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    legacy_pins = 0
+    legacy_rmse: float | None = None
+
+    for gold_slide in gold.get("slides") or []:
+        # Skipped slides are hidden alternates the operator parked in the deck.
+        # On one gold CG they held 21% of all items, which would have been scored
+        # as content the resizer failed to produce.
+        if gold_slide.get("skipped"):
             continue
-        pred_s = sorted(pred, key=lambda t: (t.x + t.w / 2.0, t.y + t.h / 2.0))
-        gold_s = sorted(gold_pins, key=lambda it: item_center(it))
-        n = min(len(pred_s), len(gold_s))
-        pairs = [
-            ((pred_s[i].x + pred_s[i].w / 2.0, pred_s[i].y + pred_s[i].h / 2.0), item_center(gold_s[i]))
-            for i in range(n)
+        gold_number = int(gold_slide.get("number") or (int(gold_slide.get("index") or 0) + 1))
+        pred_number = gold_number
+        if slide_map:
+            match = [p for p, g in slide_map.items() if g == gold_number]
+            if not match:
+                continue
+            pred_number = match[0]
+        pred = by_slide.get(pred_number) or []
+        if not pred:
+            continue
+        gold_items = [
+            it
+            for it in gold_slide.get("items") or []
+            if not is_placeholder_text(it) and not it.get("duplicateOf")
         ]
-        best = {"pinPairs": n, "pinRmse": round(rmse_points(pairs), 2)}
-        break
-    return best
+        wall_slide = wall_slides.get(pred_number)
+        gold_aff = gold_frame_affine(wall_slide, gold_slide) if wall_slide else None
+        wall_items = _wall_item_lookup(wall_slide) if wall_slide else {}
+
+        per_role: dict[str, Any] = {}
+        for role in SCORED_ROLES:
+            specs = [t for t in pred if t.role == role]
+            pred_pts = [(t.x + t.w / 2.0, t.y + t.h / 2.0) for t in specs]
+            gold_pts = [item_center(it) for it in gold_items if classify_item(it) == role]
+            if not pred_pts and not gold_pts:
+                continue
+
+            # Exact comparison: same wall object, our placement versus where the
+            # gold's own transform would have put it.
+            projected: list[tuple[tuple[float, float], tuple[float, float]]] = []
+            if gold_aff is not None:
+                for spec in specs:
+                    source = wall_items.get(_spec_key(spec))
+                    if source is None:
+                        continue
+                    ideal = gold_aff.apply_rect(item_rect(source))
+                    projected.append(
+                        (
+                            (spec.x + spec.w / 2.0, spec.y + spec.h / 2.0),
+                            (ideal.x + ideal.w / 2.0, ideal.y + ideal.h / 2.0),
+                        )
+                    )
+
+            nearest = _greedy_match(pred_pts, gold_pts) if pred_pts and gold_pts else []
+            per_role[role] = {
+                "predicted": len(pred_pts),
+                "gold": len(gold_pts),
+                "matched": len(projected),
+                "goldRmse": round(rmse_points(projected), 2) if projected else None,
+                "nearestRmse": round(rmse_points(nearest), 2) if nearest else None,
+            }
+            all_pairs.extend(projected)
+            if role == "pin" and projected and legacy_rmse is None:
+                legacy_pins = len(projected)
+                legacy_rmse = round(rmse_points(projected), 2)
+        if per_role:
+            slides[pred_number] = per_role
+            if gold_aff is not None:
+                slides[pred_number]["_goldAffine"] = {
+                    "s": round(gold_aff.s, 4),
+                    "tx": round(gold_aff.tx, 1),
+                    "ty": round(gold_aff.ty, 1),
+                }
+
+    return {
+        "slides": slides,
+        "overallPairs": len(all_pairs),
+        "overallRmse": round(rmse_points(all_pairs), 2) if all_pairs else None,
+        # Kept for the CLI and dashboard, which print a single pin number.
+        "pinPairs": legacy_pins,
+        "pinRmse": legacy_rmse,
+    }
 
 
 def summarize_plan(transforms: list[ItemTransform]) -> dict[str, int]:
