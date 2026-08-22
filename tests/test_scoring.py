@@ -351,6 +351,33 @@ def test_a_sparse_template_is_still_believed():
     assert on_canvas_fraction(slide, _identity_recipe(), 1920.0, 1080.0) == 1.0
 
 
+def test_many_labels_do_not_all_snap_to_one_template_position():
+    """listDst pins where a single column belongs. Applied to fifteen map
+    labels it stacked all fifteen on one point; the old blind packing spread
+    them again afterwards, so the collapse only showed once that was deferred."""
+    from obed_edom.map_remap import plan_slide_transforms
+
+    labels = [
+        _item(kind="text", text=f"CHC Name {i}", x=3300 + i * 40, y=200 + i * 30, w=200, h=44, kindIndex=i, size=20)
+        for i in range(5)
+    ]
+    slide = {"number": 1, "items": [_map(3000, 100, 1200, 700, kindIndex=0), *labels]}
+    recipe = dict(_identity_recipe())
+    recipe["listFontSize"] = 20.0
+    recipe["listPaired"] = True
+    recipe["listDst"] = {"x": 638.0, "y": 537.0, "w": 192.0, "h": 46.0}
+
+    out = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=True)
+    spots = {(round(t.x), round(t.y)) for t in out if t.role == "list"}
+    assert len(spots) == 5, "labels collapsed onto one another"
+
+    # A lone column still honours the template's destination.
+    single = {"number": 1, "items": [_map(3000, 100, 1200, 700, kindIndex=0), labels[0]]}
+    out = plan_slide_transforms(single, recipe, include_lists=True, defer_list_packing=True)
+    only = next(t for t in out if t.role == "list")
+    assert (round(only.x), round(only.y)) == (638, 537)
+
+
 def test_map_labels_are_not_dragged_off_the_map():
     """A label belongs to its plate. Blind packing moved the words to the frame
     edge and left the red plate behind on the map, which reads as a broken deck.

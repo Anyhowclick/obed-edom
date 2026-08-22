@@ -1387,6 +1387,7 @@ def plan_slide_transforms(
 
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
+    list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
@@ -1476,7 +1477,10 @@ def plan_slide_transforms(
                 )
             )
             continue
-        if role == "list" and include_lists and recipe.get("listPaired"):
+        # Snapping to the template's list destination only makes sense for a
+        # single column. With fifteen map labels it puts all fifteen on the same
+        # point, which the old blind packing then spread out again and so hid.
+        if role == "list" and include_lists and recipe.get("listPaired") and list_count == 1:
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
             size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
