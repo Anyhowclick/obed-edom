@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable
 
 CG_WIDTH = 1920
@@ -43,6 +45,9 @@ MIN_ON_CANVAS_FRACTION = 0.5
 # pixels under it are the background colour. Its own glyphs are in the sample, so
 # this never approaches 1.0; landmass under a box drops it far below.
 FREE_TEXT_BACKGROUND_MIN = 0.55
+# An object showing less than this much of itself inside the CG frame is
+# reported. Bleeding off an edge is normal and intended; disappearing is not.
+OFFFRAME_MIN_VISIBLE = 0.5
 
 
 @dataclass(frozen=True)
@@ -279,13 +284,39 @@ def is_list_item(item: dict) -> bool:
     return text.count("\n") >= 3
 
 
-TITLE_RE = re.compile(r"global missions|全球使命", re.I)
+# The badge wording changes with the series — "Global Missions" one term,
+# "Missions Update" the next, in English or Chinese. A phrase this misses is a
+# badge that gets treated as ordinary content and can walk off the CG frame, so
+# the list lives in masters.yaml under `cg.title_phrases` where staff can extend
+# it without a code change.
+DEFAULT_TITLE_PHRASES = (
+    "global missions",
+    "全球使命",
+    "missions update",
+    "宣教近况",
+)
+
+
+@lru_cache(maxsize=1)
+def title_pattern() -> re.Pattern[str]:
+    phrases: list[str] = []
+    try:
+        import yaml  # noqa: PLC0415
+
+        raw = yaml.safe_load((Path(__file__).resolve().parent / "masters.yaml").read_text())
+        configured = ((raw or {}).get("cg") or {}).get("title_phrases") or []
+        phrases = [str(p).strip() for p in configured if str(p).strip()]
+    except Exception:  # noqa: BLE001 - a broken key must not stop a remap
+        phrases = []
+    if not phrases:
+        phrases = list(DEFAULT_TITLE_PHRASES)
+    return re.compile("|".join(re.escape(p) for p in phrases), re.I)
 
 
 def is_title_item(item: dict) -> bool:
     if (item.get("kind") or "") != "text":
         return False
-    return bool(TITLE_RE.search((item.get("text") or "").strip()))
+    return bool(title_pattern().search((item.get("text") or "").strip()))
 
 
 def is_placeholder_text(item: dict) -> bool:
@@ -2241,6 +2272,58 @@ def _place_free_text(
     return report
 
 
+def offframe_rows(
+    transforms: list[ItemTransform],
+    slide: dict,
+    recipe: dict[str, Any],
+    wall_w: float,
+    wall_h: float,
+    *,
+    min_visible: float = OFFFRAME_MIN_VISIBLE,
+) -> list[dict[str, Any]]:
+    """Objects that showed on the wall but land outside the CG frame.
+
+    Nothing else reports these. `bounds.offcanvas` only measures vertical cuts
+    and `bounds.straddles` looks for LED panel seams, so an object pushed off the
+    left edge is invisible to both — a title badge vanished from a deck with no
+    warning at all. The planner is the right place to notice, because only it
+    knows the object was visible before it was moved.
+    """
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    if dest_w <= 0 or dest_h <= 0:
+        return []
+    was_visible = {
+        (str(it.get("kind") or "item"), _item_kind_index(it, _item_index(it, i)))
+        for i, it in enumerate(slide.get("items") or [])
+        if is_visible(it, wall_w, wall_h) and not is_placeholder_text(it)
+    }
+    rows: list[dict[str, Any]] = []
+    for spec in transforms:
+        if spec.role == "hide" or spec.w <= 0 or spec.h <= 0:
+            continue
+        if _spec_key(spec) not in was_visible:
+            continue
+        x0 = max(0.0, spec.x)
+        y0 = max(0.0, spec.y)
+        x1 = min(dest_w, spec.x + spec.w)
+        y1 = min(dest_h, spec.y + spec.h)
+        shown = 0.0 if x1 <= x0 or y1 <= y0 else ((x1 - x0) * (y1 - y0)) / (spec.w * spec.h)
+        if shown < min_visible:
+            rows.append(
+                {
+                    "slide": spec.slide_number,
+                    "kind": spec.kind,
+                    "kindIndex": spec.kind_index,
+                    "role": spec.role,
+                    "visible": round(shown, 3),
+                    "x": round(spec.x, 1),
+                    "y": round(spec.y, 1),
+                }
+            )
+    return rows
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -2252,6 +2335,7 @@ def plan_payload_transforms(
     placement_report: list[dict[str, Any]] | None = None,
     skipped_slides: list[int] | None = None,
     fitted_slides: list[int] | None = None,
+    offframe_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
@@ -2328,6 +2412,10 @@ def plan_payload_transforms(
             rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)
+        if offframe_report is not None:
+            offframe_report.extend(
+                offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
+            )
         transforms.extend(planned)
     return transforms
 

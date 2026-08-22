@@ -351,6 +351,57 @@ def test_a_sparse_template_is_still_believed():
     assert on_canvas_fraction(slide, _identity_recipe(), 1920.0, 1080.0) == 1.0
 
 
+def test_content_pushed_out_of_frame_is_reported():
+    """Nothing else catches this. bounds.offcanvas measures vertical cuts only
+    and bounds.straddles looks for LED panel seams, so an object shoved off the
+    left or right edge is invisible to both and simply vanishes."""
+    from obed_edom.map_remap import offframe_rows, plan_slide_transforms
+
+    keeper = _map(3000, 100, 1200, 700, kindIndex=0)
+    off_left = _item(kind="image", fileName="badge.png", x=100, y=40, w=300, h=120, kindIndex=1)
+    off_right = _item(kind="text", text="Not Actual Names", x=5385, y=100, w=300, h=60, kindIndex=0)
+    slide = {"number": 1, "items": [keeper, off_left, off_right]}
+    # A pure crop: wall x 3000 lands at 0.
+    frame = {"x": 3000.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    dst = {"x": 0.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(frame),
+        "mapDst": dict(dst),
+        "groups": [{"s": 1.0, "tx": -3000.0, "ty": 0.0, "src": frame, "dst": dst}],
+    }
+    out = plan_slide_transforms(slide, recipe, include_lists=True, wall_size=(7680.0, 1080.0))
+    rows = offframe_rows(out, slide, recipe, 7680.0, 1080.0)
+    reported = {(r["kind"], r["kindIndex"]) for r in rows}
+    assert ("image", 1) in reported, "badge pushed off the left edge went unreported"
+    assert ("text", 0) in reported, "text pushed off the right edge went unreported"
+    # The map itself is fine and must not be reported.
+    assert ("image", 0) not in reported
+
+
+def test_offscreen_wall_content_is_not_reported_as_pushed_out():
+    """It was already invisible, so it is not news — and it is never planned."""
+    from obed_edom.map_remap import offframe_rows, plan_slide_transforms
+
+    slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(1892, -510, kindIndex=0)],
+    }
+    frame = {"x": 3000.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    dst = {"x": 0.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    crop = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(frame),
+        "mapDst": dict(dst),
+        "groups": [{"s": 1.0, "tx": -3000.0, "ty": 0.0, "src": frame, "dst": dst}],
+    }
+    out = plan_slide_transforms(slide, crop, wall_size=(7680.0, 1080.0))
+    # The parked pin is never planned, so it cannot be reported either.
+    assert offframe_rows(out, slide, crop, 7680.0, 1080.0) == []
+
+
 def test_many_labels_do_not_all_snap_to_one_template_position():
     """listDst pins where a single column belongs. Applied to fifteen map
     labels it stacked all fifteen on one point; the old blind packing spread
