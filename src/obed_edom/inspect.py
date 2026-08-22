@@ -259,9 +259,21 @@ def preview_inspect(folder: Path | str) -> dict[str, Any]:
     }
 
 
+def is_duplicate_item(item: dict) -> bool:
+    """A text-bearing shape that Keynote also listed under textItems.
+
+    Both records point at one object, so acting on both moves it twice and
+    counts its text twice. inspect_keynote.js marks the shape copy; the text
+    copy is the one to keep, since it carries the font and size.
+    """
+    return bool(item.get("duplicateOf"))
+
+
 def _walk_items(node: dict):
     items = node.get("items") or node.get("children") or []
     for item in items:
+        if is_duplicate_item(item):
+            continue
         yield item
         yield from _walk_items(item)
 

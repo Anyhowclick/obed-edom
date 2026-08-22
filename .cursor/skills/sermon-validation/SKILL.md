@@ -53,6 +53,28 @@ i. Text overflow: if copy cannot fit the mapped Keynote box (character
    limit or estimated height vs box), raise a warning. Do not rewrite the
    deck. `[VERSE-CONTINUED]` that exceeds the lower-third is flagged, not split.
 
+## Duplicated wall text is not a mistake
+
+The wall is long, so a verse is set twice across the centre panels for
+readability. Two same-size text boxes side by side are therefore normal, and
+any check counting words or verses must collapse them or it double-counts.
+
+Do not collapse them blindly, though. On bilingual services one side is English
+and the other Chinese. Identical text is a readability mirror and should
+collapse; text that differs is likely a translation pair and should be reported
+rather than silently halved. Detect the difference by script (CJK vs Latin),
+not by assuming the left or right copy wins.
+
+## Style checks that cannot fire from deck data
+
+`style.highlight` reads colour runs, and Keynote does not expose them —
+`objectText.attributeRuns()` raises "Can't convert types." on every deck tried,
+so highlighted-punctuation findings never fire from inspect data. Small caps hit
+the same wall and were reimplemented on rendered previews (ink-height profiling
+in `bible.py`); highlight needs the same treatment. Until then, treat a clean
+`style.highlight` result as "not checked", not as "passed". See the obed-edom
+skill for the full list of verified Keynote scripting limits.
+
 ## Rule ids
 
 Every `Flag` carries a stable `rule` id, plus `slide`, `deck` and an optional

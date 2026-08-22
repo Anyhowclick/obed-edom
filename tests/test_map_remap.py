@@ -13,8 +13,8 @@ from obed_edom.map_remap import (
     merge_affine_groups,
     pair_by_size,
     plan_payload_transforms,
+    plan_slide_transforms,
     recipe_from_cover,
-    restack_move_order,
     score_against_gold,
     summarize_plan,
 )
@@ -96,7 +96,7 @@ def test_gold_recipe_pairs_pins_and_list():
     assert abs(pin.w - 50) < 1
     assert pin.as_dict()["w"] == 50
     assert pin.as_dict()["kindIndex"] == 0
-    score = score_against_gold(transforms, gold)
+    score = score_against_gold(transforms, gold, wall=wall)
     assert score["pinPairs"] == 1
     assert score["pinRmse"] < 5
 
@@ -265,6 +265,30 @@ def test_two_layout_groups_do_not_share_an_affine():
     assert len(grouped) == 2
 
 
+def test_led_panel_tiles_are_not_the_base_map():
+    """`map BG.png` passes is_map_item, but a 1920x1080 panel tile is a backdrop.
+
+    It outweighs real map art on area, so taking it as the affine origin put a
+    whole deck's pins about 2500px from where the finished CG has them.
+    """
+    from obed_edom.map_remap import primary_map_rect
+
+    items = [
+        _item(kind="image", fileName="Data/map BG-39230.png", x=0, y=0, w=1920, h=1080),
+        _item(kind="image", fileName="Data/map BG-39231.png", x=5760, y=0, w=1920, h=1080),
+        _item(kind="image", fileName="pasted-image.pdf", x=3258, y=-69, w=1364, h=947),
+    ]
+    assert primary_map_rect(items) == Rect(3258, -69, 1364, 947)
+
+
+def test_full_wall_map_art_is_still_eligible():
+    """A wall-spanning map named `map BG` is art, not a panel tile."""
+    from obed_edom.map_remap import primary_map_rect
+
+    items = [_item(kind="image", fileName="Data/map BG-1.png", x=0, y=0, w=7680, h=1080)]
+    assert primary_map_rect(items) == Rect(0, 0, 7680, 1080)
+
+
 def test_classifies_pasted_map_art():
     assert is_map_item(_item(kind="image", fileName="pasted-image.pdf", w=1248, h=771))
     assert not is_map_item(_item(kind="image", fileName="pasted-image.pdf", w=20000, h=14934))
@@ -279,26 +303,45 @@ def test_classifies_pasted_map_art():
     assert not is_map_item(_item(kind="image", fileName="LED blank-1.png", w=7680, h=1080))
 
 
-def test_australia_overlay_restacks_above_base_map():
-    asia = _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
-    australia = _item(kind="image", fileName="pasted-image.pdf", x=1032, y=778, w=306, h=295)
-    globe = _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80)
-    pin = _item(kind="shape", x=1100, y=900, w=11, h=11)
-    title = _item(kind="text", text="Global Missions", x=135, y=67, w=271, h=64, role="title")
-    order = restack_move_order([asia, australia, globe, pin, title])
-    assert order.index(0) < order.index(1)
-    assert order.index(1) < order.index(3)
-    assert order.index(3) < order.index(2)
-    assert order[-1] == 4
+def _identity_recipe():
+    """A 1:1 recipe, so planning order can be asserted without geometry noise."""
+    frame = {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(frame),
+        "mapDst": dict(frame),
+        "groups": [{"s": 1.0, "tx": 0.0, "ty": 0.0, "src": dict(frame), "dst": dict(frame)}],
+        # Without a titleDst the planner drops title text entirely.
+        "titleDst": {"x": 135.0, "y": 67.0, "w": 271.0, "h": 64.0},
+    }
 
 
-def test_same_size_country_overlays_follow_z_index():
-    """India/Japan are often full-frame transparent PDFs the same size as the white map."""
-    japan = _item(kind="image", fileName="pasted-image.pdf", x=900, y=80, w=220, h=180, zIndex=5)
-    india = _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771, zIndex=4)
-    white = _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771, zIndex=0)
-    order = restack_move_order([japan, india, white])
-    assert order == [2, 1, 0]
+def test_base_map_is_applied_before_the_overlays_that_sit_on_it():
+    """Apply order is stacking order, so the biggest map plate has to go first."""
+    asia = _item(index=0, kindIndex=0, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
+    australia = _item(index=1, kindIndex=1, kind="image", fileName="pasted-image.pdf", x=1032, y=778, w=306, h=295)
+    pin = _item(index=2, kindIndex=0, kind="movie", fileName="PIN DROP WAVE-1.mov", x=1100, y=900, w=50, h=50)
+    title = _item(index=3, kindIndex=0, kind="text", text="Global Missions", x=135, y=67, w=271, h=64)
+    slide = {"number": 1, "items": [pin, title, australia, asia]}
+    roles = [
+        (t.role, t.w * t.h)
+        for t in plan_slide_transforms(slide, _identity_recipe(), include_lists=True)
+    ]
+    assert [r for r, _ in roles] == ["map", "map", "pin", "title"]
+    # Largest map first: Australia must land on top of the Asia plate.
+    assert roles[0][1] > roles[1][1]
+
+
+def test_same_size_overlays_keep_deck_order_because_z_is_unreadable():
+    """Keynote reports no stacking (slide.iWorkItems() is empty), so equal-area
+    map layers can only fall back to the order Keynote listed them in. Getting
+    these two the right way round needs a human, and that is a known limit."""
+    india = _item(index=0, kindIndex=0, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
+    white = _item(index=1, kindIndex=1, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
+    slide = {"number": 1, "items": [india, white]}
+    out = plan_slide_transforms(slide, _identity_recipe(), include_lists=True)
+    assert [t.kind_index for t in out] == [0, 1]
 
 
 def test_resolve_slide_range_single_and_span():

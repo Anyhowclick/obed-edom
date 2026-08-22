@@ -65,6 +65,68 @@ def recipe_for(wall: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]
     return learn_recipe(wall, template)
 
 
+def resolve_source_previews(
+    source: Path,
+    wall: dict[str, Any],
+    *,
+    folder: Path | str | None = None,
+    wanted: list[int] | None = None,
+) -> tuple[dict[int, Any], str]:
+    """Rendered wall slides, keyed by slide number, for measuring empty space.
+
+    Placing loose text needs to know where the CG is actually empty, which needs
+    a picture of the slide. Rather than render one, this reuses an export that
+    already exists: an explicit folder if given, otherwise the preview cache that
+    any earlier inspect of this deck filled in. Both are free. When neither is
+    available the caller falls back to blind packing.
+
+    Returns the images plus a short label naming the source, because a stale
+    preview folder produces a plausible-looking but wrong mask and the log is
+    where that gets noticed.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
+    from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
+    from obed_edom.inspect import preview_media  # noqa: PLC0415
+
+    candidates: list[tuple[Path, str]] = []
+    if folder:
+        candidates.append((Path(folder).expanduser(), "supplied folder"))
+    if wall.get("previewDir"):
+        candidates.append((Path(str(wall["previewDir"])), "this run's export"))
+    try:
+        candidates.append((preview_cache_dir(deck_digest(source)), "preview cache"))
+    except (OSError, FileNotFoundError):
+        pass
+
+    slides = wall.get("slides") or []
+    for path, label in candidates:
+        if not path.is_dir():
+            continue
+        images = [p for p in preview_media(path) if p.suffix.lower() != ".mov"]
+        if not images:
+            continue
+        by_index = map_preview_pngs(slides, images)
+        out: dict[int, Any] = {}
+        for index, png in by_index.items():
+            if index >= len(slides):
+                continue
+            number = int(slides[index].get("number") or index + 1)
+            if wanted and number not in wanted:
+                continue
+            try:
+                out[number] = Image.open(png).convert("RGB")
+            except OSError:
+                continue
+        if out:
+            detail = f"{label} ({len(images)} image(s) for {len(slides)} slide(s))"
+            if len(images) != len(slides):
+                detail += " — count differs, check the export is current"
+            return out, detail
+    return {}, ""
+
+
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
@@ -74,6 +136,7 @@ def remap_keynote(
     include_lists: bool = False,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
+    source_previews: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop."""
@@ -109,13 +172,31 @@ def remap_keynote(
         template_data = inspect_keynote(template_path)
 
     recipe = recipe_for(wall, template_data)
+    previews: dict[int, Any] = {}
+    preview_note = ""
+    if include_lists:
+        previews, preview_note = resolve_source_previews(
+            source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
+        )
+    placements: list[dict[str, Any]] = []
+    hidden: list[int] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
         slide_range=slide_range,
         include_lists=include_lists,
         template=template_data,
+        previews=previews or None,
+        placement_report=placements,
+        skipped_slides=hidden,
     )
+    if hidden:
+        say(
+            f"Left {len(hidden)} skipped slide(s) alone: "
+            + ", ".join(str(n) for n in hidden[:10])
+            + ("…" if len(hidden) > 10 else "")
+            + ". Un-skip in Keynote and re-run to include them."
+        )
     reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
     counts = summarize_plan(transforms)
     say(
@@ -125,10 +206,22 @@ def remap_keynote(
         f"{'' if include_lists else ' (church names hidden; tick the list checkbox to pack them)'}."
     )
     if include_lists and recipe.get("listFontSize"):
-        say(
-            f"Church names → {recipe.get('listFontSize')}pt, packed from the right "
-            f"(gutter first; extras may overlap the map)."
-        )
+        if placements:
+            crowded = [row for row in placements if row.get("overlap")]
+            detail = f"{len(placements)} moved into empty space"
+            if crowded:
+                worst = max(row["overlap"] for row in crowded)
+                detail += (
+                    f", {len(crowded)} had to overlap artwork (worst {worst:.0%}) "
+                    "— break those up by hand"
+                )
+            say(f"Church names → {recipe.get('listFontSize')}pt, {detail}. Measured from {preview_note}.")
+        else:
+            reason = "no wall previews found" if not previews else "nothing free to move"
+            say(
+                f"Church names → {recipe.get('listFontSize')}pt, packed from the right "
+                f"(gutter first; extras may overlap the map) — {reason}."
+            )
     styles = recipe.get("characterStyles") or []
     if styles:
         bits = []
@@ -236,7 +329,14 @@ def remap_keynote(
         "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),
-        "templateScore": score_against_gold(transforms, template_data),
+        # Against the template this is a self-consistency check, not a quality
+        # score: the recipe was learned from that same template, so a non-zero
+        # figure means the planner did not apply the affine it derived. Use
+        # scripts/score_resize.py against a finished CG deck to judge output.
+        "templateScore": score_against_gold(transforms, template_data, wall=wall),
+        "placements": placements,
+        "placementSource": preview_note,
+        "skippedSlidesLeftAlone": hidden,
     }
     return result
 
@@ -249,6 +349,7 @@ def remap_and_inspect(
     slide_range: tuple[int, int] | frozenset[int] | None = None,
     include_lists: bool = False,
     export_dir: Path | str | None = None,
+    source_previews: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
@@ -257,6 +358,7 @@ def remap_and_inspect(
         template=template,
         slide_range=slide_range,
         include_lists=include_lists,
+        source_previews=source_previews,
         log=log,
     )
     if log:

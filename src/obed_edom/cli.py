@@ -77,6 +77,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also resize church-name text to the template sample size and pack it off the map.",
     )
+    remap.add_argument(
+        "--source-previews",
+        help=(
+            "Folder of exported wall slide images. Used to measure where the CG is "
+            "empty so loose text lands off the artwork. Optional: a cached inspect "
+            "of the same deck is used when available, else packing falls back to "
+            "the old right-to-left fill."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.command == "generate":
@@ -146,9 +155,19 @@ def _run_remap(args: argparse.Namespace) -> int:
     def log(message: str) -> None:
         print(message)
 
+    source_previews = Path(args.source_previews).expanduser() if args.source_previews else None
+    if source_previews and not source_previews.is_dir():
+        print(f"Wall preview folder not found: {source_previews}", file=sys.stderr)
+        return 1
     if args.no_export:
         info = remap_keynote(
-            source, dest, template=template, slide_range=slide_range, include_lists=args.include_lists, log=log
+            source,
+            dest,
+            template=template,
+            slide_range=slide_range,
+            include_lists=args.include_lists,
+            source_previews=source_previews,
+            log=log,
         )
     else:
         export_dir = dest.parent / "previews" / dest.stem
@@ -159,6 +178,7 @@ def _run_remap(args: argparse.Namespace) -> int:
             slide_range=slide_range,
             include_lists=args.include_lists,
             export_dir=export_dir,
+            source_previews=source_previews,
             log=log,
         )
     print(f"Wrote {info['dest']}")

@@ -18,6 +18,11 @@ from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
 HASH_CACHE_VERSION = 1
+# Bump whenever inspect_keynote.js changes the payload shape. The cache is keyed
+# by deck digest, which says nothing about the reader that produced it, so
+# without this a deck inspected by an older build is reused forever — a payload
+# captured before duplicate-shape marking existed would never gain it.
+INSPECT_VERSION = 2
 DIGEST_LEN = 16
 
 
@@ -31,7 +36,7 @@ def pairings_dir(root: Path | None = None) -> Path:
 
 
 def inspect_cache_path(digest: str, root: Path | None = None) -> Path:
-    return cache_root(root) / "inspect" / f"{digest}.json"
+    return cache_root(root) / "inspect" / f"{digest}.v{INSPECT_VERSION}.json"
 
 
 def preview_cache_dir(digest: str, root: Path | None = None) -> Path:
