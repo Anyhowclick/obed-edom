@@ -67,11 +67,24 @@ Grant Accessibility to whatever launches generate — Terminal, iTerm, or the da
 
 Multi-verse slides need each verse number to carry the template's verse-number character style, and Keynote's AppleScript dictionary has no style support at all. Generate has to drive **Format > Copy Style** and **Paste Style** through the UI, which needs Accessibility. Without it the deck still generates with the right wording, but later verse numbers sit on the baseline and generate reports a flag. See the `obed-edom` skill for the full details before changing that code.
 
+## After you clone (no technical setup)
+
+You do **not** need Homebrew or Node for day-to-day use. The dashboard UI is already built in this folder (`dashboard/dist`).
+
+1. Clone or unzip this project onto a **Mac** that already has **Keynote**.
+2. Double-click **`Start Dashboard.command`**.
+3. The first run may take a minute (it sets up a private Python folder). Leave the Terminal window open.
+4. Your browser should open [http://127.0.0.1:8765/](http://127.0.0.1:8765/).
+
+If macOS says the file “cannot be opened because it is from an unidentified developer”, Control-click it → **Open**. If Python 3.10+ is missing, the script installs it with Homebrew *only if you already have brew*; otherwise it uses a small helper (`uv`) and does not require `brew install`.
+
+Grant Accessibility to Terminal (or iTerm) the first time you generate a deck — see [Accessibility permission](#accessibility-permission).
+
 ## Dashboard
 
 Operator UI on localhost: generate from outlines, read-only Keynote diff, plus DSK/resize tabs (those two are UI stubs until the logic lands).
 
-From the repo root, with the venv active:
+From the repo root, with the venv active (or just use `Start Dashboard.command`):
 
 ```bash
 python -m pip install -e .
