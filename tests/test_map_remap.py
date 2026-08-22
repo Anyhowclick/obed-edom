@@ -371,6 +371,9 @@ def test_parse_slide_spec_lists_and_gaps():
     assert parse_slide_spec("2, 4-6") == frozenset({2, 4, 5, 6})
     assert parse_slide_spec("1–3, 8") == frozenset({1, 2, 3, 8})
     assert format_slide_range({2, 4, 5, 6}) == "2, 4–6"
+    # No selection means the whole deck, and must not raise.
+    assert format_slide_range(None) == ""
+    assert format_slide_range(frozenset()) == ""
     assert resolve_slides(spec="2,4-6") == frozenset({2, 4, 5, 6})
     assert wants_slide(3, frozenset({2, 4, 5, 6})) is False
     assert wants_slide(4, frozenset({2, 4, 5, 6})) is True

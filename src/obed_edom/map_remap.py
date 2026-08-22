@@ -1639,8 +1639,14 @@ def slides_for_plan(slide_range: SlideRange) -> list[int] | None:
     return None if selected is None else sorted(selected)
 
 
-def format_slide_range(slide_range: Iterable[int] | tuple[int, int]) -> str:
-    """`{2,4,5,6}` → `2, 4–6`."""
+def format_slide_range(slide_range: SlideRange) -> str:
+    """`{2,4,5,6}` → `2, 4–6`. No selection → `""`, meaning the whole deck.
+
+    Takes the same SlideRange as the other helpers, None included. It used to
+    require an iterable, which was fine only while a slide always defaulted to 2.
+    """
+    if slide_range is None:
+        return ""
     if isinstance(slide_range, tuple) and len(slide_range) == 2:
         nums = expand_slide_range(slide_range) or frozenset()
     else:

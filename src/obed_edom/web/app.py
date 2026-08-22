@@ -1232,7 +1232,9 @@ def _run_resize(
     dest_dir = ROOT / "output" / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
-    job.log(f"Remapping {path.name} → 1920×1080 (slide {format_slide_range(slide_range)})…")
+    label = format_slide_range(slide_range)
+    scope = f"slide {label}" if label else "every slide"
+    job.log(f"Remapping {path.name} → 1920×1080 ({scope})…")
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
     if not include_lists:
         job.log("Church-name text hidden (enable the list checkbox to pack them at the template size).")
