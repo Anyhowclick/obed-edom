@@ -1,3 +1,14 @@
+# CG resizer. The title badge is recognised by its wording, and the wording
+# changes with the series, so add new phrasings here rather than in code — a
+# phrase that is missed makes the badge ordinary content, which can end up
+# outside the 16:9 frame.
+cg:
+  title_phrases:
+    - Global Missions
+    - 全球使命
+    - Missions Update
+    - 宣教近况
+
 lw:
   template: Default Templates/Sermon_GW.key
   series_opener_master: TITLE

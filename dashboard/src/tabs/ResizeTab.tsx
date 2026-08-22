@@ -45,7 +45,7 @@ export function ResizeTab() {
   const { job, upsert, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
-  const [range, setRange] = useState("2");
+  const [range, setRange] = useState("");
   const [includeLists, setIncludeLists] = useState(true);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -105,12 +105,10 @@ export function ResizeTab() {
     <div>
       <h1>CG resizer</h1>
       <p className="lede">
-        MVP: copy the wall deck, copy the CG template’s 16:9 slide layouts
-        onto it (MAP BLANK (16:9) is the repurposed background), set 1920×1080,
-        then move existing objects onto that layout. Church names take the
-        template’s sample size and pack from the right so they prefer the
-        gutter beside the map. Use Empty_Map.key (full map layers plus one
-        resized church name), not Only_Map.key.
+        Turns a wall deck into 1920×1080 CGs. Your template deck shows where
+        things should end up: put each object where you want it, at the size you
+        want it, and add a slide for each map layout you use. Anything it hasn’t
+        seen before is shrunk to fit and listed for you to check.
       </p>
       <div className="row">
         <FileWell
@@ -129,7 +127,7 @@ export function ResizeTab() {
         />
         <FileWell
           label="CG_Template.key"
-          hint="Required 16:9 deck (Empty_Map.key). Its slide layouts are copied over; object positions teach the crop."
+          hint="The 16:9 deck showing where things should end up"
           file={template}
           onChoose={async () => {
             try {
@@ -143,8 +141,13 @@ export function ResizeTab() {
         />
       </div>
       <label className="field">
-        Slide (2 or 2, 4-6)
-        <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="2, 4-6" />
+        Slides — leave blank for the whole deck
+        <input
+          type="text"
+          value={range}
+          onChange={(e) => setRange(e.target.value)}
+          placeholder="All slides (or 2, or 2, 4-6)"
+        />
       </label>
       <label className="check">
         <input
@@ -152,7 +155,7 @@ export function ResizeTab() {
           checked={includeLists}
           onChange={(e) => setIncludeLists(e.target.checked)}
         />
-        <span>Resize church-name text to the template sample size and pack it beside the map. Leave off for a map-only slide.</span>
+        <span>Include resizing church-name lists on side panels (Special Offering Series)</span>
       </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>

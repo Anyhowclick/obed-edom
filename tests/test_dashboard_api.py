@@ -199,3 +199,38 @@ def test_validate_keynote_records_whether_the_wall_is_final(tmp_path):
         assert job["result"]["lwFinal"] is False
     finally:
         app_mod._run_inspect = original
+
+
+def test_blank_slide_range_resizes_the_whole_deck(tmp_path):
+    """A blank range means every slide, and used to raise on the log line.
+
+    format_slide_range only accepted an iterable, so leaving the field empty
+    reached it as None and failed with "'NoneType' object is not iterable".
+    """
+    import obed_edom.web.app as app_mod
+
+    seen = {}
+
+    def fake_remap(path, dest, **kwargs):
+        seen["slide_range"] = kwargs.get("slide_range")
+        return {"dest": str(dest), "counts": {}, "applied": 0, "missed": 0}
+
+    original = app_mod.remap_and_inspect
+    app_mod.remap_and_inspect = fake_remap
+    try:
+        client = TestClient(app)
+        deck = tmp_path / "Wall.key"
+        deck.write_text("placeholder")
+        template = tmp_path / "Base_CG_Assets.key"
+        template.write_text("placeholder")
+        started = client.post(
+            "/api/resize",
+            data={"path": str(deck), "template_path": str(template), "export": "false"},
+        )
+        assert started.status_code == 200
+        job = _wait(client, started.json()["id"])
+        assert job["status"] == "done", job.get("error")
+        assert seen["slide_range"] is None
+        assert any("every slide" in line for line in job["logs"])
+    finally:
+        app_mod.remap_and_inspect = original

@@ -5,7 +5,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slides
+from obed_edom.map_remap import resolve_slides
 from obed_edom.paths import find_repo_root
 from obed_edom.pipeline import generate
 
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         "--from-slide",
         type=int,
         dest="range_from",
-        help="First slide, or the only slide (default: 2). Prefer --slides for gaps.",
+        help="First slide, or the only slide. Omit for every slide. Prefer --slides for gaps.",
     )
     remap.add_argument(
         "--to-slide",
@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     remap.add_argument(
         "--include-lists",
         action="store_true",
-        help="Also resize church-name text to the template sample size and pack it off the map.",
+        help="Include resizing church-name lists on side panels (Special Offering Series).",
     )
     remap.add_argument(
         "--source-previews",
@@ -142,12 +142,13 @@ def _run_remap(args: argparse.Namespace) -> int:
         print(f"CG template not found: {template}", file=sys.stderr)
         return 1
     try:
+        # No selection means the whole deck. It used to mean slide 2 only, from
+        # when the map lived there by convention.
         slide_range = resolve_slides(
             spec=getattr(args, "slides", None),
             range_from=args.range_from,
             range_to=args.range_to,
-            default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE),
-        ) or frozenset({MVP_MAP_SLIDE})
+        )
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return 1

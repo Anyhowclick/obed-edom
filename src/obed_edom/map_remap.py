@@ -12,13 +12,13 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable
 
 CG_WIDTH = 1920
 CG_HEIGHT = 1080
 MIN_PIN_PX = 28.0
-# Wall map + pins live on slide 2 of the extracted wall deck.
-MVP_MAP_SLIDE = 2
 
 MAP_NAME_RE = re.compile(r"map\s*bg", re.I)
 PIN_NAME_RE = re.compile(r"pin\s*drop", re.I)
@@ -45,6 +45,9 @@ MIN_ON_CANVAS_FRACTION = 0.5
 # pixels under it are the background colour. Its own glyphs are in the sample, so
 # this never approaches 1.0; landmass under a box drops it far below.
 FREE_TEXT_BACKGROUND_MIN = 0.55
+# An object showing less than this much of itself inside the CG frame is
+# reported. Bleeding off an edge is normal and intended; disappearing is not.
+OFFFRAME_MIN_VISIBLE = 0.5
 
 
 @dataclass(frozen=True)
@@ -281,13 +284,39 @@ def is_list_item(item: dict) -> bool:
     return text.count("\n") >= 3
 
 
-TITLE_RE = re.compile(r"global missions|全球使命", re.I)
+# The badge wording changes with the series — "Global Missions" one term,
+# "Missions Update" the next, in English or Chinese. A phrase this misses is a
+# badge that gets treated as ordinary content and can walk off the CG frame, so
+# the list lives in masters.yaml under `cg.title_phrases` where staff can extend
+# it without a code change.
+DEFAULT_TITLE_PHRASES = (
+    "global missions",
+    "全球使命",
+    "missions update",
+    "宣教近况",
+)
+
+
+@lru_cache(maxsize=1)
+def title_pattern() -> re.Pattern[str]:
+    phrases: list[str] = []
+    try:
+        import yaml  # noqa: PLC0415
+
+        raw = yaml.safe_load((Path(__file__).resolve().parent / "masters.yaml").read_text())
+        configured = ((raw or {}).get("cg") or {}).get("title_phrases") or []
+        phrases = [str(p).strip() for p in configured if str(p).strip()]
+    except Exception:  # noqa: BLE001 - a broken key must not stop a remap
+        phrases = []
+    if not phrases:
+        phrases = list(DEFAULT_TITLE_PHRASES)
+    return re.compile("|".join(re.escape(p) for p in phrases), re.I)
 
 
 def is_title_item(item: dict) -> bool:
     if (item.get("kind") or "") != "text":
         return False
-    return bool(TITLE_RE.search((item.get("text") or "").strip()))
+    return bool(title_pattern().search((item.get("text") or "").strip()))
 
 
 def is_placeholder_text(item: dict) -> bool:
@@ -969,19 +998,93 @@ def _score_template_slide(wall_slide: dict, template_slide: dict) -> int:
     return len([it for it in template_slide.get("items") or [] if is_map_item(it)])
 
 
-def _best_matching_slide(wall_slide: dict | None, candidates: list[dict]) -> dict | None:
+def _framing_fit(
+    wall_slide: dict,
+    template_slide: dict,
+    wall_w: float,
+    wall_h: float,
+    dest_w: float,
+    dest_h: float,
+) -> float:
+    """How well this framing uses the CG frame: keeps content in, and fills it.
+
+    The same map often appears on several template slides at different framings —
+    one showing it whole, another cropping in — and those pair equally well, so
+    pairing quality ties and the winner would be whichever was listed first.
+
+    Both halves are needed. Scoring only how much content stays inside the frame
+    is maximised by shrinking everything into a corner, which is exactly what
+    happened: a small framing scored a perfect 1.0 and won every tie, leaving the
+    frame empty. Scoring only how much of the frame is filled would pick a
+    framing so large that most of the map hangs off the edge. Multiplying the two
+    prefers the framing that shows the whole thing, at a size that uses the space.
+    """
+    wall_imgs = [
+        it
+        for it in wall_slide.get("items") or []
+        if is_pairable_image(it) and is_visible(it, wall_w, wall_h)
+    ]
+    tmpl_imgs = [
+        it
+        for it in template_slide.get("items") or []
+        if is_pairable_image(it) and is_visible(it, dest_w, dest_h)
+    ]
+    if not wall_imgs or not tmpl_imgs:
+        return 0.0
+    groups = merge_affine_groups(best_image_pairs(wall_imgs, tmpl_imgs))
+    if not groups:
+        return 0.0
+    aff = groups[0]["affine"]
+    # Measure the artwork this framing is about, not every visible thing. The
+    # whole-slide extent includes the side-panel name lists, which run three
+    # times wider than the map and get relocated anyway — so judging by it
+    # punished the framing that keeps the map at true size and rewarded one that
+    # shrank the map until the side panels fitted too.
+    src = union_rect_of([item_rect(a) for a, _ in groups[0]["members"]])
+    if src is None or src.w <= 0 or src.h <= 0:
+        return 0.0
+    mapped = aff.apply_rect(src)
+    if mapped.w <= 0 or mapped.h <= 0 or dest_w <= 0 or dest_h <= 0:
+        return 0.0
+    x0 = max(0.0, mapped.x)
+    y0 = max(0.0, mapped.y)
+    x1 = min(dest_w, mapped.x + mapped.w)
+    y1 = min(dest_h, mapped.y + mapped.h)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    visible = (x1 - x0) * (y1 - y0)
+    kept = visible / (mapped.w * mapped.h)
+    fills = min(1.0, visible / (dest_w * dest_h))
+    return kept * fills
+
+
+def _best_matching_slide(
+    wall_slide: dict | None,
+    candidates: list[dict],
+    *,
+    wall_size: tuple[float, float] | None = None,
+    dest_size: tuple[float, float] | None = None,
+) -> dict | None:
     if not wall_slide:
         return _first_slide_with(candidates, is_map_item) or _first_slide_with(
             candidates, is_pin_item
         )
     best: dict | None = None
-    best_score = -1
+    best_key: tuple[int, float] | None = None
     for slide in candidates:
         score = _score_template_slide(wall_slide, slide)
-        if score > best_score:
-            best_score = score
+        fit = 0.0
+        if wall_size and dest_size and score > 0:
+            fit = _framing_fit(wall_slide, slide, *wall_size, *dest_size)
+        # Rank on how many objects agreed, not on the raw score: that also
+        # carries a pair total, and a one-pair difference used to outrank a fit
+        # two and a half times better. Agreement is the real signal; how well the
+        # framing uses the frame settles everything within one level of it.
+        key = (score // 100, fit)
+        if best_key is None or key > best_key:
+            best_key = key
             best = slide
-    if best is not None and best_score > 0:
+    if best is not None and best_key and _score_template_slide(wall_slide, best) > 0:
         return best
     return _first_slide_with(candidates, is_map_item) or _first_slide_with(
         candidates, is_pin_item
@@ -1000,7 +1103,12 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(
             wall_slides, is_pin_item
         )
-    g_slide = _best_matching_slide(w_slide, template_slides)
+    g_slide = _best_matching_slide(
+        w_slide,
+        template_slides,
+        wall_size=(_f(wall.get("slideWidth"), 7680), _f(wall.get("slideHeight"), 1080)),
+        dest_size=(float(dest_w), float(dest_h)),
+    )
     map_src = None
     map_dst = None
     list_src = None
@@ -1107,6 +1215,11 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         # How many objects agreed on one affine. Low means no template slide
         # describes this page, and the caller should fall back to fitting.
         "pairQuality": max((len(g["members"]) for g in grouped), default=0),
+        # Which template slide taught this. Worth surfacing: picking the wrong
+        # framing looks like a geometry bug until you can see the choice.
+        "templateSlide": (
+            int(g_slide.get("number") or (int(g_slide.get("index") or 0) + 1)) if g_slide else None
+        ),
     }
     if list_src and list_dst and list_src.w > 1 and list_src.h > 1:
         recipe["listSrc"] = list_src.as_dict()
@@ -1280,6 +1393,8 @@ def plan_slide_transforms(
     *,
     include_lists: bool = False,
     wall_size: tuple[float, float] | None = None,
+    defer_list_packing: bool = False,
+    free_text_keys: set[tuple[str, int]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
@@ -1288,13 +1403,22 @@ def plan_slide_transforms(
         return []
     number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
     styles = list(recipe.get("characterStyles") or [])
+    # Blind right-to-left packing moves every list box, including labels that
+    # belong to artwork. A map label dragged into a column at the frame edge
+    # leaves its red plate behind on the map and reads as a bug in the deck, so
+    # when a rendered slide is available the placement decision is deferred to
+    # repack_free_text, which can tell a free-floating column from a label.
     pack_lists = bool(
-        include_lists and recipe.get("listFontSize") and slide_has_column_lists(slide)
+        include_lists
+        and not defer_list_packing
+        and recipe.get("listFontSize")
+        and slide_has_column_lists(slide)
     )
     from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
 
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
+    list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
@@ -1334,7 +1458,14 @@ def plan_slide_transforms(
             role = "map"
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
             continue
-        if role == "list" and not include_lists:
+        # Leaving the lists out means dropping side-panel name columns, never
+        # blanking the labels on the map: both look like lists to is_list_item,
+        # and hiding a label leaves its plate behind with no name on it. When a
+        # rendered slide told us which is which, honour that; blind, keep the
+        # old behaviour of dropping them all, since the flag is an explicit
+        # instruction and the operator can see the result.
+        loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
+        if role == "list" and not include_lists and loose:
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1377,7 +1508,10 @@ def plan_slide_transforms(
                 )
             )
             continue
-        if role == "list" and include_lists and recipe.get("listPaired"):
+        # Snapping to the template's list destination only makes sense for a
+        # single column. With fifteen map labels it puts all fifteen on the same
+        # point, which the old blind packing then spread out again and so hid.
+        if role == "list" and include_lists and recipe.get("listPaired") and list_count == 1:
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
             size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
@@ -1564,8 +1698,14 @@ def slides_for_plan(slide_range: SlideRange) -> list[int] | None:
     return None if selected is None else sorted(selected)
 
 
-def format_slide_range(slide_range: Iterable[int] | tuple[int, int]) -> str:
-    """`{2,4,5,6}` → `2, 4–6`."""
+def format_slide_range(slide_range: SlideRange) -> str:
+    """`{2,4,5,6}` → `2, 4–6`. No selection → `""`, meaning the whole deck.
+
+    Takes the same SlideRange as the other helpers, None included. It used to
+    require an iterable, which was fine only while a slide always defaulted to 2.
+    """
+    if slide_range is None:
+        return ""
     if isinstance(slide_range, tuple) and len(slide_range) == 2:
         nums = expand_slide_range(slide_range) or frozenset()
     else:
@@ -1854,6 +1994,29 @@ def union_rect_of(rects: list[Rect]) -> Rect | None:
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
+def is_degenerate_scale(recipe: dict[str, Any], wall_w: float, wall_h: float) -> bool:
+    """True when a recipe shrinks the wall past any useful size.
+
+    Fitting the entire wall into the frame is the smallest sensible scale — going
+    below it shows less than the whole wall would, at a smaller size, which no
+    layout wants. A run picked a framing at s=0.063 against a floor of 0.25 and
+    delivered slides squeezed into the top-left corner. The off-canvas check
+    cannot catch that, because collapsed content is entirely on canvas.
+    """
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    if wall_w <= 0 or wall_h <= 0 or dest_w <= 0 or dest_h <= 0:
+        return False
+    # Judge the transform that governs the frame, not the most generous of the
+    # groups: a sane minor group does not rescue a collapsed primary one, and
+    # mapSrc/mapDst — hence the whole layout — comes from the primary.
+    aff = frame_affine(recipe)
+    if aff is None or aff.s <= 0:
+        return False
+    floor = min(dest_w / wall_w, dest_h / wall_h) * 0.9
+    return aff.s < floor
+
+
 def on_canvas_fraction(
     slide: dict,
     recipe: dict[str, Any],
@@ -1877,6 +2040,10 @@ def on_canvas_fraction(
         if is_placeholder_text(item) or item.get("duplicateOf"):
             continue
         if not is_visible(item, wall_w, wall_h) or is_chrome_bg(item):
+            continue
+        # Name lists are re-placed rather than carried by the affine, so where
+        # the affine would put them says nothing about whether it fits.
+        if is_list_item(item):
             continue
         rect = item_rect(item)
         if rect.w <= 0 or rect.h <= 0:
@@ -1991,18 +2158,36 @@ def repack_free_text(
     already keeps it with the thing it labels. Returns one report row per moved
     box so the caller can flag the crowded ones.
     """
+    analysis = analyse_free_text(slide, recipe, preview=preview, wall_w=wall_w, wall_h=wall_h)
+    if analysis is None:
+        return []
+    return _place_free_text(transforms, slide, recipe, analysis)
+
+
+def analyse_free_text(
+    slide: dict,
+    recipe: dict[str, Any],
+    *,
+    preview: Any,
+    wall_w: float,
+    wall_h: float,
+) -> dict[str, Any] | None:
+    """Work out, from a rendered wall slide, which list text is free to move.
+
+    Done once per slide and shared, because two decisions depend on it: whether
+    an unticked "include lists" should drop a piece of text, and where to put it
+    if it is kept. Deciding twice by different rules is how a label ends up
+    hidden on one path and relocated on the other.
+    """
     from obed_edom.free_space import (  # noqa: PLC0415
         Box,
         background_fraction,
-        occupancy_from_image,
-        place_boxes,
         predict_cg_raster,
     )
-    from PIL import ImageDraw  # noqa: PLC0415
 
     aff = frame_affine(recipe)
     if aff is None or preview is None or aff.s <= 0:
-        return []
+        return None
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
 
@@ -2033,8 +2218,25 @@ def repack_free_text(
         )
         if clear >= FREE_TEXT_BACKGROUND_MIN:
             movable.add((str(item.get("kind")), int(item.get("kindIndex") or 0)))
+    return {"frame": frame, "bg": bg, "affine": aff, "free": movable, "dest": (dest_w, dest_h)}
+
+
+def _place_free_text(
+    transforms: list[ItemTransform],
+    slide: dict,
+    recipe: dict[str, Any],
+    analysis: dict[str, Any],
+) -> list[dict[str, Any]]:
+    from obed_edom.free_space import Box, occupancy_from_image, place_boxes  # noqa: PLC0415
+    from PIL import ImageDraw  # noqa: PLC0415
+
+    movable: set[tuple[str, int]] = analysis["free"]
     if not movable:
         return []
+    frame = analysis["frame"]
+    bg = analysis["bg"]
+    aff: Affine = analysis["affine"]
+    dest_w, dest_h = analysis["dest"]
 
     cx = frame.width / dest_w
     cy = frame.height / dest_h
@@ -2070,6 +2272,58 @@ def repack_free_text(
     return report
 
 
+def offframe_rows(
+    transforms: list[ItemTransform],
+    slide: dict,
+    recipe: dict[str, Any],
+    wall_w: float,
+    wall_h: float,
+    *,
+    min_visible: float = OFFFRAME_MIN_VISIBLE,
+) -> list[dict[str, Any]]:
+    """Objects that showed on the wall but land outside the CG frame.
+
+    Nothing else reports these. `bounds.offcanvas` only measures vertical cuts
+    and `bounds.straddles` looks for LED panel seams, so an object pushed off the
+    left edge is invisible to both — a title badge vanished from a deck with no
+    warning at all. The planner is the right place to notice, because only it
+    knows the object was visible before it was moved.
+    """
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    if dest_w <= 0 or dest_h <= 0:
+        return []
+    was_visible = {
+        (str(it.get("kind") or "item"), _item_kind_index(it, _item_index(it, i)))
+        for i, it in enumerate(slide.get("items") or [])
+        if is_visible(it, wall_w, wall_h) and not is_placeholder_text(it)
+    }
+    rows: list[dict[str, Any]] = []
+    for spec in transforms:
+        if spec.role == "hide" or spec.w <= 0 or spec.h <= 0:
+            continue
+        if _spec_key(spec) not in was_visible:
+            continue
+        x0 = max(0.0, spec.x)
+        y0 = max(0.0, spec.y)
+        x1 = min(dest_w, spec.x + spec.w)
+        y1 = min(dest_h, spec.y + spec.h)
+        shown = 0.0 if x1 <= x0 or y1 <= y0 else ((x1 - x0) * (y1 - y0)) / (spec.w * spec.h)
+        if shown < min_visible:
+            rows.append(
+                {
+                    "slide": spec.slide_number,
+                    "kind": spec.kind,
+                    "kindIndex": spec.kind_index,
+                    "role": spec.role,
+                    "visible": round(shown, 3),
+                    "x": round(spec.x, 1),
+                    "y": round(spec.y, 1),
+                }
+            )
+    return rows
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -2081,6 +2335,7 @@ def plan_payload_transforms(
     placement_report: list[dict[str, Any]] | None = None,
     skipped_slides: list[int] | None = None,
     fitted_slides: list[int] | None = None,
+    offframe_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
@@ -2115,8 +2370,12 @@ def plan_payload_transforms(
                 template,
             )
             # No template framing describes this page. Applying the closest one
-            # anyway put objects 2000px out; fitting what is visible does not.
-            if on_canvas_fraction(slide, slide_recipe, wall_w, wall_h) < min_on_canvas:
+            # anyway either throws objects thousands of pixels out of frame or
+            # collapses them into a corner; fitting what is visible does neither.
+            unusable = on_canvas_fraction(
+                slide, slide_recipe, wall_w, wall_h
+            ) < min_on_canvas or is_degenerate_scale(slide_recipe, wall_w, wall_h)
+            if unusable:
                 fitted = fit_to_frame_recipe(
                     slide,
                     wall_w,
@@ -2131,20 +2390,32 @@ def plan_payload_transforms(
                     slide_recipe = fitted
                     if fitted_slides is not None:
                         fitted_slides.append(number)
-        planned = plan_slide_transforms(
-            slide, slide_recipe, include_lists=include_lists, wall_size=(wall_w, wall_h)
-        )
-        if include_lists and previews and previews.get(number) is not None:
-            rows = repack_free_text(
-                planned,
-                slide,
-                slide_recipe,
-                preview=previews.get(number),
-                wall_w=wall_w,
-                wall_h=wall_h,
+        preview = (previews or {}).get(number)
+        # One raster read per slide, shared by the drop decision and the
+        # placement decision so they can never disagree.
+        analysis = (
+            analyse_free_text(
+                slide, slide_recipe, preview=preview, wall_w=wall_w, wall_h=wall_h
             )
+            if preview is not None
+            else None
+        )
+        planned = plan_slide_transforms(
+            slide,
+            slide_recipe,
+            include_lists=include_lists,
+            wall_size=(wall_w, wall_h),
+            defer_list_packing=include_lists and analysis is not None,
+            free_text_keys=analysis["free"] if analysis else None,
+        )
+        if include_lists and analysis is not None:
+            rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)
+        if offframe_report is not None:
+            offframe_report.extend(
+                offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
+            )
         transforms.extend(planned)
     return transforms
 

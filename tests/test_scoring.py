@@ -351,6 +351,240 @@ def test_a_sparse_template_is_still_believed():
     assert on_canvas_fraction(slide, _identity_recipe(), 1920.0, 1080.0) == 1.0
 
 
+def test_content_pushed_out_of_frame_is_reported():
+    """Nothing else catches this. bounds.offcanvas measures vertical cuts only
+    and bounds.straddles looks for LED panel seams, so an object shoved off the
+    left or right edge is invisible to both and simply vanishes."""
+    from obed_edom.map_remap import offframe_rows, plan_slide_transforms
+
+    keeper = _map(3000, 100, 1200, 700, kindIndex=0)
+    off_left = _item(kind="image", fileName="badge.png", x=100, y=40, w=300, h=120, kindIndex=1)
+    off_right = _item(kind="text", text="Not Actual Names", x=5385, y=100, w=300, h=60, kindIndex=0)
+    slide = {"number": 1, "items": [keeper, off_left, off_right]}
+    # A pure crop: wall x 3000 lands at 0.
+    frame = {"x": 3000.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    dst = {"x": 0.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(frame),
+        "mapDst": dict(dst),
+        "groups": [{"s": 1.0, "tx": -3000.0, "ty": 0.0, "src": frame, "dst": dst}],
+    }
+    out = plan_slide_transforms(slide, recipe, include_lists=True, wall_size=(7680.0, 1080.0))
+    rows = offframe_rows(out, slide, recipe, 7680.0, 1080.0)
+    reported = {(r["kind"], r["kindIndex"]) for r in rows}
+    assert ("image", 1) in reported, "badge pushed off the left edge went unreported"
+    assert ("text", 0) in reported, "text pushed off the right edge went unreported"
+    # The map itself is fine and must not be reported.
+    assert ("image", 0) not in reported
+
+
+def test_offscreen_wall_content_is_not_reported_as_pushed_out():
+    """It was already invisible, so it is not news — and it is never planned."""
+    from obed_edom.map_remap import offframe_rows, plan_slide_transforms
+
+    slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(1892, -510, kindIndex=0)],
+    }
+    frame = {"x": 3000.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    dst = {"x": 0.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    crop = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(frame),
+        "mapDst": dict(dst),
+        "groups": [{"s": 1.0, "tx": -3000.0, "ty": 0.0, "src": frame, "dst": dst}],
+    }
+    out = plan_slide_transforms(slide, crop, wall_size=(7680.0, 1080.0))
+    # The parked pin is never planned, so it cannot be reported either.
+    assert offframe_rows(out, slide, crop, 7680.0, 1080.0) == []
+
+
+def test_many_labels_do_not_all_snap_to_one_template_position():
+    """listDst pins where a single column belongs. Applied to fifteen map
+    labels it stacked all fifteen on one point; the old blind packing spread
+    them again afterwards, so the collapse only showed once that was deferred."""
+    from obed_edom.map_remap import plan_slide_transforms
+
+    labels = [
+        _item(kind="text", text=f"CHC Name {i}", x=3300 + i * 40, y=200 + i * 30, w=200, h=44, kindIndex=i, size=20)
+        for i in range(5)
+    ]
+    slide = {"number": 1, "items": [_map(3000, 100, 1200, 700, kindIndex=0), *labels]}
+    recipe = dict(_identity_recipe())
+    recipe["listFontSize"] = 20.0
+    recipe["listPaired"] = True
+    recipe["listDst"] = {"x": 638.0, "y": 537.0, "w": 192.0, "h": 46.0}
+
+    out = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=True)
+    spots = {(round(t.x), round(t.y)) for t in out if t.role == "list"}
+    assert len(spots) == 5, "labels collapsed onto one another"
+
+    # A lone column still honours the template's destination.
+    single = {"number": 1, "items": [_map(3000, 100, 1200, 700, kindIndex=0), labels[0]]}
+    out = plan_slide_transforms(single, recipe, include_lists=True, defer_list_packing=True)
+    only = next(t for t in out if t.role == "list")
+    assert (round(only.x), round(only.y)) == (638, 537)
+
+
+def test_map_labels_are_not_dragged_off_the_map():
+    """A label belongs to its plate. Blind packing moved the words to the frame
+    edge and left the red plate behind on the map, which reads as a broken deck.
+    Deferring the decision keeps labels at their mapped position."""
+    from obed_edom.map_remap import plan_slide_transforms
+
+    # Two labels sitting on plates, plus a genuine free-floating name column.
+    label_a = _item(kind="text", text="CHC Bian Lan", x=500, y=300, w=220, h=44, kindIndex=0, size=20)
+    label_b = _item(kind="text", text="CHC Zui Si", x=700, y=500, w=200, h=44, kindIndex=1, size=20)
+    column = _item(
+        kind="text",
+        text="CHC Aaliana\nCHC Bais\nCHC Cavinte\nCHC Dahunan",
+        x=1500,
+        y=100,
+        w=300,
+        h=400,
+        kindIndex=2,
+        size=20,
+    )
+    slide = {
+        "number": 1,
+        "items": [_map(0, 0, 1000, 600, kindIndex=0), label_a, label_b, column],
+    }
+    recipe = dict(_identity_recipe())
+    recipe["listFontSize"] = 20.0
+
+    packed = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=False)
+    deferred = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=True)
+
+    # Blind packing walks them to the right edge; deferring leaves them put.
+    packed_xs = sorted(t.x for t in packed if t.role == "list")
+    deferred_xs = sorted(t.x for t in deferred if t.role == "list")
+    assert packed_xs != deferred_xs
+    assert deferred_xs == [500.0, 700.0, 1500.0]
+
+
+def test_a_framing_that_keeps_the_map_whole_wins_a_tie():
+    """The same map often appears at several framings; one crops it."""
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    # Both hold the same art, so they pair equally well. The first crops it off
+    # the left edge; the second keeps it inside the frame.
+    crops = {"number": 1, "items": [_map(-700, 100, 1200, 700, kindIndex=0)]}
+    whole = {"number": 2, "items": [_map(300, 100, 1200, 700, kindIndex=0)]}
+
+    picked = _best_matching_slide(
+        wall_slide, [crops, whole], wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+    )
+    assert picked is whole
+
+    # Order must not decide it.
+    picked = _best_matching_slide(
+        wall_slide, [whole, crops], wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+    )
+    assert picked is whole
+
+
+def test_a_framing_that_shrinks_into_a_corner_does_not_win():
+    """Keeping content inside the frame is trivially maximised by shrinking.
+
+    Scoring only that made a tiny framing beat every rival with a perfect 1.0,
+    so slides came out squeezed into the top-left with the frame left empty.
+    """
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    tiny = {"number": 3, "items": [_map(20, 20, 300, 175, kindIndex=0)]}
+    sized = {"number": 2, "items": [_map(300, 100, 1200, 700, kindIndex=0)]}
+
+    for order in ([tiny, sized], [sized, tiny]):
+        picked = _best_matching_slide(
+            wall_slide, order, wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+        )
+        assert picked is sized
+
+
+def test_a_better_fit_beats_one_extra_paired_object():
+    """Score is agreement*100 + pair count, so a single extra pair used to
+    outrank a fit two and a half times better and pick the wrong framing."""
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [
+            _map(3000, 100, 1364, 947, kindIndex=0),
+            _item(kind="image", fileName="pasted-image.pdf", x=3100, y=200, w=200, h=140, kindIndex=1),
+        ],
+    }
+    # Same agreement level; this one frames the map properly.
+    good_fit = {"number": 1, "items": [_map(226, 61, 1364, 947, kindIndex=0)]}
+    # One extra paired object, but a framing that barely uses the frame.
+    extra_pair = {
+        "number": 3,
+        "items": [
+            _map(11, 18, 400, 278, kindIndex=0),
+            _item(kind="image", fileName="pasted-image.pdf", x=20, y=30, w=59, h=41, kindIndex=1),
+        ],
+    }
+    for order in ([extra_pair, good_fit], [good_fit, extra_pair]):
+        picked = _best_matching_slide(
+            wall_slide, order, wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+        )
+        assert picked is good_fit
+
+
+def test_a_collapsed_scale_is_rejected_even_though_it_is_all_on_canvas():
+    """Content squeezed into a corner is entirely on canvas, so the off-frame
+    check blesses it. Nothing sensible shrinks below "the whole wall fits"."""
+    from obed_edom.map_remap import is_degenerate_scale, on_canvas_fraction
+
+    slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    tiny_src = {"x": 3000.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    tiny_dst = {"x": 10.0, "y": 10.0, "w": 76.0, "h": 44.0}
+    collapsed = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(tiny_src),
+        "mapDst": dict(tiny_dst),
+        "groups": [{"s": 0.0634, "tx": -180.0, "ty": 3.7, "src": tiny_src, "dst": tiny_dst}],
+    }
+    # Everything lands on canvas, so the off-frame test cannot see the problem.
+    assert on_canvas_fraction(slide, collapsed, 7680.0, 1080.0) == 1.0
+    # The scale floor can: 1920/7680 * 0.9 = 0.225.
+    assert is_degenerate_scale(collapsed, 7680.0, 1080.0)
+    # A crop at full size is fine.
+    assert not is_degenerate_scale(_identity_recipe(), 7680.0, 1080.0)
+
+
+def test_a_framing_that_overflows_the_frame_does_not_win_either():
+    """The mirror failure: filling the frame is maximised by going too big."""
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    huge = {"number": 4, "items": [_map(-1500, -900, 4800, 2800, kindIndex=0)]}
+    sized = {"number": 2, "items": [_map(300, 100, 1200, 700, kindIndex=0)]}
+
+    for order in ([huge, sized], [sized, huge]):
+        picked = _best_matching_slide(
+            wall_slide, order, wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+        )
+        assert picked is sized
+
+
 def test_skipped_wall_slides_are_not_planned():
     slides = [
         {"number": 1, "items": [_pin(100, 100, kindIndex=0)]},

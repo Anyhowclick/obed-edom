@@ -180,6 +180,8 @@ def remap_keynote(
         )
     placements: list[dict[str, Any]] = []
     hidden: list[int] = []
+    fitted: list[int] = []
+    offframe: list[dict[str, Any]] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -189,7 +191,25 @@ def remap_keynote(
         previews=previews or None,
         placement_report=placements,
         skipped_slides=hidden,
+        fitted_slides=fitted,
+        offframe_report=offframe,
     )
+    if fitted:
+        say(
+            f"No template framing matched {len(fitted)} slide(s) "
+            + ", ".join(str(n) for n in fitted[:10])
+            + ("…" if len(fitted) > 10 else "")
+            + "; scaled their content to fit instead. Add a template slide for that layout."
+        )
+    if offframe:
+        by_slide: dict[int, int] = {}
+        for row in offframe:
+            by_slide[int(row["slide"])] = by_slide.get(int(row["slide"]), 0) + 1
+        detail = ", ".join(f"slide {n}: {c}" for n, c in sorted(by_slide.items())[:8])
+        say(
+            f"{len(offframe)} object(s) visible on the wall land outside the CG frame "
+            f"({detail}). They are still in the deck — drag them back or adjust the template."
+        )
     if hidden:
         say(
             f"Left {len(hidden)} skipped slide(s) alone: "
@@ -337,6 +357,8 @@ def remap_keynote(
         "placements": placements,
         "placementSource": preview_note,
         "skippedSlidesLeftAlone": hidden,
+        "fittedSlides": fitted,
+        "offFrame": offframe,
     }
     return result
 
