@@ -967,7 +967,7 @@ def _score_template_slide(wall_slide: dict, template_slide: dict) -> int:
     return len([it for it in template_slide.get("items") or [] if is_map_item(it)])
 
 
-def _framing_coverage(
+def _framing_fit(
     wall_slide: dict,
     template_slide: dict,
     wall_w: float,
@@ -975,13 +975,18 @@ def _framing_coverage(
     dest_w: float,
     dest_h: float,
 ) -> float:
-    """Fraction of the wall's visible extent this framing keeps inside the frame.
+    """How well this framing uses the CG frame: keeps content in, and fills it.
 
     The same map often appears on several template slides at different framings —
-    one showing it whole, another cropping in. Those pair equally well, so
-    pairing quality ties and the winner is whichever was listed first. Coverage
-    breaks the tie the way an operator would: prefer the framing that keeps the
-    map whole over one that cuts it off.
+    one showing it whole, another cropping in — and those pair equally well, so
+    pairing quality ties and the winner would be whichever was listed first.
+
+    Both halves are needed. Scoring only how much content stays inside the frame
+    is maximised by shrinking everything into a corner, which is exactly what
+    happened: a small framing scored a perfect 1.0 and won every tie, leaving the
+    frame empty. Scoring only how much of the frame is filled would pick a
+    framing so large that most of the map hangs off the edge. Multiplying the two
+    prefers the framing that shows the whole thing, at a size that uses the space.
     """
     wall_imgs = [
         it
@@ -1003,13 +1008,18 @@ def _framing_coverage(
     if src is None or src.w <= 0 or src.h <= 0:
         return 0.0
     mapped = aff.apply_rect(src)
+    if mapped.w <= 0 or mapped.h <= 0 or dest_w <= 0 or dest_h <= 0:
+        return 0.0
     x0 = max(0.0, mapped.x)
     y0 = max(0.0, mapped.y)
     x1 = min(dest_w, mapped.x + mapped.w)
     y1 = min(dest_h, mapped.y + mapped.h)
     if x1 <= x0 or y1 <= y0:
         return 0.0
-    return ((x1 - x0) * (y1 - y0)) / (mapped.w * mapped.h)
+    visible = (x1 - x0) * (y1 - y0)
+    kept = visible / (mapped.w * mapped.h)
+    fills = min(1.0, visible / (dest_w * dest_h))
+    return kept * fills
 
 
 def _best_matching_slide(
@@ -1027,14 +1037,18 @@ def _best_matching_slide(
     best_key: tuple[int, float] | None = None
     for slide in candidates:
         score = _score_template_slide(wall_slide, slide)
-        coverage = 0.0
+        fit = 0.0
         if wall_size and dest_size and score > 0:
-            coverage = _framing_coverage(wall_slide, slide, *wall_size, *dest_size)
-        key = (score, coverage)
+            fit = _framing_fit(wall_slide, slide, *wall_size, *dest_size)
+        # Rank on how many objects agreed, not on the raw score: that also
+        # carries a pair total, and a one-pair difference used to outrank a fit
+        # two and a half times better. Agreement is the real signal; how well the
+        # framing uses the frame settles everything within one level of it.
+        key = (score // 100, fit)
         if best_key is None or key > best_key:
             best_key = key
             best = slide
-    if best is not None and best_key and best_key[0] > 0:
+    if best is not None and best_key and _score_template_slide(wall_slide, best) > 0:
         return best
     return _first_slide_with(candidates, is_map_item) or _first_slide_with(
         candidates, is_pin_item
@@ -1165,6 +1179,11 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         # How many objects agreed on one affine. Low means no template slide
         # describes this page, and the caller should fall back to fitting.
         "pairQuality": max((len(g["members"]) for g in grouped), default=0),
+        # Which template slide taught this. Worth surfacing: picking the wrong
+        # framing looks like a geometry bug until you can see the choice.
+        "templateSlide": (
+            int(g_slide.get("number") or (int(g_slide.get("index") or 0) + 1)) if g_slide else None
+        ),
     }
     if list_src and list_dst and list_src.w > 1 and list_src.h > 1:
         recipe["listSrc"] = list_src.as_dict()
@@ -1935,6 +1954,29 @@ def union_rect_of(rects: list[Rect]) -> Rect | None:
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
+def is_degenerate_scale(recipe: dict[str, Any], wall_w: float, wall_h: float) -> bool:
+    """True when a recipe shrinks the wall past any useful size.
+
+    Fitting the entire wall into the frame is the smallest sensible scale — going
+    below it shows less than the whole wall would, at a smaller size, which no
+    layout wants. A run picked a framing at s=0.063 against a floor of 0.25 and
+    delivered slides squeezed into the top-left corner. The off-canvas check
+    cannot catch that, because collapsed content is entirely on canvas.
+    """
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    if wall_w <= 0 or wall_h <= 0 or dest_w <= 0 or dest_h <= 0:
+        return False
+    # Judge the transform that governs the frame, not the most generous of the
+    # groups: a sane minor group does not rescue a collapsed primary one, and
+    # mapSrc/mapDst — hence the whole layout — comes from the primary.
+    aff = frame_affine(recipe)
+    if aff is None or aff.s <= 0:
+        return False
+    floor = min(dest_w / wall_w, dest_h / wall_h) * 0.9
+    return aff.s < floor
+
+
 def on_canvas_fraction(
     slide: dict,
     recipe: dict[str, Any],
@@ -2231,8 +2273,12 @@ def plan_payload_transforms(
                 template,
             )
             # No template framing describes this page. Applying the closest one
-            # anyway put objects 2000px out; fitting what is visible does not.
-            if on_canvas_fraction(slide, slide_recipe, wall_w, wall_h) < min_on_canvas:
+            # anyway either throws objects thousands of pixels out of frame or
+            # collapses them into a corner; fitting what is visible does neither.
+            unusable = on_canvas_fraction(
+                slide, slide_recipe, wall_w, wall_h
+            ) < min_on_canvas or is_degenerate_scale(slide_recipe, wall_w, wall_h)
+            if unusable:
                 fitted = fit_to_frame_recipe(
                     slide,
                     wall_w,

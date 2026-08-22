@@ -412,6 +412,101 @@ def test_a_framing_that_keeps_the_map_whole_wins_a_tie():
     assert picked is whole
 
 
+def test_a_framing_that_shrinks_into_a_corner_does_not_win():
+    """Keeping content inside the frame is trivially maximised by shrinking.
+
+    Scoring only that made a tiny framing beat every rival with a perfect 1.0,
+    so slides came out squeezed into the top-left with the frame left empty.
+    """
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    tiny = {"number": 3, "items": [_map(20, 20, 300, 175, kindIndex=0)]}
+    sized = {"number": 2, "items": [_map(300, 100, 1200, 700, kindIndex=0)]}
+
+    for order in ([tiny, sized], [sized, tiny]):
+        picked = _best_matching_slide(
+            wall_slide, order, wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+        )
+        assert picked is sized
+
+
+def test_a_better_fit_beats_one_extra_paired_object():
+    """Score is agreement*100 + pair count, so a single extra pair used to
+    outrank a fit two and a half times better and pick the wrong framing."""
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [
+            _map(3000, 100, 1364, 947, kindIndex=0),
+            _item(kind="image", fileName="pasted-image.pdf", x=3100, y=200, w=200, h=140, kindIndex=1),
+        ],
+    }
+    # Same agreement level; this one frames the map properly.
+    good_fit = {"number": 1, "items": [_map(226, 61, 1364, 947, kindIndex=0)]}
+    # One extra paired object, but a framing that barely uses the frame.
+    extra_pair = {
+        "number": 3,
+        "items": [
+            _map(11, 18, 400, 278, kindIndex=0),
+            _item(kind="image", fileName="pasted-image.pdf", x=20, y=30, w=59, h=41, kindIndex=1),
+        ],
+    }
+    for order in ([extra_pair, good_fit], [good_fit, extra_pair]):
+        picked = _best_matching_slide(
+            wall_slide, order, wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+        )
+        assert picked is good_fit
+
+
+def test_a_collapsed_scale_is_rejected_even_though_it_is_all_on_canvas():
+    """Content squeezed into a corner is entirely on canvas, so the off-frame
+    check blesses it. Nothing sensible shrinks below "the whole wall fits"."""
+    from obed_edom.map_remap import is_degenerate_scale, on_canvas_fraction
+
+    slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    tiny_src = {"x": 3000.0, "y": 100.0, "w": 1200.0, "h": 700.0}
+    tiny_dst = {"x": 10.0, "y": 10.0, "w": 76.0, "h": 44.0}
+    collapsed = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": dict(tiny_src),
+        "mapDst": dict(tiny_dst),
+        "groups": [{"s": 0.0634, "tx": -180.0, "ty": 3.7, "src": tiny_src, "dst": tiny_dst}],
+    }
+    # Everything lands on canvas, so the off-frame test cannot see the problem.
+    assert on_canvas_fraction(slide, collapsed, 7680.0, 1080.0) == 1.0
+    # The scale floor can: 1920/7680 * 0.9 = 0.225.
+    assert is_degenerate_scale(collapsed, 7680.0, 1080.0)
+    # A crop at full size is fine.
+    assert not is_degenerate_scale(_identity_recipe(), 7680.0, 1080.0)
+
+
+def test_a_framing_that_overflows_the_frame_does_not_win_either():
+    """The mirror failure: filling the frame is maximised by going too big."""
+    from obed_edom.map_remap import _best_matching_slide
+
+    wall_slide = {
+        "number": 1,
+        "items": [_map(3000, 100, 1200, 700, kindIndex=0), _pin(3500, 400, kindIndex=0)],
+    }
+    huge = {"number": 4, "items": [_map(-1500, -900, 4800, 2800, kindIndex=0)]}
+    sized = {"number": 2, "items": [_map(300, 100, 1200, 700, kindIndex=0)]}
+
+    for order in ([huge, sized], [sized, huge]):
+        picked = _best_matching_slide(
+            wall_slide, order, wall_size=(7680.0, 1080.0), dest_size=(1920.0, 1080.0)
+        )
+        assert picked is sized
+
+
 def test_skipped_wall_slides_are_not_planned():
     slides = [
         {"number": 1, "items": [_pin(100, 100, kindIndex=0)]},
