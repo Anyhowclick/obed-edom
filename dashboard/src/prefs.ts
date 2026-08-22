@@ -30,3 +30,30 @@ export function useSessionToggle(key: string, fallback: boolean): [boolean, (nex
 
 export const SHOW_INFO_KEY = "obed-edom.findings.showInfo";
 export const SIDE_PANELS_KEY = "obed-edom.diff.sidePanels";
+export const LW_TEMPLATE_KEY = "obed-edom.generate.lwTemplate";
+export const DSK_TEMPLATE_KEY = "obed-edom.generate.dskTemplate";
+
+export type StoredFile = { path: string; name: string };
+
+export function loadStoredFile(key: string): StoredFile | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as StoredFile;
+    if (data && typeof data.path === "string" && typeof data.name === "string" && data.path) {
+      return data;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function saveStoredFile(key: string, file: StoredFile | null) {
+  try {
+    if (file) localStorage.setItem(key, JSON.stringify(file));
+    else localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}

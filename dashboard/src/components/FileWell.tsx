@@ -10,11 +10,26 @@ type Props = {
   onChoose?: () => void;
   onPath?: (path: string) => void;
   onError?: (message: string) => void;
+  onClear?: () => void;
   multiple?: boolean;
   folder?: boolean;
+  tone?: "keynote" | "document";
 };
 
-export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath, onError, multiple, folder }: Props) {
+export function FileWell({
+  label,
+  hint,
+  accept,
+  file,
+  onFiles,
+  onChoose,
+  onPath,
+  onError,
+  onClear,
+  multiple,
+  folder,
+  tone,
+}: Props) {
   const [over, setOver] = useState(false);
   const inputId = `file-${label.replace(/[^a-z0-9]+/gi, "-")}`;
 
@@ -35,9 +50,9 @@ export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath,
   }
 
   return (
-    <div className="col">
+    <div className={`col${tone ? ` well-tone-${tone}` : ""}`}>
       <div
-        className={`well ${over ? "over" : ""}`}
+        className={`well ${over ? "over" : ""}${tone ? ` ${tone}` : ""}`}
         onDragOver={(e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
@@ -90,6 +105,18 @@ export function FileWell({ label, hint, accept, file, onFiles, onChoose, onPath,
           <button className="btn secondary" type="button" onClick={onChoose}>
             Choose on this Mac
           </button>
+          {onClear && file && (
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClear();
+              }}
+            >
+              Clear
+            </button>
+          )}
         </div>
       )}
     </div>

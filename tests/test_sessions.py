@@ -156,6 +156,48 @@ def test_delete_when_files_already_gone(tmp_path: Path):
     assert runner.get(job.id) is None
 
 
+def test_delete_all_purges_finished(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    first = output / "One"
+    second = output / "Two"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "a.png").write_text("x")
+    (second / "b.png").write_text("y")
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    a = runner.submit(
+        "generate",
+        lambda _j: {"stem": "One", "outputDir": str(first)},
+        feature="generate",
+    )
+    b = runner.submit(
+        "diff",
+        lambda _j: {"stem": "Two", "outputDir": str(second)},
+        feature="diff",
+    )
+    _wait(runner, a.id)
+    _wait(runner, b.id)
+    assert runner.delete_all(purge=True) == 2
+    assert not first.exists()
+    assert not second.exists()
+    assert runner.list() == []
+    assert JobRunner(session_dir=sessions, output_root=output).list() == []
+
+
+def test_delete_all_skips_running(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    done = runner.submit("generate", lambda _j: {"stem": "Done"}, feature="generate")
+    _wait(runner, done.id)
+    running = Job(id="live", kind="generate", feature="generate", status="running")
+    runner._jobs[running.id] = running
+    assert runner.delete_all(purge=True) == 1
+    assert runner.get("live") is not None
+    assert runner.get(done.id) is None
+
+
 def test_visual_result_pairs_png_folders(tmp_path: Path):
     from obed_edom.web.jobs import visual_result
 

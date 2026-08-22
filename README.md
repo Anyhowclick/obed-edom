@@ -51,5 +51,5 @@ Vite is on [http://localhost:5173/](http://localhost:5173/) and proxies `/api` t
 ### Notes
 
 - Generate and Keynote inspect run **one job at a time** (Keynote is a single app).
-- `.docx` outlines can be dropped in the generator. `.key` files are packages — drop from Finder or use **Choose on this Mac**.
+- `.docx` outlines and at least one LW or DSK template `.key` are dropped in the generator. `.key` files are packages — drop from Finder or use **Choose on this Mac**.
 - Diff never saves the source Keynotes.

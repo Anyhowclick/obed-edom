@@ -9,7 +9,7 @@ import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
 import { useJobSessions } from "../sessions";
 
 export function HistoryTab({ active: visible }: { active: boolean }) {
-  const { jobs, active, activeId, setActiveId, upsert, remove, reload, sessionError } = useJobSessions();
+  const { jobs, active, activeId, setActiveId, upsert, remove, removeAll, reload, sessionError } = useJobSessions();
   const { openInFeature } = useRunNav();
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +55,14 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
 
   return (
     <div>
-      <h1>History</h1>
+      <div className="history-head">
+        <h1>History</h1>
+        {jobs.length > 0 && (
+          <button className="btn delete-all" type="button" onClick={() => void removeAll()}>
+            Delete All
+          </button>
+        )}
+      </div>
       <p className="lede">
         Finished runs appear here. They are pointers to files under output/ — if you rename or delete those
         files in Finder, the catalog stays until you Relocate or Delete.

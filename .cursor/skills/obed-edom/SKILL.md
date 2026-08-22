@@ -17,7 +17,9 @@ description: >-
 From the repo root:
 
 ```bash
-python -m obed_edom generate "/path/to/outline.docx"
+python -m obed_edom generate "/path/to/outline.docx" \
+  --lw-template "/path/to/Sermon_GW.key" \
+  --dsk-template "/path/to/2026_Lower-Thirds (ENG).key"
 ```
 
 Local operator dashboard (generate, diff, DSK stub, CG resize stub):
@@ -45,18 +47,19 @@ python -m obed_edom generate "/path/to/outline.docx" --no-keynote
 
 Writes `output/<stem>/`:
 
-- `<stem>_LW.key` — from `Default Templates/Sermon_GW.key`
-- `<stem>_DSK.key` — from `Default Templates/2026_Lower-Thirds (ENG).key`
+- `<stem>_LW.key` — from the dropped / `--lw-template` Keynote when an LW template is supplied
+- `<stem>_DSK.key` — from the dropped / `--dsk-template` Keynote when a DSK template is supplied
 - `<stem>_CUED.docx` — the outline with operator `[LW]` / `[DSK-…]` cues for show-call
 - `review.pdf` — short checklist for the operator
 - `previews/lw/` and `previews/dsk/` PNGs
 
-Never overwrite files in `Default Templates/`. Never overwrite the source outline.
+Never overwrite the dropped templates. Never overwrite the source outline.
 
 ## When to run
 
-- User drops a sermon / offering / testimony `.docx` with semantic layout cues
-- Experiment files: `Sermon Outlines/Sermon BC.docx`, `Sermon Outlines/Offering JX.docx`
+- User drops a sermon / offering / testimony `.docx` with semantic layout cues, plus at least one Keynote template (LW, DSK, or both), in the dashboard
+- CLI generate needs `--lw-template` and/or `--dsk-template` unless a matching file still exists under local `Default Templates/`
+- Experiment files (local, gitignored): `Sermon Outlines/Sermon BC.docx`, `Sermon Outlines/Offering JX.docx`
 
 ## Input cues (semantic)
 

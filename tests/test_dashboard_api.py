@@ -22,6 +22,39 @@ def test_resize_requires_template(tmp_path):
     assert "template" in res.json()["detail"].lower()
 
 
+def test_generate_requires_templates():
+    client = TestClient(app)
+    res = client.post(
+        "/api/generate",
+        files={
+            "files": (
+                "outline.docx",
+                b"not-a-real-docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert res.status_code == 400
+    assert "at least one" in res.json()["detail"].lower()
+
+
+def test_generate_rejects_missing_single_template(tmp_path):
+    client = TestClient(app)
+    res = client.post(
+        "/api/generate",
+        data={"lw_template": str(tmp_path / "missing.key")},
+        files={
+            "files": (
+                "outline.docx",
+                b"not-a-real-docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert res.status_code == 400
+    assert "lw template not found" in res.json()["detail"].lower()
+
+
 def test_resolve_drop_unknown_name():
     client = TestClient(app)
     res = client.post("/api/resolve-drop", data={"name": "definitely-not-a-real-deck-zzzz.key"})

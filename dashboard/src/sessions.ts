@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { deleteJob, getJob, listJobs, patchJob, type Job } from "./api";
+import { deleteAllJobs, deleteJob, getJob, listJobs, patchJob, type Job } from "./api";
 import { useRunNav, type FeatureId } from "./nav";
 
 export function jobLabel(job: Job): string {
@@ -83,6 +83,17 @@ export function useJobSessions(feature?: string) {
     });
   }
 
+  async function removeAll() {
+    if (!jobs.length) return;
+    const n = jobs.length;
+    const ok = window.confirm(
+      `Delete all ${n} saved run${n === 1 ? "" : "s"}? This removes the dashboard sessions and those runs’ preview/output files if they are still on disk.`
+    );
+    if (!ok) return;
+    await deleteAllJobs();
+    reload();
+  }
+
   return {
     jobs,
     active,
@@ -91,6 +102,7 @@ export function useJobSessions(feature?: string) {
     upsert,
     persistResult,
     remove,
+    removeAll,
     reload,
     sessionError,
     setSessionError,

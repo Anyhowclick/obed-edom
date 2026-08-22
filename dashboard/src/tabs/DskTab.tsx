@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import {
   chooseKeynote,
   deleteJob,
-  getTemplates,
   patchJob,
   pollJob,
   stubDsk,
@@ -19,17 +18,12 @@ export function DskTab() {
   const { job, upsert, error: openError } = useCurrentJob("dsk");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [dsk, setDsk] = useState<ChosenFile | null>(null);
-  const [template, setTemplate] = useState("");
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const result = (job?.result || undefined) as { path?: string } | undefined;
-
-  useEffect(() => {
-    getTemplates().then((t) => setTemplate(t.dskTemplate || t.dskTemplatePath));
-  }, []);
 
   useEffect(() => {
     const path = result?.path;
@@ -79,7 +73,7 @@ export function DskTab() {
     <div>
       <h1>DSK Generator</h1>
       <p className="lede">
-        Shadow content from a finalised LW into a DSK deck (from an existing DSK or the template masters).
+        Shadow content from a finalised LW into a DSK deck (from an existing DSK or a dropped template).
         Generation logic is not implemented yet; validation still runs. Finished checks are kept under
         History.
       </p>
@@ -100,7 +94,7 @@ export function DskTab() {
         />
         <FileWell
           label="Optional DSK.key to modify"
-          hint={template ? `Otherwise use template: ${template}` : "Or create from template"}
+          hint="Drop an existing DSK, or a DSK template .key"
           file={dsk}
           onChoose={async () => {
             try {

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from obed_edom.models import SlideSpec
-from obed_edom.paths import find_repo_root, template_path
+from obed_edom.paths import find_repo_root, select_deck_template
 from obed_edom.slide_map import load_masters
 
 
@@ -994,14 +994,14 @@ def run_applescript(plan: dict) -> dict:
 
 def generate_deck(
     slides: list[SlideSpec],
-    template_rel: str,
+    template: str | Path,
     dest: Path,
     export_dir: Path | None = None,
     overlays: list[dict] | None = None,
     *,
     superscript_fix: bool = True,
 ) -> dict:
-    src = template_path(template_rel)
+    src = Path(template).expanduser()
     if not src.exists():
         raise FileNotFoundError(f"Template not found: {src}")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1022,23 +1022,52 @@ def generate_deck(
     return result
 
 
+_SKIPPED_DECK = {
+    "skipped": True,
+    "exported": True,
+    "missingMasters": [],
+    "superscriptFix": {"ok": True, "skipped": True, "reason": "no_template"},
+}
+
+
 def generate_both(
     docx: Path,
     lw_slides: list[SlideSpec],
     dsk_slides: list[SlideSpec],
     export: bool = True,
-) -> tuple[Path, Path, Path, dict, dict]:
+    *,
+    lw_template: Path | str | None = None,
+    dsk_template: Path | str | None = None,
+    only_provided: bool = False,
+) -> tuple[Path, Path | None, Path | None, dict, dict]:
     masters = load_masters()
+    allow_fallback = not only_provided
+    lw_src = select_deck_template(
+        lw_template, fallback_rel=masters["lw"]["template"], allow_fallback=allow_fallback
+    )
+    dsk_src = select_deck_template(
+        dsk_template, fallback_rel=masters["dsk"]["template"], allow_fallback=allow_fallback
+    )
+    if lw_src is None and dsk_src is None:
+        raise FileNotFoundError(
+            "At least one Keynote template is required (LW, DSK, or both)."
+        )
     out_dir = output_dir_for(docx)
     stem = _stem(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"
-    lw_export = out_dir / "previews" / "lw" if export else None
-    dsk_export = out_dir / "previews" / "dsk" if export else None
+    lw_export = out_dir / "previews" / "lw" if export and lw_src else None
+    dsk_export = out_dir / "previews" / "dsk" if export and dsk_src else None
     if lw_export:
         lw_export.mkdir(parents=True, exist_ok=True)
     if dsk_export:
         dsk_export.mkdir(parents=True, exist_ok=True)
-    lw_result = generate_deck(lw_slides, masters["lw"]["template"], lw_path, lw_export)
-    dsk_result = generate_deck(dsk_slides, masters["dsk"]["template"], dsk_path, dsk_export)
-    return out_dir, lw_path, dsk_path, lw_result, dsk_result
+    lw_result = generate_deck(lw_slides, lw_src, lw_path, lw_export) if lw_src else dict(_SKIPPED_DECK)
+    dsk_result = generate_deck(dsk_slides, dsk_src, dsk_path, dsk_export) if dsk_src else dict(_SKIPPED_DECK)
+    return (
+        out_dir,
+        lw_path if lw_src else None,
+        dsk_path if dsk_src else None,
+        lw_result,
+        dsk_result,
+    )

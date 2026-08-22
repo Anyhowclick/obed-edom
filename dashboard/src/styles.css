@@ -109,6 +109,20 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
 .well.over { border-color: var(--ok); }
 .well p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
 .well strong { display: block; }
+.well.keynote {
+  border-color: #5b8ec9;
+  background: #152a42;
+}
+.well.keynote.over { border-color: #8eb8e8; background: #1a3554; }
+.well.keynote strong { color: #c5dcff; }
+.well.document {
+  border-color: #d9b36a;
+  background: #2a2114;
+}
+.well.document.over { border-color: #f0d08a; background: #3a2c18; }
+.well.document strong { color: #f3ddaa; }
+.well-tone-keynote .btn.secondary { border-color: #5b8ec9; color: #c5dcff; }
+.well-tone-document .btn.secondary { border-color: #d9b36a; color: #f3ddaa; }
 
 .btn {
   background: #d9b36a;
@@ -271,6 +285,28 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
 .session-row.active .session-del,
 .session-del:hover { color: var(--err); border-color: var(--err); }
 .library-detail { min-width: 0; }
+.library-detail .playlist-bar {
+  margin: 0;
+  padding-inline: 0;
+  top: 0;
+}
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.history-head h1 { margin: 0; }
+.btn.delete-all {
+  flex-shrink: 0;
+  background: linear-gradient(180deg, #e07a72 0%, #c44a42 100%);
+  color: #fff8f4;
+  box-shadow: 0 0 0 1px rgba(255, 170, 160, 0.28);
+}
+.btn.delete-all:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ee8a82 0%, #d2554c 100%);
+}
 .path-note { overflow-wrap: anywhere; }
 .pane.off { display: none; }
 

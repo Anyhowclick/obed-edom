@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from obed_edom.parse_outline import parse_outline
 from obed_edom.slide_map import map_slides
 from obed_edom.validate import validate_inspect, validate_slide_specs, validate_style_text
@@ -24,7 +25,10 @@ def test_trinity_lowercase_god():
 
 
 def test_continued_dsk_verse_overflow_is_flagged():
-    offering = parse_outline(OUTLINES / "Offering JX.docx")
+    offering_path = OUTLINES / "Offering JX.docx"
+    if not offering_path.is_file():
+        pytest.skip("Missing operator outline Offering JX.docx (Sermon Outlines/ is gitignored)")
+    offering = parse_outline(offering_path)
     lw, dsk, _ = map_slides(offering)
     flags = validate_slide_specs(lw, dsk)
     overflow = [f for f in flags if f.category == "overflow"]

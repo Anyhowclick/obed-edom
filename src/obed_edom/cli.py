@@ -28,6 +28,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip PNG export and contrast checks.",
     )
+    gen.add_argument(
+        "--lw-template",
+        type=Path,
+        help="LW Keynote template (.key). Omit to skip the LW deck. At least one of --lw-template / --dsk-template is required unless a local Default Templates file exists.",
+    )
+    gen.add_argument(
+        "--dsk-template",
+        type=Path,
+        help="DSK Keynote template (.key). Omit to skip the DSK deck. At least one of --lw-template / --dsk-template is required unless a local Default Templates file exists.",
+    )
     dash = sub.add_parser("dashboard", help="Run the local operator dashboard.")
     dash.add_argument("--host", default="127.0.0.1")
     dash.add_argument("--port", type=int, default=8765)
@@ -73,11 +83,18 @@ def main(argv: list[str] | None = None) -> int:
         if not args.docx.exists():
             print(f"File not found: {args.docx}", file=sys.stderr)
             return 1
-        result = generate(
-            args.docx,
-            make_keynote=not args.no_keynote,
-            check_visuals=not args.no_keynote and not args.no_contrast,
-        )
+        try:
+            result = generate(
+                args.docx,
+                make_keynote=not args.no_keynote,
+                check_visuals=not args.no_keynote and not args.no_contrast,
+                lw_template=args.lw_template,
+                dsk_template=args.dsk_template,
+                only_provided=args.lw_template is not None or args.dsk_template is not None,
+            )
+        except FileNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         print(f"Output: {result.output_dir}")
         print(f"Review: {result.review_path}")
         if result.lw_key:
