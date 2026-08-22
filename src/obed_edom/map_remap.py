@@ -552,17 +552,24 @@ def map_rect_from_slide(slide: dict) -> Rect | None:
 
 
 def primary_map_rect(items: Iterable[dict]) -> Rect | None:
-    """Largest white/base map piece — the affine origin, not the union of overlays."""
+    """Largest white/base map piece — the affine origin, not the union of overlays.
+
+    LED panel tiles are excluded even though they are named `map BG.png` and so
+    pass is_map_item. A 1920x1080 tile outweighs real map art on area, and taking
+    it as the origin puts the whole affine on a backdrop: on one wall deck that
+    made the base map (0,0,1920,1080) instead of the Asia art at 1364x947, which
+    pushed every pin about 2500px from where the finished CG has it.
+    """
+    candidates = [it for it in items if is_map_item(it) and not is_chrome_bg(it)]
     large = [
         it
-        for it in items
-        if is_map_item(it) and _f(it.get("w")) >= MAP_LAYER_MIN_W and _f(it.get("h")) >= MAP_LAYER_MIN_H
+        for it in candidates
+        if _f(it.get("w")) >= MAP_LAYER_MIN_W and _f(it.get("h")) >= MAP_LAYER_MIN_H
     ]
     if not large:
-        named = [it for it in items if is_map_item(it)]
-        if not named:
+        if not candidates:
             return None
-        named.sort(key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
+        named = sorted(candidates, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
         return item_rect(named[0])
     large.sort(key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
     return item_rect(large[0])

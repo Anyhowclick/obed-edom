@@ -265,6 +265,30 @@ def test_two_layout_groups_do_not_share_an_affine():
     assert len(grouped) == 2
 
 
+def test_led_panel_tiles_are_not_the_base_map():
+    """`map BG.png` passes is_map_item, but a 1920x1080 panel tile is a backdrop.
+
+    It outweighs real map art on area, so taking it as the affine origin put a
+    whole deck's pins about 2500px from where the finished CG has them.
+    """
+    from obed_edom.map_remap import primary_map_rect
+
+    items = [
+        _item(kind="image", fileName="Data/map BG-39230.png", x=0, y=0, w=1920, h=1080),
+        _item(kind="image", fileName="Data/map BG-39231.png", x=5760, y=0, w=1920, h=1080),
+        _item(kind="image", fileName="pasted-image.pdf", x=3258, y=-69, w=1364, h=947),
+    ]
+    assert primary_map_rect(items) == Rect(3258, -69, 1364, 947)
+
+
+def test_full_wall_map_art_is_still_eligible():
+    """A wall-spanning map named `map BG` is art, not a panel tile."""
+    from obed_edom.map_remap import primary_map_rect
+
+    items = [_item(kind="image", fileName="Data/map BG-1.png", x=0, y=0, w=7680, h=1080)]
+    assert primary_map_rect(items) == Rect(0, 0, 7680, 1080)
+
+
 def test_classifies_pasted_map_art():
     assert is_map_item(_item(kind="image", fileName="pasted-image.pdf", w=1248, h=771))
     assert not is_map_item(_item(kind="image", fileName="pasted-image.pdf", w=20000, h=14934))
