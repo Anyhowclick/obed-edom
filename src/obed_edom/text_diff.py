@@ -340,6 +340,43 @@ def _near_reference(tokens: list[str], start: int, end: int) -> bool:
     return False
 
 
+BLOCK_MIN_TOKENS = 3
+
+
+def _longest_common_run(a: list[str], b: list[str]) -> tuple[int, int, int] | None:
+    best = (0, 0, 0)
+    prev = [0] * (len(b) + 1)
+    for i, x in enumerate(a, 1):
+        cur = [0] * (len(b) + 1)
+        for j, y in enumerate(b, 1):
+            if x == y:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best[2]:
+                    best = (i - cur[j], j - cur[j], cur[j])
+        prev = cur
+    return best if best[2] else None
+
+
+def _restacked(a: list[str], b: list[str]) -> bool:
+    """Do both decks hold the same blocks, only stacked in a different order?
+
+    The wall leads with the verse and the lower third with the point title, so
+    whole blocks swap places. Peel off the longest run the two share until
+    nothing is left: when every block was a phrase, this is layout. A sentence
+    rewritten from its own words leaves only stray one and two token runs, and
+    stays a wording difference.
+    """
+    left, right = list(a), list(b)
+    while left and right:
+        run = _longest_common_run(left, right)
+        if run is None or run[2] < BLOCK_MIN_TOKENS:
+            return False
+        start_a, start_b, size = run
+        del left[start_a : start_a + size]
+        del right[start_b : start_b + size]
+    return not left and not right
+
+
 def classify_text_diff(
     left: str,
     right: str,
@@ -447,6 +484,13 @@ def classify_text_diff(
             return TextFinding(
                 "text.order",
                 f"Scripture label sits in a different place. {left_label}: {_brief(left, 90)} / "
+                f"{right_label}: {_brief(right, 90)}",
+                default="info",
+            )
+        if _restacked(canon_a, canon_b):
+            return TextFinding(
+                "text.order",
+                f"The same copy is stacked in a different order. {left_label}: {_brief(left, 90)} / "
                 f"{right_label}: {_brief(right, 90)}",
                 default="info",
             )
