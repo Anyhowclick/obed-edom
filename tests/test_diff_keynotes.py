@@ -192,7 +192,7 @@ def test_same_type_still_index_pairs_and_heatmaps(tmp_path):
     assert result["pairs"][0].get("heatPng")
     diffs = [f for f in result["flags"] if f.category == "diff"]
     assert any("Photo" in f.message or "layout differs" in f.message for f in diffs)
-    assert all(not getattr(f, "evidence", None) for f in diffs if (f.rule or "").startswith("photo."))
+    assert all(not getattr(f, "evidence", None) for f in diffs if f.rule == "photo.differs")
 
 
 def test_mixed_image_crop_flags_flipped_photo(tmp_path):
@@ -226,7 +226,9 @@ def test_mixed_image_crop_flags_flipped_photo(tmp_path):
     assert result["sameType"] is False
     assert any(f.message == "Photo is flipped." or "Photo is flipped" in f.message for f in diffs)
     assert result["pairs"][0].get("heatPng")
-    assert all(not getattr(f, "evidence", None) for f in diffs if (f.rule or "").startswith("photo."))
+    flipped = [f for f in diffs if f.rule == "photo.flipped"]
+    assert flipped
+    assert flipped[0].evidence
 
 
 def test_wall_duplicated_verse_is_not_a_wording_diff(tmp_path):
@@ -1017,3 +1019,91 @@ def test_ocr_unavailable_and_count_stay_deck_wide():
     )
     assert len(leftover) == 2
     assert pairs[0]["flags"] == []
+
+
+def test_carried_point_title_is_info_not_wording(tmp_path):
+    verse = (
+        "18 Some men came carrying a paralyzed man on a mat and tried to take him "
+        "into the house to lay him before Jesus."
+    )
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [
+            _slide(1, "3\nFaith"),
+            _slide(2, f"Luke 5\n{verse}\n3\nFaith"),
+        ],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [
+            _slide(1, "Your Faith"),
+            _slide(2, f"Luke 5\n{verse}"),
+        ],
+    }
+    result = compare_inspects(
+        left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK"
+    )
+    title_pair = next(p for p in result["pairs"] if p.get("leftNumber") == 1)
+    assert title_pair.get("rightNumber") == 1
+    assert any(f.rule == "text.word" for f in (title_pair.get("flags") or []))
+    verse_pair = next(p for p in result["pairs"] if p.get("leftNumber") == 2)
+    assert verse_pair.get("rightNumber") == 2
+    rules = [f.rule for f in (verse_pair.get("flags") or []) if f.category == "diff"]
+    assert "text.word" not in rules
+    assert "text.point_carry" in rules
+
+
+def test_carried_title_still_strips_when_verse_uses_the_word(tmp_path):
+    verse = '20 When Jesus saw their faith, He said, "Friend, your sins are forgiven."'
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [
+            _slide(1, "3\nFaith"),
+            _slide(2, f"Luke 5\n{verse}\nFaith"),
+        ],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [
+            _slide(1, "Your Faith"),
+            _slide(2, f"Luke 5\n{verse}"),
+        ],
+    }
+    result = compare_inspects(
+        left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK"
+    )
+    verse_pair = next(p for p in result["pairs"] if p.get("leftNumber") == 2)
+    rules = [f.rule for f in (verse_pair.get("flags") or []) if f.category == "diff"]
+    assert "text.word" not in rules
+    assert "text.point_carry" in rules
+
+
+def test_recap_list_is_not_a_carried_title(tmp_path):
+    left = {
+        "path": str(tmp_path / "Sermon_LW.key"),
+        "slideWidth": 3840,
+        "slides": [
+            _slide(1, "3\nFaith"),
+            _slide(2, "4\nSpiritual Actions"),
+            _slide(3, "Overall Consecration\nSpiritual Actions\nFaith\nPrayer\nPraise and Worship"),
+        ],
+    }
+    right = {
+        "path": str(tmp_path / "Sermon_DSK.key"),
+        "slideWidth": 1920,
+        "slides": [
+            _slide(1, "Your Faith"),
+            _slide(2, "Spiritual Actions"),
+            _slide(3, "Overall Consecration"),
+        ],
+    }
+    result = compare_inspects(
+        left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK"
+    )
+    recap = next(p for p in result["pairs"] if p.get("leftNumber") == 3)
+    rules = [f.rule for f in (recap.get("flags") or []) if f.category == "diff"]
+    assert "text.point_carry" not in rules

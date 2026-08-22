@@ -17,14 +17,14 @@ from obed_edom.inspect import (
     slide_plain_text,
 )
 from obed_edom.models import Flag
-from obed_edom.rendered import CENTER_WALL, center_wall_box, render_slide
+from obed_edom.rendered import CENTER_WALL, center_wall_box, point_number_lines, render_slide
 from obed_edom.text_diff import (
+    BIBLE_BOOK_WORDS,
     classify_text_diff,
     collapse_repeat as _collapse_repeat,
     comparable_tokens,
     fingerprint,
     is_rotation as _is_rotation,
-    standalone_numbers,
     text_score,
     texts_equivalent,
 )
@@ -154,7 +154,9 @@ def _pair_quality(
             return score
     if _token_count(left_slide) > SHORT_TITLE_TOKENS and _token_count(right_slide) > SHORT_TITLE_TOKENS:
         return score
-    if not _image_items(left_slide) or not _image_items(right_slide):
+    from obed_edom.photo_regions import content_regions  # noqa: PLC0415
+
+    if not content_regions(left_slide, left_size) or not content_regions(right_slide, right_size):
         return score
     lb = _cached_bits(left_bits, li, left_slide, left_map.get(li), left_size)
     rb = _cached_bits(right_bits, ri, right_slide, right_map.get(ri), right_size)
@@ -438,6 +440,79 @@ def build_repeat_indices(
     return repeats
 
 
+_POINT_TITLE_TOKENS = 6
+_TITLE_FILLER = {"and", "or", "the", "a", "an", "to", "of", "your"}
+
+
+def point_title_keys(slides: list[dict]) -> list[str]:
+    """Normalised titles from short PRE slides (point number plus a few words)."""
+    titles: list[str] = []
+    seen: set[str] = set()
+    for slide in slides:
+        if _skipped(slide):
+            continue
+        tokens = comparable_tokens(slide_plain_text(slide))
+        if tokens and re.fullmatch(r"\d{1,2}", tokens[0] or ""):
+            tokens = tokens[1:]
+        if not tokens or len(tokens) > _POINT_TITLE_TOKENS:
+            continue
+        if tokens[0].lower().strip("()") in BIBLE_BOOK_WORDS:
+            continue
+        key = " ".join(t.lower() for t in tokens)
+        if key and key not in seen:
+            seen.add(key)
+            titles.append(key)
+    return titles
+
+
+def strip_carried_point_title(lw_text: str, dsk_text: str, titles: list[str]) -> tuple[str, str | None]:
+    """Drop LW lines that are a carried PRE title, but only on verse slides.
+
+    The point slide itself is left alone so "Faith" vs "Your Faith" still flags.
+    A title word that also appears inside the verse ("saw their faith") is not
+    a reason to keep the standalone title line.
+    """
+    if not titles:
+        return lw_text, None
+    title_set = set(titles)
+    title_tokens = [set(title.split()) for title in titles]
+    dsk_lines = {fingerprint(line) for line in dsk_text.split("\n") if line.strip()}
+
+    def line_title(line: str) -> str | None:
+        tokens = [t.lower() for t in comparable_tokens(line)]
+        if tokens and re.fullmatch(r"\d{1,2}", tokens[0] or ""):
+            tokens = tokens[1:]
+        if not tokens:
+            return None
+        folded = " ".join(tokens)
+        if folded in title_set:
+            return folded
+        words = set(tokens)
+        for title, wanted in zip(titles, title_tokens):
+            if words <= wanted and not words <= _TITLE_FILLER:
+                return title
+        return None
+
+    lines = lw_text.split("\n")
+    kept: list[str] = []
+    stripped: list[tuple[str, str]] = []
+    for line in lines:
+        title = line_title(line)
+        if title and fingerprint(line) not in dsk_lines:
+            stripped.append((line.strip() or title, title))
+            continue
+        kept.append(line)
+    if not stripped:
+        return lw_text, None
+    if len({title for _, title in stripped}) > 1:
+        return lw_text, None
+    rest_tokens = [t for t in comparable_tokens("\n".join(kept)) if not re.fullmatch(r"\d{1,2}", t)]
+    if len(rest_tokens) < 6:
+        return lw_text, None
+    label = next((text for text, _ in stripped if text and not re.fullmatch(r"\d{1,2}", text)), stripped[0][0])
+    return "\n".join(kept), label
+
+
 def visual_diff(a_png: Path, b_png: Path, out_png: Path, threshold: int = 18) -> dict:
     a = open_rgb(a_png)
     b = open_rgb(b_png)
@@ -577,6 +652,11 @@ def _slide_probe(slide: dict, png: Path, slide_size: tuple[float, float]) -> Ima
         im = open_rgb(png)
     except OSError:
         return None
+    from obed_edom.photo_regions import largest_region_crop  # noqa: PLC0415
+
+    region = largest_region_crop(slide, im, slide_size)
+    if region is not None:
+        return region
     items = [
         it
         for it in content_photos(slide, slide_size)
@@ -742,6 +822,7 @@ def image_item_diff(
     *,
     extra_rights: list[tuple[dict, Path, tuple[float, float]]] | None = None,
     hamming_limit: int = IMAGE_HAMMING,
+    skip_full_frame: bool = False,
 ) -> dict:
     """Compare photo items after cropping; ignores full-frame layout chrome."""
     left_im, left_crops = _photo_crops(left_slide, left_png, left_size)
@@ -752,7 +833,7 @@ def image_item_diff(
         right_crops.extend(extra_crops)
         right_has_text = right_has_text or _has_text(extra_slide)
     if not left_crops or not right_crops:
-        if _has_text(left_slide) or right_has_text:
+        if skip_full_frame or _has_text(left_slide) or right_has_text:
             return {"visual": False, "maxDelta": 0, "changedRatio": 0.0, "kind": "images", "reason": ""}
         left_im = crop_center_wall(left_im, left_size[0], left_size[1])
         right_im = crop_center_wall(right_im, right_size[0], right_size[1])
@@ -1043,6 +1124,10 @@ def compare_inspects(
         if li is not None and _right_indexes(raw_ri)
     }
     build_repeats = build_repeat_indices(left_slides, matched_left) if not same_type else set()
+    point_titles = point_title_keys(left_slides) if not same_type else []
+    evidence_dir = heat_dir.parent / "evidence"
+    if check:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
 
     pairs = []
     for li, raw_ri, score in slots:
@@ -1201,27 +1286,47 @@ def compare_inspects(
         pair["ocr"] = a_render.ocr_used or any(r.ocr_used for r in b_renders)
         a_mark = pair.get("leftMarkup") or ""
         b_mark = pair.get("rightMarkup") or ""
+        compare_text = a_text
+        carried = None
+        if point_titles:
+            compare_text, carried = strip_carried_point_title(a_text, b_text, point_titles)
         finding = classify_text_diff(
-            a_text,
+            compare_text,
             b_text,
             left_label,
             right_label,
-            ignore_left_tokens=standalone_numbers(a_text),
+            ignore_left_tokens=point_number_lines(compare_text),
         )
-        if finding:
+        if carried:
             _add_flag(
                 pair_flags,
                 flags,
                 make_flag(
-                    finding.rule,
+                    "text.point_carry",
                     "diff",
-                    finding.message,
-                    default=finding.default,
+                    f'LW keeps the point title "{carried}" on this verse slide; '
+                    "the DSK verse slide does not.",
+                    default="info",
                     location=loc,
                     slide=left_num,
                     deck="lw",
                 ),
             )
+        copy_warning = False
+        if finding:
+            text_flag = make_flag(
+                finding.rule,
+                "diff",
+                finding.message,
+                default=finding.default,
+                location=loc,
+                slide=left_num,
+                deck="lw",
+            )
+            if text_flag:
+                _add_flag(pair_flags, flags, text_flag)
+                if text_flag.severity in {"warning", "error"}:
+                    copy_warning = True
         elif _highlighted_words(a_mark) and _highlighted_words(a_mark) != _highlighted_words(b_mark):
             _add_flag(
                 pair_flags,
@@ -1253,6 +1358,55 @@ def compare_inspects(
             for (i, slide), png in zip(extra_hits, right_png_paths[1:])
             if png is not None
         ]
+        region_hits = []
+        video_pair = bool(
+            left_png
+            and right_png
+            and (
+                left_png.suffix.lower() in PREVIEW_VIDEO_SUFFIXES
+                or right_png.suffix.lower() in PREVIEW_VIDEO_SUFFIXES
+            )
+        )
+        if left_png and right_png and not same_type and not video_pair:
+            from obed_edom.photo_regions import compare_slide_regions  # noqa: PLC0415
+
+            region_hits = compare_slide_regions(
+                ls,
+                [slide for _, slide in right_hits],
+                left_png,
+                list(right_png_paths),
+                left_size,
+                right_size,
+                evidence_dir,
+                pair_i,
+            )
+            shown_regions = []
+            for region in region_hits:
+                if copy_warning and region.rule in {"photo.region", "photo.marker", "photo.framing"}:
+                    continue
+                shown_regions.append(region)
+                _add_flag(
+                    pair_flags,
+                    flags,
+                    make_flag(
+                        region.rule,
+                        "diff",
+                        region.message,
+                        default=region.default,
+                        location=loc,
+                        slide=left_num,
+                        deck="lw",
+                        evidence=region.evidence,
+                    ),
+                )
+            first_evidence = next((r.evidence for r in shown_regions if r.evidence), "")
+            if first_evidence:
+                src = evidence_dir / first_evidence
+                if src.is_file():
+                    heat_dir.mkdir(parents=True, exist_ok=True)
+                    dest = heat_dir / first_evidence
+                    dest.write_bytes(src.read_bytes())
+                    pair["heatPng"] = first_evidence
         photo_findings = photo_findings_for_pair(
             ls,
             [slide for _, slide in right_hits],
@@ -1262,6 +1416,8 @@ def compare_inspects(
             right_size,
         )
         for photo in photo_findings:
+            if region_hits and photo.rule == "photo.count":
+                continue
             _add_flag(
                 pair_flags,
                 flags,
@@ -1275,8 +1431,8 @@ def compare_inspects(
                     deck="lw",
                 ),
             )
-        if left_png and right_png and not photo_findings:
-            if left_png.suffix.lower() in PREVIEW_VIDEO_SUFFIXES or right_png.suffix.lower() in PREVIEW_VIDEO_SUFFIXES:
+        if left_png and right_png and not photo_findings and not region_hits:
+            if video_pair:
                 pair["flags"] = pair_flags
                 pairs.append(pair)
                 continue
@@ -1293,12 +1449,13 @@ def compare_inspects(
                     right_size,
                     heat,
                     extra_rights=extra_photo or None,
+                    skip_full_frame=True,
                 )
             pair["visual"] = vis
             if vis.get("heatmap"):
                 pair["heatPng"] = Path(str(vis["heatmap"])).name
             if vis.get("visual"):
-                same_copy = finding is None
+                same_copy = not copy_warning
                 if vis.get("reason") == "flipped":
                     rule, message, default = "photo.flipped", "Photo is flipped.", "warning"
                 elif same_type:
@@ -1331,7 +1488,6 @@ def compare_inspects(
         pairs.append(pair)
 
     if check:
-        evidence_dir = heat_dir.parent / "evidence"
         left_text = {i: shot.text for i, shot in left_shots.items()}
         right_text = {i: shot.text for i, shot in right_shots.items()}
         left_ocr = {i: shot.ocr for i, shot in left_shots.items() if getattr(shot, "ocr_used", False)}
