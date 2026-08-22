@@ -163,12 +163,16 @@ def render_slide(
     )
 
 
-def point_number_lines(rendered: RenderedSlide) -> set[str]:
+def point_number_lines(source: RenderedSlide | str) -> set[str]:
     """Standalone point numbers, e.g. the '3' beside a Faith title on the wall.
 
     LW carries them; the DSK lower third does not. They are layout, not copy.
     """
-    return {ln.strip() for ln in rendered.lines if _STANDALONE_NUMBER.match(ln.strip())}
+    if isinstance(source, RenderedSlide):
+        lines = source.lines
+    else:
+        lines = (source or "").split("\n")
+    return {ln.strip() for ln in lines if _STANDALONE_NUMBER.match(ln.strip())}
 
 
 def ocr_unavailable() -> str | None:

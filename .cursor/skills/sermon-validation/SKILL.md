@@ -51,10 +51,14 @@ Every `Flag` carries a stable `rule` id, plus `slide`, `deck` and an optional
 | `text.order` | Reference label sits above the body on one deck, below on the other |
 | `text.verse_split` | The wall carries verses the paired DSK slide does not |
 | `text.unreadable` | Neither extraction nor OCR found text on one side |
+| `text.point_carry` | LW still shows the PRE point title on a verse slide; the paired DSK verse does not |
 | `photo.source` | Paired photos come from different `fileName`s (dated or reshot image) |
 | `photo.rotated` | `rotation` differs between the decks |
 | `photo.flipped` | Mirror image, detected by flip hash |
 | `photo.count` / `photo.differs` | Photo counts differ; pixel fallback when copy already matched |
+| `photo.region` | Localised edit inside a pasted screenshot (blur patch, redrawn area) |
+| `photo.marker` | Highlight box or circle added, moved or recoloured |
+| `photo.framing` | Same picture, framed or cropped differently |
 | `diff.count` / `diff.missing` / `diff.unmatched` / `diff.skip_mismatch` | Pairing |
 | `bounds.straddles` | Object crosses a wall boundary, so it is visibly cut. Carries evidence |
 | `bounds.offcanvas` | Object sits outside the canvas |

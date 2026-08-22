@@ -39,6 +39,8 @@ rules:
   text.verse_split: info
   # One side has no readable text at all, usually a preview that failed to OCR.
   text.unreadable: off
+  # Magic Move keeps the PRE title on the wall while the verse changes.
+  text.point_carry: info
 
   # Photos
   photo.source: warning
@@ -48,6 +50,12 @@ rules:
   # Only fires when the copy already matched, so it is the last line of defence
   # for a reshot, flipped or tilted image whose tilt is baked into the file.
   photo.differs: warning
+  # Localised edit inside a pasted screenshot (blur patch, redrawn area).
+  photo.region: warning
+  # Highlight box or circle added, moved or recoloured.
+  photo.marker: warning
+  # Same picture, framed or cropped differently. Not a content edit.
+  photo.framing: info
 
   # Pairing
   diff.count: info
@@ -87,11 +95,15 @@ titles:
   text.order: Text Order
   text.verse_split: Text Verse Split
   text.unreadable: Text Unreadable
+  text.point_carry: Point Title Carry
   photo.source: Photo Source
   photo.rotated: Photo Rotated
   photo.flipped: Photo Flipped
   photo.count: Photo Count
   photo.differs: Photo Differs
+  photo.region: Photo Region
+  photo.marker: Photo Marker
+  photo.framing: Photo Framing
   diff.count: Diff Count
   diff.missing: Diff Missing
   diff.unmatched: Diff Unmatched
