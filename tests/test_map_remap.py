@@ -345,13 +345,23 @@ def test_same_size_overlays_keep_deck_order_because_z_is_unreadable():
 
 
 def test_resolve_slide_range_single_and_span():
-    from obed_edom.map_remap import MVP_MAP_SLIDE, resolve_slide_range
+    from obed_edom.map_remap import resolve_slide_range
 
     assert resolve_slide_range(2, None) == (2, 2)
     assert resolve_slide_range(None, 2) == (2, 2)
     assert resolve_slide_range(1, 9) == (1, 9)
+    # Nothing asked for means the whole deck, not a default slide.
     assert resolve_slide_range(None, None) is None
-    assert resolve_slide_range(None, None, default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE)) == (2, 2)
+    assert resolve_slide_range(None, None, default=(2, 2)) == (2, 2)
+
+
+def test_no_slide_selection_plans_every_slide():
+    """The resizer used to default to slide 2, where the map lived by convention."""
+    from obed_edom.map_remap import resolve_slides, wants_slide
+
+    assert resolve_slides(spec=None, range_from=None, range_to=None) is None
+    for number in (1, 2, 7, 158):
+        assert wants_slide(number, None)
 
 
 def test_parse_slide_spec_lists_and_gaps():

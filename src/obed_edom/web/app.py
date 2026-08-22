@@ -32,7 +32,7 @@ from obed_edom.diff_keynotes import (
     slots_from_pairs,
 )
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
-from obed_edom.map_remap import MVP_MAP_SLIDE, format_slide_range, resolve_slides
+from obed_edom.map_remap import format_slide_range, resolve_slides
 from obed_edom.models import Flag
 from obed_edom.outline_check import (
     SemanticOutlineError,
@@ -540,12 +540,13 @@ def create_app() -> FastAPI:
         do_export = export.lower() in {"1", "true", "yes", "on"}
         do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
         try:
+            # No selection means the whole deck. It used to mean slide 2 only,
+            # from when the map lived there by convention.
             sel = resolve_slides(
                 spec=slides or None,
                 range_from=range_from,
                 range_to=range_to,
-                default=(MVP_MAP_SLIDE, MVP_MAP_SLIDE),
-            ) or frozenset({MVP_MAP_SLIDE})
+            )
         except ValueError as err:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
@@ -1224,7 +1225,7 @@ def _run_resize(
     job: Job,
     path: Path,
     template: Path,
-    slide_range: frozenset[int],
+    slide_range: frozenset[int] | None,
     export: bool,
     include_lists: bool = False,
 ) -> dict[str, Any]:

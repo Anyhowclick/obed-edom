@@ -17,8 +17,6 @@ from typing import Any, Iterable
 CG_WIDTH = 1920
 CG_HEIGHT = 1080
 MIN_PIN_PX = 28.0
-# Wall map + pins live on slide 2 of the extracted wall deck.
-MVP_MAP_SLIDE = 2
 
 MAP_NAME_RE = re.compile(r"map\s*bg", re.I)
 PIN_NAME_RE = re.compile(r"pin\s*drop", re.I)

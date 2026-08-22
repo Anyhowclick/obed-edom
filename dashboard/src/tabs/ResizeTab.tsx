@@ -45,7 +45,7 @@ export function ResizeTab() {
   const { job, upsert, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
-  const [range, setRange] = useState("2");
+  const [range, setRange] = useState("");
   const [includeLists, setIncludeLists] = useState(true);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -144,8 +144,13 @@ export function ResizeTab() {
         />
       </div>
       <label className="field">
-        Slide (2 or 2, 4-6)
-        <input type="text" value={range} onChange={(e) => setRange(e.target.value)} placeholder="2, 4-6" />
+        Slides — leave blank for the whole deck
+        <input
+          type="text"
+          value={range}
+          onChange={(e) => setRange(e.target.value)}
+          placeholder="All slides (or 2, or 2, 4-6)"
+        />
       </label>
       <label className="check">
         <input
