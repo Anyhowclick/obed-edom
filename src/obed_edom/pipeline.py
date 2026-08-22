@@ -25,6 +25,9 @@ def generate(
     *,
     make_keynote: bool = True,
     check_visuals: bool = True,
+    lw_template: Path | str | None = None,
+    dsk_template: Path | str | None = None,
+    only_provided: bool = False,
 ) -> GenerationResult:
     docx = Path(docx).expanduser().resolve()
     outline = parse_outline(docx)
@@ -43,9 +46,17 @@ def generate(
 
     if make_keynote:
         out_dir, lw_key, dsk_key, lw_result, dsk_result = generate_both(
-            docx, lw, dsk, export=check_visuals
+            docx,
+            lw,
+            dsk,
+            export=check_visuals,
+            lw_template=lw_template,
+            dsk_template=dsk_template,
+            only_provided=only_provided,
         )
         for result, deck in ((lw_result, "LW"), (dsk_result, "DSK")):
+            if result.get("skipped"):
+                continue
             missing = result.get("missingMasters") or []
             if missing:
                 flags.append(
@@ -88,14 +99,15 @@ def generate(
             dsk_flags, _ = check_contrast(dsk, out_dir / "previews" / "dsk", "dsk")
             flags.extend(dsk_flags)
 
-    if lw_key is None:
-        candidate = out_dir / f"{stem}_LW.key"
-        if candidate.exists():
-            lw_key = candidate
-    if dsk_key is None:
-        candidate = out_dir / f"{stem}_DSK.key"
-        if candidate.exists():
-            dsk_key = candidate
+    if not make_keynote:
+        if lw_key is None:
+            candidate = out_dir / f"{stem}_LW.key"
+            if candidate.exists():
+                lw_key = candidate
+        if dsk_key is None:
+            candidate = out_dir / f"{stem}_DSK.key"
+            if candidate.exists():
+                dsk_key = candidate
 
     write_review(review_path, outline, lw, dsk, flags, lw_key, dsk_key)
     _cleanup_output(out_dir)

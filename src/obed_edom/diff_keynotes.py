@@ -1325,7 +1325,6 @@ def compare_inspects(
                             location=loc,
                             slide=left_num,
                             deck="lw",
-                            evidence=pair.get("heatPng") or "",
                         ),
                     )
         pair["flags"] = pair_flags

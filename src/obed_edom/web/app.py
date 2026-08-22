@@ -163,6 +163,10 @@ def create_app() -> FastAPI:
     def list_jobs(kind: str | None = None, feature: str | None = None) -> dict:
         return {"jobs": [RUNNER.public_dict(j) for j in RUNNER.list(kind, feature)]}
 
+    @app.delete("/api/jobs")
+    def delete_all_jobs() -> dict:
+        return {"ok": True, "deleted": RUNNER.delete_all(purge=True)}
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict:
         job = RUNNER.get(job_id)
@@ -238,7 +242,19 @@ def create_app() -> FastAPI:
         return FileResponse(path)
 
     @app.post("/api/generate")
-    async def generate_endpoint(files: list[UploadFile] = File(...)) -> dict:
+    async def generate_endpoint(
+        files: list[UploadFile] = File(...),
+        lw_template: str = Form(""),
+        dsk_template: str = Form(""),
+    ) -> dict:
+        lw_path = Path(lw_template.strip()).expanduser() if lw_template.strip() else None
+        dsk_path = Path(dsk_template.strip()).expanduser() if dsk_template.strip() else None
+        if lw_path is None and dsk_path is None:
+            raise HTTPException(400, "At least one Keynote template is required (LW, DSK, or both).")
+        if lw_path is not None and not lw_path.exists():
+            raise HTTPException(400, f"LW template not found: {lw_template}")
+        if dsk_path is not None and not dsk_path.exists():
+            raise HTTPException(400, f"DSK template not found: {dsk_template}")
         saved: list[Path] = []
         batch = UPLOADS / str(uuid4())[:8]
         batch.mkdir(parents=True, exist_ok=True)
@@ -251,7 +267,11 @@ def create_app() -> FastAPI:
             saved.append(dest)
         jobs = []
         for path in saved:
-            job = RUNNER.submit("generate", lambda j, p=path: _run_generate(j, p), feature="generate")
+            job = RUNNER.submit(
+                "generate",
+                lambda j, p=path, lw=lw_path, dsk=dsk_path: _run_generate(j, p, lw, dsk),
+                feature="generate",
+            )
             jobs.append(job.to_dict())
         return {"jobs": jobs}
 
@@ -495,12 +515,35 @@ def _safe_file(folder: Path, filename: str) -> Path:
     raise HTTPException(404, filename)
 
 
-def _run_generate(job: Job, docx: Path) -> dict[str, Any]:
+def _run_generate(
+    job: Job, docx: Path, lw_template: Path | None, dsk_template: Path | None
+) -> dict[str, Any]:
     job.log(f"Generating from {docx.name}…")
-    result = generate(docx)
+    if lw_template:
+        job.log(f"LW template: {lw_template.name}.")
+    else:
+        job.log("Skipping LW (no template).")
+    if dsk_template:
+        job.log(f"DSK template: {dsk_template.name}.")
+    else:
+        job.log("Skipping DSK (no template).")
+    result = generate(
+        docx,
+        lw_template=lw_template,
+        dsk_template=dsk_template,
+        only_provided=True,
+    )
     lw_prev = result.output_dir / "previews" / "lw"
     dsk_prev = result.output_dir / "previews" / "dsk"
     job.log(f"Output {result.output_dir}")
+    previews: dict[str, str] = {}
+    preview_files: dict[str, list[str]] = {"lw": [], "dsk": []}
+    if result.lw_key:
+        previews["lw"] = str(lw_prev)
+        preview_files["lw"] = preview_names(lw_prev)
+    if result.dsk_key:
+        previews["dsk"] = str(dsk_prev)
+        preview_files["dsk"] = preview_names(dsk_prev)
     return {
         "stem": docx.stem.replace(" ", "_"),
         "source": str(docx),
@@ -509,14 +552,13 @@ def _run_generate(job: Job, docx: Path) -> dict[str, Any]:
         "dskKey": str(result.dsk_key) if result.dsk_key else None,
         "cuedDocx": str(result.cued_docx) if result.cued_docx else None,
         "reviewPath": str(result.review_path) if result.review_path else None,
-        "previews": {"lw": str(lw_prev), "dsk": str(dsk_prev)},
-        "previewFiles": {
-            "lw": preview_names(lw_prev),
-            "dsk": preview_names(dsk_prev),
-        },
+        "previews": previews,
+        "previewFiles": preview_files,
         "flags": serialize_flags(result.flags),
-        "lwCount": len(result.lw_slides),
-        "dskCount": len(result.dsk_slides),
+        "lwCount": len(result.lw_slides) if result.lw_key else 0,
+        "dskCount": len(result.dsk_slides) if result.dsk_key else 0,
+        "lwTemplate": str(lw_template) if lw_template else None,
+        "dskTemplate": str(dsk_template) if dsk_template else None,
     }
 
 

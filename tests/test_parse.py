@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from docx.oxml.ns import qn
 from obed_edom.annotate import annotate_outline, extract_operator_cues
 from obed_edom.bible import _parse_gateway_html, check_bible, fetch_passage
@@ -11,6 +12,11 @@ from obed_edom.slide_map import _split_styled_runs, map_slides
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTLINES = ROOT / "Sermon Outlines"
+_NEED = ["Sermon BC.docx", "Offering JX.docx", "Offering JX_EXPECTED_RESULT.docx"]
+pytestmark = pytest.mark.skipif(
+    not all((OUTLINES / name).is_file() for name in _NEED),
+    reason="Sermon Outlines/ fixtures are local operator files (gitignored)",
+)
 
 
 def test_sermon_cues():

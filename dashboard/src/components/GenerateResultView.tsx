@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { previewUrl, reveal, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
 import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
@@ -26,16 +26,6 @@ function present(job: Job, label: string): boolean {
 export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: string) => void }) {
   const [deck, setDeck] = useState<"lw" | "dsk">("lw");
   const result = (job.result || null) as GenResult | null;
-  const urls = useMemo(() => {
-    if (!result) return [];
-    const names = result.previewFiles?.[deck] || [];
-    const previewLabel = deck === "lw" ? "LW previews" : "DSK previews";
-    if (!present(job, previewLabel)) return [];
-    return names.map((name, i) => ({
-      src: previewUrl(job.id, deck, name),
-      label: `${deck.toUpperCase()} ${i + 1}`,
-    }));
-  }, [job, result, deck]);
 
   function jumpToSlide(location: string) {
     if (!result) return;
@@ -51,10 +41,28 @@ export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: st
   if (job.status === "error") return <p className="err">{job.error}</p>;
   if (!result || job.status !== "done") return null;
 
+  const hasLw = Boolean(result.lwKey) || (result.previewFiles?.lw || []).length > 0;
+  const hasDsk = Boolean(result.dskKey) || (result.previewFiles?.dsk || []).length > 0;
+  const shown = deck === "lw" && !hasLw && hasDsk ? "dsk" : deck === "dsk" && !hasDsk && hasLw ? "lw" : deck;
+  const names = result.previewFiles?.[shown] || [];
+  const previewLabel = shown === "lw" ? "LW previews" : "DSK previews";
+  const generated = shown === "lw" ? hasLw : hasDsk;
+  const urls =
+    generated && present(job, previewLabel) && names.length
+      ? names.map((name, i) => ({
+          src: previewUrl(job.id, shown, name),
+          label: `${shown.toUpperCase()} ${i + 1}`,
+        }))
+      : [];
+
   return (
     <>
       <p className="note path-note">
-        {result.lwCount} LW · {result.dskCount} DSK · {result.outputDir}
+        {hasLw ? `${result.lwCount} LW` : "No LW"}
+        {" · "}
+        {hasDsk ? `${result.dskCount} DSK` : "No DSK"}
+        {" · "}
+        {result.outputDir}
       </p>
       <div className="actions">
         {result.lwKey && present(job, "LW.key") && (
@@ -78,18 +86,26 @@ export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: st
           </button>
         )}
       </div>
-      <div className="seg">
-        <button type="button" className={deck === "lw" ? "on" : ""} onClick={() => setDeck("lw")}>
-          LW previews
-        </button>
-        <button type="button" className={deck === "dsk" ? "on" : ""} onClick={() => setDeck("dsk")}>
-          DSK previews
-        </button>
-      </div>
+      {(hasLw || hasDsk) && (
+        <div className="seg">
+          {hasLw && (
+            <button type="button" className={shown === "lw" ? "on" : ""} onClick={() => setDeck("lw")}>
+              LW previews
+            </button>
+          )}
+          {hasDsk && (
+            <button type="button" className={shown === "dsk" ? "on" : ""} onClick={() => setDeck("dsk")}>
+              DSK previews
+            </button>
+          )}
+        </div>
+      )}
       {urls.length > 0 ? (
-        <PreviewGrid urls={urls} onOpen={onOpen} columns={deck === "lw" ? LW_PREVIEW_COLS : DSK_PREVIEW_COLS} />
-      ) : (
+        <PreviewGrid urls={urls} onOpen={onOpen} columns={shown === "lw" ? LW_PREVIEW_COLS : DSK_PREVIEW_COLS} />
+      ) : generated ? (
         <p className="note">Previews are missing on disk.</p>
+      ) : (
+        <p className="note">This run did not generate a {shown.toUpperCase()} deck (no template).</p>
       )}
       <ValidationPanel flags={result.flags || []} onJump={jumpToSlide} />
     </>

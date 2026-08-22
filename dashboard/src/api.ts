@@ -72,9 +72,14 @@ export async function reveal(path: string): Promise<void> {
   await fetch("/api/reveal", { method: "POST", body });
 }
 
-export async function generateDocx(files: File[]): Promise<Job[]> {
+export async function generateDocx(
+  files: File[],
+  templates: { lwTemplate?: string; dskTemplate?: string }
+): Promise<Job[]> {
   const body = new FormData();
   for (const file of files) body.append("files", file);
+  if (templates.lwTemplate) body.set("lw_template", templates.lwTemplate);
+  if (templates.dskTemplate) body.set("dsk_template", templates.dskTemplate);
   const res = await fetch("/api/generate", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   const data = await res.json();
@@ -108,6 +113,13 @@ export async function patchJob(id: string, result: Record<string, unknown>): Pro
 export async function deleteJob(id: string): Promise<void> {
   const res = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function deleteAllJobs(): Promise<number> {
+  const res = await fetch("/api/jobs", { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return typeof data.deleted === "number" ? data.deleted : 0;
 }
 
 export async function relocateJob(

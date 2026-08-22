@@ -175,6 +175,14 @@ class JobRunner:
             self._purge_artifacts(job)
         return True
 
+    def delete_all(self, *, purge: bool = True) -> int:
+        ids = [job.id for job in self.list() if job.status in {"done", "error"}]
+        deleted = 0
+        for job_id in ids:
+            if self.delete(job_id, purge=purge):
+                deleted += 1
+        return deleted
+
     def _session_file(self, job_id: str) -> Path:
         return self._session_dir / f"{job_id}.json"
 

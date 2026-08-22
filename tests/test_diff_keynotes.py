@@ -192,6 +192,7 @@ def test_same_type_still_index_pairs_and_heatmaps(tmp_path):
     assert result["pairs"][0].get("heatPng")
     diffs = [f for f in result["flags"] if f.category == "diff"]
     assert any("Photo" in f.message or "layout differs" in f.message for f in diffs)
+    assert all(not getattr(f, "evidence", None) for f in diffs if (f.rule or "").startswith("photo."))
 
 
 def test_mixed_image_crop_flags_flipped_photo(tmp_path):
@@ -225,6 +226,7 @@ def test_mixed_image_crop_flags_flipped_photo(tmp_path):
     assert result["sameType"] is False
     assert any(f.message == "Photo is flipped." or "Photo is flipped" in f.message for f in diffs)
     assert result["pairs"][0].get("heatPng")
+    assert all(not getattr(f, "evidence", None) for f in diffs if (f.rule or "").startswith("photo."))
 
 
 def test_wall_duplicated_verse_is_not_a_wording_diff(tmp_path):

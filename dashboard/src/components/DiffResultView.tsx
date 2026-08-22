@@ -93,7 +93,15 @@ function defaultSplit(): number {
   return 50;
 }
 
-function PairSplit({ pct, onPct }: { pct: number; onPct: (n: number) => void }) {
+function PairSplit({
+  pct,
+  onPct,
+  onActivate,
+}: {
+  pct: number;
+  onPct: (n: number, rowEl?: HTMLElement | null) => void;
+  onActivate?: () => void;
+}) {
   return (
     <div
       className="pair-split"
@@ -106,12 +114,14 @@ function PairSplit({ pct, onPct }: { pct: number; onPct: (n: number) => void }) 
       onPointerDown={(event) => {
         event.preventDefault();
         event.stopPropagation();
+        onActivate?.();
         const parent = event.currentTarget.parentElement?.getBoundingClientRect();
+        const rowEl = event.currentTarget.closest(".diff-row") as HTMLElement | null;
         if (!parent?.width) return;
         const startX = event.clientX;
         const startPct = pct;
         const onMove = (ev: PointerEvent) => {
-          onPct(Math.min(85, Math.max(20, startPct + ((ev.clientX - startX) / parent.width) * 100)));
+          onPct(Math.min(85, Math.max(20, startPct + ((ev.clientX - startX) / parent.width) * 100)), rowEl);
         };
         const onUp = () => {
           document.body.classList.remove("dragging-split");
@@ -289,8 +299,8 @@ export function DiffResultView({
   const pairLayout = leftWide && rightWide ? "lw-lw" : leftWide ? "lw-dsk" : rightWide ? "dsk-lw" : "dsk-dsk";
   const leftPct = split ?? defaultSplit();
 
-  function setSplitPct(next: number) {
-    const row = stackRef.current?.querySelector(".diff-row.on");
+  function setSplitPct(next: number, rowEl?: HTMLElement | null) {
+    const row = rowEl || (stackRef.current?.querySelector(".diff-row.on") as HTMLElement | null);
     if (row) selectedTopRef.current = row.getBoundingClientRect().top;
     setSplit(next);
     try {
@@ -434,7 +444,7 @@ export function DiffResultView({
                   onOpen={onOpen}
                   onDragStart={() => pair.leftIndex != null && setDragging({ side: "left", index: pair.leftIndex })}
                 />
-                <PairSplit pct={leftPct} onPct={setSplitPct} />
+                <PairSplit pct={leftPct} onPct={setSplitPct} onActivate={() => setSelected(row)} />
                 {combined ? (
                   <div className="dsk-stack">
                     {rightIndexes.map((index, i) => (
