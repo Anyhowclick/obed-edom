@@ -1004,7 +1004,12 @@ def _framing_fit(
     if not groups:
         return 0.0
     aff = groups[0]["affine"]
-    src = visible_content_union(wall_slide, wall_w, wall_h)
+    # Measure the artwork this framing is about, not every visible thing. The
+    # whole-slide extent includes the side-panel name lists, which run three
+    # times wider than the map and get relocated anyway — so judging by it
+    # punished the framing that keeps the map at true size and rewarded one that
+    # shrank the map until the side panels fitted too.
+    src = union_rect_of([item_rect(a) for a, _ in groups[0]["members"]])
     if src is None or src.w <= 0 or src.h <= 0:
         return 0.0
     mapped = aff.apply_rect(src)
@@ -2000,6 +2005,10 @@ def on_canvas_fraction(
         if is_placeholder_text(item) or item.get("duplicateOf"):
             continue
         if not is_visible(item, wall_w, wall_h) or is_chrome_bg(item):
+            continue
+        # Name lists are re-placed rather than carried by the affine, so where
+        # the affine would put them says nothing about whether it fits.
+        if is_list_item(item):
             continue
         rect = item_rect(item)
         if rect.w <= 0 or rect.h <= 0:
