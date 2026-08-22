@@ -155,7 +155,7 @@ export function ResizeTab() {
           checked={includeLists}
           onChange={(e) => setIncludeLists(e.target.checked)}
         />
-        <span>Bring the church-name lists across. Map labels come across either way.</span>
+        <span>Include resizing church-name lists on side panels (Special Offering Series)</span>
       </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>
