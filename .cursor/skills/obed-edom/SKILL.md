@@ -257,6 +257,70 @@ lists, judge by whether every box was placed and by the overlap percentages.
 score: the recipe was learned from that same template, so anything other than
 roughly zero means the planner failed to apply the affine it derived.
 
+### Measuring without opening Keynote
+
+Reading a wall deck costs minutes (a 6.8 GB deck took 11½, a 7.2 GB one 21), and
+Keynote is single-instance, so iterating through it is painful. Everything below
+runs from `output/.cache` instead, in seconds:
+
+| Script | Answers |
+|---|---|
+| `scripts/score_resize.py` | Placement error per slide and role against a finished CG deck. `--no-previews` compares against the old blind packing. |
+| `scripts/try_free_space.py` | Where loose text would land, as a picture: mask, old positions, new positions. |
+| `scripts/try_multi_framing.py` | Whether framing selection picks the framing a human chose, given several candidates. |
+| `scripts/inspect_gold.py` | Warms the cache. `--template-only` after editing the template, which is the one deck whose digest changes. |
+| `scripts/probe_runs.js` | Reproduces the unreachable-run-style result on demand. |
+
+Only warm the cache when a deck changes. Keep tests on the two `Map_Extracted`
+pairs; `Full_Report_Card` is 158 and 207 slides and only worth running when
+something specifically needs it.
+
+### Metrics that mislead
+
+Framing selection went through five rewrites in one session, each fixing a real
+case and several creating the next. All four traps below looked obviously
+correct when written:
+
+- **Matching points by proximity.** 138 pins sit about 6px apart while a layout
+  difference offsets everything by up to 190px, so each pin matches one about
+  thirty places away and the error is noise. Both sides derive from the same wall
+  objects, so compare by identity — project the wall through the gold's own
+  transform. `score_against_gold` does this; `nearestRmse` is kept only as a
+  reminder not to use it.
+- **Scoring how much content stays inside the frame.** Maximised by shrinking:
+  a framing that squeezed everything into a corner scored a perfect 1.0 and won
+  every tie. Multiply by how much of the frame is filled, so neither shrinking
+  nor overflowing wins.
+- **Measuring fit over everything visible.** The side-panel name lists run about
+  three times wider than the map, and they get relocated anyway, so a framing
+  that kept the map at true size was punished for not containing them. Measure
+  the artwork that paired into the affine.
+- **Ranking on the raw template score.** It is agreement×100 plus a pair count,
+  so one extra paired object outranked a fit two and a half times better. Rank on
+  the agreement level and let fit settle ties within it.
+
+One more of the same shape: the old blind packing was *hiding* a bug rather than
+causing one. Every map label was being snapped to a single template position, and
+the packing spread them out again afterwards. Deferring the packing revealed the
+collapse. When two layout paths sit in front of each other, check whether the
+outer one is masking the inner.
+
+**The pattern matters more than the four instances.** Every fix was a genuine
+improvement and most exposed the next problem. That is the signature of a metric
+being asked to infer something the data does not contain: which crop of a map the
+operator wants is an editorial choice, and no amount of pixel area encodes it. An
+operator looking at two framings of the same 1364x947 map knew instantly which
+was right; the geometry says nothing. So when framing selection needs another
+exception, a sixth metric is the wrong move — asking is the right one.
+
+This repo already has the pattern for asking. The Sermon Checker proposes slide
+pairings, shows them, lets the operator correct them, and remembers the answer
+across runs by content digest: `/api/diff/{id}/slots`, `save_pairing`, and the
+slot remapping in `baseline.py`. Reuse it rather than inventing a confirmation
+flow. Ask from the inspect alone, before remapping, so it costs no extra Keynote
+pass, and keep the fit-to-frame fallback so an unconfirmed deck degrades instead
+of breaking.
+
 ## LW deck facts worth knowing
 
 - **Verses are duplicated across the centre panels.** The wall is long, so the
@@ -272,7 +336,13 @@ roughly zero means the planner failed to apply the affine it derived.
   (verse reference vs verse body vs point), which is why those live in
   `masters.yaml` rather than in code.
 
-## Keynote scripting limits (verified, do not re-litigate)
+## Keynote scripting limits (verified on 14.5)
+
+All four were verified against Keynote 14.5 on macOS Sonoma 14.0. Do not
+re-litigate them on that version. They are worth **re-probing after a Keynote
+upgrade**, because the operators appear to run 15.x and any of these could have
+changed — `scripts/probe_runs.js` exists for exactly that.
+
 
 - **Per-run character style is unreachable.** `objectText.attributeRuns()`
   raises "Can't convert types."; `paragraphs()`, `characters()` and `words()`
