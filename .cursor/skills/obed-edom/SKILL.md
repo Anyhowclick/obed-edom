@@ -430,14 +430,54 @@ of which take a bundle id as their last argument.
   `objectText()` on a layout's text item giving its placeholder wording ("Slide
   Title"). So the cue palette can read a dropped template's layouts and their
   placeholders rather than having them declared by hand in `masters.yaml`.
-- **An image can be placed from a file path.** `Keynote.Image({file: Path(…)})`
-  pushed onto `slide.images` works, reads back with its file name and geometry,
-  and can then be repositioned and resized. The image cue is buildable on the
-  existing scripting path.
-- **Movies are not settled.** `Keynote.Movie({file: …})` raises "Can't convert
-  types." when handed a still, which proves nothing about a real `.mov` — and the
-  wall decks do use `.mov` slides. Probe with an actual movie before designing the
-  video half of the image cue.
+- **An image can be placed from a file path, in AppleScript.** This is the one
+  that matters, because the deck builder in `keynote.py` is AppleScript, not JXA:
+
+  ```applescript
+  make new image with properties {file:POSIX file imgPath, position:{120, 140}, width:640}
+  ```
+
+  Verified end to end — built that way, saved, then read back by
+  `inspect_keynote` at exactly `x=120 y=140 w=640`. **Set one dimension and the
+  other follows**: a 1920x1080 source given `width:640` came back `h=360`, so
+  aspect ratio is preserved for free and the cue only needs to specify a width.
+  `Keynote.Image({file: …})` works in JXA too, but nothing needs it.
+
+- **A movie is placed by creating an image and then reassigning its `file name`.**
+  There is no direct route — `make new movie` cannot be handed a file by any key —
+  but this works, verified end to end:
+
+  ```applescript
+  set mv to make new image with properties {file:POSIX file imgPath, position:{40, 40}, width:300}
+  set file name of mv to POSIX file mp4Path
+  ```
+
+  Assigning a video to an image's `file name` **converts the object into a movie**:
+  `images` drops to 0, `movies` rises to 1. It keeps the position and width it was
+  given, recomputes height from the video's aspect ratio, and survives save and
+  reload — `inspect_keynote` reads it back as `kind=movie`, `x=40 y=40 w=300
+  h=169`, `file=clip.mp4`.
+
+  **So video slides are fully generatable, with no GUI automation.** The practical
+  consequence for templates: a master needs only a small *image* placeholder, not
+  an embedded video, since the image is what gets converted. That keeps template
+  files small.
+
+  The route matters because the sdef misleads here. `movie` has **no `file`
+  property at all**, and `image`'s `file` is `access="r"` — yet `make new image
+  with properties {file: …}` works. Creation-time keys and settable properties are
+  different sets. The writable door on both classes is `file name`
+  (`access="rw"`, accepting a file *or* text).
+
+  **Two silent failures worth knowing.** `make new movie with properties
+  {file name: …}` reports success in both the `POSIX file` and plain-text forms
+  while creating nothing: `count of movies` stays 0 and the returned reference is
+  `missing value`. A probe that trusts the absence of an error will conclude
+  movies work when they do not — check the collection count, not the error.
+
+  Incidentally the movie media inside these decks is `.mp4`; `.mov` in this repo
+  means Keynote's *export* format for a movie slide, a different thing worth not
+  conflating.
 - **The inspect cache is keyed by deck digest**, which says nothing about the
   reader that produced it. Two axes need handling. Bump `INSPECT_VERSION` in
   `baseline.py` when the payload shape changes, or old payloads are reused
@@ -450,7 +490,9 @@ of which take a bundle id as their last argument.
   worth knowing before the next upgrade: the offline scripts
   (`score_resize.py`, `try_free_space.py`, `try_multi_framing.py`) all read the
   cache, so they go quiet until the decks are read again on the new version.
-  `output/baseline-14.5/` keeps the 14.5 score table as a cold archive.
+  The 14.5 payloads and their score table have been deleted: re-reading all seven
+  gold decks on 15.3.1 reproduced that table exactly, object for object, so the
+  old set held nothing the current one does not.
 
 ## Operator outline (`_CUED.docx`)
 
