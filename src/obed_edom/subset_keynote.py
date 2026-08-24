@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from obed_edom import keynote_app
+
 SUBSET_JS = Path(__file__).resolve().parent / "subset_keynote.js"
 
 
@@ -22,7 +24,11 @@ def subset_keynote(source: Path | str, dest: Path | str, slides: list[int]) -> P
         else:
             dest.unlink()
     subprocess.run(["ditto", str(source), str(dest)], check=True)
-    plan = {"dest": str(dest), "slides": [int(n) for n in slides]}
+    plan = {
+        "dest": str(dest),
+        "slides": [int(n) for n in slides],
+        "bundleId": keynote_app.bundle_id(),
+    }
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(plan, handle)
         plan_path = handle.name

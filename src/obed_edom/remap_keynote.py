@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from obed_edom import keynote_app
 from obed_edom.inspect import inspect_keynote, preview_pngs
 from obed_edom.map_remap import (
     CG_HEIGHT,
@@ -26,7 +27,8 @@ REMAP_JS = Path(__file__).resolve().parent / "remap_keynote.js"
 
 
 def _run_jxa(plan: dict[str, Any]) -> dict[str, Any]:
-    subprocess.run(["open", "-a", "Keynote"], check=False)
+    plan = {**plan, "bundleId": keynote_app.bundle_id()}
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(plan, handle)
@@ -86,7 +88,7 @@ def resolve_source_previews(
     """
     from PIL import Image  # noqa: PLC0415
 
-    from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
+    from obed_edom.baseline import deck_digest, preview_cache_candidates  # noqa: PLC0415
     from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
     from obed_edom.inspect import preview_media  # noqa: PLC0415
 
@@ -96,7 +98,9 @@ def resolve_source_previews(
     if wall.get("previewDir"):
         candidates.append((Path(str(wall["previewDir"])), "this run's export"))
     try:
-        candidates.append((preview_cache_dir(deck_digest(source)), "preview cache"))
+        candidates += [
+            (path, "preview cache") for path in preview_cache_candidates(deck_digest(source))
+        ]
     except (OSError, FileNotFoundError):
         pass
 

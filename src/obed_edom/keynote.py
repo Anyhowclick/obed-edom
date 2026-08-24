@@ -6,9 +6,31 @@ import tempfile
 import time
 from pathlib import Path
 
+from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
 from obed_edom.paths import find_repo_root, select_deck_template
 from obed_edom.slide_map import load_masters
+
+
+def _keynote_tell() -> str:
+    """``tell`` header addressing Keynote by bundle id rather than by name."""
+    return f'tell application id "{keynote_app.bundle_id()}"'
+
+
+def _keynote_terms() -> str:
+    return f'using terms from application id "{keynote_app.bundle_id()}"'
+
+
+def _keynote_process_tell() -> str:
+    """System Events target for GUI scripting.
+
+    Matched on bundle identifier: both Keynote 14.x and 15.x set their bundle
+    name to "Keynote", so ``process "Keynote"`` is as ambiguous as the app name.
+    """
+    return (
+        'tell application "System Events" to tell '
+        f'(first application process whose bundle identifier is "{keynote_app.bundle_id()}")'
+    )
 
 
 def _stem(docx: Path) -> str:
@@ -506,7 +528,7 @@ def _append_superscript_gui_pass(lines: list[str], seed: dict, plan: list[dict])
     seed_len = int(seed["len"])
     lines += [
         "try",
-        '  tell application "System Events" to tell process "Keynote"',
+        "  " + _keynote_process_tell(),
     ]
     _append_select_digits(lines, seed_anchor, seed_len, "    ")
     lines += [
@@ -527,7 +549,7 @@ def _append_superscript_gui_pass(lines: list[str], seed: dict, plan: list[dict])
         lines += [
             f"repeat {occurrences} times",
             "  try",
-            '    tell application "System Events" to tell process "Keynote"',
+            "    " + _keynote_process_tell(),
         ]
         _append_select_digits(lines, anchor, digit_len, "      ")
         lines += [
@@ -560,8 +582,8 @@ def _build_superscript_fix_script(
     escaped = _as_escape(str(key_path))
     lines = [
         'set guiError to ""',
-        'using terms from application "Keynote"',
-        'tell application "Keynote"',
+        _keynote_terms(),
+        _keynote_tell(),
         "  activate",
         f'  set theFile to POSIX file "{escaped}"',
         "  open theFile",
@@ -571,8 +593,8 @@ def _build_superscript_fix_script(
     ]
     _append_superscript_gui_pass(lines, seed, plan)
     lines += [
-        'using terms from application "Keynote"',
-        'tell application "Keynote"',
+        _keynote_terms(),
+        _keynote_tell(),
         "  set theDoc to document 1",
         '  set sizeReport to ""',
         "  tell theDoc",
@@ -765,8 +787,8 @@ def _build_applescript(plan: dict) -> str:
     # without saving -- only ever this deck, which we just regenerated.
     doc_name = _as_escape(Path(output).name)
     lines = [
-        'using terms from application "Keynote"',
-        'tell application "Keynote"',
+        _keynote_terms(),
+        _keynote_tell(),
         "  activate",
         "  try",
         f'    close (every document whose name is "{doc_name}") saving no',
@@ -951,7 +973,7 @@ def run_applescript(plan: dict) -> dict:
     # File + LaunchServices, not stdin: uvicorn's worker thread makes
     # osascript's HIServices/clipboard connection fail, and then Keynote's
     # dictionary never loads (syntax error on ``properties``).
-    subprocess.run(["open", "-a", "Keynote"], check=False)
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
         handle.write(script)

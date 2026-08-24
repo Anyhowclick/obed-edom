@@ -1,5 +1,10 @@
 ObjC.import("Foundation");
 
+// Set from the plan in run(). Keynote is addressed by bundle id because 15.x is
+// "Keynote Creator Studio" under com.apple.Keynote while 14.x is
+// com.apple.iWork.Keynote, and both answer to the name "Keynote".
+let KEYNOTE_BUNDLE_ID = "com.apple.Keynote";
+
 function readJSON(path) {
   const data = $.NSData.dataWithContentsOfFile(path);
   const str = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
@@ -295,7 +300,13 @@ function runAppleScript(doc, body) {
       'document "' + String(doc.name()).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
   } catch (eN) {}
   const script =
-    'tell application "Keynote"\ntell ' + target + "\n" + body + "\nend tell\nend tell\n";
+    'tell application id "' +
+    KEYNOTE_BUNDLE_ID +
+    '"\ntell ' +
+    target +
+    "\n" +
+    body +
+    "\nend tell\nend tell\n";
   const ns = $.NSString.stringWithString(script);
   ns.writeToFileAtomicallyEncodingError(
     "/tmp/obed-edom-keynote.applescript",
@@ -665,7 +676,8 @@ function deleteTrailingSlides(dest, Keynote, keepCount) {
 
 function run(argv) {
   const plan = readJSON(argv[0]);
-  const Keynote = Application("Keynote");
+  KEYNOTE_BUNDLE_ID = plan.bundleId || KEYNOTE_BUNDLE_ID;
+  const Keynote = Application(KEYNOTE_BUNDLE_ID);
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.dest));
   const transforms = plan.transforms || [];

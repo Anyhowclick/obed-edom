@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from obed_edom import keynote_app
 from obed_edom.map_remap import slides_for_plan
 from obed_edom.paths import find_repo_root
 
@@ -22,10 +23,11 @@ def export_applescript(key_path: Path, export_dir: Path) -> str:
     """Same export shape generate uses: POSIX file + slide images PNG."""
     key = _as_escape(str(Path(key_path).resolve()))
     dest = _as_escape(str(Path(export_dir).resolve()))
+    app = keynote_app.bundle_id()
     return "\n".join(
         [
-            'tell application "Keynote"',
-            '  using terms from application "Keynote"',
+            f'tell application id "{app}"',
+            f'  using terms from application id "{app}"',
             f'    set theDoc to open POSIX file "{key}"',
             f'    set exportFolder to POSIX file "{dest}"',
             "    export theDoc to exportFolder as slide images with properties {image format:PNG, skipped slides:false}",
@@ -43,7 +45,7 @@ def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     script = export_applescript(key_path, export_dir)
-    subprocess.run(["open", "-a", "Keynote"], check=False)
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
         handle.write(script)
@@ -94,15 +96,24 @@ def inspect_keynote(
         dest.mkdir(parents=True, exist_ok=True)
 
     if want_cache:
-        from obed_edom.baseline import deck_digest, inspect_cache_path, preview_cache_dir  # noqa: PLC0415
+        from obed_edom.baseline import (  # noqa: PLC0415
+            deck_digest,
+            inspect_cache_candidates,
+            preview_cache_candidates,
+            preview_cache_dir,
+        )
 
         t_hash = time.perf_counter()
         digest = deck_digest(key_path)
         timing["digest"] = time.perf_counter() - t_hash
-        json_path = inspect_cache_path(digest)
-        png_dir = preview_cache_dir(digest)
-        pngs_ok = dest is None or bool(preview_pngs(png_dir))
-        if json_path.is_file() and pngs_ok:
+        # Candidates are per Keynote version, so a 15.x run never reuses a 14.5
+        # payload. Only the 14.5 target also considers the untagged legacy names.
+        for json_path, png_dir in zip(
+            inspect_cache_candidates(digest), preview_cache_candidates(digest)
+        ):
+            pngs_ok = dest is None or bool(preview_pngs(png_dir))
+            if not (json_path.is_file() and pngs_ok):
+                continue
             payload = json.loads(json_path.read_text(encoding="utf-8"))
             payload["_cached"] = True
             payload["_digest"] = digest
@@ -112,10 +123,15 @@ def inspect_keynote(
                 payload["exported"] = bool(preview_pngs(png_dir))
             return payload
         if dest is not None:
-            dest = png_dir
+            dest = preview_cache_dir(digest)
             dest.mkdir(parents=True, exist_ok=True)
 
-    plan: dict[str, Any] = {"path": str(key_path), "close": True, "save": False}
+    plan: dict[str, Any] = {
+        "path": str(key_path),
+        "close": True,
+        "save": False,
+        "bundleId": keynote_app.bundle_id(),
+    }
     if dest:
         plan["exportDir"] = str(dest.resolve())
     wanted = slides_for_plan(slide_range)
@@ -144,6 +160,9 @@ def inspect_keynote(
     if not raw:
         raise RuntimeError("Keynote inspect returned no JSON.")
     payload = json.loads(raw)
+    # Persisted, so a payload can always say which Keynote read the deck.
+    payload["keynoteBundleId"] = keynote_app.bundle_id()
+    payload["keynoteVersion"] = keynote_app.app_version()
     if dest:
         t_export = time.perf_counter()
         pngs = preview_pngs(dest)

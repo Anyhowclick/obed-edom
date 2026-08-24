@@ -157,8 +157,9 @@ Other constraints worth keeping:
   what makes pass 1 hand the deck over. An unusable job would leave the deck
   open, unexported and never closed.
 - GUI scripting must live in its own `tell application "System Events"` block.
-  Inside `tell application "Keynote"`, `menu` resolves to a Keynote class and the
-  script fails to compile.
+  Inside the Keynote `tell`, `menu` resolves to a Keynote class and the script
+  fails to compile. The System Events target is matched on bundle identifier, not
+  `process "Keynote"` — see the section below for why the name is ambiguous.
 - Keynote is driven from a script *file* via `osascript`, not stdin: from the
   dashboard's worker thread the clipboard/HIServices connection dies and
   Keynote's dictionary never loads.
@@ -336,13 +337,42 @@ of breaking.
   (verse reference vs verse body vs point), which is why those live in
   `masters.yaml` rather than in code.
 
-## Keynote scripting limits (verified on 14.5)
+## Never address Keynote by name
 
-All four were verified against Keynote 14.5 on macOS Sonoma 14.0. Do not
-re-litigate them on that version. They are worth **re-probing after a Keynote
-upgrade**, because the operators appear to run 15.x and any of these could have
-changed — `scripts/probe_runs.js` exists for exactly that.
+Keynote 15 installs as **`Keynote Creator Studio.app`** with bundle identifier
+`com.apple.Keynote`. Keynote 14.x is `Keynote.app` / `com.apple.iWork.Keynote`.
+Both set their bundle *name* to "Keynote", so on a machine with both:
 
+- `tell application "Keynote"` resolves to **14.5**, not 15.
+- `Application("Keynote")` in JXA does the same.
+- `process "Keynote"` in System Events is equally ambiguous.
+
+An upgrade therefore looks like a no-op: every script keeps driving the old app
+while appearing to test the new one. So `src/obed_edom/keynote_app.py` is the one
+place that decides, everything addresses the app by bundle id
+(`tell application id "…"`, `using terms from application id "…"`,
+`Application(bundleId)`, `open -b`), and the JXA scripts take `bundleId` in their
+plan JSON. Set `OBED_EDOM_KEYNOTE_BUNDLE_ID` to pin a version.
+
+Resolution asks LaunchServices first — one targeted lookup that touches no other
+app — and falls back to reading `Info.plist` off disk when that is unavailable, as
+it is inside a sandbox. Keep that order: the scan is the only thing that reaches
+third-party bundles, and malformed ones are common enough that one game in
+`~/Applications` broke resolution in testing. The scan tries the names Keynote
+ships under before enumerating, and skips any app whose plist will not parse.
+
+Verified on macOS 26.6.2 with both installed: `com.apple.Keynote` reports 15.3.1,
+`com.apple.iWork.Keynote` reports 14.5, and the by-name lookup returns 14.5.
+`tests/test_keynote_app.py` locks the targeting and the cache split in.
+
+## Keynote scripting limits (14.5 and 15.3.1 agree)
+
+Re-probed on macOS 26.6.2 against both installed versions, driven by bundle id.
+**Every answer below is identical on 14.5 and 15.3.1**, so the upgrade changed
+nothing we depend on and none of this needs re-litigating per version. Re-probe
+after the *next* upgrade with `scripts/probe_runs.js` and
+`scripts/probe_layouts.js`, both of which take a bundle id as their last argument
+so the same probe can be pointed at either app.
 
 - **Per-run character style is unreachable.** `objectText.attributeRuns()`
   raises "Can't convert types."; `paragraphs()`, `characters()` and `words()`
@@ -350,17 +380,60 @@ changed — `scripts/probe_runs.js` exists for exactly that.
   `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
   look like it works while reporting nonsense. Anything needing per-character
   style must come off a rendered preview. `scripts/probe_runs.js` reproduces it.
-- **Z-order is unreadable.** `slide.iWorkItems()` reports 0 on slides holding 19
-  real objects. Stacking is therefore a deliberate policy — the `role_order`
+- **Z-order is unreadable.** `slide.iWorkItems()` raises "Can't convert types."
+  Earlier notes said it returned 0 on slides holding real objects; on macOS 26 it
+  raises on both Keynote versions, so the version is not what changed it. Either
+  way it is unreadable, and stacking stays a deliberate policy — the `role_order`
   sort in `plan_slide_transforms` — not something recovered from the deck.
+- **`masterSlides()` is broken in JXA, but AppleScript `master slide` is fine.**
+  `doc.masterSlides()` raises "Can't convert types." while `doc.slideLayouts()`
+  returns all 9. In AppleScript the same collection answers perfectly: `count of
+  master slides` gives 9, `master slide "MAP BLANK (16:9)"` resolves, and `make
+  new slide with properties {base slide:…}` creates a slide with the right `base
+  layout`. Generate depends on that AppleScript path and is unaffected — but it is
+  why `keynote_jxa.js` must stay unused, since porting slide creation to JXA would
+  fail on the very lookup it needs.
 - **A text box is also a shape.** Keynote lists text-bearing shapes in both
   `textItems` and `shapes`; a third of text objects came back twice on a real
   wall deck. `inspect_keynote.js` marks the duplicate rather than dropping it,
   because objects are resolved by (collection, kindIndex) and those indices must
   keep matching Keynote's.
+- **The JXA export always fails; the AppleScript fallback is what works.** Every
+  payload that exported carries `exportError: "Keynote export as slide images
+  failed."` alongside `exported: true`, on 14.5/macOS 14 as well as on both
+  versions under macOS 26. So `exportImages()` in `inspect_keynote.js` has never
+  produced the PNGs — `export_slide_images()` in `inspect.py` does, after the JXA
+  attempt has already cost a pass. Pre-existing, not an upgrade regression, and
+  worth cleaning up rather than reading as a failure when it appears in a payload.
+
+### What 15.3.1 unblocks
+
+- **A slide layout's contents are readable.** `doc.slideLayouts()` returns 9
+  named layouts, and each answers `textItems()`, `images()` and `shapes()`, with
+  `objectText()` on a layout's text item giving its placeholder wording ("Slide
+  Title"). So the cue palette can read a dropped template's layouts and their
+  placeholders rather than having them declared by hand in `masters.yaml`.
+- **An image can be placed from a file path.** `Keynote.Image({file: Path(…)})`
+  pushed onto `slide.images` works, reads back with its file name and geometry,
+  and can then be repositioned and resized. The image cue is buildable on the
+  existing scripting path.
+- **Movies are not settled.** `Keynote.Movie({file: …})` raises "Can't convert
+  types." when handed a still, which proves nothing about a real `.mov` — and the
+  wall decks do use `.mov` slides. Probe with an actual movie before designing the
+  video half of the image cue.
 - **The inspect cache is keyed by deck digest**, which says nothing about the
-  code that produced it. Bump `INSPECT_VERSION` in `baseline.py` when the
-  payload shape changes, or old payloads are reused forever.
+  reader that produced it. Two axes need handling. Bump `INSPECT_VERSION` in
+  `baseline.py` when the payload shape changes, or old payloads are reused
+  forever; and the file name carries a `.k<Keynote version>` tag, because a
+  digest-keyed hit would otherwise hand a 14.5 payload to a 15.x run.
+  Payloads also record `keynoteBundleId` and `keynoteVersion`.
+
+  Untagged payloads under `output/.cache` predate the tag. They were all produced
+  by Keynote 14.5 on macOS 14, so they are read only when the target is 14.5 and
+  are never written to again — a fresh 14.5 inspect lands beside them rather than
+  overwriting them, which is what makes a three-way 14.5/macOS 14 versus
+  14.5/macOS 26 versus 15.3.1 comparison possible. `output/baseline-14.5/` holds a
+  clone of that set plus the score table it produces.
 
 ## Operator outline (`_CUED.docx`)
 

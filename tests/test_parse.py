@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from docx.oxml.ns import qn
+from obed_edom import keynote_app
 from obed_edom.annotate import annotate_outline, extract_operator_cues
 from obed_edom.bible import _parse_gateway_html, check_bible, fetch_passage
 from obed_edom.models import StyledRun
@@ -504,7 +505,7 @@ def test_point_applescript_replaces_placeholder(tmp_path):
     assert "†" not in matt_script
     assert "27" in matt_script
     assert "28" in matt_script
-    assert 'using terms from application "Keynote"' in matt_script
+    assert f'using terms from application id "{keynote_app.bundle_id()}"' in matt_script
     assert "to (size of character 1)" not in matt_script
     assert "²" not in matt_script
     assert "⁷" not in matt_script

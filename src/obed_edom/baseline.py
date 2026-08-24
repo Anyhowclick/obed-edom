@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from obed_edom import keynote_app
 from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
@@ -22,7 +24,16 @@ HASH_CACHE_VERSION = 1
 # by deck digest, which says nothing about the reader that produced it, so
 # without this a deck inspected by an older build is reused forever — a payload
 # captured before duplicate-shape marking existed would never gain it.
+#
+# Our own build is only half of "the reader". Keynote's version is the other, and
+# it moves without us: on a machine with 14.5 and 15.x installed, a digest-keyed
+# hit would hand a 14.5 payload to a 15.x run and the upgrade would look like it
+# changed nothing. Hence the `.k<version>` tag below, which partitions the cache
+# per app version instead.
 INSPECT_VERSION = 2
+# Payloads written before that tag existed. All were produced by Keynote 14.5
+# under macOS 14, so they are read as the 14.5 set and never written to again.
+LEGACY_APP_VERSION = "14.5"
 DIGEST_LEN = 16
 
 
@@ -35,12 +46,51 @@ def pairings_dir(root: Path | None = None) -> Path:
     return cache_root(root) / "pairings"
 
 
-def inspect_cache_path(digest: str, root: Path | None = None) -> Path:
+def _app_tag(app_version: str | None = None) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", app_version or keynote_app.app_version())
+
+
+def inspect_cache_path(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Where a payload produced by this Keynote version is written."""
+    name = f"{digest}.v{INSPECT_VERSION}.k{_app_tag(app_version)}.json"
+    return cache_root(root) / "inspect" / name
+
+
+def legacy_inspect_cache_path(digest: str, root: Path | None = None) -> Path:
     return cache_root(root) / "inspect" / f"{digest}.v{INSPECT_VERSION}.json"
 
 
-def preview_cache_dir(digest: str, root: Path | None = None) -> Path:
+def inspect_cache_candidates(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> list[Path]:
+    """Payloads this Keynote version may read, current naming first."""
+    paths = [inspect_cache_path(digest, root, app_version)]
+    if (app_version or keynote_app.app_version()) == LEGACY_APP_VERSION:
+        paths.append(legacy_inspect_cache_path(digest, root))
+    return paths
+
+
+def preview_cache_dir(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Where previews exported by this Keynote version are written."""
+    return cache_root(root) / "previews" / f"{digest}.k{_app_tag(app_version)}"
+
+
+def legacy_preview_cache_dir(digest: str, root: Path | None = None) -> Path:
     return cache_root(root) / "previews" / digest
+
+
+def preview_cache_candidates(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> list[Path]:
+    """Preview folders this Keynote version may read, current naming first."""
+    dirs = [preview_cache_dir(digest, root, app_version)]
+    if (app_version or keynote_app.app_version()) == LEGACY_APP_VERSION:
+        dirs.append(legacy_preview_cache_dir(digest, root))
+    return dirs
 
 
 def _hash_file(hasher: hashlib._Hash, path: Path, chunk: int = 1024 * 1024) -> None:
