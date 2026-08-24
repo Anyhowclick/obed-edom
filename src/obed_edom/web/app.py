@@ -31,6 +31,18 @@ from obed_edom.diff_keynotes import (
     slide_catalog,
     slots_from_pairs,
 )
+from obed_edom.framing import (
+    AUTO,
+    DEFERRED,
+    PINNED,
+    Decision,
+    FramingReuse,
+    load_framings,
+    normalize_decision,
+    propose_framings,
+    reuse_framings,
+    save_framings,
+)
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
 from obed_edom.map_remap import format_slide_range, resolve_slides
 from obed_edom.models import Flag
@@ -80,6 +92,16 @@ class RelocateBody(BaseModel):
 class DiffSlotsBody(BaseModel):
     slots: list[dict[str, Any]] | None = None
     pairs: list[dict[str, Any]] | None = None
+
+
+class FramingsBody(BaseModel):
+    """Framing decisions, one per page the operator answered.
+
+    Each entry is `{wallIndex, state, templateSlide}`. Confirming a whole group of
+    pages that share a framing is just several entries in one request.
+    """
+
+    decisions: list[dict[str, Any]] | None = None
 
 
 class SettingsBody(BaseModel):
@@ -558,12 +580,70 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists: _run_resize(
-                j, p, t, sl, ex, lists
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists: (
+                _run_resize_propose(j, p, t, sl, ex, lists)
             ),
             feature="resize",
         )
         return job.to_dict()
+
+    @app.post("/api/resize/{job_id}/framings")
+    def save_resize_framings(job_id: str, payload: FramingsBody) -> dict:
+        """Remember which crop each page should use, without remapping."""
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        result = dict(job.result)
+        decisions = _decisions_from_body(payload, result)
+        save_framings(
+            result["path"],
+            result["templatePath"],
+            list(result.get("wallDigests") or []),
+            str(result.get("templateDigest") or ""),
+            decisions,
+            job_id=job_id,
+        )
+        by_index = {d.wall_index: d.as_dict() for d in decisions}
+        for page in result.get("pages") or []:
+            saved = by_index.get(page["index"])
+            if saved:
+                page["decision"] = saved
+        updated = RUNNER.update_result(job_id, result)
+        return RUNNER.public_dict(updated) if updated else result
+
+    @app.post("/api/resize/{job_id}/apply")
+    def apply_resize(job_id: str, payload: FramingsBody = Body(default=FramingsBody())) -> dict:
+        """Phase two: remap using the confirmed framings."""
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if payload and payload.decisions is not None:
+            save_resize_framings(job_id, payload)
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        overrides = _overrides_from_result(result)
+        key = Path(str(result.get("path") or "")).expanduser()
+        template = Path(str(result.get("templatePath") or "")).expanduser()
+        if not key.exists() or not template.exists():
+            raise HTTPException(400, "The wall deck or template has moved since proposing.")
+        raw_range = result.get("slideRange")
+        sel = frozenset(int(n) for n in raw_range) if raw_range else None
+        do_export = bool(result.get("export", True))
+        do_lists = bool(result.get("includeLists", False))
+        try:
+            updated = RUNNER.rerun(
+                job_id,
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides: (
+                    _run_resize(j, p, t, sl, ex, lists, ov)
+                ),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not updated:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(updated)
 
     if DASHBOARD_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
@@ -1228,6 +1308,108 @@ def _check_single_deck_outline(
     return out
 
 
+def _decisions_from_body(payload: FramingsBody, result: dict[str, Any]) -> list[Decision]:
+    """Body decisions, falling back to whatever the pages already carry.
+
+    An unparseable entry is dropped rather than guessed at: a decision the
+    operator did not make is worse than no decision.
+    """
+    if payload.decisions is not None:
+        rows = payload.decisions
+    else:
+        rows = [p.get("decision") or {} for p in result.get("pages") or []]
+    out: list[Decision] = []
+    for raw in rows:
+        decision = normalize_decision(raw)
+        if decision is not None:
+            out.append(decision)
+    return out
+
+
+def _overrides_from_result(result: dict[str, Any]) -> dict[int, int]:
+    """Wall slide number to template slide, from pinned pages only.
+
+    Auto and deferred both mean "let the planner choose", so neither pins.
+    """
+    overrides: dict[int, int] = {}
+    for page in result.get("pages") or []:
+        decision = normalize_decision(page.get("decision") or {})
+        if decision is None or decision.state != PINNED or decision.template_slide is None:
+            continue
+        overrides[int(page["slide"])] = int(decision.template_slide)
+    return overrides
+
+
+def _run_resize_propose(
+    job: Job,
+    path: Path,
+    template: Path,
+    slide_range: frozenset[int] | None,
+    export: bool,
+    include_lists: bool = False,
+) -> dict[str, Any]:
+    """Phase one: ask which crop each map page should use.
+
+    Stops before copying anything. Planning is pure Python over the inspect
+    payloads, so the only Keynote time here is the inspect a resize needed anyway
+    — and confirming costs none at all.
+    """
+    label = format_slide_range(slide_range)
+    scope = f"slide {label}" if label else "every slide"
+    job.log(f"Reading {path.name} and {template.name} to propose framings ({scope})…")
+    wall = inspect_keynote(path, slide_range=slide_range)
+    template_data = inspect_keynote(template)
+    proposal = propose_framings(
+        path,
+        template,
+        slide_range=slide_range,
+        wall_payload=wall,
+        template_payload=template_data,
+        log=job.log,
+    )
+    settings = load_settings()
+    reuse = FramingReuse()
+    if settings["reusePairings"]:
+        record = load_framings(path, template)
+        reuse = reuse_framings(
+            record, proposal["wallDigests"], proposal["templateDigest"]
+        )
+        if reuse.carried:
+            job.log(
+                f"Carried {reuse.carried} earlier framing decision(s) onto this deck"
+                + (f", dropped {reuse.dropped} whose page changed" if reuse.dropped else "")
+                + "."
+            )
+        if reuse.resurfaced:
+            job.log(
+                f"The template changed, so {len(reuse.resurfaced)} page(s) you deferred are "
+                "worth another look: " + ", ".join(str(i + 1) for i in reuse.resurfaced[:10]) + "."
+            )
+    decisions = {index: d.as_dict() for index, d in reuse.decisions.items()}
+    for page in proposal["pages"]:
+        saved = decisions.get(page["index"])
+        page["decision"] = saved or {
+            "wallIndex": page["index"],
+            # A page with nothing worth picking defaults to "I will add a template
+            # slide", because offering a dropdown of options that all degrade the
+            # same way invites a click that changes nothing.
+            "state": DEFERRED if page["noUsableFraming"] else AUTO,
+            "templateSlide": None,
+        }
+        page["resurfaced"] = page["index"] in set(reuse.resurfaced)
+    return {
+        "phase": "framing",
+        "path": str(path),
+        "templatePath": str(template),
+        "includeLists": include_lists,
+        "export": export,
+        "slideRange": sorted(slide_range) if slide_range else None,
+        **proposal,
+        "templateChanged": reuse.template_changed,
+        "resurfaced": reuse.resurfaced,
+    }
+
+
 def _run_resize(
     job: Job,
     path: Path,
@@ -1235,6 +1417,7 @@ def _run_resize(
     slide_range: frozenset[int] | None,
     export: bool,
     include_lists: bool = False,
+    framing_overrides: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     dest_dir = ROOT / "output" / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
@@ -1252,6 +1435,7 @@ def _run_resize(
         slide_range=slide_range,
         include_lists=include_lists,
         export_dir=export_dir,
+        framing_overrides=framing_overrides,
         log=job.log,
     )
     inspect = info.get("inspect") or {}
@@ -1273,6 +1457,7 @@ def _run_resize(
     job.log(f"Wrote {dest.name}: applied {applied}, missed {missed}.")
     score = info.get("templateScore") or info.get("goldScore") or {}
     return {
+        "phase": "resized",
         "path": str(path),
         "destPath": str(dest),
         "templatePath": str(template),

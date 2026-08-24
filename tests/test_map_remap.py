@@ -35,6 +35,117 @@ def test_wall_canvas_used_when_map_image_inspects_as_cg():
     assert already_cg.w == 1920
 
 
+def _one_map_wall() -> dict:
+    return {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=0, w=7680, h=1080),
+                ],
+            }
+        ],
+    }
+
+
+def test_a_pinned_framing_is_used_instead_of_the_best_match():
+    wall = _one_map_wall()
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=-2880, y=0, w=7680, h=1080),
+                ],
+            },
+            {
+                "number": 2,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=100, w=1280, h=720),
+                ],
+            },
+        ],
+    }
+    auto = learn_recipe(wall, template)
+    pinned = learn_recipe(wall, template, template_slide=2)
+    assert pinned["templateSlide"] == 2
+    assert pinned["framingPinned"] is True
+    assert pinned["mapDst"] != auto["mapDst"]
+    # An unknown pin must not fail the run; it falls back to choosing.
+    stale = learn_recipe(wall, template, template_slide=99)
+    assert stale["framingPinned"] is False
+    assert stale["templateSlide"] == auto["templateSlide"]
+
+
+def test_an_unbuildable_pin_still_reports_which_slide_was_tried():
+    """A pin applied and found unusable is not the same answer as a pin ignored.
+
+    Only the first tells the operator that this template slide cannot frame this
+    page, and the cover-fallback path used to report neither.
+    """
+    wall = _one_map_wall()
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=-2880, y=0, w=7680, h=1080),
+                ],
+            },
+            {"number": 2, "items": []},
+        ],
+    }
+    recipe = learn_recipe(wall, template, template_slide=2)
+    assert recipe["source"] == "cover-fallback"
+    assert recipe["templateSlide"] == 2
+    assert recipe["framingPinned"] is True
+    assert recipe["pairQuality"] == 0
+
+
+def test_framing_report_says_what_each_slide_used():
+    wall = _one_map_wall()
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=-2880, y=0, w=7680, h=1080),
+                ],
+            },
+            {
+                "number": 2,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=100, w=1280, h=720),
+                ],
+            },
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    report: list[dict] = []
+    plan_payload_transforms(
+        wall,
+        recipe,
+        template=template,
+        framing_overrides={1: 2},
+        framing_report=report,
+    )
+    assert len(report) == 1
+    row = report[0]
+    assert row["slide"] == 1
+    assert row["requested"] == 2
+    assert row["templateSlide"] == 2
+    assert row["confirmed"] is True
+    assert "fitted" in row
+
+
 def test_cover_keeps_center_pin_on_canvas():
     map_src = Rect(0, 0, 7680, 1080)
     recipe = recipe_from_cover(map_src)

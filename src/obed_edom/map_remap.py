@@ -1253,6 +1253,13 @@ def learn_recipe(
     if map_dst is None:
         recipe = recipe_from_cover(map_src, dest_w=dest_w, dest_h=dest_h)
         recipe["source"] = "cover-fallback"
+        # Carry the provenance even though no template framing was usable. A pin
+        # that was applied and then found unbuildable is a different answer from a
+        # pin that was ignored, and only the first tells the operator that this
+        # template slide cannot frame this page.
+        recipe["templateSlide"] = _slide_number_of(g_slide) if g_slide else None
+        recipe["framingPinned"] = pinned
+        recipe["pairQuality"] = 0
         recipe["groups"] = [
             {
                 **affine_from_rects(map_src, _rect_from_dict(recipe["mapDst"]) or map_src).as_dict(),

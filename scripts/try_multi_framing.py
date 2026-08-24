@@ -29,8 +29,11 @@ WALL = GOLD_DIR / "Full_Report_Card_Wall.key"
 CG = GOLD_DIR / "Full_Report_Card_CG.key"
 
 
-def cached(path: Path) -> dict[str, Any]:
-    return json.loads(inspect_cache_path(deck_digest(path)).read_text(encoding="utf-8"))
+def cached(path: Path) -> dict[str, Any] | None:
+    blob = inspect_cache_path(deck_digest(path))
+    if not blob.is_file():
+        return None
+    return json.loads(blob.read_text(encoding="utf-8"))
 
 
 def framing(slide: dict, w: float, h: float):
@@ -53,6 +56,15 @@ def key(rect) -> tuple[int, int, int, int] | None:
 def main() -> int:
     wall = cached(WALL)
     gold = cached(CG)
+    # Editing either deck changes its digest, so say which one needs re-reading
+    # rather than dying on a missing path.
+    for name, payload in (("wall", wall), ("CG", gold)):
+        if payload is None:
+            source = WALL if name == "wall" else CG
+            print(f"No cached inspect for the {name} deck ({source.name}).")
+            print("Warm it with scripts/inspect_gold.py, or re-inspect it if you have edited it.")
+            return 1
+    assert wall is not None and gold is not None
     ww, wh = float(wall["slideWidth"]), float(wall["slideHeight"])
     gw, gh = float(gold["slideWidth"]), float(gold["slideHeight"])
     gold_by = {int(s.get("number") or 0): s for s in gold["slides"]}

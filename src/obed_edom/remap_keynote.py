@@ -138,10 +138,15 @@ def remap_keynote(
     include_lists: bool = False,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
+    framing_overrides: dict[int, int] | None = None,
     source_previews: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop."""
+    """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
+
+    `framing_overrides` maps a wall slide number to the template slide the operator
+    confirmed, for the pages where the automatic choice was wrong.
+    """
     def say(message: str) -> None:
         if log:
             log(message)
@@ -184,6 +189,7 @@ def remap_keynote(
     hidden: list[int] = []
     fitted: list[int] = []
     offframe: list[dict[str, Any]] = []
+    framing_rows: list[dict[str, Any]] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -195,7 +201,22 @@ def remap_keynote(
         skipped_slides=hidden,
         fitted_slides=fitted,
         offframe_report=offframe,
+        framing_overrides=framing_overrides,
+        framing_report=framing_rows,
     )
+    confirmed = [r for r in framing_rows if r.get("confirmed")]
+    if confirmed:
+        overruled = [r for r in confirmed if r.get("fitted")]
+        say(
+            f"Used your confirmed framing on {len(confirmed)} slide(s)."
+            + (
+                f" {len(overruled)} of them still had to fall back to fitting content: "
+                + ", ".join(str(r["slide"]) for r in overruled[:8])
+                + " — that template slide cannot frame those pages."
+                if overruled
+                else ""
+            )
+        )
     if fitted:
         say(
             f"No template framing matched {len(fitted)} slide(s) "
@@ -361,6 +382,7 @@ def remap_keynote(
         "skippedSlidesLeftAlone": hidden,
         "fittedSlides": fitted,
         "offFrame": offframe,
+        "framingReport": framing_rows,
     }
     return result
 
@@ -374,6 +396,9 @@ def remap_and_inspect(
     include_lists: bool = False,
     export_dir: Path | str | None = None,
     source_previews: Path | str | None = None,
+    framing_overrides: dict[int, int] | None = None,
+    wall_payload: dict[str, Any] | None = None,
+    template_payload: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
@@ -383,6 +408,9 @@ def remap_and_inspect(
         slide_range=slide_range,
         include_lists=include_lists,
         source_previews=source_previews,
+        framing_overrides=framing_overrides,
+        wall_payload=wall_payload,
+        template_payload=template_payload,
         log=log,
     )
     if log:
