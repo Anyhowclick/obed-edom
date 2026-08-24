@@ -98,22 +98,19 @@ def inspect_keynote(
     if want_cache:
         from obed_edom.baseline import (  # noqa: PLC0415
             deck_digest,
-            inspect_cache_candidates,
-            preview_cache_candidates,
+            inspect_cache_path,
             preview_cache_dir,
         )
 
         t_hash = time.perf_counter()
         digest = deck_digest(key_path)
         timing["digest"] = time.perf_counter() - t_hash
-        # Candidates are per Keynote version, so a 15.x run never reuses a 14.5
-        # payload. Only the 14.5 target also considers the untagged legacy names.
-        for json_path, png_dir in zip(
-            inspect_cache_candidates(digest), preview_cache_candidates(digest)
-        ):
-            pngs_ok = dest is None or bool(preview_pngs(png_dir))
-            if not (json_path.is_file() and pngs_ok):
-                continue
+        # Keyed per Keynote version, so a payload read by one build is never handed
+        # to another.
+        json_path = inspect_cache_path(digest)
+        png_dir = preview_cache_dir(digest)
+        pngs_ok = dest is None or bool(preview_pngs(png_dir))
+        if json_path.is_file() and pngs_ok:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
             payload["_cached"] = True
             payload["_digest"] = digest
@@ -123,7 +120,7 @@ def inspect_keynote(
                 payload["exported"] = bool(preview_pngs(png_dir))
             return payload
         if dest is not None:
-            dest = preview_cache_dir(digest)
+            dest = png_dir
             dest.mkdir(parents=True, exist_ok=True)
 
     plan: dict[str, Any] = {

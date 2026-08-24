@@ -206,8 +206,14 @@ alongside a scaled layout, since the two teach contradictory transforms.
 ### One slide per framing you actually use
 
 Template slides compete per wall slide, and selection is good at this: given the
-20 framings harvested from a finished report deck, it picked the human's framing
-on 25 of 29 pages, and all four misses were the same map size shifted 120px.
+20 framings harvested from a finished report deck, it picks the human's framing on
+23 of 29 pages, and five of the six misses are the same map size shifted 120px.
+
+Measured on Keynote 15.3.1, and re-measure with `scripts/try_multi_framing.py`
+rather than trusting this figure — an earlier note here said 25 of 29 with four
+misses, which no longer matched and briefly looked like an upgrade regression. It
+is not: the report-card payloads read byte-identically on 14.5 and 15.3.1, so the
+old number simply predated later changes to selection.
 
 So a deck whose pages are framed differently — report cards, where each country
 is cropped to suit — wants one template slide per framing. What it cannot do is
@@ -337,22 +343,35 @@ of breaking.
   (verse reference vs verse body vs point), which is why those live in
   `masters.yaml` rather than in code.
 
-## Never address Keynote by name
+## Keynote 15.x only, and never addressed by name
+
+**Supported: Keynote 15.x on macOS 26.** 14.x support was removed deliberately
+once the staff machines were confirmed on 15.3.1, and there is no fallback to
+another build — a missing Keynote fails naming the identifier it wanted.
+
+**If something breaks in a way that smells like a scripting difference** — a
+master not found, a collection that will not enumerate, an export that silently
+produces nothing, a deck that will not open — **a 14.x machine is one of the first
+things to rule out.** The fix is to restore a fallback in
+`src/obed_edom/keynote_app.py`, not to work around it at the call site.
 
 Keynote 15 installs as **`Keynote Creator Studio.app`** with bundle identifier
-`com.apple.Keynote`. Keynote 14.x is `Keynote.app` / `com.apple.iWork.Keynote`.
-Both set their bundle *name* to "Keynote", so on a machine with both:
+`com.apple.Keynote`; 14.x was `Keynote.app` / `com.apple.iWork.Keynote`. Both set
+their bundle *name* to "Keynote", so with both installed:
 
-- `tell application "Keynote"` resolves to **14.5**, not 15.
-- `Application("Keynote")` in JXA does the same.
-- `process "Keynote"` in System Events is equally ambiguous.
+- `tell application "Keynote"` resolved to **14.5**, not 15.
+- `Application("Keynote")` in JXA did the same.
+- `process "Keynote"` in System Events was equally ambiguous.
 
 An upgrade therefore looks like a no-op: every script keeps driving the old app
-while appearing to test the new one. So `src/obed_edom/keynote_app.py` is the one
-place that decides, everything addresses the app by bundle id
-(`tell application id "…"`, `using terms from application id "…"`,
-`Application(bundleId)`, `open -b`), and the JXA scripts take `bundleId` in their
-plan JSON. Set `OBED_EDOM_KEYNOTE_BUNDLE_ID` to pin a version.
+while appearing to test the new one. Uninstalling 14.5 makes the name resolve to
+15.3.1 again, which is exactly why the by-name habit is dangerous — it works until
+someone has two builds. So `keynote_app.py` is the one place that decides,
+everything addresses the app by bundle id (`tell application id "…"`,
+`using terms from application id "…"`, `Application(bundleId)`, `open -b`), and
+the JXA scripts take `bundleId` in their plan JSON.
+`OBED_EDOM_KEYNOTE_BUNDLE_ID` drives a different build and partitions the cache
+with it.
 
 Resolution asks LaunchServices first — one targeted lookup that touches no other
 app — and falls back to reading `Info.plist` off disk when that is unavailable, as
@@ -361,18 +380,16 @@ third-party bundles, and malformed ones are common enough that one game in
 `~/Applications` broke resolution in testing. The scan tries the names Keynote
 ships under before enumerating, and skips any app whose plist will not parse.
 
-Verified on macOS 26.6.2 with both installed: `com.apple.Keynote` reports 15.3.1,
-`com.apple.iWork.Keynote` reports 14.5, and the by-name lookup returns 14.5.
 `tests/test_keynote_app.py` locks the targeting and the cache split in.
 
-## Keynote scripting limits (14.5 and 15.3.1 agree)
+## Keynote scripting limits (verified on 15.3.1)
 
-Re-probed on macOS 26.6.2 against both installed versions, driven by bundle id.
-**Every answer below is identical on 14.5 and 15.3.1**, so the upgrade changed
-nothing we depend on and none of this needs re-litigating per version. Re-probe
-after the *next* upgrade with `scripts/probe_runs.js` and
-`scripts/probe_layouts.js`, both of which take a bundle id as their last argument
-so the same probe can be pointed at either app.
+Re-probed on macOS 26.6.2 against 14.5 and 15.3.1 side by side, driven by bundle
+id, while both were still installed. **Every answer below was identical on the
+two**, so the upgrade changed nothing we depend on. 14.5 has since been
+uninstalled, so 15.3.1 is now the only version these hold for. Re-probe after the
+*next* upgrade with `scripts/probe_runs.js` and `scripts/probe_layouts.js`, both
+of which take a bundle id as their last argument.
 
 - **Per-run character style is unreachable.** `objectText.attributeRuns()`
   raises "Can't convert types."; `paragraphs()`, `characters()` and `words()`
@@ -425,15 +442,15 @@ so the same probe can be pointed at either app.
   reader that produced it. Two axes need handling. Bump `INSPECT_VERSION` in
   `baseline.py` when the payload shape changes, or old payloads are reused
   forever; and the file name carries a `.k<Keynote version>` tag, because a
-  digest-keyed hit would otherwise hand a 14.5 payload to a 15.x run.
+  digest-keyed hit would otherwise hand one build's payload to a run of another.
   Payloads also record `keynoteBundleId` and `keynoteVersion`.
 
-  Untagged payloads under `output/.cache` predate the tag. They were all produced
-  by Keynote 14.5 on macOS 14, so they are read only when the target is 14.5 and
-  are never written to again — a fresh 14.5 inspect lands beside them rather than
-  overwriting them, which is what makes a three-way 14.5/macOS 14 versus
-  14.5/macOS 26 versus 15.3.1 comparison possible. `output/baseline-14.5/` holds a
-  clone of that set plus the score table it produces.
+  Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
+  longer read. **Uninstalling a Keynote version orphans its partition**, which is
+  worth knowing before the next upgrade: the offline scripts
+  (`score_resize.py`, `try_free_space.py`, `try_multi_framing.py`) all read the
+  cache, so they go quiet until the decks are read again on the new version.
+  `output/baseline-14.5/` keeps the 14.5 score table as a cold archive.
 
 ## Operator outline (`_CUED.docx`)
 

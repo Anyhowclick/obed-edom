@@ -1,25 +1,19 @@
 """Which Keynote gets driven, and which cache partition it reads.
 
 Keynote 15 ships as a separate app with its own bundle identifier while keeping
-the bundle name "Keynote", so name-based lookup silently reaches 14.x on a
-machine with both. These tests pin the two consequences: every generated script
-addresses the app by bundle id, and a payload read by one version is never handed
-to the other.
+the bundle name "Keynote", so name-based lookup reaches whichever build
+LaunchServices prefers. These tests pin the two consequences: every generated
+script addresses the app by bundle id, and a payload produced by one build is
+never handed to a run of another.
+
+The tool is 15.x only, so there is deliberately no fallback to another build.
 """
 
 from pathlib import Path
 
 import pytest
 from obed_edom import keynote_app
-from obed_edom.baseline import (
-    LEGACY_APP_VERSION,
-    inspect_cache_candidates,
-    inspect_cache_path,
-    legacy_inspect_cache_path,
-    legacy_preview_cache_dir,
-    preview_cache_candidates,
-    preview_cache_dir,
-)
+from obed_edom.baseline import inspect_cache_path, preview_cache_dir
 from obed_edom.inspect import export_applescript
 
 
@@ -31,23 +25,27 @@ def _fresh_resolution():
 
 
 def test_pinned_bundle_id_wins(monkeypatch):
-    monkeypatch.setenv(keynote_app.BUNDLE_ID_ENV, "com.apple.iWork.Keynote")
-    assert keynote_app.bundle_id() == "com.apple.iWork.Keynote"
+    """For driving a different 15.x build, e.g. a beta, against its own cache
+    partition. Not for reviving 14.x."""
+    monkeypatch.setenv(keynote_app.BUNDLE_ID_ENV, "com.apple.Keynote.beta")
+    assert keynote_app.bundle_id() == "com.apple.Keynote.beta"
 
 
-def test_pinned_bundle_id_is_returned_even_when_absent(monkeypatch):
-    """So the failure names the version that was asked for."""
-    monkeypatch.setenv(keynote_app.BUNDLE_ID_ENV, "com.example.NotKeynote")
-    assert keynote_app.bundle_id() == "com.example.NotKeynote"
-    assert keynote_app.app_version() == keynote_app.UNKNOWN_VERSION
-
-
-def test_unpinned_prefers_keynote_15(monkeypatch):
+def test_defaults_to_keynote_15(monkeypatch):
     monkeypatch.delenv(keynote_app.BUNDLE_ID_ENV, raising=False)
-    monkeypatch.setattr(keynote_app, "_from_workspace", lambda identifier: None)
-    monkeypatch.setattr(keynote_app, "_from_disk", lambda identifier: Path("/Applications/x.app"))
     keynote_app.clear_cache()
     assert keynote_app.bundle_id() == "com.apple.Keynote"
+
+
+def test_a_missing_app_never_falls_back_to_another_build(monkeypatch):
+    """15.x only. The identifier asked for is the one that fails, by name, rather
+    than a 14.x install quietly answering for it."""
+    monkeypatch.setenv(keynote_app.BUNDLE_ID_ENV, "com.example.NotKeynote")
+    monkeypatch.setattr(keynote_app, "_from_workspace", lambda identifier: None)
+    monkeypatch.setattr(keynote_app, "_from_disk", lambda identifier: None)
+    keynote_app.clear_cache()
+    assert keynote_app.bundle_id() == "com.example.NotKeynote"
+    assert keynote_app.app_version() == keynote_app.UNKNOWN_VERSION
 
 
 def test_launchservices_answers_before_any_bundle_is_parsed(monkeypatch):
@@ -75,20 +73,6 @@ def test_known_keynote_names_are_tried_before_scanning(monkeypatch, tmp_path: Pa
     assert order[-1].name == "Aaa Unrelated.app"
 
 
-def test_falls_back_to_keynote_14_when_15_is_absent(monkeypatch):
-    monkeypatch.delenv(keynote_app.BUNDLE_ID_ENV, raising=False)
-    monkeypatch.setattr(
-        keynote_app,
-        "_from_disk",
-        lambda identifier: Path("/Applications/Keynote.app")
-        if identifier == "com.apple.iWork.Keynote"
-        else None,
-    )
-    monkeypatch.setattr(keynote_app, "_from_workspace", lambda identifier: None)
-    keynote_app.clear_cache()
-    assert keynote_app.bundle_id() == "com.apple.iWork.Keynote"
-
-
 def test_scripts_address_keynote_by_bundle_id(monkeypatch, tmp_path: Path):
     monkeypatch.setenv(keynote_app.BUNDLE_ID_ENV, "com.apple.Keynote")
     keynote_app.clear_cache()
@@ -108,22 +92,11 @@ def test_cache_is_partitioned_by_app_version(tmp_path: Path):
     )
 
 
-def test_only_the_legacy_version_reads_untagged_payloads(tmp_path: Path):
-    """The banked baseline stays a live cache for 14.5 and is invisible to 15.x."""
-    legacy = legacy_inspect_cache_path("abc", tmp_path)
-    assert legacy in inspect_cache_candidates("abc", tmp_path, app_version=LEGACY_APP_VERSION)
-    assert legacy not in inspect_cache_candidates("abc", tmp_path, app_version="15.3.1")
-
-    legacy_dir = legacy_preview_cache_dir("abc", tmp_path)
-    assert legacy_dir in preview_cache_candidates("abc", tmp_path, app_version=LEGACY_APP_VERSION)
-    assert legacy_dir not in preview_cache_candidates("abc", tmp_path, app_version="15.3.1")
-
-
-def test_untagged_payloads_are_never_written_again(tmp_path: Path):
-    """Writes always go to the tagged name, so a 14.5 re-inspect cannot overwrite
-    the macOS 14 baseline it would otherwise collide with."""
-    written = inspect_cache_path("abc", tmp_path, app_version=LEGACY_APP_VERSION)
-    assert written != legacy_inspect_cache_path("abc", tmp_path)
+def test_untagged_payloads_are_not_read(tmp_path: Path):
+    """Pre-tag payloads were produced by 14.5 and must stay invisible, or a 15.x
+    run would silently reuse a reading from an unsupported build."""
+    untagged = tmp_path / "output" / ".cache" / "inspect" / "abc.v2.json"
+    assert inspect_cache_path("abc", tmp_path, app_version="15.3.1") != untagged
 
 
 def test_app_version_is_filename_safe(tmp_path: Path):

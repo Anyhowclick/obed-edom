@@ -7,10 +7,16 @@ LaunchServices happens to prefer — 14.5 on a machine with both installed. Ever
 AppleScript, JXA and ``open`` call therefore addresses Keynote by bundle
 identifier, and this module is the single place that decides which one.
 
-Set ``OBED_EDOM_KEYNOTE_BUNDLE_ID`` to pin a version. That is how one Keynote is
-compared against another on the same machine, where the OS is held constant: the
-same variable also partitions the inspect cache, so a 14.5 payload and a 15.x
-payload of the same deck coexist instead of overwriting each other.
+**This tool is Keynote 15.x only.** 14.x support was removed deliberately once the
+staff machines were confirmed on 15.3.1. If something breaks in a way that smells
+like a scripting difference — a master not found, a collection that will not
+enumerate, an export that silently produces nothing — a 14.x machine is one of the
+first things to rule out, and the fix is to restore a fallback here rather than to
+work around it at the call site.
+
+Set ``OBED_EDOM_KEYNOTE_BUNDLE_ID`` to drive a different build, which also
+partitions the inspect cache so payloads from two builds cannot overwrite each
+other.
 
 Resolution asks LaunchServices first, which is one targeted lookup and touches no
 other app. Reading ``Info.plist`` off disk is the fallback for when LaunchServices
@@ -27,15 +33,15 @@ from functools import lru_cache
 from pathlib import Path
 
 BUNDLE_ID_ENV = "OBED_EDOM_KEYNOTE_BUNDLE_ID"
-# Newest first. A machine with both installed should be driven by the version the
-# church machines run, not by whichever one LaunchServices answers with.
-KNOWN_BUNDLE_IDS = ("com.apple.Keynote", "com.apple.iWork.Keynote")
+# Keynote 15.x. 14.x was com.apple.iWork.Keynote and is no longer supported.
+KEYNOTE_BUNDLE_ID = "com.apple.Keynote"
 UNKNOWN_VERSION = "unknown"
 
 _SEARCH_DIRS = ("/Applications", "~/Applications")
-# Tried before scanning: the names Keynote has shipped under. A hit here means two
-# Apple bundles are parsed instead of every app on the machine.
-_LIKELY_NAMES = ("Keynote.app", "Keynote Creator Studio.app")
+# Tried before scanning, so a hit parses one Apple bundle rather than every app on
+# the machine. 15.x ships under the Creator Studio name; plain "Keynote.app" is
+# still checked because that is what a future rename would most likely go back to.
+_LIKELY_NAMES = ("Keynote Creator Studio.app", "Keynote.app")
 
 
 def _bundle_info(app: Path) -> dict | None:
@@ -102,16 +108,11 @@ def app_path(identifier: str) -> Path | None:
 def bundle_id() -> str:
     """The bundle identifier every Keynote call should target.
 
-    A pinned value is returned even when that app is not installed, so the
-    resulting failure names the version that was asked for.
+    Returned whether or not the app is installed, so a missing Keynote fails
+    naming the identifier that was asked for rather than silently falling back to
+    another build.
     """
-    pinned = (os.environ.get(BUNDLE_ID_ENV) or "").strip()
-    if pinned:
-        return pinned
-    for identifier in KNOWN_BUNDLE_IDS:
-        if app_path(identifier) is not None:
-            return identifier
-    return KNOWN_BUNDLE_IDS[0]
+    return (os.environ.get(BUNDLE_ID_ENV) or "").strip() or KEYNOTE_BUNDLE_ID
 
 
 @lru_cache(maxsize=None)

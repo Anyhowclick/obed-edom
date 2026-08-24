@@ -88,7 +88,7 @@ def resolve_source_previews(
     """
     from PIL import Image  # noqa: PLC0415
 
-    from obed_edom.baseline import deck_digest, preview_cache_candidates  # noqa: PLC0415
+    from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
     from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
     from obed_edom.inspect import preview_media  # noqa: PLC0415
 
@@ -98,9 +98,7 @@ def resolve_source_previews(
     if wall.get("previewDir"):
         candidates.append((Path(str(wall["previewDir"])), "this run's export"))
     try:
-        candidates += [
-            (path, "preview cache") for path in preview_cache_candidates(deck_digest(source))
-        ]
+        candidates.append((preview_cache_dir(deck_digest(source)), "preview cache"))
     except (OSError, FileNotFoundError):
         pass
 
