@@ -1091,8 +1091,60 @@ def _best_matching_slide(
     )
 
 
-def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
-    """Fit map rects from a 16:9 CG template inspect payload."""
+def _slide_number_of(slide: dict) -> int:
+    return int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+
+
+def rank_framing_candidates(
+    wall_slide: dict,
+    template_slides: list[dict],
+    *,
+    wall_size: tuple[float, float],
+    dest_size: tuple[float, float],
+) -> list[dict[str, Any]]:
+    """Every template framing this wall slide could use, best first.
+
+    The same ranking `_best_matching_slide` applies, exposed so the operator can
+    be shown the runners-up and pick one. Which crop of a map is wanted is an
+    editorial choice the geometry cannot express, so the point is to offer the
+    alternatives rather than to add another metric.
+    """
+    rows: list[dict[str, Any]] = []
+    for slide in template_slides:
+        score = _score_template_slide(wall_slide, slide)
+        fit = (
+            _framing_fit(wall_slide, slide, *wall_size, *dest_size)
+            if score > 0
+            else 0.0
+        )
+        rows.append(
+            {
+                "templateSlide": _slide_number_of(slide),
+                "name": str(slide.get("master") or ""),
+                # Agreement level is the real signal; fit only settles ties within
+                # one level of it. Both are shown so a close call reads as close.
+                "agreement": score // 100,
+                "pairTotal": score % 100,
+                "fit": round(fit, 4),
+            }
+        )
+    rows.sort(key=lambda r: (r["agreement"], r["fit"]), reverse=True)
+    for row in rows:
+        row["autoPick"] = False
+    if rows and rows[0]["agreement"] > 0:
+        rows[0]["autoPick"] = True
+    return rows
+
+
+def learn_recipe(
+    wall: dict, template: dict, *, template_slide: int | None = None
+) -> dict[str, Any]:
+    """Fit map rects from a 16:9 CG template inspect payload.
+
+    `template_slide` pins the framing to that template slide number, skipping the
+    automatic choice. An unknown number falls back to choosing automatically
+    rather than failing, so a stale confirmation cannot break a run.
+    """
     dest_w = int(template.get("slideWidth") or CG_WIDTH)
     dest_h = int(template.get("slideHeight") or CG_HEIGHT)
     wall_slides = wall.get("slides") or []
@@ -1103,12 +1155,20 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(
             wall_slides, is_pin_item
         )
-    g_slide = _best_matching_slide(
-        w_slide,
-        template_slides,
-        wall_size=(_f(wall.get("slideWidth"), 7680), _f(wall.get("slideHeight"), 1080)),
-        dest_size=(float(dest_w), float(dest_h)),
-    )
+    g_slide = None
+    if template_slide is not None:
+        g_slide = next(
+            (s for s in template_slides if _slide_number_of(s) == int(template_slide)),
+            None,
+        )
+    pinned = g_slide is not None
+    if g_slide is None:
+        g_slide = _best_matching_slide(
+            w_slide,
+            template_slides,
+            wall_size=(_f(wall.get("slideWidth"), 7680), _f(wall.get("slideHeight"), 1080)),
+            dest_size=(float(dest_w), float(dest_h)),
+        )
     map_src = None
     map_dst = None
     list_src = None
@@ -1217,9 +1277,11 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         "pairQuality": max((len(g["members"]) for g in grouped), default=0),
         # Which template slide taught this. Worth surfacing: picking the wrong
         # framing looks like a geometry bug until you can see the choice.
-        "templateSlide": (
-            int(g_slide.get("number") or (int(g_slide.get("index") or 0) + 1)) if g_slide else None
-        ),
+        "templateSlide": (_slide_number_of(g_slide) if g_slide else None),
+        # True only when a requested framing was actually found. A stale
+        # confirmation naming a slide the template no longer has falls back to
+        # choosing automatically, and must not report itself as honoured.
+        "framingPinned": pinned,
     }
     if list_src and list_dst and list_src.w > 1 and list_src.h > 1:
         recipe["listSrc"] = list_src.as_dict()
@@ -2336,6 +2398,8 @@ def plan_payload_transforms(
     skipped_slides: list[int] | None = None,
     fitted_slides: list[int] | None = None,
     offframe_report: list[dict[str, Any]] | None = None,
+    framing_overrides: dict[int, int] | None = None,
+    framing_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
@@ -2344,6 +2408,13 @@ def plan_payload_transforms(
     loose text from blind right-to-left packing onto measured empty space; rows
     describing what moved land in `placement_report` for flagging. Slides hidden
     with Skip Slide are not planned, and their numbers land in `skipped_slides`.
+
+    `framing_overrides` maps a wall slide number to the template slide number the
+    operator confirmed, replacing the automatic choice for that slide only. The
+    fit-to-frame fallback still applies afterwards, so a confirmation that turns
+    out unusable degrades the same way an automatic choice does rather than
+    throwing content out of frame. What each slide ended up using lands in
+    `framing_report`.
     """
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
@@ -2361,6 +2432,7 @@ def plan_payload_transforms(
             continue
         slide_recipe = recipe
         if template and (template.get("slides") or []):
+            wanted = (framing_overrides or {}).get(number)
             slide_recipe = learn_recipe(
                 {
                     "slideWidth": payload.get("slideWidth"),
@@ -2368,7 +2440,20 @@ def plan_payload_transforms(
                     "slides": [slide],
                 },
                 template,
+                template_slide=wanted,
             )
+            if framing_report is not None:
+                framing_report.append(
+                    {
+                        "slide": number,
+                        "templateSlide": slide_recipe.get("templateSlide"),
+                        "requested": wanted,
+                        "confirmed": bool(slide_recipe.get("framingPinned")),
+                        "source": slide_recipe.get("source"),
+                        "pairQuality": slide_recipe.get("pairQuality"),
+                        "fitted": False,
+                    }
+                )
             # No template framing describes this page. Applying the closest one
             # anyway either throws objects thousands of pixels out of frame or
             # collapses them into a corner; fitting what is visible does neither.
@@ -2390,6 +2475,8 @@ def plan_payload_transforms(
                     slide_recipe = fitted
                     if fitted_slides is not None:
                         fitted_slides.append(number)
+                    if framing_report:
+                        framing_report[-1]["fitted"] = True
         preview = (previews or {}).get(number)
         # One raster read per slide, shared by the drop decision and the
         # placement decision so they can never disagree.
