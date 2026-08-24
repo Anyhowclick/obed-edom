@@ -3,8 +3,8 @@ name: obed-edom
 description: >-
   Generates separate LW (LED wall) and DSK Keynote decks from semantic-cue
   sermon/offering Word outlines, writes operator [LW]/[DSK] cues back into a
-  copy of the outline, checks Bible references against Bible Gateway, and flags
-  contrast issues. Use when the user mentions sermon slides, DSK, LW, FW, LED
+  copy of the outline, checks Bible references against Bible Gateway.
+  Use when the user mentions sermon slides, DSK, LW, FW, LED
   cues, Keynote templates, Offering JX.docx, Sermon BC.docx, TITLE/FILLER/VERSE
   /POINT/NUM-POINT cues, running python -m obed_edom generate, or changing
   the operator dashboard under dashboard/src. Also covers the CG resizer that
