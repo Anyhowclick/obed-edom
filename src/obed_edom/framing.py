@@ -204,6 +204,94 @@ def reuse_framings(
     return out
 
 
+THUMB_WIDTH = 1920
+THUMB_QUALITY = 82
+
+
+def _transform_of(recipe: dict[str, Any]) -> dict[str, float] | None:
+    """The uniform scale and offset that puts wall coordinates into the CG frame.
+
+    `(x, y) -> (s*x + tx, s*y + ty)`, which is what the browser needs to place a
+    wall image inside a 16:9 box: width becomes `wallWidth * s`, offset `tx, ty`.
+    Derived from mapSrc/mapDst rather than the group affine so a fit-to-frame
+    recipe, which has no paired group, still renders.
+    """
+    src = recipe.get("mapSrc") or {}
+    dst = recipe.get("mapDst") or {}
+    try:
+        sw = float(src.get("w") or 0)
+        sh = float(src.get("h") or 0)
+        if sw <= 0 or sh <= 0:
+            return None
+        s = float(dst.get("w") or 0) / sw
+        if s <= 0:
+            return None
+        return {
+            "s": round(s, 6),
+            "tx": round(float(dst.get("x") or 0) - float(src.get("x") or 0) * s, 2),
+            "ty": round(float(dst.get("y") or 0) - float(src.get("y") or 0) * s, 2),
+        }
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def build_preview_thumbs(
+    deck: Path | str,
+    payload: dict[str, Any],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> dict[int, str]:
+    """Downscale a deck's cached previews once, so the browser can show artwork.
+
+    Returns slide number to thumbnail file name. Used for both sides: wall slides,
+    whose previews are 7680x1080 and 9 MB each, and the template slides, so a
+    group header can show what "template slide 4" actually looks like instead of
+    asking the operator to hold it in their head.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    from obed_edom.baseline import deck_digest, preview_cache_dir, wall_thumb_dir  # noqa: PLC0415
+    from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
+    from obed_edom.inspect import preview_media  # noqa: PLC0415
+
+    deck = Path(deck)
+    digest = deck_digest(deck)
+    source = preview_cache_dir(digest)
+    dest = wall_thumb_dir(digest)
+    slides = payload.get("slides") or []
+    if not source.is_dir():
+        if log:
+            log(f"No cached previews for {deck.name}, so its thumbnails are unavailable.")
+        return {}
+    images = [p for p in preview_media(source) if p.suffix.lower() != ".mov"]
+    mapped = map_preview_pngs(slides, images)
+    dest.mkdir(parents=True, exist_ok=True)
+    out: dict[int, str] = {}
+    made = 0
+    for index, png in mapped.items():
+        if index >= len(slides):
+            continue
+        number = int(slides[index].get("number") or index + 1)
+        name = f"{number:04d}.jpg"
+        target = dest / name
+        out[number] = name
+        if target.is_file():
+            continue
+        try:
+            with Image.open(png) as im:
+                im = im.convert("RGB")
+                if im.width > THUMB_WIDTH:
+                    height = max(1, round(im.height * THUMB_WIDTH / im.width))
+                    im = im.resize((THUMB_WIDTH, height), Image.LANCZOS)
+                im.save(target, "JPEG", quality=THUMB_QUALITY)
+            made += 1
+        except (OSError, ValueError):
+            out.pop(number, None)
+    if made and log:
+        log(f"Made {made} thumbnail(s) from {deck.name} previews.")
+    return out
+
+
 def propose_framings(
     wall: Path | str,
     template: Path | str,
@@ -265,6 +353,8 @@ def propose_framings(
         template=template_data,
         framing_report=report,
     )
+    thumbs = build_preview_thumbs(wall_path, wall_data, log=log)
+    template_thumbs = build_preview_thumbs(template_path, template_data, log=log)
 
     by_number = {
         int(s.get("number") or (int(s.get("index") or 0) + 1)): s
@@ -280,23 +370,35 @@ def propose_framings(
         candidates = rank_framing_candidates(
             slide, template_slides, wall_size=(wall_w, wall_h), dest_size=dest
         )
-        if auto_fell_back:
-            for candidate in candidates:
-                trial = learn_recipe(
-                    {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]},
-                    template_data,
-                    template_slide=candidate["templateSlide"],
-                )
-                candidate["wouldFallBack"] = (
-                    on_canvas_fraction(slide, trial, wall_w, wall_h) < MIN_ON_CANVAS_FRACTION
-                    or is_degenerate_scale(trial, wall_w, wall_h)
-                )
+        # Every candidate needs its transform, because the row renders the crop in
+        # the browser and the dropdown has to re-render instantly. Learning the
+        # recipe per candidate also settles whether it would fall back, so both
+        # answers come from the same pass.
+        for candidate in candidates:
+            trial = learn_recipe(
+                {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]},
+                template_data,
+                template_slide=candidate["templateSlide"],
+            )
+            candidate["wouldFallBack"] = (
+                on_canvas_fraction(slide, trial, wall_w, wall_h) < MIN_ON_CANVAS_FRACTION
+                or is_degenerate_scale(trial, wall_w, wall_h)
+            )
+            candidate["transform"] = _transform_of(trial)
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
+        auto_slide = row.get("templateSlide")
+        auto_candidate = next(
+            (c for c in candidates if c["templateSlide"] == auto_slide), None
+        )
         pages.append(
             {
                 "slide": number,
                 "index": number - 1,
-                "autoTemplateSlide": row.get("templateSlide"),
+                "thumb": thumbs.get(number),
+                # What the automatic choice does to this page, so a row can render
+                # before the operator touches anything.
+                "autoTransform": (auto_candidate or {}).get("transform"),
+                "autoTemplateSlide": auto_slide,
                 "autoFellBack": auto_fell_back,
                 "needsAttention": auto_fell_back,
                 # No framing here is worth picking, so the honest default is
@@ -320,11 +422,20 @@ def propose_framings(
             + ("…" if len(stuck) > 10 else "")
             + " — no existing framing can be used for those."
         )
+    from obed_edom.baseline import wall_thumb_dir  # noqa: PLC0415
+
     return {
         "wallPath": str(wall_path),
         "templatePath": str(template_path),
         "wallDigests": deck_slide_digests(wall_data),
         "templateDigest": deck_digest(template_path),
+        # Kept so serving a thumbnail does not re-hash the deck. Digesting a
+        # 6.8 GB deck took 6.8s per request, which made 150 rows unusable.
+        "wallThumbDir": str(wall_thumb_dir(deck_digest(wall_path))),
+        "templateThumbDir": str(wall_thumb_dir(deck_digest(template_path))),
+        # Template slide number to thumbnail, so a group can show the framing
+        # itself rather than only naming it.
+        "templateThumbs": {str(k): v for k, v in sorted(template_thumbs.items())},
         "destWidth": int(dest[0]),
         "destHeight": int(dest[1]),
         "wallWidth": int(wall_w),

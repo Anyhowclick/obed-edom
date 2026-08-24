@@ -65,6 +65,17 @@ def preview_cache_dir(
     return cache_root(root) / "previews" / f"{digest}.k{_app_tag(app_version)}"
 
 
+def wall_thumb_dir(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Downscaled wall previews, for showing a framing in the browser.
+
+    A wall preview is 7680x1080 and about 9 MB, so ten of them on one page is
+    ~90 MB. These are the same images at a size a row can display.
+    """
+    return cache_root(root) / "wallthumbs" / f"{digest}.k{_app_tag(app_version)}"
+
+
 def _hash_file(hasher: hashlib._Hash, path: Path, chunk: int = 1024 * 1024) -> None:
     with path.open("rb") as handle:
         while True:

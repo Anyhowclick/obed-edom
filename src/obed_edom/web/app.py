@@ -587,6 +587,28 @@ def create_app() -> FastAPI:
         )
         return job.to_dict()
 
+    @app.get("/api/resize/{job_id}/thumb/{which}/{filename}")
+    def resize_thumb(job_id: str, which: str, filename: str):
+        """A downscaled slide: `wall` for the source page, `template` for a framing."""
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        key = {"wall": "wallThumbDir", "template": "templateThumbDir"}.get(which)
+        if not key:
+            raise HTTPException(400, "Expected wall or template")
+        raw = str((job.result or {}).get(key) or "")
+        if not raw:
+            raise HTTPException(404, f"Job has no {which} thumbnails")
+        folder = Path(raw)
+        path = (folder / Path(filename).name).resolve()
+        try:
+            path.relative_to(folder.resolve())
+        except ValueError:
+            raise HTTPException(400, "Bad filename") from None
+        if not path.is_file():
+            raise HTTPException(404, "No thumbnail")
+        return FileResponse(path, media_type=preview_media_type(path))
+
     @app.post("/api/resize/{job_id}/framings")
     def save_resize_framings(job_id: str, payload: FramingsBody) -> dict:
         """Remember which crop each page should use, without remapping."""
@@ -1476,6 +1498,15 @@ def _run_resize(
         "includeLists": include_lists,
         "templateScore": score,
         "flags": serialize_flags(flags),
+        # The planner's own reporting. These were computed and then dropped before
+        # the dashboard saw them, so overruled framings, content pushed out of
+        # frame and text that had to overlap artwork were visible only in the log.
+        "framingReport": info.get("framingReport") or [],
+        "fittedSlides": info.get("fittedSlides") or [],
+        "offFrame": info.get("offFrame") or [],
+        "placements": info.get("placements") or [],
+        "placementSource": info.get("placementSource") or "",
+        "skippedSlidesLeftAlone": info.get("skippedSlidesLeftAlone") or [],
     }
 
 

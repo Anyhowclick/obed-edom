@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
-import { chooseKeynote, pollJob, reveal, startResize, type ChosenFile } from "../api";
+import {
+  applyResize,
+  chooseKeynote,
+  pollJob,
+  reveal,
+  saveResizeFramings,
+  startResize,
+  type ChosenFile,
+  type FramingDecision,
+} from "../api";
 import { FileWell } from "../components/FileWell";
+import { FramingReview, type FramingProposal } from "../components/FramingReview";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useCurrentJob } from "../sessions";
@@ -30,8 +40,9 @@ function parseSlideSpec(raw: string): number[] | null {
   return [...out].sort((a, b) => a - b);
 }
 
-type ResizeResult = {
+type ResizeResult = FramingProposal & {
   path?: string;
+  templatePath?: string;
   destPath?: string;
   applied?: number;
   missed?: number;
@@ -39,6 +50,10 @@ type ResizeResult = {
   goldScore?: { pinPairs?: number; pinRmse?: number | null };
   templateScore?: { pinPairs?: number; pinRmse?: number | null };
   recipe?: { source?: string };
+  fittedSlides?: number[];
+  offFrame?: { slide: number; role?: string }[];
+  placements?: { slide: number; overlap?: number }[];
+  framingReport?: { slide: number; templateSlide: number | null; confirmed?: boolean; fitted?: boolean }[];
 };
 
 export function ResizeTab() {
@@ -56,7 +71,13 @@ export function ResizeTab() {
   useEffect(() => {
     const path = result?.path;
     if (path) setLw({ path, name: path.split("/").pop() || path });
-  }, [job?.id, result?.path]);
+    // Restore the template too, or reopening a run leaves the button disabled and
+    // the operator has to re-pick a file the run already knows about.
+    const templatePath = result?.templatePath;
+    if (templatePath) {
+      setTemplate({ path: templatePath, name: templatePath.split("/").pop() || templatePath });
+    }
+  }, [job?.id, result?.path, result?.templatePath]);
 
   const parsedSlides = parseSlideSpec(range);
   const rangeError = range.trim() && !parsedSlides ? "Enter slides like 2 or 2, 4-6." : null;
@@ -83,14 +104,43 @@ export function ResizeTab() {
         includeLists,
       });
       upsert(created);
-      const done = await pollJob(created.id, (tick) => {
-        setLogs(tick.logs);
-        upsert(tick);
-      });
-      upsert(done);
-      if (done.status === "error") {
-        setError(done.error || "Resize failed.");
-      }
+      await track(created);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function track(created: { id: string }) {
+    const done = await pollJob(created.id, (tick) => {
+      setLogs(tick.logs);
+      upsert(tick);
+    });
+    upsert(done);
+    if (done.status === "error") setError(done.error || "Resize failed.");
+    return done;
+  }
+
+  async function saveFramings(decisions: FramingDecision[]) {
+    if (!job) return;
+    setBusy(true);
+    setError(null);
+    try {
+      upsert(await saveResizeFramings(job.id, decisions));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyFramings(decisions: FramingDecision[]) {
+    if (!job) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await track(await applyResize(job.id, decisions));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -100,6 +150,10 @@ export function ResizeTab() {
 
   const counts = result?.counts;
   const score = result?.templateScore || result?.goldScore;
+  const awaitingFramings = result?.phase === "framing";
+  const fitted = result?.fittedSlides || [];
+  const offFrame = result?.offFrame || [];
+  const overruled = (result?.framingReport || []).filter((r) => r.confirmed && r.fitted);
 
   return (
     <div>
@@ -159,9 +213,38 @@ export function ResizeTab() {
       </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>
-          Resize to 1920×1080
+          Propose framings
         </button>
       </div>
+      {awaitingFramings && result && job && (
+        <FramingReview
+          proposal={result}
+          jobId={job.id}
+          busy={busy}
+          onSave={saveFramings}
+          onApply={applyFramings}
+        />
+      )}
+      {result?.destPath && overruled.length > 0 && (
+        <p className="note">
+          Your confirmed framing could not be used on slide{overruled.length === 1 ? "" : "s"}{" "}
+          {overruled.map((r) => r.slide).join(", ")} — that template slide cannot frame{" "}
+          {overruled.length === 1 ? "it" : "them"}, so the content was fitted to the frame instead.
+        </p>
+      )}
+      {result?.destPath && fitted.length > 0 && (
+        <p className="note">
+          No template framing matched {fitted.length} slide(s): {fitted.slice(0, 14).join(", ")}
+          {fitted.length > 14 ? `, +${fitted.length - 14} more` : ""}. Their content was scaled to
+          fit. Add a template slide for those layouts.
+        </p>
+      )}
+      {result?.destPath && offFrame.length > 0 && (
+        <p className="note">
+          {offFrame.length} object(s) visible on the wall land outside the CG frame. They are still in
+          the deck — drag them back or adjust the template.
+        </p>
+      )}
       {result?.destPath && (
         <>
           <p className="note path-note">

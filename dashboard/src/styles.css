@@ -9,6 +9,8 @@
   --ok: #8fd0b0;
   --info: #7a8fb5;
   --panel: #152238;
+  --sky: #8fc4e8;
+  --plum: #c79bde;
 }
 
 * { box-sizing: border-box; }
@@ -603,7 +605,7 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   background: var(--panel);
 }
 .slide-card.flagged { border-color: #6b5a2e; }
-input[type="text"], input[type="number"] {
+input[type="text"], input[type="number"], select {
   background: var(--panel);
   border: 1px solid var(--line);
   color: var(--ink);
@@ -612,6 +614,9 @@ input[type="text"], input[type="number"] {
   font: inherit;
   width: 100%;
 }
+/* The OS renders the option list, so it needs the polarity told to it or the
+   text comes out dark on dark. */
+select { color-scheme: dark; }
 label.field { display: block; margin: 8px 0; font-size: 14px; color: var(--muted); }
 label.check {
   display: flex;
@@ -683,6 +688,154 @@ label.check input { margin-top: 3px; }
 
 /* Case 1: the cued outline read top to bottom, findings alongside. */
 .outline-summary { margin: 0; }
+.framing-review { display: flex; flex-direction: column; gap: 10px; }
+/* One row normally, growing to two only when the selection actions appear —
+   .playlist-bar is not a flex container, so without this the tabs and the
+   controls stack even when there is room for both. */
+.framing-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.framing-bar .playlist-controls { flex: 1 1 auto; }
+.framing-tabs { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* One colour per bucket. The same tone appears on the tab and on every button
+   that moves a page into it, so the colour carries the meaning. */
+.btn.secondary.tone-matched { border-color: var(--ok); color: var(--ok); }
+.btn.secondary.tone-alt { border-color: var(--warn); color: var(--warn); }
+.btn.secondary.tone-template { border-color: var(--sky); color: var(--sky); }
+.btn.secondary.tone-matched.on { background: var(--ok); color: #10241c; border-color: var(--ok); }
+.btn.secondary.tone-alt.on { background: var(--warn); color: #2c2210; border-color: var(--warn); }
+.btn.secondary.tone-template.on { background: var(--sky); color: #10222c; border-color: var(--sky); }
+.btn.tone-save { background: linear-gradient(180deg, #c79bde 0%, #9a63bd 100%); color: #f7f0fb; }
+.btn.tone-save:hover:not(:disabled) { background: linear-gradient(180deg, #d4aee7 0%, #a973c9 100%); }
+
+/* The framing itself, next to its number. Hovering shows it big, because the
+   header thumbnail is too small to judge a crop by. */
+.framing-head { display: flex; gap: 10px; align-items: center; }
+.template-thumb { position: relative; display: block; flex-shrink: 0; line-height: 0; }
+.template-thumb > img {
+  width: 132px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: block;
+}
+.template-zoom {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 6;
+  display: none;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.template-thumb:hover .template-zoom { display: block; }
+.template-zoom > img { width: 520px; display: block; border-radius: 4px; }
+.framing-group {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+}
+.framing-group.flagged { border-left-color: var(--warn); }
+.framing-group .actions { flex-wrap: wrap; align-items: center; }
+.framing-group label.field { margin: 0; min-width: 0; }
+label.inline-field { display: flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
+label.inline-field select { width: auto; padding: 5px 8px; }
+
+/* The crop: a 16:9 window with the wall image positioned inside it. */
+.crop-preview {
+  position: relative;
+  overflow: hidden;
+  background: var(--navy-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.crop-preview img { position: absolute; display: block; max-width: none; }
+.crop-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* Every page in a group at a glance, so a wrong one in a batch of 56 shows up. */
+.framing-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.framing-chip {
+  position: relative;
+  padding: 0;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 0;
+}
+/* Green means the framing was matched, yellow means it fell back to fitting
+   content. Both are "in Matched", so the border is the only thing telling them
+   apart at a glance. */
+.framing-chip { border-color: var(--ok); }
+.framing-chip.fellback { border-color: var(--warn); }
+.framing-chip.selected { border-color: var(--sky); outline: 2px solid var(--sky); }
+.framing-chip-num {
+  position: absolute;
+  bottom: 2px;
+  left: 3px;
+  font-size: 10px;
+  line-height: 1.3;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(6, 12, 24, 0.78);
+  color: var(--ink);
+}
+.framing-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+/* Framings picked from their own thumbnails, since a native select cannot show
+   images and all of them fit anyway. */
+.framing-picker { display: flex; flex-wrap: wrap; gap: 5px; }
+.framing-option {
+  position: relative;
+  padding: 0;
+  background: none;
+  border: 2px solid var(--ok);
+  border-radius: 5px;
+  cursor: pointer;
+  line-height: 0;
+  opacity: 0.65;
+}
+.framing-option.fellback { border-color: var(--warn); }
+.framing-option.current { opacity: 1; outline: 2px solid var(--sky); }
+.framing-option:disabled { cursor: not-allowed; }
+.framing-option > img { width: 84px; display: block; border-radius: 3px; }
+.framing-option-num {
+  position: absolute;
+  bottom: 1px;
+  left: 2px;
+  font-size: 9px;
+  line-height: 1.35;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(6, 12, 24, 0.8);
+  color: var(--ink);
+}
+.framing-row { display: flex; gap: 10px; align-items: flex-start; }
+.framing-check { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
+.framing-row-controls { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.framing-row-controls .note { margin: 0; }
 .outline-reader { display: flex; flex-direction: column; gap: 4px; max-width: 96ch; }
 .outline-para {
   padding: 6px 10px;
