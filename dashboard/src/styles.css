@@ -1017,6 +1017,18 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   font-size: 10px;
   color: var(--muted);
 }
+.plan-key {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+/* A filtered-out role stays listed with its count: knowing 138 pins are hidden
+   is part of reading the picture. */
+.plan-key.off { opacity: 0.4; text-decoration: line-through; }
+.plan-key.off::before { background: none; }
 .plan-key::before {
   content: "";
   display: inline-block;
@@ -1024,6 +1036,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   height: 8px;
   margin-right: 3px;
   border: 1px solid currentColor;
+  background: currentColor;
   vertical-align: -1px;
 }
 .plan-key.role-map { color: rgba(120, 200, 255, 0.95); }

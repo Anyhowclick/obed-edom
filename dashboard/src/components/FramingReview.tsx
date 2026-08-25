@@ -203,7 +203,15 @@ function CropPreview({
 /** Which roles this page actually plans, and how many of each. A count of nothing
  *  is worth seeing too: 0 hidden on a page with name columns means the lists are
  *  about to be packed, not dropped. */
-function PlanLegend({ rects }: { rects: PlannedRect[] }) {
+function PlanLegend({
+  rects,
+  hidden,
+  onToggle,
+}: {
+  rects: PlannedRect[];
+  hidden: Set<string>;
+  onToggle: (role: string) => void;
+}) {
   const counts = new Map<string, number>();
   for (const rect of rects) counts.set(rect.role, (counts.get(rect.role) || 0) + 1);
   if (!counts.size) return null;
@@ -214,9 +222,18 @@ function PlanLegend({ rects }: { rects: PlannedRect[] }) {
   return (
     <div className="plan-legend">
       {roles.map((role) => (
-        <span key={role} className={`plan-key role-${role}`}>
+        <button
+          key={role}
+          type="button"
+          // 138 pins drown the handful of boxes worth looking at, so the legend
+          // doubles as the filter rather than adding a second row of controls.
+          className={`plan-key role-${role}${hidden.has(role) ? " off" : ""}`}
+          aria-pressed={!hidden.has(role)}
+          title={hidden.has(role) ? `Show ${role}` : `Hide ${role}`}
+          onClick={() => onToggle(role)}
+        >
           {role} {counts.get(role)}
-        </span>
+        </button>
       ))}
     </div>
   );
@@ -260,6 +277,9 @@ export function FramingReview({
   // On by default: the whole point of opening a page is to see what the run does
   // to it, and the boxes are the only part of that the crop cannot show.
   const [showPlan, setShowPlan] = useState(true);
+  // Pins outnumber everything else forty to one on a report card, so they start
+  // hidden: the boxes exist to show the objects a crop cannot explain.
+  const [hiddenRoles, setHiddenRoles] = useState<Set<string>>(new Set(["pin"]));
   // Drag across thumbnails to select a run of them. `adding` is fixed at
   // pointer-down from whatever the first thumbnail was, so one drag either selects
   // or deselects throughout instead of toggling each chip it crosses.
@@ -618,14 +638,31 @@ export function FramingReview({
                             <CropPreview
                               src={thumbUrl(page)}
                               transform={transformFor(page, preview)}
-                              rects={showPlan ? rectsFor(page, preview) : undefined}
+                              rects={
+                                showPlan
+                                  ? rectsFor(page, preview).filter((r) => !hiddenRoles.has(r.role))
+                                  : undefined
+                              }
                               wallWidth={wallWidth}
                               destWidth={destWidth}
                               destHeight={destHeight}
                               width={440}
                               title={`Slide ${page.slide} as template slide ${preview}`}
                             />
-                            {showPlan && <PlanLegend rects={rectsFor(page, preview)} />}
+                            {showPlan && (
+                              <PlanLegend
+                                rects={rectsFor(page, preview)}
+                                hidden={hiddenRoles}
+                                onToggle={(role) =>
+                                  setHiddenRoles((cur) => {
+                                    const next = new Set(cur);
+                                    if (next.has(role)) next.delete(role);
+                                    else next.add(role);
+                                    return next;
+                                  })
+                                }
+                              />
+                            )}
                           </div>
                           {/* Each option shows what that framing does to *this*
                               page, not what the template slide looks like. Same
