@@ -279,6 +279,7 @@ tidy-up of the output folder once threw away an hour of Keynote time.
 | `scripts/try_multi_framing.py` | Whether framing selection picks the framing a human chose, given several candidates. |
 | `scripts/inspect_gold.py` | Warms the cache. `--template-only` after editing the template, which is the one deck whose digest changes. |
 | `scripts/probe_runs.js` | Reproduces the unreachable-run-style result on demand. |
+| `scripts/probe_zorder.js` | Reproduces both z-order results: the mixed collection will not enumerate, and no arrange command exists. Builds its own throwaway deck, so it needs no gold deck. |
 
 Only warm the cache when a deck changes. Keep tests on the two `Map_Extracted`
 pairs; `Full_Report_Card` is 158 and 207 slides and only worth running when
