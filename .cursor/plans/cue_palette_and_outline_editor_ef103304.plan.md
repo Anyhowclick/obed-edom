@@ -1,6 +1,6 @@
 ---
 name: Cue palette and outline editor
-overview: The Keynote 15.x migration, the resizer's framing confirmation and the badge placement are done. What remains is the number block in the CG resizer, then the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator.
+overview: "Handover section first. Done: the Keynote 15.x migration, framing confirmation, badge placement, structural title detection, the divider, and ranges read in Keynote's numbering. Next is giving a badge its own affine, which unblocks both the report card's map pages and portable recipes. Then the number block in the CG resizer, then the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator."
 todos:
   - id: text-placement
     content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem"
@@ -59,6 +59,35 @@ still stands except item 3 (live preview), which is dropped for the reasons belo
 Keynote 15 migration now lives there — bundle-id targeting, the verified scripting
 limits, cache versioning, the template contract. This plan holds only what is
 still to be done and the reasoning a new agent would otherwise have to rediscover.
+
+## Handover: where this branch is
+
+`feat/cg-negative-space`, rebased on main. Everything below is committed and
+pushed; `git log origin/main..HEAD` is the full list with the reasoning in the
+messages.
+
+**Verified against real decks, not only tests.** The warm cache holds
+`Map_Extracted_Wall_1st/2nd`, `Extracted_Wall/CG_3rd`, `Full_Report_Card_Wall`
+and `Base_CG_Assets`, so most of what follows was measured by planning those
+offline in about 0.2s a page. Read `.cursor/skills/obed-edom/SKILL.md` first;
+the durable Keynote facts live there.
+
+**Landed and confirmed in a real run:** the divider — planned onto the template's
+rule, then placed by `width` because Keynote 15.3.1 ignores a line's endpoints and
+*writing* them collapses it to one unit (`scripts/probe_line.js`). The badge
+geometry — plate `(17,37) 411x123`, logo `(31,59) 80x80`, measured off the
+rendered preview and matching what last year's pages shipped.
+
+**Landed, not yet seen in a run:** structural title detection; stripping the
+original back to the delta before the reuse paste (needs a multi-slide range to
+exercise at all); reading a range in Keynote's numbering; judging a framing on the
+part of an object that is on the wall.
+
+**Known and deliberate.** The badge lands correctly and is still buried by map art
+that was already above it — the resizer inherits the source deck's stacking and
+Keynote exposes no way to change it. That reads as a clipping bug and will be
+re-investigated by anyone who does not know; the skill doc records it with the
+measurements.
 
 ## Where things stand
 
@@ -425,6 +454,26 @@ So the single-group limit was not a v1 shortcut to relax later; it was this gap
 seen from the other side. Worth rebuilding once a badge reliably gets its own
 affine, and the commits are in the branch history to lift from.
 
+**What it would take to carry more than one affine.** The difficulty is not
+carrying N transforms, it is knowing which objects each governs on a page it was
+not learnt from. A group is `{s, tx, ty, src, dst, members}` with no role, and
+`_group_for_item` assigns by distance from an object's centre to that wall-side
+`src` — a rect describing the wrong page. With one group the question never
+arises, which is what the v1 limit was really saying.
+
+Naming them removes it. A group built deliberately can say what it is, and the
+applying side re-anchors by role with functions that already exist —
+`primary_map_rect` for the map, `title_plate` for the badge. Then
+`portable_recipe` drops the single-group check and carries `[{role, s, tx, ty}]`,
+and `apply_portable_recipe` resolves each role on the page in hand. Roughly a day
+with tests, once `badge-affine` has produced the first named group.
+
+One question left open: what a carried group should do when its role has no
+counterpart on the target page — a badge affine on a page with no badge. Falling
+back to the dominant group mirrors what `_group_for_item` already does when no
+cluster fits, but it wants a case to check against before being written down.
+
+
 ## Ranges should be written in the numbers Keynote shows
 
 A range is resolved against `slide["number"]`, which `inspect_keynote.js` sets to
@@ -515,6 +564,28 @@ sequencing.
 
 ## Still parked
 
+- **Text in front.** The operator asked for text to have front priority. There is
+  no arrange vocabulary, but *pasting* puts an object at the front, and
+  `applyReuse` already drives cut/paste. The cost is real: a pasted object is a
+  new object, so builds and any identity are lost, and it is keystroke-driven. A
+  narrow version — the title and the badge's words, two or three objects a slide —
+  would be cheap; doing it for 200 name labels would not.
+- **Duplicate objects in the source deck.** `Map_Extracted_Wall_1st` slide 4 has
+  two pairs of exactly coincident groups, and the planner places all four. Any
+  dedupe must be scoped to groups and text and **never** images: the same test
+  flags 9 coincident images on that deck and 1 on the template, and those are the
+  stacked map layers. Harmless as it stands — each pair lands on the same spot —
+  so this is object count, not appearance.
+- **The first ranged propose on a deck never read in full** cannot translate the
+  range into Keynote's numbering, and says so rather than guessing. A flags-only
+  Keynote pass — every slide's `skipped`, no items collected — would remove the
+  caveat if it turns out to bite.
+- **Composite preview text.** The third preview mode draws text as scaled wall
+  pixels, so anything the run restyles is close rather than right. Rendering real
+  HTML at the template's font size would fix it; occlusion never can, because
+  per-object artwork cannot be recovered from a flattened slide PNG.
+- **`deck_digest` costs about 6s on a 6.8 GB deck**, and every cache-key lookup
+  pays it. Worth knowing before adding a code path that asks casually.
 - **The "natural upgrade" idea.** Noted as a nice improvement, deliberately not now.
 - **The JXA export has never worked.** Every exporting payload carries
   `exportError` while still succeeding, because `export_slide_images()` picks up
