@@ -34,6 +34,14 @@ MAP_LAYER_MAX_H = 1200.0
 MAP_NEAR_PAD = 400.0
 # Title plate / globe sit beside the map; keep that cluster on one affine.
 TITLE_NEAR_PAD = 120.0
+# The plate already describes the badge's extent, so it needs far less slack than
+# TITLE_NEAR_PAD, which had to reach from the title's own box out to the plate and
+# logo around it. Kept small so a badge near other content does not swallow it.
+BADGE_PLATE_PAD = 24.0
+# A badge plate is short relative to the page. Measured across the gold templates
+# real plates sit at 0.09-0.11 of canvas height, so half the page is far above any
+# of them and well below the full-height side columns this rejects.
+PLATE_MAX_H_FRACTION = 0.5
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
 TEXT_DOWN_SCALE = 0.42
 # Fraction of a page's visible objects that must still land on the CG canvas for
@@ -667,6 +675,9 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
     slots = template_badge_slots(ordered, dest)
     if slots:
         recipe["badgeSlots"] = slots
+    badge_plate = template_badge_plate(ordered, dest)
+    if badge_plate is not None and badge_plate.w > 0:
+        recipe["badgePlateDst"] = badge_plate.as_dict()
     rules = template_line_slots(template_slides, recipe.get("templateSlide"))
     if rules:
         recipe["lineSlots"] = rules
@@ -1601,6 +1612,14 @@ def title_plate(slide: dict, slide_size: tuple[float, float] | None = None) -> d
     bigger than the badge — `Extracted_Wall_3rd` slide 2 has one at 398x710
     against a 485x197 plate. The badge is the shape with words on it, so require
     a text item's centre to fall inside before considering it at all.
+
+    Words are not enough on their own, though: `Map_Extracted_CG_1st` slide 1 has
+    a 622x1080 side column with text in it, which passes that test and is still
+    not a badge. A plate is short relative to the page — every real badge in that
+    template runs 0.09 to 0.11 of canvas height against the column's 1.00 — so
+    cap the height too. This only bit once the badge affine started anchoring on
+    the plate; before that the template was reached through a title, and a column
+    carrying no title was skipped for the wrong reason.
     """
     items = slide.get("items") or []
     texts = [
@@ -1619,6 +1638,8 @@ def title_plate(slide: dict, slide_size: tuple[float, float] | None = None) -> d
         if w <= PIN_KIND_MAX and h <= PIN_KIND_MAX:
             continue
         if slide_size and is_backdrop(item, slide_size[0], slide_size[1]):
+            continue
+        if slide_size and slide_size[1] > 0 and h > slide_size[1] * PLATE_MAX_H_FRACTION:
             continue
         rect = item_rect(item)
         if not any(point_in_rect(*item_center(t), rect) for t in texts):
@@ -1682,6 +1703,33 @@ def badge_members(slide: dict, title: dict) -> list[dict]:
     return out
 
 
+def badge_plate_members(slide: dict, plate: dict) -> list[dict]:
+    """The badge, found by its plate rather than by its words.
+
+    `badge_members` catches objects around the *title's* box, which presumes a
+    title was identifiable. `slide_title_item` declines a plate carrying several
+    words — the report card's badge is MISSIONS, UPDATE and China — so that path
+    yields nothing at all on exactly the pages that most need a badge affine.
+
+    The plate is unambiguous either way: one shape, present whether the badge
+    carries one word or three. Everything centred on it is the badge, including
+    the plate itself, which is what the affine is anchored on.
+    """
+    src = item_rect(plate)
+    out: list[dict] = []
+    for item in slide.get("items") or []:
+        if is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
+            continue
+        if item.get("duplicateOf"):
+            continue
+        if item is plate:
+            out.append(item)
+            continue
+        if point_in_rect(*item_center(item), src, BADGE_PLATE_PAD):
+            out.append(item)
+    return out
+
+
 def badge_slot_keys(members: Iterable[dict]) -> dict[int, str]:
     """Name each badge object `kind:n`, largest first, so wall and template agree.
 
@@ -1711,18 +1759,36 @@ def template_badge_slots(
     logo and title each moved by a different ratio — so no single affine
     reproduces it. Record the rects and place onto them directly.
     """
-    title = template_title_item(slides, slide_size)
-    if title is None:
-        return {}
-    slide = next(
-        (s for s in slides if any(it is title for it in s.get("items") or [])),
-        None,
-    )
-    if slide is None:
-        return {}
-    members = badge_members(slide, title)
-    keys = badge_slot_keys(members)
-    return {keys[id(it)]: item_rect(it).as_dict() for it in members}
+    for slide in slides:
+        plate = title_plate(slide, slide_size)
+        if plate is None:
+            continue
+        title = slide_title_item(slide, slide_size)
+        # The words are placed by titleDst, not by a slot, so they are excluded
+        # here exactly as badge_members excluded the title it was given. Both
+        # sides must drop the same objects or badge_slot_keys ranks by area over
+        # different sets and the wall's logo lands on the template's plate.
+        members = [it for it in badge_plate_members(slide, plate) if it is not title]
+        if not members:
+            continue
+        keys = badge_slot_keys(members)
+        return {keys[id(it)]: item_rect(it).as_dict() for it in members}
+    return {}
+
+
+def template_badge_plate(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> Rect | None:
+    """Where the CG template parks the badge plate — the badge affine's anchor.
+
+    Read off the same slide `template_badge_slots` reads, so the affine and the
+    slots describe one badge rather than two different ones.
+    """
+    for slide in slides:
+        plate = title_plate(slide, slide_size)
+        if plate is not None:
+            return item_rect(plate)
+    return None
 
 
 def _title_badge(
@@ -1735,13 +1801,32 @@ def _title_badge(
     template slot each non-title object should land on.
     """
     title = slide_title_item(slide, slide_size)
+    plate = title_plate(slide, slide_size)
+    plate_dst = _rect_from_dict(recipe.get("badgePlateDst"))
+    # Plate to plate. Anchoring on the title's own box was H18: that box is 537
+    # wide against the template's 271, so s = 0.505 and the 124px logo landed at
+    # 63px with the 767px plate at 387x87. Plate to plate is one shape on each
+    # side, unambiguous whether the badge carries one word or three, and it needs
+    # no title at all — which is what gives the report card a badge affine.
+    if plate is not None and plate_dst is not None and plate_dst.w > 0:
+        src = item_rect(plate)
+        if src.w > 0 and src.h > 0:
+            members = badge_plate_members(slide, plate)
+            rest = [it for it in members if it is not title]
+            ids: set[int] = {id(it) for it in members}
+            if title is not None:
+                ids.add(id(title))
+            return affine_from_rects(src, plate_dst), src, ids, badge_slot_keys(rest), title
+    # No plate on the page, or a template that never taught one. The title's box
+    # is a worse anchor but it is the only one left, and a deck that relied on it
+    # before should keep working rather than lose its badge path.
     dst = _rect_from_dict(recipe.get("titleDst"))
     if title is None or dst is None or dst.w <= 0:
         return None, None, set(), {}, title
     src = item_rect(title)
     rest = badge_members(slide, title)
     members = [title, *rest]
-    ids: set[int] = {id(it) for it in members}
+    ids = {id(it) for it in members}
     slots = badge_slot_keys(rest)
     aff = affine_from_rects(src, dst)
     return aff, src, ids, slots, title
@@ -1909,10 +1994,11 @@ def plan_slide_transforms(
         badge_dst: Rect | None = None
         if title_aff is not None and id(item) in title_ids:
             aff, cluster = title_aff, title_src
-            # The badge affine comes from the title *text box*, which carries
-            # slack the glyphs do not, so it shrinks the logo and plate by the
-            # wrong ratio. Where the template says exactly where the object
-            # goes, use that instead of scaling.
+            # The badge affine is plate to plate, so it no longer carries the
+            # title box's slack. The slot still wins where the template has one:
+            # the template's badge is not a uniform shrink of the wall's — plate,
+            # logo and title each moved by their own ratio — so no single affine
+            # reproduces it, and the recorded rect is the only exact answer.
             badge_dst = _rect_from_dict(badge_dsts.get(badge_slots.get(id(item), "")))
         if cluster is None:
             cluster = map_src
@@ -2643,9 +2729,19 @@ def on_canvas_fraction(
     # card page that is six of ten objects, all of them off the left edge, and
     # the framing was rejected for placement it never performs.
     ignore: set[int] = set()
-    if recipe.get("titleDst") or recipe.get("badgeSlots"):
+    if recipe.get("titleDst") or recipe.get("badgeSlots") or recipe.get("badgePlateDst"):
         title = slide_title_item(slide, (wall_w, wall_h))
-        if title is not None:
+        # Found by plate where there is one, for the same reason the affine is:
+        # a badge of several words has no title, so the title route leaves the
+        # ignore set empty and every badge object is scored against a framing
+        # that never places it. On the report card that is six objects in ten,
+        # which is the whole distance between judging a framing and failing it.
+        plate = title_plate(slide, (wall_w, wall_h))
+        if plate is not None:
+            ignore = {id(it) for it in badge_plate_members(slide, plate)}
+            if title is not None:
+                ignore.add(id(title))
+        elif title is not None:
             ignore = {id(title)} | {id(it) for it in badge_members(slide, title)}
     seen = inside = 0
     for item in slide.get("items") or []:
