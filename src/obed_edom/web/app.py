@@ -556,6 +556,7 @@ def create_app() -> FastAPI:
         slides: str = Form(""),
         export: str = Form("true"),
         include_lists: str = Form("false"),
+        validate: str = Form("true"),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
@@ -568,6 +569,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"CG template not found: {raw_template}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
         do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
+        do_validate = validate.lower() in {"1", "true", "yes", "on"}
         try:
             # No selection means the whole deck. It used to mean slide 2 only,
             # from when the map lived there by convention.
@@ -580,8 +582,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists: (
-                _run_resize_propose(j, p, t, sl, ex, lists)
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate: (
+                _run_resize_propose(j, p, t, sl, ex, lists, va)
             ),
             feature="resize",
         )
@@ -654,11 +656,12 @@ def create_app() -> FastAPI:
         sel = frozenset(int(n) for n in raw_range) if raw_range else None
         do_export = bool(result.get("export", True))
         do_lists = bool(result.get("includeLists", False))
+        do_validate = bool(result.get("validate", True))
         try:
             updated = RUNNER.rerun(
                 job_id,
-                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides: (
-                    _run_resize(j, p, t, sl, ex, lists, ov)
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, va=do_validate: (
+                    _run_resize(j, p, t, sl, ex, lists, ov, va)
                 ),
             )
         except RuntimeError as exc:
@@ -1369,6 +1372,7 @@ def _run_resize_propose(
     slide_range: frozenset[int] | None,
     export: bool,
     include_lists: bool = False,
+    validate: bool = True,
 ) -> dict[str, Any]:
     """Phase one: ask which crop each map page should use.
 
@@ -1424,6 +1428,7 @@ def _run_resize_propose(
         "path": str(path),
         "templatePath": str(template),
         "includeLists": include_lists,
+        "validate": validate,
         "export": export,
         "slideRange": sorted(slide_range) if slide_range else None,
         **proposal,
@@ -1440,6 +1445,7 @@ def _run_resize(
     export: bool,
     include_lists: bool = False,
     framing_overrides: dict[int, int] | None = None,
+    validate: bool = True,
 ) -> dict[str, Any]:
     dest_dir = ROOT / "output" / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
@@ -1458,6 +1464,7 @@ def _run_resize(
         include_lists=include_lists,
         export_dir=export_dir,
         framing_overrides=framing_overrides,
+        validate=validate,
         log=job.log,
     )
     inspect = info.get("inspect") or {}
@@ -1472,7 +1479,7 @@ def _run_resize(
         "slideHeight": inspect.get("slideHeight"),
         "slides": [],
     }
-    flags = validate_inspect(payload, location_prefix=dest.name)
+    flags = validate_inspect(payload, location_prefix=dest.name) if validate else []
     counts = info.get("counts") or {}
     applied = info.get("applied")
     missed = info.get("missed")
@@ -1496,6 +1503,7 @@ def _run_resize(
         "applied": applied,
         "missed": missed,
         "includeLists": include_lists,
+        "validate": validate,
         "templateScore": score,
         "flags": serialize_flags(flags),
         # The planner's own reporting. These were computed and then dropped before

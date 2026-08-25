@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from obed_edom import keynote_app
-from obed_edom.inspect import inspect_keynote, preview_pngs
+from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
 from obed_edom.map_remap import (
     CG_HEIGHT,
     CG_WIDTH,
@@ -399,6 +399,7 @@ def remap_and_inspect(
     framing_overrides: dict[int, int] | None = None,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
+    validate: bool = True,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
@@ -413,6 +414,21 @@ def remap_and_inspect(
         template_payload=template_payload,
         log=log,
     )
+    # Reading the deck back dumps every object, which is what the validation
+    # flags are built from. A run whose wall content has already been checked
+    # only wants the pictures, and those come from a Keynote pass that does not
+    # walk the objects at all.
+    if not validate:
+        if export_dir:
+            if log:
+                log("Exporting previews (validation off, so the deck is not read back)…")
+            error = export_slide_images(Path(dest), Path(export_dir))
+            if error and log:
+                log(error)
+        info["inspect"] = {"exported": bool(export_dir), "exportError": ""}
+        if export_dir:
+            info["previewFiles"] = [p.name for p in preview_pngs(Path(export_dir))]
+        return info
     if log:
         log("Inspecting remapped deck…")
     payload = inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range)

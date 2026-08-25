@@ -62,6 +62,9 @@ export function ResizeTab() {
   const [template, setTemplate] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
   const [includeLists, setIncludeLists] = useState(true);
+  // Reading the deck back to build the flags dumps every object on every slide.
+  // Worth it once; not worth it on a run whose wall content was already checked.
+  const [validate, setValidate] = useState(false);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +105,7 @@ export function ResizeTab() {
         templatePath: template.path,
         slides: parsedSlides ?? undefined,
         includeLists,
+        validate,
       });
       upsert(created);
       await track(created);
@@ -210,6 +214,14 @@ export function ResizeTab() {
           onChange={(e) => setIncludeLists(e.target.checked)}
         />
         <span>Include resizing church-name lists on side panels (Special Offering Series)</span>
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={validate}
+          onChange={(e) => setValidate(e.target.checked)}
+        />
+        <span>Validation check (Recommended: off if wall content has been checked)</span>
       </label>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>

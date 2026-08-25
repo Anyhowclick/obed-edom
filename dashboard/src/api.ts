@@ -286,6 +286,7 @@ export async function startResize(
     slides?: number[];
     export?: boolean;
     includeLists?: boolean;
+    validate?: boolean;
   }
 ): Promise<Job> {
   const body = new FormData();
@@ -296,6 +297,7 @@ export async function startResize(
   if (opts.rangeTo != null) body.set("range_to", String(opts.rangeTo));
   body.set("export", opts.export === false ? "false" : "true");
   body.set("include_lists", opts.includeLists ? "true" : "false");
+  body.set("validate", opts.validate === false ? "false" : "true");
   const res = await fetch("/api/resize", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

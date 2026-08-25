@@ -1410,3 +1410,50 @@ def test_planned_rects_cover_every_role_the_page_uses():
     assert (logo["x"], logo["y"], logo["h"]) == (31, 59, 80)
     rule = next(r for r in rects if r["kind"] == "line")
     assert (rule["x"], rule["y"], rule["h"]) == (480, 621, 383)
+
+
+def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path, monkeypatch):
+    """The read-back dumps every object on every slide, and that dump exists only
+    to build the validation flags. A run that does not want them should not pay
+    for it — but it still wants the pictures."""
+    from pathlib import Path
+
+    from obed_edom import remap_keynote as remap_mod
+
+    dest = tmp_path / "Wall_CG.key"
+    dest.write_text("placeholder")
+    previews = tmp_path / "previews"
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        remap_mod, "remap_keynote", lambda *a, **k: {"applied": 3, "missed": 0}
+    )
+    monkeypatch.setattr(
+        remap_mod,
+        "inspect_keynote",
+        lambda *a, **k: calls.append("inspect") or {"slides": []},
+    )
+
+    def fake_export(key_path, export_dir):
+        calls.append("export")
+        Path(export_dir).mkdir(parents=True, exist_ok=True)
+        (Path(export_dir) / "slide.001.png").write_bytes(b"")
+        return None
+
+    monkeypatch.setattr(remap_mod, "export_slide_images", fake_export)
+    monkeypatch.setattr(remap_mod, "preview_pngs", lambda folder: sorted(Path(folder).glob("*.png")))
+
+    info = remap_mod.remap_and_inspect(
+        tmp_path / "Wall.key", dest, template=tmp_path / "T.key",
+        export_dir=previews, validate=False,
+    )
+    assert calls == ["export"]
+    assert info["previewFiles"] == ["slide.001.png"]
+    assert "payload" not in info
+
+    calls.clear()
+    remap_mod.remap_and_inspect(
+        tmp_path / "Wall.key", dest, template=tmp_path / "T.key",
+        export_dir=previews, validate=True,
+    )
+    assert calls == ["inspect"]

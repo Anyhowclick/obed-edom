@@ -908,7 +908,12 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .framing-row-controls .note { margin: 0; }
 .framing-row-controls .actions { margin: 0; }
 .framing-label {
-  display: block;
+  /* Flex, not block: the label carries an inline checkbox and the two have to
+     sit on one centre line rather than on the text baseline. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 16px;
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -996,13 +1001,13 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: 8px;
+  line-height: 1;
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
   cursor: pointer;
 }
-.plan-toggle input { margin: 0; }
+.plan-toggle input { margin: 0; width: 12px; height: 12px; flex-shrink: 0; }
 
 .plan-legend {
   display: flex;
