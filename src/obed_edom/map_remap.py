@@ -628,14 +628,33 @@ def template_line_slots(
     return out
 
 
+def slides_preferring(template_slides: list[dict], number: int | None) -> list[dict]:
+    """The chosen template slide first, then the rest of the deck.
+
+    "Template slide 12" has to mean slide 12's layout, including where its title
+    sits and how big its badge is. Scanning the deck in order instead returned
+    whichever slide happened to hold the first title — so every framing produced
+    the same title box, and choosing a different one moved the map and nothing
+    else. The rest of the deck stays as a fallback for a slide that has no title
+    of its own.
+    """
+    if number is None:
+        return list(template_slides)
+    chosen = [s for s in template_slides if _slide_number_of(s) == number]
+    if not chosen:
+        return list(template_slides)
+    return chosen + [s for s in template_slides if _slide_number_of(s) != number]
+
+
 def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> dict[str, Any]:
     dest = (_f(recipe.get("destWidth"), CG_WIDTH), _f(recipe.get("destHeight"), CG_HEIGHT))
-    font, sample = template_list_sample(template_slides, dest)
+    ordered = slides_preferring(template_slides, recipe.get("templateSlide"))
+    font, sample = template_list_sample(ordered, dest)
     if font:
         recipe["listFontSize"] = round(font, 2)
         if sample:
             recipe["listSample"] = sample.as_dict()
-    title = template_title_item(template_slides, dest)
+    title = template_title_item(ordered, dest)
     if title:
         recipe["titleDst"] = item_rect(title).as_dict()
         if title.get("size"):
@@ -645,7 +664,7 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         title_rgb = item_rgb(title)
         if title_rgb:
             recipe["titleColor"] = [round(c, 4) for c in title_rgb]
-    slots = template_badge_slots(template_slides, dest)
+    slots = template_badge_slots(ordered, dest)
     if slots:
         recipe["badgeSlots"] = slots
     rules = template_line_slots(template_slides, recipe.get("templateSlide"))

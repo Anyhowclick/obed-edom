@@ -347,7 +347,6 @@ def planned_rects(
     recipe: dict[str, Any],
     *,
     wall_size: tuple[float, float],
-    template: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Where every object on this page ends up, for drawing over the crop.
 
@@ -358,13 +357,19 @@ def planned_rects(
 
     Compact on purpose: a page can plan 1500 objects and every candidate framing
     carries its own set.
+
+    The template is deliberately not handed on. `plan_payload_transforms` re-learns
+    a recipe per slide when given one, from whichever framing it would pick
+    automatically — which threw away the recipe passed here and drew every
+    candidate, and every saved recipe, as the automatic choice. The caller has
+    already settled which recipe it wants shown.
     """
     from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
 
     wall_w, wall_h = wall_size
     payload = {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]}
     out: list[dict[str, Any]] = []
-    for spec in plan_payload_transforms(payload, recipe, template=template):
+    for spec in plan_payload_transforms(payload, recipe):
         rect = {
             "role": spec.role,
             "kind": spec.kind,
@@ -501,9 +506,7 @@ def propose_framings(
             candidate["transform"] = _transform_of(shown)
             # The crop shows one affine; these show what the run does to every
             # object on the page, which is where it actually goes wrong.
-            candidate["rects"] = planned_rects(
-                slide, shown, wall_size=(wall_w, wall_h), template=template_data
-            )
+            candidate["rects"] = planned_rects(slide, shown, wall_size=(wall_w, wall_h))
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")
         auto_candidate = next(

@@ -767,9 +767,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "That recipe carries no usable transform.")
         return {
             "transform": recipe.get("affine"),
-            "rects": planned_rects(
-                page, applied, wall_size=(wall_w, wall_h), template=template_data
-            ),
+            "rects": planned_rects(page, applied, wall_size=(wall_w, wall_h)),
         }
 
     @app.post("/api/resize/{job_id}/apply")
