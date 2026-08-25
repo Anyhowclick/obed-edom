@@ -86,6 +86,10 @@ export type FramingProposal = {
   wallHeight?: number;
   /** Template slide number to thumbnail file name. */
   templateThumbs?: Record<string, string>;
+  /** Document positions of slides set to Skip Slide in Keynote. */
+  skippedSlides?: number[];
+  /** How those positions read against Keynote's navigator, if they differ. */
+  numberingNote?: string;
 };
 
 type Category = "matched" | "fitted" | "template" | "reviewed";
@@ -625,6 +629,16 @@ export function FramingReview({
         {proposal.templateChanged && (proposal.resurfaced?.length ?? 0) > 0 &&
           ` The template changed, so ${proposal.resurfaced!.length} deferred page(s) can now use a new framing.`}
       </p>
+
+      {/* Before the apply, because the apply is the step that cannot be taken
+          back. A range typed off Keynote's navigator selects different pages
+          from the ones it names here, and nothing else would say so. */}
+      {proposal.numberingNote && (
+        <p className="danger-note">
+          <strong>Check the slide range.</strong> {proposal.numberingNote} Un-hiding a
+          slide while a proposal is open shifts them again, so re-propose if you do.
+        </p>
+      )}
 
       {groups.length === 0 && <p className="note">Nothing in {CATEGORY_LABEL[tab].toLowerCase()}.</p>}
 

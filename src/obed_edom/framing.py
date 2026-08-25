@@ -415,9 +415,11 @@ def propose_framings(
         fit_to_frame_recipe,
         is_degenerate_scale,
         learn_recipe,
+        navigator_numbering,
         on_canvas_fraction,
         plan_payload_transforms,
         rank_framing_candidates,
+        skipped_positions,
     )
 
     def say(message: str) -> None:
@@ -561,4 +563,10 @@ def propose_framings(
         "pages": pages,
         "needAttention": attention,
         "noUsableFraming": stuck,
+        # Ranges are written in document positions and Keynote's navigator numbers
+        # only the slides that will play, so a deck with anything set to Skip
+        # reads differently in the two places. Surfaced here because this is the
+        # last screen before anything is remapped.
+        "skippedSlides": skipped_positions(wall_data),
+        "numberingNote": navigator_numbering(wall_data),
     }

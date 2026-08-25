@@ -1126,3 +1126,18 @@ label.inline-field select { width: auto; padding: 5px 8px; }
    hangs off the chip's right instead. Set by measurement on hover: where a row
    wraps is a layout fact, not something a :nth-child rule can know. */
 .framing-option.tip-left .option-tip { left: auto; right: 0; }
+
+/* Loud on purpose: it is the difference between remapping the pages you named
+   and remapping different ones, and the apply cannot be taken back. */
+.danger-note {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: rgba(240, 163, 160, 0.1);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.danger-note strong { color: var(--err); }
