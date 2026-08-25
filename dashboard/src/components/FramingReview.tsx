@@ -85,7 +85,7 @@ type Category = "matched" | "fitted" | "template" | "reviewed";
 
 const CATEGORY_LABEL: Record<Category, string> = {
   matched: "Good fit",
-  fitted: "Fitted content",
+  fitted: "Scaled Fit",
   template: "New template",
   reviewed: "Reviewed",
 };
@@ -115,7 +115,7 @@ function stateOf(page: FramingPage, decisions: Record<number, FramingDecision>):
   return (decisions[page.index] ?? page.decision)?.state ?? "auto";
 }
 
-/** Whether the framing this page will use falls back to fitting content. */
+/** Whether the framing this page will use fails, leaving it scaled to the frame. */
 function fellBackWith(page: FramingPage, slide: number | null): boolean {
   if (slide == null) return page.autoFellBack;
   const candidate = page.candidates.find((c) => c.templateSlide === slide);
@@ -129,7 +129,7 @@ function fellBackWith(page: FramingPage, slide: number | null): boolean {
  * needs a look — that is what makes "how much is left" answerable at a glance.
  * The unreviewed buckets are keyed on the outcome of the framing the page will
  * use rather than on what was clicked, so switching a page to a framing that
- * applies cleanly moves it out of Fitted content by itself.
+ * applies cleanly moves it out of Scaled Fit by itself.
  */
 function categoryOf(page: FramingPage, decisions: Record<number, FramingDecision>): Category {
   const state = stateOf(page, decisions);
@@ -431,7 +431,7 @@ export function FramingReview({
   /**
    * Confirm, defer, or undo — not "move to bucket".
    *
-   * Good fit and Fitted content are outcomes rather than choices, so there is no
+   * Good fit and Scaled Fit are outcomes rather than choices, so there is no
    * honest way to put a page in one by clicking. Unconfirming returns it to auto
    * and the outcome decides which of the two it lands in.
    */
@@ -584,7 +584,7 @@ export function FramingReview({
                 </strong>
                 <span className="note">
                   {group.pages.length} page{group.pages.length === 1 ? "" : "s"}
-                  {fellBack > 0 && ` · ${fellBack} fell back to fitting content`}
+                  {fellBack > 0 && ` · ${fellBack} scaled to fit`}
                   {fellBack === 0 && group.slide != null && " · all matched this framing"}
                 </span>
               </p>
@@ -662,7 +662,7 @@ export function FramingReview({
                     title={
                       `Slide ${page.slide}` +
                       (fellBackWith(page, chosenSlide(page, decisions))
-                        ? " — falls back to fitting content"
+                        ? " — no framing fit, so it is scaled to the frame"
                         : "")
                     }
                     onClick={() => {
@@ -893,7 +893,7 @@ export function FramingReview({
                         <p className="note">
                           {`Template slide ${preview ?? "—"}. `}
                           {previewFalls
-                            ? "This framing falls back to fitting content. "
+                            ? "This framing does not fit, so the page is scaled to the frame. "
                             : "This framing applies cleanly. "}
                           {stateOf(page, decisions) === "pinned" && "Reviewed. "}
                           {page.resurfaced && "The template changed since you deferred this. "}
