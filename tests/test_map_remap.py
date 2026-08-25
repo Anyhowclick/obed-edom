@@ -1256,3 +1256,61 @@ def test_outlier_pairs_left_alone_when_there_is_no_consensus():
         (_item(kind="image", w=200, h=200), _item(kind="image", w=20, h=20)),
     ]
     assert drop_outlier_pairs(pairs) == pairs
+
+
+def test_divider_lands_on_the_template_rule():
+    """The wall's rule sits in a gutter the CG crop excludes, so the affine puts
+    it off-canvas and the meridian rescue re-places it on the document scale —
+    near enough in x to look deliberate, wrong length. The template says where."""
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 4,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="line", x=2587, y=223, w=658, h=0, start=[2587, 881], end=[2587, 223]),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=2147,
+                        y=52,
+                        w=537,
+                        h=124,
+                        size=100,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 12,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1067, h=659),
+                    _item(kind="line", x=480, y=621, w=383, h=0, start=[480, 1004], end=[480, 621]),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["lineSlots"][0]["start"] == [480.0, 1004.0]
+    rule = next(t for t in plan_payload_transforms(wall, recipe, template=template) if t.kind == "line")
+    assert rule.start == (480.0, 1004.0)
+    assert rule.end == (480.0, 621.0)
+    assert (round(rule.x), round(rule.y), round(rule.h)) == (480, 621, 383)

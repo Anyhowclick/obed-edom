@@ -566,6 +566,38 @@ def pack_columns_from_right(
     return placed
 
 
+def template_line_slots(
+    slides: list[dict], slide_number: int | None = None
+) -> list[dict[str, Any]]:
+    """The rules the template draws, left to right.
+
+    A divider between stat blocks sits in a gutter the CG crop leaves out, so the
+    group affine puts it off-canvas and the meridian rescue re-places it on the
+    document scale — near enough in x to look deliberate, but the wrong length.
+    The template already says where the rule goes; take it at its word.
+    """
+    slide = None
+    if slide_number is not None:
+        slide = next((s for s in slides if _slide_number_of(s) == slide_number), None)
+    if slide is None or not any(str(it.get("kind") or "") == "line" for it in slide.get("items") or []):
+        slide = _first_slide_with(
+            slides,
+            lambda s: any(str(it.get("kind") or "") == "line" for it in s.get("items") or []),
+        )
+    if slide is None:
+        return []
+    lines = [it for it in slide.get("items") or [] if str(it.get("kind") or "") == "line"]
+    out: list[dict[str, Any]] = []
+    for item in sorted(lines, key=lambda it: (_f(it.get("x")), _f(it.get("y")))):
+        slot: dict[str, Any] = dict(item_rect(item).as_dict())
+        if item.get("start"):
+            slot["start"] = [_f(item["start"][0]), _f(item["start"][1])]
+        if item.get("end"):
+            slot["end"] = [_f(item["end"][0]), _f(item["end"][1])]
+        out.append(slot)
+    return out
+
+
 def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> dict[str, Any]:
     font, sample = template_list_sample(template_slides)
     if font:
@@ -585,6 +617,9 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
     slots = template_badge_slots(template_slides)
     if slots:
         recipe["badgeSlots"] = slots
+    rules = template_line_slots(template_slides, recipe.get("templateSlide"))
+    if rules:
+        recipe["lineSlots"] = rules
     styles = template_character_styles(template_slides)
     if styles:
         recipe["characterStyles"] = styles
@@ -1675,6 +1710,7 @@ def plan_slide_transforms(
     groups = _groups_for_slide(slide, recipe)
     title_aff, title_src, title_ids, badge_slots = _title_badge(slide, recipe)
     badge_dsts = dict(recipe.get("badgeSlots") or {})
+    line_slots = list(recipe.get("lineSlots") or [])
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     if not groups and (map_src is None or map_dst is None):
@@ -1942,6 +1978,17 @@ def plan_slide_transforms(
                 abs(end[0] - start[0]),
                 abs(end[1] - start[1]),
             )
+        # The template is the authority on a rule it draws itself, so a divider
+        # lands on its slot rather than wherever the crop pushed the wall's copy.
+        if role == "line" and kind_index < len(line_slots):
+            slot = line_slots[kind_index]
+            mapped = Rect(
+                _f(slot.get("x")), _f(slot.get("y")), _f(slot.get("w")), _f(slot.get("h"))
+            )
+            if slot.get("start"):
+                start = (_f(slot["start"][0]), _f(slot["start"][1]))
+            if slot.get("end"):
+                end = (_f(slot["end"][0]), _f(slot["end"][1]))
         out.append(
             ItemTransform(
                 slide_number=number,
