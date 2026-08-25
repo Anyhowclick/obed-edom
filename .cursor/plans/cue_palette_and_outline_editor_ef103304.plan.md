@@ -23,6 +23,12 @@ todos:
   - id: dsk-generator
     content: DSK generator, unchanged from the superseded plan including its four corrections
     status: pending
+  - id: title-structural
+    content: "Find the title structurally instead of by wording. is_title_item matches masters.yaml title_phrases, so any series not on that list gets no titleDst and no badgeSlots and the badge machinery silently does nothing. Blocks recipe-library"
+    status: pending
+  - id: recipe-library
+    content: "Recipes as browsable artefacts: learn from pages that pair, save under a label, apply to pages that do not pair. Replaces offering template slides to pages where no template slide can help"
+    status: pending
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
     status: pending
@@ -291,14 +297,126 @@ Ships at `warning`, not `error`: a figure that genuinely steps per slide will tr
 it, and the operator has said that is the cheaper mistake. Rule name and severity
 are stubbed in `src/obed_edom/validation_rules.yaml`.
 
+## Find the title structurally, not by wording
+
+`is_title_item` matches the text against `masters.yaml -> cg.title_phrases`
+("Global Missions", "全球使命", "Missions Update", "宣教近况"). Any series whose
+title is not on that list gets no `titleDst` and no `badgeSlots`, so the whole
+badge path — plate, logo, title size and colour — silently does nothing. Measured
+on `Extracted_Wall/CG_3rd`, whose pages are titled "CHC Kuching":
+
+```
+titleDst      = MISSING
+badgeSlots    = MISSING
+titleFontSize = MISSING
+listFontSize  = 60.0      <- the title mistaken for a church-name list sample
+```
+
+Adding `CHC` to the phrase list is not the fix: every label on the missions map
+is "CHC …", so a hundred list entries would classify as titles.
+
+**Keep the phrase match as the first signal** — that is what the missions decks
+use today and it must not regress — and fall back to structure when it misses:
+
+- **plate** = the non-pin, non-backdrop shape of largest area *among those whose
+  rect contains the centre of at least one text item*
+- **title** = the largest text whose centre lies inside that plate
+
+The containment clause is what makes it work rather than "largest shape": on
+`Extracted_Wall_3rd` slide 2 the side panel `(4261,205) 398x710` is larger than
+the plate `(1961,-65) 485x197`, and holds no text. Checked against all four decks
+in the warm cache; the rule picks the right object on each:
+
+| deck / slide | plate | title |
+| --- | --- | --- |
+| missions wall 4 | `(1953,28) 767x173` | Global Missions |
+| Base_CG_Assets 12 | `(17,37) 411x123` | Global Missions |
+| Extracted_Wall_3rd 2 | `(1961,-65) 485x197` | CHC Kuching |
+| Extracted_CG_3rd 2 | `(20,-65) 359x160` | CHC Kuching |
+
+*Shape of the change.* A new `slide_title_item(slide)` holding both signals;
+`template_title_item` delegates to it. The awkward part is `classify_item`, which
+asks `is_title_item(item)` per item — role `title` has to come from the one
+chosen title instead, so the identity `_title_badge` already computes needs
+threading into classification rather than being re-derived. `is_title_item` stays
+as the phrase predicate the new function calls.
+
+*Watch for.* A caption on a coloured shape could be read as a title on a page
+with no real badge. Prefer the topmost candidate when more than one plate holds
+text, and record the choice in the framing report so a wrong pick is visible
+rather than mysterious.
+
+## Recipes as browsable artefacts
+
+The framing review browses **template slides**, and a template slide only helps if
+something *pairs*. `Map_Extracted_Wall_2nd` slide 3 is chrome plus a movie —
+`is_pairable_image` requires `kind == "image"`, so nothing pairs, `pairQuality`
+is 0, and every candidate previews identically because they all degrade to
+fit-to-frame. The review offers more of the thing that cannot help.
+
+What transfers instead is the **recipe**. Measured: taking the finished
+`Extracted_CG_3rd` slide 2 as the template, all four wall pages learn the same
+transform and each page's own photo lands where the finished CG has it.
+
+```
+wall slide 2: pairQuality=2  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
+wall slide 3: pairQuality=1  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
+wall slide 4: pairQuality=1  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
+wall slide 5: pairQuality=1  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
+```
+
+`tx = -2844` shows wall `2844..4764` — dead centre of the 1920–5760 panel, which
+is the right answer for any full-bleed centre panel, including the movie on
+`Map_Extracted_Wall_2nd` slide 3 that pairs with nothing.
+
+Note what this does *not* do. `Extracted_CG_3rd` slides 4 and 5 use different
+image files at different sizes (`Layer 14.png` 2355x1766, `Layer 31.png`
+2013x1133) than the wall pages they came from. Someone re-cropped and re-exported
+those. No transform reproduces a different asset, and the tool should not try.
+
+*The split.* Two questions rather than one: pages with `pairQuality > 0` choose a
+framing, as today; pages with `pairQuality == 0` choose a **recipe**.
+
+*Portable subset.* `destWidth/Height`, `groups[].s/tx/ty`, `badgeSlots`,
+`lineSlots`, `titleDst` and its font, size and colour, `listFontSize`,
+`listSample`, `characterStyles`, `minPin`, `pinSizeScale`. Dropped as
+source-specific: `mapSrc`, `groups[].src`, `groups[].dst`, `templateSlide`,
+`pairQuality`, `source`, `framingPinned`.
+
+*Constraint for v1: single-group recipes only.* `_group_for_item` assigns objects
+to a cluster by the wall-side `src` rects, which mean nothing on another page.
+With one group every object takes it regardless, which is exactly the case worth
+having. Multi-group reuse needs a rule for re-anchoring and is out of scope.
+
+*Plumbing is one branch.* `plan_payload_transforms` already re-learns per slide
+keyed by `framing_overrides[number]`. Add `recipe_overrides: dict[int, dict]`
+beside it; where a slide has one, it replaces the learn step. The fit-to-frame
+guard stays, so a reused recipe that throws content off-canvas degrades the same
+way an automatic choice does.
+
+*Storage.* A curated asset like a template, not a cache — a tracked `recipes/`
+folder of small JSON files, each with a label an operator would recognise
+("full-bleed centre panel, from Extracted_CG_3rd slide 2"). Not `.cache/`, which
+reads as disposable.
+
+*Preview costs nothing new.* "Where objects land" and "as it will look" are both
+derived from the plan, so a recipe picker reuses them unchanged.
+
+*Order within this item:* portable subset + `recipe_overrides` + headless tests
+first, then persistence, then the picker. The first step is testable with no
+Keynote and no UI.
+
 ## Order of work
 
-1. Text placement in the CG resizer, above.
-2. Cue palette and outline editor.
-3. Image cues.
-4. DSK generator, unchanged from the superseded plan including its four corrections.
+1. Structural title detection. Cheap, self-contained, and a prerequisite for
+   recipes carrying anything but artwork.
+2. Recipes as browsable artefacts.
+3. The number block in the CG resizer, above.
+4. Cue palette and outline editor.
+5. Image cues.
+6. DSK generator, unchanged from the superseded plan including its four corrections.
 
-Stat drift is independent of all four and can land whenever.
+Stat drift is independent of all six and can land whenever.
 
 ## Still parked
 
