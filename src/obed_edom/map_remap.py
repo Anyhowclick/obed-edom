@@ -2680,99 +2680,6 @@ def on_canvas_fraction(
     return inside / seen
 
 
-# What a recipe means on a page other than the one it was learnt from: the
-# transform, and everything describing the destination. Left out are the fields
-# that name the source — mapSrc, each group's src and dst, templateSlide,
-# pairQuality, source — which are re-derived when the recipe is applied.
-PORTABLE_RECIPE_KEYS = (
-    "destWidth",
-    "destHeight",
-    "minPin",
-    "pinSizeScale",
-    "badgeSlots",
-    "lineSlots",
-    "titleDst",
-    "titleFont",
-    "titleFontSize",
-    "titleColor",
-    "listFontSize",
-    "listSample",
-    "characterStyles",
-)
-
-
-def portable_recipe(recipe: dict[str, Any], *, label: str = "") -> dict[str, Any] | None:
-    """The half of a recipe that means something on another page.
-
-    None when the recipe has anything but one group. `_group_for_item` assigns
-    objects to a cluster by its wall-side rect, which describes the page the
-    recipe was learnt from and nothing else; with a single group every object
-    takes it regardless, which is the case worth carrying. Several groups would
-    need a rule for re-anchoring each one, and there is no evidence yet for what
-    that rule should be.
-    """
-    groups = recipe.get("groups") or []
-    if len(groups) != 1:
-        return None
-    group = groups[0]
-    scale = _f(group.get("s"))
-    if scale <= 0:
-        return None
-    out: dict[str, Any] = {
-        k: recipe[k] for k in PORTABLE_RECIPE_KEYS if recipe.get(k) is not None
-    }
-    out["affine"] = Affine(scale, _f(group.get("tx")), _f(group.get("ty"))).as_dict()
-    if label:
-        out["label"] = label
-    return out
-
-
-def _anchor_rect(slide: dict, wall_w: float, wall_h: float) -> Rect:
-    """What a re-anchored recipe should treat as the page's subject.
-
-    The rect is not the transform — the affine carries that — but it decides what
-    counts as map artwork and what counts as a pin, so it has to describe *this*
-    page rather than the one the recipe came from.
-    """
-    src = primary_map_rect(slide.get("items") or [])
-    if src is not None:
-        return src
-    union = visible_content_union(slide, wall_w, wall_h)
-    if union is not None and union.w > 0 and union.h > 0:
-        return union
-    return Rect(0.0, 0.0, wall_w, wall_h)
-
-
-def apply_portable_recipe(
-    portable: dict[str, Any], slide: dict, wall_w: float, wall_h: float
-) -> dict[str, Any] | None:
-    """Anchor a saved transform onto this page."""
-    raw = (portable or {}).get("affine") or {}
-    scale = _f(raw.get("s"))
-    if scale <= 0:
-        return None
-    aff = Affine(scale, _f(raw.get("tx")), _f(raw.get("ty")))
-    src = _anchor_rect(slide, wall_w, wall_h)
-    dst = aff.apply_rect(src)
-    recipe: dict[str, Any] = {
-        k: portable[k] for k in PORTABLE_RECIPE_KEYS if portable.get(k) is not None
-    }
-    recipe.setdefault("destWidth", CG_WIDTH)
-    recipe.setdefault("destHeight", CG_HEIGHT)
-    recipe.setdefault("minPin", MIN_PIN_PX)
-    recipe["mapSrc"] = src.as_dict()
-    recipe["mapDst"] = dst.as_dict()
-    recipe["groups"] = [
-        {**aff.as_dict(), "src": src.as_dict(), "dst": dst.as_dict(), "members": 0}
-    ]
-    recipe["source"] = "recipe"
-    recipe["templateSlide"] = None
-    recipe["pairQuality"] = 0
-    if portable.get("label"):
-        recipe["recipeLabel"] = portable["label"]
-    return recipe
-
-
 def fit_to_frame_recipe(
     slide: dict,
     wall_w: float,
@@ -3046,7 +2953,6 @@ def plan_payload_transforms(
     fitted_slides: list[int] | None = None,
     offframe_report: list[dict[str, Any]] | None = None,
     framing_overrides: dict[int, int] | None = None,
-    recipe_overrides: dict[int, dict[str, Any]] | None = None,
     framing_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
@@ -3056,13 +2962,6 @@ def plan_payload_transforms(
     loose text from blind right-to-left packing onto measured empty space; rows
     describing what moved land in `placement_report` for flagging. Slides hidden
     with Skip Slide are not planned, and their numbers land in `skipped_slides`.
-
-    `recipe_overrides` maps a wall slide number to a saved portable recipe, for
-    pages no template slide can describe: nothing on them pairs, so every framing
-    candidate degrades to the same fit-to-frame and choosing between them is
-    choosing between identical outcomes. A recipe learnt from a page that *did*
-    pair carries a transform that does, and it is re-anchored onto this page.
-    Takes precedence over `framing_overrides` for the slides it names.
 
     `framing_overrides` maps a wall slide number to the template slide number the
     operator confirmed, replacing the automatic choice for that slide only. The
@@ -3086,24 +2985,7 @@ def plan_payload_transforms(
                 skipped_slides.append(number)
             continue
         slide_recipe = recipe
-        chosen = (recipe_overrides or {}).get(number)
-        applied = apply_portable_recipe(chosen, slide, wall_w, wall_h) if chosen else None
-        if applied is not None:
-            slide_recipe = applied
-            if framing_report is not None:
-                framing_report.append(
-                    {
-                        "slide": number,
-                        "templateSlide": None,
-                        "requested": None,
-                        "confirmed": True,
-                        "source": "recipe",
-                        "recipeLabel": applied.get("recipeLabel") or "",
-                        "pairQuality": 0,
-                        "fitted": False,
-                    }
-                )
-        elif template and (template.get("slides") or []):
+        if template and (template.get("slides") or []):
             wanted = (framing_overrides or {}).get(number)
             slide_recipe = learn_recipe(
                 {
@@ -3126,13 +3008,10 @@ def plan_payload_transforms(
                         "fitted": False,
                     }
                 )
-        # Nothing describes this page — no template framing, or a recipe that does
-        # not suit it. Applying the closest one anyway either throws objects
-        # thousands of pixels out of frame or collapses them into a corner;
-        # fitting what is visible does neither. A chosen recipe is held to the
-        # same standard as an automatic choice, so picking a bad one degrades
-        # rather than wrecking the page.
-        if applied is not None or (template and (template.get("slides") or [])):
+        # No template framing describes this page. Applying the closest one
+        # anyway either throws objects thousands of pixels out of frame or
+        # collapses them into a corner; fitting what is visible does neither.
+        if template and (template.get("slides") or []):
             unusable = on_canvas_fraction(
                 slide, slide_recipe, wall_w, wall_h
             ) < min_on_canvas or is_degenerate_scale(slide_recipe, wall_w, wall_h)

@@ -27,11 +27,14 @@ todos:
     content: "Find the title structurally instead of by wording. Phrase match first, then the plate — the largest shape containing a text item's centre — and only where that plate carries exactly one word, since a badge of several is ambiguous"
     status: completed
   - id: recipe-library
-    content: "Recipes as browsable artefacts: learn from pages that pair, save under a label, apply to pages that do not. Saved from a reviewed page, offered on every page beside the framing candidates, previewed on demand"
-    status: completed
+    content: "Recipes as browsable artefacts. Built, then reverted: a page needing a borrowed transform usually needs two affines, not one, and the single-group limit was the same gap seen from the other side. Revisit after badge-affine"
+    status: pending
   - id: navigator-numbering
     content: "The dashboard reads a range in Keynote's numbering; the CLI keeps document positions and says so in --help. Translating needs the whole deck's skip flags, and a ranged read returns only the slides asked for, so it leans on a full read having happened and says so when it has not"
     status: completed
+  - id: badge-affine
+    content: "Anchor the badge on its plate so a page with a map and a badge gets two affines. Today the second one arrives only if area-rank pairing stumbles on a consistent second pair, and the badge otherwise rides the map's affine off the frame — which drags on_canvas_fraction under the threshold and makes every framing fall back"
+    status: pending
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
     status: pending
@@ -405,9 +408,22 @@ reads as disposable.
 *Preview costs nothing new.* "Where objects land" and "as it will look" are both
 derived from the plan, so a recipe picker reuses them unchanged.
 
-*Order within this item:* portable subset + `recipe_overrides` + headless tests
-first, then persistence, then the picker. The first step is testable with no
-Keynote and no UI.
+**Built and reverted.** It worked — a recipe learnt from `Extracted_CG_3rd` slide
+2 moved `Map_Extracted_Wall_2nd` slide 3's movie from a fitted `(24,-157)
+1872x1053` to `(-924,-890) 3840x2160`, the centre 1920 of the wall panel at full
+size. What it did not do is help the pages that need help most.
+
+The v1 constraint turned out to be the tell. A page that cannot learn a framing
+of its own is usually a page carrying a map *and* a badge, and that wants two
+affines, not one. Report card slide 94 is the case: template 10 gives the map the
+1:1 it should have, and the badge — six of the page's ten objects — rides the same
+affine to x=-979, off the frame, which drags `on_canvas_fraction` under the
+threshold and makes every framing fall back to fit-to-frame. A saved recipe would
+have carried the same single affine and the same problem.
+
+So the single-group limit was not a v1 shortcut to relax later; it was this gap
+seen from the other side. Worth rebuilding once a badge reliably gets its own
+affine, and the commits are in the branch history to lift from.
 
 ## Ranges should be written in the numbers Keynote shows
 
@@ -445,14 +461,53 @@ One caveat either way: un-hiding a slide while a proposal is open shifts the
 mapping under it. The review says to re-propose, and nothing can detect it
 without re-reading the deck.
 
+## A badge needs its own affine
+
+A page with a map and a badge needs two transforms. Today the second one arrives
+by luck: `pair_by_area_rank` orders both sides by area, and on a wall page the
+bleed art dominates, so the 124x124 badge logo pairs with a 473x364 map layer and
+`drop_outlier_pairs` correctly throws it away. What is left is one group, and
+`_group_for_item` hands it to everything.
+
+Measured on report card slide 94, one row per template:
+
+```
+template  groups  scales           badge plate rides
+   10       1     1.000            s=1.000 -> x=-979   off frame
+   12       1     0.696            s=0.696 -> x=-828   off frame
+    1       1     1.408            s=1.408 -> x=-1696  off frame
+   11       2     1.000, 0.266     s=0.266 -> x=420    on canvas
+```
+
+Template 11 is the only one that happens to produce two groups, and the only one
+where the badge lands on the page.
+
+`badgeSlots` is the other route and it does not depend on luck, but it needs a
+title, and `slide_title_item` declines a plate carrying several words rather than
+guessing which is the title. The report card's badge is MISSIONS + UPDATE +
+China, so there is no title, no slots, and the badge rides the map.
+
+**Anchor on the plate instead of the words.** One shape on each side, unambiguous
+whether the badge carries one word or three: the badge affine is plate to plate,
+and its members ride that. `titleDst` keeps positioning the title text where a
+title is identifiable. That makes the second affine deterministic rather than a
+by-product of area ranking, and it removes the multi-word guard's cost without
+removing the guard.
+
+Check against all four decks in the warm cache before and after, including that
+the missions decks keep the badge geometry last year shipped: plate `(17,37)
+411x123`, logo `(31,59) 80x80`.
+
 ## Order of work
 
-1. The number block in the CG resizer, above.
-2. Cue palette and outline editor.
-3. Image cues.
-4. DSK generator, unchanged from the superseded plan including its four corrections.
+1. A badge needs its own affine, above.
+2. The number block in the CG resizer, above.
+3. Recipes as browsable artefacts, once a badge carries its own affine.
+4. Cue palette and outline editor.
+5. Image cues.
+6. DSK generator, unchanged from the superseded plan including its four corrections.
 
-Stat drift is independent of all four and can land whenever.
+Stat drift is independent of all six and can land whenever.
 
 Structural title detection and the recipe library are done; both sections below
 are kept for the reasoning, which is what a later reader needs rather than the

@@ -140,7 +140,6 @@ def remap_keynote(
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     framing_overrides: dict[int, int] | None = None,
-    recipe_overrides: dict[int, dict[str, Any]] | None = None,
     source_previews: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -148,8 +147,6 @@ def remap_keynote(
 
     `framing_overrides` maps a wall slide number to the template slide the operator
     confirmed, for the pages where the automatic choice was wrong.
-    `recipe_overrides` maps one to a saved transform instead, for the pages where
-    no template slide can be right because nothing on them pairs.
     """
     def say(message: str) -> None:
         if log:
@@ -209,7 +206,6 @@ def remap_keynote(
         fitted_slides=fitted,
         offframe_report=offframe,
         framing_overrides=framing_overrides,
-        recipe_overrides=recipe_overrides,
         framing_report=framing_rows,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
@@ -405,7 +401,6 @@ def remap_and_inspect(
     export_dir: Path | str | None = None,
     source_previews: Path | str | None = None,
     framing_overrides: dict[int, int] | None = None,
-    recipe_overrides: dict[int, dict[str, Any]] | None = None,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     validate: bool = True,
@@ -419,7 +414,6 @@ def remap_and_inspect(
         include_lists=include_lists,
         source_previews=source_previews,
         framing_overrides=framing_overrides,
-        recipe_overrides=recipe_overrides,
         wall_payload=wall_payload,
         template_payload=template_payload,
         log=log,

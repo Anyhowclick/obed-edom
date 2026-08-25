@@ -1,12 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  deleteRecipe,
-  listRecipes,
-  previewRecipe,
-  saveRecipeFromPage,
-  type FramingDecision,
-  type SavedRecipe,
-} from "../api";
+import { useMemo, useState } from "react";
+import type { FramingDecision } from "../api";
 
 /**
  * Confirm which crop each map page uses, before anything is remapped.
@@ -364,12 +357,6 @@ export function FramingReview({
   const destHeight = proposal.destHeight || 1080;
 
   const [decisions, setDecisions] = useState<Record<number, FramingDecision>>({});
-  // Saved transforms, offered on every page rather than only the ones that
-  // learnt nothing: a page can pair weakly and still be better served by one.
-  const [recipes, setRecipes] = useState<SavedRecipe[]>([]);
-  // Keyed `${slide}:${recipeId}`, filled as the operator looks at each.
-  const [recipePreviews, setRecipePreviews] = useState<Record<string, PlannedRect[]>>({});
-  const [recipeError, setRecipeError] = useState<string | null>(null);
   const [tab, setTab] = useState<Category>("matched");
   const [pageSize, setPageSize] = useState(10);
   const [openGroup, setOpenGroup] = useState<string | null>(null);
@@ -472,70 +459,10 @@ export function FramingReview({
     });
   }
 
-  function templateLabel(page: FramingPage): string {
-    const slide = chosenSlide(page, decisions) ?? page.autoTemplateSlide;
-    return slide == null ? "fitted" : `template ${slide}`;
-  }
-
   function collect(): FramingDecision[] {
     return pages
       .map((page) => decisions[page.index] ?? page.decision)
       .filter((d): d is FramingDecision => !!d && d.state !== "auto");
-  }
-
-  useEffect(() => {
-    listRecipes().then(setRecipes).catch(() => setRecipes([]));
-  }, []);
-
-  function chosenRecipe(page: FramingPage): string | null {
-    return (decisions[page.index] ?? page.decision)?.recipeId ?? null;
-  }
-
-  function pickRecipe(page: FramingPage, id: string | null) {
-    setDecisions((current) => ({
-      ...current,
-      [page.index]: id
-        ? { wallIndex: page.index, state: "pinned", templateSlide: null, recipeId: id }
-        : { wallIndex: page.index, state: "auto", templateSlide: null, recipeId: null },
-    }));
-    if (!id) return;
-    const key = `${page.slide}:${id}`;
-    if (recipePreviews[key]) return;
-    previewRecipe(jobId, page.slide, id)
-      .then((res) =>
-        setRecipePreviews((cur) => ({ ...cur, [key]: (res.rects || []) as PlannedRect[] }))
-      )
-      .catch((err) => setRecipeError(err instanceof Error ? err.message : String(err)));
-  }
-
-  async function keepThisPage(page: FramingPage) {
-    const label = window.prompt(
-      "Name this recipe — the layout it produces, not the page it came from:",
-      `${page.slide} · ${templateLabel(page)}`
-    );
-    if (!label) return;
-    try {
-      const saved = await saveRecipeFromPage(
-        jobId,
-        page.slide,
-        label,
-        chosenSlide(page, decisions) ?? page.autoTemplateSlide
-      );
-      setRecipes((cur) => [...cur.filter((r) => r.id !== saved.id), saved]);
-      setRecipeError(null);
-    } catch (err) {
-      setRecipeError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function forgetRecipe(id: string) {
-    if (!window.confirm("Delete this recipe? Pages already pinned to it fall back to auto.")) return;
-    try {
-      await deleteRecipe(id);
-      setRecipes((cur) => cur.filter((r) => r.id !== id));
-    } catch (err) {
-      setRecipeError(err instanceof Error ? err.message : String(err));
-    }
   }
 
   const reviewed = pages.filter((p) => stateOf(p, decisions) === "pinned").length;
@@ -986,64 +913,13 @@ export function FramingReview({
                               </button>
                             ))}
                           </div>
-                          {/* Saved transforms, offered on every page. A framing
-                              candidate only helps where something pairs; where
-                              nothing does, every candidate degrades to the same
-                              fit and a recipe is the only real choice. */}
-                          <div className="recipe-picker">
-                            <span className="framing-label">Or a saved recipe</span>
-                            {recipes.length === 0 && (
-                              <p className="note">
-                                None saved yet. Confirm a page that came out right and
-                                use <strong>Save as recipe</strong> to keep how it was
-                                done — pages that pair with nothing can then borrow it,
-                                since no template slide can help them.
-                              </p>
-                            )}
-                            {recipes.length > 0 && (
-                              <div className="framing-picker">
-                                {recipes.map((recipe) => {
-                                  const on = chosenRecipe(page) === recipe.id;
-                                  return (
-                                    <button
-                                      key={recipe.id}
-                                      type="button"
-                                      disabled={busy}
-                                      title={`${recipe.label}${recipe.source ? ` — from ${recipe.source}` : ""}\ns=${recipe.affine.s}, tx=${recipe.affine.tx}, ty=${recipe.affine.ty}`}
-                                      className={"framing-option" + (on ? " current" : "")}
-                                      onClick={() => pickRecipe(page, on ? null : recipe.id)}
-                                    >
-                                      <CropPreview
-                                        src={thumbUrl(page)}
-                                        transform={recipe.affine}
-                                        rects={recipePreviews[`${page.slide}:${recipe.id}`]}
-                                        view={
-                                          recipePreviews[`${page.slide}:${recipe.id}`]
-                                            ? planView
-                                            : "crop"
-                                        }
-                                        wallWidth={wallWidth}
-                                        wallHeight={wallHeight}
-                                        destWidth={destWidth}
-                                        destHeight={destHeight}
-                                        width={104}
-                                      />
-                                      <span className="framing-option-num">{recipe.label}</span>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
                         </div>
                       <div className="framing-row-controls">
                         <div className="actions">
                           {/* Confirms as well as switches. Gating this on the
                               preview differing from the current choice meant a
-                              page whose automatic framing was already right could
-                              not be reviewed from its own row at all — and with
-                              nothing pinned there was no way to reach "Save as
-                              recipe" either. */}
+                              page whose automatic framing was already right
+                              could not be reviewed from its own row at all. */}
                           <button
                             className="btn secondary tone-alt"
                             type="button"
@@ -1066,19 +942,6 @@ export function FramingReview({
                           >
                             Needs a new template
                           </button>
-                          {/* Only once the page is settled: a recipe is worth
-                              keeping because this page came out right, so the
-                              claim it makes is about a reviewed page. */}
-                          {stateOf(page, decisions) === "pinned" && (
-                            <button
-                              className="btn secondary"
-                              type="button"
-                              disabled={busy}
-                              onClick={() => keepThisPage(page)}
-                            >
-                              Save as recipe
-                            </button>
-                          )}
                         </div>
                         <p className="note">
                           {`Template slide ${preview ?? "—"}. `}
@@ -1087,23 +950,7 @@ export function FramingReview({
                             : "This framing applies cleanly. "}
                           {stateOf(page, decisions) === "pinned" && "Reviewed. "}
                           {page.resurfaced && "The template changed since you deferred this. "}
-                          {chosenRecipe(page) && (
-                            <>
-                              {`Using the saved recipe "${
-                                recipes.find((r) => r.id === chosenRecipe(page))?.label ??
-                                chosenRecipe(page)
-                              }". `}
-                              <button
-                                type="button"
-                                className="link-button"
-                                onClick={() => forgetRecipe(chosenRecipe(page)!)}
-                              >
-                                Delete it
-                              </button>
-                            </>
-                          )}
                         </p>
-                        {recipeError && <p className="err">{recipeError}</p>}
                         </div>
                       </div>
                     </div>

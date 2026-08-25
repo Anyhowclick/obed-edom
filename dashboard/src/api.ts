@@ -308,59 +308,7 @@ export type FramingDecision = {
   wallIndex: number;
   state: "auto" | "pinned" | "deferred";
   templateSlide: number | null;
-  /** Set instead of templateSlide when the page borrows a saved transform. */
-  recipeId?: string | null;
 };
-
-/** A transform kept from a page that worked, for pages that cannot learn one. */
-export type SavedRecipe = {
-  id: string;
-  label: string;
-  source?: string;
-  affine: { s: number; tx: number; ty: number };
-};
-
-export async function listRecipes(): Promise<SavedRecipe[]> {
-  const res = await fetch("/api/recipes");
-  if (!res.ok) throw new Error(await readError(res));
-  return (await res.json()).recipes || [];
-}
-
-export async function deleteRecipe(id: string): Promise<void> {
-  const res = await fetch(`/api/recipes/${encodeURIComponent(id)}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(await readError(res));
-}
-
-/** Keep the way a reviewed page came out. */
-export async function saveRecipeFromPage(
-  jobId: string,
-  slide: number,
-  label: string,
-  templateSlide?: number | null
-): Promise<SavedRecipe> {
-  const body = new FormData();
-  body.set("slide", String(slide));
-  body.set("label", label);
-  if (templateSlide != null) body.set("template_slide", String(templateSlide));
-  const res = await fetch(`/api/resize/${jobId}/recipes`, { method: "POST", body });
-  if (!res.ok) throw new Error(await readError(res));
-  return (await res.json()).recipe;
-}
-
-/** What one saved recipe would do to one page. Fetched on demand: a library of a
- *  dozen against a 158-page deck is 1,896 plans nobody looks at. */
-export async function previewRecipe(
-  jobId: string,
-  slide: number,
-  recipeId: string
-): Promise<{ transform: { s: number; tx: number; ty: number }; rects: unknown[] }> {
-  const body = new FormData();
-  body.set("slide", String(slide));
-  body.set("recipe_id", recipeId);
-  const res = await fetch(`/api/resize/${jobId}/recipe-preview`, { method: "POST", body });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
-}
 
 export async function saveResizeFramings(jobId: string, decisions: FramingDecision[]): Promise<Job> {
   const res = await fetch(`/api/resize/${jobId}/framings`, {
