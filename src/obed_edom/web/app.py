@@ -51,11 +51,18 @@ from obed_edom.remap_keynote import remap_and_inspect
 from obed_edom.settings import load_settings, save_settings
 from obed_edom.slide_map import load_masters
 from obed_edom.validate import validate_inspect
-from obed_edom.web.jobs import Job, JobRunner, preview_names, serialize_flags, visual_result
+from obed_edom.web.jobs import (
+    Job,
+    JobRunner,
+    default_output_root,
+    preview_names,
+    serialize_flags,
+    visual_result,
+)
 
 RUNNER = JobRunner()
 ROOT = find_repo_root()
-UPLOADS = ROOT / "output" / ".uploads"
+UPLOADS = default_output_root() / ".uploads"
 DASHBOARD_DIST = ROOT / "dashboard" / "dist"
 
 
