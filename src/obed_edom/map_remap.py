@@ -16,34 +16,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-# region agent log
-def _dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
-    import json
-    import time
-
-    try:
-        with open(
-            "/Users/anyhowclick/Desktop/work/obed-edom/.cursor/debug-6310d1.log",
-            "a",
-            encoding="utf-8",
-        ) as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "sessionId": "6310d1",
-                        "runId": "post-fix",
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-# endregion
 
 CG_WIDTH = 1920
 CG_HEIGHT = 1080
@@ -1610,31 +1582,6 @@ def _title_badge(
     ids: set[int] = {id(it) for it in members}
     slots = badge_slot_keys(rest)
     aff = affine_from_rects(src, dst)
-    # region agent log
-    _dbg(
-        "H18",
-        "map_remap.py:_title_badge",
-        "title cluster members",
-        {
-            "title": {
-                "text": (title.get("text") or "")[:40],
-                "rect": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
-            },
-            "titleDst": {"x": round(dst.x, 1), "y": round(dst.y, 1), "w": round(dst.w, 1), "h": round(dst.h, 1)},
-            "members": [
-                {
-                    "kind": it.get("kind"),
-                    "idx": it.get("index"),
-                    "x": round(_f(it.get("x")), 1),
-                    "y": round(_f(it.get("y")), 1),
-                    "w": round(_f(it.get("w")), 1),
-                    "h": round(_f(it.get("h")), 1),
-                }
-                for it in members
-            ],
-        },
-    )
-    # endregion
     return aff, src, ids, slots
 
 
@@ -1689,67 +1636,13 @@ def _style_text_box(
             mapped = Rect(origin.x, origin.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
         else:
             mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
-        # region agent log
-        if interesting:
-            _dbg(
-                "H15",
-                "map_remap.py:_style_text_box",
-                "styled branch",
-                {
-                    "text": snippet,
-                    "path": "styled",
-                    "affS": round(aff.s, 4) if aff else None,
-                    "ratio": round(ratio, 4),
-                    "wallFont": round(wall_font, 2),
-                    "dstSize": round(dst_size, 2),
-                    "src": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
-                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
-                },
-            )
-        # endregion
         return mapped, dst_size, font_name, colour
     if aff is not None:
         origin = aff.apply_rect(Rect(src.x, src.y, 1.0, 1.0))
         scale = min(aff.s, TEXT_DOWN_SCALE)
         mapped = Rect(origin.x, origin.y, max(8.0, src.w * scale), max(8.0, src.h * scale))
         font = max(8.0, wall_font * scale) if wall_font else None
-        # region agent log
-        if interesting:
-            _dbg(
-                "H15",
-                "map_remap.py:_style_text_box",
-                "clamp branch",
-                {
-                    "text": snippet,
-                    "path": "clamp",
-                    "affS": round(aff.s, 4),
-                    "clamp": TEXT_DOWN_SCALE,
-                    "scaleUsed": round(scale, 4),
-                    "clampBound": aff.s > TEXT_DOWN_SCALE,
-                    "wallFont": round(wall_font, 2),
-                    "fontOut": round(font, 2) if font else None,
-                    "src": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
-                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
-                    "hadStyle": bool(style),
-                },
-            )
-        # endregion
         return mapped, font, font_name, colour
-    # region agent log
-    if interesting:
-        _dbg(
-            "H15",
-            "map_remap.py:_style_text_box",
-            "passthrough branch",
-            {
-                "text": snippet,
-                "path": "passthrough",
-                "hadStyle": bool(style),
-                "wallFont": round(wall_font, 2),
-                "src": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
-            },
-        )
-    # endregion
     return src, (wall_font or None), font_name, colour
 
 
@@ -1804,9 +1697,6 @@ def plan_slide_transforms(
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
-    # region agent log
-    _text_rows: list[dict[str, Any]] = []
-    # endregion
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
@@ -1882,20 +1772,6 @@ def plan_slide_transforms(
             dst = _rect_from_dict(recipe.get("titleDst"))
             if dst is None:
                 continue
-            # region agent log
-            _src = item_rect(item)
-            _text_rows.append(
-                {
-                    "path": "title",
-                    "role": "title",
-                    "text": (item.get("text") or "").replace("\n", " ")[:48],
-                    "src": {"x": round(_src.x, 1), "y": round(_src.y, 1), "w": round(_src.w, 1), "h": round(_src.h, 1)},
-                    "mapped": {"x": round(dst.x, 1), "y": round(dst.y, 1), "w": round(dst.w, 1), "h": round(dst.h, 1)},
-                    "affS": round(aff.s, 4) if aff else None,
-                    "font": recipe.get("titleFontSize"),
-                }
-            )
-            # endregion
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1930,19 +1806,6 @@ def plan_slide_transforms(
                 font_name, colour = None, None
             if dst is not None:
                 mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
-            # region agent log
-            _text_rows.append(
-                {
-                    "path": "listDst",
-                    "role": "list",
-                    "text": (item.get("text") or "").replace("\n", " ")[:48],
-                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
-                    "snapped": dst is not None,
-                    "listCount": list_count,
-                    "style": (style or {}).get("size") if style else None,
-                }
-            )
-            # endregion
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -2005,28 +1868,6 @@ def plan_slide_transforms(
         if role in {"list", "other"} and (item.get("kind") or "") == "text":
             style = match_character_style(item, styles)
             mapped, font, font_name, colour = _style_text_box(item, aff, style)
-            # region agent log
-            _text_rows.append(
-                {
-                    "path": "style_text",
-                    "role": role,
-                    "text": (item.get("text") or "").replace("\n", " ")[:48],
-                    "src": {
-                        "x": round(_f(item.get("x")), 1),
-                        "y": round(_f(item.get("y")), 1),
-                        "w": round(_f(item.get("w")), 1),
-                        "h": round(_f(item.get("h")), 1),
-                    },
-                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
-                    "affS": round(aff.s, 4) if aff else None,
-                    "styleMatched": bool(style),
-                    "styleSize": _f(style.get("size")) if style else None,
-                    "wallFont": _f(item.get("size")),
-                    "fontOut": font,
-                    "fontName": font_name,
-                }
-            )
-            # endregion
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -2068,32 +1909,6 @@ def plan_slide_transforms(
                 src_box.w,
                 src_box.h,
             )
-        # region agent log
-        if str(item.get("kind") or "") == "group":
-            _dbg(
-                "H18",
-                "map_remap.py:plan_slide_transforms",
-                "group placement",
-                {
-                    "idx": item_index,
-                    "src": {
-                        "x": round(_f(item.get("x")), 1),
-                        "y": round(_f(item.get("y")), 1),
-                        "w": round(_f(item.get("w")), 1),
-                        "h": round(_f(item.get("h")), 1),
-                    },
-                    "mapped": {
-                        "x": round(mapped.x, 1),
-                        "y": round(mapped.y, 1),
-                        "w": round(mapped.w, 1),
-                        "h": round(mapped.h, 1),
-                    },
-                    "affS": round(aff.s, 4) if aff else None,
-                    "role": role,
-                    "runId": "post-fix",
-                },
-            )
-        # endregion
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -2127,33 +1942,6 @@ def plan_slide_transforms(
                 abs(end[0] - start[0]),
                 abs(end[1] - start[1]),
             )
-        # region agent log
-        if role == "line":
-            _dbg(
-                "H22",
-                "map_remap.py:plan_slide_transforms",
-                "line placement",
-                {
-                    "idx": item_index,
-                    "src": {
-                        "x": round(_f(item.get("x")), 1),
-                        "y": round(_f(item.get("y")), 1),
-                        "w": round(_f(item.get("w")), 1),
-                        "h": round(_f(item.get("h")), 1),
-                    },
-                    "mapped": {
-                        "x": round(mapped.x, 1),
-                        "y": round(mapped.y, 1),
-                        "w": round(mapped.w, 1),
-                        "h": round(mapped.h, 1),
-                    },
-                    "start": [round(start[0], 1), round(start[1], 1)] if start else None,
-                    "end": [round(end[0], 1), round(end[1], 1)] if end else None,
-                    "affS": round(aff.s, 4) if aff else None,
-                    "runId": "post-fix",
-                },
-            )
-        # endregion
         out.append(
             ItemTransform(
                 slide_number=number,
@@ -2184,56 +1972,6 @@ def plan_slide_transforms(
             -(t.w * t.h) if t.role == "map" else 0.0,
         )
     )
-    # region agent log
-    if number == 4:
-        text_final = [
-            {
-                "role": t.role,
-                "kind": t.kind,
-                "x": round(t.x, 1),
-                "y": round(t.y, 1),
-                "w": round(t.w, 1),
-                "h": round(t.h, 1),
-                "font": t.font_size,
-                "idx": t.item_index,
-            }
-            for t in out
-            if t.kind == "text" or t.role in {"title", "list"}
-        ]
-        extras = [
-            {
-                "role": t.role,
-                "kind": t.kind,
-                "idx": t.item_index,
-                "ki": t.kind_index,
-                "x": round(t.x, 1),
-                "y": round(t.y, 1),
-                "w": round(t.w, 1),
-                "h": round(t.h, 1),
-                "start": [round(t.start[0], 1), round(t.start[1], 1)] if t.start else None,
-                "end": [round(t.end[0], 1), round(t.end[1], 1)] if t.end else None,
-                "payloadWH": t.role in {"map", "list", "pin", "title", "other"},
-            }
-            for t in out
-            if t.kind in {"line", "group"} or (t.kind == "image" and t.item_index == 3)
-        ]
-        _dbg(
-            "H22",
-            "map_remap.py:plan_slide_transforms",
-            "slide 4 text plan",
-            {
-                "include_lists": include_lists,
-                "pack_lists": pack_lists,
-                "list_count": list_count,
-                "titleDst": recipe.get("titleDst"),
-                "titleFontSize": recipe.get("titleFontSize"),
-                "styleCount": len(styles),
-                "rows": _text_rows,
-                "final": text_final,
-                "extras": extras,
-            },
-        )
-    # endregion
     return out
 
 
