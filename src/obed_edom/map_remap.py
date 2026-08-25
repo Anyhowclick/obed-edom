@@ -2325,6 +2325,20 @@ def plan_slide_reuses(
                     payload["matchText"] = text
             if payload.get("role") != "hide":
                 mutate_specs.append(payload)
+        # The delta is pasted with a select-all, so everything the donor copy
+        # already carries has to leave the original first — and that is every
+        # object except the ones being added, not merely the ones the planner
+        # looked at. `_live_items` drops placeholder text and objects inspect
+        # marked as duplicates; those never reached `strip`, so the select-all
+        # swept them across and the donor's own copies were joined by a second
+        # set. The original slide is deleted straight afterwards, so stripping
+        # it back to the delta costs nothing.
+        add_keys = {(str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) for it in add}
+        strip_items = [
+            it
+            for it in (slide.get("items") or [])
+            if (str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) not in add_keys
+        ]
         strip_builds = [
             _ref(prev)
             for curr, prev in persist_pairs
@@ -2339,7 +2353,7 @@ def plan_slide_reuses(
                 # The delta is pasted with a select-all on the original slide, so
                 # everything the donor copy already carries has to go first — the
                 # persisting objects, and the mutated ones the donor supplies too.
-                "strip": [_ref(it) for it in persist] + [_ref(it) for _donor, it in mutate],
+                "strip": [_ref(it) for it in strip_items],
                 "stripBuilds": strip_builds,
                 "add": add_specs,
                 "mutate": mutate_specs,

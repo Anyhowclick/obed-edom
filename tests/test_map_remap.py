@@ -1564,3 +1564,58 @@ def test_a_rule_sends_its_length_the_way_keynote_reports_it():
     ).as_dict()
     assert across["w"] == 300.0
     assert across["h"] == 0.0
+
+
+def test_reuse_strips_the_objects_the_planner_never_looked_at():
+    """The delta is pasted with a select-all, so anything left on the original
+    rides across. `_live_items` skips placeholder text and objects inspect marked
+    as duplicates, so those were never stripped and the donor's own copies were
+    joined by a second set."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [
+        _item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)
+    ]
+
+    def page(number, extra):
+        return {
+            "number": number,
+            "items": [
+                dict(map_img, kindIndex=0),
+                *[dict(p) for p in pins],
+                # Every wall slide carries these, and neither reaches the planner.
+                _item(kind="text", kindIndex=8, text="", x=0, y=0, w=0, h=0),
+                _item(
+                    kind="text",
+                    kindIndex=9,
+                    text="183 CHC Churches",
+                    x=262,
+                    y=9,
+                    w=215,
+                    h=58,
+                    duplicateOf=1,
+                ),
+                *extra,
+            ],
+        }
+
+    wall = {
+        "slides": [
+            page(2, []),
+            page(
+                3,
+                [_item(kind="text", kindIndex=10, text="26 Total", x=300, y=500, w=200, h=60)],
+            ),
+        ]
+    }
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
+    assert [a.get("matchText") for a in job["add"]] == ["26 Total"]
+
+    stripped = {(r["kind"], r["kindIndex"]) for r in job["strip"]}
+    assert ("text", 9) in stripped, "the duplicate would be pasted a second time"
+    assert ("text", 8) in stripped, "the placeholder would be pasted a second time"
+    # Everything except the delta goes; the original slide is deleted right after.
+    assert ("text", 10) not in stripped
+    assert ("image", 0) in stripped
+    assert len(stripped) == 43
