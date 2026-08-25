@@ -162,18 +162,12 @@ function applyGeom(obj, spec, positionOnly) {
       ok = true;
     } catch (eH) {}
   }
-  if (!positionOnly && spec.start && spec.start.length >= 2) {
-    try {
-      obj.startPoint = spec.start;
-      ok = true;
-    } catch (eS) {}
-  }
-  if (!positionOnly && spec.end && spec.end.length >= 2) {
-    try {
-      obj.endPoint = spec.end;
-      ok = true;
-    } catch (eE) {}
-  }
+  // Keynote 15.3.1 does not implement a line's endpoints: they read back null
+  // even on a line created with them, and *writing* them collapses the line to
+  // one unit long. A 383px divider came out at w=1. `width` is the length —
+  // Keynote reports it that way whichever direction the line runs — and setting
+  // it works, so the size pass above is what places a rule.
+  // See scripts/probe_line.js.
   if (!positionOnly && spec.font) {
     try {
       obj.objectText.font = spec.font;
