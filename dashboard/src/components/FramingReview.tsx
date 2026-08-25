@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { FramingDecision } from "../api";
 
 /**
@@ -286,6 +286,9 @@ function PlanLegend({
 type Marquee = {
   key: string;
   box: { x0: number; y0: number; x1: number; y1: number };
+  /** Set once the pointer has moved far enough to mean a sweep rather than a
+   *  click, so pressing a chip still just toggles it. */
+  active: boolean;
   /** Selection as it stood when the drag began, so a live drag replaces its own
    *  result each move instead of accumulating one. */
   base: Set<number>;
@@ -358,14 +361,14 @@ export function FramingReview({
   // Pins outnumber everything else forty to one on a report card, so they start
   // hidden: the boxes exist to show the objects a crop cannot explain.
   const [hiddenRoles, setHiddenRoles] = useState<Set<string>>(new Set(["pin"]));
-  // Drag across thumbnails to select a run of them. `adding` is fixed at
-  // pointer-down from whatever the first thumbnail was, so one drag either selects
-  // or deselects throughout instead of toggling each chip it crosses.
-  const [drag, setDrag] = useState<{ adding: boolean } | null>(null);
-  // Marquee from the strip's empty space. Dragging across chips selects a run,
-  // which needs the pointer to stay on the chips; a batch of 56 wraps over several
-  // rows, and sweeping a box across them is the faster way to take a block.
+  // Sweep a box anywhere over the strip to take a block of pages; a press that
+  // does not move is still just a click on that chip. Starting only from the
+  // strip's empty space, as this first did, meant the obvious gesture — press a
+  // chip and drag — never began a sweep at all.
   const [marquee, setMarquee] = useState<Marquee | null>(null);
+  // A sweep ends with a click event on whichever chip it finished over. Without
+  // this that click would toggle the chip straight back off.
+  const swept = useRef(false);
 
   const byCategory = useMemo(() => {
     const out: Record<Category, FramingPage[]> = {
@@ -582,15 +585,13 @@ export function FramingReview({
             </div>
 
             {/* Every page in the group, so a wrong one in a batch of 56 is visible
-                without opening anything. Drag across the chips to select a run, or
-                sweep a box from the empty space to take a block that wraps rows —
-                hold shift to add that block to what is already selected. */}
+                without opening anything. Click a chip to toggle it, or sweep a box
+                across them to take a block that wraps rows — hold shift to add
+                that block to what is already selected. */}
             <div
               className="framing-strip"
               onPointerDown={(e) => {
-                // Only from empty space: a press that lands on a chip already
-                // means "select this run", and that gesture is worth keeping.
-                if (e.target !== e.currentTarget || e.button !== 0) return;
+                if (e.button !== 0) return;
                 // Otherwise the browser starts a text/image drag mid-sweep.
                 e.preventDefault();
                 const strip = e.currentTarget;
@@ -598,9 +599,11 @@ export function FramingReview({
                 const x = e.clientX - rect.left;
                 const y = e.clientY - rect.top;
                 strip.setPointerCapture?.(e.pointerId);
+                swept.current = false;
                 setMarquee({
                   key: group.key,
                   box: { x0: x, y0: y, x1: x, y1: y },
+                  active: false,
                   // Shift or the platform modifier adds to what is already
                   // selected; a plain sweep replaces it.
                   base: e.shiftKey || e.metaKey || e.ctrlKey ? new Set(selected) : new Set(),
@@ -615,16 +618,19 @@ export function FramingReview({
                   x1: e.clientX - rect.left,
                   y1: e.clientY - rect.top,
                 };
-                setMarquee({ ...marquee, box });
+                const moved =
+                  Math.abs(box.x1 - box.x0) > 4 || Math.abs(box.y1 - box.y0) > 4;
+                if (!moved && !marquee.active) {
+                  setMarquee({ ...marquee, box });
+                  return;
+                }
+                swept.current = true;
+                setMarquee({ ...marquee, box, active: true });
                 const next = new Set(marquee.base);
                 for (const index of indexesUnder(strip, box)) next.add(index);
                 setSelected(next);
               }}
-              onPointerUp={() => {
-                setDrag(null);
-                setMarquee(null);
-              }}
-              onPointerLeave={() => setDrag(null)}
+              onPointerUp={() => setMarquee(null)}
               onPointerCancel={() => setMarquee(null)}
             >
               {group.pages.map((page) => {
@@ -647,16 +653,11 @@ export function FramingReview({
                         ? " — falls back to fitting content"
                         : "")
                     }
-                    onPointerDown={(e) => {
-                      // Keep receiving moves after the pointer leaves this chip,
-                      // otherwise the drag stops at the first boundary.
-                      e.currentTarget.releasePointerCapture?.(e.pointerId);
-                      const adding = !selected.has(page.index);
-                      setDrag({ adding });
-                      applySelection(page.index, adding);
-                    }}
-                    onPointerEnter={() => {
-                      if (drag) applySelection(page.index, drag.adding);
+                    onClick={() => {
+                      // The sweep already decided the selection; this is only the
+                      // click it ended on.
+                      if (swept.current) return;
+                      applySelection(page.index, !selected.has(page.index));
                     }}
                   >
                     <CropPreview
@@ -672,7 +673,7 @@ export function FramingReview({
                   </button>
                 );
               })}
-              {marquee && marquee.key === group.key && (
+              {marquee?.active && marquee.key === group.key && (
                 <span className="framing-marquee" style={marqueeRect(marquee.box)} />
               )}
             </div>
