@@ -959,9 +959,17 @@ export function FramingReview({
                               candidate only helps where something pairs; where
                               nothing does, every candidate degrades to the same
                               fit and a recipe is the only real choice. */}
-                          {recipes.length > 0 && (
-                            <div className="recipe-picker">
-                              <span className="framing-label">Or a saved recipe</span>
+                          <div className="recipe-picker">
+                            <span className="framing-label">Or a saved recipe</span>
+                            {recipes.length === 0 && (
+                              <p className="note">
+                                None saved yet. Confirm a page that came out right and
+                                use <strong>Save as recipe</strong> to keep how it was
+                                done — pages that pair with nothing can then borrow it,
+                                since no template slide can help them.
+                              </p>
+                            )}
+                            {recipes.length > 0 && (
                               <div className="framing-picker">
                                 {recipes.map((recipe) => {
                                   const on = chosenRecipe(page) === recipe.id;
@@ -994,18 +1002,30 @@ export function FramingReview({
                                   );
                                 })}
                               </div>
-                            </div>
-                          )}
+                            )}
+                          </div>
                         </div>
                       <div className="framing-row-controls">
                         <div className="actions">
+                          {/* Confirms as well as switches. Gating this on the
+                              preview differing from the current choice meant a
+                              page whose automatic framing was already right could
+                              not be reviewed from its own row at all — and with
+                              nothing pinned there was no way to reach "Save as
+                              recipe" either. */}
                           <button
                             className="btn secondary tone-alt"
                             type="button"
-                            disabled={busy || !differs}
-                            onClick={() => decide([page.index], "pinned", () => preview)}
+                            disabled={busy || (preview ?? page.autoTemplateSlide) == null}
+                            onClick={() =>
+                              decide(
+                                [page.index],
+                                "pinned",
+                                (p) => preview ?? p.autoTemplateSlide
+                              )
+                            }
                           >
-                            Use this framing
+                            {differs ? "Use this framing" : "Confirm this framing"}
                           </button>
                           <button
                             className="btn secondary tone-template"
