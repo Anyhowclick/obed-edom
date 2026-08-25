@@ -283,6 +283,39 @@ function PlanLegend({
   );
 }
 
+type Marquee = {
+  key: string;
+  box: { x0: number; y0: number; x1: number; y1: number };
+  /** Selection as it stood when the drag began, so a live drag replaces its own
+   *  result each move instead of accumulating one. */
+  base: Set<number>;
+};
+
+function marqueeRect(box: Marquee["box"]) {
+  return {
+    left: Math.min(box.x0, box.x1),
+    top: Math.min(box.y0, box.y1),
+    width: Math.abs(box.x1 - box.x0),
+    height: Math.abs(box.y1 - box.y0),
+  };
+}
+
+/** Chip indexes the box touches, read off layout rather than tracked per chip. */
+function indexesUnder(strip: HTMLElement, box: Marquee["box"]): number[] {
+  const { left, top, width, height } = marqueeRect(box);
+  const right = left + width;
+  const bottom = top + height;
+  const out: number[] = [];
+  for (const node of Array.from(strip.querySelectorAll<HTMLElement>("[data-page-index]"))) {
+    const x = node.offsetLeft;
+    const y = node.offsetTop;
+    if (x < right && x + node.offsetWidth > left && y < bottom && y + node.offsetHeight > top) {
+      out.push(Number(node.dataset.pageIndex));
+    }
+  }
+  return out;
+}
+
 function candidateLabel(candidate: FramingCandidate): string {
   const bits = [`Template slide ${candidate.templateSlide}`];
   if (candidate.wouldFallBack) bits.push("would fall back");
@@ -329,6 +362,10 @@ export function FramingReview({
   // pointer-down from whatever the first thumbnail was, so one drag either selects
   // or deselects throughout instead of toggling each chip it crosses.
   const [drag, setDrag] = useState<{ adding: boolean } | null>(null);
+  // Marquee from the strip's empty space. Dragging across chips selects a run,
+  // which needs the pointer to stay on the chips; a batch of 56 wraps over several
+  // rows, and sweeping a box across them is the faster way to take a block.
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
 
   const byCategory = useMemo(() => {
     const out: Record<Category, FramingPage[]> = {
@@ -545,11 +582,50 @@ export function FramingReview({
             </div>
 
             {/* Every page in the group, so a wrong one in a batch of 56 is visible
-                without opening anything. Drag across them to select a run. */}
+                without opening anything. Drag across the chips to select a run, or
+                sweep a box from the empty space to take a block that wraps rows —
+                hold shift to add that block to what is already selected. */}
             <div
               className="framing-strip"
-              onPointerUp={() => setDrag(null)}
+              onPointerDown={(e) => {
+                // Only from empty space: a press that lands on a chip already
+                // means "select this run", and that gesture is worth keeping.
+                if (e.target !== e.currentTarget || e.button !== 0) return;
+                // Otherwise the browser starts a text/image drag mid-sweep.
+                e.preventDefault();
+                const strip = e.currentTarget;
+                const rect = strip.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                strip.setPointerCapture?.(e.pointerId);
+                setMarquee({
+                  key: group.key,
+                  box: { x0: x, y0: y, x1: x, y1: y },
+                  // Shift or the platform modifier adds to what is already
+                  // selected; a plain sweep replaces it.
+                  base: e.shiftKey || e.metaKey || e.ctrlKey ? new Set(selected) : new Set(),
+                });
+              }}
+              onPointerMove={(e) => {
+                if (!marquee || marquee.key !== group.key) return;
+                const strip = e.currentTarget;
+                const rect = strip.getBoundingClientRect();
+                const box = {
+                  ...marquee.box,
+                  x1: e.clientX - rect.left,
+                  y1: e.clientY - rect.top,
+                };
+                setMarquee({ ...marquee, box });
+                const next = new Set(marquee.base);
+                for (const index of indexesUnder(strip, box)) next.add(index);
+                setSelected(next);
+              }}
+              onPointerUp={() => {
+                setDrag(null);
+                setMarquee(null);
+              }}
               onPointerLeave={() => setDrag(null)}
+              onPointerCancel={() => setMarquee(null)}
             >
               {group.pages.map((page) => {
                 const isSelected = selected.has(page.index);
@@ -557,6 +633,7 @@ export function FramingReview({
                   <button
                     key={page.slide}
                     type="button"
+                    data-page-index={page.index}
                     className={
                       "framing-chip" +
                       (isSelected ? " selected" : "") +
@@ -595,6 +672,9 @@ export function FramingReview({
                   </button>
                 );
               })}
+              {marquee && marquee.key === group.key && (
+                <span className="framing-marquee" style={marqueeRect(marquee.box)} />
+              )}
             </div>
 
             <div className="actions">

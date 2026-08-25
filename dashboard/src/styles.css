@@ -785,6 +785,18 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   gap: 6px;
   margin: 8px 0;
   user-select: none;
+  /* Anchors the marquee, and makes each chip's offsetLeft/Top strip-relative so
+     the box can be tested against layout instead of client coordinates. */
+  position: relative;
+  /* Somewhere to start a sweep on a row the chips fill exactly. */
+  padding-bottom: 6px;
+}
+.framing-marquee {
+  position: absolute;
+  border: 1px solid rgba(127, 211, 255, 0.9);
+  background: rgba(127, 211, 255, 0.14);
+  border-radius: 2px;
+  pointer-events: none;
 }
 .framing-strip img { -webkit-user-drag: none; user-drag: none; }
 .framing-chip {
