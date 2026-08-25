@@ -969,3 +969,62 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .final-ask input { margin-top: 3px; flex: 0 0 auto; }
 .final-ask span { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .final-ask strong { color: var(--ink); display: block; margin-bottom: 2px; }
+
+/* What the run does to each object, drawn over the crop. Outlines only: the
+   thumbnail underneath is the thing being judged, so the boxes must not hide it. */
+.plan-rect {
+  position: absolute;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+.plan-rect.role-map { color: rgba(120, 200, 255, 0.75); }
+.plan-rect.role-pin { color: rgba(255, 120, 120, 0.75); }
+.plan-rect.role-other { color: rgba(160, 255, 180, 0.8); }
+.plan-rect.role-list { color: rgba(255, 220, 120, 0.85); }
+.plan-rect.role-line { color: rgba(255, 255, 255, 0.95); }
+.plan-rect.role-title { color: rgba(255, 170, 255, 0.95); }
+/* Hidden objects are the ones the operator cannot see any other way. */
+.plan-rect.role-hide {
+  color: rgba(255, 90, 90, 0.7);
+  border-style: dashed;
+  background: rgba(255, 90, 90, 0.09);
+}
+
+.plan-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.plan-toggle input { margin: 0; }
+
+.plan-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.plan-key::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 3px;
+  border: 1px solid currentColor;
+  vertical-align: -1px;
+}
+.plan-key.role-map { color: rgba(120, 200, 255, 0.95); }
+.plan-key.role-pin { color: rgba(255, 120, 120, 0.95); }
+.plan-key.role-other { color: rgba(160, 255, 180, 0.95); }
+.plan-key.role-list { color: rgba(255, 220, 120, 0.95); }
+.plan-key.role-line { color: rgba(255, 255, 255, 0.95); }
+.plan-key.role-title { color: rgba(255, 170, 255, 0.95); }
+.plan-key.role-hide { color: rgba(255, 90, 90, 0.95); }

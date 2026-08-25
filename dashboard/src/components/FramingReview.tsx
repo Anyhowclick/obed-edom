@@ -18,6 +18,17 @@ import type { FramingDecision } from "../api";
 
 export type FramingTransform = { s: number; tx: number; ty: number };
 
+/** Where one object lands, in destination (CG) coordinates. */
+export type PlannedRect = {
+  role: string;
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text?: string;
+};
+
 export type FramingCandidate = {
   templateSlide: number;
   name?: string;
@@ -26,6 +37,7 @@ export type FramingCandidate = {
   autoPick?: boolean;
   wouldFallBack?: boolean;
   transform?: FramingTransform | null;
+  rects?: PlannedRect[];
 };
 
 export type FramingPage = {
@@ -33,6 +45,7 @@ export type FramingPage = {
   index: number;
   thumb?: string | null;
   autoTransform?: FramingTransform | null;
+  autoRects?: PlannedRect[];
   autoTemplateSlide: number | null;
   autoFellBack: boolean;
   needsAttention: boolean;
@@ -120,10 +133,23 @@ function transformFor(page: FramingPage, slide: number | null): FramingTransform
   return candidate?.transform ?? page.autoTransform ?? null;
 }
 
-/** The crop, drawn by placing the wall image inside a 16:9 window. */
+function rectsFor(page: FramingPage, slide: number | null): PlannedRect[] {
+  if (slide == null) return page.autoRects ?? [];
+  const candidate = page.candidates.find((c) => c.templateSlide === slide);
+  return candidate?.rects ?? page.autoRects ?? [];
+}
+
+/** The crop, drawn by placing the wall image inside a 16:9 window.
+ *
+ * `rects` draws what the planner does to each object on top of it. The crop is
+ * one affine over the whole wall, so on its own it cannot show the badge landing
+ * on its template slot, lists repacking, or the objects the run hides — which is
+ * where the result actually diverges from what the operator was shown.
+ */
 function CropPreview({
   src,
   transform,
+  rects,
   wallWidth,
   destWidth,
   destHeight,
@@ -132,6 +158,7 @@ function CropPreview({
 }: {
   src?: string | null;
   transform?: FramingTransform | null;
+  rects?: PlannedRect[];
   wallWidth: number;
   destWidth: number;
   destHeight: number;
@@ -155,6 +182,42 @@ function CropPreview({
       ) : (
         <span className="crop-empty">no preview</span>
       )}
+      {(rects || []).map((rect, i) => (
+        <span
+          key={i}
+          className={`plan-rect role-${rect.role}`}
+          title={`${rect.role} · ${rect.kind}${rect.text ? ` · ${rect.text}` : ""}`}
+          style={{
+            left: rect.x * k,
+            top: rect.y * k,
+            // A rule inspects as zero-width, so give every box a hairline.
+            width: Math.max(rect.w * k, 1),
+            height: Math.max(rect.h * k, 1),
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Which roles this page actually plans, and how many of each. A count of nothing
+ *  is worth seeing too: 0 hidden on a page with name columns means the lists are
+ *  about to be packed, not dropped. */
+function PlanLegend({ rects }: { rects: PlannedRect[] }) {
+  const counts = new Map<string, number>();
+  for (const rect of rects) counts.set(rect.role, (counts.get(rect.role) || 0) + 1);
+  if (!counts.size) return null;
+  const order = ["map", "pin", "other", "list", "line", "title", "hide"];
+  const roles = [...counts.keys()].sort(
+    (a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)
+  );
+  return (
+    <div className="plan-legend">
+      {roles.map((role) => (
+        <span key={role} className={`plan-key role-${role}`}>
+          {role} {counts.get(role)}
+        </span>
+      ))}
     </div>
   );
 }
@@ -194,6 +257,9 @@ export function FramingReview({
   const [groupPage, setGroupPage] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [previewing, setPreviewing] = useState<Record<number, number>>({});
+  // On by default: the whole point of opening a page is to see what the run does
+  // to it, and the boxes are the only part of that the crop cannot show.
+  const [showPlan, setShowPlan] = useState(true);
   // Drag across thumbnails to select a run of them. `adding` is fixed at
   // pointer-down from whatever the first thumbnail was, so one drag either selects
   // or deselects throughout instead of toggling each chip it crosses.
@@ -540,16 +606,26 @@ export function FramingReview({
                           <div>
                             <span className="framing-label">
                               After — template slide {preview ?? "—"}
+                              <label className="plan-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={showPlan}
+                                  onChange={(event) => setShowPlan(event.target.checked)}
+                                />
+                                where objects land
+                              </label>
                             </span>
                             <CropPreview
                               src={thumbUrl(page)}
                               transform={transformFor(page, preview)}
+                              rects={showPlan ? rectsFor(page, preview) : undefined}
                               wallWidth={wallWidth}
                               destWidth={destWidth}
                               destHeight={destHeight}
                               width={440}
                               title={`Slide ${page.slide} as template slide ${preview}`}
                             />
+                            {showPlan && <PlanLegend rects={rectsFor(page, preview)} />}
                           </div>
                           {/* Each option shows what that framing does to *this*
                               page, not what the template slide looks like. Same

@@ -270,17 +270,29 @@ def build_preview_thumbs(
 
     from obed_edom.baseline import deck_digest, preview_cache_dir, wall_thumb_dir  # noqa: PLC0415
     from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
-    from obed_edom.inspect import preview_media  # noqa: PLC0415
+    from obed_edom.inspect import (  # noqa: PLC0415
+        export_slide_images,
+        preview_media,
+        preview_pngs,
+    )
 
     deck = Path(deck)
     digest = deck_digest(deck)
     source = preview_cache_dir(digest)
     dest = wall_thumb_dir(digest)
     slides = payload.get("slides") or []
-    if not source.is_dir():
+    # A template is usually inspected without an export_dir, so it reaches here
+    # with no previews and the operator gets a framing list of bare slide numbers.
+    # Export them now: it is the same Keynote pass the wall already paid for, and
+    # the cache means it happens once per template revision.
+    if not preview_pngs(source):
         if log:
-            log(f"No cached previews for {deck.name}, so its thumbnails are unavailable.")
-        return {}
+            log(f"Exporting previews for {deck.name}\u2026")
+        error = export_slide_images(deck, source)
+        if error:
+            if log:
+                log(f"No previews for {deck.name}: {error}")
+            return {}
     images = [p for p in preview_media(source) if p.suffix.lower() != ".mov"]
     mapped = map_preview_pngs(slides, images)
     dest.mkdir(parents=True, exist_ok=True)
@@ -307,6 +319,43 @@ def build_preview_thumbs(
             out.pop(number, None)
     if made and log:
         log(f"Made {made} thumbnail(s) from {deck.name} previews.")
+    return out
+
+
+def planned_rects(
+    slide: dict[str, Any],
+    recipe: dict[str, Any],
+    *,
+    wall_size: tuple[float, float],
+    template: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Where every object on this page ends up, for drawing over the crop.
+
+    The crop alone only ever shows one affine, so it cannot show what the run
+    actually does to the badge, the lists, or the 200-odd objects it hides. The
+    planner already works this out in about 10ms a page and it costs no Keynote
+    pass, so the operator may as well see it before committing.
+
+    Compact on purpose: a page can plan 1500 objects and every candidate framing
+    carries its own set.
+    """
+    from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
+
+    wall_w, wall_h = wall_size
+    payload = {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]}
+    out: list[dict[str, Any]] = []
+    for spec in plan_payload_transforms(payload, recipe, template=template):
+        rect = {
+            "role": spec.role,
+            "kind": spec.kind,
+            "x": round(spec.x),
+            "y": round(spec.y),
+            "w": round(spec.w),
+            "h": round(spec.h),
+        }
+        if spec.match_text:
+            rect["text"] = spec.match_text[:40]
+        out.append(rect)
     return out
 
 
@@ -421,6 +470,11 @@ def propose_framings(
                 if fitted:
                     shown = fitted
             candidate["transform"] = _transform_of(shown)
+            # The crop shows one affine; these show what the run does to every
+            # object on the page, which is where it actually goes wrong.
+            candidate["rects"] = planned_rects(
+                slide, shown, wall_size=(wall_w, wall_h), template=template_data
+            )
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")
         auto_candidate = next(
@@ -434,6 +488,7 @@ def propose_framings(
                 # What the automatic choice does to this page, so a row can render
                 # before the operator touches anything.
                 "autoTransform": (auto_candidate or {}).get("transform"),
+                "autoRects": (auto_candidate or {}).get("rects") or [],
                 "autoTemplateSlide": auto_slide,
                 "autoFellBack": auto_fell_back,
                 "needsAttention": auto_fell_back,
