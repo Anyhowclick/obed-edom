@@ -576,7 +576,13 @@ def test_zero_thickness_line_is_visible_and_planned():
     assert planned.start is not None and planned.end is not None
     assert planned.x >= 0
     assert abs(planned.end[1] - planned.start[1]) > 400
-    assert "w" not in planned.as_dict()
+    # Sending no size at all used to be the guard against the bounding box zeroing
+    # the length. It also left Keynote's slide-size scale in place, so the rule
+    # came out 164px — the wall's 658 at 0.25. Send the length, in Keynote's own
+    # convention of width-is-length.
+    sent = planned.as_dict()
+    assert sent["w"] == round(abs(planned.end[1] - planned.start[1]), 2)
+    assert sent["h"] == 0.0
 
 
 def test_date_group_keeps_wall_width():
@@ -1518,3 +1524,43 @@ def test_planned_rects_carry_the_wall_source_to_cut_from():
     # that says which pixels to draw there.
     logo = next(r for r in rects if r["kind"] == "image" and r["w"] == 80)
     assert (logo["sx"], logo["sy"], logo["sw"], logo["sh"]) == (1992, 52, 124, 124)
+
+
+def test_a_rule_sends_its_length_the_way_keynote_reports_it():
+    """A divider came out 164px long — the wall's 658 through the 0.25 slide-size
+    scale — because endpoints alone were sent and Keynote did not take them. It
+    reports a line's width as its length whichever way the line runs, so the
+    bounding box a vertical rule carries would set that length to zero."""
+    from obed_edom.map_remap import ItemTransform
+
+    spec = ItemTransform(
+        slide_number=4,
+        item_index=171,
+        kind="line",
+        x=480.0,
+        y=621.0,
+        w=0.0,
+        h=383.0,
+        role="line",
+        start=(480.0, 1004.0),
+        end=(480.0, 621.0),
+    ).as_dict()
+    assert spec["w"] == 383.0
+    assert spec["h"] == 0.0
+    assert spec["start"] == [480.0, 1004.0]
+    assert spec["end"] == [480.0, 621.0]
+
+    across = ItemTransform(
+        slide_number=4,
+        item_index=1,
+        kind="line",
+        x=100.0,
+        y=50.0,
+        w=300.0,
+        h=0.0,
+        role="line",
+        start=(100.0, 50.0),
+        end=(400.0, 50.0),
+    ).as_dict()
+    assert across["w"] == 300.0
+    assert across["h"] == 0.0

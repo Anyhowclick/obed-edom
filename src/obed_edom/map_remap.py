@@ -136,6 +136,20 @@ class ItemTransform:
         if self.role in {"map", "list", "pin", "title", "other"}:
             payload["w"] = round(self.w, 2)
             payload["h"] = round(self.h, 2)
+        elif self.role == "line" and self.start is not None and self.end is not None:
+            # A rule sent nothing but its endpoints, and Keynote does not take
+            # those: a divider came out 164px long, which is the wall's 658
+            # through the 0.25 slide-size scale — the length Keynote assigned when
+            # the canvas changed, not the one we asked for. Send the size too.
+            #
+            # Keynote reports a line's width as its *length* and its height as 0
+            # whichever way the line runs, so the bounding box this transform
+            # carries (0 wide by 383 tall, for a vertical rule) would set the
+            # length to zero and the rule would vanish outright.
+            payload["w"] = round(
+                math.hypot(self.end[0] - self.start[0], self.end[1] - self.start[1]), 2
+            )
+            payload["h"] = 0.0
         if self.font_size is not None:
             payload["fontSize"] = round(self.font_size, 2)
         if self.font:
