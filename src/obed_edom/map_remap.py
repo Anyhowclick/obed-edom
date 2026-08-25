@@ -2158,13 +2158,41 @@ def skipped_positions(payload: dict[str, Any]) -> list[int]:
     return out
 
 
+def to_document_range(
+    payload: dict[str, Any], slide_range: SlideRange
+) -> frozenset[int] | None:
+    """Read a range written in Keynote's numbers as document positions.
+
+    Keynote numbers the slides that will play, so navigator number V is the
+    position of the Vth slide with `skipped` false. On a deck that plays
+    everything the two are the same and this is a no-op.
+
+    A number past the end of the playable slides is kept as given rather than
+    dropped: the operator meant *a* page, and losing it silently is worse than
+    planning one that turns out not to exist.
+    """
+    wanted = expand_slide_range(slide_range)
+    if not wanted:
+        return wanted
+    positions: dict[int, int] = {}
+    seen = 0
+    for i, slide in enumerate(payload.get("slides") or []):
+        if slide.get("skipped"):
+            continue
+        seen += 1
+        positions[seen] = int(slide.get("number") or (i + 1))
+    if not positions:
+        return wanted
+    return frozenset(positions.get(int(n), int(n)) for n in wanted)
+
+
 def navigator_numbering(payload: dict[str, Any]) -> str:
     """How this deck's positions read in Keynote's slide navigator, if they differ.
 
-    Slide numbers here are document positions and count every slide. Keynote
-    numbers only the ones that will play, so a deck with anything set to Skip
-    Slide shows the operator different numbers from the ones a range is written
-    in — and a range typed off the navigator quietly selects the wrong pages.
+    The dashboard reads a range in Keynote's numbers, so the two agree there.
+    Everything reported afterwards — the framing rows, the logs, the skipped
+    list — is in document positions, so a deck with slides set to Skip still
+    needs the operator told which is which.
     """
     skipped = skipped_positions(payload)
     if not skipped:
@@ -2182,8 +2210,8 @@ def navigator_numbering(payload: dict[str, Any]) -> str:
     tail = f" Positions shift: {', '.join(shown)}…" if shown else ""
     return (
         f"{len(skipped)} slide(s) are set to Skip Slide (position {where}). "
-        f"Ranges here count every slide, so they differ from the numbers Keynote's "
-        f"navigator shows.{tail}"
+        f"A range is read as the numbers Keynote shows; everything reported back "
+        f"counts every slide, so the two differ.{tail}"
     )
 
 

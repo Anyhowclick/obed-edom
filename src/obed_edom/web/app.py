@@ -60,10 +60,13 @@ from obed_edom.inspect import (
 )
 from obed_edom.map_remap import (
     apply_portable_recipe,
+    expand_slide_range,
     format_slide_range,
     learn_recipe,
+    navigator_numbering,
     portable_recipe,
     resolve_slides,
+    to_document_range,
 )
 from obed_edom.models import Flag
 from obed_edom.outline_check import (
@@ -1530,9 +1533,34 @@ def _run_resize_propose(
     payloads, so the only Keynote time here is the inspect a resize needed anyway
     — and confirming costs none at all.
     """
+    # A range is written in the numbers Keynote shows, which count only the
+    # slides that will play. Translating needs the skip flags for the whole deck,
+    # and a ranged read returns only the slides asked for — so this leans on a
+    # full read having happened before, and says plainly when it has not rather
+    # than quietly taking the numbers to mean something else.
+    typed = slide_range
+    numbering = ""
+    if slide_range:
+        known = cached_payload(path)
+        if known is None:
+            numbering = (
+                "This deck has not been read in full, so the range is taken as "
+                "document positions, counting any slides set to Skip Slide. "
+                "Propose once without a range to have Keynote's numbering used."
+            )
+        else:
+            slide_range = to_document_range(known, slide_range)
+            numbering = navigator_numbering(known)
+            if slide_range != expand_slide_range(typed):
+                job.log(
+                    f"Range {format_slide_range(typed)} is Keynote's numbering; "
+                    f"that is document position {format_slide_range(slide_range)}."
+                )
     label = format_slide_range(slide_range)
     scope = f"slide {label}" if label else "every slide"
     job.log(f"Reading {path.name} and {template.name} to propose framings ({scope})…")
+    if numbering:
+        job.log(numbering)
     wall = inspect_keynote(path, slide_range=slide_range)
     template_data = inspect_keynote(template)
     proposal = propose_framings(
@@ -1580,8 +1608,14 @@ def _run_resize_propose(
         "includeLists": include_lists,
         "validate": validate,
         "export": export,
-        "slideRange": sorted(slide_range) if slide_range else None,
         **proposal,
+        # After the proposal, not before: with a range its payload holds only the
+        # slides asked for, so the note it derives from that is blind to the rest
+        # of the deck. Document positions from here on — apply, the framing rows
+        # and the logs all speak that language — with what was typed beside it.
+        "slideRange": sorted(slide_range) if slide_range else None,
+        "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
+        "numberingNote": numbering or proposal.get("numberingNote") or "",
         "templateChanged": reuse.template_changed,
         "resurfaced": reuse.resurfaced,
     }

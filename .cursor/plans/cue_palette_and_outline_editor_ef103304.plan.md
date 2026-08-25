@@ -30,8 +30,8 @@ todos:
     content: "Recipes as browsable artefacts: learn from pages that pair, save under a label, apply to pages that do not. Saved from a reviewed page, offered on every page beside the framing candidates, previewed on demand"
     status: completed
   - id: navigator-numbering
-    content: "Take slide ranges in Keynote's navigator numbering rather than document positions. Needs the skip flags before the range is resolved, which the dashboard has at propose time and the CLI does not"
-    status: pending
+    content: "The dashboard reads a range in Keynote's numbering; the CLI keeps document positions and says so in --help. Translating needs the whole deck's skip flags, and a ranged read returns only the slides asked for, so it leans on a full read having happened and says so when it has not"
+    status: completed
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
     status: pending
@@ -426,20 +426,20 @@ order to slide index. Only the typed range is wrong.
 the position of the Vth slide with `skipped` false, so the mapping needs the skip
 flags — which means the deck must be inspected before the range can be resolved.
 
-- *The dashboard has them.* `propose_framings` inspects the whole wall regardless
-  of range, so the propose phase can translate once and store document positions
-  in the job result. Apply then behaves exactly as it does today. Add the typed
-  range beside it so logs can show both, and make sure nothing translates twice.
-- *The CLI does not.* `--range` is resolved before anything is read, and
-  `remap_keynote` then inspects *only that range*, so there is nothing to
-  translate against. Options: inspect the skip flags first with a cheap pass that
-  collects no items, accept that the CLI keeps document positions and say so in
-  its help, or drop the ranged inspect and always read the deck.
+**Settled, and the shape it took.** Neither door has the flags for free: a ranged
+read returns only the slides asked for, so the dashboard is in the same position
+as the CLI, not a better one. What it does have is a warm cache — the first
+propose of a deck is normally unranged, and that writes a full payload.
 
-That fork is the decision to take before writing any of it. Splitting the two
-conventions is the worst outcome — the same number meaning different pages
-depending on which door the operator came through — so the CLI answer decides
-whether this is worth doing at all.
+- *The dashboard* translates from the cached full payload when there is one, and
+  otherwise says the range is being taken as document positions and that
+  proposing once without a range fixes it. Deterministic given what is known,
+  and never a silent reinterpretation.
+- *The CLI* keeps document positions and says so in `--help`. It is barely used,
+  and a cheap flags-only pass was not worth the machinery for it.
+
+Everything reported back — framing rows, logs, the skipped list — stays in
+document positions. Only the typed range is translated, once, at propose.
 
 One caveat either way: un-hiding a slide while a proposal is open shifts the
 mapping under it. The review says to re-propose, and nothing can detect it

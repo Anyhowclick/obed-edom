@@ -636,7 +636,8 @@ export function FramingReview({
       {proposal.numberingNote && (
         <p className="danger-note">
           <strong>Check the slide range.</strong> {proposal.numberingNote} Un-hiding a
-          slide while a proposal is open shifts them again, so re-propose if you do.
+          slide while a proposal is open shifts the mapping under it, so re-propose
+          if you do.
         </p>
       )}
 

@@ -57,13 +57,16 @@ def main(argv: list[str] | None = None) -> int:
     remap.add_argument(
         "--slides",
         dest="slides",
-        help="Slides to remap, e.g. 2 or 2,4-6 (default: 2).",
+        help="Slides to remap, e.g. 2 or 2,4-6 (default: 2). Counted by document position, including any slides set to Skip Slide, so these are not the numbers Keynote's navigator shows on a deck that skips any. The dashboard reads them the other way.",
     )
     remap.add_argument(
         "--from-slide",
         type=int,
         dest="range_from",
-        help="First slide, or the only slide. Omit for every slide. Prefer --slides for gaps.",
+        help=(
+            "First slide, or the only slide. Omit for every slide. Prefer "
+            "--slides for gaps. Document position, as with --slides."
+        ),
     )
     remap.add_argument(
         "--to-slide",

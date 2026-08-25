@@ -1895,3 +1895,22 @@ def test_a_deck_with_skipped_slides_says_how_its_numbers_read():
 
     # Nothing to say about a deck that plays every slide.
     assert navigator_numbering({"slides": [{"number": n} for n in range(1, 5)]}) == ""
+
+
+def test_a_range_is_read_in_the_numbers_keynote_shows():
+    """The dashboard takes a range in navigator numbering; the CLI keeps document
+    positions and says so in --help. Splitting them silently would be worse than
+    either, so the translation is explicit and one-way."""
+    from obed_edom.map_remap import to_document_range
+
+    deck = {"slides": [{"number": n, "skipped": n in (3, 7)} for n in range(1, 12)]}
+    # Keynote shows the 4th playable slide as 3, and it is document position 4.
+    assert sorted(to_document_range(deck, frozenset({3, 4}))) == [4, 5]
+    assert sorted(to_document_range(deck, frozenset({1, 2}))) == [1, 2]
+    # A deck that plays everything is untouched.
+    plain = {"slides": [{"number": n} for n in range(1, 6)]}
+    assert sorted(to_document_range(plain, frozenset({2, 3}))) == [2, 3]
+    # Past the end is kept rather than dropped: losing a page silently is worse
+    # than planning one that turns out not to exist.
+    assert sorted(to_document_range(deck, frozenset({99}))) == [99]
+    assert to_document_range(deck, None) is None
