@@ -33,8 +33,8 @@ todos:
     content: "The dashboard reads a range in Keynote's numbering; the CLI keeps document positions and says so in --help. Translating needs the whole deck's skip flags, and a ranged read returns only the slides asked for, so it leans on a full read having happened and says so when it has not"
     status: completed
   - id: badge-affine
-    content: "Anchor the badge on its plate so a page with a map and a badge gets two affines. Today the second one arrives only if area-rank pairing stumbles on a consistent second pair, and the badge otherwise rides the map's affine off the frame — which drags on_canvas_fraction under the threshold and makes every framing fall back"
-    status: pending
+    content: "Anchor the badge on its plate so a page with a map and a badge gets two affines. Done: plate-to-plate, and on_canvas_fraction taught the same route. On the report card's 34 map-and-badge pages the plate went from 117 of 136 placements off-frame to none, and fallbacks halved"
+    status: completed
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
     status: pending
@@ -469,9 +469,40 @@ and `apply_portable_recipe` resolves each role on the page in hand. Roughly a da
 with tests, once `badge-affine` has produced the first named group.
 
 One question left open: what a carried group should do when its role has no
-counterpart on the target page — a badge affine on a page with no badge. Falling
-back to the dominant group mirrors what `_group_for_item` already does when no
-cluster fits, but it wants a case to check against before being written down.
+counterpart on the target page — a badge affine on a page with no badge.
+
+*Leading candidate: fit the orphans to their own footprint.* Falling back to the
+dominant group was the first idea, on the grounds that it mirrors
+`_group_for_item`. It does not — `_group_for_item` never declines. It ranks every
+cluster by centre distance, then by whether the cluster can hold the object, then
+by area, and always returns one. There is no "no cluster fits" branch to mirror.
+
+The estimation the operator asked about does exist, but only whole-slide:
+`fit_to_frame_recipe` takes `visible_content_union` — one box over everything
+visible — and applies a single `min(usable_w/src.w, usable_h/src.h)` with a 24px
+margin, centred. Its own docstring is the philosophy to follow: "everything
+present, readable and roughly placed, which is a far better starting point than
+confidently wrong geometry."
+
+So run that logic over the orphaned subset rather than the whole slide: their wall
+union, their own uniform shrink, placed by where that union sat relative to the
+frame. It reuses `visible_content_union` and the fit arithmetic unchanged, and it
+degrades the way the operator wants — roughly right, resized by hand after.
+
+Two facts to carry into that work, both checked in the code rather than assumed:
+
+- **The union is measured against the full 7680, not the 3960 the operator thinks
+  in.** `visible_content_union` drops only `is_chrome_bg` (named `map BG.png`
+  tiles at 1920x1080) and `is_backdrop` (≥98% of canvas). A side-panel graphic
+  that is neither is included, and drags the union out to full wall width. There
+  is no "excluding side panels" concept anywhere in the geometry. If the estimate
+  should be relative to the centre panel, that notion has to be introduced.
+- **Relative position is discarded today.** Fit-to-frame centres its result. The
+  operator's version keeps the orphans where they were relative to the frame,
+  which is a change to the arithmetic, not just its input set.
+
+Still wants a real case to check against before being written down; `badge-affine`
+produces the first named group and with it the first page that can orphan one.
 
 
 ## Ranges should be written in the numbers Keynote shows
@@ -547,9 +578,58 @@ Check against all four decks in the warm cache before and after, including that
 the missions decks keep the badge geometry last year shipped: plate `(17,37)
 411x123`, logo `(31,59) 80x80`.
 
+**Done, and measured.** `_title_badge` anchors plate to plate; `badge_plate_members`
+finds the badge by its plate so a badge of several words has a badge path at all;
+`template_badge_slots` moved to the same anchor so both sides rank one object set;
+`template_badge_plate` records it as `badgePlateDst`. The title-anchored path stays
+as the fallback for a page with no plate.
+
+*The plate anchor alone was half of it.* `on_canvas_fraction` built its ignore set
+through `slide_title_item`, so on exactly the pages this item is about — no title —
+the set came back empty and six badge objects in ten were scored against a framing
+that never places them. It now finds the badge by plate too. Without that half the
+numbers below do not move.
+
+Report card, the 34 pages carrying both a map and a multi-word badge, across
+templates 1/10/11/12 — 136 samples:
+
+```
+                     before     after
+plate off-frame      117        0
+mean on_canvas       0.3871     0.6562
+would fall back      96/136     48/136
+```
+
+Regression, per object rather than per line:
+
+```
+Map_Extracted_Wall_1st  5904 objects compared,  28 changed, all badge, all onto the page
+  logo   (-459,63) 83x83    -> (31,59) 80x80      gold, exact
+  plate  (-485,47) 526x116  -> (17,37) 411x123    gold, exact
+Extracted_Wall_3rd       136 objects compared,   8 changed, all the plate
+  plate  (698,41) 662x92    -> (18,36) 468x123
+```
+
+`(698,41) 662x92` was the title text box's own rect — the plate was being cloned
+onto it, which is H18 in miniature.
+
+**A defect this surfaced.** `title_plate` accepted a 622x1080 full-height side
+column on `Map_Extracted_CG_1st` slide 1: it guards against side panels by
+requiring text inside, and that column has text in it. It was masked while the
+template was reached through a title, since that slide has none. Now capped at
+half the canvas height — real plates measure 0.09–0.11 of it. With the column
+rejected, template slide 1 reads its own badge, 381x123, rather than borrowing
+slide 2's 411x123. That is what `slides_preferring` already says should happen:
+template slide N means slide N's layout, its badge included.
+
+**Note for whoever picks this up: the plan's "report card slide 94" is stale.**
+The deck was edited on 25 Aug, so the numbering moved and slide 94 now carries no
+map and no plate. Do not anchor on the number — select the pages by structure, as
+above. There are 34 of them, which is a better sample than the one slide anyway.
+
 ## Order of work
 
-1. A badge needs its own affine, above.
+1. ~~A badge needs its own affine~~ — done, measured below.
 2. The number block in the CG resizer, above.
 3. Recipes as browsable artefacts, once a badge carries its own affine.
 4. Cue palette and outline editor.
@@ -564,12 +644,16 @@ sequencing.
 
 ## Still parked
 
-- **Text in front.** The operator asked for text to have front priority. There is
-  no arrange vocabulary, but *pasting* puts an object at the front, and
+- **Text in front. Parked deliberately, decided 2026-08-25 — do not re-raise
+  without new information.** The operator asked for text to have front priority.
+  There is no arrange vocabulary, but *pasting* puts an object at the front, and
   `applyReuse` already drives cut/paste. The cost is real: a pasted object is a
   new object, so builds and any identity are lost, and it is keystroke-driven. A
   narrow version — the title and the badge's words, two or three objects a slide —
-  would be cheap; doing it for 200 name labels would not.
+  would be cheap; doing it for 200 name labels would not. The narrow version was
+  offered and declined: the case it would address is the buried badge, and that is
+  source-deck stacking, which no script can reach. Building it would spend the
+  paste cost without fixing the symptom that motivated it.
 - **Duplicate objects in the source deck.** `Map_Extracted_Wall_1st` slide 4 has
   two pairs of exactly coincident groups, and the planner places all four. Any
   dedupe must be scoped to groups and text and **never** images: the same test
