@@ -1877,3 +1877,21 @@ def test_a_pinned_recipe_survives_the_decision_round_trip():
     reuse = FramingReuse(decisions={2: decision})
     assert reuse.recipe_choices() == {3: "centre-panel"}
     assert reuse.overrides() == {}
+
+
+def test_a_deck_with_skipped_slides_says_how_its_numbers_read():
+    """Slide numbers here are document positions and count every slide. Keynote
+    numbers only the ones that will play, so a range typed off the navigator
+    quietly selects the wrong pages."""
+    from obed_edom.map_remap import navigator_numbering, skipped_positions
+
+    deck = {"slides": [{"number": n, "skipped": n in (3, 7)} for n in range(1, 12)]}
+    assert skipped_positions(deck) == [3, 7]
+    note = navigator_numbering(deck)
+    assert "position 3, 7" in note
+    # Position 4 is the navigator's 3 once one slide before it is skipped.
+    assert "4→3" in note
+    assert "8→6" in note
+
+    # Nothing to say about a deck that plays every slide.
+    assert navigator_numbering({"slides": [{"number": n} for n in range(1, 5)]}) == ""

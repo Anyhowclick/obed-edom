@@ -12,6 +12,7 @@ from typing import Any
 from obed_edom import keynote_app
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
 from obed_edom.map_remap import (
+    navigator_numbering,
     CG_HEIGHT,
     CG_WIDTH,
     format_slide_range,
@@ -175,6 +176,9 @@ def remap_keynote(
                 f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, "
                 f"{wall.get('slideCount')} slides."
             )
+        note = navigator_numbering(wall)
+        if note:
+            say(note)
     if template_payload is not None:
         template_data = template_payload
     else:

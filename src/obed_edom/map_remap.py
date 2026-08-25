@@ -2149,6 +2149,44 @@ def plan_slide_transforms(
     return out
 
 
+def skipped_positions(payload: dict[str, Any]) -> list[int]:
+    """Document positions of slides set to Skip Slide in Keynote."""
+    out: list[int] = []
+    for i, slide in enumerate(payload.get("slides") or []):
+        if slide.get("skipped"):
+            out.append(int(slide.get("number") or (i + 1)))
+    return out
+
+
+def navigator_numbering(payload: dict[str, Any]) -> str:
+    """How this deck's positions read in Keynote's slide navigator, if they differ.
+
+    Slide numbers here are document positions and count every slide. Keynote
+    numbers only the ones that will play, so a deck with anything set to Skip
+    Slide shows the operator different numbers from the ones a range is written
+    in — and a range typed off the navigator quietly selects the wrong pages.
+    """
+    skipped = skipped_positions(payload)
+    if not skipped:
+        return ""
+    shown: list[str] = []
+    seen = 0
+    for i, slide in enumerate(payload.get("slides") or []):
+        position = int(slide.get("number") or (i + 1))
+        if slide.get("skipped"):
+            continue
+        seen += 1
+        if seen != position and len(shown) < 4:
+            shown.append(f"{position}→{seen}")
+    where = ", ".join(str(n) for n in skipped[:6]) + ("…" if len(skipped) > 6 else "")
+    tail = f" Positions shift: {', '.join(shown)}…" if shown else ""
+    return (
+        f"{len(skipped)} slide(s) are set to Skip Slide (position {where}). "
+        f"Ranges here count every slide, so they differ from the numbers Keynote's "
+        f"navigator shows.{tail}"
+    )
+
+
 def resolve_slide_range(
     range_from: int | None,
     range_to: int | None = None,

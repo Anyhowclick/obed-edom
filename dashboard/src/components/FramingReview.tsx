@@ -922,6 +922,22 @@ export function FramingReview({
                                   (candidate.templateSlide === preview ? " current" : "") +
                                   (candidate.wouldFallBack ? " fellback" : "")
                                 }
+                                // The tip is far wider than the chip, so one at
+                                // the end of a row is cut off by the panel. Which
+                                // chips those are depends on where the row wraps,
+                                // which only layout knows — hence measuring here
+                                // rather than a :nth-child rule.
+                                onMouseEnter={(event) => {
+                                  const chip = event.currentTarget;
+                                  const strip = chip.parentElement;
+                                  if (!strip) return;
+                                  const tip = chip.querySelector<HTMLElement>(".option-tip");
+                                  const width = tip?.offsetWidth || 330;
+                                  chip.classList.toggle(
+                                    "tip-left",
+                                    chip.offsetLeft + width > strip.clientWidth
+                                  );
+                                }}
                                 onClick={() =>
                                   setPreviewing((cur) => ({
                                     ...cur,
