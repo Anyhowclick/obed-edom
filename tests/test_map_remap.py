@@ -2013,3 +2013,42 @@ def test_two_framings_of_one_page_do_not_preview_the_same():
     assert title_of(12) != title_of(4)
     assert (title_of(12)["x"], title_of(12)["w"]) == (135, 271)
     assert (title_of(4)["x"], title_of(4)["w"]) == (25, 181)
+
+
+def test_bleed_art_is_judged_on_the_part_that_is_on_the_wall():
+    """A 2752px-tall image on a 1080px wall has its centre off the source deck
+    before any framing is applied. Judging the framing by where that centre lands
+    called a correct 1:1 placement a failure and scaled the page instead."""
+    from obed_edom.map_remap import on_canvas_fraction
+
+    recipe = {
+        "destWidth": 1920,
+        "destHeight": 1080,
+        "mapSrc": {"x": 3158.0, "y": -69.0, "w": 1364.0, "h": 947.0},
+        "mapDst": {"x": 226.0, "y": 61.0, "w": 1364.0, "h": 947.0},
+        "groups": [
+            {
+                "s": 1.0,
+                "tx": -2932.0,
+                "ty": 130.0,
+                "src": {"x": 3158.0, "y": -69.0, "w": 1364.0, "h": 947.0},
+                "dst": {"x": 226.0, "y": 61.0, "w": 1364.0, "h": 947.0},
+                "members": 1,
+            }
+        ],
+    }
+    slide = {
+        "number": 94,
+        "items": [
+            # Full-bleed art, far taller than the wall it sits on.
+            _item(kind="image", kindIndex=0, fileName="pasted-image.pdf",
+                  x=2189, y=-96, w=3686, h=2752),
+            _item(kind="image", kindIndex=1, fileName="pasted-image.pdf",
+                  x=2231, y=-123, w=3686, h=2752),
+            # The map itself, which the framing places 1:1.
+            _item(kind="image", kindIndex=2, fileName="pasted-image.pdf",
+                  x=3158, y=-69, w=1364, h=947),
+        ],
+    }
+    # All three are on frame once each is judged by its visible part.
+    assert on_canvas_fraction(slide, recipe, 7680, 1080) == 1.0

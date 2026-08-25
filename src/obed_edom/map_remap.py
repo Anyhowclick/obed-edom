@@ -2613,6 +2613,13 @@ def is_degenerate_scale(recipe: dict[str, Any], wall_w: float, wall_h: float) ->
     return aff.s < floor
 
 
+def _clipped(rect: Rect, wall_w: float, wall_h: float) -> Rect:
+    """The part of a rect that is actually on the wall."""
+    x0, y0 = max(rect.x, 0.0), max(rect.y, 0.0)
+    x1, y1 = min(rect.x + rect.w, wall_w), min(rect.y + rect.h, wall_h)
+    return Rect(x0, y0, max(x1 - x0, 0.0), max(y1 - y0, 0.0))
+
+
 def on_canvas_fraction(
     slide: dict,
     recipe: dict[str, Any],
@@ -2631,6 +2638,15 @@ def on_canvas_fraction(
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    # The badge is not carried by the affine either — it lands on the template's
+    # own slots — so where the affine would put it is no evidence. On a report
+    # card page that is six of ten objects, all of them off the left edge, and
+    # the framing was rejected for placement it never performs.
+    ignore: set[int] = set()
+    if recipe.get("titleDst") or recipe.get("badgeSlots"):
+        title = slide_title_item(slide, (wall_w, wall_h))
+        if title is not None:
+            ignore = {id(title)} | {id(it) for it in badge_members(slide, title)}
     seen = inside = 0
     for item in slide.get("items") or []:
         if is_placeholder_text(item) or item.get("duplicateOf"):
@@ -2639,9 +2655,13 @@ def on_canvas_fraction(
             continue
         # Name lists are re-placed rather than carried by the affine, so where
         # the affine would put them says nothing about whether it fits.
-        if is_list_item(item):
+        if is_list_item(item) or id(item) in ignore:
             continue
-        rect = item_rect(item)
+        # The part of the object that is on the wall, not the whole of it. Full
+        # bleed art is routinely taller than the wall — 2752px on a 1080px
+        # canvas — which puts its centre off the source deck before any framing
+        # is applied, and judged a correct 1:1 framing as throwing it away.
+        rect = _clipped(item_rect(item), wall_w, wall_h)
         if rect.w <= 0 or rect.h <= 0:
             continue
         aff = _affine_for_item(item, groups)
