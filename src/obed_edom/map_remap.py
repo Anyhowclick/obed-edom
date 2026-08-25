@@ -836,6 +836,34 @@ def pairing_quality(pairs: list[tuple[dict, dict]]) -> tuple[int, int]:
     return (max(len(g["members"]) for g in groups), len(pairs))
 
 
+def drop_outlier_pairs(pairs: list[tuple[dict, dict]]) -> list[tuple[dict, dict]]:
+    """Discard pairs whose scale no other pair agrees with.
+
+    Rank pairing walks both sides by descending area, so it only holds while the
+    two sides carry the same artwork. A wall slide with 21 images against a
+    template with 8 runs out of template long before it runs out of wall, and the
+    tail pairs whatever is left: a 306x316 map inset took the template's 80x80
+    badge logo (s=0.26) and a 306x295 one took an 11x11 pin (s=0.04), against
+    three pairs agreeing on 0.85. The real 124x124 logo, ranked 13th by area,
+    never reached the slot that was waiting for it.
+
+    Judged against the median so a couple of bad pairs cannot move the consensus,
+    and only with enough pairs to have one. Wall objects that lose their pair fall
+    back to the nearest cluster, which is the consensus affine.
+    """
+    if len(pairs) < 3:
+        return pairs
+    scales = []
+    for src_item, dst_item in pairs:
+        src = item_rect(src_item)
+        scales.append(item_rect(dst_item).w / src.w if src.w > 0 else 0.0)
+    consensus = _median([s for s in scales if s > 0])
+    if consensus <= 0:
+        return pairs
+    lo, hi = consensus / OUTLIER_SCALE_FACTOR, consensus * OUTLIER_SCALE_FACTOR
+    return [pair for pair, s in zip(pairs, scales) if lo <= s <= hi]
+
+
 def best_image_pairs(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
     """Pair wall artwork to template artwork, whichever way explains it best.
 
@@ -844,7 +872,8 @@ def best_image_pairs(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dic
     """
     exact = pair_by_size(wall, dest)
     exact = exact + pair_resized_leftovers(wall, dest, exact)
-    ranked = pair_by_area_rank(wall, dest)
+    # Exact pairing needs identical dimensions, so it cannot go wrong this way.
+    ranked = drop_outlier_pairs(pair_by_area_rank(wall, dest))
     if pairing_quality(ranked) > pairing_quality(exact):
         return ranked
     return exact

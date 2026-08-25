@@ -1218,3 +1218,41 @@ def test_badge_logo_and_plate_land_on_their_template_slots():
     assert (round(logo.x), round(logo.y), round(logo.w), round(logo.h)) == (31, 59, 80, 80)
     plate = next(t for t in transforms if t.kind == "shape" and t.w > 50)
     assert (round(plate.x), round(plate.y), round(plate.w), round(plate.h)) == (17, 37, 411, 123)
+
+
+def test_rank_pairing_drops_scales_nothing_else_agrees_with():
+    """Rank pairing walks both sides by area, so once the wall runs past the end
+    of the template it pairs whatever is left. Those tail pairs have to go, or a
+    map inset ends up wearing the badge logo's affine."""
+    from obed_edom.map_remap import drop_outlier_pairs, item_rect, pair_by_area_rank
+
+    wall = [
+        _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+        _item(kind="image", fileName="pasted-image.pdf", x=3061, y=-6, w=1232, h=761),
+        _item(kind="image", fileName="pasted-image.pdf", x=3547, y=15, w=634, h=425),
+        _item(kind="image", fileName="pasted-image.pdf", x=3489, y=245, w=306, h=316),
+        _item(kind="image", fileName="pasted-image.pdf", x=4073, y=748, w=306, h=295),
+    ]
+    template = [
+        _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1067, h=659),
+        _item(kind="image", fileName="pasted-image.pdf", x=19, y=23, w=1053, h=651),
+        _item(kind="image", fileName="pasted-image.pdf", x=599, y=309, w=473, h=364),
+        _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80),
+        _item(kind="image", fileName="pasted-image.pdf", x=227, y=322, w=11, h=11),
+    ]
+    ranked = pair_by_area_rank(wall, template)
+    assert len(ranked) == 5
+    kept = drop_outlier_pairs(ranked)
+    scales = [round(item_rect(d).w / item_rect(s).w, 3) for s, d in kept]
+    # 0.855 x2 and 0.746 survive; the 80x80 (0.261) and 11x11 (0.036) do not.
+    assert scales == [0.855, 0.855, 0.746]
+
+
+def test_outlier_pairs_left_alone_when_there_is_no_consensus():
+    from obed_edom.map_remap import drop_outlier_pairs
+
+    pairs = [
+        (_item(kind="image", w=1000, h=600), _item(kind="image", w=500, h=300)),
+        (_item(kind="image", w=200, h=200), _item(kind="image", w=20, h=20)),
+    ]
+    assert drop_outlier_pairs(pairs) == pairs
