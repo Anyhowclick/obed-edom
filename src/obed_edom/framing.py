@@ -53,12 +53,16 @@ class Decision:
     wall_index: int
     state: str = AUTO
     template_slide: int | None = None
+    # A page whose artwork pairs with nothing cannot learn a framing, so it
+    # borrows a saved transform instead of pinning a template slide.
+    recipe_id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "wallIndex": int(self.wall_index),
             "state": self.state,
             "templateSlide": None if self.template_slide is None else int(self.template_slide),
+            "recipeId": self.recipe_id,
         }
 
 
@@ -84,6 +88,14 @@ class FramingReuse:
             if decision.state == PINNED and decision.template_slide is not None
         }
 
+    def recipe_choices(self) -> dict[int, str]:
+        """Wall slide *number* to the saved recipe pinned to it."""
+        return {
+            index + 1: decision.recipe_id
+            for index, decision in sorted(self.decisions.items())
+            if decision.state == PINNED and decision.recipe_id
+        }
+
 
 def normalize_decision(raw: dict[str, Any]) -> Decision | None:
     try:
@@ -98,13 +110,21 @@ def normalize_decision(raw: dict[str, Any]) -> Decision | None:
         template_slide = None if slide is None else int(slide)
     except (TypeError, ValueError):
         template_slide = None
-    if state == PINNED and template_slide is None:
+    recipe = raw.get("recipeId")
+    recipe_id = str(recipe).strip() if recipe else None
+    if state == PINNED and template_slide is None and not recipe_id:
         # A pin with nothing pinned is not a decision; treat it as unanswered
         # rather than silently pinning slide 0.
         return None
     if state != PINNED:
         template_slide = None
-    return Decision(wall_index=wall_index, state=state, template_slide=template_slide)
+        recipe_id = None
+    return Decision(
+        wall_index=wall_index,
+        state=state,
+        template_slide=template_slide,
+        recipe_id=recipe_id,
+    )
 
 
 def framing_path(wall: Path | str, template: Path | str, root: Path | None = None) -> Path:

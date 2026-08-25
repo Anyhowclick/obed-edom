@@ -1831,3 +1831,49 @@ def test_a_recipe_that_does_not_suit_the_page_still_degrades():
     report: list = []
     plan_payload_transforms(wall, {}, recipe_overrides={3: saved}, framing_report=report)
     assert report[0]["fitted"] is True
+
+
+def test_a_recipe_round_trips_through_the_library(tmp_path):
+    from obed_edom.map_remap import portable_recipe
+    from obed_edom.recipes import delete_recipe, get_recipe, load_recipes, save_recipe
+
+    portable = portable_recipe(_saved_recipe())
+    record = save_recipe(portable, "Full-bleed centre panel",
+                         source="Extracted_Wall_3rd slide 2", root=tmp_path)
+    assert record["id"] == "full-bleed-centre-panel"
+    assert record["source"] == "Extracted_Wall_3rd slide 2"
+
+    listed = load_recipes(tmp_path)
+    assert [r["id"] for r in listed] == ["full-bleed-centre-panel"]
+    assert listed[0]["affine"] == {"s": 1.0, "tx": -2844.0, "ty": 0.0}
+    assert get_recipe("full-bleed-centre-panel", tmp_path)["label"] == "Full-bleed centre panel"
+
+    assert delete_recipe("full-bleed-centre-panel", tmp_path) is True
+    assert load_recipes(tmp_path) == []
+
+
+def test_two_recipes_with_one_label_do_not_overwrite_each_other(tmp_path):
+    from obed_edom.map_remap import portable_recipe
+    from obed_edom.recipes import load_recipes, save_recipe
+
+    portable = portable_recipe(_saved_recipe())
+    first = save_recipe(portable, "Centre panel", root=tmp_path)
+    second = save_recipe(portable, "Centre panel", root=tmp_path)
+    assert first["id"] != second["id"]
+    assert len(load_recipes(tmp_path)) == 2
+
+
+def test_a_pinned_recipe_survives_the_decision_round_trip():
+    from obed_edom.framing import PINNED, FramingReuse, Decision, normalize_decision
+
+    decision = normalize_decision(
+        {"wallIndex": 2, "state": PINNED, "templateSlide": None, "recipeId": "centre-panel"}
+    )
+    assert decision is not None
+    assert decision.recipe_id == "centre-panel"
+    # A pin naming neither a template slide nor a recipe is still not a decision.
+    assert normalize_decision({"wallIndex": 2, "state": PINNED, "templateSlide": None}) is None
+
+    reuse = FramingReuse(decisions={2: decision})
+    assert reuse.recipe_choices() == {3: "centre-panel"}
+    assert reuse.overrides() == {}

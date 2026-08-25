@@ -31,6 +31,12 @@ from obed_edom.diff_keynotes import (
     slide_catalog,
     slots_from_pairs,
 )
+from obed_edom.recipes import (
+    delete_recipe,
+    get_recipe,
+    load_recipes,
+    save_recipe,
+)
 from obed_edom.framing import (
     AUTO,
     DEFERRED,
@@ -39,12 +45,19 @@ from obed_edom.framing import (
     FramingReuse,
     load_framings,
     normalize_decision,
+    planned_rects,
     propose_framings,
     reuse_framings,
     save_framings,
 )
 from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
-from obed_edom.map_remap import format_slide_range, resolve_slides
+from obed_edom.map_remap import (
+    apply_portable_recipe,
+    format_slide_range,
+    learn_recipe,
+    portable_recipe,
+    resolve_slides,
+)
 from obed_edom.models import Flag
 from obed_edom.outline_check import (
     SemanticOutlineError,
@@ -640,6 +653,108 @@ def create_app() -> FastAPI:
         updated = RUNNER.update_result(job_id, result)
         return RUNNER.public_dict(updated) if updated else result
 
+    def _job_decks(job_id: str) -> tuple[Path, Path, dict, dict]:
+        """The wall and template a resize job is working on, and their payloads.
+
+        Both are already inspected by the time a job reaches review, so these
+        come off the warm cache and cost no Keynote pass.
+        """
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        wall = Path(str(result.get("path") or "")).expanduser()
+        template = Path(str(result.get("templatePath") or "")).expanduser()
+        if not wall.exists() or not template.exists():
+            raise HTTPException(400, "The wall deck or template has moved since proposing.")
+        return wall, template, inspect_keynote(wall), inspect_keynote(template)
+
+    @app.get("/api/recipes")
+    def list_recipes() -> dict:
+        return {"recipes": load_recipes()}
+
+    @app.delete("/api/recipes/{recipe_id}")
+    def remove_recipe(recipe_id: str) -> dict:
+        if not delete_recipe(recipe_id):
+            raise HTTPException(404, "Unknown recipe")
+        return {"ok": True}
+
+    @app.post("/api/resize/{job_id}/recipes")
+    def save_page_recipe(
+        job_id: str,
+        slide: int = Form(...),
+        label: str = Form(""),
+        template_slide: int | None = Form(None),
+    ) -> dict:
+        """Keep the way this page came out, so a page that can learn nothing can
+        borrow it."""
+        wall, template, wall_data, template_data = _job_decks(job_id)
+        page = next(
+            (
+                s
+                for s in wall_data.get("slides") or []
+                if int(s.get("number") or 0) == int(slide)
+            ),
+            None,
+        )
+        if page is None:
+            raise HTTPException(404, f"Slide {slide} is not in {wall.name}")
+        learnt = learn_recipe(
+            {
+                "slideWidth": wall_data.get("slideWidth"),
+                "slideHeight": wall_data.get("slideHeight"),
+                "slides": [page],
+            },
+            template_data,
+            template_slide=template_slide,
+        )
+        portable = portable_recipe(learnt)
+        if portable is None:
+            raise HTTPException(
+                400,
+                "That page did not settle on a single transform, so there is "
+                "nothing here another page could borrow.",
+            )
+        record = save_recipe(
+            portable,
+            label or f"{wall.stem} slide {slide}",
+            source=f"{wall.stem} slide {slide}",
+        )
+        return {"recipe": record}
+
+    @app.post("/api/resize/{job_id}/recipe-preview")
+    def preview_page_recipe(
+        job_id: str, slide: int = Form(...), recipe_id: str = Form(...)
+    ) -> dict:
+        """What one saved recipe would do to one page.
+
+        On demand rather than in the proposal: a library of a dozen against a
+        deck of 158 pages is 1,896 plans nobody looks at.
+        """
+        recipe = get_recipe(recipe_id)
+        if recipe is None:
+            raise HTTPException(404, "Unknown recipe")
+        _wall, _template, wall_data, template_data = _job_decks(job_id)
+        page = next(
+            (
+                s
+                for s in wall_data.get("slides") or []
+                if int(s.get("number") or 0) == int(slide)
+            ),
+            None,
+        )
+        if page is None:
+            raise HTTPException(404, f"Slide {slide} is not on that deck")
+        wall_w = float(wall_data.get("slideWidth") or 7680)
+        wall_h = float(wall_data.get("slideHeight") or 1080)
+        applied = apply_portable_recipe(recipe, page, wall_w, wall_h)
+        if applied is None:
+            raise HTTPException(400, "That recipe carries no usable transform.")
+        return {
+            "transform": recipe.get("affine"),
+            "rects": planned_rects(
+                page, applied, wall_size=(wall_w, wall_h), template=template_data
+            ),
+        }
+
     @app.post("/api/resize/{job_id}/apply")
     def apply_resize(job_id: str, payload: FramingsBody = Body(default=FramingsBody())) -> dict:
         """Phase two: remap using the confirmed framings."""
@@ -651,6 +766,7 @@ def create_app() -> FastAPI:
         job = RUNNER.get(job_id)
         result = dict((job.result if job else None) or {})
         overrides = _overrides_from_result(result)
+        chosen_recipes = _recipes_from_result(result)
         key = Path(str(result.get("path") or "")).expanduser()
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not key.exists() or not template.exists():
@@ -663,8 +779,8 @@ def create_app() -> FastAPI:
         try:
             updated = RUNNER.rerun(
                 job_id,
-                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, va=do_validate: (
-                    _run_resize(j, p, t, sl, ex, lists, ov, va)
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, va=do_validate, rc=chosen_recipes: (
+                    _run_resize(j, p, t, sl, ex, lists, ov, va, rc)
                 ),
             )
         except RuntimeError as exc:
@@ -1368,6 +1484,23 @@ def _overrides_from_result(result: dict[str, Any]) -> dict[int, int]:
     return overrides
 
 
+def _recipes_from_result(result: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """Wall slide number to the saved recipe pinned to it.
+
+    Resolved here rather than stored in the decision, so a recipe edited between
+    proposing and applying is the one that runs.
+    """
+    chosen: dict[int, dict[str, Any]] = {}
+    for page in result.get("pages") or []:
+        decision = normalize_decision(page.get("decision") or {})
+        if decision is None or decision.state != PINNED or not decision.recipe_id:
+            continue
+        recipe = get_recipe(decision.recipe_id)
+        if recipe is not None:
+            chosen[int(page["slide"])] = recipe
+    return chosen
+
+
 def _run_resize_propose(
     job: Job,
     path: Path,
@@ -1449,6 +1582,7 @@ def _run_resize(
     include_lists: bool = False,
     framing_overrides: dict[int, int] | None = None,
     validate: bool = True,
+    recipe_overrides: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     dest_dir = default_output_root() / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
@@ -1467,6 +1601,7 @@ def _run_resize(
         include_lists=include_lists,
         export_dir=export_dir,
         framing_overrides=framing_overrides,
+        recipe_overrides=recipe_overrides,
         validate=validate,
         log=job.log,
     )
