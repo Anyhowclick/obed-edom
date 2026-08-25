@@ -521,11 +521,21 @@ def slide_has_column_lists(slide: dict) -> bool:
     return any("\n" in (it.get("text") or "") for it in lists)
 
 
-def template_list_sample(slides: list[dict]) -> tuple[float | None, Rect | None]:
-    """Prefer a one-line church-name seed (Empty_Map's resized CHC Aaliana) over a column."""
+def template_list_sample(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> tuple[float | None, Rect | None]:
+    """Prefer a one-line church-name seed (Empty_Map's resized CHC Aaliana) over a column.
+
+    The page's own title is skipped. A deck titled per church matches
+    CHURCH_LIST_RE on its title, which made a 60pt heading the seed that church
+    name columns were then sized against.
+    """
     candidates: list[tuple[int, float, Rect]] = []
     for slide in slides:
+        title = slide_title_item(slide, slide_size)
         for item in slide.get("items") or []:
+            if title is not None and item is title:
+                continue
             if not is_list_item(item):
                 continue
             size = _f(item.get("size"))
@@ -540,11 +550,13 @@ def template_list_sample(slides: list[dict]) -> tuple[float | None, Rect | None]
     return candidates[0][1], candidates[0][2]
 
 
-def template_title_item(slides: list[dict]) -> dict | None:
+def template_title_item(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> dict | None:
     for slide in slides:
-        for item in slide.get("items") or []:
-            if is_title_item(item) and _f(item.get("w")) > 0:
-                return item
+        title = slide_title_item(slide, slide_size)
+        if title is not None:
+            return title
     return None
 
 
@@ -617,12 +629,13 @@ def template_line_slots(
 
 
 def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> dict[str, Any]:
-    font, sample = template_list_sample(template_slides)
+    dest = (_f(recipe.get("destWidth"), CG_WIDTH), _f(recipe.get("destHeight"), CG_HEIGHT))
+    font, sample = template_list_sample(template_slides, dest)
     if font:
         recipe["listFontSize"] = round(font, 2)
         if sample:
             recipe["listSample"] = sample.as_dict()
-    title = template_title_item(template_slides)
+    title = template_title_item(template_slides, dest)
     if title:
         recipe["titleDst"] = item_rect(title).as_dict()
         if title.get("size"):
@@ -632,7 +645,7 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         title_rgb = item_rgb(title)
         if title_rgb:
             recipe["titleColor"] = [round(c, 4) for c in title_rgb]
-    slots = template_badge_slots(template_slides)
+    slots = template_badge_slots(template_slides, dest)
     if slots:
         recipe["badgeSlots"] = slots
     rules = template_line_slots(template_slides, recipe.get("templateSlide"))
@@ -1562,6 +1575,81 @@ def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine,
     return list(_groups_from_recipe(recipe))
 
 
+def title_plate(slide: dict, slide_size: tuple[float, float] | None = None) -> dict | None:
+    """The badge plate: the shape a title sits on.
+
+    Not simply the largest shape on the page. On a wall slide a side panel can be
+    bigger than the badge — `Extracted_Wall_3rd` slide 2 has one at 398x710
+    against a 485x197 plate. The badge is the shape with words on it, so require
+    a text item's centre to fall inside before considering it at all.
+    """
+    items = slide.get("items") or []
+    texts = [
+        it
+        for it in items
+        if (it.get("kind") or "") == "text" and (it.get("text") or "").strip()
+    ]
+    if not texts:
+        return None
+    best: dict | None = None
+    best_key: tuple[float, float] | None = None
+    for item in items:
+        if (item.get("kind") or "") != "shape":
+            continue
+        w, h = _f(item.get("w")), _f(item.get("h"))
+        if w <= PIN_KIND_MAX and h <= PIN_KIND_MAX:
+            continue
+        if slide_size and is_backdrop(item, slide_size[0], slide_size[1]):
+            continue
+        rect = item_rect(item)
+        if not any(point_in_rect(*item_center(t), rect) for t in texts):
+            continue
+        # Largest wins, topmost breaks the tie: a page with two lettered shapes
+        # is choosing between a badge and a caption, and the badge sits higher.
+        key = (-(w * h), rect.y)
+        if best_key is None or key < best_key:
+            best_key, best = key, item
+    return best
+
+
+def slide_title_item(
+    slide: dict, slide_size: tuple[float, float] | None = None
+) -> dict | None:
+    """The page's title — by wording where masters.yaml knows it, by structure
+    where it does not.
+
+    The phrase list is series-specific, so a deck titled per church ("CHC
+    Kuching") matched nothing and lost its whole badge path: no titleDst, no
+    badgeSlots, and the title itself read as a church-name list sample. The
+    phrase match stays first so the decks that rely on it are untouched; the
+    structural read is the fallback, and it is the largest text sitting on the
+    plate.
+    """
+    for item in slide.get("items") or []:
+        if is_title_item(item) and _f(item.get("w")) > 0:
+            return item
+    plate = title_plate(slide, slide_size)
+    if plate is None:
+        return None
+    rect = item_rect(plate)
+    inside = [
+        it
+        for it in slide.get("items") or []
+        if (it.get("kind") or "") == "text"
+        and (it.get("text") or "").strip()
+        and _f(it.get("w")) > 0
+        and point_in_rect(*item_center(it), rect)
+    ]
+    # Exactly one, or nothing. A plate carrying several words is genuinely
+    # ambiguous — `Map_Extracted_Wall_2nd` has MISSIONS, UPDATE and China on one
+    # badge, and picking the largest would collapse one of the three onto the
+    # template's single title box while the other two hunt for slots. Decks like
+    # that keep the behaviour they had, which is no structural title at all.
+    if len(inside) != 1:
+        return None
+    return inside[0]
+
+
 def badge_members(slide: dict, title: dict) -> list[dict]:
     """Plate, logo and rule sharing the title's box — the badge minus its words."""
     src = item_rect(title)
@@ -1595,14 +1683,16 @@ def badge_slot_keys(members: Iterable[dict]) -> dict[int, str]:
     return keys
 
 
-def template_badge_slots(slides: list[dict]) -> dict[str, dict[str, float]]:
+def template_badge_slots(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> dict[str, dict[str, float]]:
     """Where the CG template parks each badge object.
 
     The template's badge is not a uniform shrink of the wall's — its plate,
     logo and title each moved by a different ratio — so no single affine
     reproduces it. Record the rects and place onto them directly.
     """
-    title = template_title_item(slides)
+    title = template_title_item(slides, slide_size)
     if title is None:
         return {}
     slide = next(
@@ -1617,35 +1707,47 @@ def template_badge_slots(slides: list[dict]) -> dict[str, dict[str, float]]:
 
 
 def _title_badge(
-    slide: dict, recipe: dict[str, Any]
-) -> tuple[Affine | None, Rect | None, set[int], dict[int, str]]:
+    slide: dict, recipe: dict[str, Any], slide_size: tuple[float, float] | None = None
+) -> tuple[Affine | None, Rect | None, set[int], dict[int, str], dict | None]:
     """Globe, plate and title text that share the title's vertical centre.
 
     Returns identity ids (`id(item)`) so membership does not collide when two
     inspect records share `index` 0, which tests and some payloads do, plus the
     template slot each non-title object should land on.
     """
-    title = next((it for it in slide.get("items") or [] if is_title_item(it)), None)
+    title = slide_title_item(slide, slide_size)
     dst = _rect_from_dict(recipe.get("titleDst"))
     if title is None or dst is None or dst.w <= 0:
-        return None, None, set(), {}
+        return None, None, set(), {}, title
     src = item_rect(title)
     rest = badge_members(slide, title)
     members = [title, *rest]
     ids: set[int] = {id(it) for it in members}
     slots = badge_slot_keys(rest)
     aff = affine_from_rects(src, dst)
-    return aff, src, ids, slots
+    return aff, src, ids, slots, title
 
 
-def classify_item(item: dict, map_src: Rect | None = None) -> str:
+def classify_item(
+    item: dict, map_src: Rect | None = None, title: dict | None = None
+) -> str:
+    """`title` is the page's chosen title, where one has been resolved.
+
+    Passing it matters: the structural read finds titles the phrase list does not,
+    and a page's title must be the one object classified that way — otherwise a
+    church-named heading falls through to `is_list_item` and is packed into a
+    column.
+    """
     if (item.get("kind") or "") == "line":
         return "line"
     if is_map_item(item, map_src):
         return "map"
     if is_pin_item(item, map_src):
         return "pin"
-    if is_title_item(item):
+    if title is not None:
+        if item is title:
+            return "title"
+    elif is_title_item(item):
         return "title"
     if is_list_item(item):
         return "list"
@@ -1726,7 +1828,9 @@ def plan_slide_transforms(
     free_text_keys: set[tuple[str, int]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
-    title_aff, title_src, title_ids, badge_slots = _title_badge(slide, recipe)
+    title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
+        slide, recipe, wall_size
+    )
     badge_dsts = dict(recipe.get("badgeSlots") or {})
     line_slots = list(recipe.get("lineSlots") or [])
     map_src = _rect_from_dict(recipe.get("mapSrc"))
@@ -1793,7 +1897,7 @@ def plan_slide_transforms(
             badge_dst = _rect_from_dict(badge_dsts.get(badge_slots.get(id(item), "")))
         if cluster is None:
             cluster = map_src
-        role = classify_item(item, cluster)
+        role = classify_item(item, cluster, title_item)
         if role == "other" and aff is not None and is_layout_image(item):
             role = "map"
         if role == "other" and aff is None and (item.get("kind") or "") != "text":

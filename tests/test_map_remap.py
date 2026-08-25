@@ -1619,3 +1619,85 @@ def test_reuse_strips_the_objects_the_planner_never_looked_at():
     assert ("text", 10) not in stripped
     assert ("image", 0) in stripped
     assert len(stripped) == 43
+
+
+def _kuching_wall_slide():
+    """Extracted_Wall_3rd slide 2, to scale: a badge, a bigger empty side panel,
+    and a full-bleed photo."""
+    return {
+        "number": 2,
+        "items": [
+            _item(kind="text", kindIndex=0, text="CHC Kuching", x=1993, y=18, w=423, h=100, size=80),
+            _item(kind="image", kindIndex=0, fileName="CHC Kuching Building.png",
+                  x=1920, y=-1, w=3840, h=1080),
+            _item(kind="shape", kindIndex=0, x=1961, y=-65, w=485, h=197),
+            # Larger than the plate, and carries no words.
+            _item(kind="shape", kindIndex=1, x=4261, y=205, w=398, h=710),
+        ],
+    }
+
+
+def test_title_found_from_the_plate_when_no_phrase_matches():
+    """`is_title_item` matches masters.yaml wording, so a deck titled per church
+    had no title at all — and with it no titleDst and no badge slots."""
+    from obed_edom.map_remap import is_title_item, slide_title_item, title_plate
+
+    slide = _kuching_wall_slide()
+    assert not any(is_title_item(it) for it in slide["items"])
+
+    plate = title_plate(slide, (7680, 1080))
+    # The side panel is the larger shape; the plate is the one with words on it.
+    assert (plate["x"], plate["y"], plate["w"], plate["h"]) == (1961, -65, 485, 197)
+
+    title = slide_title_item(slide, (7680, 1080))
+    assert title is not None and title["text"] == "CHC Kuching"
+
+
+def test_phrase_still_wins_where_masters_knows_the_wording():
+    from obed_edom.map_remap import slide_title_item
+
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kind="text", kindIndex=0, text="Global Missions", x=2147, y=52, w=537, h=124, size=100),
+            _item(kind="shape", kindIndex=0, x=1953, y=28, w=767, h=173),
+            # Bigger, lettered, and not the badge — structure alone might take it.
+            _item(kind="shape", kindIndex=1, x=3000, y=300, w=900, h=600),
+            _item(kind="text", kindIndex=1, text="a caption", x=3100, y=400, w=400, h=120, size=40),
+        ],
+    }
+    title = slide_title_item(slide, (7680, 1080))
+    assert title["text"] == "Global Missions"
+
+
+def test_a_plate_with_several_words_is_left_alone():
+    """Map_Extracted_Wall_2nd's badge is MISSIONS + UPDATE + China. Picking the
+    largest would collapse one of three onto the template's single title box, so
+    the deck keeps the behaviour it had: no structural title."""
+    from obed_edom.map_remap import slide_title_item
+
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="text", kindIndex=0, text="MISSIONS", x=2139, y=34, w=270, h=82, size=65),
+            _item(kind="text", kindIndex=1, text="UPDATE", x=2138, y=90, w=273, h=104, size=83),
+            _item(kind="text", kindIndex=2, text="China", x=2458, y=51, w=198, h=124, size=100),
+            _item(kind="shape", kindIndex=0, x=1953, y=28, w=740, h=173),
+        ],
+    }
+    assert slide_title_item(slide, (7680, 1080)) is None
+
+
+def test_a_church_named_title_is_not_a_list_sample():
+    """CHURCH_LIST_RE matches "CHC Kuching", so a 60pt heading became the seed
+    that church-name columns were sized against."""
+    from obed_edom.map_remap import classify_item, slide_title_item, template_list_sample
+
+    slide = _kuching_wall_slide()
+    size, _rect = template_list_sample([slide], (7680, 1080))
+    assert size is None
+
+    title = slide_title_item(slide, (7680, 1080))
+    assert classify_item(title, None, title) == "title"
+    # Without the resolved title it falls through to the church-name pattern.
+    assert classify_item(title, None, None) == "list"
