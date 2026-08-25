@@ -1,13 +1,13 @@
 ---
 name: Cue palette and outline editor
-overview: The Keynote 15.x migration and the resizer's framing confirmation are done. What remains is text placement in the CG resizer (five hypotheses below, uninvestigated), then the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator.
+overview: The Keynote 15.x migration, the resizer's framing confirmation and the badge placement are done. What remains is the number block in the CG resizer, then the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator.
 todos:
   - id: text-placement
-    content: "CG resizer text defects on Map_Extracted_Wall_1st slide 4: badge clipped at the left edge, number block rendering as overlapping fragments, date truncated. Five hypotheses recorded, none investigated yet"
+    content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem"
     status: pending
   - id: badge-cluster
-    content: "Badge-as-cluster placement in the CG resizer. May be the same defect as the clipped badge in text-placement; check before treating them separately"
-    status: pending
+    content: "Badge-as-cluster placement in the CG resizer. H18 confirmed: the badge affine came from the title text box, so logo and plate landed short. They now take the template's own rects and match gold exactly"
+    status: completed
   - id: layout-thumbs
     content: "Layout thumbnail extraction: scratch copy, one slide per layout, export, cache by template digest, serve via GET /api/template-layouts with cue mapping"
     status: pending
@@ -64,23 +64,42 @@ overridable with `OBED_EDOM_CACHE_DIR`. It costs about an hour of Keynote time t
 rebuild and it used to live inside the folder people clear, which is how that hour
 got lost once. `output/` is otherwise disposable — clearing it is safe.
 
-## Immediate: text placement in the CG resizer
+## Immediate: the number block in the CG resizer
 
-The map geometry is correct as of `cd83162`. Three text defects remain, all
-reproducible on `Map_Extracted_Wall_1st.key` slide 4 against `Base_CG_Assets.key`:
+The map geometry is correct as of `cd83162`. Of the three text defects recorded
+against `Map_Extracted_Wall_1st.key` slide 4, one remains:
 
-1. The "Global Missions" badge is clipped at the left edge.
-2. The 183 / 86 / 14 / 269 number block renders as fragments — "1ou", "Toa".
-3. "Oct 2024 – Sep 2025" is truncated to "Oct 2024 – Sep".
+**The 183 / 86 / 14 / 269 number block renders as overlapping fragments.** The
+cause is not a text bug. Those figures live in groups, and `plan_slide_transforms`
+parks every left-column group at `x = 16` while restoring its *wall* size, because
+the map affine would otherwise throw it off the left edge and setting a group's
+width does not scale its children. Five groups therefore land in one column with
+heavily overlapping y ranges — planned rects `(16, 175, 537x271)`,
+`(16, 326, 496x383)`, `(16, 388, 199x258)`, `(16, 584, 237x258)` — which is what
+the fragments are. This is the negative-space problem the branch is named for:
+the groups need packing against each other, not a shared left margin.
 
-Symptom 2 is the informative one. Fragments like "Toa" are not what a single
-clipped string looks like — characters are missing from the middle, which reads
-much more like slivers of several boxes overlapping than one box too small for its
-text. Weight that when picking which hypothesis to test first.
+H15 and H16 below still stand for loose text items that are *not* inside groups;
+they were never the explanation for this block.
 
-**Five hypotheses, none investigated.** Each names the evidence that would settle
-it; all of them are answerable from one instrumented planning run, since planning
-the whole deck takes 0.17s off the warm cache and needs no Keynote.
+**Resolved, do not re-investigate:**
+
+- *The badge was H18, confirmed.* It was classified `other` and took the title
+  affine, which is derived from the title **text box** — 537 wide against the
+  template's 271, so `s = 0.505`. That put the 124px logo at 63px and the 767px
+  plate at `387x87`. The template's badge is not a uniform shrink of the wall's:
+  plate, logo and title each moved by their own ratio, so no single affine
+  reproduces it. Badge objects now land on the template's own rects, verified
+  against the rendered preview at `(17,37) 411x123` and `(31,59) 80x80` — which is
+  also exactly what last year's five finished pages carry.
+- *The badge still looks clipped, and no code can fix it.* The map layers sit
+  above it in the source deck, and Keynote exposes no way to restack. See the
+  skill doc. It is a source-deck or template fix.
+- *"Oct 2024 – Sep 2025" is no longer truncated.*
+
+**Two hypotheses still open, for loose text only.** Both are answerable from one
+instrumented planning run, since planning the whole deck takes 0.17s off the warm
+cache and needs no Keynote.
 
 - **H15 — the `TEXT_DOWN_SCALE` clamp sizes text boxes at a different scale than
   the one that positions them.** In `_style_text_box`
@@ -97,37 +116,19 @@ the whole deck takes 0.17s off the warm cache and needs no Keynote.
   (lines 1512-1519) scales by `ratio = dst_size / wall_font`, which is the intended
   behaviour; the clamp is only the no-style fallback. *Evidence:* log the matched
   style or `None`, plus `dst_size`, per text item.
-- **H17 — the number block is several text items snapped onto one destination.**
-  The `listDst` branch (lines 1670-1680) only snaps when `list_count == 1`, and the
-  code's own comment there records that fifteen map labels otherwise land on the
-  same point, which `_pack_list_transforms` (line 1529) then spreads again.
-  Overlapping boxes would read exactly like the observed fragments. *Evidence:* log
-  role, x, y, w, h for every text transform on the slide and look for coincident
-  rects. Note the harmless duplicated `if dst is not None` block at lines 1677-1680
-  while you are in there.
-- **H18 — the badge is the parked "badge-as-cluster" defect, not a text bug.** The
-  badge matcher at `map_remap.py:287` carries its own warning that the wording is
-  series-dependent ("Global Missions" one term, "Missions Update" the next, in
-  English or Chinese). A miss classifies the badge as `other`, which takes whatever
-  cluster affine `_group_for_item` hands it, and that can put x negative.
-  *Evidence:* log the badge item's classified role, the cluster affine it drew, and
-  its mapped x. If this confirms, `badge-cluster` and the clipped badge are one
-  task, not two.
-- **H19 — Keynote reflows the text on the size pass and the position pass cannot
-  correct it.** `applyGeom` deliberately runs full-then-position-only
-  (`src/obed_edom/remap_keynote.js:259-260`) because setting width or height yanks
-  an object to (0,0). But setting `objectText.size` can also trigger Keynote's own
-  autofit, and the second pass restores position without ever re-checking size.
-  *Evidence:* this is the one hypothesis needing a real Keynote pass — log
-  requested versus read-back width, height and position per text item after both
-  passes.
+- **H19 — Keynote reflows text on the size pass and the position pass cannot
+  correct it.** `applyGeom` deliberately runs full-then-position-only because
+  setting width or height yanks an object to (0,0), but setting `objectText.size`
+  can trigger Keynote's own autofit and the second pass restores position without
+  re-checking size. Needs a real Keynote pass: log requested versus read-back
+  width, height and position per text item after both passes. Worth raising up the
+  order — the same shape of defect turned out to be real for lines, where the
+  endpoint writes silently undid the size that had just been set.
 
-One caveat on reading the code around this. The `role_order` comment at
-`map_remap.py:1799` asserts "apply order *is* stacking order". That looks wrong for
-the resize path specifically: `remap_keynote.js` duplicates a slide and then moves,
-resizes and deletes objects already on it, so it inherits the source deck's
-stacking and apply order changes nothing. The claim holds for generate, which
-creates objects. Worth confirming rather than trusting either way.
+  H17 is answered: the block is groups sharing a left margin, not text items
+  snapped onto one `listDst`. H18 is answered and fixed; see above. The stacking
+  caveat that used to sit here is settled and lives in the skill doc — apply order
+  is stacking order for generate and not for resize.
 
 ## Keynote cannot read or set z-order — both halves verified
 
@@ -301,8 +302,6 @@ Stat drift is independent of all four and can land whenever.
 
 ## Still parked
 
-- **Badge-as-cluster placement** in the CG resizer — see H18, which may make this
-  the same task as the clipped badge.
 - **The "natural upgrade" idea.** Noted as a nice improvement, deliberately not now.
 - **The JXA export has never worked.** Every exporting payload carries
   `exportError` while still succeeding, because `export_slide_images()` picks up

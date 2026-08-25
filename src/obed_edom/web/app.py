@@ -556,7 +556,10 @@ def create_app() -> FastAPI:
         slides: str = Form(""),
         export: str = Form("true"),
         include_lists: str = Form("false"),
-        validate: str = Form("true"),
+        # Aliased: a form field literally named `validate` becomes a Pydantic
+        # model field that shadows BaseModel.validate, which warns on import.
+        # The wire name stays `validate`.
+        run_validation: str = Form("true", alias="validate"),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
@@ -569,7 +572,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"CG template not found: {raw_template}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
         do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
-        do_validate = validate.lower() in {"1", "true", "yes", "on"}
+        do_validate = run_validation.lower() in {"1", "true", "yes", "on"}
         try:
             # No selection means the whole deck. It used to mean slide 2 only,
             # from when the map lived there by convention.

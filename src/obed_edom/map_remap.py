@@ -2026,11 +2026,15 @@ def plan_slide_transforms(
         )
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    # Apply order *is* stacking order, and the wall's real stacking cannot be
-    # read (see inspect_keynote.js: slide.iWorkItems() reports 0). So this sort
-    # is the stacking policy, not a reconstruction: base maps first and largest
-    # first, so country overlays land on top of the plate they belong to, then
-    # pins, then loose text, with the title cluster last so it is never buried.
+    # Apply order is stacking order for *generate*, which creates the objects.
+    # Resize inherits the source deck's stacking and cannot change it: Keynote
+    # 15.3.1 exposes no arrange vocabulary at all — `bringToFront` and friends
+    # answer "Message not understood" (scripts/probe_zorder.js) — and moving an
+    # object does not restack it. So on the resize path this sort decides only
+    # what is placed first, not what ends up on top, and "the title cluster last
+    # so it is never buried" does not hold there: on a missions wall the badge
+    # lands correctly and is still covered by map art that was already above it.
+    # Ordering is kept because it costs nothing and generate does depend on it.
     role_order = {"map": 0, "pin": 1, "other": 2, "list": 3, "hide": 4, "line": 5, "title": 6}
     out.sort(
         key=lambda t: (

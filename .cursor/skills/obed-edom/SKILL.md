@@ -421,7 +421,15 @@ of which take a bundle id as their last argument.
     resizes and deletes the objects already on it, so it inherits the source deck's
     stacking untouched. It cannot repair a bad stack, but it cannot break a good
     one. Only generate, which creates objects, controls stacking — by creation
-    order, via the `role_order` sort in `plan_slide_transforms`.
+    order, via the `role_order` sort in `plan_slide_transforms`. That sort's own
+    comment claims apply order *is* stacking order; read it as true for generate
+    and false for resize.
+  - *Seen in the wild:* on `Map_Extracted_Wall_1st` the map layers sit above the
+    title badge in the source deck. The badge lands on its slot exactly — measured
+    at `(17,37) 411x123` off the rendered preview, matching gold — and is still
+    buried from x≈220 onward, where the map's white landmass begins. It reads as a
+    clipped plate and a title truncated to "Glob". No code can lift it; the fix is
+    in the source deck or the template.
 - **`masterSlides()` is broken in JXA, but AppleScript `master slide` is fine.**
   `doc.masterSlides()` raises "Can't convert types." while `doc.slideLayouts()`
   returns all 9. In AppleScript the same collection answers perfectly: `count of
@@ -435,6 +443,25 @@ of which take a bundle id as their last argument.
   wall deck. `inspect_keynote.js` marks the duplicate rather than dropping it,
   because objects are resolved by (collection, kindIndex) and those indices must
   keep matching Keynote's.
+- **A line's endpoints are unreachable; its `width` is its length.**
+  `startPoint` and `endPoint` read back `null` even on a line created with them,
+  and *writing* them is worse than useless: it collapses the line to one unit
+  long. `width` is the length whichever direction the line runs, and `height` is
+  always 0 — a vertical rule 383px tall inspects as `w=383, h=0`. So a rule is
+  placed by setting `width` and `position`, and it keeps the orientation it
+  already had. Verified with `scripts/probe_line.js`:
+
+  ```
+  width=383 only ................. w=383
+  width=383 then height=0 ........ w=383
+  width=383 then position ........ w=383
+  endpoints only ................. w=1
+  w, h, start, end, position ..... w=1
+  ```
+
+  This is why a divider survived every check — planned correctly, applied without
+  error, present in the deck — and still did not appear: the endpoint writes were
+  undoing the size.
 - **The JXA export always fails; the AppleScript fallback is what works.** Every
   payload that exported carries `exportError: "Keynote export as slide images
   failed."` alongside `exported: true`, on 14.5/macOS 14 as well as on both
