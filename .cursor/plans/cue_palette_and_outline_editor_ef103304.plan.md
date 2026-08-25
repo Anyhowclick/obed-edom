@@ -29,6 +29,9 @@ todos:
   - id: recipe-library
     content: "Recipes as browsable artefacts: learn from pages that pair, save under a label, apply to pages that do not. Saved from a reviewed page, offered on every page beside the framing candidates, previewed on demand"
     status: completed
+  - id: navigator-numbering
+    content: "Take slide ranges in Keynote's navigator numbering rather than document positions. Needs the skip flags before the range is resolved, which the dashboard has at propose time and the CLI does not"
+    status: pending
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
     status: pending
@@ -405,6 +408,42 @@ derived from the plan, so a recipe picker reuses them unchanged.
 *Order within this item:* portable subset + `recipe_overrides` + headless tests
 first, then persistence, then the picker. The first step is testable with no
 Keynote and no UI.
+
+## Ranges should be written in the numbers Keynote shows
+
+A range is resolved against `slide["number"]`, which `inspect_keynote.js` sets to
+`i + 1` — the document position, counting slides set to Skip Slide. Keynote's
+navigator numbers only the slides that will play. On a deck with anything
+skipped the two disagree, and a range typed off the navigator remaps pages it did
+not name. The framing review warns about this now; the warning is a patch over
+the wrong convention rather than the fix.
+
+Previews are already right: Keynote exports skipped slides out, so file N is not
+slide N, and `map_preview_pngs` detects the count mismatch and realigns visible
+order to slide index. Only the typed range is wrong.
+
+**The translation is easy; knowing when to do it is not.** Navigator number V is
+the position of the Vth slide with `skipped` false, so the mapping needs the skip
+flags — which means the deck must be inspected before the range can be resolved.
+
+- *The dashboard has them.* `propose_framings` inspects the whole wall regardless
+  of range, so the propose phase can translate once and store document positions
+  in the job result. Apply then behaves exactly as it does today. Add the typed
+  range beside it so logs can show both, and make sure nothing translates twice.
+- *The CLI does not.* `--range` is resolved before anything is read, and
+  `remap_keynote` then inspects *only that range*, so there is nothing to
+  translate against. Options: inspect the skip flags first with a cheap pass that
+  collects no items, accept that the CLI keeps document positions and say so in
+  its help, or drop the ranged inspect and always read the deck.
+
+That fork is the decision to take before writing any of it. Splitting the two
+conventions is the worst outcome — the same number meaning different pages
+depending on which door the operator came through — so the CLI answer decides
+whether this is worth doing at all.
+
+One caveat either way: un-hiding a slide while a proposal is open shifts the
+mapping under it. The review says to re-propose, and nothing can detect it
+without re-reading the deck.
 
 ## Order of work
 
