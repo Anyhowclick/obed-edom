@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import type { FramingDecision } from "../api";
 
 /**
@@ -292,8 +292,11 @@ type Marquee = {
   /** Selection as it stood when the drag began, so a live sweep replaces its own
    *  result each move instead of accumulating one. */
   base: Set<number>;
-  /** Alt-sweep takes pages out of the selection instead of adding them. */
+  /** Whether this sweep takes pages out of the selection instead of adding them. */
   removing: boolean;
+  /** The chip the press landed on, if any. A press that never becomes a sweep
+   *  toggles it on release. */
+  from: number | null;
 };
 
 function marqueeRect(box: Marquee["box"]) {
@@ -368,9 +371,6 @@ export function FramingReview({
   // strip's empty space, as this first did, meant the obvious gesture — press a
   // chip and drag — never began a sweep at all.
   const [marquee, setMarquee] = useState<Marquee | null>(null);
-  // A sweep ends with a click event on whichever chip it finished over. Without
-  // this that click would toggle the chip straight back off.
-  const swept = useRef(false);
 
   const byCategory = useMemo(() => {
     const out: Record<Category, FramingPage[]> = {
@@ -593,8 +593,9 @@ export function FramingReview({
             {/* Every page in the group, so a wrong one in a batch of 56 is visible
                 without opening anything. Click a chip to toggle it, or sweep a box
                 across them to take a block that wraps rows. A sweep adds to what
-                is already selected rather than replacing it, so the two compose;
-                alt-sweep takes a block back out again. */}
+                is already selected rather than replacing it, so the two compose,
+                and a sweep that starts on an already-selected chip takes pages
+                back out instead. Alt forces that from anywhere. */}
             <div
               className="framing-strip"
               onPointerDown={(e) => {
@@ -606,16 +607,20 @@ export function FramingReview({
                 const x = e.clientX - rect.left;
                 const y = e.clientY - rect.top;
                 strip.setPointerCapture?.(e.pointerId);
-                swept.current = false;
+                const chip = (e.target as HTMLElement).closest?.("[data-page-index]");
+                const from = chip ? Number((chip as HTMLElement).dataset.pageIndex) : null;
                 setMarquee({
                   key: group.key,
                   box: { x0: x, y0: y, x1: x, y1: y },
                   active: false,
+                  from,
                   // A sweep works on top of whatever is already selected rather
-                  // than replacing it, so it composes with clicking chips one by
-                  // one. Alt-sweep is the way back out of a big selection.
+                  // than replacing it, so it composes with picking chips one by
+                  // one. It takes pages back out when it starts on one that is
+                  // already selected — the same read as dragging across them —
+                  // and alt forces that from anywhere.
                   base: new Set(selected),
-                  removing: e.altKey,
+                  removing: e.altKey || (from != null && selected.has(from)),
                 });
               }}
               onPointerMove={(e) => {
@@ -633,7 +638,6 @@ export function FramingReview({
                   setMarquee({ ...marquee, box });
                   return;
                 }
-                swept.current = true;
                 setMarquee({ ...marquee, box, active: true });
                 const next = new Set(marquee.base);
                 for (const index of indexesUnder(strip, box)) {
@@ -642,7 +646,15 @@ export function FramingReview({
                 }
                 setSelected(next);
               }}
-              onPointerUp={() => setMarquee(null)}
+              onPointerUp={() => {
+                // Capturing the pointer on the strip moves the click that would
+                // follow off the chip, so the toggle has to happen here rather
+                // than in an onClick that never fires.
+                if (marquee && !marquee.active && marquee.from != null) {
+                  applySelection(marquee.from, !selected.has(marquee.from));
+                }
+                setMarquee(null);
+              }}
               onPointerCancel={() => setMarquee(null)}
             >
               {group.pages.map((page) => {
@@ -665,12 +677,6 @@ export function FramingReview({
                         ? " — no framing fit, so it is scaled to the frame"
                         : "")
                     }
-                    onClick={() => {
-                      // The sweep already decided the selection; this is only the
-                      // click it ended on.
-                      if (swept.current) return;
-                      applySelection(page.index, !selected.has(page.index));
-                    }}
                   >
                     <CropPreview
                       src={thumbUrl(page)}

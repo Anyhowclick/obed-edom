@@ -78,6 +78,21 @@ rules:
   outline.lw_deviates: warning
   outline.both_deviate: warning
   outline.three_way: info
+
+  # TODO: slide.stat_drift — a figure that changes between adjacent slides and
+  # then holds at the new value.
+  #
+  # A missions wall read "11 Renovated Church Buildings" on one page and "44" on
+  # every page after it. Nothing in the deck is wrong on its own, so no rule
+  # fires; it only shows up by reading two pages side by side. The tell is that
+  # a caption which persists unchanged across a run of slides changes once —
+  # the odd one out is the stale copy someone forgot to update.
+  #
+  # Compare text objects that match by position and wording-minus-digits across
+  # adjacent slides, and flag a page whose number disagrees with the run either
+  # side of it. False positives are acceptable here: a figure that genuinely
+  # steps per slide will trip it, and that is cheaper than shipping a wrong
+  # count, so this ships at `warning` rather than `error`.
   outline.text_unavailable: info
 
   # Pairing
