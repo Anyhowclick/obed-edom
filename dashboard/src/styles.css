@@ -707,6 +707,12 @@ label.check input { margin-top: 3px; }
    that moves a page into it, so the colour carries the meaning. */
 .btn.secondary.tone-matched { border-color: var(--ok); color: var(--ok); }
 .btn.secondary.tone-alt { border-color: var(--warn); color: var(--warn); }
+.btn.secondary.tone-clear {
+  border-color: #8a6a35;
+  color: #d8b57c;
+  background: rgba(138, 106, 53, 0.18);
+}
+.btn.secondary.tone-clear:hover { border-color: var(--warn); color: var(--warn); }
 .btn.secondary.tone-template { border-color: var(--sky); color: var(--sky); }
 /* Pink for Reviewed: distinct from the purple Save and the red Resize, which are
    the two other saturated things in the bar. */
@@ -793,10 +799,14 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 }
 .framing-marquee {
   position: absolute;
-  border: 1px solid rgba(127, 211, 255, 0.9);
-  background: rgba(127, 211, 255, 0.14);
+  border: 1px solid rgba(244, 241, 234, 0.9);
+  background: rgba(244, 241, 234, 0.12);
   border-radius: 2px;
   pointer-events: none;
+}
+.framing-marquee.removing {
+  border-color: var(--err);
+  background: rgba(240, 163, 160, 0.14);
 }
 .framing-strip img { -webkit-user-drag: none; user-drag: none; }
 .framing-chip {
@@ -814,12 +824,13 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .framing-chip { border-color: var(--ok); }
 .framing-chip.fellback { border-color: var(--warn); }
 /* Selection has to survive being one of fifty thumbnails, so it glows rather than
-   just changing a border colour that the green/yellow states already use. */
+   just changing a border colour that the green/yellow states already use. White,
+   because a coloured ring reads as another state rather than as "picked". */
 .framing-chip.selected {
-  border-color: var(--sky);
+  border-color: var(--ink);
   box-shadow:
-    0 0 0 2px var(--sky),
-    0 0 14px rgba(143, 196, 232, 0.75);
+    0 0 0 2px var(--ink),
+    0 0 14px rgba(244, 241, 234, 0.6);
 }
 .framing-chip-num {
   position: absolute;

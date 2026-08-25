@@ -289,9 +289,11 @@ type Marquee = {
   /** Set once the pointer has moved far enough to mean a sweep rather than a
    *  click, so pressing a chip still just toggles it. */
   active: boolean;
-  /** Selection as it stood when the drag began, so a live drag replaces its own
+  /** Selection as it stood when the drag began, so a live sweep replaces its own
    *  result each move instead of accumulating one. */
   base: Set<number>;
+  /** Alt-sweep takes pages out of the selection instead of adding them. */
+  removing: boolean;
 };
 
 function marqueeRect(box: Marquee["box"]) {
@@ -515,7 +517,11 @@ export function FramingReview({
                   Unconfirm selected
                 </button>
               )}
-              <button className="btn secondary" type="button" onClick={() => setSelected(new Set())}>
+              <button
+                className="btn secondary tone-clear"
+                type="button"
+                onClick={() => setSelected(new Set())}
+              >
                 Clear selection
               </button>
             </>
@@ -586,8 +592,9 @@ export function FramingReview({
 
             {/* Every page in the group, so a wrong one in a batch of 56 is visible
                 without opening anything. Click a chip to toggle it, or sweep a box
-                across them to take a block that wraps rows — hold shift to add
-                that block to what is already selected. */}
+                across them to take a block that wraps rows. A sweep adds to what
+                is already selected rather than replacing it, so the two compose;
+                alt-sweep takes a block back out again. */}
             <div
               className="framing-strip"
               onPointerDown={(e) => {
@@ -604,9 +611,11 @@ export function FramingReview({
                   key: group.key,
                   box: { x0: x, y0: y, x1: x, y1: y },
                   active: false,
-                  // Shift or the platform modifier adds to what is already
-                  // selected; a plain sweep replaces it.
-                  base: e.shiftKey || e.metaKey || e.ctrlKey ? new Set(selected) : new Set(),
+                  // A sweep works on top of whatever is already selected rather
+                  // than replacing it, so it composes with clicking chips one by
+                  // one. Alt-sweep is the way back out of a big selection.
+                  base: new Set(selected),
+                  removing: e.altKey,
                 });
               }}
               onPointerMove={(e) => {
@@ -627,7 +636,10 @@ export function FramingReview({
                 swept.current = true;
                 setMarquee({ ...marquee, box, active: true });
                 const next = new Set(marquee.base);
-                for (const index of indexesUnder(strip, box)) next.add(index);
+                for (const index of indexesUnder(strip, box)) {
+                  if (marquee.removing) next.delete(index);
+                  else next.add(index);
+                }
                 setSelected(next);
               }}
               onPointerUp={() => setMarquee(null)}
@@ -674,7 +686,10 @@ export function FramingReview({
                 );
               })}
               {marquee?.active && marquee.key === group.key && (
-                <span className="framing-marquee" style={marqueeRect(marquee.box)} />
+                <span
+                  className={`framing-marquee${marquee.removing ? " removing" : ""}`}
+                  style={marqueeRect(marquee.box)}
+                />
               )}
             </div>
 
