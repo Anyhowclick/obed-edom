@@ -1153,3 +1153,68 @@ def test_reuse_strips_mutated_text_before_pasting_the_delta():
     # already supplies it, so the select-all must not pick it up again.
     stripped = {(r["kind"], r["kindIndex"]) for r in job["strip"]}
     assert ("text", 0) in stripped
+
+
+def test_badge_logo_and_plate_land_on_their_template_slots():
+    """The template's badge is not a uniform shrink of the wall's — plate, logo
+    and title each moved by their own ratio — so scaling by the title text box
+    lands the logo and plate short. Place them on the template's rects."""
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 5,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=1992, y=52, w=124, h=124),
+                    _item(kind="shape", x=1953, y=28, w=767, h=173),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=2147,
+                        y=52,
+                        w=537,
+                        h=124,
+                        size=100,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 3,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1067, h=659),
+                    _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80),
+                    _item(kind="shape", x=17, y=37, w=411, h=123),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["badgeSlots"]["image:0"] == {"x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0}
+    assert recipe["badgeSlots"]["shape:0"] == {"x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0}
+
+    transforms = plan_payload_transforms(wall, recipe, template=template)
+    # The title text box shrinks 537 -> 271, so the affine alone would give the
+    # 124px logo 63px and the 767px plate 387px.
+    logo = next(t for t in transforms if t.kind == "image" and t.w < 200)
+    assert (round(logo.x), round(logo.y), round(logo.w), round(logo.h)) == (31, 59, 80, 80)
+    plate = next(t for t in transforms if t.kind == "shape" and t.w > 50)
+    assert (round(plate.x), round(plate.y), round(plate.w), round(plate.h)) == (17, 37, 411, 123)

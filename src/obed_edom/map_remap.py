@@ -610,6 +610,9 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         title_rgb = item_rgb(title)
         if title_rgb:
             recipe["titleColor"] = [round(c, 4) for c in title_rgb]
+    slots = template_badge_slots(template_slides)
+    if slots:
+        recipe["badgeSlots"] = slots
     styles = template_character_styles(template_slides)
     if styles:
         recipe["characterStyles"] = styles
@@ -1505,28 +1508,78 @@ def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine,
     return list(_groups_from_recipe(recipe))
 
 
-def _title_badge(
-    slide: dict, recipe: dict[str, Any]
-) -> tuple[Affine | None, Rect | None, set[int]]:
-    """Globe, plate and title text that share the title's vertical centre.
-
-    Returns identity ids (`id(item)`) so membership does not collide when two
-    inspect records share `index` 0, which tests and some payloads do.
-    """
-    title = next((it for it in slide.get("items") or [] if is_title_item(it)), None)
-    dst = _rect_from_dict(recipe.get("titleDst"))
-    if title is None or dst is None or dst.w <= 0:
-        return None, None, set()
+def badge_members(slide: dict, title: dict) -> list[dict]:
+    """Plate, logo and rule sharing the title's box — the badge minus its words."""
     src = item_rect(title)
-    members = [title]
-    ids: set[int] = {id(title)}
+    out: list[dict] = []
     for item in slide.get("items") or []:
         if item is title or is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
             continue
         cx, cy = item_center(item)
         if point_in_rect(cx, cy, src, TITLE_NEAR_PAD):
-            members.append(item)
-            ids.add(id(item))
+            out.append(item)
+    return out
+
+
+def badge_slot_keys(members: Iterable[dict]) -> dict[int, str]:
+    """Name each badge object `kind:n`, largest first, so wall and template agree.
+
+    Z-order differs between the wall and the CG template, and both sides carry
+    the same handful of objects, so rank within a kind by area instead.
+    """
+    counts: dict[str, int] = {}
+    keys: dict[int, str] = {}
+    ordered = sorted(
+        members,
+        key=lambda it: (-(_f(it.get("w")) * _f(it.get("h"))), _f(it.get("x"))),
+    )
+    for item in ordered:
+        kind = str(item.get("kind") or "item")
+        n = counts.get(kind, 0)
+        counts[kind] = n + 1
+        keys[id(item)] = f"{kind}:{n}"
+    return keys
+
+
+def template_badge_slots(slides: list[dict]) -> dict[str, dict[str, float]]:
+    """Where the CG template parks each badge object.
+
+    The template's badge is not a uniform shrink of the wall's — its plate,
+    logo and title each moved by a different ratio — so no single affine
+    reproduces it. Record the rects and place onto them directly.
+    """
+    title = template_title_item(slides)
+    if title is None:
+        return {}
+    slide = next(
+        (s for s in slides if any(it is title for it in s.get("items") or [])),
+        None,
+    )
+    if slide is None:
+        return {}
+    members = badge_members(slide, title)
+    keys = badge_slot_keys(members)
+    return {keys[id(it)]: item_rect(it).as_dict() for it in members}
+
+
+def _title_badge(
+    slide: dict, recipe: dict[str, Any]
+) -> tuple[Affine | None, Rect | None, set[int], dict[int, str]]:
+    """Globe, plate and title text that share the title's vertical centre.
+
+    Returns identity ids (`id(item)`) so membership does not collide when two
+    inspect records share `index` 0, which tests and some payloads do, plus the
+    template slot each non-title object should land on.
+    """
+    title = next((it for it in slide.get("items") or [] if is_title_item(it)), None)
+    dst = _rect_from_dict(recipe.get("titleDst"))
+    if title is None or dst is None or dst.w <= 0:
+        return None, None, set(), {}
+    src = item_rect(title)
+    rest = badge_members(slide, title)
+    members = [title, *rest]
+    ids: set[int] = {id(it) for it in members}
+    slots = badge_slot_keys(rest)
     aff = affine_from_rects(src, dst)
     # region agent log
     _dbg(
@@ -1553,7 +1606,7 @@ def _title_badge(
         },
     )
     # endregion
-    return aff, src, ids
+    return aff, src, ids, slots
 
 
 def classify_item(item: dict, map_src: Rect | None = None) -> str:
@@ -1698,7 +1751,8 @@ def plan_slide_transforms(
     free_text_keys: set[tuple[str, int]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
-    title_aff, title_src, title_ids = _title_badge(slide, recipe)
+    title_aff, title_src, title_ids, badge_slots = _title_badge(slide, recipe)
+    badge_dsts = dict(recipe.get("badgeSlots") or {})
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     if not groups and (map_src is None or map_dst is None):
@@ -1756,8 +1810,14 @@ def plan_slide_transforms(
         # 9 of 10 pins, because they were 700px from the group that happened to
         # be listed first.
         aff, cluster = _group_for_item(item, groups)
+        badge_dst: Rect | None = None
         if title_aff is not None and id(item) in title_ids:
             aff, cluster = title_aff, title_src
+            # The badge affine comes from the title *text box*, which carries
+            # slack the glyphs do not, so it shrinks the logo and plate by the
+            # wrong ratio. Where the template says exactly where the object
+            # goes, use that instead of scaling.
+            badge_dst = _rect_from_dict(badge_dsts.get(badge_slots.get(id(item), "")))
         if cluster is None:
             cluster = map_src
         role = classify_item(item, cluster)
@@ -1956,7 +2016,9 @@ def plan_slide_transforms(
                 )
             )
             continue
-        if aff is None and map_src and map_dst:
+        if badge_dst is not None:
+            mapped = badge_dst
+        elif aff is None and map_src and map_dst:
             mapped = map_rect(item_rect(item), map_src, map_dst)
         elif aff is not None:
             mapped = aff.apply_rect(item_rect(item))
