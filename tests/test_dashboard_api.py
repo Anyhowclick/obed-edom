@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from obed_edom.web.app import app
@@ -323,7 +325,10 @@ def test_a_page_recipe_is_saved_listed_previewed_and_applied(tmp_path, monkeypat
         seen["recipe_overrides"] = kwargs.get("recipe_overrides")
         return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
 
+    asked = []
+
     def fake_inspect(path, **kwargs):
+        asked.append((Path(path).name, kwargs.get("slide_range")))
         return template_payload if "Base_CG" in str(path) else wall_payload
 
     def fake_propose(wall, template, **kwargs):
@@ -355,6 +360,9 @@ def test_a_page_recipe_is_saved_listed_previewed_and_applied(tmp_path, monkeypat
         job_id = started.json()["id"]
         assert _wait(client, job_id)["status"] == "done"
 
+        # Only what the save request itself asks for; the proposal already read
+        # the deck before this point.
+        before = len(asked)
         saved = client.post(
             f"/api/resize/{job_id}/recipes",
             data={"slide": "2", "label": "Full-bleed centre panel"},
@@ -365,6 +373,11 @@ def test_a_page_recipe_is_saved_listed_previewed_and_applied(tmp_path, monkeypat
         # The photo does not change size, so the transform is a pure translation.
         assert recipe["affine"]["s"] == 1.0
         assert recipe["affine"]["tx"] == -2844.0
+        # One slide, never the deck. Asking for the whole wall here turned a
+        # button into a 158-slide Keynote pass the moment the cache went cold.
+        during = asked[before:]
+        assert ("Wall.key", (2, 2)) in during
+        assert ("Wall.key", None) not in during
 
         listed = client.get("/api/recipes").json()["recipes"]
         assert [r["id"] for r in listed] == ["full-bleed-centre-panel"]

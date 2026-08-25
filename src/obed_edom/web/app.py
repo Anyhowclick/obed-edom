@@ -50,7 +50,14 @@ from obed_edom.framing import (
     reuse_framings,
     save_framings,
 )
-from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
+from obed_edom.inspect import (
+    cached_payload,
+    diff_work_dir,
+    inspect_keynote,
+    preview_inspect,
+    preview_media_type,
+    preview_pngs,
+)
 from obed_edom.map_remap import (
     apply_portable_recipe,
     format_slide_range,
@@ -653,11 +660,14 @@ def create_app() -> FastAPI:
         updated = RUNNER.update_result(job_id, result)
         return RUNNER.public_dict(updated) if updated else result
 
-    def _job_decks(job_id: str) -> tuple[Path, Path, dict, dict]:
+    def _job_decks(job_id: str, slide: int) -> tuple[Path, Path, dict, dict]:
         """The wall and template a resize job is working on, and their payloads.
 
-        Both are already inspected by the time a job reaches review, so these
-        come off the warm cache and cost no Keynote pass.
+        The warm cache first, and a *single slide* when it misses. Asking for the
+        whole wall here turned a button into a 158-slide Keynote pass the moment
+        the cache went cold — which it does whenever the deck is re-exported, run
+        on a subset, or read with preview reuse switched off. Only one page is
+        ever needed.
         """
         job = RUNNER.get(job_id)
         result = dict((job.result if job else None) or {})
@@ -665,7 +675,11 @@ def create_app() -> FastAPI:
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not wall.exists() or not template.exists():
             raise HTTPException(400, "The wall deck or template has moved since proposing.")
-        return wall, template, inspect_keynote(wall), inspect_keynote(template)
+        wall_data = cached_payload(wall)
+        if wall_data is None:
+            wall_data = inspect_keynote(wall, slide_range=(int(slide), int(slide)))
+        template_data = cached_payload(template) or inspect_keynote(template)
+        return wall, template, wall_data, template_data
 
     @app.get("/api/recipes")
     def list_recipes() -> dict:
@@ -686,7 +700,7 @@ def create_app() -> FastAPI:
     ) -> dict:
         """Keep the way this page came out, so a page that can learn nothing can
         borrow it."""
-        wall, template, wall_data, template_data = _job_decks(job_id)
+        wall, template, wall_data, template_data = _job_decks(job_id, slide)
         page = next(
             (
                 s
@@ -732,7 +746,7 @@ def create_app() -> FastAPI:
         recipe = get_recipe(recipe_id)
         if recipe is None:
             raise HTTPException(404, "Unknown recipe")
-        _wall, _template, wall_data, template_data = _job_decks(job_id)
+        _wall, _template, wall_data, template_data = _job_decks(job_id, slide)
         page = next(
             (
                 s

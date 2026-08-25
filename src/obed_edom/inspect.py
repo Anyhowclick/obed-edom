@@ -197,6 +197,30 @@ _PREVIEW_MEDIA_TYPES = {
 }
 
 
+def cached_payload(key_path: Path | str) -> dict[str, Any] | None:
+    """A previously inspected payload, or None. Never opens Keynote.
+
+    For callers that want the deck's contents but must not cost a pass: a cache
+    miss is a normal answer, not a reason to go and read 158 slides.
+    """
+    from obed_edom.baseline import deck_digest, inspect_cache_path  # noqa: PLC0415
+
+    key_path = Path(key_path).expanduser()
+    if not key_path.exists():
+        return None
+    try:
+        json_path = inspect_cache_path(deck_digest(key_path))
+        if not json_path.is_file():
+            return None
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, FileNotFoundError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload["_cached"] = True
+    return payload
+
+
 def preview_media_type(path: Path | str) -> str:
     ext = Path(path).suffix.lower()
     return _PREVIEW_MEDIA_TYPES.get(ext, "application/octet-stream")
