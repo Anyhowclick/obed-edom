@@ -1101,3 +1101,23 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   border-color: rgba(255, 255, 255, 0.5);
   color: #fff;
 }
+
+/* Saved transforms, under the framing candidates. Same chip shape, so the two
+   read as alternatives to each other rather than as separate features. */
+.recipe-picker { margin-top: 10px; }
+.recipe-picker .framing-label { margin-bottom: 4px; }
+.recipe-picker .framing-option-num {
+  max-width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--err);
+  text-decoration: underline;
+  cursor: pointer;
+}
