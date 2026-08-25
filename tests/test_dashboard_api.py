@@ -296,3 +296,98 @@ def test_resize_form_still_takes_validate():
     body = schema["components"]["schemas"][ref.rsplit("/", 1)[-1]]
     assert "validate" in body["properties"]
     assert "run_validation" not in body["properties"]
+
+
+def test_a_page_recipe_is_saved_listed_previewed_and_applied(tmp_path, monkeypatch):
+    """The whole loop: keep the way a reviewed page came out, see what it would
+    do to another page, and have the planner receive it on apply."""
+    import obed_edom.web.app as app_mod
+    from obed_edom.recipes import RECIPES_DIR_ENV
+
+    monkeypatch.setenv(RECIPES_DIR_ENV, str(tmp_path / "recipes"))
+
+    photo = {"index": 1, "kind": "image", "fileName": "photo.png",
+             "x": 1920, "y": -1, "w": 3840, "h": 1080, "text": "", "locked": False}
+    wall_payload = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [{"number": 2, "items": [dict(photo)]}],
+    }
+    template_payload = {
+        "slideWidth": 1920, "slideHeight": 1080,
+        "slides": [{"number": 1, "items": [dict(photo, x=-924, y=-1)]}],
+    }
+
+    seen = {}
+
+    def fake_remap(path, dest, **kwargs):
+        seen["recipe_overrides"] = kwargs.get("recipe_overrides")
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    def fake_inspect(path, **kwargs):
+        return template_payload if "Base_CG" in str(path) else wall_payload
+
+    def fake_propose(wall, template, **kwargs):
+        return {
+            "wallPath": str(wall), "templatePath": str(template),
+            "wallDigests": ["d0"], "templateDigest": "t0",
+            "destWidth": 1920, "destHeight": 1080,
+            "wallWidth": 7680, "wallHeight": 1080,
+            "pages": [{"slide": 2, "index": 1, "autoTemplateSlide": 1,
+                       "autoFellBack": False, "needsAttention": False,
+                       "noUsableFraming": False, "candidates": []}],
+            "needAttention": [], "noUsableFraming": [],
+        }
+
+    originals = (app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings)
+    app_mod.remap_and_inspect = fake_remap
+    app_mod.inspect_keynote = fake_inspect
+    app_mod.propose_framings = fake_propose
+    try:
+        client = TestClient(app)
+        deck = tmp_path / "Wall.key"
+        deck.write_text("placeholder")
+        template = tmp_path / "Base_CG_Assets.key"
+        template.write_text("placeholder")
+        started = client.post(
+            "/api/resize",
+            data={"path": str(deck), "template_path": str(template), "export": "false"},
+        )
+        job_id = started.json()["id"]
+        assert _wait(client, job_id)["status"] == "done"
+
+        saved = client.post(
+            f"/api/resize/{job_id}/recipes",
+            data={"slide": "2", "label": "Full-bleed centre panel"},
+        )
+        assert saved.status_code == 200, saved.text
+        recipe = saved.json()["recipe"]
+        assert recipe["id"] == "full-bleed-centre-panel"
+        # The photo does not change size, so the transform is a pure translation.
+        assert recipe["affine"]["s"] == 1.0
+        assert recipe["affine"]["tx"] == -2844.0
+
+        listed = client.get("/api/recipes").json()["recipes"]
+        assert [r["id"] for r in listed] == ["full-bleed-centre-panel"]
+
+        shown = client.post(
+            f"/api/resize/{job_id}/recipe-preview",
+            data={"slide": "2", "recipe_id": "full-bleed-centre-panel"},
+        )
+        assert shown.status_code == 200, shown.text
+        rects = shown.json()["rects"]
+        assert any(r["x"] == -924 and r["w"] == 3840 for r in rects)
+
+        applied = client.post(
+            f"/api/resize/{job_id}/apply",
+            json={"decisions": [{"wallIndex": 1, "state": "pinned",
+                                 "templateSlide": None,
+                                 "recipeId": "full-bleed-centre-panel"}]},
+        )
+        assert applied.status_code == 200, applied.text
+        assert _wait(client, job_id)["status"] == "done"
+        assert seen["recipe_overrides"][2]["affine"]["tx"] == -2844.0
+
+        assert client.delete("/api/recipes/full-bleed-centre-panel").status_code == 200
+        assert client.get("/api/recipes").json()["recipes"] == []
+    finally:
+        app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals

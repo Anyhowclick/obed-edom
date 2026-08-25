@@ -24,11 +24,11 @@ todos:
     content: DSK generator, unchanged from the superseded plan including its four corrections
     status: pending
   - id: title-structural
-    content: "Find the title structurally instead of by wording. is_title_item matches masters.yaml title_phrases, so any series not on that list gets no titleDst and no badgeSlots and the badge machinery silently does nothing. Blocks recipe-library"
-    status: pending
+    content: "Find the title structurally instead of by wording. Phrase match first, then the plate — the largest shape containing a text item's centre — and only where that plate carries exactly one word, since a badge of several is ambiguous"
+    status: completed
   - id: recipe-library
-    content: "Recipes as browsable artefacts: learn from pages that pair, save under a label, apply to pages that do not pair. Replaces offering template slides to pages where no template slide can help"
-    status: pending
+    content: "Recipes as browsable artefacts: learn from pages that pair, save under a label, apply to pages that do not. Saved from a reviewed page, offered on every page beside the framing candidates, previewed on demand"
+    status: completed
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
     status: pending
@@ -408,15 +408,16 @@ Keynote and no UI.
 
 ## Order of work
 
-1. Structural title detection. Cheap, self-contained, and a prerequisite for
-   recipes carrying anything but artwork.
-2. Recipes as browsable artefacts.
-3. The number block in the CG resizer, above.
-4. Cue palette and outline editor.
-5. Image cues.
-6. DSK generator, unchanged from the superseded plan including its four corrections.
+1. The number block in the CG resizer, above.
+2. Cue palette and outline editor.
+3. Image cues.
+4. DSK generator, unchanged from the superseded plan including its four corrections.
 
-Stat drift is independent of all six and can land whenever.
+Stat drift is independent of all four and can land whenever.
+
+Structural title detection and the recipe library are done; both sections below
+are kept for the reasoning, which is what a later reader needs rather than the
+sequencing.
 
 ## Still parked
 
