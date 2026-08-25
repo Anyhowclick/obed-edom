@@ -268,7 +268,9 @@ roughly zero means the planner failed to apply the affine it derived.
 
 Reading a wall deck costs minutes (a 6.8 GB deck took 11½, a 7.2 GB one 21), and
 Keynote is single-instance, so iterating through it is painful. Everything below
-runs from `output/.cache` instead, in seconds:
+runs from the cache root — `.cache/` at the repo root, moved with
+`OBED_EDOM_CACHE_DIR` — in seconds. It sits outside `output/` deliberately: a
+tidy-up of the output folder once threw away an hour of Keynote time.
 
 | Script | Answers |
 |---|---|
@@ -397,11 +399,28 @@ of which take a bundle id as their last argument.
   `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
   look like it works while reporting nonsense. Anything needing per-character
   style must come off a rendered preview. `scripts/probe_runs.js` reproduces it.
-- **Z-order is unreadable.** `slide.iWorkItems()` raises "Can't convert types."
-  Earlier notes said it returned 0 on slides holding real objects; on macOS 26 it
-  raises on both Keynote versions, so the version is not what changed it. Either
-  way it is unreadable, and stacking stays a deliberate policy — the `role_order`
-  sort in `plan_slide_transforms` — not something recovered from the deck.
+- **Z-order can be neither read nor set.** Verified on 15.3.1 by
+  `scripts/probe_zorder.js`; both halves are Keynote limits, not our bugs.
+  - *Reading:* `slide.iWorkItems()` raises "Can't convert types.", so the one
+    collection that would interleave classes in stacking order is unavailable.
+    Earlier notes said it returned 0 on slides holding real objects; on macOS 26 it
+    raises on both Keynote versions, so the version is not what changed it. No
+    per-item substitute exists either — `zOrder`, `zOrderIndex`, `stackingOrder`
+    and `layer` all raise, and `index` gives "Can't get object."
+  - *Writing:* `Keynote.sdef` contains **no arrange vocabulary at all** — no
+    bring-to-front, send-to-back or z-order property on `iWork item`, whose entire
+    property list is height, locked, parent, position, width. JXA hands back a
+    function for any name you ask for, so `app.bringToFront` looks like it exists;
+    calling it gives "Message not understood." Reordering is GUI-only.
+  - *What is knowable:* per-type collections do enumerate in creation order
+    (`slide.shapes()` returned the three probe shapes in the order they were made),
+    so relative order **within** one class is recoverable. Cross-class is not, and
+    that is the part stacking actually needs.
+  - *Consequence for resize:* the resizer duplicates a slide and then moves,
+    resizes and deletes the objects already on it, so it inherits the source deck's
+    stacking untouched. It cannot repair a bad stack, but it cannot break a good
+    one. Only generate, which creates objects, controls stacking — by creation
+    order, via the `role_order` sort in `plan_slide_transforms`.
 - **`masterSlides()` is broken in JXA, but AppleScript `master slide` is fine.**
   `doc.masterSlides()` raises "Can't convert types." while `doc.slideLayouts()`
   returns all 9. In AppleScript the same collection answers perfectly: `count of

@@ -580,6 +580,8 @@ def map_rect_from_slide(slide: dict) -> Rect | None:
     return item_rect(maps[0])
 
 
+
+
 def primary_map_rect(items: Iterable[dict]) -> Rect | None:
     """Largest white/base map piece — the affine origin, not the union of overlays.
 
@@ -1189,7 +1191,9 @@ def learn_recipe(
         g_imgs = [it for it in g_items if is_pairable_image(it)]
         size_pairs = list(best_image_pairs(w_imgs, g_imgs))
         size_pairs.extend(pair_largest_shapes(w_items, g_items))
+        size_pairs = uniform_pairs(size_pairs)
         grouped = merge_affine_groups(size_pairs) if size_pairs else []
+        grouped = drop_outlier_groups(grouped)
         if grouped:
             biggest = grouped[0]["members"][0]
             map_src = effective_wall_map_src(wall, item_rect(biggest[0]))
@@ -1345,20 +1349,103 @@ def _groups_from_recipe(recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
     return []
 
 
+OUTLIER_SCALE_FACTOR = 2.0
+# A pair may differ this much between its width and height scale and still count
+# as the same artwork uniformly resized.
+PAIR_UNIFORM_TOLERANCE = 0.05
+
+
+def uniform_pairs(
+    pairs: Iterable[tuple[dict, dict]],
+) -> list[tuple[dict, dict]]:
+    """Keep only pairs that one uniform scale can actually explain.
+
+    `Affine` is a uniform scale, so a pair whose width ratio and height ratio
+    disagree cannot be represented by it: `affine_from_rects` takes the width and
+    gets the other axis wrong. On a missions map a 634x425 layer paired with a
+    473x364 one gave sx=0.746 against sy=0.856, and the layer was placed at 87% of
+    the height the rest of the map used — the white base map and the orange country
+    fill ended up at different sizes on the same slide.
+
+    A mismatched pair says the two objects are not the same artwork, or that one is
+    cropped differently, and neither can teach a transform.
+    """
+    kept: list[tuple[dict, dict]] = []
+    for src_item, dst_item in pairs:
+        src = item_rect(src_item)
+        dst = item_rect(dst_item)
+        if src.w <= 0 or src.h <= 0:
+            continue
+        sx = dst.w / src.w
+        sy = dst.h / src.h
+        if sy <= 0 or sx <= 0:
+            continue
+        if abs(sx - sy) / max(sx, sy) <= PAIR_UNIFORM_TOLERANCE:
+            kept.append((src_item, dst_item))
+    return kept
+
+
+def drop_outlier_groups(grouped: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Discard clusters whose scale no other object agrees with.
+
+    Map layers all inspect as `pasted-image.pdf`, so pairing matches on size alone
+    and sometimes matches a layer to something unrelated: on a missions map a
+    306x316 layer paired with an 80x80 template item (s=0.2532) and a 306x295 with
+    an 11x11 one (s=0.0359), against a consensus of 0.8547 that three objects
+    agreed on. Any object landing in those clusters is destroyed — the 0.0359 one
+    shrank Australia to 3.6% of its size, so it vanished from the CG.
+
+    Only outliers are dropped, and only when there is a consensus to judge them
+    against: with every cluster holding one object there is nothing to prefer, so
+    the list is left alone. Objects that lose their cluster fall back to the
+    nearest surviving one, which is the consensus affine.
+    """
+    if len(grouped) < 2:
+        return grouped
+    dominant = max(grouped, key=lambda g: len(g["members"]))
+    if len(dominant["members"]) < 2:
+        return grouped
+    scale = dominant["affine"].s
+    if scale <= 0:
+        return grouped
+    kept: list[dict[str, Any]] = []
+    dropped: list[float] = []
+    for group in grouped:
+        ratio = group["affine"].s / scale
+        if group is dominant or 1 / OUTLIER_SCALE_FACTOR <= ratio <= OUTLIER_SCALE_FACTOR:
+            kept.append(group)
+        else:
+            dropped.append(round(group["affine"].s, 4))
+    return kept
+
+
 def _group_for_item(
     item: dict, groups: list[tuple[Affine, Rect]]
 ) -> tuple[Affine | None, Rect | None]:
-    """The cluster this object belongs to: nearest by centre, smallest on a tie."""
+    """The cluster this object belongs to: nearest by centre, then the smallest
+    cluster big enough to hold it.
+
+    Ranking ties purely by smallest area let an overlay capture the artwork it sits
+    on: on a missions map, a 306x316 overlay and the 1248x771 map both contained
+    the map's own centre, so the map was placed with the overlay's affine at
+    s=0.2532 instead of its own s=0.8547 — 316px wide instead of 1067px, and
+    pushed off the left edge. A cluster smaller than the object cannot be the
+    cluster that object belongs to. Preferring clusters that can hold it keeps the
+    behaviour that matters for pins, where the smallest containing cluster is the
+    inset a pin sits in rather than the whole map.
+    """
     if not groups:
         return None, None
     rect = item_rect(item)
     cx, cy = rect.center()
+    item_area = max(rect.w * rect.h, 1.0)
     best: tuple[Affine, Rect] | None = None
-    best_key: tuple[float, float] | None = None
+    best_key: tuple[float, float, float] | None = None
     for aff, src in groups:
         d = dist_to_rect(cx, cy, src)
         area = max(src.w * src.h, 1.0)
-        key = (d, area)
+        too_small = 0 if area >= item_area else 1
+        key = (d, too_small, area)
         if best_key is None or key < best_key:
             best_key = key
             best = (aff, src)

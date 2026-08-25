@@ -36,7 +36,9 @@ PAIRS = [
 def warm(path: Path, *, previews: bool) -> None:
     export_dir = None
     if previews:
-        export_dir = find_repo_root() / "output" / ".cache" / "goldpreviews" / path.stem
+        from obed_edom.baseline import cache_root  # noqa: PLC0415
+
+        export_dir = cache_root() / "goldpreviews" / path.stem
     started = time.perf_counter()
     try:
         payload = inspect_keynote(path, export_dir=export_dir, use_cache=True)

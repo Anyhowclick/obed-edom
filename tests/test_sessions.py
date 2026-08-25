@@ -73,9 +73,13 @@ def test_delete_does_not_escape_output_root(tmp_path: Path):
     assert marker.is_file()
 
 
-def test_delete_does_not_purge_preview_cache(tmp_path: Path):
+def test_delete_does_not_purge_preview_cache(tmp_path: Path, monkeypatch):
     sessions = tmp_path / "sessions"
     output = tmp_path / "output"
+    # The cache normally lives outside output/, where purging cannot reach it at
+    # all. Pointing it back inside is the only way the guard matters, so that is
+    # what this exercises.
+    monkeypatch.setenv("OBED_EDOM_CACHE_DIR", str(output / ".cache"))
     cache = output / ".cache" / "previews" / "abc"
     cache.mkdir(parents=True)
     marker = cache / "slide-001.png"

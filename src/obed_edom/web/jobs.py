@@ -242,8 +242,13 @@ class JobRunner:
         left = result.get("leftPreviews")
         if left:
             candidates.append(Path(left).parent)
+        from obed_edom.baseline import cache_root as _cache_root  # noqa: PLC0415
+
         root = self._output_root.resolve()
-        cache_root = (self._output_root / ".cache").resolve()
+        # Never purge the warm cache, wherever it is: rebuilding it costs about an
+        # hour of Keynote time. It normally lives outside output/ now, but honour
+        # the real location in case OBED_EDOM_CACHE_DIR points back inside.
+        cache_root = _cache_root().resolve()
         seen: set[Path] = set()
         for path in candidates:
             try:

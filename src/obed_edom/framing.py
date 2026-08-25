@@ -213,9 +213,27 @@ def _transform_of(recipe: dict[str, Any]) -> dict[str, float] | None:
 
     `(x, y) -> (s*x + tx, s*y + ty)`, which is what the browser needs to place a
     wall image inside a 16:9 box: width becomes `wallWidth * s`, offset `tx, ty`.
-    Derived from mapSrc/mapDst rather than the group affine so a fit-to-frame
-    recipe, which has no paired group, still renders.
+
+    Must follow the same precedence as `_groups_from_recipe`, which is what the
+    planner actually places objects with: the first group affine when there is
+    one, and only mapSrc/mapDst when there is not. Deriving it from mapSrc/mapDst
+    unconditionally made the preview lie — on a real page the group affine was
+    s=0.871 while mapSrc/mapDst implied 1.412, so the operator was shown a crop
+    62% larger than the deck would get.
     """
+    groups = recipe.get("groups") or []
+    if groups:
+        first = groups[0] or {}
+        try:
+            s = float(first.get("s") or 0)
+            if s > 0:
+                return {
+                    "s": round(s, 6),
+                    "tx": round(float(first.get("tx") or 0), 2),
+                    "ty": round(float(first.get("ty") or 0), 2),
+                }
+        except (TypeError, ValueError):
+            pass
     src = recipe.get("mapSrc") or {}
     dst = recipe.get("mapDst") or {}
     try:
@@ -315,7 +333,10 @@ def propose_framings(
     from obed_edom.baseline import deck_digest, deck_slide_digests  # noqa: PLC0415
     from obed_edom.inspect import inspect_keynote  # noqa: PLC0415
     from obed_edom.map_remap import (  # noqa: PLC0415
+        CG_HEIGHT,
+        CG_WIDTH,
         MIN_ON_CANVAS_FRACTION,
+        fit_to_frame_recipe,
         is_degenerate_scale,
         learn_recipe,
         on_canvas_fraction,
@@ -380,11 +401,26 @@ def propose_framings(
                 template_data,
                 template_slide=candidate["templateSlide"],
             )
-            candidate["wouldFallBack"] = (
+            falls_back = (
                 on_canvas_fraction(slide, trial, wall_w, wall_h) < MIN_ON_CANVAS_FRACTION
                 or is_degenerate_scale(trial, wall_w, wall_h)
             )
-            candidate["transform"] = _transform_of(trial)
+            candidate["wouldFallBack"] = falls_back
+            # Preview what the deck will get, not what was asked for. A framing
+            # that falls back is planned with fit-to-frame instead, so showing the
+            # template's crop would promise a result the run cannot produce.
+            shown = trial
+            if falls_back:
+                fitted = fit_to_frame_recipe(
+                    slide,
+                    wall_w,
+                    wall_h,
+                    float(trial.get("destWidth") or CG_WIDTH),
+                    float(trial.get("destHeight") or CG_HEIGHT),
+                )
+                if fitted:
+                    shown = fitted
+            candidate["transform"] = _transform_of(shown)
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")
         auto_candidate = next(

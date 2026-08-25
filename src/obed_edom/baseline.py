@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -37,9 +38,23 @@ INSPECT_VERSION = 2
 DIGEST_LEN = 16
 
 
+CACHE_DIR_ENV = "OBED_EDOM_CACHE_DIR"
+
+
 def cache_root(root: Path | None = None) -> Path:
-    base = Path(root) if root else find_repo_root()
-    return base / "output" / ".cache"
+    """Where inspect payloads, previews and pairings live.
+
+    Deliberately outside `output/`. Reading a wall deck costs minutes — 63 for the
+    six gold decks — and it used to sit in `output/.cache`, so a tidy-up of the
+    output folder threw away an hour of Keynote time. `OBED_EDOM_CACHE_DIR` moves
+    it, e.g. onto an external disk.
+    """
+    if root is not None:
+        return Path(root) / ".cache"
+    override = (os.environ.get(CACHE_DIR_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return find_repo_root() / ".cache"
 
 
 def pairings_dir(root: Path | None = None) -> Path:

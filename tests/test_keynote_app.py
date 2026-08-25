@@ -95,7 +95,7 @@ def test_cache_is_partitioned_by_app_version(tmp_path: Path):
 def test_untagged_payloads_are_not_read(tmp_path: Path):
     """Pre-tag payloads were produced by 14.5 and must stay invisible, or a 15.x
     run would silently reuse a reading from an unsupported build."""
-    untagged = tmp_path / "output" / ".cache" / "inspect" / "abc.v2.json"
+    untagged = tmp_path / ".cache" / "inspect" / "abc.v2.json"
     assert inspect_cache_path("abc", tmp_path, app_version="15.3.1") != untagged
 
 

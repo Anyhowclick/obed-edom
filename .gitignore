@@ -6,6 +6,11 @@ __pycache__/
 .DS_Store
 output/*
 !output/.gitkeep
+# Inspect payloads and previews. Outside output/ on purpose: rebuilding costs
+# about an hour of Keynote time, and it used to be lost to an output tidy-up.
+.cache/
+# Debug-session logs. The rest of .cursor/ is tracked on purpose.
+.cursor/debug-*.log
 *.applescript
 
 # Keep the folders, ignore the (large) files inside.

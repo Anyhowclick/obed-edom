@@ -11,6 +11,7 @@
   --panel: #152238;
   --sky: #8fc4e8;
   --plum: #c79bde;
+  --rose: #e0a0c4;
 }
 
 * { box-sizing: border-box; }
@@ -707,9 +708,13 @@ label.check input { margin-top: 3px; }
 .btn.secondary.tone-matched { border-color: var(--ok); color: var(--ok); }
 .btn.secondary.tone-alt { border-color: var(--warn); color: var(--warn); }
 .btn.secondary.tone-template { border-color: var(--sky); color: var(--sky); }
+/* Pink for Reviewed: distinct from the purple Save and the red Resize, which are
+   the two other saturated things in the bar. */
+.btn.secondary.tone-reviewed { border-color: var(--rose); color: var(--rose); }
 .btn.secondary.tone-matched.on { background: var(--ok); color: #10241c; border-color: var(--ok); }
 .btn.secondary.tone-alt.on { background: var(--warn); color: #2c2210; border-color: var(--warn); }
 .btn.secondary.tone-template.on { background: var(--sky); color: #10222c; border-color: var(--sky); }
+.btn.secondary.tone-reviewed.on { background: var(--rose); color: #2c1020; border-color: var(--rose); }
 .btn.tone-save { background: linear-gradient(180deg, #c79bde 0%, #9a63bd 100%); color: #f7f0fb; }
 .btn.tone-save:hover:not(:disabled) { background: linear-gradient(180deg, #d4aee7 0%, #a973c9 100%); }
 
@@ -748,13 +753,16 @@ label.check input { margin-top: 3px; }
 label.inline-field { display: flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
 label.inline-field select { width: auto; padding: 5px 8px; }
 
-/* The crop: a 16:9 window with the wall image positioned inside it. */
+/* The crop: a 16:9 window with the wall image positioned inside it.
+   The border is near-white on purpose — it marks the 1920x1080 edge, and a muted
+   one blended into the panel so the frame's real extent was hard to see when the
+   content only filled part of it. */
 .crop-preview {
   position: relative;
   overflow: hidden;
   background: var(--navy-2);
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
   flex-shrink: 0;
 }
 .crop-preview img { position: absolute; display: block; max-width: none; }
@@ -769,7 +777,16 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 }
 
 /* Every page in a group at a glance, so a wrong one in a batch of 56 shows up. */
-.framing-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+/* user-select and user-drag off so dragging across the strip selects thumbnails
+   instead of highlighting their labels or picking up a preview image. */
+.framing-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  user-select: none;
+}
+.framing-strip img { -webkit-user-drag: none; user-drag: none; }
 .framing-chip {
   position: relative;
   padding: 0;
@@ -784,7 +801,14 @@ label.inline-field select { width: auto; padding: 5px 8px; }
    apart at a glance. */
 .framing-chip { border-color: var(--ok); }
 .framing-chip.fellback { border-color: var(--warn); }
-.framing-chip.selected { border-color: var(--sky); outline: 2px solid var(--sky); }
+/* Selection has to survive being one of fifty thumbnails, so it glows rather than
+   just changing a border colour that the green/yellow states already use. */
+.framing-chip.selected {
+  border-color: var(--sky);
+  box-shadow:
+    0 0 0 2px var(--sky),
+    0 0 14px rgba(143, 196, 232, 0.75);
+}
 .framing-chip-num {
   position: absolute;
   bottom: 2px;
@@ -818,9 +842,48 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   opacity: 0.65;
 }
 .framing-option.fellback { border-color: var(--warn); }
-.framing-option.current { opacity: 1; outline: 2px solid var(--sky); }
+.framing-option.current {
+  opacity: 1;
+  box-shadow:
+    0 0 0 2px var(--sky),
+    0 0 12px rgba(143, 196, 232, 0.7);
+}
 .framing-option:disabled { cursor: not-allowed; }
-.framing-option > img { width: 84px; display: block; border-radius: 3px; }
+.framing-option:hover { opacity: 1; }
+
+/* The template slide behind an option, revealed on hover. */
+.option-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 5px);
+  z-index: 7;
+  display: none;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.framing-option:hover .option-tip { display: block; }
+.option-tip > img {
+  width: 320px;
+  display: block;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
+}
+.option-tip-label {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+/* On the small ones the button's own coloured border already shows the edge, and
+   a second line inside it just muddies a 104px thumbnail. */
+.framing-option .crop-preview,
+.framing-chip .crop-preview {
+  border: 0;
+  border-radius: 3px;
+}
 .framing-option-num {
   position: absolute;
   bottom: 1px;
@@ -832,10 +895,36 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   background: rgba(6, 12, 24, 0.8);
   color: var(--ink);
 }
-.framing-row { display: flex; gap: 10px; align-items: flex-start; }
-.framing-check { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
-.framing-row-controls { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.framing-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.framing-row-num { padding-top: 2px; flex-shrink: 0; min-width: 3ch; text-align: right; }
+.framing-row-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
+.framing-row-controls { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .framing-row-controls .note { margin: 0; }
+.framing-row-controls .actions { margin: 0; }
+.framing-label {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+/* The whole wall, as the "before". Wide and short at 7680x1080, so it reads as a
+   strip above the crops rather than competing with them. */
+.framing-before > img {
+  width: 100%;
+  max-width: 760px;
+  display: block;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
+}
+.framing-after { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
 .outline-reader { display: flex; flex-direction: column; gap: 4px; max-width: 96ch; }
 .outline-para {
   padding: 6px 10px;

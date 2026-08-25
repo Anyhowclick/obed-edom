@@ -57,12 +57,13 @@ export type FramingProposal = {
   templateThumbs?: Record<string, string>;
 };
 
-type Category = "matched" | "fitted" | "template";
+type Category = "matched" | "fitted" | "template" | "reviewed";
 
 const CATEGORY_LABEL: Record<Category, string> = {
-  matched: "Matched",
+  matched: "Good fit",
   fitted: "Fitted content",
   template: "New template",
+  reviewed: "Reviewed",
 };
 
 /** One colour per bucket, used on the tabs and on every button that moves a page
@@ -71,7 +72,10 @@ const CATEGORY_TONE: Record<Category, string> = {
   matched: "tone-matched",
   fitted: "tone-alt",
   template: "tone-template",
+  reviewed: "tone-reviewed",
 };
+
+const TABS: Category[] = ["matched", "fitted", "template", "reviewed"];
 
 const PAGE_SIZES = [5, 10, 25];
 
@@ -95,13 +99,18 @@ function fellBackWith(page: FramingPage, slide: number | null): boolean {
 }
 
 /**
- * Which bucket a page sits in, keyed on the outcome of the framing it will
- * actually use. Switching a page to a framing that applies cleanly moves it out
- * of Fitted content by itself, which is the point: the tabs track what the deck
- * will look like, not what was clicked.
+ * Which bucket a page sits in.
+ *
+ * Confirmed pages live in Reviewed, so the other three hold only what still
+ * needs a look — that is what makes "how much is left" answerable at a glance.
+ * The unreviewed buckets are keyed on the outcome of the framing the page will
+ * use rather than on what was clicked, so switching a page to a framing that
+ * applies cleanly moves it out of Fitted content by itself.
  */
 function categoryOf(page: FramingPage, decisions: Record<number, FramingDecision>): Category {
-  if (stateOf(page, decisions) === "deferred") return "template";
+  const state = stateOf(page, decisions);
+  if (state === "pinned") return "reviewed";
+  if (state === "deferred") return "template";
   return fellBackWith(page, chosenSlide(page, decisions)) ? "fitted" : "matched";
 }
 
@@ -180,12 +189,23 @@ export function FramingReview({
   const [tab, setTab] = useState<Category>("matched");
   const [pageSize, setPageSize] = useState(10);
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  // Whether an opened group lists every page or only the selected ones.
+  const [openScope, setOpenScope] = useState<"all" | "selected">("all");
   const [groupPage, setGroupPage] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [previewing, setPreviewing] = useState<Record<number, number>>({});
+  // Drag across thumbnails to select a run of them. `adding` is fixed at
+  // pointer-down from whatever the first thumbnail was, so one drag either selects
+  // or deselects throughout instead of toggling each chip it crosses.
+  const [drag, setDrag] = useState<{ adding: boolean } | null>(null);
 
   const byCategory = useMemo(() => {
-    const out: Record<Category, FramingPage[]> = { matched: [], fitted: [], template: [] };
+    const out: Record<Category, FramingPage[]> = {
+      matched: [],
+      fitted: [],
+      template: [],
+      reviewed: [],
+    };
     for (const page of pages) out[categoryOf(page, decisions)].push(page);
     // Fell back first, since those are the ones needing eyes, then deck order so
     // the rest stay findable by slide number.
@@ -235,24 +255,30 @@ export function FramingReview({
     });
   }
 
-  function moveSelected(target: Category) {
+  /**
+   * Confirm, defer, or undo — not "move to bucket".
+   *
+   * Good fit and Fitted content are outcomes rather than choices, so there is no
+   * honest way to put a page in one by clicking. Unconfirming returns it to auto
+   * and the outcome decides which of the two it lands in.
+   */
+  function actOnSelected(action: "confirm" | "defer" | "unconfirm") {
     const indexes = [...selected];
     if (!indexes.length) return;
-    if (target === "template") {
-      decide(indexes, "deferred", () => null);
-    } else if (target === "matched") {
-      // Pin the best framing that does not fall back, so "move to Matched" is a
-      // real instruction rather than a wish. Pages with no such framing stay put.
-      decide(indexes, "pinned", (p) => {
-        const clean = p.candidates.find((c) => !c.wouldFallBack);
-        return clean ? clean.templateSlide : chosenSlide(p, decisions);
-      });
-    } else {
-      // Accepting a fitted result: pin what it already uses, so the page counts as
-      // looked at rather than merely untouched.
-      decide(indexes, "pinned", (p) => chosenSlide(p, decisions) ?? p.autoTemplateSlide);
-    }
+    if (action === "defer") decide(indexes, "deferred", () => null);
+    else if (action === "unconfirm") decide(indexes, "auto", () => null);
+    else decide(indexes, "pinned", (p) => chosenSlide(p, decisions) ?? p.autoTemplateSlide);
     setSelected(new Set());
+  }
+
+  function applySelection(index: number, adding: boolean) {
+    setSelected((current) => {
+      if (current.has(index) === adding) return current;
+      const next = new Set(current);
+      if (adding) next.add(index);
+      else next.delete(index);
+      return next;
+    });
   }
 
   function collect(): FramingDecision[] {
@@ -269,7 +295,7 @@ export function FramingReview({
     <div className="framing-review">
       <div className="playlist-bar framing-bar">
         <div className="framing-tabs">
-          {(Object.keys(CATEGORY_LABEL) as Category[]).map((key) => (
+          {TABS.map((key) => (
             <button
               key={key}
               type="button"
@@ -287,20 +313,40 @@ export function FramingReview({
         <div className="actions playlist-controls">
           {selected.size > 0 && (
             <>
-              <span className="note">{selected.size} selected → </span>
-              {(Object.keys(CATEGORY_LABEL) as Category[])
-                .filter((key) => key !== tab)
-                .map((key) => (
-                  <button
-                    key={key}
-                    className={`btn secondary ${CATEGORY_TONE[key]}`}
-                    type="button"
-                    disabled={busy}
-                    onClick={() => moveSelected(key)}
-                  >
-                    {CATEGORY_LABEL[key]}
-                  </button>
-                ))}
+              <span className="note">{selected.size} selected</span>
+              {tab !== "template" && (
+                <button
+                  className="btn secondary tone-template"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => actOnSelected("defer")}
+                >
+                  New template
+                </button>
+              )}
+              {tab !== "reviewed" && (
+                <button
+                  className="btn secondary tone-reviewed"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => actOnSelected("confirm")}
+                >
+                  Confirm selected
+                </button>
+              )}
+              {tab === "reviewed" && (
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => actOnSelected("unconfirm")}
+                >
+                  Unconfirm selected
+                </button>
+              )}
+              <button className="btn secondary" type="button" onClick={() => setSelected(new Set())}>
+                Clear selection
+              </button>
             </>
           )}
           <label className="field inline-field">
@@ -333,12 +379,15 @@ export function FramingReview({
 
       {groups.map((group) => {
         const open = openGroup === group.key;
-            const fellBack = group.pages.filter((p) =>
-              fellBackWith(p, chosenSlide(p, decisions))
-            ).length;
+        const fellBack = group.pages.filter((p) =>
+          fellBackWith(p, chosenSlide(p, decisions))
+        ).length;
+        const chosenPages = group.pages.filter((p) => selected.has(p.index));
+        const scoped = open && openScope === "selected" && chosenPages.length > 0;
+        const listed = scoped ? chosenPages : group.pages;
         const start = open ? groupPage * pageSize : 0;
-        const shown = open ? group.pages.slice(start, start + pageSize) : [];
-        const totalPages = Math.max(1, Math.ceil(group.pages.length / pageSize));
+        const shown = open ? listed.slice(start, start + pageSize) : [];
+        const totalPages = Math.max(1, Math.ceil(listed.length / pageSize));
         return (
           <article key={group.key} className={`framing-group${fellBack ? " flagged" : ""}`}>
             {/* The template slide, not just its number: "template slide 4" means
@@ -365,8 +414,12 @@ export function FramingReview({
             </div>
 
             {/* Every page in the group, so a wrong one in a batch of 56 is visible
-                without opening anything. */}
-            <div className="framing-strip">
+                without opening anything. Drag across them to select a run. */}
+            <div
+              className="framing-strip"
+              onPointerUp={() => setDrag(null)}
+              onPointerLeave={() => setDrag(null)}
+            >
               {group.pages.map((page) => {
                 const isSelected = selected.has(page.index);
                 return (
@@ -386,14 +439,17 @@ export function FramingReview({
                         ? " — falls back to fitting content"
                         : "")
                     }
-                    onClick={() =>
-                      setSelected((current) => {
-                        const next = new Set(current);
-                        if (next.has(page.index)) next.delete(page.index);
-                        else next.add(page.index);
-                        return next;
-                      })
-                    }
+                    onPointerDown={(e) => {
+                      // Keep receiving moves after the pointer leaves this chip,
+                      // otherwise the drag stops at the first boundary.
+                      e.currentTarget.releasePointerCapture?.(e.pointerId);
+                      const adding = !selected.has(page.index);
+                      setDrag({ adding });
+                      applySelection(page.index, adding);
+                    }}
+                    onPointerEnter={() => {
+                      if (drag) applySelection(page.index, drag.adding);
+                    }}
                   >
                     <CropPreview
                       src={thumbUrl(page)}
@@ -410,36 +466,11 @@ export function FramingReview({
             </div>
 
             <div className="actions">
-              {group.slide != null && (
-                <button
-                  className="btn secondary tone-matched"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => decide(group.pages.map((p) => p.index), "pinned", () => group.slide)}
-                >
-                  Confirm all {group.pages.length}
-                </button>
-              )}
+              {/* Selecting is the first half of confirming a group: the act that
+                  changes a decision lives in one place, the pinned bar, so there
+                  is no second path that behaves subtly differently. */}
               <button
-                className="btn secondary tone-template"
-                type="button"
-                disabled={busy}
-                onClick={() => decide(group.pages.map((p) => p.index), "deferred", () => null)}
-              >
-                Needs a new template slide
-              </button>
-              <button
-                className="btn secondary"
-                type="button"
-                onClick={() => {
-                  setOpenGroup(open ? null : group.key);
-                  setGroupPage(0);
-                }}
-              >
-                {open ? "Hide pages" : `Open pages (${group.pages.length})`}
-              </button>
-              <button
-                className="btn secondary"
+                className="btn secondary tone-reviewed"
                 type="button"
                 onClick={() =>
                   setSelected((current) => {
@@ -453,8 +484,37 @@ export function FramingReview({
                   })
                 }
               >
-                {group.pages.every((p) => selected.has(p.index)) ? "Deselect group" : "Select group"}
+                {group.pages.every((p) => selected.has(p.index))
+                  ? `Deselect ${group.pages.length}`
+                  : `Select all ${group.pages.length}`}
               </button>
+              <button
+                className="btn secondary"
+                type="button"
+                onClick={() => {
+                  setOpenGroup(open ? null : group.key);
+                  setOpenScope(chosenPages.length > 0 ? "selected" : "all");
+                  setGroupPage(0);
+                }}
+              >
+                {open
+                  ? "Hide pages"
+                  : chosenPages.length > 0
+                    ? `Open selected (${chosenPages.length})`
+                    : `Open pages (${group.pages.length})`}
+              </button>
+              {scoped && (
+                <button
+                  className="btn secondary"
+                  type="button"
+                  onClick={() => {
+                    setOpenScope("all");
+                    setGroupPage(0);
+                  }}
+                >
+                  Show all {group.pages.length}
+                </button>
+              )}
             </div>
 
             {open && (
@@ -466,39 +526,37 @@ export function FramingReview({
                   const previewFalls = fellBackWith(page, preview);
                   return (
                     <div key={page.slide} className="framing-row">
-                      <label className="framing-check">
-                        <input
-                          type="checkbox"
-                          checked={selected.has(page.index)}
-                          onChange={(e) =>
-                            setSelected((cur) => {
-                              const next = new Set(cur);
-                              if (e.target.checked) next.add(page.index);
-                              else next.delete(page.index);
-                              return next;
-                            })
-                          }
-                        />
-                        <span className="outline-num">{page.slide}</span>
-                      </label>
-                      <CropPreview
-                        src={thumbUrl(page)}
-                        transform={transformFor(page, preview)}
-                        wallWidth={wallWidth}
-                        destWidth={destWidth}
-                        destHeight={destHeight}
-                        width={280}
-                        title={`Slide ${page.slide} as template slide ${preview}`}
-                      />
-                      <div className="framing-row-controls">
-                        {/* A native select cannot show images in its option list, so
-                            the framings are picked from their own thumbnails. Also
-                            better than a dropdown here: all of them are visible at
-                            once rather than one at a time. */}
-                        <div className="framing-picker">
-                          {page.candidates.map((candidate) => {
-                            const url = templateThumbUrl(candidate.templateSlide);
-                            return (
+                      <span className="outline-num framing-row-num">{page.slide}</span>
+                      <div className="framing-row-body">
+                        {/* The wall slide whole, so the crop below can be judged
+                            against what it came from rather than in isolation. */}
+                        {thumbUrl(page) && (
+                          <div className="framing-before">
+                            <span className="framing-label">Before — full wall</span>
+                            <img src={thumbUrl(page)!} alt="" />
+                          </div>
+                        )}
+                        <div className="framing-after">
+                          <div>
+                            <span className="framing-label">
+                              After — template slide {preview ?? "—"}
+                            </span>
+                            <CropPreview
+                              src={thumbUrl(page)}
+                              transform={transformFor(page, preview)}
+                              wallWidth={wallWidth}
+                              destWidth={destWidth}
+                              destHeight={destHeight}
+                              width={440}
+                              title={`Slide ${page.slide} as template slide ${preview}`}
+                            />
+                          </div>
+                          {/* Each option shows what that framing does to *this*
+                              page, not what the template slide looks like. Same
+                              cached image throughout, so thirteen of them cost one
+                              request and re-render instantly. */}
+                          <div className="framing-picker">
+                            {page.candidates.map((candidate) => (
                               <button
                                 key={candidate.templateSlide}
                                 type="button"
@@ -516,14 +574,33 @@ export function FramingReview({
                                   }))
                                 }
                               >
-                                {url ? <img src={url} alt="" /> : <span className="crop-empty">?</span>}
+                                <CropPreview
+                                  src={thumbUrl(page)}
+                                  transform={candidate.transform}
+                                  wallWidth={wallWidth}
+                                  destWidth={destWidth}
+                                  destHeight={destHeight}
+                                  width={104}
+                                />
                                 <span className="framing-option-num">
                                   {candidate.templateSlide} · {candidate.fit.toFixed(2)}
                                 </span>
+                                {/* The template slide behind this option, on hover:
+                                    the option shows the result, this shows the frame
+                                    that produced it. */}
+                                {templateThumbUrl(candidate.templateSlide) && (
+                                  <span className="option-tip">
+                                    <img src={templateThumbUrl(candidate.templateSlide)!} alt="" />
+                                    <span className="option-tip-label">
+                                      Template slide {candidate.templateSlide}
+                                    </span>
+                                  </span>
+                                )}
                               </button>
-                            );
-                          })}
+                            ))}
+                          </div>
                         </div>
+                      <div className="framing-row-controls">
                         <div className="actions">
                           <button
                             className="btn secondary tone-alt"
@@ -550,6 +627,7 @@ export function FramingReview({
                           {stateOf(page, decisions) === "pinned" && "Reviewed. "}
                           {page.resurfaced && "The template changed since you deferred this. "}
                         </p>
+                        </div>
                       </div>
                     </div>
                   );
