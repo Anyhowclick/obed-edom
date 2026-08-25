@@ -292,8 +292,9 @@ type Marquee = {
   /** Selection as it stood when the drag began, so a live sweep replaces its own
    *  result each move instead of accumulating one. */
   base: Set<number>;
-  /** Whether this sweep takes pages out of the selection instead of adding them. */
-  removing: boolean;
+  /** Whether this sweep takes pages out of the selection instead of adding them.
+   *  Null until the sweep has touched a chip to decide from. */
+  removing: boolean | null;
   /** The chip the press landed on, if any. A press that never becomes a sweep
    *  toggles it on release. */
   from: number | null;
@@ -594,8 +595,8 @@ export function FramingReview({
                 without opening anything. Click a chip to toggle it, or sweep a box
                 across them to take a block that wraps rows. A sweep adds to what
                 is already selected rather than replacing it, so the two compose,
-                and a sweep that starts on an already-selected chip takes pages
-                back out instead. Alt forces that from anywhere. */}
+                and a sweep whose first chip is already selected takes pages back
+                out instead. Alt forces that from anywhere. */}
             <div
               className="framing-strip"
               onPointerDown={(e) => {
@@ -616,11 +617,13 @@ export function FramingReview({
                   from,
                   // A sweep works on top of whatever is already selected rather
                   // than replacing it, so it composes with picking chips one by
-                  // one. It takes pages back out when it starts on one that is
-                  // already selected — the same read as dragging across them —
-                  // and alt forces that from anywhere.
+                  // one, and it takes pages back out when the first chip it meets
+                  // is already selected — the same read as dragging across them.
+                  // Starting on empty space leaves that undecided until the sweep
+                  // reaches a chip, because a press on nothing says nothing about
+                  // which way it is going. Alt settles it up front.
                   base: new Set(selected),
-                  removing: e.altKey || (from != null && selected.has(from)),
+                  removing: e.altKey ? true : from != null ? selected.has(from) : null,
                 });
               }}
               onPointerMove={(e) => {
@@ -638,10 +641,13 @@ export function FramingReview({
                   setMarquee({ ...marquee, box });
                   return;
                 }
-                setMarquee({ ...marquee, box, active: true });
+                const hits = indexesUnder(strip, box);
+                const removing =
+                  marquee.removing ?? (hits.length ? marquee.base.has(hits[0]) : null);
+                setMarquee({ ...marquee, box, active: true, removing });
                 const next = new Set(marquee.base);
-                for (const index of indexesUnder(strip, box)) {
-                  if (marquee.removing) next.delete(index);
+                for (const index of hits) {
+                  if (removing) next.delete(index);
                   else next.add(index);
                 }
                 setSelected(next);
