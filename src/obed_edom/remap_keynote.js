@@ -254,10 +254,82 @@ function keystroke(cmd) {
   SE.keystroke(cmd, { using: "command down" });
 }
 
+function lineEnds(obj) {
+  const out = {};
+  try {
+    const p = obj.startPoint();
+    out.start = [Number(p[0]), Number(p[1])];
+  } catch (eS) {}
+  try {
+    const p = obj.endPoint();
+    out.end = [Number(p[0]), Number(p[1])];
+  } catch (eE) {}
+  return out;
+}
+
+function debugInteresting(spec) {
+  return (
+    spec.fontSize ||
+    spec.role === "title" ||
+    spec.kind === "text" ||
+    spec.kind === "line" ||
+    spec.kind === "group" ||
+    (spec.kind === "image" && Number(spec.itemIndex) === 3)
+  );
+}
+
 function applySpec(obj, spec) {
   if (!obj || !spec || spec.x == null) return false;
   const a = applyGeom(obj, spec, false);
+  let afterSize = null;
+  try {
+    afterSize = { w: Number(obj.width()), h: Number(obj.height()), pos: xyOf(obj), ends: lineEnds(obj) };
+  } catch (eMid) {}
   applyGeom(obj, spec, true);
+  let afterPos = null;
+  try {
+    afterPos = { w: Number(obj.width()), h: Number(obj.height()), pos: xyOf(obj), ends: lineEnds(obj) };
+  } catch (eEnd) {}
+  // #region agent log
+  if (debugInteresting(spec)) {
+    try {
+      const app = Application.currentApplication();
+      app.includeStandardAdditions = true;
+      const line =
+        JSON.stringify({
+          sessionId: "6310d1",
+          runId: "pre-fix",
+          hypothesisId: spec.kind === "line" ? "H22" : spec.kind === "group" ? "H23" : "H19",
+          location: "remap_keynote.js:applySpec",
+          message: "geom after size then position pass",
+          data: {
+            role: spec.role,
+            kind: spec.kind,
+            idx: spec.itemIndex,
+            ki: spec.kindIndex,
+            planned: {
+              x: spec.x,
+              y: spec.y,
+              w: spec.w,
+              h: spec.h,
+              fontSize: spec.fontSize,
+              start: spec.start || null,
+              end: spec.end || null,
+            },
+            afterSize: afterSize,
+            afterPos: afterPos,
+          },
+          timestamp: Date.now(),
+        }) + "\n";
+      app.doShellScript(
+        "printf %s " +
+          JSON.stringify(line) +
+          " >> " +
+          JSON.stringify("/Users/anyhowclick/Desktop/work/obed-edom/.cursor/debug-6310d1.log")
+      );
+    } catch (eLog) {}
+  }
+  // #endregion
   return a;
 }
 
@@ -537,10 +609,87 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
           "slide " + slideNo + " " + (spec.kind || "item") + "[" + spec.kindIndex + "] missing"
         );
       }
+      // #region agent log
+      if (debugInteresting(spec)) {
+        try {
+          const app = Application.currentApplication();
+          app.includeStandardAdditions = true;
+          const line =
+            JSON.stringify({
+              sessionId: "6310d1",
+              runId: "pre-fix",
+              hypothesisId: spec.kind === "line" ? "H22" : spec.kind === "group" ? "H20" : "H24",
+              location: "remap_keynote.js:applyTransforms",
+              message: "getItem missed",
+              data: {
+                role: spec.role,
+                kind: spec.kind,
+                idx: spec.itemIndex,
+                ki: spec.kindIndex,
+                positionOnly: !!positionOnly,
+                planned: { x: spec.x, y: spec.y, w: spec.w, h: spec.h, start: spec.start || null, end: spec.end || null },
+              },
+              timestamp: Date.now(),
+            }) + "\n";
+          app.doShellScript(
+            "printf %s " +
+              JSON.stringify(line) +
+              " >> " +
+              JSON.stringify("/Users/anyhowclick/Desktop/work/obed-edom/.cursor/debug-6310d1.log")
+          );
+        } catch (eMiss) {}
+      }
+      // #endregion
       continue;
     }
     if (applyGeom(obj, spec, positionOnly)) {
       applied += 1;
+      // #region agent log
+      if (debugInteresting(spec)) {
+        try {
+          const got = {
+            w: Number(obj.width()),
+            h: Number(obj.height()),
+            pos: xyOf(obj),
+            ends: lineEnds(obj),
+          };
+          const app = Application.currentApplication();
+          app.includeStandardAdditions = true;
+          const line =
+            JSON.stringify({
+              sessionId: "6310d1",
+              runId: "pre-fix",
+              hypothesisId: spec.kind === "line" ? "H22" : spec.kind === "group" ? "H23" : "H19",
+              location: "remap_keynote.js:applyTransforms",
+              message: "readback after geom pass",
+              data: {
+                role: spec.role,
+                kind: spec.kind,
+                idx: spec.itemIndex,
+                ki: spec.kindIndex,
+                positionOnly: !!positionOnly,
+                planned: {
+                  x: spec.x,
+                  y: spec.y,
+                  w: spec.w,
+                  h: spec.h,
+                  fontSize: spec.fontSize,
+                  start: spec.start || null,
+                  end: spec.end || null,
+                },
+                got: got,
+              },
+              timestamp: Date.now(),
+            }) + "\n";
+          app.doShellScript(
+            "printf %s " +
+              JSON.stringify(line) +
+              " >> " +
+              JSON.stringify("/Users/anyhowclick/Desktop/work/obed-edom/.cursor/debug-6310d1.log")
+          );
+        } catch (eLog) {}
+      }
+      // #endregion
     } else {
       missed += 1;
       if (missReasons.length < 8) {

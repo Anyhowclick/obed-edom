@@ -16,6 +16,35 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
+# region agent log
+def _dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    import json
+    import time
+
+    try:
+        with open(
+            "/Users/anyhowclick/Desktop/work/obed-edom/.cursor/debug-6310d1.log",
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "sessionId": "6310d1",
+                        "runId": "post-fix",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+# endregion
+
 CG_WIDTH = 1920
 CG_HEIGHT = 1080
 MIN_PIN_PX = 28.0
@@ -168,6 +197,17 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 
 def item_rect(item: dict) -> Rect:
+    start = item.get("start")
+    end = item.get("end")
+    if (
+        isinstance(start, (list, tuple))
+        and isinstance(end, (list, tuple))
+        and len(start) >= 2
+        and len(end) >= 2
+    ):
+        x0, y0 = _f(start[0]), _f(start[1])
+        x1, y1 = _f(end[0]), _f(end[1])
+        return Rect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
     return Rect(_f(item.get("x")), _f(item.get("y")), _f(item.get("w")), _f(item.get("h")))
 
 
@@ -341,9 +381,13 @@ def is_visible(item: dict, slide_w: float, slide_h: float) -> bool:
     if slide_w <= 0 or slide_h <= 0:
         return True
     rect = item_rect(item)
-    if rect.w <= 0 or rect.h <= 0:
+    # Keynote reports a 90° line as width=length, height=0 (or the reverse after
+    # we rebuild the box from start/end). Zero thickness is still a visible stroke.
+    if rect.w <= 0 and rect.h <= 0:
         return False
-    return rect.x < slide_w and rect.y < slide_h and rect.x + rect.w > 0 and rect.y + rect.h > 0
+    w = rect.w if rect.w > 0 else 1.0
+    h = rect.h if rect.h > 0 else 1.0
+    return rect.x < slide_w and rect.y < slide_h and rect.x + w > 0 and rect.y + h > 0
 
 
 def is_backdrop(item: dict, slide_w: float, slide_h: float) -> bool:
@@ -1457,25 +1501,64 @@ def _affine_for_item(item: dict, groups: list[tuple[Affine, Rect]]) -> Affine | 
 
 
 def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
-    """Recipe groups plus a title-plate cluster so the badge stays with Global Missions."""
-    groups = list(_groups_from_recipe(recipe))
+    """Layout affines from the recipe. The badge is not one of them."""
+    return list(_groups_from_recipe(recipe))
+
+
+def _title_badge(
+    slide: dict, recipe: dict[str, Any]
+) -> tuple[Affine | None, Rect | None, set[int]]:
+    """Globe, plate and title text that share the title's vertical centre.
+
+    Returns identity ids (`id(item)`) so membership does not collide when two
+    inspect records share `index` 0, which tests and some payloads do.
+    """
     title = next((it for it in slide.get("items") or [] if is_title_item(it)), None)
     dst = _rect_from_dict(recipe.get("titleDst"))
     if title is None or dst is None or dst.w <= 0:
-        return groups
+        return None, None, set()
     src = item_rect(title)
-    cluster_items = [title]
+    members = [title]
+    ids: set[int] = {id(title)}
     for item in slide.get("items") or []:
         if item is title or is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
             continue
-        if rects_near(item_rect(item), src, TITLE_NEAR_PAD):
-            cluster_items.append(item)
-    cluster = union_rect(cluster_items) or src
-    groups.append((affine_from_rects(src, dst), cluster))
-    return groups
+        cx, cy = item_center(item)
+        if point_in_rect(cx, cy, src, TITLE_NEAR_PAD):
+            members.append(item)
+            ids.add(id(item))
+    aff = affine_from_rects(src, dst)
+    # region agent log
+    _dbg(
+        "H18",
+        "map_remap.py:_title_badge",
+        "title cluster members",
+        {
+            "title": {
+                "text": (title.get("text") or "")[:40],
+                "rect": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
+            },
+            "titleDst": {"x": round(dst.x, 1), "y": round(dst.y, 1), "w": round(dst.w, 1), "h": round(dst.h, 1)},
+            "members": [
+                {
+                    "kind": it.get("kind"),
+                    "idx": it.get("index"),
+                    "x": round(_f(it.get("x")), 1),
+                    "y": round(_f(it.get("y")), 1),
+                    "w": round(_f(it.get("w")), 1),
+                    "h": round(_f(it.get("h")), 1),
+                }
+                for it in members
+            ],
+        },
+    )
+    # endregion
+    return aff, src, ids
 
 
 def classify_item(item: dict, map_src: Rect | None = None) -> str:
+    if (item.get("kind") or "") == "line":
+        return "line"
     if is_map_item(item, map_src):
         return "map"
     if is_pin_item(item, map_src):
@@ -1509,6 +1592,14 @@ def _style_text_box(
     dst_size = _f(style.get("size")) if style else 0.0
     font_name = (str(style.get("font") or "") or None) if style else None
     colour = norm_rgb(style.get("color")) if style else None
+    snippet = (item.get("text") or "").replace("\n", " ")[:48]
+    interesting = bool(
+        re.search(
+            r"global|missions|oct|183|269|total|churches|countries",
+            snippet,
+            re.I,
+        )
+    )
     if style and dst_size > 0 and wall_font > 0:
         ratio = dst_size / wall_font
         if aff is not None:
@@ -1516,13 +1607,67 @@ def _style_text_box(
             mapped = Rect(origin.x, origin.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
         else:
             mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+        # region agent log
+        if interesting:
+            _dbg(
+                "H15",
+                "map_remap.py:_style_text_box",
+                "styled branch",
+                {
+                    "text": snippet,
+                    "path": "styled",
+                    "affS": round(aff.s, 4) if aff else None,
+                    "ratio": round(ratio, 4),
+                    "wallFont": round(wall_font, 2),
+                    "dstSize": round(dst_size, 2),
+                    "src": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
+                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
+                },
+            )
+        # endregion
         return mapped, dst_size, font_name, colour
     if aff is not None:
         origin = aff.apply_rect(Rect(src.x, src.y, 1.0, 1.0))
         scale = min(aff.s, TEXT_DOWN_SCALE)
         mapped = Rect(origin.x, origin.y, max(8.0, src.w * scale), max(8.0, src.h * scale))
         font = max(8.0, wall_font * scale) if wall_font else None
+        # region agent log
+        if interesting:
+            _dbg(
+                "H15",
+                "map_remap.py:_style_text_box",
+                "clamp branch",
+                {
+                    "text": snippet,
+                    "path": "clamp",
+                    "affS": round(aff.s, 4),
+                    "clamp": TEXT_DOWN_SCALE,
+                    "scaleUsed": round(scale, 4),
+                    "clampBound": aff.s > TEXT_DOWN_SCALE,
+                    "wallFont": round(wall_font, 2),
+                    "fontOut": round(font, 2) if font else None,
+                    "src": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
+                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
+                    "hadStyle": bool(style),
+                },
+            )
+        # endregion
         return mapped, font, font_name, colour
+    # region agent log
+    if interesting:
+        _dbg(
+            "H15",
+            "map_remap.py:_style_text_box",
+            "passthrough branch",
+            {
+                "text": snippet,
+                "path": "passthrough",
+                "hadStyle": bool(style),
+                "wallFont": round(wall_font, 2),
+                "src": {"x": round(src.x, 1), "y": round(src.y, 1), "w": round(src.w, 1), "h": round(src.h, 1)},
+            },
+        )
+    # endregion
     return src, (wall_font or None), font_name, colour
 
 
@@ -1553,6 +1698,7 @@ def plan_slide_transforms(
     free_text_keys: set[tuple[str, int]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
+    title_aff, title_src, title_ids = _title_badge(slide, recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     if not groups and (map_src is None or map_dst is None):
@@ -1575,6 +1721,9 @@ def plan_slide_transforms(
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
+    # region agent log
+    _text_rows: list[dict[str, Any]] = []
+    # endregion
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
@@ -1607,6 +1756,8 @@ def plan_slide_transforms(
         # 9 of 10 pins, because they were 700px from the group that happened to
         # be listed first.
         aff, cluster = _group_for_item(item, groups)
+        if title_aff is not None and id(item) in title_ids:
+            aff, cluster = title_aff, title_src
         if cluster is None:
             cluster = map_src
         role = classify_item(item, cluster)
@@ -1642,6 +1793,20 @@ def plan_slide_transforms(
             dst = _rect_from_dict(recipe.get("titleDst"))
             if dst is None:
                 continue
+            # region agent log
+            _src = item_rect(item)
+            _text_rows.append(
+                {
+                    "path": "title",
+                    "role": "title",
+                    "text": (item.get("text") or "").replace("\n", " ")[:48],
+                    "src": {"x": round(_src.x, 1), "y": round(_src.y, 1), "w": round(_src.w, 1), "h": round(_src.h, 1)},
+                    "mapped": {"x": round(dst.x, 1), "y": round(dst.y, 1), "w": round(dst.w, 1), "h": round(dst.h, 1)},
+                    "affS": round(aff.s, 4) if aff else None,
+                    "font": recipe.get("titleFontSize"),
+                }
+            )
+            # endregion
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1676,8 +1841,19 @@ def plan_slide_transforms(
                 font_name, colour = None, None
             if dst is not None:
                 mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
-            if dst is not None:
-                mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
+            # region agent log
+            _text_rows.append(
+                {
+                    "path": "listDst",
+                    "role": "list",
+                    "text": (item.get("text") or "").replace("\n", " ")[:48],
+                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
+                    "snapped": dst is not None,
+                    "listCount": list_count,
+                    "style": (style or {}).get("size") if style else None,
+                }
+            )
+            # endregion
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1740,6 +1916,28 @@ def plan_slide_transforms(
         if role in {"list", "other"} and (item.get("kind") or "") == "text":
             style = match_character_style(item, styles)
             mapped, font, font_name, colour = _style_text_box(item, aff, style)
+            # region agent log
+            _text_rows.append(
+                {
+                    "path": "style_text",
+                    "role": role,
+                    "text": (item.get("text") or "").replace("\n", " ")[:48],
+                    "src": {
+                        "x": round(_f(item.get("x")), 1),
+                        "y": round(_f(item.get("y")), 1),
+                        "w": round(_f(item.get("w")), 1),
+                        "h": round(_f(item.get("h")), 1),
+                    },
+                    "mapped": {"x": round(mapped.x, 1), "y": round(mapped.y, 1), "w": round(mapped.w, 1), "h": round(mapped.h, 1)},
+                    "affS": round(aff.s, 4) if aff else None,
+                    "styleMatched": bool(style),
+                    "styleSize": _f(style.get("size")) if style else None,
+                    "wallFont": _f(item.get("size")),
+                    "fontOut": font,
+                    "fontName": font_name,
+                }
+            )
+            # endregion
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1764,6 +1962,47 @@ def plan_slide_transforms(
             mapped = aff.apply_rect(item_rect(item))
         else:
             continue
+        # Left-column infographics sit beside the wall map, so the map affine
+        # throws them off the CG's left edge (x≈-900). Shift them onto the
+        # canvas rather than leaving them invisible or parking them on the badge.
+        # Setting the affine-scaled w/h on a group does not scale its children:
+        # Keynote keeps wall-sized text/logo/rules, so the box clips (missing
+        # CHC logo, short inner rule, truncated date, overflow +). Restore the
+        # wall size and only move the group. Pins stay affine-scaled.
+        if str(item.get("kind") or "") == "group" and role == "other":
+            src_box = item_rect(item)
+            mapped = Rect(
+                16.0 if mapped.x < 16 else mapped.x,
+                mapped.y,
+                src_box.w,
+                src_box.h,
+            )
+        # region agent log
+        if str(item.get("kind") or "") == "group":
+            _dbg(
+                "H18",
+                "map_remap.py:plan_slide_transforms",
+                "group placement",
+                {
+                    "idx": item_index,
+                    "src": {
+                        "x": round(_f(item.get("x")), 1),
+                        "y": round(_f(item.get("y")), 1),
+                        "w": round(_f(item.get("w")), 1),
+                        "h": round(_f(item.get("h")), 1),
+                    },
+                    "mapped": {
+                        "x": round(mapped.x, 1),
+                        "y": round(mapped.y, 1),
+                        "w": round(mapped.w, 1),
+                        "h": round(mapped.h, 1),
+                    },
+                    "affS": round(aff.s, 4) if aff else None,
+                    "role": role,
+                    "runId": "post-fix",
+                },
+            )
+        # endregion
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -1778,6 +2017,52 @@ def plan_slide_transforms(
                     end = (aff.s * _f(x1) + aff.tx, aff.s * _f(y1) + aff.ty)
                 elif map_src and map_dst:
                     end = map_point(_f(x1), _f(y1), map_src, map_dst)
+        # The map affine parks gutter meridians at x≈-386. Leaving them unplanned
+        # used to keep the 7680→1920 leftover (~164px). Translate back onto the
+        # x the document scale already chose (on the map) and keep affine y/length.
+        dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+        if (
+            start is not None
+            and end is not None
+            and (max(start[0], end[0]) <= 0 or min(start[0], end[0]) >= dest_w)
+        ):
+            doc_s = (dest_w / wall_w) if wall_w > 0 else 1.0
+            x_keep = _f((item.get("start") or [item.get("x")])[0]) * doc_s
+            start = (x_keep, start[1])
+            end = (x_keep, end[1])
+            mapped = Rect(
+                min(start[0], end[0]),
+                min(start[1], end[1]),
+                abs(end[0] - start[0]),
+                abs(end[1] - start[1]),
+            )
+        # region agent log
+        if role == "line":
+            _dbg(
+                "H22",
+                "map_remap.py:plan_slide_transforms",
+                "line placement",
+                {
+                    "idx": item_index,
+                    "src": {
+                        "x": round(_f(item.get("x")), 1),
+                        "y": round(_f(item.get("y")), 1),
+                        "w": round(_f(item.get("w")), 1),
+                        "h": round(_f(item.get("h")), 1),
+                    },
+                    "mapped": {
+                        "x": round(mapped.x, 1),
+                        "y": round(mapped.y, 1),
+                        "w": round(mapped.w, 1),
+                        "h": round(mapped.h, 1),
+                    },
+                    "start": [round(start[0], 1), round(start[1], 1)] if start else None,
+                    "end": [round(end[0], 1), round(end[1], 1)] if end else None,
+                    "affS": round(aff.s, 4) if aff else None,
+                    "runId": "post-fix",
+                },
+            )
+        # endregion
         out.append(
             ItemTransform(
                 slide_number=number,
@@ -1808,6 +2093,56 @@ def plan_slide_transforms(
             -(t.w * t.h) if t.role == "map" else 0.0,
         )
     )
+    # region agent log
+    if number == 4:
+        text_final = [
+            {
+                "role": t.role,
+                "kind": t.kind,
+                "x": round(t.x, 1),
+                "y": round(t.y, 1),
+                "w": round(t.w, 1),
+                "h": round(t.h, 1),
+                "font": t.font_size,
+                "idx": t.item_index,
+            }
+            for t in out
+            if t.kind == "text" or t.role in {"title", "list"}
+        ]
+        extras = [
+            {
+                "role": t.role,
+                "kind": t.kind,
+                "idx": t.item_index,
+                "ki": t.kind_index,
+                "x": round(t.x, 1),
+                "y": round(t.y, 1),
+                "w": round(t.w, 1),
+                "h": round(t.h, 1),
+                "start": [round(t.start[0], 1), round(t.start[1], 1)] if t.start else None,
+                "end": [round(t.end[0], 1), round(t.end[1], 1)] if t.end else None,
+                "payloadWH": t.role in {"map", "list", "pin", "title", "other"},
+            }
+            for t in out
+            if t.kind in {"line", "group"} or (t.kind == "image" and t.item_index == 3)
+        ]
+        _dbg(
+            "H22",
+            "map_remap.py:plan_slide_transforms",
+            "slide 4 text plan",
+            {
+                "include_lists": include_lists,
+                "pack_lists": pack_lists,
+                "list_count": list_count,
+                "titleDst": recipe.get("titleDst"),
+                "titleFontSize": recipe.get("titleFontSize"),
+                "styleCount": len(styles),
+                "rows": _text_rows,
+                "final": text_final,
+                "extras": extras,
+            },
+        )
+    # endregion
     return out
 
 
@@ -2106,7 +2441,10 @@ def plan_slide_reuses(
                 "from": from_n,
                 "persist": persist_n,
                 "remove": [_ref(it) for it in remove],
-                "strip": [_ref(it) for it in persist],
+                # The delta is pasted with a select-all on the original slide, so
+                # everything the donor copy already carries has to go first — the
+                # persisting objects, and the mutated ones the donor supplies too.
+                "strip": [_ref(it) for it in persist] + [_ref(it) for _donor, it in mutate],
                 "stripBuilds": strip_builds,
                 "add": add_specs,
                 "mutate": mutate_specs,

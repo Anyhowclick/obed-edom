@@ -444,6 +444,165 @@ def test_base_map_is_applied_before_the_overlays_that_sit_on_it():
     assert roles[0][1] > roles[1][1]
 
 
+def test_title_cluster_does_not_swallow_stats_groups():
+    """The stats infographic sits 4px under the badge on the wall. A padded
+    bbox test used to give it the title affine, landing it on the badge."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {
+                "s": 0.8547,
+                "tx": -2597.5,
+                "ty": 28.3,
+                "src": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+                "dst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+            }
+        ],
+        "titleDst": {"x": 135.0, "y": 67.0, "w": 271.0, "h": 64.0},
+        "titleFontSize": 50.0,
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(
+                index=0,
+                kindIndex=0,
+                kind="text",
+                text="Global Missions",
+                x=2147,
+                y=52,
+                w=537,
+                h=124,
+                size=100,
+            ),
+            _item(
+                index=3,
+                kindIndex=0,
+                kind="image",
+                fileName="pasted-image.pdf",
+                x=1992,
+                y=52,
+                w=124,
+                h=124,
+            ),
+            _item(index=24, kindIndex=0, kind="shape", x=1953, y=28, w=767, h=173),
+            _item(
+                index=4,
+                kindIndex=1,
+                kind="image",
+                fileName="pasted-image.pdf",
+                x=3052,
+                y=-12,
+                w=1248,
+                h=771,
+            ),
+            _item(index=163, kindIndex=0, kind="group", x=1993, y=172, w=537, h=271),
+        ],
+    }
+    out = plan_slide_transforms(slide, recipe)
+    title = next(t for t in out if t.role == "title")
+    assert abs(title.x - 135) < 1
+    globe = next(t for t in out if t.kind == "image" and t.item_index == 3)
+    assert 0 < globe.x < 200
+    stats = next(t for t in out if t.kind == "group")
+    # Map affine for position, wall size so grouped children (logo, rules, type)
+    # still fit. Affine-scaled w/h clips them.
+    assert abs(stats.w - 537) < 1
+    assert abs(stats.h - 271) < 1
+    assert stats.y > title.y + title.h + 20
+    assert stats.x >= 0
+    plate = next(t for t in out if t.kind == "shape")
+    assert 0 < plate.x < 200
+
+
+def _missions_map_recipe() -> dict:
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {
+                "s": 0.8547,
+                "tx": -2597.5,
+                "ty": 28.3,
+                "src": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+                "dst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+            }
+        ],
+        "titleDst": {"x": 135.0, "y": 67.0, "w": 271.0, "h": 64.0},
+        "titleFontSize": 50.0,
+    }
+
+
+def test_zero_thickness_line_is_visible_and_planned():
+    """Inspect reports a 90° meridian as h=0 / w=length. Skipping those left
+    the 7680→1920 leftover (~164px) on the map."""
+    from obed_edom.map_remap import is_visible
+
+    line = _item(
+        index=171,
+        kindIndex=0,
+        kind="line",
+        x=2587,
+        y=223,
+        w=658,
+        h=0,
+        start=[2587, 881],
+        end=[2587, 223],
+    )
+    assert is_visible(line, 7680, 1080)
+    slide = {
+        "number": 4,
+        "items": [
+            _item(
+                index=4,
+                kindIndex=1,
+                kind="image",
+                fileName="pasted-image.pdf",
+                x=3052,
+                y=-12,
+                w=1248,
+                h=771,
+            ),
+            line,
+        ],
+    }
+    out = plan_slide_transforms(slide, _missions_map_recipe(), wall_size=(7680, 1080))
+    planned = next(t for t in out if t.kind == "line")
+    assert planned.start is not None and planned.end is not None
+    assert planned.x >= 0
+    assert abs(planned.end[1] - planned.start[1]) > 400
+    assert "w" not in planned.as_dict()
+
+
+def test_date_group_keeps_wall_width():
+    recipe = _missions_map_recipe()
+    slide = {
+        "number": 4,
+        "items": [
+            _item(
+                index=4,
+                kindIndex=1,
+                kind="image",
+                fileName="pasted-image.pdf",
+                x=3052,
+                y=-12,
+                w=1248,
+                h=771,
+            ),
+            _item(index=166, kindIndex=3, kind="group", x=4438, y=21, w=575, h=76),
+        ],
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    date = next(t for t in out if t.kind == "group")
+    assert abs(date.w - 575) < 1
+    assert abs(date.h - 76) < 1
+
+
 def test_same_size_overlays_keep_deck_order_because_z_is_unreadable():
     """Keynote reports no stacking (slide.iWorkItems() is empty), so equal-area
     map layers can only fall back to the order Keynote listed them in. Getting
@@ -954,3 +1113,43 @@ def test_reuse_strips_builds_missing_on_dest():
     jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
     assert jobs[5]["from"] == 2
     assert any(r["kind"] == "shape" for r in jobs[5]["stripBuilds"])
+
+
+def test_reuse_strips_mutated_text_before_pasting_the_delta():
+    """A slide with both an add and a mutate pastes with select-all, so the
+    mutated text has to be stripped from the original or the donor copy ends up
+    carrying two of it."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    wall = {
+        "slides": [
+            {
+                "number": 2,
+                "items": [
+                    map_img,
+                    *pins,
+                    _item(kind="text", text="183 CHC Churches", x=262, y=9, w=215, h=58, size=42),
+                ],
+            },
+            {
+                "number": 3,
+                "items": [
+                    dict(map_img),
+                    *[dict(p) for p in pins],
+                    # Same words, new geometry -> mutate the donor's copy.
+                    _item(kind="text", text="183 CHC Churches", x=800, y=400, w=180, h=40, size=30),
+                    # Brand new words -> pasted across as the delta.
+                    _item(kind="text", text="26 Total", x=300, y=500, w=200, h=60, size=42),
+                ],
+            },
+        ]
+    }
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
+    assert [a.get("matchText") for a in job["add"]] == ["26 Total"]
+    assert [m.get("matchText") for m in job["mutate"]] == ["183 CHC Churches"]
+    # The mutated text is the slide's first text item, and the donor copy
+    # already supplies it, so the select-all must not pick it up again.
+    stripped = {(r["kind"], r["kindIndex"]) for r in job["strip"]}
+    assert ("text", 0) in stripped
