@@ -1046,3 +1046,35 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .plan-key.role-line { color: rgba(255, 255, 255, 0.95); }
 .plan-key.role-title { color: rgba(255, 170, 255, 0.95); }
 .plan-key.role-hide { color: rgba(255, 90, 90, 0.95); }
+
+/* One object, cut from the wall thumbnail and drawn where the plan puts it. The
+   wall image underneath is hidden in this mode: drawn over the crop, every object
+   would show twice — once where the affine put it, once where the plan does. */
+.plan-piece {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+.plan-piece > img { position: absolute; display: block; max-width: none; }
+
+.plan-modes {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+.plan-modes button {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font: inherit;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.plan-modes button.current {
+  border-color: rgba(255, 255, 255, 0.5);
+  color: #fff;
+}

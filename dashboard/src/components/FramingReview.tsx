@@ -27,7 +27,18 @@ export type PlannedRect = {
   w: number;
   h: number;
   text?: string;
+  /** The part of the wall this object occupies, for cutting it out. */
+  sx?: number;
+  sy?: number;
+  sw?: number;
+  sh?: number;
 };
+
+/** crop: one affine over the whole wall. boxes: the same, outlined per object.
+ *  composite: each object cut from the wall and drawn where it lands — which
+ *  replaces the crop rather than layering on it, because otherwise every object
+ *  shows twice, once where the affine put it and once where the plan puts it. */
+export type PlanView = "crop" | "boxes" | "composite";
 
 export type FramingCandidate = {
   templateSlide: number;
@@ -150,7 +161,9 @@ function CropPreview({
   src,
   transform,
   rects,
+  view = "boxes",
   wallWidth,
+  wallHeight,
   destWidth,
   destHeight,
   width,
@@ -159,7 +172,9 @@ function CropPreview({
   src?: string | null;
   transform?: FramingTransform | null;
   rects?: PlannedRect[];
+  view?: PlanView;
   wallWidth: number;
+  wallHeight: number;
   destWidth: number;
   destHeight: number;
   width: number;
@@ -167,9 +182,10 @@ function CropPreview({
 }) {
   const k = width / destWidth;
   const height = Math.round(destHeight * k);
+  const composite = view === "composite" && !!src;
   return (
     <div className="crop-preview" style={{ width, height }} title={title}>
-      {src && transform ? (
+      {src && transform && !composite ? (
         <img
           src={src}
           alt=""
@@ -179,23 +195,51 @@ function CropPreview({
             width: wallWidth * transform.s * k,
           }}
         />
-      ) : (
+      ) : composite ? null : (
         <span className="crop-empty">no preview</span>
       )}
-      {(rects || []).map((rect, i) => (
-        <span
-          key={i}
-          className={`plan-rect role-${rect.role}`}
-          title={`${rect.role} · ${rect.kind}${rect.text ? ` · ${rect.text}` : ""}`}
-          style={{
-            left: rect.x * k,
-            top: rect.y * k,
-            // A rule inspects as zero-width, so give every box a hairline.
-            width: Math.max(rect.w * k, 1),
-            height: Math.max(rect.h * k, 1),
-          }}
-        />
-      ))}
+      {composite &&
+        (rects || []).map((rect, i) => {
+          // A hidden object is drawn by not drawing it — that is the whole point
+          // of showing this instead of the crop.
+          if (rect.role === "hide") return null;
+          if (!rect.sw || !rect.sh || rect.w <= 0 || rect.h <= 0) return null;
+          const zx = rect.w / rect.sw;
+          const zy = rect.h / rect.sh;
+          return (
+            <span
+              key={i}
+              className="plan-piece"
+              style={{ left: rect.x * k, top: rect.y * k, width: rect.w * k, height: rect.h * k }}
+            >
+              <img
+                src={src!}
+                alt=""
+                style={{
+                  left: -(rect.sx || 0) * zx * k,
+                  top: -(rect.sy || 0) * zy * k,
+                  width: wallWidth * zx * k,
+                  height: wallHeight * zy * k,
+                }}
+              />
+            </span>
+          );
+        })}
+      {view === "boxes" &&
+        (rects || []).map((rect, i) => (
+          <span
+            key={i}
+            className={`plan-rect role-${rect.role}`}
+            title={`${rect.role} · ${rect.kind}${rect.text ? ` · ${rect.text}` : ""}`}
+            style={{
+              left: rect.x * k,
+              top: rect.y * k,
+              // A rule inspects as zero-width, so give every box a hairline.
+              width: Math.max(rect.w * k, 1),
+              height: Math.max(rect.h * k, 1),
+            }}
+          />
+        ))}
     </div>
   );
 }
@@ -262,6 +306,7 @@ export function FramingReview({
 }) {
   const pages = proposal.pages || [];
   const wallWidth = proposal.wallWidth || 7680;
+  const wallHeight = proposal.wallHeight || 1080;
   const destWidth = proposal.destWidth || 1920;
   const destHeight = proposal.destHeight || 1080;
 
@@ -276,7 +321,7 @@ export function FramingReview({
   const [previewing, setPreviewing] = useState<Record<number, number>>({});
   // On by default: the whole point of opening a page is to see what the run does
   // to it, and the boxes are the only part of that the crop cannot show.
-  const [showPlan, setShowPlan] = useState(true);
+  const [planView, setPlanView] = useState<PlanView>("boxes");
   // Pins outnumber everything else forty to one on a report card, so they start
   // hidden: the boxes exist to show the objects a crop cannot explain.
   const [hiddenRoles, setHiddenRoles] = useState<Set<string>>(new Set(["pin"]));
@@ -541,6 +586,7 @@ export function FramingReview({
                       src={thumbUrl(page)}
                       transform={transformFor(page, chosenSlide(page, decisions))}
                       wallWidth={wallWidth}
+                      wallHeight={wallHeight}
                       destWidth={destWidth}
                       destHeight={destHeight}
                       width={104}
@@ -626,30 +672,45 @@ export function FramingReview({
                           <div>
                             <span className="framing-label">
                               After — template slide {preview ?? "—"}
-                              <label className="plan-toggle">
-                                <input
-                                  type="checkbox"
-                                  checked={showPlan}
-                                  onChange={(event) => setShowPlan(event.target.checked)}
-                                />
-                                where objects land
-                              </label>
+                              <span className="plan-modes">
+                                {(
+                                  [
+                                    ["crop", "crop"],
+                                    ["boxes", "where objects land"],
+                                    ["composite", "as it will look"],
+                                  ] as [PlanView, string][]
+                                ).map(([mode, label]) => (
+                                  <button
+                                    key={mode}
+                                    type="button"
+                                    className={planView === mode ? "current" : ""}
+                                    aria-pressed={planView === mode}
+                                    onClick={() => setPlanView(mode)}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </span>
                             </span>
                             <CropPreview
                               src={thumbUrl(page)}
                               transform={transformFor(page, preview)}
+                              view={planView}
                               rects={
-                                showPlan
-                                  ? rectsFor(page, preview).filter((r) => !hiddenRoles.has(r.role))
-                                  : undefined
+                                planView === "crop"
+                                  ? undefined
+                                  : planView === "composite"
+                                    ? rectsFor(page, preview)
+                                    : rectsFor(page, preview).filter((r) => !hiddenRoles.has(r.role))
                               }
                               wallWidth={wallWidth}
+                              wallHeight={wallHeight}
                               destWidth={destWidth}
                               destHeight={destHeight}
                               width={440}
                               title={`Slide ${page.slide} as template slide ${preview}`}
                             />
-                            {showPlan && (
+                            {planView === "boxes" && (
                               <PlanLegend
                                 rects={rectsFor(page, preview)}
                                 hidden={hiddenRoles}
@@ -691,6 +752,7 @@ export function FramingReview({
                                   src={thumbUrl(page)}
                                   transform={candidate.transform}
                                   wallWidth={wallWidth}
+                                  wallHeight={wallHeight}
                                   destWidth={destWidth}
                                   destHeight={destHeight}
                                   width={104}

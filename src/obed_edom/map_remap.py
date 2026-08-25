@@ -115,6 +115,10 @@ class ItemTransform:
     opacity: float | None = None
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
+    # Where the object came from on the wall. JXA has no use for it — it moves the
+    # object that is already there — but a preview that wants to draw the object
+    # rather than outline it has to know which part of the wall to cut out.
+    src: Rect | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -2003,6 +2007,7 @@ def plan_slide_transforms(
                 end=end,
                 role=role,
                 kind_index=kind_index,
+                src=item_rect(item),
             )
         )
     if pack_lists:

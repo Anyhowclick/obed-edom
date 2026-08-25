@@ -1457,3 +1457,64 @@ def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path,
         export_dir=previews, validate=True,
     )
     assert calls == ["inspect"]
+
+
+def test_planned_rects_carry_the_wall_source_to_cut_from():
+    """A composite preview draws each object by cutting it out of the wall
+    thumbnail, so the destination rect alone is not enough — it needs to know
+    which part of the wall the object occupied."""
+    from obed_edom.framing import planned_rects
+
+    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    slide = {
+        "number": 4,
+        "items": [
+            map_img,
+            _item(kind="image", fileName="pasted-image.pdf", x=1992, y=52, w=124, h=124),
+            _item(kind="shape", x=1953, y=28, w=767, h=173),
+            _item(
+                kind="text",
+                text="Global Missions",
+                x=2147,
+                y=52,
+                w=537,
+                h=124,
+                size=100,
+                font="AmplitudeCond-Medium",
+            ),
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 12,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1067, h=659),
+                    _item(kind="image", fileName="pasted-image.pdf", x=31, y=59, w=80, h=80),
+                    _item(kind="shape", x=17, y=37, w=411, h=123),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="AmplitudeCond-Medium",
+                    ),
+                ],
+            }
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, template)
+    rects = planned_rects(slide, recipe, wall_size=(7680, 1080), template=template)
+
+    art = next(r for r in rects if r["role"] == "map" and r["w"] == 1067)
+    assert (art["sx"], art["sy"], art["sw"], art["sh"]) == (3052, -12, 1248, 771)
+    # The badge logo moves to its template slot, so its source is the only thing
+    # that says which pixels to draw there.
+    logo = next(r for r in rects if r["kind"] == "image" and r["w"] == 80)
+    assert (logo["sx"], logo["sy"], logo["sw"], logo["sh"]) == (1992, 52, 124, 124)

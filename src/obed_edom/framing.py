@@ -355,6 +355,13 @@ def planned_rects(
         }
         if spec.match_text:
             rect["text"] = spec.match_text[:40]
+        # The part of the wall this object occupies, so a preview can cut it out
+        # and draw it where it lands instead of only outlining the destination.
+        if spec.src is not None and spec.src.w > 0 and spec.src.h > 0:
+            rect["sx"] = round(spec.src.x)
+            rect["sy"] = round(spec.src.y)
+            rect["sw"] = round(spec.src.w)
+            rect["sh"] = round(spec.src.h)
         out.append(rect)
     return out
 
