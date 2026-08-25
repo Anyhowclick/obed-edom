@@ -8,7 +8,7 @@ from pathlib import Path
 
 from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
-from obed_edom.paths import find_repo_root, select_deck_template
+from obed_edom.paths import output_root, select_deck_template
 from obed_edom.slide_map import load_masters
 
 
@@ -38,8 +38,7 @@ def _stem(docx: Path) -> str:
 
 
 def output_dir_for(docx: Path, root: Path | None = None) -> Path:
-    root = root or find_repo_root()
-    out = root / "output" / _stem(docx)
+    out = (root / "output" if root else output_root()) / _stem(docx)
     out.mkdir(parents=True, exist_ok=True)
     return out
 

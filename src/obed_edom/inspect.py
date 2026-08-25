@@ -10,7 +10,7 @@ from typing import Any
 
 from obed_edom import keynote_app
 from obed_edom.map_remap import slides_for_plan
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import output_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
 
@@ -339,6 +339,6 @@ def _looks_highlight(color: list | None) -> bool:
 
 
 def diff_work_dir(job_id: str) -> Path:
-    root = find_repo_root() / "output" / ".diff" / job_id
+    root = output_root() / ".diff" / job_id
     root.mkdir(parents=True, exist_ok=True)
     return root

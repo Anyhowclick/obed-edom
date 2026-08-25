@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import threading
@@ -13,14 +12,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from obed_edom.inspect import preview_media
-from obed_edom.paths import find_repo_root
+# Aliased: `output_root` is also a parameter name in this module.
+from obed_edom.paths import output_root as default_output_root
 from obed_edom.validate import flag_dict
-
-
-def default_output_root() -> Path:
-    """Where saved runs live. Overridable so a test run cannot write into the real one."""
-    override = os.environ.get("OBED_EDOM_OUTPUT_ROOT")
-    return Path(override).expanduser() if override else find_repo_root() / "output"
 
 
 @dataclass

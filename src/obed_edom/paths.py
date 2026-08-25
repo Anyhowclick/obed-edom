@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -10,6 +11,18 @@ def find_repo_root() -> Path:
         if (path / "pyproject.toml").is_file() and (path / "src" / "obed_edom").is_dir():
             return path
     return Path.cwd()
+
+
+def output_root() -> Path:
+    """Where runs write their results.
+
+    Overridable through `OBED_EDOM_OUTPUT_ROOT` so a test run cannot write into
+    the real one. Every caller has to come through here: pointing only the job
+    runner at a temp dir still left the suite dropping cued documents, findings
+    PDFs and generator folders into the operator's output.
+    """
+    override = (os.environ.get("OBED_EDOM_OUTPUT_ROOT") or "").strip()
+    return Path(override).expanduser() if override else find_repo_root() / "output"
 
 
 def template_path(relative: str) -> Path:

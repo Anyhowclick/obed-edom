@@ -6,7 +6,7 @@ import webbrowser
 from pathlib import Path
 
 from obed_edom.map_remap import resolve_slides
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import find_repo_root, output_root
 from obed_edom.pipeline import generate
 
 
@@ -132,7 +132,7 @@ def _run_remap(args: argparse.Namespace) -> int:
     if not source.exists():
         print(f"File not found: {source}", file=sys.stderr)
         return 1
-    dest = Path(args.out).expanduser() if args.out else find_repo_root() / "output" / f"{source.stem}_CG.key"
+    dest = Path(args.out).expanduser() if args.out else output_root() / f"{source.stem}_CG.key"
     template = args.template or args.gold
     if template is None:
         print("CG template .key is required (--template CG_Template.key).", file=sys.stderr)

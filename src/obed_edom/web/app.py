@@ -1163,7 +1163,7 @@ def _run_visual_check(job: Job) -> dict[str, Any]:
     right = Path(str(result.get("rightPath") or result.get("rightPreviews") or ""))
     if not left.is_dir() or not right.is_dir():
         raise FileNotFoundError("Preview folders are missing; choose them again.")
-    work = ROOT / "output" / ".visual" / job.id
+    work = default_output_root() / ".visual" / job.id
     heat_dir = work / "heat"
     heat_dir.mkdir(parents=True, exist_ok=True)
     job.log("Reading previews and checking wording, photos, and house style…")
@@ -1216,7 +1216,7 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
         f"{len(report['rows'])} advance(s)."
     )
     job.log("Checking scripture references and house style…")
-    dest = ROOT / "output" / ".outline" / job.id / f"{path.stem}_findings.pdf"
+    dest = default_output_root() / ".outline" / job.id / f"{path.stem}_findings.pdf"
     written = _write_outline_pdf(job, dest, report)
     return {**report, "kind": "outline", "outlineReport": str(written) if written else None}
 
@@ -1241,7 +1241,7 @@ def _run_inspect(
     outline: Path | None = None,
     lw_final: bool = True,
 ) -> dict[str, Any]:
-    job_dir = ROOT / "output" / ".inspect" / job.id if export else None
+    job_dir = default_output_root() / ".inspect" / job.id if export else None
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=job_dir, slide_range=slide_range)
     _log_inspect(job, path.name, payload)
@@ -1447,7 +1447,7 @@ def _run_resize(
     framing_overrides: dict[int, int] | None = None,
     validate: bool = True,
 ) -> dict[str, Any]:
-    dest_dir = ROOT / "output" / ".resize" / job.id
+    dest_dir = default_output_root() / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
