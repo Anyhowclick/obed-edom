@@ -645,11 +645,22 @@ def create_app() -> FastAPI:
             decisions,
             job_id=job_id,
         )
+        # A submitted decisions list is the complete set of non-default answers —
+        # the dashboard sends every pinned/deferred/whitelisted page at once and
+        # omits the ones back on the default. So a page absent from it has been
+        # reset, and its stale decision must be cleared, not left. Apply reads the
+        # overrides and the side-content whitelist from these in-memory pages, so a
+        # left-over decision would keep un-pinning or un-whitelisting from ever
+        # taking effect (the record file is already rewritten without it). When no
+        # decisions were submitted (the fallback), pages are left as they were.
+        authoritative = payload.decisions is not None
         by_index = {d.wall_index: d.as_dict() for d in decisions}
         for page in result.get("pages") or []:
             saved = by_index.get(page["index"])
             if saved:
                 page["decision"] = saved
+            elif authoritative:
+                page["decision"] = None
         updated = RUNNER.update_result(job_id, result)
         return RUNNER.public_dict(updated) if updated else result
 
