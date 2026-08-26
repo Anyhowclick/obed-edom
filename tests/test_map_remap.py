@@ -1004,6 +1004,147 @@ def test_unpaired_text_resizes_when_swatch_face_differs():
     assert abs(photo.x - (3121 - 2848)) < 40
 
 
+def test_unpaired_text_keeps_source_colour_takes_only_template_size():
+    """Rule: unpaired LW text keeps its source font family and colour. A matched
+    template swatch lends its size only — never its colour. A white verse on the
+    wall must stay white even when its face matches a cyan template swatch."""
+    white = [1.0, 1.0, 1.0]
+    cyan = [0.125, 0.996, 0.996]
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=-8400, y=-4070, w=20000, h=14934),
+                    _item(kind="image", fileName="scene.JPG", x=3121, y=-78, w=2720, h=1240),
+                    _item(
+                        kind="text",
+                        text="Then Moses said to Aaron",
+                        x=2458,
+                        y=51,
+                        w=248,
+                        h=124,
+                        size=100,
+                        font="Helvetica",
+                        color=white,
+                    ),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=-11221, y=-4069, w=20000, h=14934),
+                    _item(kind="image", fileName="scene.JPG", x=-153, y=-11, w=787, h=1154),
+                ],
+            },
+            {
+                "number": 2,
+                "items": [
+                    _item(
+                        kind="text",
+                        text="NUMBERS 16",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="Helvetica",
+                        color=cyan,
+                    ),
+                ],
+            },
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    styles = recipe.get("characterStyles") or []
+    assert any(abs(s["size"] - 50) < 0.1 and "helvetica" in (s["font"] or "").lower() for s in styles)
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    verse = next(t for t in transforms if t.role == "other" and t.kind == "text")
+    # Size comes from the swatch...
+    assert verse.font_size is not None and abs(verse.font_size - 50) < 0.1
+    # ...face stays the source's (equal to the swatch by construction)...
+    assert verse.font == "Helvetica"
+    # ...and the colour is never repainted: None means Keynote leaves the source
+    # white in place rather than writing the swatch's cyan.
+    assert verse.color is None
+
+
+def test_title_keeps_source_font_and_colour_takes_template_position_and_size():
+    """The rule reaches the title too. It keeps its source face and colour and
+    takes only the template's position (titleDst) and size (titleFontSize). The
+    template's own title font/colour are recorded on the recipe but never applied
+    — a white title must not turn the template's cyan."""
+    white = [1.0, 1.0, 1.0]
+    cyan = [0.125, 0.996, 0.996]
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=2147,
+                        y=52,
+                        w=537,
+                        h=124,
+                        size=100,
+                        font="AzoSans-Bold",
+                        color=white,
+                    ),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(
+                        kind="text",
+                        text="Global Missions",
+                        x=135,
+                        y=67,
+                        w=271,
+                        h=64,
+                        size=50,
+                        font="Helvetica",
+                        color=cyan,
+                    ),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    # The template's title styling is recorded on the recipe...
+    assert recipe["titleFont"] == "Helvetica"
+    assert recipe.get("titleColor") is not None
+    assert recipe["titleFontSize"] == 50
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    title = next(t for t in transforms if t.role == "title")
+    # ...position and size come from the template...
+    assert abs(title.x - 135) < 1
+    assert title.font_size == 50
+    # ...but the face stays the source's and the colour is never repainted.
+    assert title.font == "AzoSans-Bold"
+    assert title.color is None
+
+
 def test_resized_leftover_image_gets_its_own_affine():
     wall = {
         "slideWidth": 7680,

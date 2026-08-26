@@ -1870,6 +1870,17 @@ def _item_kind_index(item: dict, fallback: int) -> int:
     return fallback
 
 
+def _source_face(item: dict) -> str | None:
+    """The item's own font string, or None.
+
+    Unpaired LW text keeps this. A matched template swatch lends its size and
+    nothing else: its face equals the source's by construction — the match
+    requires the same family and weight — so re-asserting the source face is a
+    no-op that documents the intent and survives a change to the matcher.
+    """
+    return str(item.get("font") or "").strip() or None
+
+
 def _style_text_box(
     item: dict,
     aff: Affine | None,
@@ -2050,8 +2061,14 @@ def plan_slide_transforms(
                         if recipe.get("titleFontSize")
                         else (_f(item.get("size")) or None)
                     ),
-                    font=str(recipe["titleFont"]) if recipe.get("titleFont") else None,
-                    color=norm_rgb(recipe.get("titleColor")),
+                    # The title keeps its source font family and colour like any
+                    # other text; only position (titleDst) and size (titleFontSize)
+                    # change. `titleFont` and `titleColor` stay on the recipe as a
+                    # record of what the template carries, but applying them
+                    # repainted copy the operator wrote — a white verse turned cyan
+                    # because the template's title was cyan.
+                    font=_source_face(item),
+                    color=None,
                     role="title",
                     kind_index=kind_index,
                 )
@@ -2064,9 +2081,7 @@ def plan_slide_transforms(
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
             size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
-            mapped, font, font_name, colour = _style_text_box(item, None, style or size_only)
-            if not style:
-                font_name, colour = None, None
+            mapped, font, _face, _colour = _style_text_box(item, None, style or size_only)
             if dst is not None:
                 mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
             out.append(
@@ -2080,8 +2095,8 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
-                    font=font_name,
-                    color=colour,
+                    font=_source_face(item) if style else None,
+                    color=None,
                     role="list",
                     kind_index=kind_index,
                 )
@@ -2121,8 +2136,8 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
-                    font=(style.get("font") or None) if style else None,
-                    color=norm_rgb(style.get("color")) if style else None,
+                    font=_source_face(item) if style else None,
+                    color=None,
                     role="list",
                     kind_index=kind_index,
                 )
@@ -2130,7 +2145,13 @@ def plan_slide_transforms(
             continue
         if role in {"list", "other"} and (item.get("kind") or "") == "text":
             style = match_character_style(item, styles)
-            mapped, font, font_name, colour = _style_text_box(item, aff, style)
+            mapped, font, _face, _colour = _style_text_box(item, aff, style)
+            # Unpaired LW text keeps its source font family and colour; only its
+            # position (the affine) and size (the matched swatch) change. The
+            # swatch is used for size alone — its colour must not repaint the
+            # source, which shipped its own. The source face is emitted only when
+            # a swatch resized the box, so the no-match path still leaves the
+            # object untouched and rides the affine.
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -2142,8 +2163,8 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
-                    font=font_name,
-                    color=colour,
+                    font=_source_face(item) if style else None,
+                    color=None,
                     role="other" if role == "other" else "list",
                     kind_index=kind_index,
                 )
