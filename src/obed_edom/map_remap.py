@@ -3747,6 +3747,7 @@ def plan_payload_transforms(
     offframe_report: list[dict[str, Any]] | None = None,
     framing_overrides: dict[int, int] | None = None,
     framing_report: list[dict[str, Any]] | None = None,
+    side_content_slides: set[int] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
@@ -3762,6 +3763,12 @@ def plan_payload_transforms(
     out unusable degrades the same way an automatic choice does rather than
     throwing content out of frame. What each slide ended up using lands in
     `framing_report`.
+
+    `side_content_slides` is the set of wall slide *numbers* whose LW side-panel
+    content is kept rather than dropped — the per-slide whitelist. It is the
+    per-slide form of `include_lists` (which stays a global override for the CLI):
+    a slide is treated as keeping side content when the global flag is on or its
+    number is in this set.
     """
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
@@ -3874,15 +3881,19 @@ def plan_payload_transforms(
             if preview is not None
             else None
         )
+        # Global flag or per-slide whitelist: either keeps this page's side content.
+        slide_lists = include_lists or (
+            side_content_slides is not None and number in side_content_slides
+        )
         planned = plan_slide_transforms(
             slide,
             slide_recipe,
-            include_lists=include_lists,
+            include_lists=slide_lists,
             wall_size=(wall_w, wall_h),
-            defer_list_packing=include_lists and analysis is not None,
+            defer_list_packing=slide_lists and analysis is not None,
             free_text_keys=analysis["free"] if analysis else None,
         )
-        if include_lists and analysis is not None:
+        if slide_lists and analysis is not None:
             rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)

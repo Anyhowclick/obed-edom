@@ -1676,6 +1676,38 @@ def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
     assert any(t.kind == "text" and t.role != "hide" for t in kept)  # kept when side content is kept
 
 
+def test_side_content_whitelist_keeps_only_the_named_slide():
+    """plan_payload_transforms drops side content by default and keeps it on the
+    slides named in side_content_slides — the per-slide form of include_lists."""
+    def slide(n):
+        return {
+            "number": n,
+            "items": [
+                _item(kind="image", fileName="worldmap.png", x=2600, y=0, w=2400, h=1080),  # centre
+                _item(kind="text", text="CHC Left", x=200, y=100, w=300, h=60),  # side panel
+            ],
+        }
+
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide(1), slide(2)]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+
+    def side_text_visible(transforms, number):
+        return any(
+            t.slide_number == number and t.kind == "text" and t.role != "hide"
+            for t in transforms
+        )
+
+    # No whitelist: the side text is dropped on both slides.
+    none = plan_payload_transforms(wall, recipe, template=template)
+    assert not side_text_visible(none, 1) and not side_text_visible(none, 2)
+
+    # Whitelist slide 2 only: it keeps its side text, slide 1 still drops it.
+    picked = plan_payload_transforms(wall, recipe, template=template, side_content_slides={2})
+    assert not side_text_visible(picked, 1)
+    assert side_text_visible(picked, 2)
+
+
 def test_church_summary_list_over_map_is_hidden_when_flag_off():
     """A church-name list is dropped when 'include lists' is off even where it
     sits over the map. The background test marks names over land as non-free, and

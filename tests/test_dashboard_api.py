@@ -285,6 +285,22 @@ def test_resize_asks_for_framings_before_remapping(tmp_path):
         app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals
 
 
+def test_side_content_slides_reads_whitelisted_pages():
+    """The apply path turns whitelisted pages into wall slide numbers, regardless of
+    their framing state — an auto page can still be whitelisted."""
+    from obed_edom.web.app import _side_content_slides_from_result
+
+    result = {
+        "pages": [
+            {"slide": 2, "decision": {"wallIndex": 1, "state": "auto"}},
+            {"slide": 5, "decision": {"wallIndex": 4, "state": "auto", "keepSideContent": True}},
+            {"slide": 9, "decision": {"wallIndex": 8, "state": "pinned", "templateSlide": 3, "keepSideContent": True}},
+            {"slide": 11, "decision": {"wallIndex": 10, "state": "pinned", "templateSlide": 4}},
+        ]
+    }
+    assert _side_content_slides_from_result(result) == {5, 9}
+
+
 def test_resize_form_still_takes_validate():
     """The parameter is aliased, because a form field literally named `validate`
     generates a Pydantic field that shadows BaseModel.validate and warns on
