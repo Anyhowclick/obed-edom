@@ -838,6 +838,66 @@ def is_layout_image(item: dict) -> bool:
     return True
 
 
+# A centre panel spans about two CG frames wide and one frame tall, centred on
+# the wall. It is a panorama meant to be shown 1:1, centre-cropped — a China map
+# that becomes the same map with a photo grid on it, one slide to the next.
+CENTRE_PANEL_MIN_WIDTH_FRAMES = 1.7
+CENTRE_PANEL_MAX_HEIGHT_FRAMES = 1.3
+CENTRE_PANEL_CENTRE_TOLERANCE = 0.25
+# An image small against the panel is something laid on top of it (a thumbnail in
+# a grid), not part of the framing. Below this share of the panel's area it rides
+# the panel's affine rather than voting on the crop.
+CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION = 0.25
+
+
+def centre_panel_image(
+    items: Iterable[dict], wall_w: float, wall_h: float, dest_w: float, dest_h: float
+) -> Rect | None:
+    """The largest full-height, ~2×-frame-wide image centred on the wall, or None.
+
+    Such a panorama is shown at 1:1 and cropped to the frame's centre, the way the
+    plain map slides on either side of a transition are. Small images overlaid on
+    it — a grid of photos over a map — otherwise out-vote it in agreement scoring
+    and drag the whole frame down to their scale. Height is capped near one frame
+    so a full-bleed image that runs off the top and bottom (a different thing) is
+    not mistaken for a centre panel.
+    """
+    if dest_w <= 0 or dest_h <= 0 or wall_w <= 0 or wall_h <= 0:
+        return None
+    best: Rect | None = None
+    for item in items:
+        if not is_pairable_image(item):
+            continue
+        r = item_rect(item)
+        if r.w < dest_w * CENTRE_PANEL_MIN_WIDTH_FRAMES:
+            continue
+        if not (wall_h * 0.9 <= r.h <= wall_h * CENTRE_PANEL_MAX_HEIGHT_FRAMES):
+            continue
+        if abs((r.x + r.w / 2) - wall_w / 2) > wall_w * CENTRE_PANEL_CENTRE_TOLERANCE:
+            continue
+        if best is None or r.w * r.h > best.w * best.h:
+            best = r
+    return best
+
+
+def _slide_for_panel_framing(slide: dict, panel: Rect) -> dict:
+    """`slide` with the small images overlaid on a centre panel removed.
+
+    Used only to choose the framing: the crop is decided as though the panel were
+    alone, matching the plain panorama slides beside it. The overlays stay in the
+    slide the transforms are planned from, so they ride the panel's affine.
+    """
+    threshold = panel.w * panel.h * CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION
+
+    def keep(item: dict) -> bool:
+        if not is_pairable_image(item):
+            return True
+        r = item_rect(item)
+        return r.w * r.h >= threshold
+
+    return {**slide, "items": [it for it in slide.get("items") or [] if keep(it)]}
+
+
 def pair_by_size(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
     """1:1 by (width, height). Same-size copies (stacked map PDFs) pair in order."""
     used: set[int] = set()
@@ -1308,11 +1368,23 @@ def learn_recipe(
             None,
         )
     pinned = g_slide is not None
+    # A centre-panel panorama decides the crop as though the small images laid on
+    # top of it were not there, so a map with a photo grid over it frames like the
+    # plain map beside it rather than anchoring on one thumbnail. The overlays are
+    # only held out of the framing choice; they stay in the slide the transforms
+    # are planned from and ride the panel's affine.
+    wall_w0 = _f(wall.get("slideWidth"), 7680)
+    wall_h0 = _f(wall.get("slideHeight"), 1080)
+    panel = None
+    if w_slide is not None:
+        w_vis0 = [it for it in w_slide.get("items") or [] if is_visible(it, wall_w0, wall_h0)]
+        panel = centre_panel_image(w_vis0, wall_w0, wall_h0, float(dest_w), float(dest_h))
+    framing_slide = _slide_for_panel_framing(w_slide, panel) if (w_slide and panel) else w_slide
     if g_slide is None:
         g_slide = _best_matching_slide(
-            w_slide,
+            framing_slide,
             template_slides,
-            wall_size=(_f(wall.get("slideWidth"), 7680), _f(wall.get("slideHeight"), 1080)),
+            wall_size=(wall_w0, wall_h0),
             dest_size=(float(dest_w), float(dest_h)),
         )
     map_src = None
@@ -1331,7 +1403,9 @@ def learn_recipe(
         # its position says nothing about where visible art should land.
         w_items = [it for it in w_slide.get("items") or [] if is_visible(it, wall_w, wall_h)]
         g_items = [it for it in g_slide.get("items") or [] if is_visible(it, dest_w, dest_h)]
-        w_imgs = [it for it in w_items if is_pairable_image(it)]
+        # Pair on the panel, not the thumbnails riding it (see framing_slide above).
+        framing_imgs = [it for it in (framing_slide.get("items") or []) if is_visible(it, wall_w, wall_h)]
+        w_imgs = [it for it in framing_imgs if is_pairable_image(it)]
         g_imgs = [it for it in g_items if is_pairable_image(it)]
         size_pairs = list(best_image_pairs(w_imgs, g_imgs))
         size_pairs.extend(pair_largest_shapes(w_items, g_items))

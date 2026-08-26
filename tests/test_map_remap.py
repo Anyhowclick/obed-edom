@@ -1145,6 +1145,65 @@ def test_title_keeps_source_font_and_colour_takes_template_position_and_size():
     assert title.color is None
 
 
+def test_centre_panel_panorama_frames_one_to_one_over_overlaid_thumbnails():
+    """A map spanning the centre panel is shown 1:1. A grid of thumbnails laid on
+    top must not drag the frame down to their scale, the way one slide of a
+    transition (map alone) should match the next (map plus a photo grid). The
+    overlays are only held out of the framing choice; they still ride the affine."""
+    from obed_edom.map_remap import centre_panel_image, frame_affine
+
+    panel = _item(kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)
+    thumbs = [
+        _item(
+            kind="image",
+            fileName=f"upg{i}.png",
+            x=2044 + (i % 5) * 314,
+            y=166 + (i // 5) * 346,
+            w=279,
+            h=315,
+        )
+        for i in range(10)
+    ]
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [{"number": 1, "items": [panel, *thumbs]}],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            # A cover slide: its own centre panel, which the wall panel frames against.
+            {"number": 1, "items": [_item(kind="image", fileName="China.png", x=-338, y=0, w=3840, h=1080)]},
+            # A thumbnail-grid slide the raw agreement count would otherwise prefer.
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="image", fileName=f"t{i}.png", x=100 + i * 150, y=200, w=150, h=169)
+                    for i in range(6)
+                ],
+            },
+        ],
+    }
+    assert centre_panel_image(wall["slides"][0]["items"], 7680, 1080, 1920, 1080) is not None
+    recipe = learn_recipe(wall, template)
+    # 1:1, not the thumbnail scale it would take if the grid drove the framing.
+    assert abs(frame_affine(recipe).s - 1.0) < 0.05
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    placed = [t for t in transforms if t.kind == "image" and t.role != "hide"]
+    # Every overlay is still placed — held out of the crop choice, not dropped.
+    assert len(placed) >= 10
+
+
+def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
+    """A full-bleed image that runs off the top and bottom is not a centre panel:
+    height is capped near one frame, so its framing is left to the usual path."""
+    from obed_edom.map_remap import centre_panel_image
+
+    items = [_item(kind="image", fileName="bleed.png", x=2189, y=-96, w=3686, h=2752)]
+    assert centre_panel_image(items, 7680, 1080, 1920, 1080) is None
+
+
 def test_resized_leftover_image_gets_its_own_affine():
     wall = {
         "slideWidth": 7680,
