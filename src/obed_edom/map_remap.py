@@ -408,6 +408,36 @@ def is_backdrop(item: dict, slide_w: float, slide_h: float) -> bool:
     return w >= slide_w * 0.98 and h >= slide_h * 0.98
 
 
+# The LED wall is three 1920-wide panels; the 16:9 CG keeps the centre one,
+# [1920..5760]. Content lying wholly on a side panel has nowhere to go after the
+# crop, so it is dropped when side content is not being kept.
+LW_WALL_SIZE = (7680.0, 1080.0)
+CENTRE_PANEL_RECT = Rect(1920.0, 0.0, 3840.0, 1080.0)
+
+
+def is_lw_wall(wall_w: float, wall_h: float) -> bool:
+    """The 7680×1080 LED wall, the only format the side-panel rule applies to."""
+    return round(wall_w) == round(LW_WALL_SIZE[0]) and round(wall_h) == round(LW_WALL_SIZE[1])
+
+
+def is_side_panel_item(item: dict, wall_w: float, wall_h: float) -> bool:
+    """Content that sits wholly on the wall's left/right side panels.
+
+    Only for the LW 7680×1080 wall. An on-wall item is side-panel content when its
+    rect does not overlap the centre panel [1920..5760]; an item straddling that
+    boundary is deemed inside and kept. Off-wall leftovers are `is_visible`'s
+    concern (they are off-screen, not side-panel), so they are not counted here.
+    """
+    if not is_lw_wall(wall_w, wall_h) or not is_visible(item, wall_w, wall_h):
+        return False
+    r = item_rect(item)
+    c = CENTRE_PANEL_RECT
+    overlaps_centre = (
+        r.x < c.x + c.w and r.x + r.w > c.x and r.y < c.y + c.h and r.y + r.h > c.y
+    )
+    return not overlaps_centre
+
+
 def occluder_rects(slide: dict, slide_w: float, slide_h: float) -> list[Rect]:
     """Artwork a text box could be sitting on top of.
 
@@ -2384,6 +2414,29 @@ def plan_slide_transforms(
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
         if is_chrome_bg(item):
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "image"),
+                    x=_f(item.get("x")),
+                    y=_f(item.get("y")),
+                    w=_f(item.get("w")),
+                    h=_f(item.get("h")),
+                    locked=bool(item.get("locked")),
+                    role="hide",
+                    kind_index=kind_index,
+                    opacity=0.0,
+                )
+            )
+            continue
+        # Content wholly on a side panel has nowhere to go after the 16:9 crop, so
+        # it is dropped unless side content is being kept. This is the general form
+        # of dropping the church-name columns: it also sheds side badges, photo
+        # strips and labels (a CHC Klang photo, a CHC Kuching map) that used to ride
+        # the affine and still show. Kept content — the map, its labels, the title —
+        # overlaps the centre panel and so is never side-panel content.
+        if not include_lists and is_side_panel_item(item, wall_w, wall_h):
             out.append(
                 ItemTransform(
                     slide_number=number,

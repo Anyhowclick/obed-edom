@@ -1511,6 +1511,33 @@ def test_coincident_group_deduped_but_images_kept():
     assert id(items[3]) not in dup  # the coincident image is kept
 
 
+def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
+    """On the LW wall, content wholly on a side panel is dropped unless side
+    content is being kept; centre and boundary-straddling content stay."""
+    from obed_edom.map_remap import is_side_panel_item
+
+    left = _item(kind="text", text="CHC Left", x=200, y=100, w=300, h=60)  # side
+    right = _item(kind="image", fileName="badge.png", x=6200, y=100, w=800, h=400)  # side
+    straddle = _item(kind="image", fileName="panorama.png", x=1700, y=0, w=900, h=1080)  # crosses in
+    centre = _item(kind="image", fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)  # centre
+    assert is_side_panel_item(left, 7680, 1080)
+    assert is_side_panel_item(right, 7680, 1080)
+    assert not is_side_panel_item(straddle, 7680, 1080)  # deemed inside
+    assert not is_side_panel_item(centre, 7680, 1080)
+    assert not is_side_panel_item(left, 1920, 1080)  # not the LW wall
+
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [{"number": 1, "items": [centre, left, right, straddle]}],
+    }
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+    dropped = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080))
+    assert not any(t.kind == "text" and t.role != "hide" for t in dropped)  # side text dropped
+    kept = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    assert any(t.kind == "text" and t.role != "hide" for t in kept)  # kept when side content is kept
+
+
 def test_church_summary_list_over_map_is_hidden_when_flag_off():
     """A church-name list is dropped when 'include lists' is off even where it
     sits over the map. The background test marks names over land as non-free, and
@@ -1518,9 +1545,11 @@ def test_church_summary_list_over_map_is_hidden_when_flag_off():
     set of map labels. A slide with only a couple of labels keeps the old
     protection."""
     def church_slide(n_names):
+        # Names over the centre map (x within 1920..5760) so this exercises the
+        # summary-list rule, not the side-panel drop that has its own test.
         items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
         for i in range(n_names):
-            items.append(_item(kind="text", text=f"CHC Place{i}", x=260, y=6 + i * 52, w=215, h=58, size=42))
+            items.append(_item(kind="text", text=f"CHC Place{i}", x=3000, y=6 + i * 52, w=215, h=58, size=42))
         return {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
 
     from obed_edom.map_remap import is_list_item
