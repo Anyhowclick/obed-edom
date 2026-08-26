@@ -133,6 +133,12 @@ class ItemTransform:
     opacity: float | None = None
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
+    # Delete the box's hard line breaks after placing it. A verse authored for the
+    # wide wall carries returns that fell at a line end there; in the narrow CG box
+    # they break mid-line. Only the newline characters are removed, so the bold,
+    # coloured emphasis runs the box also carries survive — see strip_newlines in
+    # remap_keynote.js.
+    strip_newlines: bool = False
     # Where the object came from on the wall. JXA has no use for it — it moves the
     # object that is already there — but a preview that wants to draw the object
     # rather than outline it has to know which part of the wall to cut out.
@@ -184,6 +190,8 @@ class ItemTransform:
             payload["opacity"] = self.opacity
         if self.match_text:
             payload["matchText"] = self.match_text
+        if self.strip_newlines:
+            payload["stripNewlines"] = True
         return payload
 
 
@@ -2573,6 +2581,10 @@ def plan_slide_transforms(
             # and setting the box font to the item's single face flattens them —
             # the yellow "the plague has started" lost its weight. The box is moved
             # in place, so Keynote keeps every run; only size and position change.
+            # Its wall-authored hard line breaks are dropped so it wraps to fill the
+            # narrower box instead of breaking mid-line; only the newline characters
+            # go, so the runs survive.
+            body_text = str(item.get("text") or "")
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -2592,6 +2604,7 @@ def plan_slide_transforms(
                     color=None,
                     role="other",
                     kind_index=kind_index,
+                    strip_newlines=("\n" in body_text or "\r" in body_text),
                 )
             )
             if item is body_for_body:

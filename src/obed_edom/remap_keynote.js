@@ -550,6 +550,94 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
   return { applied: applied, missed: missed };
 }
 
+const NEWLINE_RE = /[\n\r\u000B\u2028\u2029]/g;
+
+function scaleColor(c) {
+  // Keynote reports a character's colour as 0..1 floats but sets it in 0..65535,
+  // so a read value handed straight back reads as near-black. Scale up when the
+  // components look normalised; pass a genuine 0..65535 triple through unchanged.
+  if (!c || c.length < 3) return c;
+  var max = Math.max(c[0], c[1], c[2]);
+  if (max <= 1.0) {
+    return [Math.round(c[0] * 65535), Math.round(c[1] * 65535), Math.round(c[2] * 65535)];
+  }
+  return c;
+}
+
+function rewriteWithoutNewlines(obj) {
+  // Turn a verse box's hard line breaks into spaces so its words do not merge and
+  // it wraps to fill the narrower CG box. Keynote scripting can delete a character
+  // but neither insert nor set one, so a break cannot be swapped for a space in
+  // place; and a plain whole-text rewrite flattens the bold, coloured emphasis runs
+  // the box carries. So the per-character style is captured first (the inspect
+  // cannot see runs, but Keynote reports font/size/colour per character at run
+  // time), the text is rewritten with each break turned into a space -- same
+  // length, so indices still line up 1:1 -- and every character's style re-applied.
+  var text;
+  try {
+    text = String(obj.objectText());
+  } catch (e) {
+    return false;
+  }
+  NEWLINE_RE.lastIndex = 0;
+  if (!text || !NEWLINE_RE.test(text)) return false;
+  var ot = obj.objectText;
+  var n = text.length;
+  var fonts = new Array(n);
+  var sizes = new Array(n);
+  var colors = new Array(n);
+  for (var i = 0; i < n; i++) {
+    try {
+      fonts[i] = ot.characters[i].font();
+    } catch (e) {}
+    try {
+      sizes[i] = ot.characters[i].size();
+    } catch (e) {}
+    try {
+      colors[i] = ot.characters[i].color();
+    } catch (e) {}
+  }
+  NEWLINE_RE.lastIndex = 0;
+  var rebuilt = text.replace(NEWLINE_RE, " ");
+  try {
+    obj.objectText = rebuilt;
+  } catch (e) {
+    return false;
+  }
+  var ot2 = obj.objectText;
+  for (var j = 0; j < n; j++) {
+    if (fonts[j]) {
+      try {
+        ot2.characters[j].font = fonts[j];
+      } catch (e) {}
+    }
+    if (sizes[j] != null) {
+      try {
+        ot2.characters[j].size = sizes[j];
+      } catch (e) {}
+    }
+    if (colors[j]) {
+      try {
+        ot2.characters[j].color = scaleColor(colors[j]);
+      } catch (e) {}
+    }
+  }
+  return true;
+}
+
+function stripBodyNewlines(slides, Keynote, transforms) {
+  let done = 0;
+  for (let t = 0; t < transforms.length; t++) {
+    const spec = transforms[t];
+    if (!spec.stripNewlines) continue;
+    const slideNo = Number(spec.slide) || 1;
+    if (slideNo < 1 || slideNo > countOf(slides)) continue;
+    const obj = getItem(slides[slideNo - 1], spec);
+    if (obj && rewriteWithoutNewlines(obj)) done += 1;
+  }
+  return done;
+}
+
 function deleteGroupHides(slides, Keynote, transforms, missReasons) {
   // Remove the groups marked role="hide", after both geometry passes have read the
   // collection by its original indices. Descending by (slide, kindIndex) so each
@@ -774,6 +862,7 @@ function run(argv) {
         const rd = deleteGroupHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
         appliedFirst += rd.applied;
         missedFirst += rd.missed;
+        stripBodyNewlines(doc.slides(), Keynote, transformsForSlide(transforms, n));
       }
       continue;
     }
@@ -790,6 +879,7 @@ function run(argv) {
     const rd = deleteGroupHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
     appliedFirst += rd.applied;
     missedFirst += rd.missed;
+    stripBodyNewlines(doc.slides(), Keynote, transformsForSlide(transforms, n));
   }
   if (appliedFirst === 0 && cloned === 0) {
     try {

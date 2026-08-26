@@ -1420,6 +1420,53 @@ def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     # the inspect cannot see); setting the single face would flatten them.
     assert body.font is None
     assert body.color is None  # source colour kept
+    # No hard breaks in this verse, so nothing to strip.
+    assert body.strip_newlines is False
+
+
+def test_scripture_body_with_hard_breaks_is_flagged_to_strip_them():
+    """A verse authored with returns for the wide wall is flagged so the remap turns
+    them into spaces; in the narrow CG box they would otherwise break mid-line. A
+    verse without breaks is not flagged."""
+    verse = (
+        "46 Then Moses said to Aaron, and hurry to the assembly\n"
+        "to make atonement for them. Wrath has come out from the Lord;\n"
+        "the plague has started."
+    )
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=3395, y=21, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=3395, y=21, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=3395, y=89, w=2328, h=351, size=46.67, font="AzoSans-Regular"),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=702, y=49, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=702, y=49, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=698, y=119, w=1140, h=675, size=46.67, font="AzoSans-Regular"),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    body = next(t for t in transforms if t.kind == "text" and t.role == "other")
+    assert body.strip_newlines is True
 
 
 def test_full_bleed_cover_is_not_vetoed_by_reflowed_body_and_cropped_side_content():
