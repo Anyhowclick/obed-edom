@@ -1862,6 +1862,47 @@ def sparkle_overlays(
     return out
 
 
+COINCIDENT_DUP_TOL = 4.0
+
+
+def coincident_duplicate_ids(items: list[dict]) -> set[int]:
+    """Ids of groups and text boxes that are near-exact copies of an earlier one
+    at the same spot — all but the first of each cluster.
+
+    A magic-move build can leave two copies of a group on one slide, and the
+    planner would place both. Images are never deduped: a wall deck stacks map
+    layers as coincident images on purpose, and dropping them would tear the map
+    apart. Groups match on box and child count, text on box and wording, so two
+    different objects that merely share a spot are left alone.
+    """
+    kept: list[tuple[str, Rect, str, int]] = []
+    dup: set[int] = set()
+    for item in items:
+        kind = str(item.get("kind") or "")
+        if kind not in {"group", "text"}:
+            continue
+        rect = item_rect(item)
+        sig = (
+            (item.get("text") or "").strip()
+            if kind == "text"
+            else str(item.get("childCount") or len(item.get("children") or []))
+        )
+        for k2, r2, s2, _ in kept:
+            if (
+                k2 == kind
+                and s2 == sig
+                and abs(rect.x - r2.x) <= COINCIDENT_DUP_TOL
+                and abs(rect.y - r2.y) <= COINCIDENT_DUP_TOL
+                and abs(rect.w - r2.w) <= COINCIDENT_DUP_TOL
+                and abs(rect.h - r2.h) <= COINCIDENT_DUP_TOL
+            ):
+                dup.add(id(item))
+                break
+        else:
+            kept.append((kind, rect, sig, id(item)))
+    return dup
+
+
 def badge_members(slide: dict, title: dict) -> list[dict]:
     """Plate, logo and rule sharing the title's box — the badge minus its words."""
     src = item_rect(title)
@@ -2164,8 +2205,13 @@ def plan_slide_transforms(
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
+    coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
+            continue
+        # A magic-move build's leftover second copy of a group or text box: place
+        # it once, not twice. Images are never in this set (stacked map layers).
+        if id(item) in coincident_dups:
             continue
         # Off-slide leftovers are invisible on the wall, and the affine would
         # drag some of them into the CG frame.

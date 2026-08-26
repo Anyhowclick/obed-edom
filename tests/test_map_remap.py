@@ -1323,6 +1323,25 @@ def test_sparkle_overlay_takes_body_size_not_its_own_clamp():
     assert overlay_tf.font_size and overlay_tf.font_size > 75 * 0.42 + 1
 
 
+def test_coincident_group_deduped_but_images_kept():
+    """A magic-move build's leftover second copy of a group is placed once. Two
+    coincident images are both kept — stacked map layers are coincident on
+    purpose and dropping one tears the map apart."""
+    from obed_edom.map_remap import coincident_duplicate_ids
+
+    items = [
+        _item(kind="group", x=5770, y=-174, w=1923, h=1317, childCount=5),
+        _item(kind="group", x=5771, y=-174, w=1923, h=1317, childCount=5),  # dup
+        _item(kind="image", fileName="a.png", x=0, y=0, w=1364, h=947),
+        _item(kind="image", fileName="b.png", x=0, y=0, w=1364, h=947),  # coincident layer
+        _item(kind="group", x=100, y=100, w=200, h=200, childCount=2),  # different spot
+    ]
+    dup = coincident_duplicate_ids(items)
+    assert len(dup) == 1  # one group dropped
+    assert id(items[1]) in dup  # the second coincident group
+    assert id(items[3]) not in dup  # the coincident image is kept
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""
