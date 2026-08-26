@@ -1,6 +1,6 @@
 ---
 name: Cue palette and outline editor
-overview: "Handover section first. Done: the Keynote 15.x migration, framing confirmation, badge placement, structural title detection, the divider, and ranges read in Keynote's numbering. Next is giving a badge its own affine, which unblocks both the report card's map pages and portable recipes. Then the number block in the CG resizer, then the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator."
+overview: "Handover section first. Done: the Keynote 15.x migration, framing confirmation, badge placement (its own plate affine), structural title detection, the divider, ranges read in Keynote's numbering, and a batch of text/framing fixes from a real-run review — source font/colour kept on resize, the scripture body in its template box, centre-panel 1:1 framing, sparkle-overlay sizing and coupling, the church-list checkbox honoured over the map, off-screen/fit handling scoped to the body verse, magic-move de-dup, and corner labels kept at their own size. Still to do: the number block in the CG resizer, the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator. Recipes-as-artefacts revisit is unblocked now the badge has its own affine."
 todos:
   - id: text-placement
     content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem"
@@ -34,6 +34,30 @@ todos:
     status: completed
   - id: badge-affine
     content: "Anchor the badge on its plate so a page with a map and a badge gets two affines. Done: plate-to-plate, and on_canvas_fraction taught the same route. On the report card's 34 map-and-badge pages the plate went from 117 of 136 placements off-frame to none, and fallbacks halved"
+    status: completed
+  - id: text-source-style
+    content: "Resized text keeps its source font family and colour; only size and position change (title included). A white verse turned cyan because its face matched a cyan template swatch. `_source_face` re-asserts the source face; every text branch sends colour None"
+    status: completed
+  - id: scripture-body-box
+    content: "The scripture body verse lands in the template's own text box (bodyTextDst) and reflows into it, like the title, rather than riding the scene affine at its wall width. Told from a church-name column by is_list_item and from a label by a character count; only fires with a title present"
+    status: completed
+  - id: centre-panel-1to1
+    content: "A centre-panel panorama (~2x frame wide, ~1 frame tall, centred) frames at 1:1 over the small images overlaid on it, so a map with a photo grid frames like the plain map beside it. The crop is chosen as if the overlays were absent; they ride the panel affine"
+    status: completed
+  - id: sparkle-overlay
+    content: "A sparkle build's emphasis copy (substring of the body, sitting over it) takes the body's final size, then is re-seated on the body after it is placed and fitted, so it stays over the words rather than clamped small and off-frame"
+    status: completed
+  - id: church-list-flag-over-map
+    content: "A church-name list is dropped when 'include lists' is off even where it sits over the map. The free-to-move test marked names over land as labels to protect; a slide of many names (>=6) is a list to drop. Not the de-dup path — the free-text classification, which only bites on the rendered-slide run"
+    status: completed
+  - id: offscreen-and-fit
+    content: "Off-screen objects are not remapped (is_visible; test added). The body verse, if it overflows and the template gives no box, is nudged <=10% and narrowed to fit — scoped to the body only, after fitting every overflowing box wrapped corner labels and pulled them off their plates"
+    status: completed
+  - id: magic-move-dedup
+    content: "A magic-move build's leftover second copy of a group or text box is placed once. Scoped to groups and text, never images: a wall deck stacks map layers as coincident images on purpose (221 on the report card) and dropping one tears the map apart"
+    status: completed
+  - id: corner-label
+    content: "A corner label (plate + one word, no logo, slot bleeds off an edge) is moved to the template corner at its wall size, not resized into the slot: keeps a rounded plate rounded and a longer word's room. Keynote exposes no corner-radius handle (probe_corner.js); missions badges with a logo keep the slot"
     status: completed
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
@@ -88,6 +112,61 @@ that was already above it — the resizer inherits the source deck's stacking an
 Keynote exposes no way to change it. That reads as a clipping bug and will be
 re-investigated by anyone who does not know; the skill doc records it with the
 measurements.
+
+## Text and framing batch (from a real-run review)
+
+Ten commits, `23a8dcd..52b13cd`, each with its reasoning in the message. Measured
+against the warm cache; the reviewer's own decks were a combined
+sermon+missions deck that is not cached, so slide numbers below are the
+reviewer's and the mechanisms were reproduced on the cached gold decks. What each
+does, and what to know before touching it:
+
+- **Text keeps its source font and colour** (`23a8dcd`). Only size and position
+  change, title included. A matched template swatch lends its *size* only;
+  `_source_face` re-asserts the item's own face and every text branch sends colour
+  `None`, so Keynote leaves the source in place. The swatch's face equals the
+  source's by construction (match requires the same family), so the pre-existing
+  swatch-face test still holds. Memory: `lw-text-keeps-source-font-colour`.
+- **Scripture body in the template box** (`0b31519`). `bodyTextDst` mirrors
+  `titleDst`: the largest non-title, non-list text carrying a real paragraph
+  (>= `BODY_TEXT_MIN_CHARS`) snaps to the template's body box and reflows. Only two
+  cached slides have a verse (Numbers 16, Romans 15:20); missions slides are
+  untouched because their large text is a church-name column (`is_list_item`).
+- **Centre-panel 1:1** (`e04602e`). `centre_panel_image` finds a ~2x-frame-wide,
+  ~1-frame-tall centred panorama; the crop is chosen as if the small images over
+  it were absent, so a map with a photo grid frames like the plain map beside it
+  and the overlays ride the panel affine. Height is capped so a full-bleed image
+  that runs off top and bottom is not mistaken for a panel.
+- **Sparkle overlays** (`1e1c16c` + `c26bae8`). An emphasis copy is a substring of
+  the body that sits over it; it takes the body's final size, then is *re-seated*
+  on the body after the body is placed and fitted, by the same translate + scale
+  that took the body's wall box to its final box. A heavy reflow moves words, so
+  the placement is near, not exact.
+- **Church-list checkbox honoured over the map** (`971bd7b`). The hide was gated on
+  the same free-to-move test as packing, so names over land were kept as labels; a
+  slide of many names (`LIST_SUMMARY_MIN`) is now dropped regardless of what is
+  under each. This only bit on the rendered-slide run, which is why a blind unit
+  test missed it — worth remembering when a resizer bug won't reproduce offline.
+- **De-dup magic-move copies** (`c862569`). Coincident groups/text are placed once;
+  **images are never de-duped** — a wall stacks its map layers as coincident images
+  on purpose (221 on the report card).
+- **Off-screen + fit, scoped to the body** (`b400090` + `f83ce63`). Off-screen
+  objects are not remapped (`is_visible`). The body verse, if it overflows and the
+  template gives no box, is nudged <= 10% and narrowed to fit. This started as a
+  general pass over every overflowing box and **regressed labels** — it wrapped a
+  corner label and pulled it off its plate — so it is now the body verse alone.
+- **Corner labels** (`52b13cd`). A plate with one word, no logo, whose slot bleeds
+  off an edge is moved to the template corner at its *wall size*, not resized into
+  the slot. This keeps a rounded plate rounded — **Keynote exposes no corner-radius
+  handle** (`scripts/probe_corner.js`; a resize squares the corners and cannot be
+  undone) — and keeps a longer word's room. Told from a title plate by the bleed,
+  from a missions badge by the absence of a logo. A rounded *missions* plate would
+  still lose its corners; no script fix, template/source only.
+
+**The two open reflow caveats.** The scripture body reflows when it narrows, so
+sparkle overlays land near their words rather than on them (`c26bae8`), and a body
+the 10% budget cannot fully rescue is left narrowed at its nudged spot for the
+operator. Both are the "operator adjusts" boundary the reviewer accepted.
 
 ## Where things stand
 
@@ -638,9 +717,11 @@ above. There are 34 of them, which is a better sample than the one slide anyway.
 
 Stat drift is independent of all six and can land whenever.
 
-Structural title detection and the recipe library are done; both sections below
-are kept for the reasoning, which is what a later reader needs rather than the
-sequencing.
+The text and framing batch (see the handover section above, `23a8dcd..52b13cd`)
+landed alongside badge-affine from a real-run review; it did **not** touch the
+number block, which stays the immediate item. Structural title detection and the
+recipe library are done; both sections below are kept for the reasoning, which is
+what a later reader needs rather than the sequencing.
 
 ## Still parked
 
