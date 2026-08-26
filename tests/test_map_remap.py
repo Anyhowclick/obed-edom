@@ -1378,6 +1378,47 @@ def test_church_summary_list_over_map_is_hidden_when_flag_off():
     assert kept  # few labels over artwork are not dropped
 
 
+def test_off_screen_objects_are_not_placed():
+    """An object wholly off the wall is never remapped: it is invisible on the
+    wall, and the affine could otherwise drag it into the CG frame. A
+    partly-visible object is kept."""
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+            _item(kind="text", text="CHC Kuching", x=4681, y=1678, w=235, h=52, size=40),  # y>1080, off
+            _item(kind="text", text="on the wall", x=3000, y=200, w=300, h=60, size=40),  # visible
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
+    texts = [(t.x, t.y) for t in out if t.kind == "text"]
+    # The off-slide "CHC Kuching" at y=1678 must not appear.
+    assert all(y < 1080 for _, y in texts)
+    assert any(t.kind == "text" for t in out)  # the visible one is kept
+
+
+def test_fit_on_canvas_shrinks_overflowing_text_and_leaves_the_rest():
+    """A text box spilling off the right is narrowed to fit; the bleeding panel
+    and an already-on-screen box are left exactly as they were."""
+    from obed_edom.map_remap import fit_on_canvas, ItemTransform
+
+    panel = ItemTransform(slide_number=1, item_index=0, kind="image", x=-338, y=0, w=3840, h=1080, role="other")
+    verse = ItemTransform(slide_number=1, item_index=1, kind="text", x=1137, y=89, w=1995, h=301, role="other")
+    onframe = ItemTransform(slide_number=1, item_index=2, kind="text", x=100, y=100, w=400, h=80, role="other")
+    tf = [panel, verse, onframe]
+    fit_on_canvas(tf, 1920, 1080)
+    # The panel bleeds on purpose — untouched.
+    assert (panel.x, panel.w) == (-338, 3840)
+    # The on-frame box is untouched.
+    assert (onframe.x, onframe.y, onframe.w) == (100, 100, 400)
+    # The verse is nudged left within a tenth of the frame and narrowed to fit.
+    assert verse.x >= 0 and verse.x + verse.w <= 1920 + 0.5
+    assert verse.w < 1995
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""
