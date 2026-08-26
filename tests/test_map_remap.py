@@ -1195,6 +1195,77 @@ def test_centre_panel_panorama_frames_one_to_one_over_overlaid_thumbnails():
     assert len(placed) >= 10
 
 
+def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
+    """A verse paragraph lands in the template's body box at the template's size,
+    rather than keeping its wall width at the scene's 1:1 scale. Source font and
+    colour are kept, like the title."""
+    verse = (
+        "46 Then Moses said to Aaron, Take your censer and put incense in it, "
+        "along with burning coals from the altar, and hurry to the assembly."
+    )
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=3395, y=21, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=3395, y=21, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=3395, y=89, w=2328, h=351, size=46.67, font="AzoSans-Regular"),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=702, y=49, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=702, y=49, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=698, y=119, w=1140, h=675, size=46.67, font="AzoSans-Regular"),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe.get("bodyTextDst") == {"x": 698.0, "y": 119.0, "w": 1140.0, "h": 675.0}
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    body = next(t for t in transforms if t.kind == "text" and t.role == "other")
+    assert (round(body.x), round(body.y), round(body.w), round(body.h)) == (698, 119, 1140, 675)
+    assert abs((body.font_size or 0) - 46.67) < 0.1
+    assert body.font == "AzoSans-Regular"  # source face kept
+    assert body.color is None  # source colour kept
+
+
+def test_church_name_column_is_not_taken_for_a_body_paragraph():
+    """A tall stack of church names is long like a verse but is a list, not a
+    body — it keeps its own placement path and is never snapped to a body box."""
+    from obed_edom.map_remap import slide_body_text_item
+
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="text", text="Global Missions", x=2147, y=52, w=537, h=124, size=100),
+            _item(
+                kind="text",
+                text="CHC Zui Si\nCHC Zwechipen\nCHC Sitiawan\nCHC Ipoh\nCHC Prai\nCHC Klang",
+                x=6946,
+                y=9,
+                w=474,
+                h=954,
+                size=42,
+            ),
+        ],
+    }
+    assert slide_body_text_item(slide, (7680, 1080)) is None
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""

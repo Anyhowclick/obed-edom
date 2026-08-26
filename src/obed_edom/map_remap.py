@@ -38,6 +38,10 @@ TITLE_NEAR_PAD = 120.0
 # TITLE_NEAR_PAD, which had to reach from the title's own box out to the plate and
 # logo around it. Kept small so a badge near other content does not swallow it.
 BADGE_PLATE_PAD = 24.0
+# A body text box carries a paragraph, not a heading. A scripture verse runs to
+# a couple of hundred characters; a church name, a stat or a label is a handful.
+# The threshold only has to separate a sentence from a phrase.
+BODY_TEXT_MIN_CHARS = 60
 # A badge plate is short relative to the page. Measured across the gold templates
 # real plates sit at 0.09-0.11 of canvas height, so half the page is far above any
 # of them and well below the full-height side columns this rejects.
@@ -568,6 +572,20 @@ def template_title_item(
     return None
 
 
+def template_body_text(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> dict | None:
+    """The chosen template slide's body-text box, or None.
+
+    Read off the chosen slide alone — a body box describes one layout, so unlike
+    the title it is not searched for across the deck. `slides_preferring` has
+    already put the chosen slide first.
+    """
+    if not slides:
+        return None
+    return slide_body_text_item(slides[0], slide_size)
+
+
 def pack_columns_from_right(
     boxes: list[Rect],
     dest_w: float,
@@ -672,6 +690,13 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         title_rgb = item_rgb(title)
         if title_rgb:
             recipe["titleColor"] = [round(c, 4) for c in title_rgb]
+    body = template_body_text(ordered, dest)
+    if body is not None:
+        body_rect = item_rect(body)
+        if body_rect.w > 0 and body_rect.h > 0:
+            recipe["bodyTextDst"] = body_rect.as_dict()
+            if body.get("size"):
+                recipe["bodyTextFontSize"] = round(_f(body.get("size")), 2)
     slots = template_badge_slots(ordered, dest)
     if slots:
         recipe["badgeSlots"] = slots
@@ -1764,6 +1789,45 @@ def slide_title_item(
     return inside[0]
 
 
+def slide_body_text_item(
+    slide: dict, slide_size: tuple[float, float] | None = None
+) -> dict | None:
+    """The slide's body text — the largest text box that is not the title.
+
+    A scripture slide's verse paragraph. It is told from a title or a label by
+    three things at once: it is the biggest text on the slide, it is bigger than
+    the title, and it carries a real paragraph of text rather than a few words —
+    so a church name, a stat, or a heading is never taken for a body. A slide with
+    no title cannot disambiguate one, so it returns nothing rather than guess.
+    """
+    title = slide_title_item(slide, slide_size)
+    if title is None:
+        return None
+    title_rect = item_rect(title)
+    title_area = title_rect.w * title_rect.h
+    best: dict | None = None
+    best_area = 0.0
+    for item in slide.get("items") or []:
+        if (item.get("kind") or "") != "text" or not (item.get("text") or "").strip():
+            continue
+        if item is title or is_placeholder_text(item):
+            continue
+        # A church-name column is long and tall like a verse but is a stack of
+        # short names, not a paragraph. `is_list_item` already tells them apart,
+        # and a list has its own placement path.
+        if is_list_item(item):
+            continue
+        r = item_rect(item)
+        area = r.w * r.h
+        if area > best_area:
+            best, best_area = item, area
+    if best is None or best_area <= title_area:
+        return None
+    if len((best.get("text") or "").strip()) < BODY_TEXT_MIN_CHARS:
+        return None
+    return best
+
+
 def badge_members(slide: dict, title: dict) -> list[dict]:
     """Plate, logo and rule sharing the title's box — the badge minus its words."""
     src = item_rect(title)
@@ -2020,6 +2084,11 @@ def plan_slide_transforms(
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
         slide, recipe, wall_size
     )
+    # The body text lands in the template's own box, like the title, rather than
+    # riding the scene affine at its wall width. Identified once, matched by
+    # identity in the loop.
+    body_dst = _rect_from_dict(recipe.get("bodyTextDst"))
+    body_item = slide_body_text_item(slide, wall_size) if body_dst is not None else None
     badge_dsts = dict(recipe.get("badgeSlots") or {})
     line_slots = list(recipe.get("lineSlots") or [])
     map_src = _rect_from_dict(recipe.get("mapSrc"))
@@ -2144,6 +2213,34 @@ def plan_slide_transforms(
                     font=_source_face(item),
                     color=None,
                     role="title",
+                    kind_index=kind_index,
+                )
+            )
+            continue
+        if body_dst is not None and item is body_item:
+            # Apply the template: the body verse takes the template's box and font
+            # size so it reflows into the frame, rather than keeping its wall width
+            # at the scene's 1:1 scale. Source face and colour are kept — the same
+            # rule as the title and every other resized text. Matched before the
+            # list branches so a verse that reads as a column still lands here.
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind="text",
+                    x=body_dst.x,
+                    y=body_dst.y,
+                    w=body_dst.w,
+                    h=body_dst.h,
+                    locked=bool(item.get("locked")),
+                    font_size=(
+                        float(recipe["bodyTextFontSize"])
+                        if recipe.get("bodyTextFontSize")
+                        else (_f(item.get("size")) or None)
+                    ),
+                    font=_source_face(item),
+                    color=None,
+                    role="other",
                     kind_index=kind_index,
                 )
             )
