@@ -1,9 +1,18 @@
 ---
 name: Cue palette and outline editor
-overview: "Handover section first. Done: the Keynote 15.x migration, framing confirmation, badge placement (its own plate affine), structural title detection, the divider, ranges read in Keynote's numbering, and a batch of text/framing fixes from a real-run review — source font/colour kept on resize, the scripture body in its template box, centre-panel 1:1 framing, sparkle-overlay sizing and coupling, the church-list checkbox honoured over the map, off-screen/fit handling scoped to the body verse, magic-move de-dup, and corner labels kept at their own size. Still to do: the number block in the CG resizer, the cue-first palette built from the dropped template's real layouts, the in-dashboard outline editor that writes semantic cues into the source .docx, image cues, and the DSK generator. Recipes-as-artefacts revisit is unblocked now the badge has its own affine."
+overview: "Read the Session 2 section first (right after this handover) — it holds the latest work. Done: the Keynote 15.x migration, framing confirmation, badge placement (its own plate affine), structural title detection, the divider, ranges in Keynote's numbering, a first text/framing batch, and a Session-2 batch from a second real-run review (cdaf271..ceaff9d) — the fit-vs-cover veto refactored to count only affine-placed artwork, degenerate-pin auto-correct, cover-fallback covering the centre panel, the badge refusing a differently-coloured template plate, LW side-panel content dropped, a verse's bold emphasis runs kept, an adjacent same-pin sibling's affine reused to keep a magic-move map 1:1, and a framing-review QoL pass. Still to do: the number block in the CG resizer; the per-slide side-panel whitelist (only the global-flag drop shipped); the cue-first palette; the in-dashboard outline editor; image cues; the DSK generator. Slide 125's grouped church names, the sparkle-overlay-on-words placement, and a caption in the 'as it will look' preview are the operator/source or nice-to-have leftovers noted in Session 2."
 todos:
   - id: text-placement
-    content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem"
+    content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem. Untouched in Session 2"
+    status: pending
+  - id: side-panel-whitelist
+    content: "Per-slide side-panel whitelist. Session 2 shipped only the global-flag drop (fe6b610); the full feature — drop side content by default, keep per whitelisted slide via a keepSideContent Decision bool surfaced in the framing review, replacing the include-lists checkbox — is scoped in the Session 2 section, not built"
+    status: pending
+  - id: session2-batch
+    content: "Second real-run review batch cdaf271..ceaff9d: cover-veto refactor, degenerate-pin auto-correct, panel cover-fallback, badge colour-reject/borrow, LW side-panel drop, verse bold-run preservation, sibling-affine magic-move reuse, framing-review QoL. See the Session 2 section"
+    status: completed
+  - id: slide125-grouping
+    content: "Slide 125 church list stays visible because its names are opaque groups spanning the centre (not text, not side-panel). Source-deck grouping problem — ungroup so they hide like slide 124. Agreed as operator/source, not a code fix"
     status: pending
   - id: badge-cluster
     content: "Badge-as-cluster placement in the CG resizer. H18 confirmed: the badge affine came from the title text box, so logo and plate landed short. They now take the template's own rects and match gold exactly"
@@ -83,6 +92,88 @@ still stands except item 3 (live preview), which is dropped for the reasons belo
 Keynote 15 migration now lives there — bundle-id targeting, the verified scripting
 limits, cache versioning, the template contract. This plan holds only what is
 still to be done and the reasoning a new agent would otherwise have to rediscover.
+
+## Session 2 — second real-run review batch (`cdaf271..ceaff9d`, read this first)
+
+Five commits on `feat/cg-negative-space`, from reviewing a real report-card resize
+(`Full_Report_Card_Wall.key` slides 2–5, 19–23, 92–94, 104, 124–125 against
+`Base_CG_Assets.key`). All measured offline against the warm cache; 314 tests
+pass. Each has its reasoning in the message.
+
+- **`cdaf271` — cover full-bleed slides instead of letterboxing.** Three fixes.
+  (1) `on_canvas_fraction` (the fit-vs-cover veto) now counts only the artwork the
+  affine is *responsible for*: `_replaced_item_ids` excludes the title, verse body,
+  sparkle emphasis and centre-panel overlays (as lists/badges already were), and
+  for a cover recipe a `_COVER_SOURCES` crop-footprint drops side content beyond
+  the centre — a correct full-bleed cover was being letterboxed because its
+  reflowed text and cropped side content read as "half the page thrown away".
+  (2) A pinned framing that collapses to a degenerate scale falls back to the
+  page's own automatic framing (`pinOverridden`), not fit-to-frame. (3) The
+  cover-fallback covers the detected centre panel, not the full wall, so a
+  centre-panel photo crops its side groups off. Plus the framing-review QoL: the
+  "crop" view is gone and the chip/candidate thumbnails render "where objects land".
+- **`32e21e4` — refuse a differently-coloured template plate as the badge home.**
+  Template 10 is a plain map whose only text is a white in-map label ("CHC Qiu
+  Cha"); the structural detector took it as the badge slot, so the cyan "MISSIONS
+  UPDATE" badge buried mid-map. The badge slots are now read from the template
+  slide whose plate *colour matches* the source badge — the deck's real cyan badge
+  (template 12, top-left, plate + logo) — skipping the white label. `_rgb_close`
+  + `PLATE_COLOR_TOLERANCE`; `template_badge_plate` gained the same no-member guard
+  the slots had, so anchor and slots always describe one badge. Every real badge on
+  these decks is the same cyan, so scripture titles and missions badges are
+  untouched.
+- **`fe6b610` — drop LW side-panel content the 16:9 crop cannot keep.**
+  `is_side_panel_item`: on the 7680×1080 wall, content whose rect does not overlap
+  the centre panel `[1920..5760]` is dropped when side content is not kept (the
+  "include lists" toggle off). Generalises the church-column drop to side badges,
+  photo strips and labels (a CHC Klang photo, a CHC Kuching map on slides 19/20).
+  **This is the global-flag form only**; the per-slide whitelist is still to do
+  (see below).
+- **`197edfd` — keep a verse's bold emphasis runs.** A scripture body is one text
+  box carrying bold/coloured emphasis *runs* the inspect cannot see (one face per
+  item). The body branch re-asserted that single face and `applyGeom`'s
+  set-font-on-box flattened every run. It now sends `font=None` on the body —
+  the box is moved in place, so Keynote keeps the runs. Memory
+  `lw-text-keeps-source-font-colour` updated with this.
+- **`ceaff9d` — reuse an adjacent same-pin sibling's affine.** A China map morphs
+  vector→photo across a magic-move sequence (92→93→94); on the wall it sits at one
+  position, so one transform keeps it 1:1. 93/94's own art pairs to a sliver, so
+  each covered to its own shifted crop. Now a degenerate pinned framing first
+  reuses the affine the *immediately-preceding same-pin* page used
+  (`_recipe_reusing_affine`, `source=sibling-affine`), before its own cover.
+  Adjacency is the grouping (magic move is consecutive-only) and the shared pin is
+  the operator's say-so — never inferred; a gap or different pin breaks the chain.
+  92→93→94 all end on `s=1.0 tx=-2932`, identical.
+
+**Left as operator/source or nice-to-have (agreed with the operator):**
+
+- *Slide 125's church list.* Its names live in ~51 opaque **groups** (childCount 0,
+  no member text in the inspect) that span the centre, so neither the list-hide
+  (text only) nor the side-panel drop reaches them, unlike slide 124's individual
+  text. Classified as a source-deck **grouping** problem — ungroup the names so
+  they hide like 124.
+- *93/94 fine-crop.* The sibling-affine fix aligns the China map; if a photo's
+  subject still needs re-centring the operator nudges it in Keynote. A per-slide
+  crop-nudge control was offered and declined.
+- *Sparkle overlay on the words.* The verse reflows into the narrower box, so the
+  emphasis overlay copies land near, not exactly on, the words. Manual nudge; the
+  body's own emphasis now renders correctly (`197edfd`).
+- *Caption in "as it will look".* The composite preview cuts wall pixels and
+  re-placed text has no source rect, so captions don't render — the parked
+  "composite is approximate" limitation. A review-only nicety; does not touch the
+  output deck.
+
+**Per-slide side-panel whitelist — scoped, not built.** During Session 2 the full
+feature (drop side content by default + a per-slide whitelist to keep it, replacing
+the "include lists" checkbox) was designed and drafted, then set aside; only the
+drop (gated on the existing toggle, `fe6b610`) shipped. Operator's chosen shape:
+side panel = the LW `[1920..5760]` centre, drop by default, **whitelist per slide
+in the framing review** (a `keepSideContent` bool on the `framing.py` `Decision`,
+stored by digest like the pins, surfaced as a per-slide toggle). It threads through
+`plan_payload_transforms` (a `side_content_slides` set), `remap_keynote`, the
+`/api/resize` endpoints and `FramingReview.tsx`, and removes the checkbox in
+`ResizeTab.tsx`. The full draft lived in a session-temp patch that will vanish;
+rebuild from this paragraph — it is a clean vertical slice.
 
 ## Handover: where this branch is
 
