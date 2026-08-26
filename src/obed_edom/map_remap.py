@@ -2176,6 +2176,31 @@ def _fully_on_frame(r: Rect, dest_w: float, dest_h: float) -> bool:
     return r.x >= 0 and r.y >= 0 and r.x + r.w <= dest_w and r.y + r.h <= dest_h
 
 
+def _couple_overlays_to_body(
+    body_tf: ItemTransform,
+    body_wall: Rect,
+    overlays: list[tuple[ItemTransform, Rect]],
+) -> None:
+    """Re-seat each sparkle overlay on the body after the body has been placed.
+
+    An emphasis copy is a sub-region of the body: it should undergo whatever the
+    body did — the template box, the affine, and the fit pass's move and narrow —
+    so it stays over the words rather than drifting off on its own. The body's
+    wall box maps to its final box by a translate and a per-axis scale; the same
+    map carries each overlay's wall box across. A heavy reflow moves words within
+    the body, so this is near, not exact, which is what the operator adjusts.
+    """
+    if body_wall.w <= 0 or body_wall.h <= 0:
+        return
+    sx = body_tf.w / body_wall.w
+    sy = body_tf.h / body_wall.h
+    for ov_tf, ov_wall in overlays:
+        ov_tf.x = body_tf.x + (ov_wall.x - body_wall.x) * sx
+        ov_tf.y = body_tf.y + (ov_wall.y - body_wall.y) * sy
+        ov_tf.w = max(8.0, ov_wall.w * sx)
+        ov_tf.h = max(8.0, ov_wall.h * sy)
+
+
 def fit_on_canvas(
     transforms: list[ItemTransform], dest_w: float, dest_h: float
 ) -> None:
@@ -2294,6 +2319,11 @@ def plan_slide_transforms(
                 _affine_for_item(body_for_body, _groups_for_slide(slide, recipe)),
                 match_character_style(body_for_body, styles_pre),
             )
+    # Captured as they are placed, so the overlays can be re-seated on the body
+    # after the fit pass has moved and narrowed it — see _couple_overlays_to_body.
+    body_wall_rect = item_rect(body_for_body) if (overlay_ids and body_for_body) else None
+    body_tf: ItemTransform | None = None
+    overlay_tfs: list[tuple[ItemTransform, Rect]] = []
     line_slots = list(recipe.get("lineSlots") or [])
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
@@ -2459,6 +2489,8 @@ def plan_slide_transforms(
                     kind_index=kind_index,
                 )
             )
+            if item is body_for_body:
+                body_tf = out[-1]
             continue
         # Snapping to the template's list destination only makes sense for a
         # single column. With fifteen map labels it puts all fifteen on the same
@@ -2568,6 +2600,10 @@ def plan_slide_transforms(
                     kind_index=kind_index,
                 )
             )
+            if item is body_for_body:
+                body_tf = out[-1]
+            elif id(item) in overlay_ids:
+                overlay_tfs.append((out[-1], item_rect(item)))
             continue
         if badge_dst is not None:
             mapped = badge_dst
@@ -2660,6 +2696,10 @@ def plan_slide_transforms(
         _f(recipe.get("destWidth"), CG_WIDTH),
         _f(recipe.get("destHeight"), CG_HEIGHT),
     )
+    # After the fit pass has settled the body, re-seat its sparkle overlays on it
+    # so they follow the body on-screen instead of being left where they fell.
+    if body_tf is not None and overlay_tfs and body_wall_rect is not None:
+        _couple_overlays_to_body(body_tf, body_wall_rect, overlay_tfs)
     # Apply order is stacking order for *generate*, which creates the objects.
     # Resize inherits the source deck's stacking and cannot change it: Keynote
     # 15.3.1 exposes no arrange vocabulary at all — `bringToFront` and friends

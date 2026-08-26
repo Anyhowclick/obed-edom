@@ -1419,6 +1419,46 @@ def test_fit_on_canvas_shrinks_overflowing_text_and_leaves_the_rest():
     assert verse.w < 1995
 
 
+def test_sparkle_overlays_follow_the_body_after_the_fit_pass():
+    """An emphasis copy is re-seated on the body once the body has been placed and
+    the fit pass has moved and narrowed it, so it lands on the body's words on the
+    frame instead of being left off-screen where its own affine put it."""
+    verse = (
+        "47 So Aaron did as Moses said and ran into the midst of the assembly. "
+        "He stood between the living and the dead, and the plague stopped."
+    )
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=3395, y=21, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=3395, y=21, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=3395, y=89, w=2328, h=351, size=46.67, font="AzoSans-Regular"),
+                    # An emphasis copy far to the right — off-frame at 1:1 on its own.
+                    _item(kind="text", text="the plague stopped", x=4378, y=337, w=676, h=98, size=75, font="AzoSans-Bold"),
+                ],
+            }
+        ],
+    }
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": [
+        _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
+    ]}]}
+    recipe = learn_recipe(wall, template)
+    tfs = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    others = [t for t in tfs if t.role == "other" and t.kind == "text"]
+    body = max(others, key=lambda t: t.w * t.h)
+    overlay = next(t for t in others if t is not body)
+    # The overlay lands on-frame, within the body's final vertical span, at the
+    # body's size — following it rather than sitting off to the right.
+    assert 0 <= overlay.x and overlay.x + overlay.w <= 1920 + 0.5
+    assert body.y - 1 <= overlay.y <= body.y + body.h + 1
+    assert abs((overlay.font_size or 0) - (body.font_size or 0)) < 0.5
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""
