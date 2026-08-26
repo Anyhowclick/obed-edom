@@ -409,6 +409,19 @@ of which take a bundle id as their last argument.
     resize moves the box in place, so leaving `font` unset keeps every run. The
     resizer now sends `font=None` on the body (`197edfd`); colour was already left
     to the source. See memory `lw-text-keeps-source-font-colour`.
+  - *You cannot rebuild the runs after a rewrite either, so do not rewrite verse
+    text at all.* A character exposes only `font`, `color`, `size` (probed on
+    15.3.1: `properties()` on a character returns `font,color,pcls,size`; reading
+    `superscript`, `baselineShift`, `capitalization`, `underline`, `strikethrough`
+    all raise "Can't convert types" — the same limit `## Later verse numbers`
+    documents for generate). So `objectText = rebuilt` followed by re-applying
+    captured font/size/colour per character still **loses the superscript verse
+    numbers and the small-caps LORD**, and there is no way back. And Keynote can
+    only *delete* a character, never insert or set one, so a hard line break cannot
+    be swapped for a space in place (deleting it merges the words). A resize attempt
+    to strip a verse's wall line breaks was built on the rewrite and reverted for
+    exactly this — the styling did not survive. **Leave verse boxes untouched;** a
+    stray hard break is a source-deck fix, not a scriptable one.
 - **Z-order can be neither read nor set.** Verified on 15.3.1 by
   `scripts/probe_zorder.js`; both halves are Keynote limits, not our bugs.
   - *Reading:* `slide.iWorkItems()` raises "Can't convert types.", so the one
