@@ -1580,6 +1580,28 @@ def test_coincident_group_deduped_but_images_kept():
     assert id(items[3]) not in dup  # the coincident image is kept
 
 
+def test_coincident_dup_is_hidden_not_dropped_from_plan():
+    """The leftover magic-move copy is pinned to zero opacity, not left un-planned.
+    On the LW wall the canvas change scales every un-planned object into the frame,
+    so a dropped duplicate reappears as a ghost beside the copy that was placed."""
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="Building.png", x=1920, y=-126, w=3840, h=1250),
+            _item(kind="group", x=5770, y=-174, w=1923, h=1317, childCount=5),  # side panel
+            _item(kind="group", x=5771, y=-174, w=1923, h=1317, childCount=5),  # coincident dup
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    groups = [t for t in out if t.kind == "group"]
+    # Both the side-panel copy and its coincident duplicate are hidden; neither is
+    # left un-planned to be scaled back on-frame.
+    assert len(groups) == 2 and all(t.role == "hide" and t.opacity == 0.0 for t in groups)
+
+
 def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
     """On the LW wall, content wholly on a side panel is dropped unless side
     content is being kept; centre and boundary-straddling content stay."""
@@ -1645,10 +1667,11 @@ def test_church_summary_list_over_map_is_hidden_when_flag_off():
     assert kept  # few labels over artwork are not dropped
 
 
-def test_off_screen_objects_are_not_placed():
-    """An object wholly off the wall is never remapped: it is invisible on the
-    wall, and the affine could otherwise drag it into the CG frame. A
-    partly-visible object is kept."""
+def test_off_screen_objects_are_hidden_not_left_alone():
+    """An object wholly off the wall is pinned to zero opacity, not dropped from the
+    plan. Changing the canvas to 16:9 scales every object Keynote still owns into
+    the frame, so an off-slide leftover left un-planned is dragged back on-frame; a
+    hide is what actually removes it. A partly-visible object is kept and placed."""
     slide = {
         "number": 1,
         "items": [
@@ -1661,10 +1684,12 @@ def test_off_screen_objects_are_not_placed():
     template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
     recipe = learn_recipe(wall, template)
     out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
-    texts = [(t.x, t.y) for t in out if t.kind == "text"]
-    # The off-slide "CHC Kuching" at y=1678 must not appear.
-    assert all(y < 1080 for _, y in texts)
-    assert any(t.kind == "text" for t in out)  # the visible one is kept
+    # The off-slide "CHC Kuching" (the only text parked at y=1678) is present but
+    # hidden, so the canvas change cannot scale it back on-frame.
+    off = [t for t in out if t.kind == "text" and t.y >= 1080]
+    assert off and all(t.role == "hide" and t.opacity == 0.0 for t in off)
+    visible = [t for t in out if t.kind == "text" and t.role != "hide"]
+    assert visible  # the on-wall label is kept and placed
 
 
 def test_fit_body_to_frame_narrows_the_body_only():

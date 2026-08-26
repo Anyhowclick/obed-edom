@@ -2309,6 +2309,32 @@ def _fit_body_to_frame(t: ItemTransform, dest_w: float, dest_h: float) -> None:
         t.w = max(FIT_MARGIN, dest_w - FIT_MARGIN - t.x)
 
 
+def _hide_item_transform(
+    item: dict, number: int, item_index: int, kind_index: int
+) -> ItemTransform:
+    """A zero-opacity placement that pins an object out of sight.
+
+    Hiding is not the same as leaving an object out of the plan. Changing the
+    canvas to 16:9 makes Keynote scale-to-fit every object it still owns into the
+    frame, so an object we merely skip — an off-slide leftover, a magic-move
+    duplicate, a side panel — is dragged back on-frame at the scaled position
+    instead of vanishing. Pinning its opacity to zero is what actually removes it.
+    """
+    return ItemTransform(
+        slide_number=number,
+        item_index=item_index,
+        kind=str(item.get("kind") or "image"),
+        x=_f(item.get("x")),
+        y=_f(item.get("y")),
+        w=_f(item.get("w")),
+        h=_f(item.get("h")),
+        locked=bool(item.get("locked")),
+        role="hide",
+        kind_index=kind_index,
+        opacity=0.0,
+    )
+
+
 def plan_slide_transforms(
     slide: dict,
     recipe: dict[str, Any],
@@ -2403,32 +2429,24 @@ def plan_slide_transforms(
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
-        # A magic-move build's leftover second copy of a group or text box: place
-        # it once, not twice. Images are never in this set (stacked map layers).
-        if id(item) in coincident_dups:
-            continue
-        # Off-slide leftovers are invisible on the wall, and the affine would
-        # drag some of them into the CG frame.
-        if wall_size and not is_visible(item, wall_w, wall_h):
-            continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
+        # A magic-move build's leftover second copy of a group or text box: show it
+        # once, not twice. Hidden, not skipped — a skipped copy is scaled back into
+        # frame by the canvas change and reappears as a ghost beside the first.
+        # Images are never in this set (stacked map layers).
+        if id(item) in coincident_dups:
+            out.append(_hide_item_transform(item, number, item_index, kind_index))
+            continue
+        # Off-slide leftovers are invisible on the wall. Hide them rather than skip:
+        # the 16:9 canvas change scales every object it still owns into the frame,
+        # so a parked map or an off-screen label lands back on-frame unless its
+        # opacity is pinned to zero.
+        if wall_size and not is_visible(item, wall_w, wall_h):
+            out.append(_hide_item_transform(item, number, item_index, kind_index))
+            continue
         if is_chrome_bg(item):
-            out.append(
-                ItemTransform(
-                    slide_number=number,
-                    item_index=item_index,
-                    kind=str(item.get("kind") or "image"),
-                    x=_f(item.get("x")),
-                    y=_f(item.get("y")),
-                    w=_f(item.get("w")),
-                    h=_f(item.get("h")),
-                    locked=bool(item.get("locked")),
-                    role="hide",
-                    kind_index=kind_index,
-                    opacity=0.0,
-                )
-            )
+            out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         # Content wholly on a side panel has nowhere to go after the 16:9 crop, so
         # it is dropped unless side content is being kept. This is the general form
@@ -2437,21 +2455,7 @@ def plan_slide_transforms(
         # the affine and still show. Kept content — the map, its labels, the title —
         # overlaps the centre panel and so is never side-panel content.
         if not include_lists and is_side_panel_item(item, wall_w, wall_h):
-            out.append(
-                ItemTransform(
-                    slide_number=number,
-                    item_index=item_index,
-                    kind=str(item.get("kind") or "image"),
-                    x=_f(item.get("x")),
-                    y=_f(item.get("y")),
-                    w=_f(item.get("w")),
-                    h=_f(item.get("h")),
-                    locked=bool(item.get("locked")),
-                    role="hide",
-                    kind_index=kind_index,
-                    opacity=0.0,
-                )
-            )
+            out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         if corner_translate is not None and id(item) in corner_ids:
             # Move the corner label to the template's corner at its own size, so
