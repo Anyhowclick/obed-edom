@@ -1400,23 +1400,55 @@ def test_off_screen_objects_are_not_placed():
     assert any(t.kind == "text" for t in out)  # the visible one is kept
 
 
-def test_fit_on_canvas_shrinks_overflowing_text_and_leaves_the_rest():
-    """A text box spilling off the right is narrowed to fit; the bleeding panel
+def test_fit_body_to_frame_narrows_the_body_only():
+    """The overflowing body verse is nudged and narrowed to fit; a bleeding panel
     and an already-on-screen box are left exactly as they were."""
-    from obed_edom.map_remap import fit_on_canvas, ItemTransform
+    from obed_edom.map_remap import _fit_body_to_frame, ItemTransform
 
-    panel = ItemTransform(slide_number=1, item_index=0, kind="image", x=-338, y=0, w=3840, h=1080, role="other")
     verse = ItemTransform(slide_number=1, item_index=1, kind="text", x=1137, y=89, w=1995, h=301, role="other")
-    onframe = ItemTransform(slide_number=1, item_index=2, kind="text", x=100, y=100, w=400, h=80, role="other")
-    tf = [panel, verse, onframe]
-    fit_on_canvas(tf, 1920, 1080)
-    # The panel bleeds on purpose — untouched.
-    assert (panel.x, panel.w) == (-338, 3840)
-    # The on-frame box is untouched.
-    assert (onframe.x, onframe.y, onframe.w) == (100, 100, 400)
-    # The verse is nudged left within a tenth of the frame and narrowed to fit.
+    _fit_body_to_frame(verse, 1920, 1080)
     assert verse.x >= 0 and verse.x + verse.w <= 1920 + 0.5
     assert verse.w < 1995
+
+    onframe = ItemTransform(slide_number=1, item_index=2, kind="text", x=100, y=100, w=400, h=80, role="other")
+    _fit_body_to_frame(onframe, 1920, 1080)
+    assert (onframe.x, onframe.y, onframe.w) == (100, 100, 400)  # already on-frame — untouched
+
+
+def test_fit_pass_leaves_a_corner_label_and_its_width_alone():
+    """A short corner label that bleeds off an edge is not the body, so the fit
+    pass does not narrow it (which would wrap it) or move it off its plate. Only
+    the verse is fitted."""
+    verse = (
+        "47 So Aaron did as Moses said and ran into the midst of the assembly. "
+        "He stood between the living and the dead, and the plague stopped."
+    )
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+            _item(kind="shape", x=3395, y=21, w=662, h=92),  # title plate
+            _item(kind="text", text="Numbers 16", x=3395, y=21, w=662, h=92, size=60, font="AzoSans-Bold"),
+            _item(kind="text", text=verse, x=3395, y=89, w=2328, h=351, size=46.67, font="AzoSans-Regular"),
+            # A short corner label riding the affine to the right edge — must keep its width.
+            _item(kind="text", text="Main Sanctuary", x=5400, y=40, w=333, h=64, size=40),
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": [
+        _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
+    ]}]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
+    others = sorted(
+        (t for t in out if t.kind == "text" and t.role == "other"), key=lambda t: t.w * t.h
+    )
+    label, body = others[0], others[-1]
+    # The body verse is fitted onto the frame and narrowed.
+    assert body.x >= 0 and body.x + body.w <= 1920 + 0.5
+    # The label rides the affine off the right edge and is left there — the fit
+    # pass does not pull it on and narrow it (which would wrap it onto the plate).
+    assert label.x + label.w > 1920
 
 
 def test_sparkle_overlays_follow_the_body_after_the_fit_pass():

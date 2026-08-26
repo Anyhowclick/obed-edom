@@ -2152,24 +2152,11 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
         lists[idx].h = rect.h
 
 
-# How far, as a fraction of each frame dimension, an object may be nudged to get
-# back on-screen. Small, so it stays near where it was placed and an operator can
-# still recognise and adjust it.
+# How far, as a fraction of each frame dimension, the body verse may be nudged to
+# get back on-screen. Small, so it stays near where it was placed and an operator
+# can still recognise and adjust it.
 FIT_MAX_DELTA_FRACTION = 0.10
 FIT_MARGIN = 8.0
-# Roles that bleed off the frame on purpose (the cropped map, its pins, a rule)
-# or are already gone (hidden), and so are never pulled back on-screen.
-_FIT_SKIP_ROLES = frozenset({"map", "pin", "line", "hide"})
-
-
-def _overlap_area(a: Rect, b: Rect) -> float:
-    dx = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
-    dy = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
-    return dx * dy if dx > 0 and dy > 0 else 0.0
-
-
-def _on_frame_area(r: Rect, dest_w: float, dest_h: float) -> float:
-    return _overlap_area(r, Rect(0.0, 0.0, dest_w, dest_h))
 
 
 def _fully_on_frame(r: Rect, dest_w: float, dest_h: float) -> bool:
@@ -2201,86 +2188,36 @@ def _couple_overlays_to_body(
         ov_tf.h = max(8.0, ov_wall.h * sy)
 
 
-def fit_on_canvas(
-    transforms: list[ItemTransform], dest_w: float, dest_h: float
-) -> None:
-    """Pull content that spills off the frame back on-screen, in place.
+def _fit_body_to_frame(t: ItemTransform, dest_w: float, dest_h: float) -> None:
+    """Narrow and nudge the body verse so it sits on the frame, in place.
 
-    Text too wide for the frame has its box narrowed to fit — it reflows taller,
-    which is what the operator asked for over a verse running off the edge. Then
-    any object still crossing an edge is nudged, by at most a tenth of the frame,
-    toward the position that sits most on-screen and overlaps its neighbours
-    least. Overlap is tolerated where it cannot be avoided within that budget; the
-    map, its pins and rules bleed on purpose and are left alone, as is an image or
-    group larger than the frame, which is a full-bleed panel.
+    Only the body is fitted. Everything else — a corner label on its plate meant
+    to bleed off an edge, a full-bleed photo, the cropped map — is left exactly
+    where the template and affine placed it: fitting them wrapped short labels
+    and pulled them off the plates they belonged to. The body is nudged by at
+    most a tenth of the frame toward being on-screen, then, if still crossing the
+    right edge, narrowed to the space it has, reflowing taller inside the frame
+    rather than running off.
     """
     if dest_w <= 0 or dest_h <= 0:
         return
+    rect = Rect(t.x, t.y, t.w, t.h)
+    if _fully_on_frame(rect, dest_w, dest_h):
+        return
     max_dx = dest_w * FIT_MAX_DELTA_FRACTION
     max_dy = dest_h * FIT_MAX_DELTA_FRACTION
-    # Parallel to `transforms` (None for hidden) so an index into one indexes the
-    # other; kept current as objects move so later ones avoid where earlier landed.
-    obstacles: list[Rect | None] = [
-        None if t.role == "hide" else Rect(t.x, t.y, t.w, t.h) for t in transforms
-    ]
-    for idx, t in enumerate(transforms):
-        if t.role in _FIT_SKIP_ROLES:
-            continue
-        rect = Rect(t.x, t.y, t.w, t.h)
-        if _fully_on_frame(rect, dest_w, dest_h):
-            continue
-        is_text = (t.kind or "") == "text"
-        if not is_text and (t.w >= dest_w or t.h >= dest_h):
-            # A full-bleed image or group is meant to run off the edges.
-            continue
-        others = [o for i, o in enumerate(obstacles) if i != idx and o is not None]
-        # 1. Nudge within the delta toward the spot most on-screen, then least
-        #    overlapping. The clamp offset (as far on as the budget allows) is
-        #    always a candidate, with a small grid so a tie on coverage can be
-        #    broken on overlap.
-        clamp_x = 0.0
-        if rect.x < 0:
-            clamp_x = min(-rect.x, max_dx)
-        elif rect.x + rect.w > dest_w:
-            clamp_x = max(dest_w - (rect.x + rect.w), -max_dx)
-        clamp_y = 0.0
-        if rect.y < 0:
-            clamp_y = min(-rect.y, max_dy)
-        elif rect.y + rect.h > dest_h:
-            clamp_y = max(dest_h - (rect.y + rect.h), -max_dy)
-        candidates = {(clamp_x, clamp_y)}
-        for gx in (-2, -1, 0, 1, 2):
-            for gy in (-2, -1, 0, 1, 2):
-                candidates.add((gx / 2.0 * max_dx, gy / 2.0 * max_dy))
-        best: tuple[float, float] = (clamp_x, clamp_y)
-        best_key: tuple[float, float] | None = None
-        for dx, dy in candidates:
-            moved = Rect(rect.x + dx, rect.y + dy, rect.w, rect.h)
-            key = (
-                round(_on_frame_area(moved, dest_w, dest_h), 1),
-                -round(sum(_overlap_area(moved, o) for o in others), 1),
-            )
-            if best_key is None or key > best_key:
-                best_key, best = key, (dx, dy)
-        t.x += best[0]
-        t.y += best[1]
-        # 2. Text left crossing an edge — but still partly on-screen — is narrowed
-        #    to the space it now has, reflowing taller inside the frame rather than
-        #    running off. Text the budget could not bring on at all is left as is,
-        #    not collapsed to a sliver: a tenth of the frame cannot rescue a box
-        #    that starts wholly outside it, and the operator moves that by hand.
-        nudged = Rect(t.x, t.y, t.w, t.h)
-        if (
-            is_text
-            and _on_frame_area(nudged, dest_w, dest_h) > 0
-            and not _fully_on_frame(nudged, dest_w, dest_h)
-        ):
-            if t.x < FIT_MARGIN:
-                t.x = FIT_MARGIN
-            if t.x + t.w > dest_w - FIT_MARGIN:
-                t.w = max(FIT_MARGIN, dest_w - FIT_MARGIN - t.x)
-        # Keep the obstacle list current so later objects avoid where this landed.
-        obstacles[idx] = Rect(t.x, t.y, t.w, t.h)
+    if t.x < 0:
+        t.x += min(-t.x, max_dx)
+    elif t.x + t.w > dest_w:
+        t.x += max(dest_w - (t.x + t.w), -max_dx)
+    if t.y < 0:
+        t.y += min(-t.y, max_dy)
+    elif t.y + t.h > dest_h:
+        t.y += max(dest_h - (t.y + t.h), -max_dy)
+    if t.x < FIT_MARGIN:
+        t.x = FIT_MARGIN
+    if t.x + t.w > dest_w - FIT_MARGIN:
+        t.w = max(FIT_MARGIN, dest_w - FIT_MARGIN - t.x)
 
 
 def plan_slide_transforms(
@@ -2691,13 +2628,16 @@ def plan_slide_transforms(
         )
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    fit_on_canvas(
-        out,
-        _f(recipe.get("destWidth"), CG_WIDTH),
-        _f(recipe.get("destHeight"), CG_HEIGHT),
-    )
-    # After the fit pass has settled the body, re-seat its sparkle overlays on it
-    # so they follow the body on-screen instead of being left where they fell.
+    # Fit only the body verse. Labels, plates and images are left where the
+    # template and affine placed them — bleeding off an edge is often deliberate.
+    if body_tf is not None:
+        _fit_body_to_frame(
+            body_tf,
+            _f(recipe.get("destWidth"), CG_WIDTH),
+            _f(recipe.get("destHeight"), CG_HEIGHT),
+        )
+    # After the body has settled, re-seat its sparkle overlays on it so they
+    # follow the body on-screen instead of being left where they fell.
     if body_tf is not None and overlay_tfs and body_wall_rect is not None:
         _couple_overlays_to_body(body_tf, body_wall_rect, overlay_tfs)
     # Apply order is stacking order for *generate*, which creates the objects.
