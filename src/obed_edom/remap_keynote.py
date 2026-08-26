@@ -221,6 +221,16 @@ def remap_keynote(
                 else ""
             )
         )
+    reused = [r for r in framing_rows if r.get("reusedSibling")]
+    if reused:
+        say(
+            f"Kept {len(reused)} slide(s) 1:1 with the page before them by reusing "
+            "that framing's transform: "
+            + ", ".join(str(r["slide"]) for r in reused[:10])
+            + ("…" if len(reused) > 10 else "")
+            + " (their own art paired to a sliver, but they share the pin and are "
+            "adjacent, so the magic-move map stays put)."
+        )
     overridden = [r for r in framing_rows if r.get("pinOverridden")]
     if overridden:
         say(

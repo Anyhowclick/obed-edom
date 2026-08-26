@@ -12,6 +12,7 @@ from obed_edom.map_remap import (
     map_point,
     merge_affine_groups,
     on_canvas_fraction,
+    _recipe_reusing_affine,
     pair_by_size,
     plan_payload_transforms,
     plan_slide_transforms,
@@ -149,6 +150,72 @@ def test_framing_report_says_what_each_slide_used():
     assert row["confirmed"] is True
     assert row["pinOverridden"] is False
     assert "fitted" in row
+
+
+def test_a_degenerate_pin_reuses_an_adjacent_same_pin_siblings_affine():
+    """Magic-move siblings pinned to one framing keep the map 1:1 across the morph.
+
+    Slide 1's own art pairs cleanly; slides 2 and 3 are full-bleed photos that pair
+    to a sliver on their own. All three carry the same pin, so 2 reuses 1's affine
+    and 3 reuses 2's — the same transform down the sequence, not each page's own
+    shifted cover."""
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=-2880, y=0, w=7680, h=1080)]},
+            # A plain map slot the first slide pairs cleanly.
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="m.pdf", x=200, y=0, w=480, h=135)]},
+        ],
+    }
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=3000, y=0, w=480, h=135)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
+            {"number": 3, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
+        ],
+    }
+    rows: list[dict] = []
+    plan_payload_transforms(
+        wall, learn_recipe(wall, template), template=template,
+        framing_overrides={1: 2, 2: 2, 3: 2}, framing_report=rows,
+    )
+    assert rows[0]["reusedSibling"] is False  # slide 1 pairs on its own
+    assert rows[1]["source"] == "sibling-affine" and rows[1]["reusedSibling"] is True
+    assert rows[2]["source"] == "sibling-affine" and rows[2]["reusedSibling"] is True
+
+    from obed_edom.map_remap import frame_affine
+    a1 = frame_affine(learn_recipe({"slideWidth": 7680, "slideHeight": 1080, "slides": [wall["slides"][0]]}, template, template_slide=2))
+    a2 = frame_affine(_recipe_reusing_affine(wall["slides"][1], learn_recipe({"slideWidth": 7680, "slideHeight": 1080, "slides": [wall["slides"][1]]}, template, template_slide=2), a1, 7680, 1080))
+    assert abs(a2.s - a1.s) < 1e-6 and abs(a2.tx - a1.tx) < 1e-6  # identical transform
+
+
+def test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse():
+    """Reuse is only for adjacent slides carrying the same pin — never inferred."""
+    template = {
+        "slideWidth": 1920, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=-2880, y=0, w=7680, h=1080)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="m.pdf", x=200, y=100, w=1000, h=600)]},
+        ],
+    }
+    wall = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=2000, y=100, w=1000, h=600)]},
+            {"number": 2, "skipped": True, "items": []},  # a gap breaks adjacency
+            {"number": 3, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
+        ],
+    }
+    rows: list[dict] = []
+    plan_payload_transforms(
+        wall, learn_recipe(wall, template), template=template,
+        framing_overrides={1: 2, 3: 2}, framing_report=rows, skipped_slides=[],
+    )
+    slide3 = next(r for r in rows if r["slide"] == 3)
+    assert slide3["reusedSibling"] is False  # slide 1 is not adjacent to slide 3
 
 
 def test_a_degenerate_pin_falls_back_to_the_pages_own_framing():

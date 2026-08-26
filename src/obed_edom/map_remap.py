@@ -1649,7 +1649,7 @@ def cg_layout_name(name: str) -> str:
 
 # Recipe sources that crop the wall to the frame's centre and shed what lies
 # beyond it — as opposed to a map framing, which places the whole page.
-_COVER_SOURCES = frozenset({"template-cover", "cover-fallback"})
+_COVER_SOURCES = frozenset({"template-cover", "cover-fallback", "sibling-affine"})
 
 
 def _recipe_source(map_src: Rect, map_dst: Rect, dest_w: float) -> str:
@@ -3679,6 +3679,43 @@ def _framing_unusable(
     )
 
 
+def _recipe_reusing_affine(
+    slide: dict, recipe: dict[str, Any], affine: Affine, wall_w: float, wall_h: float
+) -> dict[str, Any] | None:
+    """`recipe` re-anchored on a sibling's `affine`.
+
+    A magic-move sequence pinned to one framing shows the same artwork (a China
+    map morphing from a vector to a photo) at the same wall position across
+    adjacent slides. Their own art pairs to a degenerate scale, but the affine the
+    valid sibling learned maps that shared position identically — an affine is a
+    point transform, so re-anchoring keeps the map 1:1 down the sequence rather
+    than each slide covering to its own, shifted crop. Text styling carried on the
+    recipe is kept; only the map transform is replaced.
+
+    The src is the page's centre panel where it has one, so this reads as the cover
+    it is — the crop footprint then sheds the side panels (a portrait grid beside
+    the map), rather than a full-wall src keeping them in scope and failing the
+    on-canvas check.
+    """
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    panel = centre_panel_image(slide.get("items") or [], wall_w, wall_h, dest_w, dest_h)
+    src = panel or _rect_from_dict(recipe.get("mapSrc"))
+    if src is None or src.w <= 0 or src.h <= 0 or affine.s <= 0:
+        return None
+    dst = affine.apply_rect(src)
+    out = dict(recipe)
+    out["mapSrc"] = src.as_dict()
+    out["mapDst"] = dst.as_dict()
+    out["source"] = "sibling-affine"
+    # It is not the pinned framing itself, so it must not report as confirmed.
+    out["framingPinned"] = False
+    out["groups"] = [
+        {**affine.as_dict(), "src": src.as_dict(), "dst": dst.as_dict(), "members": 0}
+    ]
+    return out
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -3712,6 +3749,11 @@ def plan_payload_transforms(
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
     transforms: list[ItemTransform] = []
+    # The previous non-skipped slide's number, its pin, and the affine it ended up
+    # using — so a degenerate pin can reuse an adjacent same-pin sibling's affine.
+    prev_number: int | None = None
+    prev_pin: int | None = None
+    prev_affine: Affine | None = None
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not wants_slide(number, slide_range):
@@ -3724,6 +3766,7 @@ def plan_payload_transforms(
                 skipped_slides.append(number)
             continue
         slide_recipe = recipe
+        wanted = None
         if template and (template.get("slides") or []):
             single = {
                 "slideWidth": payload.get("slideWidth"),
@@ -3733,18 +3776,37 @@ def plan_payload_transforms(
             wanted = (framing_overrides or {}).get(number)
             slide_recipe = learn_recipe(single, template, template_slide=wanted)
             pin_overridden = False
-            # A pinned framing that collapses the page is worse than no pin: a
-            # small-map layout dropped onto a full-bleed photo shrinks it to a
-            # sliver. Before giving up to fit-to-frame, try the page's own
-            # automatic framing — which for such a page is the 1:1 cover the pin
-            # was reaching for — and use it where the pin cannot frame the page.
+            reused_sibling = False
             if wanted is not None and _framing_unusable(
                 slide, slide_recipe, wall_w, wall_h, min_on_canvas
             ):
-                auto_recipe = learn_recipe(single, template, template_slide=None)
-                if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
-                    slide_recipe = auto_recipe
-                    pin_overridden = True
+                # A magic-move sequence pinned to one framing keeps its map 1:1
+                # across the morph: where this page's own art pairs to a sliver,
+                # reuse the affine of the immediately-preceding page carrying the
+                # same pin, whose art did pair. Adjacency is the grouping — magic
+                # move only runs between consecutive slides — and the shared pin is
+                # the operator's say-so, so it is never inferred.
+                if (
+                    prev_number == number - 1
+                    and prev_pin == wanted
+                    and prev_affine is not None
+                ):
+                    reused = _recipe_reusing_affine(
+                        slide, slide_recipe, prev_affine, wall_w, wall_h
+                    )
+                    if reused is not None and not _framing_unusable(
+                        slide, reused, wall_w, wall_h, min_on_canvas
+                    ):
+                        slide_recipe = reused
+                        reused_sibling = True
+                # Otherwise the pinned framing collapsing the page is worse than no
+                # pin: fall back to the page's own automatic framing — the 1:1
+                # cover the pin was reaching for — before giving up to fit-to-frame.
+                if not reused_sibling:
+                    auto_recipe = learn_recipe(single, template, template_slide=None)
+                    if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
+                        slide_recipe = auto_recipe
+                        pin_overridden = True
             if framing_report is not None:
                 framing_report.append(
                     {
@@ -3758,6 +3820,9 @@ def plan_payload_transforms(
                         # The pin could not frame the page, so its own automatic
                         # framing was used instead. Surfaced, not silent.
                         "pinOverridden": pin_overridden,
+                        # ...or an adjacent same-pin sibling's affine was reused to
+                        # keep a magic-move sequence 1:1.
+                        "reusedSibling": reused_sibling,
                     }
                 )
         # No template framing describes this page. Applying the closest one
@@ -3809,6 +3874,18 @@ def plan_payload_transforms(
                 offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
             )
         transforms.extend(planned)
+        # Remember what this slide used, so an adjacent same-pin sibling can reuse
+        # its affine. Only a usable transform is worth passing on — a fitted or
+        # collapsed one would carry the wrong crop down the sequence.
+        used_affine = frame_affine(slide_recipe)
+        prev_affine = (
+            used_affine
+            if used_affine is not None
+            and not _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
+            else None
+        )
+        prev_number = number
+        prev_pin = wanted
     return transforms
 
 
