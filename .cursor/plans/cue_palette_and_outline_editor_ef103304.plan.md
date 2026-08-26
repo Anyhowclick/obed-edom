@@ -1,13 +1,13 @@
 ---
 name: Cue palette and outline editor
-overview: "Read the Session 2 section first (right after this handover) — it holds the latest work. Done: the Keynote 15.x migration, framing confirmation, badge placement (its own plate affine), structural title detection, the divider, ranges in Keynote's numbering, a first text/framing batch, and a Session-2 batch from a second real-run review (cdaf271..ceaff9d) — the fit-vs-cover veto refactored to count only affine-placed artwork, degenerate-pin auto-correct, cover-fallback covering the centre panel, the badge refusing a differently-coloured template plate, LW side-panel content dropped, a verse's bold emphasis runs kept, an adjacent same-pin sibling's affine reused to keep a magic-move map 1:1, and a framing-review QoL pass. Still to do: the number block in the CG resizer; the per-slide side-panel whitelist (only the global-flag drop shipped); the cue-first palette; the in-dashboard outline editor; image cues; the DSK generator. Slide 125's grouped church names, the sparkle-overlay-on-words placement, and a caption in the 'as it will look' preview are the operator/source or nice-to-have leftovers noted in Session 2."
+overview: "Read the Session 3 section first, then Session 2 — they hold the latest work. Done: the Keynote 15.x migration, framing confirmation, badge placement (its own plate affine), structural title detection, the divider, ranges in Keynote's numbering, a first text/framing batch, a Session-2 batch (cdaf271..ceaff9d), and a Session-3 batch (branch feat/side-panel-whitelist) from a third real-run review — off-frame content now hidden so the 16:9 canvas-shrink cannot scale it back on-frame (off-screen/dup items and grouped side insets), and the per-slide side-panel whitelist built (drop side content by default, keep per whitelisted slide via a keepSideContent Decision toggle in the framing review, replacing the include-lists checkbox). Still to do: the number block in the CG resizer; the cue-first palette; the in-dashboard outline editor; image cues; the DSK generator. Operator/source or won't-fix leftovers: slide 125's grouped church names, the sparkle-overlay-on-words placement, a caption in the 'as it will look' preview, and — the Session-3 lesson — a verse's wall-authored hard line breaks (stripping them by script destroys the un-scriptable superscript numbers and small-caps LORD; a source-deck fix)."
 todos:
   - id: text-placement
     content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem. Untouched in Session 2"
     status: pending
   - id: side-panel-whitelist
-    content: "Per-slide side-panel whitelist. Session 2 shipped only the global-flag drop (fe6b610); the full feature — drop side content by default, keep per whitelisted slide via a keepSideContent Decision bool surfaced in the framing review, replacing the include-lists checkbox — is scoped in the Session 2 section, not built"
-    status: pending
+    content: "Per-slide side-panel whitelist — BUILT in Session 3 (feat/side-panel-whitelist). Drops side content by default, keeps it per slide whitelisted via a keepSideContent Decision (orthogonal to framing state, stored by digest) surfaced as a per-page toggle + bulk action in the framing review; the include-lists checkbox is removed (CLI --include-lists stays a global override). Plan-reviewed and adversarially verified by sub-agents; one found bug fixed (reverting a whitelist/pin now persists on Apply)"
+    status: completed
   - id: session2-batch
     content: "Second real-run review batch cdaf271..ceaff9d: cover-veto refactor, degenerate-pin auto-correct, panel cover-fallback, badge colour-reject/borrow, LW side-panel drop, verse bold-run preservation, sibling-affine magic-move reuse, framing-review QoL. See the Session 2 section"
     status: completed
@@ -92,6 +92,59 @@ still stands except item 3 (live preview), which is dropped for the reasons belo
 Keynote 15 migration now lives there — bundle-id targeting, the verified scripting
 limits, cache versioning, the template contract. This plan holds only what is
 still to be done and the reasoning a new agent would otherwise have to rediscover.
+
+## Session 3 — off-frame hiding + the side-panel whitelist (`feat/side-panel-whitelist`, read this first)
+
+Branch `feat/side-panel-whitelist`, pushed to origin, forked from `main` (`84ae648`).
+A third real-run review of `Full_Report_Card_Wall`. Three things shipped, one was
+tried and reverted.
+
+- **Off-frame content is hidden, not skipped (`e7621f8`).** The root cause of "the
+  off-screen CHC Kuching map / label / inset still shows": changing the wall copy's
+  canvas to 16:9 makes Keynote **scale-to-fit every object it still owns into the
+  frame**, so an object the planner merely *skipped* is dragged back on-frame at the
+  scaled position. `plan_slide_transforms` now emits a zero-opacity hide for
+  off-screen leftovers and magic-move coincident duplicates instead of dropping
+  them (`_hide_item_transform`). Opacity alone does not hide a **group** (Keynote
+  ignores it, and clamps an off-canvas move), so `remap_keynote.js` **deletes**
+  `role="hide"` groups in `deleteGroupHides`, descending by kindIndex so the
+  removal never shifts a placed sibling's index. Verified: slides 19–20 render the
+  centre building only.
+
+- **Per-slide side-panel whitelist / the inversion (`14ef262`, fix `7f1fa59`).** The
+  feature scoped in Session 2, now built. Default flipped: side content dropped
+  everywhere, kept only on whitelisted pages. `Decision.keep_side_content` is
+  orthogonal to framing state (an `auto` page can be whitelisted), stored by digest
+  like a pin — so `save_framings` keeps an auto+keep row, `normalize_decision`
+  preserves it for every state, `reuse_framings` carries it, and
+  `_side_content_slides_from_result` / `FramingReuse.side_content_slides()` yield the
+  wall slide numbers. `plan_payload_transforms` takes a `side_content_slides` set and
+  treats a slide as keeping side content when the global `include_lists` (still the
+  CLI override) is on OR its number is whitelisted — applied at all three per-slide
+  gates (drop, deferred packing, measured free-text placement); `remap_keynote` /
+  `remap_and_inspect` thread it and widen the previews gate. Frontend: the ResizeTab
+  checkbox is gone; the framing review gains a per-page "Keep side panels" toggle +
+  bulk action; `decide()` seeds from the prior answer so a whitelist survives a
+  framing change, and `collect()` sends an auto+whitelisted page. Plan-reviewed and
+  adversarially verified by sub-agents; the one bug found — reverting a whitelist or
+  pin didn't persist because the save endpoint never cleared a page absent from the
+  submitted set — is fixed in `7f1fa59`.
+
+- **Verse hard-break strip — tried, REVERTED (`ac3969c` → `b8bcf5e`).** A verse
+  authored for the wide wall carries hard returns that break mid-line in the narrow
+  CG box. Stripping them needs the box text edited, and the only ways to do that by
+  script both fail: a whole-box rewrite (breaks→spaces, then re-apply captured
+  per-character style) **loses the superscript verse numbers and the small-caps
+  LORD** — a character exposes only `font`/`color`/`size` to scripting, everything
+  else raises "Can't convert types" — and delete-only can't insert a space so it
+  merges the words. This is the same limit generate hits (`## Later verse numbers`),
+  now consolidated in **SKILL `## Keynote scripting limits → Character and run
+  styling is NOT scriptable`**. A stray hard break is a **source-deck fix**. The
+  branch keeps the commit as an add-then-revert pair; squash-merge to drop it.
+
+- **Left as before:** the sparkle overlay duplicates on verse slides (float
+  separately — the operator/source overlay-placement item), and item-1's line breaks
+  (source fix).
 
 ## Session 2 — second real-run review batch (`cdaf271..ceaff9d`, read this first)
 
