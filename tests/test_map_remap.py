@@ -1349,7 +1349,9 @@ def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     body = next(t for t in transforms if t.kind == "text" and t.role == "other")
     assert (round(body.x), round(body.y), round(body.w), round(body.h)) == (698, 119, 1140, 675)
     assert abs((body.font_size or 0) - 46.67) < 0.1
-    assert body.font == "AzoSans-Regular"  # source face kept
+    # Font is left unset so the box keeps its own runs (bold, coloured emphasis
+    # the inspect cannot see); setting the single face would flatten them.
+    assert body.font is None
     assert body.color is None  # source colour kept
 
 

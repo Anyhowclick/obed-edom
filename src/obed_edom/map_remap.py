@@ -2564,9 +2564,11 @@ def plan_slide_transforms(
         if body_dst is not None and item is body_item:
             # Apply the template: the body verse takes the template's box and font
             # size so it reflows into the frame, rather than keeping its wall width
-            # at the scene's 1:1 scale. Source face and colour are kept — the same
-            # rule as the title and every other resized text. Matched before the
-            # list branches so a verse that reads as a column still lands here.
+            # at the scene's 1:1 scale. Font is left unset (not re-asserted): a
+            # verse carries bold, coloured emphasis *runs* the inspect cannot see,
+            # and setting the box font to the item's single face flattens them —
+            # the yellow "the plague has started" lost its weight. The box is moved
+            # in place, so Keynote keeps every run; only size and position change.
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -2582,7 +2584,7 @@ def plan_slide_transforms(
                         if recipe.get("bodyTextFontSize")
                         else (_f(item.get("size")) or None)
                     ),
-                    font=_source_face(item),
+                    font=None,
                     color=None,
                     role="other",
                     kind_index=kind_index,
