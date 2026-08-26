@@ -401,6 +401,14 @@ of which take a bundle id as their last argument.
   `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
   look like it works while reporting nonsense. Anything needing per-character
   style must come off a rendered preview. `scripts/probe_runs.js` reproduces it.
+  - *Writing a box font flattens its runs.* The corollary that bit the resizer:
+    `objectText.font = "X"` sets the *whole* box to one face, wiping any bold or
+    coloured runs the box carried — a scripture verse's yellow-bold emphasis
+    vanished when the body branch re-asserted its single inspected face. There is
+    no per-run write either, so the only safe move is to **not set the font**: a
+    resize moves the box in place, so leaving `font` unset keeps every run. The
+    resizer now sends `font=None` on the body (`197edfd`); colour was already left
+    to the source. See memory `lw-text-keeps-source-font-colour`.
 - **Z-order can be neither read nor set.** Verified on 15.3.1 by
   `scripts/probe_zorder.js`; both halves are Keynote limits, not our bugs.
   - *Reading:* `slide.iWorkItems()` raises "Can't convert types.", so the one
