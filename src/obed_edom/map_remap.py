@@ -42,6 +42,12 @@ BADGE_PLATE_PAD = 24.0
 # a couple of hundred characters; a church name, a stat or a label is a handful.
 # The threshold only has to separate a sentence from a phrase.
 BODY_TEXT_MIN_CHARS = 60
+# A slide carrying this many church-name boxes is a church-name list, not a map
+# with a few labels on it. Every multi-box list in the gold decks is a church
+# list (the smallest is six); map labels come one to five at a time. Used so an
+# unticked "include lists" drops the whole list even where it sits over the map,
+# rather than protecting it as if each name were a label on the art beneath it.
+LIST_SUMMARY_MIN = 6
 # A badge plate is short relative to the page. Measured across the gold templates
 # real plates sit at 0.09-0.11 of canvas height, so half the page is far above any
 # of them and well below the full-height side columns this rejects.
@@ -2264,8 +2270,14 @@ def plan_slide_transforms(
         # rendered slide told us which is which, honour that; blind, keep the
         # old behaviour of dropping them all, since the flag is an explicit
         # instruction and the operator can see the result.
+        #
+        # But a whole church-name list is not a set of map labels, even where it
+        # sits over the map: the background test marks the names over land as
+        # non-free and used to leave them remapped in place. A slide carrying many
+        # names is a list to drop regardless of what is beneath each one.
         loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
-        if role == "list" and not include_lists and loose:
+        is_summary_list = list_count >= LIST_SUMMARY_MIN
+        if role == "list" and not include_lists and (loose or is_summary_list):
             out.append(
                 ItemTransform(
                     slide_number=number,

@@ -1342,6 +1342,42 @@ def test_coincident_group_deduped_but_images_kept():
     assert id(items[3]) not in dup  # the coincident image is kept
 
 
+def test_church_summary_list_over_map_is_hidden_when_flag_off():
+    """A church-name list is dropped when 'include lists' is off even where it
+    sits over the map. The background test marks names over land as non-free, and
+    they used to be left remapped in place; a slide of many names is a list, not a
+    set of map labels. A slide with only a couple of labels keeps the old
+    protection."""
+    def church_slide(n_names):
+        items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
+        for i in range(n_names):
+            items.append(_item(kind="text", text=f"CHC Place{i}", x=260, y=6 + i * 52, w=215, h=58, size=42))
+        return {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+
+    from obed_edom.map_remap import is_list_item
+
+    # Sanity: the names read as list items.
+    many = church_slide(20)
+    assert sum(1 for it in many["slides"][0]["items"] if is_list_item(it)) >= 6
+
+    recipe = learn_recipe(many, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+    # free_text_keys empty simulates a real run where every name sits over artwork.
+    off = plan_slide_transforms(
+        many["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=set()
+    )
+    placed_names = [t for t in off if t.kind == "text" and t.role != "hide"]
+    assert not placed_names  # the whole list is hidden, not remapped over the map
+
+    # A couple of labels over artwork keep their protection (not a summary list).
+    few = church_slide(2)
+    recipe2 = learn_recipe(few, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+    off2 = plan_slide_transforms(
+        few["slides"][0], recipe2, include_lists=False, wall_size=(7680, 1080), free_text_keys=set()
+    )
+    kept = [t for t in off2 if t.kind == "text" and t.role != "hide"]
+    assert kept  # few labels over artwork are not dropped
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""
