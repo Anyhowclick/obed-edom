@@ -1266,6 +1266,63 @@ def test_church_name_column_is_not_taken_for_a_body_paragraph():
     assert slide_body_text_item(slide, (7680, 1080)) is None
 
 
+def test_sparkle_overlay_takes_body_size_not_its_own_clamp():
+    """An emphasis copy of body words (substring of the body, sitting over it)
+    takes the body's final size so it stays on the words, rather than being
+    clamped small on its own and drifting off them. A phrase that is a substring
+    but does not overlap the body is left alone."""
+    from obed_edom.map_remap import sparkle_overlays, slide_body_text_item
+
+    verse = (
+        "47 So Aaron did as Moses said and ran into the midst of the assembly. "
+        "He stood between the living and the dead, and the plague stopped."
+    )
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=3395, y=21, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=3395, y=21, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=3395, y=89, w=2328, h=351, size=46.67, font="AzoSans-Regular"),
+                    # Emphasis copy: substring of the verse, sitting over the body box.
+                    _item(kind="text", text="the living and the dead", x=3395, y=336, w=817, h=98, size=75, font="AzoSans-Bold"),
+                    # Substring, but far off the body box — not an overlay.
+                    _item(kind="text", text="the plague stopped", x=200, y=980, w=676, h=98, size=75, font="AzoSans-Bold"),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
+                    _item(kind="text", text="body sample text of a reasonable length here", x=698, y=119, w=1140, h=675, size=40, font="AzoSans-Regular"),
+                ],
+            }
+        ],
+    }
+    s = wall["slides"][0]
+    body = slide_body_text_item(s, (7680, 1080))
+    overlays = sparkle_overlays(s, body)
+    assert len(overlays) == 1  # only the overlapping substring, not the far one
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    others = [t for t in transforms if t.role == "other" and t.kind == "text"]
+    body_tf = max(others, key=lambda t: t.w * t.h)
+    overlay_tf = next(t for t in others if t is not body_tf and 300 < t.w < 600)
+    # The overlay takes the body's final size, not the 0.42 down-scale of its own 75.
+    assert abs((overlay_tf.font_size or 0) - (body_tf.font_size or 0)) < 0.5
+    assert overlay_tf.font_size and overlay_tf.font_size > 75 * 0.42 + 1
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""

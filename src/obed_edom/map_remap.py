@@ -1828,6 +1828,40 @@ def slide_body_text_item(
     return best
 
 
+def _norm_for_overlay(text: str) -> str:
+    """Collapse whitespace so an emphasis phrase compares against the body wording."""
+    return re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip().lower()
+
+
+def sparkle_overlays(
+    slide: dict, body_item: dict | None
+) -> set[int]:
+    """Ids of the animated emphasis copies of body phrases.
+
+    A sparkle build reveals a few words in a colour by laying a second copy of
+    them over the body. That copy is a substring of the body *and* sits on top of
+    it, and the two together tell it apart from any other text. Resized on its own
+    a copy is clamped small and drifts off the words it highlights, so it is
+    identified here and later given the body's own size, keeping the two aligned.
+    """
+    if body_item is None:
+        return set()
+    body_text = _norm_for_overlay(body_item.get("text") or "")
+    if not body_text:
+        return set()
+    body_rect = item_rect(body_item)
+    out: set[int] = set()
+    for item in slide.get("items") or []:
+        if item is body_item or (item.get("kind") or "") != "text":
+            continue
+        phrase = _norm_for_overlay(item.get("text") or "")
+        if not phrase or len(phrase) >= len(body_text):
+            continue
+        if phrase in body_text and _rects_overlap(item_rect(item), body_rect):
+            out.add(id(item))
+    return out
+
+
 def badge_members(slide: dict, title: dict) -> list[dict]:
     """Plate, logo and rule sharing the title's box — the badge minus its words."""
     src = item_rect(title)
@@ -2088,8 +2122,25 @@ def plan_slide_transforms(
     # riding the scene affine at its wall width. Identified once, matched by
     # identity in the loop.
     body_dst = _rect_from_dict(recipe.get("bodyTextDst"))
-    body_item = slide_body_text_item(slide, wall_size) if body_dst is not None else None
+    body_for_body = slide_body_text_item(slide, wall_size)
+    body_item = body_for_body if body_dst is not None else None
     badge_dsts = dict(recipe.get("badgeSlots") or {})
+    styles_pre = list(recipe.get("characterStyles") or [])
+    # Sparkle-build emphasis copies of body phrases take the body's own final
+    # size, or each is clamped small on its own and drifts off the words it sits
+    # over. Their size is whatever the body itself lands at — the template box, or
+    # the matched swatch, or the down-scale fallback.
+    overlay_ids = sparkle_overlays(slide, body_for_body)
+    body_final_size: float | None = None
+    if overlay_ids and body_for_body is not None:
+        if body_dst is not None and recipe.get("bodyTextFontSize"):
+            body_final_size = float(recipe["bodyTextFontSize"])
+        else:
+            _bm, body_final_size, _bf, _bc = _style_text_box(
+                body_for_body,
+                _affine_for_item(body_for_body, _groups_for_slide(slide, recipe)),
+                match_character_style(body_for_body, styles_pre),
+            )
     line_slots = list(recipe.get("lineSlots") or [])
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
@@ -2317,6 +2368,19 @@ def plan_slide_transforms(
         if role in {"list", "other"} and (item.get("kind") or "") == "text":
             style = match_character_style(item, styles)
             mapped, font, _face, _colour = _style_text_box(item, aff, style)
+            if id(item) in overlay_ids and body_final_size is not None:
+                # An emphasis copy: take the body's final size and scale the box to
+                # it, keeping its top-left on the affine, so it stays over the same
+                # words the body shows rather than being clamped small on its own.
+                src = item_rect(item)
+                own = _f(item.get("size")) or body_final_size
+                ratio = body_final_size / own if own > 0 else 1.0
+                if aff is not None:
+                    origin = aff.apply_rect(Rect(src.x, src.y, 1.0, 1.0))
+                    mapped = Rect(origin.x, origin.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+                else:
+                    mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+                font = body_final_size
             # Unpaired LW text keeps its source font family and colour; only its
             # position (the affine) and size (the matched swatch) change. The
             # swatch is used for size alone — its colour must not repaint the
