@@ -1,84 +1,51 @@
 ---
 name: Cue palette and outline editor
-overview: "Read the Session 3 section first, then Session 2 — they hold the latest work. Done: the Keynote 15.x migration, framing confirmation, badge placement (its own plate affine), structural title detection, the divider, ranges in Keynote's numbering, a first text/framing batch, a Session-2 batch (cdaf271..ceaff9d), and a Session-3 batch (branch feat/side-panel-whitelist) from a third real-run review — off-frame content now hidden so the 16:9 canvas-shrink cannot scale it back on-frame (off-screen/dup items and grouped side insets), and the per-slide side-panel whitelist built (drop side content by default, keep per whitelisted slide via a keepSideContent Decision toggle in the framing review, replacing the include-lists checkbox). Still to do: the number block in the CG resizer; the cue-first palette; the in-dashboard outline editor; image cues; the DSK generator. Operator/source or won't-fix leftovers: slide 125's grouped church names, the sparkle-overlay-on-words placement, a caption in the 'as it will look' preview, and — the Session-3 lesson — a verse's wall-authored hard line breaks (stripping them by script destroys the un-scriptable superscript numbers and small-caps LORD; a source-deck fix)."
+overview: "Read `.cursor/skills/obed-edom/SKILL.md` first — every durable Keynote finding lives there. This plan holds only what is still to do plus the reasoning a new agent would otherwise rediscover. DONE (in SKILL / git log, condensed below): Keynote 15.x migration, framing confirmation, badge-affine, structural title detection, the divider, ranges in Keynote's numbering, off-frame hiding, and the per-slide side-panel whitelist. STILL TO DO: the number block in the CG resizer; the cue-first palette; the in-dashboard outline editor; image cues; the DSK generator; stat-drift; recipe library (revisit now badge-affine exists). Operator/source or won't-fix leftovers: slide 125's grouped church names, the sparkle-overlay-on-words placement, a caption in the 'as it will look' preview, and a verse's wall-authored hard line breaks (a source-deck fix — stripping them by script destroys the un-scriptable superscript numbers and small-caps LORD)."
 todos:
   - id: text-placement
-    content: "CG resizer: the 183 / 86 / 14 / 269 number block renders as overlapping fragments. The badge and the date are resolved; the badge is now buried by map art rather than misplaced, which is a source-deck problem. Untouched in Session 2"
-    status: pending
-  - id: side-panel-whitelist
-    content: "Per-slide side-panel whitelist — BUILT in Session 3 (feat/side-panel-whitelist). Drops side content by default, keeps it per slide whitelisted via a keepSideContent Decision (orthogonal to framing state, stored by digest) surfaced as a per-page toggle + bulk action in the framing review; the include-lists checkbox is removed (CLI --include-lists stays a global override). Plan-reviewed and adversarially verified by sub-agents; one found bug fixed (reverting a whitelist/pin now persists on Apply)"
-    status: completed
-  - id: session2-batch
-    content: "Second real-run review batch cdaf271..ceaff9d: cover-veto refactor, degenerate-pin auto-correct, panel cover-fallback, badge colour-reject/borrow, LW side-panel drop, verse bold-run preservation, sibling-affine magic-move reuse, framing-review QoL. See the Session 2 section"
-    status: completed
-  - id: slide125-grouping
-    content: "Slide 125 church list stays visible because its names are opaque groups spanning the centre (not text, not side-panel). Source-deck grouping problem — ungroup so they hide like slide 124. Agreed as operator/source, not a code fix"
-    status: pending
-  - id: badge-cluster
-    content: "Badge-as-cluster placement in the CG resizer. H18 confirmed: the badge affine came from the title text box, so logo and plate landed short. They now take the template's own rects and match gold exactly"
-    status: completed
-  - id: layout-thumbs
-    content: "Layout thumbnail extraction: scratch copy, one slide per layout, export, cache by template digest, serve via GET /api/template-layouts with cue mapping"
+    content: "CG resizer number block (183/86/14/269) renders as overlapping fragments. Root cause is groups sharing a left margin, not a text bug — see 'The number block' below. The immediate item. Pending."
     status: pending
   - id: cue-palette
-    content: Cue-first palette in the dashboard, inverting masters.yaml cue maps, with adjacency and context rules enforced
+    content: "Cue-first palette in the dashboard, inverting masters.yaml cue maps, with adjacency and context rules enforced. Pending — design below."
     status: pending
   - id: outline-editor
-    content: Editable outline view extending OutlineResultView, with LibreOffice page-view toggle, in-place surgical writes to the source .docx and timestamped backups
+    content: "Editable outline view extending OutlineResultView, LibreOffice page-view toggle, in-place surgical writes to the source .docx with timestamped backups. Pending — design below."
     status: pending
   - id: image-cues
-    content: Image cues, as an asset slot count and shape per cue rather than N placements. Both capabilities probed and present
+    content: "Image cues as an asset slot count + shape per cue. Both capabilities (image place, movie via file-name reassign) probed and present. Pending — taxonomy below."
     status: pending
   - id: dsk-generator
-    content: DSK generator, unchanged from the superseded plan including its four corrections
+    content: "DSK generator, unchanged from the superseded plan including its four corrections. Pending."
     status: pending
-  - id: title-structural
-    content: "Find the title structurally instead of by wording. Phrase match first, then the plate — the largest shape containing a text item's centre — and only where that plate carries exactly one word, since a badge of several is ambiguous"
-    status: completed
+  - id: stat-drift
+    content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides then holds. Ships at warning. Independent of everything; can land anytime. Pending — below."
+    status: pending
   - id: recipe-library
-    content: "Recipes as browsable artefacts. Built, then reverted: a page needing a borrowed transform usually needs two affines, not one, and the single-group limit was the same gap seen from the other side. Revisit after badge-affine"
+    content: "Recipes as browsable artefacts. Built then reverted: a page needing a borrowed transform usually needs two affines, the same gap seen from the other side. Revisit now badge-affine exists. Pending — reasoning below."
     status: pending
-  - id: navigator-numbering
-    content: "The dashboard reads a range in Keynote's numbering; the CLI keeps document positions and says so in --help. Translating needs the whole deck's skip flags, and a ranged read returns only the slides asked for, so it leans on a full read having happened and says so when it has not"
+  - id: side-panel-whitelist
+    content: "Per-slide side-panel whitelist. DONE (feat/side-panel-whitelist). Drop side content by default, keep per whitelisted slide via keepSideContent Decision. See git log."
+    status: completed
+  - id: operator-notes
+    content: "Session 4: operator IMPORTANT callout in the CG resizer + a whitelist view in the Reviewed tab + prettier checkboxes. DONE (feat/resize-operator-notes). Frontend only."
+    status: completed
+  - id: offscreen-hiding
+    content: "Off-frame content hidden not skipped, so the 16:9 canvas-shrink can't scale it back on-frame. DONE. See git log e7621f8."
     status: completed
   - id: badge-affine
-    content: "Anchor the badge on its plate so a page with a map and a badge gets two affines. Done: plate-to-plate, and on_canvas_fraction taught the same route. On the report card's 34 map-and-badge pages the plate went from 117 of 136 placements off-frame to none, and fallbacks halved"
+    content: "A badge gets its own plate-to-plate affine. DONE and measured. See SKILL + git log."
     status: completed
-  - id: text-source-style
-    content: "Resized text keeps its source font family and colour; only size and position change (title included). A white verse turned cyan because its face matched a cyan template swatch. `_source_face` re-asserts the source face; every text branch sends colour None"
+  - id: title-structural
+    content: "Find the title structurally (phrase match, then the one-word plate) not by wording. DONE."
     status: completed
-  - id: scripture-body-box
-    content: "The scripture body verse lands in the template's own text box (bodyTextDst) and reflows into it, like the title, rather than riding the scene affine at its wall width. Told from a church-name column by is_list_item and from a label by a character count; only fires with a title present"
-    status: completed
-  - id: centre-panel-1to1
-    content: "A centre-panel panorama (~2x frame wide, ~1 frame tall, centred) frames at 1:1 over the small images overlaid on it, so a map with a photo grid frames like the plain map beside it. The crop is chosen as if the overlays were absent; they ride the panel affine"
-    status: completed
-  - id: sparkle-overlay
-    content: "A sparkle build's emphasis copy (substring of the body, sitting over it) takes the body's final size, then is re-seated on the body after it is placed and fitted, so it stays over the words rather than clamped small and off-frame"
-    status: completed
-  - id: church-list-flag-over-map
-    content: "A church-name list is dropped when 'include lists' is off even where it sits over the map. The free-to-move test marked names over land as labels to protect; a slide of many names (>=6) is a list to drop. Not the de-dup path — the free-text classification, which only bites on the rendered-slide run"
-    status: completed
-  - id: offscreen-and-fit
-    content: "Off-screen objects are not remapped (is_visible; test added). The body verse, if it overflows and the template gives no box, is nudged <=10% and narrowed to fit — scoped to the body only, after fitting every overflowing box wrapped corner labels and pulled them off their plates"
-    status: completed
-  - id: magic-move-dedup
-    content: "A magic-move build's leftover second copy of a group or text box is placed once. Scoped to groups and text, never images: a wall deck stacks map layers as coincident images on purpose (221 on the report card) and dropping one tears the map apart"
-    status: completed
-  - id: corner-label
-    content: "A corner label (plate + one word, no logo, slot bleeds off an edge) is moved to the template corner at its wall size, not resized into the slot: keeps a rounded plate rounded and a longer word's room. Keynote exposes no corner-radius handle (probe_corner.js); missions badges with a logo keep the slot"
-    status: completed
-  - id: stat-drift
-    content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides and then holds at the new value. A missions wall read 11 Renovated Church Buildings on one page and 44 on every page after it. False positives acceptable"
-    status: pending
   - id: keynote-15-migration
-    content: "Keynote 15.x migration: bundle-id targeting, version-tagged cache, 14.5 A/B comparison, 14.5 deleted, gold decks re-warmed, 15.x-only decision. Findings are in the skill doc"
+    content: "Keynote 15.x migration: bundle-id targeting, version-tagged cache, 14.5 deleted. DONE. Findings in SKILL."
     status: completed
   - id: framing-confirm
-    content: "Framing confirmation for map slides: two-phase resize job, grouped review by framing with projected wall previews, drag-select, decisions remembered by digest"
+    content: "Two-phase framing confirmation grouped by framing with projected wall previews, decisions remembered by digest. DONE."
     status: completed
-  - id: map-affine-fixes
-    content: "Three planner defects fixed and verified: cluster choice for large objects, junk pairings dropped, non-uniform pairs rejected. Gold scores 933 to 503 and 376 to 317"
+  - id: navigator-numbering
+    content: "Dashboard reads a range in Keynote's numbering from the cached full payload; CLI keeps document positions and says so. DONE."
     status: completed
 isProject: false
 ---
@@ -86,838 +53,323 @@ isProject: false
 # Cue palette and outline editor
 
 Supersedes `keynote_file_format_spike_6b4ae4c2.plan.md`. Everything in that plan
-still stands except item 3 (live preview), which is dropped for the reasons below.
+still stands except item 3 (live preview), dropped for the reasons below.
 
-**Read `.cursor/skills/obed-edom/SKILL.md` first.** Every durable finding from the
-Keynote 15 migration now lives there — bundle-id targeting, the verified scripting
-limits, cache versioning, the template contract. This plan holds only what is
-still to be done and the reasoning a new agent would otherwise have to rediscover.
+**Read `.cursor/skills/obed-edom/SKILL.md` first.** Every durable finding — bundle-id
+targeting, the verified scripting limits, cache versioning, the template contract —
+lives there. This plan holds only what is still to be done and the reasoning a new
+agent would otherwise have to rediscover.
 
-## Session 3 — off-frame hiding + the side-panel whitelist (`feat/side-panel-whitelist`, read this first)
+## Completed work — pointers, not detail
 
-Branch `feat/side-panel-whitelist`, pushed to origin, forked from `main` (`84ae648`).
-A third real-run review of `Full_Report_Card_Wall`. Three things shipped, one was
-tried and reverted.
+All of the following shipped; the durable findings are in SKILL.md and the
+reasoning is in the commit messages (`git log`). Condensed here so this plan stays
+about what is left.
 
-- **Off-frame content is hidden, not skipped (`e7621f8`).** The root cause of "the
-  off-screen CHC Kuching map / label / inset still shows": changing the wall copy's
-  canvas to 16:9 makes Keynote **scale-to-fit every object it still owns into the
-  frame**, so an object the planner merely *skipped* is dragged back on-frame at the
-  scaled position. `plan_slide_transforms` now emits a zero-opacity hide for
-  off-screen leftovers and magic-move coincident duplicates instead of dropping
-  them (`_hide_item_transform`). Opacity alone does not hide a **group** (Keynote
-  ignores it, and clamps an off-canvas move), so `remap_keynote.js` **deletes**
-  `role="hide"` groups in `deleteGroupHides`, descending by kindIndex so the
-  removal never shifts a placed sibling's index. Verified: slides 19–20 render the
-  centre building only.
+- **Keynote 15.x migration** — bundle-id targeting through the single resolver in
+  `keynote_app.py`, version-tagged cache, 14.5 deleted after an A/B pass, gold decks
+  re-warmed. In SKILL.
+- **Framing confirmation** — `/api/resize` is a two-phase job (propose, then apply
+  after the operator confirms), reviewed in `FramingReview.tsx` grouped by framing,
+  each candidate a real wall preview under the planner's own affine. Decisions
+  remembered by digest.
+- **A badge gets its own affine** — plate-to-plate, so a page with a map and a badge
+  gets two affines. On the report card's 34 map-and-badge pages the plate went from
+  117/136 placements off-frame to none. `_title_badge`, `badge_plate_members`,
+  `template_badge_slots`, `badgePlateDst`. In SKILL/commits.
+- **Structural title detection** — phrase match first, then the plate (largest shape
+  containing a text item's centre) where that plate carries exactly one word.
+- **Off-frame hiding (`e7621f8`)** — changing the wall copy to 16:9 makes Keynote
+  scale-to-fit every object it still owns, so a *skipped* object gets dragged back
+  on-frame. `plan_slide_transforms` now emits a zero-opacity hide for off-screen
+  leftovers and magic-move duplicates; `remap_keynote.js` deletes `role="hide"`
+  groups (opacity can't hide a group). This is why the operator must delete skipped
+  slides and ungroup side content — see the resizer's Important callout.
+- **Per-slide side-panel whitelist (`14ef262`, fix `7f1fa59`)** — side content dropped
+  by default, kept per whitelisted page via `Decision.keep_side_content` (orthogonal
+  to framing state, stored by digest). Threads through `plan_payload_transforms`
+  (`side_content_slides`), `remap_keynote`, the `/api/resize` endpoints, and the
+  framing review's per-page toggle + bulk action. CLI `--include-lists` stays the
+  global override.
+- **Ranges in Keynote's numbering** — the dashboard translates a typed range from the
+  cached full payload when there is one, else says it is taking the range as document
+  positions; the CLI keeps document positions and says so in `--help`.
+- **The text and framing batch (`23a8dcd..52b13cd`)** and the **Session 2 batch
+  (`cdaf271..ceaff9d`)** and **Session 3 batch** (off-frame hiding + whitelist, on
+  `feat/side-panel-whitelist`) — real-run review fixes: text keeps its source font
+  and colour, scripture body in the template box, centre-panel 1:1, sparkle overlays,
+  church-list drop over the map, magic-move de-dup, off-screen skip + body fit,
+  corner labels, cover-vs-letterbox, badge colour-reject, LW side-panel drop, verse
+  bold-run preservation, sibling-affine magic-move reuse. Each has its reasoning in
+  its commit message; the mechanisms are locked by tests.
+- **Session 4 (`feat/resize-operator-notes`)** — operator-facing polish, frontend
+  only: an Important callout at the top of the CG resizer (delete skipped slides;
+  ungroup side content or it reads as centre; close Keynote first; check box edges;
+  check text line breaks), a read-only whitelist summary in the framing review's
+  Reviewed tab (spans all pages, since a whitelisted page can be on auto), and custom
+  checkbox styling.
 
-- **Per-slide side-panel whitelist / the inversion (`14ef262`, fix `7f1fa59`).** The
-  feature scoped in Session 2, now built. Default flipped: side content dropped
-  everywhere, kept only on whitelisted pages. `Decision.keep_side_content` is
-  orthogonal to framing state (an `auto` page can be whitelisted), stored by digest
-  like a pin — so `save_framings` keeps an auto+keep row, `normalize_decision`
-  preserves it for every state, `reuse_framings` carries it, and
-  `_side_content_slides_from_result` / `FramingReuse.side_content_slides()` yield the
-  wall slide numbers. `plan_payload_transforms` takes a `side_content_slides` set and
-  treats a slide as keeping side content when the global `include_lists` (still the
-  CLI override) is on OR its number is whitelisted — applied at all three per-slide
-  gates (drop, deferred packing, measured free-text placement); `remap_keynote` /
-  `remap_and_inspect` thread it and widen the previews gate. Frontend: the ResizeTab
-  checkbox is gone; the framing review gains a per-page "Keep side panels" toggle +
-  bulk action; `decide()` seeds from the prior answer so a whitelist survives a
-  framing change, and `collect()` sends an auto+whitelisted page. Plan-reviewed and
-  adversarially verified by sub-agents; the one bug found — reverting a whitelist or
-  pin didn't persist because the save endpoint never cleared a page absent from the
-  submitted set — is fixed in `7f1fa59`.
+**Known and deliberate, not a bug:** a badge can land correctly and still be buried
+by map art that was already above it — the resizer inherits the source deck's
+stacking and Keynote exposes no way to change it (z-order is neither readable nor
+settable; in SKILL). It reads as a clipping bug; it is a source-deck or template fix.
 
-- **Verse hard-break strip — tried, REVERTED (`ac3969c` → `b8bcf5e`).** A verse
-  authored for the wide wall carries hard returns that break mid-line in the narrow
-  CG box. Stripping them needs the box text edited, and the only ways to do that by
-  script both fail: a whole-box rewrite (breaks→spaces, then re-apply captured
-  per-character style) **loses the superscript verse numbers and the small-caps
-  LORD** — a character exposes only `font`/`color`/`size` to scripting, everything
-  else raises "Can't convert types" — and delete-only can't insert a space so it
-  merges the words. This is the same limit generate hits (`## Later verse numbers`),
-  now consolidated in **SKILL `## Keynote scripting limits → Character and run
-  styling is NOT scriptable`**. A stray hard break is a **source-deck fix**. The
-  branch keeps the commit as an add-then-revert pair; squash-merge to drop it.
-
-- **Left as before:** the sparkle overlay duplicates on verse slides (float
-  separately — the operator/source overlay-placement item), and item-1's line breaks
-  (source fix).
-
-## Session 2 — second real-run review batch (`cdaf271..ceaff9d`, read this first)
-
-Five commits on `feat/cg-negative-space`, from reviewing a real report-card resize
-(`Full_Report_Card_Wall.key` slides 2–5, 19–23, 92–94, 104, 124–125 against
-`Base_CG_Assets.key`). All measured offline against the warm cache; 314 tests
-pass. Each has its reasoning in the message.
-
-- **`cdaf271` — cover full-bleed slides instead of letterboxing.** Three fixes.
-  (1) `on_canvas_fraction` (the fit-vs-cover veto) now counts only the artwork the
-  affine is *responsible for*: `_replaced_item_ids` excludes the title, verse body,
-  sparkle emphasis and centre-panel overlays (as lists/badges already were), and
-  for a cover recipe a `_COVER_SOURCES` crop-footprint drops side content beyond
-  the centre — a correct full-bleed cover was being letterboxed because its
-  reflowed text and cropped side content read as "half the page thrown away".
-  (2) A pinned framing that collapses to a degenerate scale falls back to the
-  page's own automatic framing (`pinOverridden`), not fit-to-frame. (3) The
-  cover-fallback covers the detected centre panel, not the full wall, so a
-  centre-panel photo crops its side groups off. Plus the framing-review QoL: the
-  "crop" view is gone and the chip/candidate thumbnails render "where objects land".
-- **`32e21e4` — refuse a differently-coloured template plate as the badge home.**
-  Template 10 is a plain map whose only text is a white in-map label ("CHC Qiu
-  Cha"); the structural detector took it as the badge slot, so the cyan "MISSIONS
-  UPDATE" badge buried mid-map. The badge slots are now read from the template
-  slide whose plate *colour matches* the source badge — the deck's real cyan badge
-  (template 12, top-left, plate + logo) — skipping the white label. `_rgb_close`
-  + `PLATE_COLOR_TOLERANCE`; `template_badge_plate` gained the same no-member guard
-  the slots had, so anchor and slots always describe one badge. Every real badge on
-  these decks is the same cyan, so scripture titles and missions badges are
-  untouched.
-- **`fe6b610` — drop LW side-panel content the 16:9 crop cannot keep.**
-  `is_side_panel_item`: on the 7680×1080 wall, content whose rect does not overlap
-  the centre panel `[1920..5760]` is dropped when side content is not kept (the
-  "include lists" toggle off). Generalises the church-column drop to side badges,
-  photo strips and labels (a CHC Klang photo, a CHC Kuching map on slides 19/20).
-  **This is the global-flag form only**; the per-slide whitelist is still to do
-  (see below).
-- **`197edfd` — keep a verse's bold emphasis runs.** A scripture body is one text
-  box carrying bold/coloured emphasis *runs* the inspect cannot see (one face per
-  item). The body branch re-asserted that single face and `applyGeom`'s
-  set-font-on-box flattened every run. It now sends `font=None` on the body —
-  the box is moved in place, so Keynote keeps the runs. Memory
-  `lw-text-keeps-source-font-colour` updated with this.
-- **`ceaff9d` — reuse an adjacent same-pin sibling's affine.** A China map morphs
-  vector→photo across a magic-move sequence (92→93→94); on the wall it sits at one
-  position, so one transform keeps it 1:1. 93/94's own art pairs to a sliver, so
-  each covered to its own shifted crop. Now a degenerate pinned framing first
-  reuses the affine the *immediately-preceding same-pin* page used
-  (`_recipe_reusing_affine`, `source=sibling-affine`), before its own cover.
-  Adjacency is the grouping (magic move is consecutive-only) and the shared pin is
-  the operator's say-so — never inferred; a gap or different pin breaks the chain.
-  92→93→94 all end on `s=1.0 tx=-2932`, identical.
-
-**Left as operator/source or nice-to-have (agreed with the operator):**
-
-- *Slide 125's church list.* Its names live in ~51 opaque **groups** (childCount 0,
-  no member text in the inspect) that span the centre, so neither the list-hide
-  (text only) nor the side-panel drop reaches them, unlike slide 124's individual
-  text. Classified as a source-deck **grouping** problem — ungroup the names so
-  they hide like 124.
-- *93/94 fine-crop.* The sibling-affine fix aligns the China map; if a photo's
-  subject still needs re-centring the operator nudges it in Keynote. A per-slide
-  crop-nudge control was offered and declined.
-- *Sparkle overlay on the words.* The verse reflows into the narrower box, so the
-  emphasis overlay copies land near, not exactly on, the words. Manual nudge; the
-  body's own emphasis now renders correctly (`197edfd`).
-- *Caption in "as it will look".* The composite preview cuts wall pixels and
-  re-placed text has no source rect, so captions don't render — the parked
-  "composite is approximate" limitation. A review-only nicety; does not touch the
-  output deck.
-
-**Per-slide side-panel whitelist — scoped, not built.** During Session 2 the full
-feature (drop side content by default + a per-slide whitelist to keep it, replacing
-the "include lists" checkbox) was designed and drafted, then set aside; only the
-drop (gated on the existing toggle, `fe6b610`) shipped. Operator's chosen shape:
-side panel = the LW `[1920..5760]` centre, drop by default, **whitelist per slide
-in the framing review** (a `keepSideContent` bool on the `framing.py` `Decision`,
-stored by digest like the pins, surfaced as a per-slide toggle). It threads through
-`plan_payload_transforms` (a `side_content_slides` set), `remap_keynote`, the
-`/api/resize` endpoints and `FramingReview.tsx`, and removes the checkbox in
-`ResizeTab.tsx`. The full draft lived in a session-temp patch that will vanish;
-rebuild from this paragraph — it is a clean vertical slice.
-
-## Handover: where this branch is
-
-`feat/cg-negative-space`, rebased on main. Everything below is committed and
-pushed; `git log origin/main..HEAD` is the full list with the reasoning in the
-messages.
-
-**Verified against real decks, not only tests.** The warm cache holds
-`Map_Extracted_Wall_1st/2nd`, `Extracted_Wall/CG_3rd`, `Full_Report_Card_Wall`
-and `Base_CG_Assets`, so most of what follows was measured by planning those
-offline in about 0.2s a page. Read `.cursor/skills/obed-edom/SKILL.md` first;
-the durable Keynote facts live there.
-
-**Landed and confirmed in a real run:** the divider — planned onto the template's
-rule, then placed by `width` because Keynote 15.3.1 ignores a line's endpoints and
-*writing* them collapses it to one unit (`scripts/probe_line.js`). The badge
-geometry — plate `(17,37) 411x123`, logo `(31,59) 80x80`, measured off the
-rendered preview and matching what last year's pages shipped.
-
-**Landed, not yet seen in a run:** structural title detection; stripping the
-original back to the delta before the reuse paste (needs a multi-slide range to
-exercise at all); reading a range in Keynote's numbering; judging a framing on the
-part of an object that is on the wall.
-
-**Known and deliberate.** The badge lands correctly and is still buried by map art
-that was already above it — the resizer inherits the source deck's stacking and
-Keynote exposes no way to change it. That reads as a clipping bug and will be
-re-investigated by anyone who does not know; the skill doc records it with the
-measurements.
-
-## Text and framing batch (from a real-run review)
-
-Ten commits, `23a8dcd..52b13cd`, each with its reasoning in the message. Measured
-against the warm cache; the reviewer's own decks were a combined
-sermon+missions deck that is not cached, so slide numbers below are the
-reviewer's and the mechanisms were reproduced on the cached gold decks. What each
-does, and what to know before touching it:
-
-- **Text keeps its source font and colour** (`23a8dcd`). Only size and position
-  change, title included. A matched template swatch lends its *size* only;
-  `_source_face` re-asserts the item's own face and every text branch sends colour
-  `None`, so Keynote leaves the source in place. The swatch's face equals the
-  source's by construction (match requires the same family), so the pre-existing
-  swatch-face test still holds. Memory: `lw-text-keeps-source-font-colour`.
-- **Scripture body in the template box** (`0b31519`). `bodyTextDst` mirrors
-  `titleDst`: the largest non-title, non-list text carrying a real paragraph
-  (>= `BODY_TEXT_MIN_CHARS`) snaps to the template's body box and reflows. Only two
-  cached slides have a verse (Numbers 16, Romans 15:20); missions slides are
-  untouched because their large text is a church-name column (`is_list_item`).
-- **Centre-panel 1:1** (`e04602e`). `centre_panel_image` finds a ~2x-frame-wide,
-  ~1-frame-tall centred panorama; the crop is chosen as if the small images over
-  it were absent, so a map with a photo grid frames like the plain map beside it
-  and the overlays ride the panel affine. Height is capped so a full-bleed image
-  that runs off top and bottom is not mistaken for a panel.
-- **Sparkle overlays** (`1e1c16c` + `c26bae8`). An emphasis copy is a substring of
-  the body that sits over it; it takes the body's final size, then is *re-seated*
-  on the body after the body is placed and fitted, by the same translate + scale
-  that took the body's wall box to its final box. A heavy reflow moves words, so
-  the placement is near, not exact.
-- **Church-list checkbox honoured over the map** (`971bd7b`). The hide was gated on
-  the same free-to-move test as packing, so names over land were kept as labels; a
-  slide of many names (`LIST_SUMMARY_MIN`) is now dropped regardless of what is
-  under each. This only bit on the rendered-slide run, which is why a blind unit
-  test missed it — worth remembering when a resizer bug won't reproduce offline.
-- **De-dup magic-move copies** (`c862569`). Coincident groups/text are placed once;
-  **images are never de-duped** — a wall stacks its map layers as coincident images
-  on purpose (221 on the report card).
-- **Off-screen + fit, scoped to the body** (`b400090` + `f83ce63`). Off-screen
-  objects are not remapped (`is_visible`). The body verse, if it overflows and the
-  template gives no box, is nudged <= 10% and narrowed to fit. This started as a
-  general pass over every overflowing box and **regressed labels** — it wrapped a
-  corner label and pulled it off its plate — so it is now the body verse alone.
-- **Corner labels** (`52b13cd`). A plate with one word, no logo, whose slot bleeds
-  off an edge is moved to the template corner at its *wall size*, not resized into
-  the slot. This keeps a rounded plate rounded — **Keynote exposes no corner-radius
-  handle** (`scripts/probe_corner.js`; a resize squares the corners and cannot be
-  undone) — and keeps a longer word's room. Told from a title plate by the bleed,
-  from a missions badge by the absence of a logo. A rounded *missions* plate would
-  still lose its corners; no script fix, template/source only.
-
-**The two open reflow caveats.** The scripture body reflows when it narrows, so
-sparkle overlays land near their words rather than on them (`c26bae8`), and a body
-the 10% budget cannot fully rescue is left narrowed at its nudged spot for the
-operator. Both are the "operator adjusts" boundary the reviewer accepted.
-
-## Where things stand
-
-**Done and verified.** The tool is Keynote 15.x only, addressed by bundle id
-through the single resolver in `src/obed_edom/keynote_app.py`. The resizer's
-framing confirmation ships: `/api/resize` is a two-phase job (propose, then apply
-after the operator confirms), reviewed in `dashboard/src/components/FramingReview.tsx`
-grouped by framing rather than by page, each candidate shown as the actual wall
-preview under a CSS transform derived from the planner's own affine. Three planner
-defects were found and fixed with runtime evidence; gold scores improved on both
-pairs (933 → 503, 376 → 317) rather than trading one against the other.
-
-**The warm cache moved out of `output/`.** It is `.cache/` at the repo root now,
-overridable with `OBED_EDOM_CACHE_DIR`. It costs about an hour of Keynote time to
-rebuild and it used to live inside the folder people clear, which is how that hour
-got lost once. `output/` is otherwise disposable — clearing it is safe.
-
-## Immediate: the number block in the CG resizer
+## The number block in the CG resizer (immediate)
 
 The map geometry is correct as of `cd83162`. Of the three text defects recorded
 against `Map_Extracted_Wall_1st.key` slide 4, one remains:
 
-**The 183 / 86 / 14 / 269 number block renders as overlapping fragments.** The
-cause is not a text bug. Those figures live in groups, and `plan_slide_transforms`
-parks every left-column group at `x = 16` while restoring its *wall* size, because
-the map affine would otherwise throw it off the left edge and setting a group's
-width does not scale its children. Five groups therefore land in one column with
-heavily overlapping y ranges — planned rects `(16, 175, 537x271)`,
-`(16, 326, 496x383)`, `(16, 388, 199x258)`, `(16, 584, 237x258)` — which is what
-the fragments are. This is the negative-space problem the branch is named for:
-the groups need packing against each other, not a shared left margin.
+**The 183 / 86 / 14 / 269 number block renders as overlapping fragments.** Not a
+text bug. Those figures live in groups, and `plan_slide_transforms` parks every
+left-column group at `x = 16` while restoring its *wall* size, because the map affine
+would otherwise throw it off the left edge and setting a group's width does not scale
+its children. Five groups land in one column with heavily overlapping y ranges —
+planned rects `(16, 175, 537x271)`, `(16, 326, 496x383)`, `(16, 388, 199x258)`,
+`(16, 584, 237x258)`. This is the negative-space problem: the groups need packing
+against each other, not a shared left margin.
 
-H15 and H16 below still stand for loose text items that are *not* inside groups;
-they were never the explanation for this block.
+**Two hypotheses still open, for loose text only** (not groups). Answerable from one
+instrumented planning run — planning the whole deck takes 0.17s off the warm cache.
 
-**Resolved, do not re-investigate:**
-
-- *The badge was H18, confirmed.* It was classified `other` and took the title
-  affine, which is derived from the title **text box** — 537 wide against the
-  template's 271, so `s = 0.505`. That put the 124px logo at 63px and the 767px
-  plate at `387x87`. The template's badge is not a uniform shrink of the wall's:
-  plate, logo and title each moved by their own ratio, so no single affine
-  reproduces it. Badge objects now land on the template's own rects, verified
-  against the rendered preview at `(17,37) 411x123` and `(31,59) 80x80` — which is
-  also exactly what last year's five finished pages carry.
-- *The badge still looks clipped, and no code can fix it.* The map layers sit
-  above it in the source deck, and Keynote exposes no way to restack. See the
-  skill doc. It is a source-deck or template fix.
-- *"Oct 2024 – Sep 2025" is no longer truncated.*
-
-**Two hypotheses still open, for loose text only.** Both are answerable from one
-instrumented planning run, since planning the whole deck takes 0.17s off the warm
-cache and needs no Keynote.
-
-- **H15 — the `TEXT_DOWN_SCALE` clamp sizes text boxes at a different scale than
-  the one that positions them.** In `_style_text_box`
-  (`src/obed_edom/map_remap.py:1520-1525`) an unstyled text item takes
-  `scale = min(aff.s, TEXT_DOWN_SCALE)` with `TEXT_DOWN_SCALE = 0.42` (line 37)
-  for its width, height and font, while its top-left corner comes from
-  `aff.apply_rect(...)` at the full `aff.s` — 0.8547 on this deck. Box and font
-  shrink together, so text ought still to fit, but every unstyled box lands about
-  half the size the rest of the layout uses, anchored by a corner computed at
-  roughly twice that scale. *Evidence:* log `aff.s`, the clamped `scale`, and src
-  versus mapped rect for each text item, and check whether the clamp bound.
+- **H15 — the `TEXT_DOWN_SCALE` clamp sizes text boxes at a different scale than the
+  one that positions them.** In `_style_text_box` (`map_remap.py:1520-1525`) an
+  unstyled text item takes `scale = min(aff.s, TEXT_DOWN_SCALE)` (`0.42`, line 37)
+  for width/height/font, while its top-left comes from `aff.apply_rect(...)` at the
+  full `aff.s` (0.8547 here). *Evidence:* log `aff.s`, the clamped `scale`, and src vs
+  mapped rect per text item; check whether the clamp bound.
 - **H16 — `match_character_style` finds nothing for these items, so they fall into
-  H15's path instead of using the template's real font size.** The styled branch
-  (lines 1512-1519) scales by `ratio = dst_size / wall_font`, which is the intended
-  behaviour; the clamp is only the no-style fallback. *Evidence:* log the matched
+  H15's path** instead of using the template's real font size. The styled branch
+  (1512-1519) scales by `ratio = dst_size / wall_font`. *Evidence:* log the matched
   style or `None`, plus `dst_size`, per text item.
-- **H19 — Keynote reflows text on the size pass and the position pass cannot
-  correct it.** `applyGeom` deliberately runs full-then-position-only because
-  setting width or height yanks an object to (0,0), but setting `objectText.size`
-  can trigger Keynote's own autofit and the second pass restores position without
-  re-checking size. Needs a real Keynote pass: log requested versus read-back
-  width, height and position per text item after both passes. Worth raising up the
-  order — the same shape of defect turned out to be real for lines, where the
-  endpoint writes silently undid the size that had just been set.
+- **H19 — Keynote reflows text on the size pass and the position pass can't correct
+  it.** `applyGeom` runs full-then-position-only because setting width/height yanks an
+  object to (0,0), but setting `objectText.size` can trigger autofit and the second
+  pass restores position without re-checking size. Needs a real Keynote pass. Worth
+  raising up the order — the same shape of defect was real for lines, where endpoint
+  writes silently undid the size.
 
-  H17 is answered: the block is groups sharing a left margin, not text items
-  snapped onto one `listDst`. H18 is answered and fixed; see above. The stacking
-  caveat that used to sit here is settled and lives in the skill doc — apply order
-  is stacking order for generate and not for resize.
-
-## Keynote cannot read or set z-order — both halves verified
-
-Asked and settled on 15.3.1 via `scripts/probe_zorder.js`; full detail is in the
-skill doc. Reading fails because `slide.iWorkItems()`, the one collection that
-would interleave classes in stacking order, raises "Can't convert types.", and no
-per-item substitute exists. Writing is impossible because `Keynote.sdef` contains
-no arrange vocabulary at all — JXA hands back a function for any name you ask for,
-so `app.bringToFront` *looks* like it exists, but calling it gives "Message not
-understood." Reordering is GUI-only.
-
-Per-type collections do enumerate in creation order, so relative order within one
-class is recoverable; cross-class is not, and that is the part stacking needs.
+Resolved, do not re-investigate: the badge (was H18 — took the title affine; now
+lands on the template's own rects); the badge looking clipped (source-deck stacking,
+no code fix); "Oct 2024 – Sep 2025" truncation; H17 (the block is groups sharing a
+left margin, not text on one `listDst`).
 
 ## Decision: live preview is dropped, cue discovery replaces it
 
 A preview is only worth building if it answers faster than editing the document
 does. A Keynote round trip cannot, and a browser overlay would still be an
-approximation of the thing it is approximating. Editing the outline and typing a
-cue is faster, so the preview is cut.
+approximation. Editing the outline and typing a cue is faster, so the preview is cut.
 
 The real problem was never "does this copy fit" — it is that the cue vocabulary is
 invisible. Nine semantic cues today, with adjacency rules and context variants, and
-it grows. So the work becomes: **show the operator the layouts the template
-actually has, and let them insert the cue that produces one.**
+it grows. So the work becomes: **show the operator the layouts the template actually
+has, and let them insert the cue that produces one.**
 
-## What the palette must get right: layout and cue are many-to-many
+## The palette: layout and cue are many-to-many
 
 Mirroring Keynote's "Choose a Layout" panel one-for-one would be wrong.
 From `src/obed_edom/masters.yaml`:
 
-- `BLANK` backs `[FILLER-QR]`, `[GIVING-OPTIONS]`, and offering-context
-  `[FILLER]` — three cues, one layout.
+- `BLANK` backs `[FILLER-QR]`, `[GIVING-OPTIONS]`, and offering-context `[FILLER]`.
 - `VERSES` backs both `[VERSE]` and `[VERSE-CONTINUED]`.
-- The four POST layouts have no cue of their own. They come from
-  `[VERSE-AFTER-POINT]`, which is valid only directly after `[POINT]` or
-  `[NUM-POINT]`, and which also drives the 1s Magic Move.
+- The four POST layouts have no cue of their own — they come from
+  `[VERSE-AFTER-POINT]`, valid only directly after `[POINT]`/`[NUM-POINT]`, which
+  also drives the 1s Magic Move.
 - `TITLE` backs `[TITLE]` and sermon-context `[FILLER]`.
-- DSK adds selection by length, not by cue: `Verse 1 Line (Variation 2)` versus
+- DSK adds selection by length, not cue: `Verse 1 Line (Variation 2)` vs
   `Verse Standard (Variation 2)` is decided by `verse_char_one_line`.
 
-So the palette is **cue-first**, each entry carrying the layout thumbnail(s) that
-cue can produce, the context that picks between them, and its adjacency rule. That
+So the palette is **cue-first**, each entry carrying the layout thumbnail(s) that cue
+can produce, the context that picks between them, and its adjacency rule. That
 inverts the existing `lw.cues` / `dsk.cues` maps rather than adding a second source
 of truth.
 
 ## Layout thumbnails: derive per template, cache by digest
 
 `Default Templates/` is empty and gitignored, so templates are always dropped and
-thumbnails cannot be pre-baked. Keynote's `export` works on documents, not layouts,
-so:
+thumbnails cannot be pre-baked. Keynote's `export` works on documents, not layouts:
 
 1. Copy the dropped template to a scratch path (never touch the original).
-2. Enumerate layouts. `remap_keynote.js` already has the pattern —
-   `doc.slideLayouts()` and `layoutNames()` at lines 543-567.
-3. Append one empty slide per layout with `{base slide: theMaster}`, the way
-   `src/obed_edom/keynote.py` line 792 onward already does.
+2. Enumerate layouts — `remap_keynote.js` has the pattern (`doc.slideLayouts()`,
+   `layoutNames()`, ~lines 543-567).
+3. Append one empty slide per layout with `{base slide: theMaster}`, as
+   `keynote.py` ~line 792 does.
 4. Export slide images, keep one PNG per layout name, discard the scratch deck.
-5. Cache under `<cache root>/layouts/{template_digest}/`, reusing `deck_digest()`
-   and the versioning discipline of `INSPECT_VERSION` in
-   `src/obed_edom/baseline.py`. Note the cache root is now `.cache/` at the repo
-   root, not under `output/`.
+5. Cache under `<cache root>/layouts/{template_digest}/`, reusing `deck_digest()` and
+   the `INSPECT_VERSION` discipline in `baseline.py`. Cache root is `.cache/` at the
+   repo root now, not under `output/`.
 
-One Keynote pass per template, once. New endpoint `GET /api/template-layouts`
-taking a template path, returning layout names, thumbnail URLs, and the cues each
-layout is reachable from. Layouts that no cue reaches are returned as unmapped —
-that list is itself useful, since it is the honest answer to "what can the template
-do that the tool cannot ask for".
-
-**Both capabilities this needs were probed on 15.3.1 and are present.**
-`doc.slideLayouts()` returns 9 named layouts and each answers `textItems()`,
-`images()` and `shapes()`. But `doc.masterSlides()` raises "Can't convert types."
-in JXA while AppleScript's `master slide` is fine, which is why `keynote_jxa.js`
-must stay unused.
+New endpoint `GET /api/template-layouts` taking a template path, returning layout
+names, thumbnail URLs, and the cues each layout is reachable from. Layouts no cue
+reaches are returned as unmapped — that list is the honest answer to "what can the
+template do that the tool cannot ask for". Both capabilities were probed on 15.3.1
+and are present (`doc.slideLayouts()` works; `doc.masterSlides()` raises in JXA but
+AppleScript's `master slide` is fine, which is why `keynote_jxa.js` stays unused).
 
 ## Outline editor in the dashboard
 
-The operator views and edits the outline in the dashboard, and picks cues from the
+The operator views and edits the outline in the dashboard, picking cues from the
 palette instead of typing them.
 
 **Editing surface: HTML rendered from the .docx.** `load_paragraphs` in
-`src/obed_edom/parse_outline.py` already returns per-run `bold`, `highlight`,
-`superscript` and `color`, and `ListNumberResolver` (line 365 onward) resolves Word
-auto-numbering. `OutlineResultView` already renders paragraphs with cue chips at
-exact character offsets via its `segments()` helper — that component is the starting
-point, made editable. This gives a real caret, exact paragraph index and character
-offset, and instant saves.
+`parse_outline.py` returns per-run `bold`, `highlight`, `superscript`, `color`, and
+`ListNumberResolver` (line 365+) resolves Word auto-numbering. `OutlineResultView`
+already renders paragraphs with cue chips at exact character offsets via `segments()`
+— that component is the starting point, made editable.
 
 **Page view: LibreOffice.** A toggle converts the current file with
-`soffice --headless --convert-to pdf` and shows the rendered pages for a
-true-to-Word visual check. Read-only, cached until the next save, and absent
-LibreOffice the toggle is simply disabled rather than an error.
+`soffice --headless --convert-to pdf` and shows the rendered pages. Read-only, cached
+until the next save, disabled (not an error) when LibreOffice is absent.
 
-**Writes go to the source .docx, in place.** This reverses the skill doc's "never
-overwrite the source outline" rule, scoped to the generator's editor only; the
-Sermon Checker stays read-only, and the `_CUED.docx` output path is unchanged. Two
-safeguards:
+**Writes go to the source .docx, in place.** This reverses SKILL's "never overwrite
+the source outline" rule, scoped to the generator's editor only; the Sermon Checker
+stays read-only and the `_CUED.docx` path is unchanged. Two safeguards:
 
-- A timestamped backup per save under `output/.outline-backups/{stem}/`, so a bad
-  edit is recoverable.
-- **Surgical edits only.** Apply an operation list against the paragraphs the
-  operator actually touched, in the manner of `_apply_ops` / `_make_run` in
-  `src/obed_edom/annotate.py`. Never re-serialise the whole document: tables,
-  images, comments and numbering definitions that the model does not represent must
-  survive untouched.
+- A timestamped backup per save under `output/.outline-backups/{stem}/`.
+- **Surgical edits only** — apply an operation list against the paragraphs the
+  operator touched, in the manner of `_apply_ops` / `_make_run` in `annotate.py`.
+  Never re-serialise the whole document: tables, images, comments and numbering the
+  model does not represent must survive untouched.
 
-**Semantic cues in, operator cues out.** The editor writes `[TITLE]`, `[VERSE]` and
-so on. Conversion to `[LW]` / `[DSK-…]` stays where it is, in `annotate_outline` at
-generate time. Nothing about the generated artefacts changes.
+**Semantic cues in, operator cues out.** The editor writes `[TITLE]`, `[VERSE]` etc.
+Conversion to `[LW]`/`[DSK-…]` stays in `annotate_outline` at generate time.
 
-**Validation as you type.** The palette can enforce what the parser already knows:
-`[VERSE-AFTER-POINT]` offered only directly after a point, `[FILLER-QR]` and
-`[GIVING-OPTIONS]` marked offering-only, and `[VERSE-FROM-PREVIOUS]` absent from
-the palette entirely since it raises `cue.deprecated_alias`. This is also where the
-invariant is cheapest to hold: one cue is one slide advance.
+**Validation as you type.** The palette enforces what the parser knows:
+`[VERSE-AFTER-POINT]` only after a point, `[FILLER-QR]`/`[GIVING-OPTIONS]`
+offering-only, `[VERSE-FROM-PREVIOUS]` absent (it raises `cue.deprecated_alias`).
+This is also where "one cue is one slide advance" is cheapest to hold.
 
 ## Image cues: design for these, build later
 
-Probing settled the two questions that gated this. An image places from AppleScript
-with `position` and `width`, height following from aspect ratio. **A movie is
-placed by creating an image and then assigning the video to its `file name`**,
+An image places from AppleScript with `position` and `width` (height follows). A
+movie is placed by creating an image and then assigning the video to its `file name`,
 which converts the object and keeps the geometry — so video slides are generatable
-with no GUI automation, and a template needs only a small image placeholder rather
-than an embedded video.
+with no GUI automation, and a template needs only a small image placeholder. (Both in
+SKILL.)
 
-The taxonomy, read off the real deck at `~/Desktop/Diff-Checker/Sermon_PK (GW).key`:
+Taxonomy, read off `~/Desktop/Diff-Checker/Sermon_PK (GW).key`:
 
-- **Centre-panel photo set** (slide 18): two photos filling the centre 3840x1080;
-  side panels keep the background. Two assets, fixed frames.
-- **Mirrored single set** (slide 20): one image set repeated left and right, the
-  same duplication the verses use. One asset, placed twice.
-- **Full-centre media** (slides 25 and 26): one image or movie across the whole
-  centre. Both generatable, per above.
-- **Design-authored collage** (slide 1): the series opener, dozens of cut-outs on a
-  custom background. Not operator-buildable and should not pretend to be — the cue
-  for these is "drop in the supplied graphic", which `[GIVING-OPTIONS]` already
-  does with its flag.
-- **Grid cases** (the mission photo wall, the missions-map infographic): tens of
-  images on a laid-out grid. These want a count and a grid spec, not N placements.
+- **Centre-panel photo set** (slide 18): two photos filling the centre 3840x1080.
+- **Mirrored single set** (slide 20): one set repeated left and right.
+- **Full-centre media** (slides 25/26): one image or movie across the whole centre.
+- **Design-authored collage** (slide 1): dozens of cut-outs; not operator-buildable —
+  the cue is "drop in the supplied graphic", which `[GIVING-OPTIONS]` already does.
+- **Grid cases** (photo wall, missions-map infographic): want a count and a grid
+  spec, not N placements.
 
-The implication: an image cue is a cue plus an **asset slot count and shape**, and
-picking it should open a drop target for that many files, in order, with the frames
-named. Custom backgrounds are the norm on these slides, so the cue must allow a
-background asset distinct from the content assets.
+So an image cue is a cue plus an **asset slot count and shape**; picking it opens a
+drop target for that many files, in order, with the frames named. Custom backgrounds
+are the norm, so the cue must allow a background asset distinct from the content ones.
 
 ## Stat drift across adjacent slides
 
 A missions wall read "11 Renovated Church Buildings" on one page and "44" on every
-page after it. No rule fires, because nothing on either page is wrong on its own —
-it is only visible by reading two pages side by side. The source deck was correct
-everywhere except that one page, so this is a source defect the checker should
-have caught rather than anything the resizer did.
-
-The tell is that a caption which persists unchanged across a run of slides changes
-exactly once. Compare text objects across adjacent slides, matching on position
-and on wording with the digits removed, and flag a page whose number disagrees
-with the run either side of it.
-
-Ships at `warning`, not `error`: a figure that genuinely steps per slide will trip
-it, and the operator has said that is the cheaper mistake. Rule name and severity
-are stubbed in `src/obed_edom/validation_rules.yaml`.
-
-## Find the title structurally, not by wording
-
-`is_title_item` matches the text against `masters.yaml -> cg.title_phrases`
-("Global Missions", "全球使命", "Missions Update", "宣教近况"). Any series whose
-title is not on that list gets no `titleDst` and no `badgeSlots`, so the whole
-badge path — plate, logo, title size and colour — silently does nothing. Measured
-on `Extracted_Wall/CG_3rd`, whose pages are titled "CHC Kuching":
-
-```
-titleDst      = MISSING
-badgeSlots    = MISSING
-titleFontSize = MISSING
-listFontSize  = 60.0      <- the title mistaken for a church-name list sample
-```
-
-Adding `CHC` to the phrase list is not the fix: every label on the missions map
-is "CHC …", so a hundred list entries would classify as titles.
-
-**Keep the phrase match as the first signal** — that is what the missions decks
-use today and it must not regress — and fall back to structure when it misses:
-
-- **plate** = the non-pin, non-backdrop shape of largest area *among those whose
-  rect contains the centre of at least one text item*
-- **title** = the largest text whose centre lies inside that plate
-
-The containment clause is what makes it work rather than "largest shape": on
-`Extracted_Wall_3rd` slide 2 the side panel `(4261,205) 398x710` is larger than
-the plate `(1961,-65) 485x197`, and holds no text. Checked against all four decks
-in the warm cache; the rule picks the right object on each:
-
-| deck / slide | plate | title |
-| --- | --- | --- |
-| missions wall 4 | `(1953,28) 767x173` | Global Missions |
-| Base_CG_Assets 12 | `(17,37) 411x123` | Global Missions |
-| Extracted_Wall_3rd 2 | `(1961,-65) 485x197` | CHC Kuching |
-| Extracted_CG_3rd 2 | `(20,-65) 359x160` | CHC Kuching |
-
-*Shape of the change.* A new `slide_title_item(slide)` holding both signals;
-`template_title_item` delegates to it. The awkward part is `classify_item`, which
-asks `is_title_item(item)` per item — role `title` has to come from the one
-chosen title instead, so the identity `_title_badge` already computes needs
-threading into classification rather than being re-derived. `is_title_item` stays
-as the phrase predicate the new function calls.
-
-*Watch for.* A caption on a coloured shape could be read as a title on a page
-with no real badge. Prefer the topmost candidate when more than one plate holds
-text, and record the choice in the framing report so a wrong pick is visible
-rather than mysterious.
+page after it. No rule fires, because nothing on either page is wrong on its own — it
+is only visible reading two pages side by side. The tell: a caption that persists
+unchanged across a run of slides changes exactly once. Compare text objects across
+adjacent slides, matching on position and on wording with the digits removed, and
+flag a page whose number disagrees with the run either side of it. Ships at
+`warning`, not `error` (a figure that genuinely steps per slide trips it, and the
+operator has said that is the cheaper mistake). Stubbed in `validation_rules.yaml`.
 
 ## Recipes as browsable artefacts
 
 The framing review browses **template slides**, and a template slide only helps if
-something *pairs*. `Map_Extracted_Wall_2nd` slide 3 is chrome plus a movie —
-`is_pairable_image` requires `kind == "image"`, so nothing pairs, `pairQuality`
-is 0, and every candidate previews identically because they all degrade to
-fit-to-frame. The review offers more of the thing that cannot help.
+something *pairs*. A chrome-plus-movie slide pairs with nothing, so every candidate
+previews identically (all degrade to fit-to-frame). What transfers instead is the
+**recipe** — a portable subset of the learned transform, applied to pages that can't
+learn a framing of their own.
 
-What transfers instead is the **recipe**. Measured: taking the finished
-`Extracted_CG_3rd` slide 2 as the template, all four wall pages learn the same
-transform and each page's own photo lands where the finished CG has it.
+**Built and reverted.** It worked (a recipe from `Extracted_CG_3rd` slide 2 moved a
+movie to the centre 1920 of the wall panel at full size) but did not help the pages
+that need help most. A page that cannot learn a framing of its own is usually a page
+carrying a map *and* a badge, and that wants **two affines, not one** — the same gap
+the single-group v1 limit described from the other side. Report card slide 94 was the
+case: the badge rode the map's affine off-frame, dragging `on_canvas_fraction` under
+threshold so every framing fell back. A saved single-affine recipe would have carried
+the same problem.
 
-```
-wall slide 2: pairQuality=2  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
-wall slide 3: pairQuality=1  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
-wall slide 4: pairQuality=1  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
-wall slide 5: pairQuality=1  s=1.0000 tx=-2844.0  photo -> (-924,-1) 3840x1080
-```
-
-`tx = -2844` shows wall `2844..4764` — dead centre of the 1920–5760 panel, which
-is the right answer for any full-bleed centre panel, including the movie on
-`Map_Extracted_Wall_2nd` slide 3 that pairs with nothing.
-
-Note what this does *not* do. `Extracted_CG_3rd` slides 4 and 5 use different
-image files at different sizes (`Layer 14.png` 2355x1766, `Layer 31.png`
-2013x1133) than the wall pages they came from. Someone re-cropped and re-exported
-those. No transform reproduces a different asset, and the tool should not try.
-
-*The split.* Two questions rather than one: pages with `pairQuality > 0` choose a
-framing, as today; pages with `pairQuality == 0` choose a **recipe**.
-
-*Portable subset.* `destWidth/Height`, `groups[].s/tx/ty`, `badgeSlots`,
-`lineSlots`, `titleDst` and its font, size and colour, `listFontSize`,
-`listSample`, `characterStyles`, `minPin`, `pinSizeScale`. Dropped as
-source-specific: `mapSrc`, `groups[].src`, `groups[].dst`, `templateSlide`,
-`pairQuality`, `source`, `framingPinned`.
-
-*Constraint for v1: single-group recipes only.* `_group_for_item` assigns objects
-to a cluster by the wall-side `src` rects, which mean nothing on another page.
-With one group every object takes it regardless, which is exactly the case worth
-having. Multi-group reuse needs a rule for re-anchoring and is out of scope.
-
-*Plumbing is one branch.* `plan_payload_transforms` already re-learns per slide
-keyed by `framing_overrides[number]`. Add `recipe_overrides: dict[int, dict]`
-beside it; where a slide has one, it replaces the learn step. The fit-to-frame
-guard stays, so a reused recipe that throws content off-canvas degrades the same
-way an automatic choice does.
-
-*Storage.* A curated asset like a template, not a cache — a tracked `recipes/`
-folder of small JSON files, each with a label an operator would recognise
-("full-bleed centre panel, from Extracted_CG_3rd slide 2"). Not `.cache/`, which
-reads as disposable.
-
-*Preview costs nothing new.* "Where objects land" and "as it will look" are both
-derived from the plan, so a recipe picker reuses them unchanged.
-
-**Built and reverted.** It worked — a recipe learnt from `Extracted_CG_3rd` slide
-2 moved `Map_Extracted_Wall_2nd` slide 3's movie from a fitted `(24,-157)
-1872x1053` to `(-924,-890) 3840x2160`, the centre 1920 of the wall panel at full
-size. What it did not do is help the pages that need help most.
-
-The v1 constraint turned out to be the tell. A page that cannot learn a framing
-of its own is usually a page carrying a map *and* a badge, and that wants two
-affines, not one. Report card slide 94 is the case: template 10 gives the map the
-1:1 it should have, and the badge — six of the page's ten objects — rides the same
-affine to x=-979, off the frame, which drags `on_canvas_fraction` under the
-threshold and makes every framing fall back to fit-to-frame. A saved recipe would
-have carried the same single affine and the same problem.
-
-So the single-group limit was not a v1 shortcut to relax later; it was this gap
-seen from the other side. Worth rebuilding once a badge reliably gets its own
-affine, and the commits are in the branch history to lift from.
-
-**What it would take to carry more than one affine.** The difficulty is not
-carrying N transforms, it is knowing which objects each governs on a page it was
-not learnt from. A group is `{s, tx, ty, src, dst, members}` with no role, and
-`_group_for_item` assigns by distance from an object's centre to that wall-side
-`src` — a rect describing the wrong page. With one group the question never
-arises, which is what the v1 limit was really saying.
-
-Naming them removes it. A group built deliberately can say what it is, and the
-applying side re-anchors by role with functions that already exist —
-`primary_map_rect` for the map, `title_plate` for the badge. Then
-`portable_recipe` drops the single-group check and carries `[{role, s, tx, ty}]`,
-and `apply_portable_recipe` resolves each role on the page in hand. Roughly a day
-with tests, once `badge-affine` has produced the first named group.
-
-One question left open: what a carried group should do when its role has no
-counterpart on the target page — a badge affine on a page with no badge.
-
-*Leading candidate: fit the orphans to their own footprint.* Falling back to the
-dominant group was the first idea, on the grounds that it mirrors
-`_group_for_item`. It does not — `_group_for_item` never declines. It ranks every
-cluster by centre distance, then by whether the cluster can hold the object, then
-by area, and always returns one. There is no "no cluster fits" branch to mirror.
-
-The estimation the operator asked about does exist, but only whole-slide:
-`fit_to_frame_recipe` takes `visible_content_union` — one box over everything
-visible — and applies a single `min(usable_w/src.w, usable_h/src.h)` with a 24px
-margin, centred. Its own docstring is the philosophy to follow: "everything
-present, readable and roughly placed, which is a far better starting point than
-confidently wrong geometry."
-
-So run that logic over the orphaned subset rather than the whole slide: their wall
-union, their own uniform shrink, placed by where that union sat relative to the
-frame. It reuses `visible_content_union` and the fit arithmetic unchanged, and it
-degrades the way the operator wants — roughly right, resized by hand after.
-
-Two facts to carry into that work, both checked in the code rather than assumed:
-
-- **The union is measured against the full 7680, not the 3960 the operator thinks
-  in.** `visible_content_union` drops only `is_chrome_bg` (named `map BG.png`
-  tiles at 1920x1080) and `is_backdrop` (≥98% of canvas). A side-panel graphic
-  that is neither is included, and drags the union out to full wall width. There
-  is no "excluding side panels" concept anywhere in the geometry. If the estimate
-  should be relative to the centre panel, that notion has to be introduced.
-- **Relative position is discarded today.** Fit-to-frame centres its result. The
-  operator's version keeps the orphans where they were relative to the frame,
-  which is a change to the arithmetic, not just its input set.
-
-Still wants a real case to check against before being written down; `badge-affine`
-produces the first named group and with it the first page that can orphan one.
-
-
-## Ranges should be written in the numbers Keynote shows
-
-A range is resolved against `slide["number"]`, which `inspect_keynote.js` sets to
-`i + 1` — the document position, counting slides set to Skip Slide. Keynote's
-navigator numbers only the slides that will play. On a deck with anything
-skipped the two disagree, and a range typed off the navigator remaps pages it did
-not name. The framing review warns about this now; the warning is a patch over
-the wrong convention rather than the fix.
-
-Previews are already right: Keynote exports skipped slides out, so file N is not
-slide N, and `map_preview_pngs` detects the count mismatch and realigns visible
-order to slide index. Only the typed range is wrong.
-
-**The translation is easy; knowing when to do it is not.** Navigator number V is
-the position of the Vth slide with `skipped` false, so the mapping needs the skip
-flags — which means the deck must be inspected before the range can be resolved.
-
-**Settled, and the shape it took.** Neither door has the flags for free: a ranged
-read returns only the slides asked for, so the dashboard is in the same position
-as the CLI, not a better one. What it does have is a warm cache — the first
-propose of a deck is normally unranged, and that writes a full payload.
-
-- *The dashboard* translates from the cached full payload when there is one, and
-  otherwise says the range is being taken as document positions and that
-  proposing once without a range fixes it. Deterministic given what is known,
-  and never a silent reinterpretation.
-- *The CLI* keeps document positions and says so in `--help`. It is barely used,
-  and a cheap flags-only pass was not worth the machinery for it.
-
-Everything reported back — framing rows, logs, the skipped list — stays in
-document positions. Only the typed range is translated, once, at propose.
-
-One caveat either way: un-hiding a slide while a proposal is open shifts the
-mapping under it. The review says to re-propose, and nothing can detect it
-without re-reading the deck.
-
-## A badge needs its own affine
-
-A page with a map and a badge needs two transforms. Today the second one arrives
-by luck: `pair_by_area_rank` orders both sides by area, and on a wall page the
-bleed art dominates, so the 124x124 badge logo pairs with a 473x364 map layer and
-`drop_outlier_pairs` correctly throws it away. What is left is one group, and
-`_group_for_item` hands it to everything.
-
-Measured on report card slide 94, one row per template:
-
-```
-template  groups  scales           badge plate rides
-   10       1     1.000            s=1.000 -> x=-979   off frame
-   12       1     0.696            s=0.696 -> x=-828   off frame
-    1       1     1.408            s=1.408 -> x=-1696  off frame
-   11       2     1.000, 0.266     s=0.266 -> x=420    on canvas
-```
-
-Template 11 is the only one that happens to produce two groups, and the only one
-where the badge lands on the page.
-
-`badgeSlots` is the other route and it does not depend on luck, but it needs a
-title, and `slide_title_item` declines a plate carrying several words rather than
-guessing which is the title. The report card's badge is MISSIONS + UPDATE +
-China, so there is no title, no slots, and the badge rides the map.
-
-**Anchor on the plate instead of the words.** One shape on each side, unambiguous
-whether the badge carries one word or three: the badge affine is plate to plate,
-and its members ride that. `titleDst` keeps positioning the title text where a
-title is identifiable. That makes the second affine deterministic rather than a
-by-product of area ranking, and it removes the multi-word guard's cost without
-removing the guard.
-
-Check against all four decks in the warm cache before and after, including that
-the missions decks keep the badge geometry last year shipped: plate `(17,37)
-411x123`, logo `(31,59) 80x80`.
-
-**Done, and measured.** `_title_badge` anchors plate to plate; `badge_plate_members`
-finds the badge by its plate so a badge of several words has a badge path at all;
-`template_badge_slots` moved to the same anchor so both sides rank one object set;
-`template_badge_plate` records it as `badgePlateDst`. The title-anchored path stays
-as the fallback for a page with no plate.
-
-*The plate anchor alone was half of it.* `on_canvas_fraction` built its ignore set
-through `slide_title_item`, so on exactly the pages this item is about — no title —
-the set came back empty and six badge objects in ten were scored against a framing
-that never places them. It now finds the badge by plate too. Without that half the
-numbers below do not move.
-
-Report card, the 34 pages carrying both a map and a multi-word badge, across
-templates 1/10/11/12 — 136 samples:
-
-```
-                     before     after
-plate off-frame      117        0
-mean on_canvas       0.3871     0.6562
-would fall back      96/136     48/136
-```
-
-Regression, per object rather than per line:
-
-```
-Map_Extracted_Wall_1st  5904 objects compared,  28 changed, all badge, all onto the page
-  logo   (-459,63) 83x83    -> (31,59) 80x80      gold, exact
-  plate  (-485,47) 526x116  -> (17,37) 411x123    gold, exact
-Extracted_Wall_3rd       136 objects compared,   8 changed, all the plate
-  plate  (698,41) 662x92    -> (18,36) 468x123
-```
-
-`(698,41) 662x92` was the title text box's own rect — the plate was being cloned
-onto it, which is H18 in miniature.
-
-**A defect this surfaced.** `title_plate` accepted a 622x1080 full-height side
-column on `Map_Extracted_CG_1st` slide 1: it guards against side panels by
-requiring text inside, and that column has text in it. It was masked while the
-template was reached through a title, since that slide has none. Now capped at
-half the canvas height — real plates measure 0.09–0.11 of it. With the column
-rejected, template slide 1 reads its own badge, 381x123, rather than borrowing
-slide 2's 411x123. That is what `slides_preferring` already says should happen:
-template slide N means slide N's layout, its badge included.
-
-**Note for whoever picks this up: the plan's "report card slide 94" is stale.**
-The deck was edited on 25 Aug, so the numbering moved and slide 94 now carries no
-map and no plate. Do not anchor on the number — select the pages by structure, as
-above. There are 34 of them, which is a better sample than the one slide anyway.
+So the single-group limit was this gap seen from the other side. **Worth rebuilding
+now `badge-affine` produces a named group** — the commits are in the branch history
+to lift from. Carrying more than one affine means naming groups by role so the
+applying side re-anchors by role (`primary_map_rect` for the map, `title_plate` for
+the badge); `portable_recipe` then drops the single-group check and carries
+`[{role, s, tx, ty}]`, and `apply_portable_recipe` resolves each role on the page in
+hand. When a carried role has no counterpart (a badge affine on a page with no
+badge), fit the orphans to their own footprint: run `fit_to_frame_recipe`'s arithmetic
+(`visible_content_union`, uniform shrink, 24px margin) over the orphaned subset rather
+than the whole slide, keeping their position relative to the frame. Two facts to carry
+in: `visible_content_union` is measured against the full 7680 (there is no
+"excluding side panels" concept — introduce it if the estimate should be centre-panel
+relative), and fit-to-frame centres its result today (keeping relative position is a
+change to the arithmetic, not just its input). Storage: a tracked `recipes/` folder of
+small labelled JSON files, not `.cache/`. Plumbing is one branch —
+`plan_payload_transforms` already re-learns per slide keyed by
+`framing_overrides[number]`; add `recipe_overrides: dict[int, dict]` beside it.
 
 ## Order of work
 
-1. ~~A badge needs its own affine~~ — done, measured below.
-2. The number block in the CG resizer, above.
-3. Recipes as browsable artefacts, once a badge carries its own affine.
-4. Cue palette and outline editor.
-5. Image cues.
-6. DSK generator, unchanged from the superseded plan including its four corrections.
+1. The number block in the CG resizer (above) — the immediate item.
+2. Recipes as browsable artefacts, now a badge carries its own affine.
+3. Cue palette and outline editor.
+4. Image cues.
+5. DSK generator, unchanged from the superseded plan including its four corrections.
 
-Stat drift is independent of all six and can land whenever.
-
-The text and framing batch (see the handover section above, `23a8dcd..52b13cd`)
-landed alongside badge-affine from a real-run review; it did **not** touch the
-number block, which stays the immediate item. Structural title detection and the
-recipe library are done; both sections below are kept for the reasoning, which is
-what a later reader needs rather than the sequencing.
+Stat drift is independent of all of these and can land whenever.
 
 ## Still parked
 
-- **Text in front. Parked deliberately, decided 2026-08-25 — do not re-raise
-  without new information.** The operator asked for text to have front priority.
-  There is no arrange vocabulary, but *pasting* puts an object at the front, and
-  `applyReuse` already drives cut/paste. The cost is real: a pasted object is a
-  new object, so builds and any identity are lost, and it is keystroke-driven. A
-  narrow version — the title and the badge's words, two or three objects a slide —
-  would be cheap; doing it for 200 name labels would not. The narrow version was
-  offered and declined: the case it would address is the buried badge, and that is
-  source-deck stacking, which no script can reach. Building it would spend the
-  paste cost without fixing the symptom that motivated it.
-- **Duplicate objects in the source deck.** `Map_Extracted_Wall_1st` slide 4 has
-  two pairs of exactly coincident groups, and the planner places all four. Any
-  dedupe must be scoped to groups and text and **never** images: the same test
-  flags 9 coincident images on that deck and 1 on the template, and those are the
-  stacked map layers. Harmless as it stands — each pair lands on the same spot —
-  so this is object count, not appearance.
-- **The first ranged propose on a deck never read in full** cannot translate the
-  range into Keynote's numbering, and says so rather than guessing. A flags-only
-  Keynote pass — every slide's `skipped`, no items collected — would remove the
-  caveat if it turns out to bite.
-- **Composite preview text.** The third preview mode draws text as scaled wall
-  pixels, so anything the run restyles is close rather than right. Rendering real
-  HTML at the template's font size would fix it; occlusion never can, because
-  per-object artwork cannot be recovered from a flattened slide PNG.
-- **`deck_digest` costs about 6s on a 6.8 GB deck**, and every cache-key lookup
-  pays it. Worth knowing before adding a code path that asks casually.
-- **The "natural upgrade" idea.** Noted as a nice improvement, deliberately not now.
-- **The JXA export has never worked.** Every exporting payload carries
-  `exportError` while still succeeding, because `export_slide_images()` picks up
-  after `exportImages()` fails. Pre-existing, true on 14.5/macOS 14 as well. Worth
-  cleaning up, not urgent.
-- **PNG export fidelity.** The two Keynote versions' exports differ by 117 pixels
-  on one slide at a maximum channel delta of 2/255 — renderer rounding, not a
-  dropped object. This is a negative result rather than a clearance: the original
-  symptom appeared on a full sermon deck mid-service, far more complex than the
-  3-slide template it was tested against. Keep watching.
+- **Text in front. Decided 2026-08-25 — do not re-raise without new information.**
+  There is no arrange vocabulary, but *pasting* puts an object at the front and
+  `applyReuse` already drives cut/paste. The cost is real (a pasted object is new, so
+  builds and identity are lost, and it is keystroke-driven). A narrow version (title
+  + badge words) was offered and declined: the case it would address is the buried
+  badge, which is source-deck stacking no script can reach.
+- **Slide 125's church list** — its names live in ~51 opaque groups spanning the
+  centre, so neither the list-hide (text only) nor the side-panel drop reaches them.
+  Source-deck **grouping** problem — ungroup so they hide like slide 124. (Now also
+  surfaced to the operator in the resizer callout.)
+- **Duplicate objects in the source deck** — `Map_Extracted_Wall_1st` slide 4 has two
+  pairs of coincident groups; the planner places all four. Harmless (each pair lands
+  on the same spot), so this is object count, not appearance. Any dedupe must be
+  scoped to groups and text and **never** images (the stacked map layers are
+  coincident on purpose).
+- **The first ranged propose on a deck never read in full** cannot translate the range
+  into Keynote's numbering, and says so rather than guessing. A flags-only Keynote
+  pass would remove the caveat if it bites.
+- **Composite preview text** — the third preview mode draws text as scaled wall
+  pixels, so anything the run restyles is close rather than right. Real HTML at the
+  template's font size would fix it; occlusion never can.
+- **`deck_digest` costs ~6s on a 6.8 GB deck**, and every cache-key lookup pays it.
+- **The JXA export has never worked** — every exporting payload carries `exportError`
+  while still succeeding, because `export_slide_images()` picks up after
+  `exportImages()` fails. Pre-existing. Worth cleaning up, not urgent.
+- **PNG export fidelity** — the two Keynote versions' exports differ by 117 pixels on
+  one slide at max channel delta 2/255 (renderer rounding). A negative result, not a
+  clearance — the original symptom was on a full sermon deck mid-service. Keep
+  watching.
 
 ## One standing caution about confirmation
 
-Measured offline: overrides are honoured, every candidate asked for is the one
-used. But **fit-to-frame still overrules them on pages where nothing in the
-template describes the page** — on `Full_Report_Card_Wall` slide 1 all three
-candidates fell back, and agreement was 1 on every candidate, meaning almost
-nothing corroborated the affine. Falling back there is correct.
+Overrides are honoured, but **fit-to-frame still overrules them on pages where nothing
+in the template describes the page** — on `Full_Report_Card_Wall` slide 1 all three
+candidates fell back with agreement 1. Falling back there is correct, and the operator
+must be told per page rather than in a footnote, or the flow lies (the UI does this via
+`wouldFallBack` — keep it if that code is touched). The deeper point: confirmation only
+bites when the template has a framing worth picking, so the count of pages with no
+candidate at all is the prompt to add template slides — the real fix rather than a
+per-page override.
 
-The consequence is not cosmetic: on those pages a confirmation changes nothing and
-the operator must be told so per page rather than in a footnote, or the flow lies.
-The UI does this now via `wouldFallBack`. Keep it if that code is touched — it is
-the specific failure the step was written to rule out. The deeper point is that
-confirmation only bites when the template has a framing worth picking, so the count
-of pages with no candidate at all is the prompt to add template slides, which is
-the real fix rather than a per-page override.
+## The metric-that-misleads pattern (worth keeping)
+
+Framing selection went through five rewrites in one session, each fixing a real case
+and several creating the next (matching points by proximity; scoring content-inside-
+frame, maximised by shrinking; measuring fit over everything visible when side lists
+run 3x wider than the map; ranking on the raw template score). The pattern matters
+more than the instances: a metric asked to infer something the data does not contain
+— which crop of a map the operator wants is editorial, and no pixel area encodes it.
+So when framing selection needs another exception, a sixth metric is the wrong move;
+asking is right. This repo already has the pattern for asking — the Sermon Checker
+proposes pairings, shows them, lets the operator correct, and remembers by content
+digest (`/api/diff/{id}/slots`, `save_pairing`, the slot remapping in `baseline.py`).
+Reuse it. Ask from the inspect alone, before remapping, and keep the fit-to-frame
+fallback so an unconfirmed deck degrades instead of breaking.

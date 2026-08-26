@@ -621,13 +621,63 @@ select { color-scheme: dark; }
 label.field { display: block; margin: 8px 0; font-size: 14px; color: var(--muted); }
 label.check {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   margin: 8px 0;
   font-size: 14px;
   color: var(--muted);
 }
-label.check input { margin-top: 3px; }
+/* Pill toggle switches — every checkbox in the app renders as one. Off reads as a
+   slate track with the knob left; on flips to a green track with the knob right,
+   so the state is unmistakable at a glance. The knob is a background-image circle
+   (a ::before knob would not render on an <input> in Firefox), which keeps this
+   markup-free and working everywhere; background-position animates the slide. */
+label.check input[type="checkbox"],
+.final-ask input[type="checkbox"],
+.settings-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 42px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background-color: #33456a;
+  background-image: radial-gradient(circle at center, #ffffff 0 45%, transparent 47%);
+  background-repeat: no-repeat;
+  background-position: 3px center;
+  background-size: 16px 16px;
+  cursor: pointer;
+  transition: background-color 150ms ease, background-position 150ms ease,
+    border-color 150ms ease;
+}
+label.check input[type="checkbox"]:checked,
+.final-ask input[type="checkbox"]:checked,
+.settings-row input[type="checkbox"]:checked {
+  background-color: #46b985;
+  border-color: #46b985;
+  background-position: calc(100% - 3px) center;
+}
+label.check input[type="checkbox"]:hover,
+.final-ask input[type="checkbox"]:hover,
+.settings-row input[type="checkbox"]:hover {
+  border-color: var(--sky);
+}
+label.check input[type="checkbox"]:focus-visible,
+.final-ask input[type="checkbox"]:focus-visible,
+.settings-row input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+label.check input[type="checkbox"]:disabled,
+.final-ask input[type="checkbox"]:disabled,
+.settings-row input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .note { color: var(--muted); font-size: 14px; }
 .err { color: var(--err); }
 .seg { display: flex; gap: 6px; margin: 12px 0; }
@@ -702,6 +752,21 @@ label.check input { margin-top: 3px; }
 }
 .framing-bar .playlist-controls { flex: 1 1 auto; }
 .framing-tabs { display: flex; gap: 6px; flex-shrink: 0; }
+.framing-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 13px;
+}
+.framing-filter-icon { display: inline-flex; color: var(--muted); }
+.framing-filter-label { color: var(--muted); font-weight: 600; }
+.framing-filter .inline-field { color: var(--muted); }
 
 /* One colour per bucket. The same tone appears on the tab and on every button
    that moves a page into it, so the colour carries the meaning. */
@@ -831,6 +896,20 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   box-shadow:
     0 0 0 2px var(--ink),
     0 0 14px rgba(244, 241, 234, 0.6);
+}
+/* A green dot marks a page whose side-panel content is whitelisted to be kept,
+   so it is legible in context without engaging the filter. */
+.framing-chip.kept::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #46b985;
+  box-shadow: 0 0 0 2px rgba(6, 12, 24, 0.85);
+  pointer-events: none;
 }
 .framing-chip-num {
   position: absolute;
@@ -994,7 +1073,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   max-width: 78ch;
   cursor: pointer;
 }
-.final-ask input { margin-top: 3px; flex: 0 0 auto; }
+.final-ask input { margin-top: 1px; flex: 0 0 auto; }
 .final-ask span { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .final-ask strong { color: var(--ink); display: block; margin-bottom: 2px; }
 
@@ -1122,3 +1201,98 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   line-height: 1.5;
 }
 .danger-note strong { color: var(--err); }
+
+.callout {
+  margin: 0 0 22px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.callout .callout-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.callout .callout-sub {
+  margin: 10px 0 2px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.callout ul { margin: 2px 0 0; padding-left: 18px; }
+.callout li { margin: 3px 0; color: var(--muted); }
+
+/* Hazard-tape warning callout: black body, gold accents, caution-stripe bands
+   top and bottom. The body stays dark so the copy reads; only the bands and the
+   title chip carry the yellow/black stripe motif. */
+.callout.important {
+  position: relative;
+  overflow: hidden;
+  border: 2px solid #f6c915;
+  border-left-width: 2px;
+  border-radius: 4px;
+  padding: 22px 16px;
+  background: #191813;
+  color: var(--ink);
+}
+.callout.important::before,
+.callout.important::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 10px;
+  background: repeating-linear-gradient(-45deg, #f6c915 0 12px, #141414 12px 24px);
+}
+.callout.important::before { top: 0; }
+.callout.important::after { bottom: 0; }
+.callout.important .callout-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 4px 13px;
+  border-radius: 3px;
+  background: #f6c915;
+  color: #141414;
+  font-weight: 700;
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+/* Dark badge so the exclamation contrasts the gold title chip rather than
+   blending into it, as a same-shade warning glyph did. */
+.callout.important .callout-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #141414;
+  color: #f6c915;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+}
+.callout.important .callout-sub { color: #f6c915; font-size: 14px; }
+.callout.important li { font-size: 12px; }
+/* The actionable verb phrase, lifted out of the muted rationale with a gold
+   highlight so it scans at a glance. */
+.callout.important .action {
+  background: rgba(246, 201, 21, 0.16);
+  color: #f7d34a;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.callout.important li { color: var(--ink); }
