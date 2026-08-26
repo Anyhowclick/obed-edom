@@ -645,11 +645,22 @@ def create_app() -> FastAPI:
             decisions,
             job_id=job_id,
         )
+        # A submitted decisions list is the complete set of non-default answers —
+        # the dashboard sends every pinned/deferred/whitelisted page at once and
+        # omits the ones back on the default. So a page absent from it has been
+        # reset, and its stale decision must be cleared, not left. Apply reads the
+        # overrides and the side-content whitelist from these in-memory pages, so a
+        # left-over decision would keep un-pinning or un-whitelisting from ever
+        # taking effect (the record file is already rewritten without it). When no
+        # decisions were submitted (the fallback), pages are left as they were.
+        authoritative = payload.decisions is not None
         by_index = {d.wall_index: d.as_dict() for d in decisions}
         for page in result.get("pages") or []:
             saved = by_index.get(page["index"])
             if saved:
                 page["decision"] = saved
+            elif authoritative:
+                page["decision"] = None
         updated = RUNNER.update_result(job_id, result)
         return RUNNER.public_dict(updated) if updated else result
 
@@ -664,6 +675,7 @@ def create_app() -> FastAPI:
         job = RUNNER.get(job_id)
         result = dict((job.result if job else None) or {})
         overrides = _overrides_from_result(result)
+        side_content = _side_content_slides_from_result(result)
         key = Path(str(result.get("path") or "")).expanduser()
         template = Path(str(result.get("templatePath") or "")).expanduser()
         if not key.exists() or not template.exists():
@@ -676,8 +688,8 @@ def create_app() -> FastAPI:
         try:
             updated = RUNNER.rerun(
                 job_id,
-                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, va=do_validate: (
-                    _run_resize(j, p, t, sl, ex, lists, ov, va)
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, side=side_content, va=do_validate: (
+                    _run_resize(j, p, t, sl, ex, lists, ov, side, va)
                 ),
             )
         except RuntimeError as exc:
@@ -1381,6 +1393,19 @@ def _overrides_from_result(result: dict[str, Any]) -> dict[int, int]:
     return overrides
 
 
+def _side_content_slides_from_result(result: dict[str, Any]) -> set[int]:
+    """Wall slide numbers whose side-panel content is kept, from whitelisted pages.
+
+    Independent of framing state: a page kept on auto can still be whitelisted.
+    """
+    slides: set[int] = set()
+    for page in result.get("pages") or []:
+        decision = normalize_decision(page.get("decision") or {})
+        if decision is not None and decision.keep_side_content:
+            slides.add(int(page["slide"]))
+    return slides
+
+
 def _run_resize_propose(
     job: Job,
     path: Path,
@@ -1492,6 +1517,7 @@ def _run_resize(
     export: bool,
     include_lists: bool = False,
     framing_overrides: dict[int, int] | None = None,
+    side_content_slides: set[int] | None = None,
     validate: bool = True,
 ) -> dict[str, Any]:
     dest_dir = default_output_root() / ".resize" / job.id
@@ -1501,8 +1527,8 @@ def _run_resize(
     scope = f"slide {label}" if label else "every slide"
     job.log(f"Remapping {path.name} → 1920×1080 ({scope})…")
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
-    if not include_lists:
-        job.log("Church-name text hidden (enable the list checkbox to pack them at the template size).")
+    if not include_lists and not side_content_slides:
+        job.log("Side-panel content dropped (whitelist a slide in the framing review to keep it).")
     info = remap_and_inspect(
         path,
         dest,
@@ -1511,6 +1537,7 @@ def _run_resize(
         include_lists=include_lists,
         export_dir=export_dir,
         framing_overrides=framing_overrides,
+        side_content_slides=side_content_slides,
         validate=validate,
         log=job.log,
     )

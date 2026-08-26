@@ -285,6 +285,89 @@ def test_resize_asks_for_framings_before_remapping(tmp_path):
         app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals
 
 
+def test_side_content_whitelist_and_undo_round_trip(tmp_path):
+    """Whitelisting a page keeps its side content on Apply, and un-whitelisting it
+    (which drops it from the submitted set) actually reverts — the stale decision on
+    the in-memory page must be cleared, or Apply keeps reading the old whitelist."""
+    import obed_edom.web.app as app_mod
+
+    seen = {}
+
+    def fake_remap(path, dest, **kwargs):
+        seen["side_content_slides"] = kwargs.get("side_content_slides")
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    def fake_inspect(path, **kwargs):
+        return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_propose(wall, template, **kwargs):
+        return {
+            "wallPath": str(wall),
+            "templatePath": str(template),
+            "wallDigests": ["d0"],
+            "templateDigest": "t0",
+            "destWidth": 1920,
+            "destHeight": 1080,
+            "wallWidth": 7680,
+            "wallHeight": 1080,
+            "pages": [
+                {"slide": 1, "index": 0, "autoTemplateSlide": 2, "autoFellBack": False,
+                 "needsAttention": False, "noUsableFraming": False, "candidates": []}
+            ],
+            "needAttention": [],
+            "noUsableFraming": [],
+        }
+
+    originals = (app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings)
+    app_mod.remap_and_inspect = fake_remap
+    app_mod.inspect_keynote = fake_inspect
+    app_mod.propose_framings = fake_propose
+    try:
+        client = TestClient(app)
+        deck = tmp_path / "Wall.key"
+        deck.write_text("placeholder")
+        template = tmp_path / "Base_CG_Assets.key"
+        template.write_text("placeholder")
+        started = client.post(
+            "/api/resize",
+            data={"path": str(deck), "template_path": str(template), "export": "false"},
+        )
+        job_id = started.json()["id"]
+        _wait(client, job_id)
+
+        # Whitelist the auto page, then apply: its side content is kept.
+        client.post(
+            f"/api/resize/{job_id}/apply",
+            json={"decisions": [{"wallIndex": 0, "state": "auto", "keepSideContent": True}]},
+        )
+        _wait(client, job_id)
+        assert seen["side_content_slides"] == {1}
+
+        # Un-whitelist: the page is back on the default, so collect() omits it and the
+        # submitted set is empty. Apply must now drop the side content again.
+        client.post(f"/api/resize/{job_id}/apply", json={"decisions": []})
+        _wait(client, job_id)
+        assert seen["side_content_slides"] == set()
+    finally:
+        app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals
+
+
+def test_side_content_slides_reads_whitelisted_pages():
+    """The apply path turns whitelisted pages into wall slide numbers, regardless of
+    their framing state — an auto page can still be whitelisted."""
+    from obed_edom.web.app import _side_content_slides_from_result
+
+    result = {
+        "pages": [
+            {"slide": 2, "decision": {"wallIndex": 1, "state": "auto"}},
+            {"slide": 5, "decision": {"wallIndex": 4, "state": "auto", "keepSideContent": True}},
+            {"slide": 9, "decision": {"wallIndex": 8, "state": "pinned", "templateSlide": 3, "keepSideContent": True}},
+            {"slide": 11, "decision": {"wallIndex": 10, "state": "pinned", "templateSlide": 4}},
+        ]
+    }
+    assert _side_content_slides_from_result(result) == {5, 9}
+
+
 def test_resize_form_still_takes_validate():
     """The parameter is aliased, because a form field literally named `validate`
     generates a Pydantic field that shadows BaseModel.validate and warns on

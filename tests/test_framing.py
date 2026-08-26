@@ -112,3 +112,41 @@ def test_no_record_is_not_an_error(tmp_path: Path):
     reuse = reuse_framings(None, ["a"], "t")
     assert reuse.overrides() == {}
     assert reuse.carried == 0
+
+
+def test_an_auto_page_kept_for_side_content_is_stored(tmp_path: Path):
+    """Side content is whitelisted independently of framing, so an auto page that
+    keeps its side content is a real decision and must not be dropped as unanswered."""
+    save_framings(
+        WALL,
+        TEMPLATE,
+        ["a", "b"],
+        "t",
+        [Decision(0, AUTO), Decision(1, AUTO, keep_side_content=True)],
+        root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    assert record is not None
+    assert [row["wallIndex"] for row in record["decisions"]] == [1]
+    assert record["decisions"][0]["keepSideContent"] is True
+    # A plain page emits no keepSideContent key, keeping the record lean.
+    assert "keepSideContent" not in Decision(0, PINNED, 7).as_dict()
+
+
+def test_side_content_whitelist_follows_its_page_and_maps_to_numbers(tmp_path: Path):
+    """The whitelist rides a re-run by content digest like a pin, and surfaces as
+    wall slide *numbers* (index + 1) for the planner."""
+    save_framings(
+        WALL,
+        TEMPLATE,
+        ["a", "b", "c"],
+        "t",
+        [Decision(2, AUTO, keep_side_content=True)],
+        root=tmp_path,
+    )
+    record = load_framings(WALL, TEMPLATE, root=tmp_path)
+    reuse = reuse_framings(record, ["new", "a", "b", "c"], "t")
+    # index 2 ("c") shifted to index 3; kept and still whitelisted.
+    assert reuse.decisions[3].keep_side_content is True
+    assert reuse.side_content_slides() == {4}
+    assert normalize_decision({"wallIndex": 5, "state": AUTO, "keepSideContent": True}).keep_side_content is True

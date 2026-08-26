@@ -303,11 +303,14 @@ export async function startResize(
   return res.json();
 }
 
-/** One page's framing answer. `templateSlide` is set only when state is "pinned". */
+/** One page's framing answer. `templateSlide` is set only when state is "pinned".
+ * `keepSideContent` whitelists the page to keep its LW side-panel content, and is
+ * independent of framing state — an auto page can still be whitelisted. */
 export type FramingDecision = {
   wallIndex: number;
   state: "auto" | "pinned" | "deferred";
   templateSlide: number | null;
+  keepSideContent?: boolean;
 };
 
 export async function saveResizeFramings(jobId: string, decisions: FramingDecision[]): Promise<Job> {

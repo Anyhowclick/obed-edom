@@ -107,23 +107,14 @@ in `2026_Lower-Thirds (ENG).key`. Pass 2 selects that first number, runs
 That carries the named character style across, so no style name is hardcoded:
 whatever the template puts on the first number is what the rest inherit.
 
-**Why the UI is unavoidable.** Keynote's AppleScript dictionary has no style
-support at all — `grep -i style` on `Keynote.sdef` returns only `export style`
-and chart types. Superscript is not a character property either; `font`, `color`
-and `size` are the only ones exposed.
-
-Verified against Keynote 14.5. Every scriptable route was tried and rejected by
-Keynote itself, and **each one fails silently inside a `try` block**, so a broken
-pass still looks like it succeeded:
-
-| Attempt | Keynote's response |
-|---|---|
-| `set character 37 to character 1` | Copies text only; size stays at the body size |
-| `duplicate` a text item | `Shapes can not be copied` |
-| `duplicate paragraph` / `word` | `Words can not be copied` |
-| `set size of character N to 46.67` | `size` is the *base* size; superscript renders it at 2/3, so this only shrinks the glyph onto the baseline |
-| Unicode `²⁷` / `²⁸` | Latin-1 `²³` and the superscripts block `⁴-⁹` are different code charts, so digits render mismatched |
-| Character Styles popup in the Format sidebar | The control is an `AXButton` whose menu never opens under `click` or `AXPress` |
+**Why the UI is unavoidable.** Keynote's scripting API cannot style a character at
+all — superscript is not a character property, and only `font`, `color`, `size` are
+exposed. The full statement, evidence table, and the resize side of the same limit
+live under **[Keynote scripting limits → Character and run styling is NOT
+scriptable](#keynote-scripting-limits-verified-on-1531)**. Every route was tried and
+**each fails silently inside a `try`**, so a broken pass still looks like it
+succeeded — verify the raised numbers on a rendered preview, not by the script
+exiting cleanly.
 
 **Apply each anchor once per occurrence.** Find cycles through matches, and a
 magic-move POST slide reuses the same verse box, so the Matthew passage lives on
@@ -395,20 +386,51 @@ uninstalled, so 15.3.1 is now the only version these hold for. Re-probe after th
 *next* upgrade with `scripts/probe_runs.js` and `scripts/probe_layouts.js`, both
 of which take a bundle id as their last argument.
 
-- **Per-run character style is unreachable.** `objectText.attributeRuns()`
-  raises "Can't convert types."; `paragraphs()`, `characters()` and `words()`
-  return plain strings carrying no colour, size or font. A string also answers
-  `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
-  look like it works while reporting nonsense. Anything needing per-character
-  style must come off a rendered preview. `scripts/probe_runs.js` reproduces it.
-  - *Writing a box font flattens its runs.* The corollary that bit the resizer:
-    `objectText.font = "X"` sets the *whole* box to one face, wiping any bold or
-    coloured runs the box carried — a scripture verse's yellow-bold emphasis
-    vanished when the body branch re-asserted its single inspected face. There is
-    no per-run write either, so the only safe move is to **not set the font**: a
-    resize moves the box in place, so leaving `font` unset keeps every run. The
-    resizer now sends `font=None` on the body (`197edfd`); colour was already left
-    to the source. See memory `lw-text-keeps-source-font-colour`.
+- **Character and run styling is NOT scriptable — only `font`, `color`, `size`,
+  and the box-write of those flattens the whole box.** This one limit governs both
+  the sermon generator and the CG resizer, so check it before any text-styling
+  idea. Nothing else about a run or character can be read or written:
+  - A character's `properties()` returns exactly `font, color, pcls, size`. Reading
+    `superscript`, `baselineShift`, `capitalization` (small-caps), `underline` or
+    `strikethrough` each raises "Can't convert types."
+  - `objectText.attributeRuns()` raises too; `paragraphs()`, `characters()`,
+    `words()` return plain strings carrying no style. (A string still answers
+    `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
+    look like it works while reporting nonsense.) `grep -i style` on `Keynote.sdef`
+    returns only `export style` and chart types.
+  - The only writes are the three properties, and `objectText.font = "X"` sets the
+    **whole box** to one face, wiping every bold/coloured run. There is no per-run
+    or per-character write. Keynote can only *delete* a character — never insert or
+    set one.
+  - So anything needing real run style must come off a rendered preview.
+    `scripts/probe_runs.js` reproduces it. Every scriptable route was tried and
+    rejected by Keynote itself, **each failing silently inside a `try`** so a broken
+    pass still looks like it succeeded:
+
+  | Attempt | Keynote's response |
+  |---|---|
+  | `set character 37 to character 1` | Copies text only; size stays at the body size |
+  | `duplicate` a text item | `Shapes can not be copied` |
+  | `duplicate paragraph` / `word` | `Words can not be copied` |
+  | `set size of character N to 46.67` | `size` is the *base* size; superscript renders it at 2/3, so this only shrinks the glyph onto the baseline |
+  | Unicode `²⁷` / `²⁸` | Latin-1 `²³` and the superscripts block `⁴-⁹` are different code charts, so digits render mismatched |
+  | Character Styles popup in the Format sidebar | An `AXButton` whose menu never opens under `click` or `AXPress` |
+
+  - *Generate consequence.* Raising each cyan superscript verse number is impossible
+    by script, so generate drives **Format > Font > Baseline > Superscript** (really
+    Copy Style / Paste Style) through System Events — which is why it needs
+    Accessibility. Operational detail in **[Later verse numbers need
+    Accessibility](#later-verse-numbers-need-accessibility)**.
+  - *Resize consequence — never re-assert or rewrite a verse box.* Re-asserting even
+    the correct single inspected face flattens the runs, so the body branch leaves
+    `font` unset (`font=None`, `197edfd`; colour was already left to the source) and
+    just moves the box in place. And a whole-box rewrite cannot be undone by
+    re-applying captured style, because only font/size/colour come back — a rewrite
+    to strip a verse's wall-authored line breaks **lost the superscript numbers and
+    the small-caps LORD** and was reverted. Since a break also can't be swapped for a
+    space in place (delete-only merges the words), **leave verse boxes untouched;** a
+    stray hard break is a source-deck fix. See memory
+    `lw-text-keeps-source-font-colour`.
 - **Z-order can be neither read nor set.** Verified on 15.3.1 by
   `scripts/probe_zorder.js`; both halves are Keynote limits, not our bugs.
   - *Reading:* `slide.iWorkItems()` raises "Can't convert types.", so the one

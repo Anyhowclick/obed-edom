@@ -523,6 +523,11 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
         collectionsOut[k] = counts[k];
       });
     }
+    // A group ignores `opacity` and clamps an off-canvas move, so neither hides it
+    // and the canvas shrink scales a "hidden" grouped inset back on-frame. It is
+    // deleted instead, in deleteGroupHides after both geometry passes — deferred so
+    // the removal never shifts the kindIndex a placed sibling is looked up by here.
+    if (spec.role === "hide" && spec.kind === "group") continue;
     const obj = getItem(slide, spec);
     if (!obj) {
       missed += 1;
@@ -539,6 +544,36 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
       missed += 1;
       if (missReasons.length < 8) {
         missReasons.push("slide " + slideNo + " " + (spec.kind || "item") + " geom failed");
+      }
+    }
+  }
+  return { applied: applied, missed: missed };
+}
+
+function deleteGroupHides(slides, Keynote, transforms, missReasons) {
+  // Remove the groups marked role="hide", after both geometry passes have read the
+  // collection by its original indices. Descending by (slide, kindIndex) so each
+  // deletion leaves the lower indices of the ones still to go valid.
+  const hides = [];
+  for (let t = 0; t < transforms.length; t++) {
+    const spec = transforms[t];
+    if (spec.role !== "hide" || spec.kind !== "group") continue;
+    const slideNo = Number(spec.slide) || 1;
+    if (slideNo >= 1 && slideNo <= countOf(slides)) hides.push(spec);
+  }
+  hides.sort(function (a, b) {
+    return Number(b.slide) - Number(a.slide) || Number(b.kindIndex) - Number(a.kindIndex);
+  });
+  let applied = 0;
+  let missed = 0;
+  for (let i = 0; i < hides.length; i++) {
+    const slide = slides[Number(hides[i].slide) - 1];
+    if (deleteObj(Keynote, getItem(slide, hides[i]))) {
+      applied += 1;
+    } else {
+      missed += 1;
+      if (missReasons.length < 8) {
+        missReasons.push("slide " + hides[i].slide + " group hide delete failed");
       }
     }
   }
@@ -736,6 +771,9 @@ function run(argv) {
         appliedFirst += r2.applied;
         missedFirst += r2.missed;
         applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
+        const rd = deleteGroupHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
+        appliedFirst += rd.applied;
+        missedFirst += rd.missed;
       }
       continue;
     }
@@ -749,6 +787,9 @@ function run(argv) {
     appliedFirst += r.applied;
     missedFirst += r.missed;
     applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
+    const rd = deleteGroupHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
+    appliedFirst += rd.applied;
+    missedFirst += rd.missed;
   }
   if (appliedFirst === 0 && cloned === 0) {
     try {

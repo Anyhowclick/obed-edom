@@ -48,18 +48,29 @@ STATES = (AUTO, PINNED, DEFERRED)
 
 @dataclass
 class Decision:
-    """One page's answer. `template_slide` is set only when `state` is `pinned`."""
+    """One page's answer. `template_slide` is set only when `state` is `pinned`.
+
+    `keep_side_content` is orthogonal to `state`: side-panel content is dropped by
+    default and kept only on the pages the operator whitelists, whatever framing
+    they end up with. So a page can be `auto` and still carry `keep_side_content`.
+    """
 
     wall_index: int
     state: str = AUTO
     template_slide: int | None = None
+    keep_side_content: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "wallIndex": int(self.wall_index),
             "state": self.state,
             "templateSlide": None if self.template_slide is None else int(self.template_slide),
         }
+        # Emitted only when set, so a plain answer stays lean — the same reason an
+        # auto row is dropped from the record entirely.
+        if self.keep_side_content:
+            out["keepSideContent"] = True
+        return out
 
 
 @dataclass
@@ -84,6 +95,18 @@ class FramingReuse:
             if decision.state == PINNED and decision.template_slide is not None
         }
 
+    def side_content_slides(self) -> set[int]:
+        """Wall slide *numbers* whose side-panel content is kept, for the planner.
+
+        Independent of framing state — whitelisting a page keeps its side content
+        whether its crop is pinned, deferred or automatic.
+        """
+        return {
+            index + 1
+            for index, decision in self.decisions.items()
+            if decision.keep_side_content
+        }
+
 
 def normalize_decision(raw: dict[str, Any]) -> Decision | None:
     try:
@@ -98,13 +121,21 @@ def normalize_decision(raw: dict[str, Any]) -> Decision | None:
         template_slide = None if slide is None else int(slide)
     except (TypeError, ValueError):
         template_slide = None
+    keep_side_content = bool(raw.get("keepSideContent"))
     if state == PINNED and template_slide is None:
         # A pin with nothing pinned is not a decision; treat it as unanswered
         # rather than silently pinning slide 0.
         return None
     if state != PINNED:
         template_slide = None
-    return Decision(wall_index=wall_index, state=state, template_slide=template_slide)
+    # keep_side_content is kept for every state — a whitelisted page left on auto
+    # is still a decision, unlike template_slide which only pinned pages carry.
+    return Decision(
+        wall_index=wall_index,
+        state=state,
+        template_slide=template_slide,
+        keep_side_content=keep_side_content,
+    )
 
 
 def framing_path(wall: Path | str, template: Path | str, root: Path | None = None) -> Path:
@@ -139,12 +170,13 @@ def save_framings(
     """Write the framing record, dropping pages left on auto.
 
     Auto is the absence of a decision, so storing it would grow the file with
-    rows that mean nothing and would make "already answered" untrue.
+    rows that mean nothing and would make "already answered" untrue. A page kept on
+    auto but whitelisted for side content is a real decision, though, so it stays.
     """
     rows: list[dict[str, Any]] = []
     for entry in decisions:
         decision = entry if isinstance(entry, Decision) else normalize_decision(entry)
-        if decision is None or decision.state == AUTO:
+        if decision is None or (decision.state == AUTO and not decision.keep_side_content):
             continue
         rows.append(decision.as_dict())
     record = {
@@ -192,6 +224,7 @@ def reuse_framings(
             wall_index=new_index,
             state=decision.state,
             template_slide=decision.template_slide,
+            keep_side_content=decision.keep_side_content,
         )
         out.carried += 1
     if out.template_changed:

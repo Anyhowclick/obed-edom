@@ -429,7 +429,29 @@ export function FramingReview({
         const page = pages.find((p) => p.index === index);
         if (!page) continue;
         const slide = state === "pinned" ? slideFor(page) : null;
-        next[index] = { wallIndex: index, state, templateSlide: slide };
+        // Seed from the existing answer (local, or the one the server carried onto
+        // the page) so a whitelist set separately survives a framing change; only
+        // state and templateSlide are overwritten.
+        next[index] = { ...(current[index] ?? page.decision), wallIndex: index, state, templateSlide: slide };
+      }
+      return next;
+    });
+  }
+
+  /** Whether this page currently keeps its side-panel content. */
+  function keepsSideContent(page: FramingPage): boolean {
+    return !!(decisions[page.index] ?? page.decision)?.keepSideContent;
+  }
+
+  /** Set the side-content whitelist on pages without touching their framing state. */
+  function toggleSideContent(indexes: number[], keep: boolean) {
+    setDecisions((current) => {
+      const next = { ...current };
+      for (const index of indexes) {
+        const page = pages.find((p) => p.index === index);
+        if (!page) continue;
+        const base = current[index] ?? page.decision ?? { wallIndex: index, state: "auto" as const, templateSlide: null };
+        next[index] = { ...base, wallIndex: index, keepSideContent: keep };
       }
       return next;
     });
@@ -464,7 +486,9 @@ export function FramingReview({
   function collect(): FramingDecision[] {
     return pages
       .map((page) => decisions[page.index] ?? page.decision)
-      .filter((d): d is FramingDecision => !!d && d.state !== "auto");
+      // A page kept on auto but whitelisted for side content is still a real
+      // decision, so it must be sent even though its framing is automatic.
+      .filter((d): d is FramingDecision => !!d && (d.state !== "auto" || !!d.keepSideContent));
   }
 
   const reviewed = pages.filter((p) => stateOf(p, decisions) === "pinned").length;
@@ -524,6 +548,24 @@ export function FramingReview({
                   Unconfirm selected
                 </button>
               )}
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={busy}
+                title="Keep the LED-wall side-panel content on the selected pages (dropped everywhere else)"
+                onClick={() => { toggleSideContent([...selected], true); setSelected(new Set()); }}
+              >
+                Keep side panels
+              </button>
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={busy}
+                title="Drop the side-panel content on the selected pages (the default)"
+                onClick={() => { toggleSideContent([...selected], false); setSelected(new Set()); }}
+              >
+                Drop side panels
+              </button>
               <button
                 className="btn secondary tone-clear"
                 type="button"
@@ -951,6 +993,15 @@ export function FramingReview({
                           >
                             Needs a new template
                           </button>
+                          <label className="check" title="Keep this page's LED-wall side-panel content instead of dropping it (the default)">
+                            <input
+                              type="checkbox"
+                              checked={keepsSideContent(page)}
+                              disabled={busy}
+                              onChange={(e) => toggleSideContent([page.index], e.target.checked)}
+                            />
+                            <span>Keep side panels</span>
+                          </label>
                         </div>
                         <p className="note">
                           {`Template slide ${preview ?? "—"}. `}
@@ -958,6 +1009,7 @@ export function FramingReview({
                             ? "This framing does not fit, so the page is scaled to the frame. "
                             : "This framing applies cleanly. "}
                           {stateOf(page, decisions) === "pinned" && "Reviewed. "}
+                          {keepsSideContent(page) && "Side panels kept. "}
                           {page.resurfaced && "The template changed since you deferred this. "}
                         </p>
                         </div>
