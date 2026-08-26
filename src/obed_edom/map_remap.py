@@ -1504,7 +1504,13 @@ def learn_recipe(
     else:
         map_src = effective_wall_map_src(wall, map_src)
     if map_dst is None:
-        recipe = recipe_from_cover(map_src, dest_w=dest_w, dest_h=dest_h)
+        # No template framing paired. Cover the centre-panel panorama if there is
+        # one, not the whole wall: the side panels are chrome the 16:9 crop is
+        # meant to shed, and covering the full wall keeps them on-frame — the
+        # "off-screen object still showing" the operator sees. A genuine full-bleed
+        # image spans the wall and is itself the panel, so this does not change it.
+        cover_src = effective_wall_map_src(wall, panel) if panel is not None else map_src
+        recipe = recipe_from_cover(cover_src, dest_w=dest_w, dest_h=dest_h)
         recipe["source"] = "cover-fallback"
         # Carry the provenance even though no template framing was usable. A pin
         # that was applied and then found unbuildable is a different answer from a
@@ -1515,8 +1521,8 @@ def learn_recipe(
         recipe["pairQuality"] = 0
         recipe["groups"] = [
             {
-                **affine_from_rects(map_src, _rect_from_dict(recipe["mapDst"]) or map_src).as_dict(),
-                "src": map_src.as_dict(),
+                **affine_from_rects(cover_src, _rect_from_dict(recipe["mapDst"]) or cover_src).as_dict(),
+                "src": cover_src.as_dict(),
                 "dst": recipe["mapDst"],
                 "members": 0,
             }
@@ -1569,6 +1575,11 @@ def cg_layout_name(name: str) -> str:
     if re.search(r"\(16:9\)\s*$", text):
         return text
     return f"{text} (16:9)"
+
+
+# Recipe sources that crop the wall to the frame's centre and shed what lies
+# beyond it — as opposed to a map framing, which places the whole page.
+_COVER_SOURCES = frozenset({"template-cover", "cover-fallback"})
 
 
 def _recipe_source(map_src: Rect, map_dst: Rect, dest_w: float) -> str:
@@ -3161,53 +3172,117 @@ def _clipped(rect: Rect, wall_w: float, wall_h: float) -> Rect:
     return Rect(x0, y0, max(x1 - x0, 0.0), max(y1 - y0, 0.0))
 
 
+def _replaced_item_ids(
+    slide: dict, recipe: dict[str, Any], slide_size: tuple[float, float]
+) -> set[int]:
+    """Ids of items the template re-places rather than the affine carrying.
+
+    Where such an item's affine would land is no evidence about whether a framing
+    fits, because that is not where it ends up: it snaps to a template box or a
+    slot. The set the veto must ignore, gathered in one place because it is the
+    whole difference between judging a full-bleed cover and rejecting it.
+
+    - **the badge** (plate, logo, title) lands on the template's own slots;
+    - **the title and the verse body** snap to `titleDst` / `bodyTextDst`, and a
+      body set for the 3840-wide wall panel has its centre off the 1920 frame
+      until it reflows into that box;
+    - **sparkle emphasis copies** re-seat on the body after it is placed;
+    - **the small photos overlaid on a centre panel** ride the panel's affine on
+      purpose, the way `_slide_for_panel_framing` already drops them when choosing
+      the crop.
+    """
+    ignore: set[int] = set()
+    # The badge — plate, logo and title — found by plate where there is one, for
+    # the same reason the affine is: a badge of several words has no title, so the
+    # title route alone leaves every badge object scored against a framing that
+    # never places it (six of ten objects on a report-card page).
+    if recipe.get("titleDst") or recipe.get("badgeSlots") or recipe.get("badgePlateDst"):
+        title = slide_title_item(slide, slide_size)
+        plate = title_plate(slide, slide_size)
+        if plate is not None:
+            ignore |= {id(it) for it in badge_plate_members(slide, plate)}
+            if title is not None:
+                ignore.add(id(title))
+        elif title is not None:
+            ignore |= {id(title)} | {id(it) for it in badge_members(slide, title)}
+    # The verse body and its sparkle emphasis, which reflow into the template box.
+    if recipe.get("bodyTextDst"):
+        body = slide_body_text_item(slide, slide_size)
+        if body is not None:
+            ignore.add(id(body))
+            ignore |= sparkle_overlays(slide, body)
+    # The small photos overlaid on a centre panel, which ride the panel affine.
+    panel = centre_panel_image(
+        slide.get("items") or [],
+        slide_size[0],
+        slide_size[1],
+        _f(recipe.get("destWidth"), CG_WIDTH),
+        _f(recipe.get("destHeight"), CG_HEIGHT),
+    )
+    if panel is not None:
+        threshold = panel.w * panel.h * CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION
+        for item in slide.get("items") or []:
+            if is_pairable_image(item):
+                r = item_rect(item)
+                if r.w * r.h < threshold:
+                    ignore.add(id(item))
+    return ignore
+
+
 def on_canvas_fraction(
     slide: dict,
     recipe: dict[str, Any],
     wall_w: float,
     wall_h: float,
 ) -> float:
-    """How much of this page's visible content the recipe keeps on the CG canvas.
+    """How much of the artwork this recipe's affine governs stays on the CG canvas.
 
     A template framing that does not describe a page does not fail subtly: it
-    throws most of the page off the edge. Measuring that is a direct test of
-    whether the learned affine applies here, and unlike counting agreeing object
-    pairs it does not penalise a deliberately sparse template.
+    throws that page's artwork off the edge, and measuring that is a direct test
+    of whether the learned affine applies here. But only artwork the affine is
+    *responsible for* is evidence. Two kinds are not, and counting them is the
+    same trap framing *selection* already avoids — measure the artwork that
+    paired into the affine, not everything visible:
+
+    - an item the template **re-places** (the title, verse body and its emphasis,
+      name lists, the badge, a panel's overlaid photos) lands where the template
+      puts it, on-frame, whatever the affine would have done — see
+      `_replaced_item_ids`;
+    - on a **cover** (which crops to the centre), an item outside that crop — a
+      side panel — is discarded on purpose, so where the affine sends it says
+      nothing about the affine. A map framing places the whole page, so there this
+      does not apply and off-frame content is counted as the failure it is.
+
+    Without those two exclusions a correct full-bleed cover is vetoed: its text
+    all reflows on-frame while its cropped side content maps off it, so the raw
+    count reads as "half the page thrown away" when nothing is.
     """
     groups = _groups_from_recipe(recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
-    # The badge is not carried by the affine either — it lands on the template's
-    # own slots — so where the affine would put it is no evidence. On a report
-    # card page that is six of ten objects, all of them off the left edge, and
-    # the framing was rejected for placement it never performs.
-    ignore: set[int] = set()
-    if recipe.get("titleDst") or recipe.get("badgeSlots") or recipe.get("badgePlateDst"):
-        title = slide_title_item(slide, (wall_w, wall_h))
-        # Found by plate where there is one, for the same reason the affine is:
-        # a badge of several words has no title, so the title route leaves the
-        # ignore set empty and every badge object is scored against a framing
-        # that never places it. On the report card that is six objects in ten,
-        # which is the whole distance between judging a framing and failing it.
-        plate = title_plate(slide, (wall_w, wall_h))
-        if plate is not None:
-            ignore = {id(it) for it in badge_plate_members(slide, plate)}
-            if title is not None:
-                ignore.add(id(title))
-        elif title is not None:
-            ignore = {id(title)} | {id(it) for it in badge_members(slide, title)}
+    ignore = _replaced_item_ids(slide, recipe, (wall_w, wall_h))
+    # A cover crops to the centre and drops what is beyond it on purpose; a map
+    # framing places the whole page, so content it sends off-frame means the
+    # framing is wrong. So the footprint exclusion below applies to covers only —
+    # judging a map framing needs that off-frame content counted.
+    crop_footprint = map_src if recipe.get("source") in _COVER_SOURCES else None
     seen = inside = 0
     for item in slide.get("items") or []:
         if is_placeholder_text(item) or item.get("duplicateOf"):
             continue
         if not is_visible(item, wall_w, wall_h) or is_chrome_bg(item):
             continue
-        # Name lists are re-placed rather than carried by the affine, so where
-        # the affine would put them says nothing about whether it fits.
         if is_list_item(item) or id(item) in ignore:
             continue
+        # Content whose centre lies outside a cover's centre crop — a side panel —
+        # is cropped away by design; the affine is not failing by sending it
+        # off-frame.
+        if crop_footprint is not None:
+            cx0, _cy0 = item_center(item)
+            if not (crop_footprint.x <= cx0 <= crop_footprint.x + crop_footprint.w):
+                continue
         # The part of the object that is on the wall, not the whole of it. Full
         # bleed art is routinely taller than the wall — 2752px on a 1080px
         # canvas — which puts its centre off the source deck before any framing
@@ -3491,6 +3566,16 @@ def offframe_rows(
     return rows
 
 
+def _framing_unusable(
+    slide: dict, recipe: dict[str, Any], wall_w: float, wall_h: float, min_on_canvas: float
+) -> bool:
+    """A framing that throws the page off the edge or collapses it to a sliver."""
+    return (
+        on_canvas_fraction(slide, recipe, wall_w, wall_h) < min_on_canvas
+        or is_degenerate_scale(recipe, wall_w, wall_h)
+    )
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -3537,16 +3622,26 @@ def plan_payload_transforms(
             continue
         slide_recipe = recipe
         if template and (template.get("slides") or []):
+            single = {
+                "slideWidth": payload.get("slideWidth"),
+                "slideHeight": payload.get("slideHeight"),
+                "slides": [slide],
+            }
             wanted = (framing_overrides or {}).get(number)
-            slide_recipe = learn_recipe(
-                {
-                    "slideWidth": payload.get("slideWidth"),
-                    "slideHeight": payload.get("slideHeight"),
-                    "slides": [slide],
-                },
-                template,
-                template_slide=wanted,
-            )
+            slide_recipe = learn_recipe(single, template, template_slide=wanted)
+            pin_overridden = False
+            # A pinned framing that collapses the page is worse than no pin: a
+            # small-map layout dropped onto a full-bleed photo shrinks it to a
+            # sliver. Before giving up to fit-to-frame, try the page's own
+            # automatic framing — which for such a page is the 1:1 cover the pin
+            # was reaching for — and use it where the pin cannot frame the page.
+            if wanted is not None and _framing_unusable(
+                slide, slide_recipe, wall_w, wall_h, min_on_canvas
+            ):
+                auto_recipe = learn_recipe(single, template, template_slide=None)
+                if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
+                    slide_recipe = auto_recipe
+                    pin_overridden = True
             if framing_report is not None:
                 framing_report.append(
                     {
@@ -3557,15 +3652,16 @@ def plan_payload_transforms(
                         "source": slide_recipe.get("source"),
                         "pairQuality": slide_recipe.get("pairQuality"),
                         "fitted": False,
+                        # The pin could not frame the page, so its own automatic
+                        # framing was used instead. Surfaced, not silent.
+                        "pinOverridden": pin_overridden,
                     }
                 )
         # No template framing describes this page. Applying the closest one
         # anyway either throws objects thousands of pixels out of frame or
         # collapses them into a corner; fitting what is visible does neither.
         if template and (template.get("slides") or []):
-            unusable = on_canvas_fraction(
-                slide, slide_recipe, wall_w, wall_h
-            ) < min_on_canvas or is_degenerate_scale(slide_recipe, wall_w, wall_h)
+            unusable = _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
             if unusable:
                 fitted = fit_to_frame_recipe(
                     slide,

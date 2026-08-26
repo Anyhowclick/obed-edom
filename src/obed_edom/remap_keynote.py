@@ -221,6 +221,15 @@ def remap_keynote(
                 else ""
             )
         )
+    overridden = [r for r in framing_rows if r.get("pinOverridden")]
+    if overridden:
+        say(
+            f"Your pinned framing could not frame {len(overridden)} slide(s) "
+            + ", ".join(str(r["slide"]) for r in overridden[:10])
+            + ("…" if len(overridden) > 10 else "")
+            + " — it would have shrunk them to a sliver, so their own best framing "
+            "was used instead."
+        )
     if fitted:
         say(
             f"No template framing matched {len(fitted)} slide(s) "

@@ -11,6 +11,7 @@ from obed_edom.map_remap import (
     map_dst_for_cg,
     map_point,
     merge_affine_groups,
+    on_canvas_fraction,
     pair_by_size,
     plan_payload_transforms,
     plan_slide_transforms,
@@ -123,7 +124,10 @@ def test_framing_report_says_what_each_slide_used():
             {
                 "number": 2,
                 "items": [
-                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=100, w=1280, h=720),
+                    # A framing this page can actually take, so the pin is honoured
+                    # rather than overridden as a collapse — the degenerate case has
+                    # its own test below.
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=10, y=400, w=1900, h=267),
                 ],
             },
         ],
@@ -143,7 +147,55 @@ def test_framing_report_says_what_each_slide_used():
     assert row["requested"] == 2
     assert row["templateSlide"] == 2
     assert row["confirmed"] is True
+    assert row["pinOverridden"] is False
     assert "fitted" in row
+
+
+def test_a_degenerate_pin_falls_back_to_the_pages_own_framing():
+    """A pin that collapses the page to a sliver is overridden by its own framing.
+
+    A small-map layout dropped onto a full-bleed page shrinks it below any useful
+    scale. Rather than honour that and letterbox, the page's automatic framing —
+    the cover it was reaching for — is used, and the override is reported so it is
+    visible rather than silent."""
+    wall = _one_map_wall()
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=-2880, y=0, w=7680, h=1080),
+                ],
+            },
+            {
+                "number": 2,
+                "items": [
+                    # 1280 wide against a 7680 wall is s≈0.17 — a degenerate collapse.
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=100, w=1280, h=720),
+                ],
+            },
+        ],
+    }
+    auto = learn_recipe(wall, template)
+    report: list[dict] = []
+    fitted: list[int] = []
+    plan_payload_transforms(
+        wall,
+        learn_recipe(wall, template),
+        template=template,
+        framing_overrides={1: 2},
+        framing_report=report,
+        fitted_slides=fitted,
+    )
+    row = report[0]
+    assert row["requested"] == 2  # the pin is still recorded as tried
+    assert row["templateSlide"] == auto["templateSlide"]  # but the page's own framing was used
+    assert row["pinOverridden"] is True
+    assert row["confirmed"] is False
+    assert row["fitted"] is False  # covered, not letterboxed
+    assert fitted == []
 
 
 def test_cover_keeps_center_pin_on_canvas():
@@ -1241,6 +1293,65 @@ def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     assert abs((body.font_size or 0) - 46.67) < 0.1
     assert body.font == "AzoSans-Regular"  # source face kept
     assert body.color is None  # source colour kept
+
+
+def test_full_bleed_cover_is_not_vetoed_by_reflowed_body_and_cropped_side_content():
+    """A correct centre-panel cover must not fall back to fit-to-frame just because
+    its verse body, emphasis copies and a side-panel graphic sit off the raw frame.
+
+    The body reflows into the template box and the side graphic is cropped by the
+    16:9 crop on purpose, so where the affine would drop them is no evidence the
+    framing fails. `on_canvas_fraction` judged them anyway and letterboxed a page
+    that covers fine — this pins that it does not."""
+    verse = (
+        "47 So Aaron did as Moses said, and ran into the midst of the assembly. "
+        "The plague had already started among the people, but Aaron offered the "
+        "incense and made atonement for them."
+    )
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=1920, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=3395, y=21, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=3395, y=21, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    # Body set for the 3840-wide wall panel: its raw centre is off
+                    # the 1920 frame until it reflows into bodyTextDst.
+                    _item(kind="text", text=verse, x=3395, y=89, w=2328, h=351, size=46.67, font="AzoSans-Regular"),
+                    # A sparkle emphasis copy of a body phrase, sitting over the body.
+                    _item(kind="text", text="the plague", x=4378, y=337, w=676, h=98, size=46.67, font="AzoSans-Regular"),
+                    # A side-panel graphic outside the centre crop — cropped by design.
+                    _item(kind="image", fileName="Sidebar.png", x=6200, y=100, w=1200, h=880),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=702, y=49, w=662, h=92),
+                    _item(kind="text", text="Numbers 16", x=702, y=49, w=662, h=92, size=60, font="AzoSans-Bold"),
+                    _item(kind="text", text=verse, x=698, y=119, w=1140, h=675, size=46.67, font="AzoSans-Regular"),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe.get("source") == "template-cover"
+    # Only the cover image is the affine's own artwork; it is on-frame, so the
+    # page is not vetoed.
+    assert on_canvas_fraction(wall["slides"][0], recipe, 7680, 1080) >= 0.5
+    fitted: list[int] = []
+    plan_payload_transforms(wall, recipe, include_lists=True, template=template, fitted_slides=fitted)
+    assert fitted == []  # covered, not scaled to fit
 
 
 def test_church_name_column_is_not_taken_for_a_body_paragraph():

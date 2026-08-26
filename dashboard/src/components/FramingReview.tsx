@@ -34,11 +34,13 @@ export type PlannedRect = {
   sh?: number;
 };
 
-/** crop: one affine over the whole wall. boxes: the same, outlined per object.
- *  composite: each object cut from the wall and drawn where it lands — which
- *  replaces the crop rather than layering on it, because otherwise every object
- *  shows twice, once where the affine put it and once where the plan puts it. */
-export type PlanView = "crop" | "boxes" | "composite";
+/** boxes: the wall cropped by one affine, with each object's landing spot
+ *  outlined on top — the badge on its slot, the lists repacked, the objects the
+ *  run hides. composite: each object cut from the wall and drawn where it lands,
+ *  which replaces the crop rather than layering on it, because otherwise every
+ *  object shows twice, once where the affine put it and once where the plan
+ *  puts it. */
+export type PlanView = "boxes" | "composite";
 
 export type FramingCandidate = {
   templateSlide: number;
@@ -702,6 +704,13 @@ export function FramingReview({
                     <CropPreview
                       src={thumbUrl(page)}
                       transform={transformFor(page, chosenSlide(page, decisions))}
+                      // Where objects land, not the bare crop: a chip should show
+                      // the badge on its slot and the lists repacked. Pins are
+                      // dropped — 138 of them bury the boxes worth seeing, the way
+                      // the full view hides them by default.
+                      rects={rectsFor(page, chosenSlide(page, decisions)).filter(
+                        (r) => r.role !== "pin"
+                      )}
                       wallWidth={wallWidth}
                       wallHeight={wallHeight}
                       destWidth={destWidth}
@@ -798,7 +807,6 @@ export function FramingReview({
                               <span className="plan-modes">
                                 {(
                                   [
-                                    ["crop", "crop"],
                                     ["boxes", "where objects land"],
                                     ["composite", "as it will look"],
                                   ] as [PlanView, string][]
@@ -820,11 +828,9 @@ export function FramingReview({
                               transform={transformFor(page, preview)}
                               view={planView}
                               rects={
-                                planView === "crop"
-                                  ? undefined
-                                  : planView === "composite"
-                                    ? rectsFor(page, preview)
-                                    : rectsFor(page, preview).filter((r) => !hiddenRoles.has(r.role))
+                                planView === "composite"
+                                  ? rectsFor(page, preview)
+                                  : rectsFor(page, preview).filter((r) => !hiddenRoles.has(r.role))
                               }
                               wallWidth={wallWidth}
                               wallHeight={wallHeight}
@@ -890,6 +896,9 @@ export function FramingReview({
                                 <CropPreview
                                   src={thumbUrl(page)}
                                   transform={candidate.transform}
+                                  rects={(candidate.rects ?? []).filter(
+                                    (r) => r.role !== "pin"
+                                  )}
                                   wallWidth={wallWidth}
                                   wallHeight={wallHeight}
                                   destWidth={destWidth}
