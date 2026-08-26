@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from docx.oxml.ns import qn
+from obed_edom import keynote_app
 from obed_edom.annotate import annotate_outline, extract_operator_cues
 from obed_edom.bible import _parse_gateway_html, check_bible, fetch_passage
 from obed_edom.models import StyledRun
@@ -504,7 +505,7 @@ def test_point_applescript_replaces_placeholder(tmp_path):
     assert "†" not in matt_script
     assert "27" in matt_script
     assert "28" in matt_script
-    assert 'using terms from application "Keynote"' in matt_script
+    assert f'using terms from application id "{keynote_app.bundle_id()}"' in matt_script
     assert "to (size of character 1)" not in matt_script
     assert "²" not in matt_script
     assert "⁷" not in matt_script
@@ -695,11 +696,10 @@ def test_passage_header():
     assert _passage_header("", "NIV", "Series Title") == "Series Title"
 
 
-def test_annotate_offering_splits():
+def test_annotate_offering_splits(tmp_path):
     outline = parse_outline(OUTLINES / "Offering JX.docx")
     lw, dsk, _ = map_slides(outline)
-    dest = ROOT / "output" / "test_cued_offering.docx"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = tmp_path / "test_cued_offering.docx"
     annotate_outline(outline, lw, dsk, dest)
     tags = extract_operator_cues(dest)
     assert tags[0] == "LW-OFFERING FILLER"
@@ -725,11 +725,10 @@ def test_annotate_offering_splits():
     assert "DSK-PP-GIVING OPTIONS" in expected
 
 
-def test_annotate_sermon_point_and_title():
+def test_annotate_sermon_point_and_title(tmp_path):
     outline = parse_outline(OUTLINES / "Sermon BC.docx")
     lw, dsk, _ = map_slides(outline)
-    dest = ROOT / "output" / "test_cued_sermon.docx"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = tmp_path / "test_cued_sermon.docx"
     annotate_outline(outline, lw, dsk, dest)
     tags = extract_operator_cues(dest)
     assert tags[0] == "LW-TITLE"
@@ -780,7 +779,7 @@ def test_annotate_sermon_point_and_title():
     assert dsk_highlights == {"yellow"}
 
 
-def test_annotate_verse_cues_at_chunk_starts():
+def test_annotate_verse_cues_at_chunk_starts(tmp_path):
     """If 26–27 fit on slide 1 and 28 starts slide 2, cues sit before 26 and before 28."""
     outline = parse_outline(OUTLINES / "Sermon BC.docx")
     lw, dsk, _ = map_slides(outline)
@@ -799,8 +798,7 @@ def test_annotate_verse_cues_at_chunk_starts():
         anchor_verse="28",
         body="28 … This is My Blood …",
     )
-    dest = ROOT / "output" / "test_cued_sermon_split.docx"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = tmp_path / "test_cued_sermon_split.docx"
     annotate_outline(outline, lw + [extra_lw], dsk + [extra_dsk], dest)
     from docx import Document
 

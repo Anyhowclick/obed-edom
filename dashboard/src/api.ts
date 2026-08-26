@@ -286,6 +286,7 @@ export async function startResize(
     slides?: number[];
     export?: boolean;
     includeLists?: boolean;
+    validate?: boolean;
   }
 ): Promise<Job> {
   const body = new FormData();
@@ -296,7 +297,36 @@ export async function startResize(
   if (opts.rangeTo != null) body.set("range_to", String(opts.rangeTo));
   body.set("export", opts.export === false ? "false" : "true");
   body.set("include_lists", opts.includeLists ? "true" : "false");
+  body.set("validate", opts.validate === false ? "false" : "true");
   const res = await fetch("/api/resize", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** One page's framing answer. `templateSlide` is set only when state is "pinned". */
+export type FramingDecision = {
+  wallIndex: number;
+  state: "auto" | "pinned" | "deferred";
+  templateSlide: number | null;
+};
+
+export async function saveResizeFramings(jobId: string, decisions: FramingDecision[]): Promise<Job> {
+  const res = await fetch(`/api/resize/${jobId}/framings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decisions }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** Phase two: remap with the confirmed framings. Saves them first if given. */
+export async function applyResize(jobId: string, decisions?: FramingDecision[]): Promise<Job> {
+  const res = await fetch(`/api/resize/${jobId}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(decisions ? { decisions } : {}),
+  });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }

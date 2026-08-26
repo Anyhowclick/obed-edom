@@ -269,12 +269,14 @@ def test_a_framing_that_throws_content_off_screen_falls_back_to_fitting():
     """
     from obed_edom.map_remap import fit_to_frame_recipe, on_canvas_fraction
 
+    # Over the centre panel (x within 1920..5760) so the side-panel drop leaves it
+    # alone — this is about a wrong framing throwing centre content off.
     slide = {
         "number": 1,
         "items": [
-            _map(6000, 200, 1200, 700, kindIndex=0),
-            _pin(6400, 400, kindIndex=0),
-            _pin(6800, 500, kindIndex=1),
+            _map(3000, 200, 1200, 700, kindIndex=0),
+            _pin(3400, 400, kindIndex=0),
+            _pin(3800, 500, kindIndex=1),
         ],
     }
     wall = {"slideWidth": 7680.0, "slideHeight": 1080.0, "slides": [slide]}

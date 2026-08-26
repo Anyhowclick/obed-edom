@@ -322,7 +322,9 @@ def _disk_cache_path(key: tuple[str, int, int, int, str]) -> Path | None:
     try:
         from obed_edom.paths import find_repo_root  # noqa: PLC0415
 
-        folder = find_repo_root() / "output" / ".cache" / "bible"
+        from obed_edom.baseline import cache_root  # noqa: PLC0415
+
+        folder = cache_root() / "bible"
     except Exception:  # noqa: BLE001
         return None
     slug = re.sub(r"[^A-Za-z0-9]+", "_", "-".join(str(part) for part in key))

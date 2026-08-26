@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from obed_edom.web.app import app
@@ -201,11 +203,13 @@ def test_validate_keynote_records_whether_the_wall_is_final(tmp_path):
         app_mod._run_inspect = original
 
 
-def test_blank_slide_range_resizes_the_whole_deck(tmp_path):
-    """A blank range means every slide, and used to raise on the log line.
+def test_resize_asks_for_framings_before_remapping(tmp_path):
+    """Resize stops at proposals, and applying carries the confirmed framing.
 
-    format_slide_range only accepted an iterable, so leaving the field empty
-    reached it as None and failed with "'NoneType' object is not iterable".
+    Also guards the original regression this test was written for: a blank range
+    means every slide, and `format_slide_range` only accepted an iterable, so an
+    empty field reached it as None and failed with "'NoneType' object is not
+    iterable". That log line lives in the apply phase now.
     """
     import obed_edom.web.app as app_mod
 
@@ -213,10 +217,41 @@ def test_blank_slide_range_resizes_the_whole_deck(tmp_path):
 
     def fake_remap(path, dest, **kwargs):
         seen["slide_range"] = kwargs.get("slide_range")
-        return {"dest": str(dest), "counts": {}, "applied": 0, "missed": 0}
+        seen["framing_overrides"] = kwargs.get("framing_overrides")
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
 
-    original = app_mod.remap_and_inspect
+    def fake_inspect(path, **kwargs):
+        return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_propose(wall, template, **kwargs):
+        return {
+            "wallPath": str(wall),
+            "templatePath": str(template),
+            "wallDigests": ["d0"],
+            "templateDigest": "t0",
+            "destWidth": 1920,
+            "destHeight": 1080,
+            "wallWidth": 7680,
+            "wallHeight": 1080,
+            "pages": [
+                {
+                    "slide": 1,
+                    "index": 0,
+                    "autoTemplateSlide": 2,
+                    "autoFellBack": False,
+                    "needsAttention": False,
+                    "noUsableFraming": False,
+                    "candidates": [],
+                }
+            ],
+            "needAttention": [],
+            "noUsableFraming": [],
+        }
+
+    originals = (app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings)
     app_mod.remap_and_inspect = fake_remap
+    app_mod.inspect_keynote = fake_inspect
+    app_mod.propose_framings = fake_propose
     try:
         client = TestClient(app)
         deck = tmp_path / "Wall.key"
@@ -228,9 +263,38 @@ def test_blank_slide_range_resizes_the_whole_deck(tmp_path):
             data={"path": str(deck), "template_path": str(template), "export": "false"},
         )
         assert started.status_code == 200
-        job = _wait(client, started.json()["id"])
+        job_id = started.json()["id"]
+        job = _wait(client, job_id)
         assert job["status"] == "done", job.get("error")
+        # Phase one only proposes: nothing was remapped.
+        assert job["result"]["phase"] == "framing"
+        assert "slide_range" not in seen
+
+        confirmed = client.post(
+            f"/api/resize/{job_id}/apply",
+            json={"decisions": [{"wallIndex": 0, "state": "pinned", "templateSlide": 5}]},
+        )
+        assert confirmed.status_code == 200
+        job = _wait(client, job_id)
+        assert job["status"] == "done", job.get("error")
+        assert job["result"]["phase"] == "resized"
         assert seen["slide_range"] is None
+        assert seen["framing_overrides"] == {1: 5}
         assert any("every slide" in line for line in job["logs"])
     finally:
-        app_mod.remap_and_inspect = original
+        app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals
+
+
+def test_resize_form_still_takes_validate():
+    """The parameter is aliased, because a form field literally named `validate`
+    generates a Pydantic field that shadows BaseModel.validate and warns on
+    import. The dashboard posts `validate`, so the alias is the contract."""
+    from obed_edom.web.app import app as fastapi_app
+
+    schema = fastapi_app.openapi()
+    ref = schema["paths"]["/api/resize"]["post"]["requestBody"]["content"][
+        "application/x-www-form-urlencoded"
+    ]["schema"]["$ref"]
+    body = schema["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+    assert "validate" in body["properties"]
+    assert "run_validation" not in body["properties"]

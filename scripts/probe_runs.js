@@ -4,7 +4,11 @@
 // it cannot read, so a total failure is indistinguishable from unstyled text.
 // This probe surfaces the errors instead of swallowing them.
 //
-//   osascript -l JavaScript scripts/probe_runs.js "/path/to/deck.key" [maxSlides]
+//   osascript -l JavaScript scripts/probe_runs.js "/path/to/deck.key" [maxSlides] [bundleId]
+//
+// The bundle id defaults to Keynote 15 (com.apple.Keynote). Pass
+// com.apple.iWork.Keynote to probe 14.x on a machine that has both, since both
+// apps answer to the name "Keynote" and the name resolves to 14.x.
 
 ObjC.import("Foundation");
 
@@ -118,12 +122,19 @@ function probeTextItem(item) {
 function run(argv) {
   const path = argv[0];
   const maxSlides = argv.length > 1 ? Number(argv[1]) : 6;
-  const Keynote = Application("Keynote");
+  const bundleId = argv.length > 2 ? argv[2] : "com.apple.Keynote";
+  const Keynote = Application(bundleId);
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(path));
   const slides = doc.slides();
 
-  const report = { path: path, slideCount: slides.length, samples: [] };
+  const report = {
+    path: path,
+    bundleId: bundleId,
+    keynoteVersion: Keynote.version(),
+    slideCount: slides.length,
+    samples: [],
+  };
   const limit = Math.min(slides.length, maxSlides);
 
   for (let i = 0; i < limit && report.samples.length < 3; i++) {

@@ -78,6 +78,12 @@ rules:
   outline.lw_deviates: warning
   outline.both_deviate: warning
   outline.three_way: info
+
+  # TODO slide.stat_drift: a figure that changes between adjacent slides and then
+  # holds at the new value ("11 Renovated Church Buildings", then 44 on every page
+  # after). Reasoning and detection sketch are in
+  # .cursor/plans/cue_palette_and_outline_editor_ef103304.plan.md.
+  # slide.stat_drift: warning
   outline.text_unavailable: info
 
   # Pairing

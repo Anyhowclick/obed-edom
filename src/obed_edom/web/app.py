@@ -31,8 +31,33 @@ from obed_edom.diff_keynotes import (
     slide_catalog,
     slots_from_pairs,
 )
-from obed_edom.inspect import diff_work_dir, inspect_keynote, preview_inspect, preview_media_type, preview_pngs
-from obed_edom.map_remap import format_slide_range, resolve_slides
+from obed_edom.framing import (
+    AUTO,
+    DEFERRED,
+    PINNED,
+    Decision,
+    FramingReuse,
+    load_framings,
+    normalize_decision,
+    propose_framings,
+    reuse_framings,
+    save_framings,
+)
+from obed_edom.inspect import (
+    cached_payload,
+    diff_work_dir,
+    inspect_keynote,
+    preview_inspect,
+    preview_media_type,
+    preview_pngs,
+)
+from obed_edom.map_remap import (
+    expand_slide_range,
+    format_slide_range,
+    navigator_numbering,
+    resolve_slides,
+    to_document_range,
+)
 from obed_edom.models import Flag
 from obed_edom.outline_check import (
     SemanticOutlineError,
@@ -80,6 +105,16 @@ class RelocateBody(BaseModel):
 class DiffSlotsBody(BaseModel):
     slots: list[dict[str, Any]] | None = None
     pairs: list[dict[str, Any]] | None = None
+
+
+class FramingsBody(BaseModel):
+    """Framing decisions, one per page the operator answered.
+
+    Each entry is `{wallIndex, state, templateSlide}`. Confirming a whole group of
+    pages that share a framing is just several entries in one request.
+    """
+
+    decisions: list[dict[str, Any]] | None = None
 
 
 class SettingsBody(BaseModel):
@@ -534,6 +569,10 @@ def create_app() -> FastAPI:
         slides: str = Form(""),
         export: str = Form("true"),
         include_lists: str = Form("false"),
+        # Aliased: a form field literally named `validate` becomes a Pydantic
+        # model field that shadows BaseModel.validate, which warns on import.
+        # The wire name stays `validate`.
+        run_validation: str = Form("true", alias="validate"),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
@@ -546,6 +585,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"CG template not found: {raw_template}")
         do_export = export.lower() in {"1", "true", "yes", "on"}
         do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
+        do_validate = run_validation.lower() in {"1", "true", "yes", "on"}
         try:
             # No selection means the whole deck. It used to mean slide 2 only,
             # from when the map lived there by convention.
@@ -558,12 +598,93 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists: _run_resize(
-                j, p, t, sl, ex, lists
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate: (
+                _run_resize_propose(j, p, t, sl, ex, lists, va)
             ),
             feature="resize",
         )
         return job.to_dict()
+
+    @app.get("/api/resize/{job_id}/thumb/{which}/{filename}")
+    def resize_thumb(job_id: str, which: str, filename: str):
+        """A downscaled slide: `wall` for the source page, `template` for a framing."""
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        key = {"wall": "wallThumbDir", "template": "templateThumbDir"}.get(which)
+        if not key:
+            raise HTTPException(400, "Expected wall or template")
+        raw = str((job.result or {}).get(key) or "")
+        if not raw:
+            raise HTTPException(404, f"Job has no {which} thumbnails")
+        folder = Path(raw)
+        path = (folder / Path(filename).name).resolve()
+        try:
+            path.relative_to(folder.resolve())
+        except ValueError:
+            raise HTTPException(400, "Bad filename") from None
+        if not path.is_file():
+            raise HTTPException(404, "No thumbnail")
+        return FileResponse(path, media_type=preview_media_type(path))
+
+    @app.post("/api/resize/{job_id}/framings")
+    def save_resize_framings(job_id: str, payload: FramingsBody) -> dict:
+        """Remember which crop each page should use, without remapping."""
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if job.status == "running":
+            raise HTTPException(409, "Job is already running")
+        result = dict(job.result)
+        decisions = _decisions_from_body(payload, result)
+        save_framings(
+            result["path"],
+            result["templatePath"],
+            list(result.get("wallDigests") or []),
+            str(result.get("templateDigest") or ""),
+            decisions,
+            job_id=job_id,
+        )
+        by_index = {d.wall_index: d.as_dict() for d in decisions}
+        for page in result.get("pages") or []:
+            saved = by_index.get(page["index"])
+            if saved:
+                page["decision"] = saved
+        updated = RUNNER.update_result(job_id, result)
+        return RUNNER.public_dict(updated) if updated else result
+
+    @app.post("/api/resize/{job_id}/apply")
+    def apply_resize(job_id: str, payload: FramingsBody = Body(default=FramingsBody())) -> dict:
+        """Phase two: remap using the confirmed framings."""
+        job = RUNNER.get(job_id)
+        if not job or not job.result:
+            raise HTTPException(404, "Unknown job")
+        if payload and payload.decisions is not None:
+            save_resize_framings(job_id, payload)
+        job = RUNNER.get(job_id)
+        result = dict((job.result if job else None) or {})
+        overrides = _overrides_from_result(result)
+        key = Path(str(result.get("path") or "")).expanduser()
+        template = Path(str(result.get("templatePath") or "")).expanduser()
+        if not key.exists() or not template.exists():
+            raise HTTPException(400, "The wall deck or template has moved since proposing.")
+        raw_range = result.get("slideRange")
+        sel = frozenset(int(n) for n in raw_range) if raw_range else None
+        do_export = bool(result.get("export", True))
+        do_lists = bool(result.get("includeLists", False))
+        do_validate = bool(result.get("validate", True))
+        try:
+            updated = RUNNER.rerun(
+                job_id,
+                lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, ov=overrides, va=do_validate: (
+                    _run_resize(j, p, t, sl, ex, lists, ov, va)
+                ),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not updated:
+            raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(updated)
 
     if DASHBOARD_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")
@@ -1058,7 +1179,7 @@ def _run_visual_check(job: Job) -> dict[str, Any]:
     right = Path(str(result.get("rightPath") or result.get("rightPreviews") or ""))
     if not left.is_dir() or not right.is_dir():
         raise FileNotFoundError("Preview folders are missing; choose them again.")
-    work = ROOT / "output" / ".visual" / job.id
+    work = default_output_root() / ".visual" / job.id
     heat_dir = work / "heat"
     heat_dir.mkdir(parents=True, exist_ok=True)
     job.log("Reading previews and checking wording, photos, and house style…")
@@ -1111,7 +1232,7 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
         f"{len(report['rows'])} advance(s)."
     )
     job.log("Checking scripture references and house style…")
-    dest = ROOT / "output" / ".outline" / job.id / f"{path.stem}_findings.pdf"
+    dest = default_output_root() / ".outline" / job.id / f"{path.stem}_findings.pdf"
     written = _write_outline_pdf(job, dest, report)
     return {**report, "kind": "outline", "outlineReport": str(written) if written else None}
 
@@ -1136,7 +1257,7 @@ def _run_inspect(
     outline: Path | None = None,
     lw_final: bool = True,
 ) -> dict[str, Any]:
-    job_dir = ROOT / "output" / ".inspect" / job.id if export else None
+    job_dir = default_output_root() / ".inspect" / job.id if export else None
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=job_dir, slide_range=slide_range)
     _log_inspect(job, path.name, payload)
@@ -1228,6 +1349,141 @@ def _check_single_deck_outline(
     return out
 
 
+def _decisions_from_body(payload: FramingsBody, result: dict[str, Any]) -> list[Decision]:
+    """Body decisions, falling back to whatever the pages already carry.
+
+    An unparseable entry is dropped rather than guessed at: a decision the
+    operator did not make is worse than no decision.
+    """
+    if payload.decisions is not None:
+        rows = payload.decisions
+    else:
+        rows = [p.get("decision") or {} for p in result.get("pages") or []]
+    out: list[Decision] = []
+    for raw in rows:
+        decision = normalize_decision(raw)
+        if decision is not None:
+            out.append(decision)
+    return out
+
+
+def _overrides_from_result(result: dict[str, Any]) -> dict[int, int]:
+    """Wall slide number to template slide, from pinned pages only.
+
+    Auto and deferred both mean "let the planner choose", so neither pins.
+    """
+    overrides: dict[int, int] = {}
+    for page in result.get("pages") or []:
+        decision = normalize_decision(page.get("decision") or {})
+        if decision is None or decision.state != PINNED or decision.template_slide is None:
+            continue
+        overrides[int(page["slide"])] = int(decision.template_slide)
+    return overrides
+
+
+def _run_resize_propose(
+    job: Job,
+    path: Path,
+    template: Path,
+    slide_range: frozenset[int] | None,
+    export: bool,
+    include_lists: bool = False,
+    validate: bool = True,
+) -> dict[str, Any]:
+    """Phase one: ask which crop each map page should use.
+
+    Stops before copying anything. Planning is pure Python over the inspect
+    payloads, so the only Keynote time here is the inspect a resize needed anyway
+    — and confirming costs none at all.
+    """
+    # A range is written in the numbers Keynote shows, which count only the
+    # slides that will play. Translating needs the skip flags for the whole deck,
+    # and a ranged read returns only the slides asked for — so this leans on a
+    # full read having happened before, and says plainly when it has not rather
+    # than quietly taking the numbers to mean something else.
+    typed = slide_range
+    numbering = ""
+    if slide_range:
+        known = cached_payload(path)
+        if known is None:
+            numbering = (
+                "This deck has not been read in full, so the range is taken as "
+                "document positions, counting any slides set to Skip Slide. "
+                "Propose once without a range to have Keynote's numbering used."
+            )
+        else:
+            slide_range = to_document_range(known, slide_range)
+            numbering = navigator_numbering(known)
+            if slide_range != expand_slide_range(typed):
+                job.log(
+                    f"Range {format_slide_range(typed)} is Keynote's numbering; "
+                    f"that is document position {format_slide_range(slide_range)}."
+                )
+    label = format_slide_range(slide_range)
+    scope = f"slide {label}" if label else "every slide"
+    job.log(f"Reading {path.name} and {template.name} to propose framings ({scope})…")
+    if numbering:
+        job.log(numbering)
+    wall = inspect_keynote(path, slide_range=slide_range)
+    template_data = inspect_keynote(template)
+    proposal = propose_framings(
+        path,
+        template,
+        slide_range=slide_range,
+        wall_payload=wall,
+        template_payload=template_data,
+        log=job.log,
+    )
+    settings = load_settings()
+    reuse = FramingReuse()
+    if settings["reusePairings"]:
+        record = load_framings(path, template)
+        reuse = reuse_framings(
+            record, proposal["wallDigests"], proposal["templateDigest"]
+        )
+        if reuse.carried:
+            job.log(
+                f"Carried {reuse.carried} earlier framing decision(s) onto this deck"
+                + (f", dropped {reuse.dropped} whose page changed" if reuse.dropped else "")
+                + "."
+            )
+        if reuse.resurfaced:
+            job.log(
+                f"The template changed, so {len(reuse.resurfaced)} page(s) you deferred are "
+                "worth another look: " + ", ".join(str(i + 1) for i in reuse.resurfaced[:10]) + "."
+            )
+    decisions = {index: d.as_dict() for index, d in reuse.decisions.items()}
+    for page in proposal["pages"]:
+        saved = decisions.get(page["index"])
+        page["decision"] = saved or {
+            "wallIndex": page["index"],
+            # A page with nothing worth picking defaults to "I will add a template
+            # slide", because offering a dropdown of options that all degrade the
+            # same way invites a click that changes nothing.
+            "state": DEFERRED if page["noUsableFraming"] else AUTO,
+            "templateSlide": None,
+        }
+        page["resurfaced"] = page["index"] in set(reuse.resurfaced)
+    return {
+        "phase": "framing",
+        "path": str(path),
+        "templatePath": str(template),
+        "includeLists": include_lists,
+        "validate": validate,
+        "export": export,
+        **proposal,
+        # After the proposal, not before: with a range its payload holds only the
+        # slides asked for, so the note it derives from that is blind to the rest
+        # of the deck. Document positions from here on — apply, the framing rows
+        # and the logs all speak that language — with what was typed beside it.
+        "slideRange": sorted(slide_range) if slide_range else None,
+        "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
+        "numberingNote": numbering or proposal.get("numberingNote") or "",
+        "templateChanged": reuse.template_changed,
+        "resurfaced": reuse.resurfaced,
+    }
+
+
 def _run_resize(
     job: Job,
     path: Path,
@@ -1235,8 +1491,10 @@ def _run_resize(
     slide_range: frozenset[int] | None,
     export: bool,
     include_lists: bool = False,
+    framing_overrides: dict[int, int] | None = None,
+    validate: bool = True,
 ) -> dict[str, Any]:
-    dest_dir = ROOT / "output" / ".resize" / job.id
+    dest_dir = default_output_root() / ".resize" / job.id
     dest = dest_dir / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
@@ -1252,6 +1510,8 @@ def _run_resize(
         slide_range=slide_range,
         include_lists=include_lists,
         export_dir=export_dir,
+        framing_overrides=framing_overrides,
+        validate=validate,
         log=job.log,
     )
     inspect = info.get("inspect") or {}
@@ -1266,13 +1526,14 @@ def _run_resize(
         "slideHeight": inspect.get("slideHeight"),
         "slides": [],
     }
-    flags = validate_inspect(payload, location_prefix=dest.name)
+    flags = validate_inspect(payload, location_prefix=dest.name) if validate else []
     counts = info.get("counts") or {}
     applied = info.get("applied")
     missed = info.get("missed")
     job.log(f"Wrote {dest.name}: applied {applied}, missed {missed}.")
     score = info.get("templateScore") or info.get("goldScore") or {}
     return {
+        "phase": "resized",
         "path": str(path),
         "destPath": str(dest),
         "templatePath": str(template),
@@ -1289,8 +1550,18 @@ def _run_resize(
         "applied": applied,
         "missed": missed,
         "includeLists": include_lists,
+        "validate": validate,
         "templateScore": score,
         "flags": serialize_flags(flags),
+        # The planner's own reporting. These were computed and then dropped before
+        # the dashboard saw them, so overruled framings, content pushed out of
+        # frame and text that had to overlap artwork were visible only in the log.
+        "framingReport": info.get("framingReport") or [],
+        "fittedSlides": info.get("fittedSlides") or [],
+        "offFrame": info.get("offFrame") or [],
+        "placements": info.get("placements") or [],
+        "placementSource": info.get("placementSource") or "",
+        "skippedSlidesLeftAlone": info.get("skippedSlidesLeftAlone") or [],
     }
 
 

@@ -157,8 +157,9 @@ Other constraints worth keeping:
   what makes pass 1 hand the deck over. An unusable job would leave the deck
   open, unexported and never closed.
 - GUI scripting must live in its own `tell application "System Events"` block.
-  Inside `tell application "Keynote"`, `menu` resolves to a Keynote class and the
-  script fails to compile.
+  Inside the Keynote `tell`, `menu` resolves to a Keynote class and the script
+  fails to compile. The System Events target is matched on bundle identifier, not
+  `process "Keynote"` — see the section below for why the name is ambiguous.
 - Keynote is driven from a script *file* via `osascript`, not stdin: from the
   dashboard's worker thread the clipboard/HIServices connection dies and
   Keynote's dictionary never loads.
@@ -205,8 +206,14 @@ alongside a scaled layout, since the two teach contradictory transforms.
 ### One slide per framing you actually use
 
 Template slides compete per wall slide, and selection is good at this: given the
-20 framings harvested from a finished report deck, it picked the human's framing
-on 25 of 29 pages, and all four misses were the same map size shifted 120px.
+20 framings harvested from a finished report deck, it picks the human's framing on
+23 of 29 pages, and five of the six misses are the same map size shifted 120px.
+
+Measured on Keynote 15.3.1, and re-measure with `scripts/try_multi_framing.py`
+rather than trusting this figure — an earlier note here said 25 of 29 with four
+misses, which no longer matched and briefly looked like an upgrade regression. It
+is not: the report-card payloads read byte-identically on 14.5 and 15.3.1, so the
+old number simply predated later changes to selection.
 
 So a deck whose pages are framed differently — report cards, where each country
 is cropped to suit — wants one template slide per framing. What it cannot do is
@@ -257,6 +264,74 @@ lists, judge by whether every box was placed and by the overlap percentages.
 score: the recipe was learned from that same template, so anything other than
 roughly zero means the planner failed to apply the affine it derived.
 
+### Measuring without opening Keynote
+
+Reading a wall deck costs minutes (a 6.8 GB deck took 11½, a 7.2 GB one 21), and
+Keynote is single-instance, so iterating through it is painful. Everything below
+runs from the cache root — `.cache/` at the repo root, moved with
+`OBED_EDOM_CACHE_DIR` — in seconds. It sits outside `output/` deliberately: a
+tidy-up of the output folder once threw away an hour of Keynote time.
+
+| Script | Answers |
+|---|---|
+| `scripts/score_resize.py` | Placement error per slide and role against a finished CG deck. `--no-previews` compares against the old blind packing. |
+| `scripts/try_free_space.py` | Where loose text would land, as a picture: mask, old positions, new positions. |
+| `scripts/try_multi_framing.py` | Whether framing selection picks the framing a human chose, given several candidates. |
+| `scripts/inspect_gold.py` | Warms the cache. `--template-only` after editing the template, which is the one deck whose digest changes. |
+| `scripts/probe_runs.js` | Reproduces the unreachable-run-style result on demand. |
+| `scripts/probe_zorder.js` | Reproduces both z-order results: the mixed collection will not enumerate, and no arrange command exists. Builds its own throwaway deck, so it needs no gold deck. |
+| `scripts/probe_corner.js` | Dumps a shape's scriptable properties and resizes it: shows there is no corner-radius handle, so a rounded plate cannot be kept rounded across a resize. Builds its own throwaway deck. |
+
+Only warm the cache when a deck changes. Keep tests on the two `Map_Extracted`
+pairs; `Full_Report_Card` is 158 and 207 slides and only worth running when
+something specifically needs it.
+
+### Metrics that mislead
+
+Framing selection went through five rewrites in one session, each fixing a real
+case and several creating the next. All four traps below looked obviously
+correct when written:
+
+- **Matching points by proximity.** 138 pins sit about 6px apart while a layout
+  difference offsets everything by up to 190px, so each pin matches one about
+  thirty places away and the error is noise. Both sides derive from the same wall
+  objects, so compare by identity — project the wall through the gold's own
+  transform. `score_against_gold` does this; `nearestRmse` is kept only as a
+  reminder not to use it.
+- **Scoring how much content stays inside the frame.** Maximised by shrinking:
+  a framing that squeezed everything into a corner scored a perfect 1.0 and won
+  every tie. Multiply by how much of the frame is filled, so neither shrinking
+  nor overflowing wins.
+- **Measuring fit over everything visible.** The side-panel name lists run about
+  three times wider than the map, and they get relocated anyway, so a framing
+  that kept the map at true size was punished for not containing them. Measure
+  the artwork that paired into the affine.
+- **Ranking on the raw template score.** It is agreement×100 plus a pair count,
+  so one extra paired object outranked a fit two and a half times better. Rank on
+  the agreement level and let fit settle ties within it.
+
+One more of the same shape: the old blind packing was *hiding* a bug rather than
+causing one. Every map label was being snapped to a single template position, and
+the packing spread them out again afterwards. Deferring the packing revealed the
+collapse. When two layout paths sit in front of each other, check whether the
+outer one is masking the inner.
+
+**The pattern matters more than the four instances.** Every fix was a genuine
+improvement and most exposed the next problem. That is the signature of a metric
+being asked to infer something the data does not contain: which crop of a map the
+operator wants is an editorial choice, and no amount of pixel area encodes it. An
+operator looking at two framings of the same 1364x947 map knew instantly which
+was right; the geometry says nothing. So when framing selection needs another
+exception, a sixth metric is the wrong move — asking is the right one.
+
+This repo already has the pattern for asking. The Sermon Checker proposes slide
+pairings, shows them, lets the operator correct them, and remembers the answer
+across runs by content digest: `/api/diff/{id}/slots`, `save_pairing`, and the
+slot remapping in `baseline.py`. Reuse it rather than inventing a confirmation
+flow. Ask from the inspect alone, before remapping, so it costs no extra Keynote
+pass, and keep the fit-to-frame fallback so an unconfirmed deck degrades instead
+of breaking.
+
 ## LW deck facts worth knowing
 
 - **Verses are duplicated across the centre panels.** The wall is long, so the
@@ -272,7 +347,53 @@ roughly zero means the planner failed to apply the affine it derived.
   (verse reference vs verse body vs point), which is why those live in
   `masters.yaml` rather than in code.
 
-## Keynote scripting limits (verified, do not re-litigate)
+## Keynote 15.x only, and never addressed by name
+
+**Supported: Keynote 15.x on macOS 26.** 14.x support was removed deliberately
+once the staff machines were confirmed on 15.3.1, and there is no fallback to
+another build — a missing Keynote fails naming the identifier it wanted.
+
+**If something breaks in a way that smells like a scripting difference** — a
+master not found, a collection that will not enumerate, an export that silently
+produces nothing, a deck that will not open — **a 14.x machine is one of the first
+things to rule out.** The fix is to restore a fallback in
+`src/obed_edom/keynote_app.py`, not to work around it at the call site.
+
+Keynote 15 installs as **`Keynote Creator Studio.app`** with bundle identifier
+`com.apple.Keynote`; 14.x was `Keynote.app` / `com.apple.iWork.Keynote`. Both set
+their bundle *name* to "Keynote", so with both installed:
+
+- `tell application "Keynote"` resolved to **14.5**, not 15.
+- `Application("Keynote")` in JXA did the same.
+- `process "Keynote"` in System Events was equally ambiguous.
+
+An upgrade therefore looks like a no-op: every script keeps driving the old app
+while appearing to test the new one. Uninstalling 14.5 makes the name resolve to
+15.3.1 again, which is exactly why the by-name habit is dangerous — it works until
+someone has two builds. So `keynote_app.py` is the one place that decides,
+everything addresses the app by bundle id (`tell application id "…"`,
+`using terms from application id "…"`, `Application(bundleId)`, `open -b`), and
+the JXA scripts take `bundleId` in their plan JSON.
+`OBED_EDOM_KEYNOTE_BUNDLE_ID` drives a different build and partitions the cache
+with it.
+
+Resolution asks LaunchServices first — one targeted lookup that touches no other
+app — and falls back to reading `Info.plist` off disk when that is unavailable, as
+it is inside a sandbox. Keep that order: the scan is the only thing that reaches
+third-party bundles, and malformed ones are common enough that one game in
+`~/Applications` broke resolution in testing. The scan tries the names Keynote
+ships under before enumerating, and skips any app whose plist will not parse.
+
+`tests/test_keynote_app.py` locks the targeting and the cache split in.
+
+## Keynote scripting limits (verified on 15.3.1)
+
+Re-probed on macOS 26.6.2 against 14.5 and 15.3.1 side by side, driven by bundle
+id, while both were still installed. **Every answer below was identical on the
+two**, so the upgrade changed nothing we depend on. 14.5 has since been
+uninstalled, so 15.3.1 is now the only version these hold for. Re-probe after the
+*next* upgrade with `scripts/probe_runs.js` and `scripts/probe_layouts.js`, both
+of which take a bundle id as their last argument.
 
 - **Per-run character style is unreachable.** `objectText.attributeRuns()`
   raises "Can't convert types."; `paragraphs()`, `characters()` and `words()`
@@ -280,17 +401,165 @@ roughly zero means the planner failed to apply the affine it derived.
   `.bold()` — that is `String.prototype.bold()`, always truthy — so a probe can
   look like it works while reporting nonsense. Anything needing per-character
   style must come off a rendered preview. `scripts/probe_runs.js` reproduces it.
-- **Z-order is unreadable.** `slide.iWorkItems()` reports 0 on slides holding 19
-  real objects. Stacking is therefore a deliberate policy — the `role_order`
-  sort in `plan_slide_transforms` — not something recovered from the deck.
+- **Z-order can be neither read nor set.** Verified on 15.3.1 by
+  `scripts/probe_zorder.js`; both halves are Keynote limits, not our bugs.
+  - *Reading:* `slide.iWorkItems()` raises "Can't convert types.", so the one
+    collection that would interleave classes in stacking order is unavailable.
+    Earlier notes said it returned 0 on slides holding real objects; on macOS 26 it
+    raises on both Keynote versions, so the version is not what changed it. No
+    per-item substitute exists either — `zOrder`, `zOrderIndex`, `stackingOrder`
+    and `layer` all raise, and `index` gives "Can't get object."
+  - *Writing:* `Keynote.sdef` contains **no arrange vocabulary at all** — no
+    bring-to-front, send-to-back or z-order property on `iWork item`, whose entire
+    property list is height, locked, parent, position, width. JXA hands back a
+    function for any name you ask for, so `app.bringToFront` looks like it exists;
+    calling it gives "Message not understood." Reordering is GUI-only.
+  - *What is knowable:* per-type collections do enumerate in creation order
+    (`slide.shapes()` returned the three probe shapes in the order they were made),
+    so relative order **within** one class is recoverable. Cross-class is not, and
+    that is the part stacking actually needs.
+  - *Consequence for resize:* the resizer duplicates a slide and then moves,
+    resizes and deletes the objects already on it, so it inherits the source deck's
+    stacking untouched. It cannot repair a bad stack, but it cannot break a good
+    one. Only generate, which creates objects, controls stacking — by creation
+    order, via the `role_order` sort in `plan_slide_transforms`. That sort's own
+    comment claims apply order *is* stacking order; read it as true for generate
+    and false for resize.
+  - *Seen in the wild:* on `Map_Extracted_Wall_1st` the map layers sit above the
+    title badge in the source deck. The badge lands on its slot exactly — measured
+    at `(17,37) 411x123` off the rendered preview, matching gold — and is still
+    buried from x≈220 onward, where the map's white landmass begins. It reads as a
+    clipped plate and a title truncated to "Glob". No code can lift it; the fix is
+    in the source deck or the template.
+- **A shape's corner radius can be neither read nor set.** Verified on 15.3.1 by
+  `scripts/probe_corner.js`. A shape's entire scriptable property bag is `opacity,
+  parent, pcls, reflectionShowing, backgroundFillType, position, objectText,
+  width, rotation, reflectionValue, height, locked` — there is no `cornerRadius`
+  (it raises "Can't convert types.") and no shape-type at all. So a rounded
+  rectangle's rounding is invisible to the pipeline and cannot be restored after
+  the fact.
+  - *Consequence:* setting `width`/`height` on a rounded plate squares its corners
+    — the rounding is a property we cannot carry across a resize. The only lever is
+    whether we resize at all: a plate that is only *moved* keeps its rounding.
+  - *What the resizer does:* a **corner label** — a plate with one word on it, no
+    logo, bleeding off a corner (`badgePlateDst` crosses a frame edge) — is moved
+    to the template's corner at its own wall size rather than resized into the
+    template's slot, so a rounded plate stays rounded and a longer word (English in
+    a slot cut for shorter text) still fits. See `_title_badge`'s corner-label
+    branch in `plan_slide_transforms`. A **missions badge** (a plate with a logo)
+    still takes the template slot as badge-affine intends; if such a plate were
+    rounded it would lose its corners, and there is no script fix — the template or
+    source deck is where that would be addressed.
+- **`masterSlides()` is broken in JXA, but AppleScript `master slide` is fine.**
+  `doc.masterSlides()` raises "Can't convert types." while `doc.slideLayouts()`
+  returns all 9. In AppleScript the same collection answers perfectly: `count of
+  master slides` gives 9, `master slide "MAP BLANK (16:9)"` resolves, and `make
+  new slide with properties {base slide:…}` creates a slide with the right `base
+  layout`. Generate depends on that AppleScript path and is unaffected — but it is
+  why `keynote_jxa.js` must stay unused, since porting slide creation to JXA would
+  fail on the very lookup it needs.
 - **A text box is also a shape.** Keynote lists text-bearing shapes in both
   `textItems` and `shapes`; a third of text objects came back twice on a real
   wall deck. `inspect_keynote.js` marks the duplicate rather than dropping it,
   because objects are resolved by (collection, kindIndex) and those indices must
   keep matching Keynote's.
+- **A line's endpoints are unreachable; its `width` is its length.**
+  `startPoint` and `endPoint` read back `null` even on a line created with them,
+  and *writing* them is worse than useless: it collapses the line to one unit
+  long. `width` is the length whichever direction the line runs, and `height` is
+  always 0 — a vertical rule 383px tall inspects as `w=383, h=0`. So a rule is
+  placed by setting `width` and `position`, and it keeps the orientation it
+  already had. Verified with `scripts/probe_line.js`:
+
+  ```
+  width=383 only ................. w=383
+  width=383 then height=0 ........ w=383
+  width=383 then position ........ w=383
+  endpoints only ................. w=1
+  w, h, start, end, position ..... w=1
+  ```
+
+  This is why a divider survived every check — planned correctly, applied without
+  error, present in the deck — and still did not appear: the endpoint writes were
+  undoing the size.
+- **The JXA export always fails; the AppleScript fallback is what works.** Every
+  payload that exported carries `exportError: "Keynote export as slide images
+  failed."` alongside `exported: true`, on 14.5/macOS 14 as well as on both
+  versions under macOS 26. So `exportImages()` in `inspect_keynote.js` has never
+  produced the PNGs — `export_slide_images()` in `inspect.py` does, after the JXA
+  attempt has already cost a pass. Pre-existing, not an upgrade regression, and
+  worth cleaning up rather than reading as a failure when it appears in a payload.
+
+### What 15.3.1 unblocks
+
+- **A slide layout's contents are readable.** `doc.slideLayouts()` returns 9
+  named layouts, and each answers `textItems()`, `images()` and `shapes()`, with
+  `objectText()` on a layout's text item giving its placeholder wording ("Slide
+  Title"). So the cue palette can read a dropped template's layouts and their
+  placeholders rather than having them declared by hand in `masters.yaml`.
+- **An image can be placed from a file path, in AppleScript.** This is the one
+  that matters, because the deck builder in `keynote.py` is AppleScript, not JXA:
+
+  ```applescript
+  make new image with properties {file:POSIX file imgPath, position:{120, 140}, width:640}
+  ```
+
+  Verified end to end — built that way, saved, then read back by
+  `inspect_keynote` at exactly `x=120 y=140 w=640`. **Set one dimension and the
+  other follows**: a 1920x1080 source given `width:640` came back `h=360`, so
+  aspect ratio is preserved for free and the cue only needs to specify a width.
+  `Keynote.Image({file: …})` works in JXA too, but nothing needs it.
+
+- **A movie is placed by creating an image and then reassigning its `file name`.**
+  There is no direct route — `make new movie` cannot be handed a file by any key —
+  but this works, verified end to end:
+
+  ```applescript
+  set mv to make new image with properties {file:POSIX file imgPath, position:{40, 40}, width:300}
+  set file name of mv to POSIX file mp4Path
+  ```
+
+  Assigning a video to an image's `file name` **converts the object into a movie**:
+  `images` drops to 0, `movies` rises to 1. It keeps the position and width it was
+  given, recomputes height from the video's aspect ratio, and survives save and
+  reload — `inspect_keynote` reads it back as `kind=movie`, `x=40 y=40 w=300
+  h=169`, `file=clip.mp4`.
+
+  **So video slides are fully generatable, with no GUI automation.** The practical
+  consequence for templates: a master needs only a small *image* placeholder, not
+  an embedded video, since the image is what gets converted. That keeps template
+  files small.
+
+  The route matters because the sdef misleads here. `movie` has **no `file`
+  property at all**, and `image`'s `file` is `access="r"` — yet `make new image
+  with properties {file: …}` works. Creation-time keys and settable properties are
+  different sets. The writable door on both classes is `file name`
+  (`access="rw"`, accepting a file *or* text).
+
+  **Two silent failures worth knowing.** `make new movie with properties
+  {file name: …}` reports success in both the `POSIX file` and plain-text forms
+  while creating nothing: `count of movies` stays 0 and the returned reference is
+  `missing value`. A probe that trusts the absence of an error will conclude
+  movies work when they do not — check the collection count, not the error.
+
+  Incidentally the movie media inside these decks is `.mp4`; `.mov` in this repo
+  means Keynote's *export* format for a movie slide, a different thing worth not
+  conflating.
 - **The inspect cache is keyed by deck digest**, which says nothing about the
-  code that produced it. Bump `INSPECT_VERSION` in `baseline.py` when the
-  payload shape changes, or old payloads are reused forever.
+  reader that produced it. Two axes need handling. Bump `INSPECT_VERSION` in
+  `baseline.py` when the payload shape changes, or old payloads are reused
+  forever; and the file name carries a `.k<Keynote version>` tag, because a
+  digest-keyed hit would otherwise hand one build's payload to a run of another.
+  Payloads also record `keynoteBundleId` and `keynoteVersion`.
+
+  Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
+  longer read. **Uninstalling a Keynote version orphans its partition**, which is
+  worth knowing before the next upgrade: the offline scripts
+  (`score_resize.py`, `try_free_space.py`, `try_multi_framing.py`) all read the
+  cache, so they go quiet until the decks are read again on the new version.
+  The 14.5 payloads and their score table have been deleted: re-reading all seven
+  gold decks on 15.3.1 reproduced that table exactly, object for object, so the
+  old set held nothing the current one does not.
 
 ## Operator outline (`_CUED.docx`)
 

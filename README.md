@@ -67,6 +67,15 @@ Grant Accessibility to whatever launches generate — Terminal, iTerm, or the da
 
 Multi-verse slides need each verse number to carry the template's verse-number character style, and Keynote's AppleScript dictionary has no style support at all. Generate has to drive **Format > Copy Style** and **Paste Style** through the UI, which needs Accessibility. Without it the deck still generates with the right wording, but later verse numbers sit on the baseline and generate reports a flag. See the `obed-edom` skill for the full details before changing that code.
 
+## Keynote scripting limitations
+
+Keynote's scripting interface (verified on 15.3.1) leaves several things out of reach. These are Keynote's limits, not bugs in this tool; each has a probe under `scripts/` and fuller notes in the `obed-edom` skill.
+
+- **Per-character style is unreadable.** Font, size and colour of a text run cannot be read; anything needing them comes off a rendered preview. (`scripts/probe_runs.js`)
+- **Z-order can be neither read nor set.** There is no arrange command and no stacking property. The resizer inherits the source deck's stacking untouched — it cannot repair a bad stack (e.g. a title badge buried under map art) or break a good one. Only generate controls stacking, by creation order. (`scripts/probe_zorder.js`)
+- **Corner radius is unreadable and unsettable.** A rounded rectangle's rounding is invisible to scripting, so resizing a rounded plate squares its corners and cannot be undone. The resizer avoids this for a corner label (a lone word on a plate bleeding off a corner) by moving it at its own size instead of resizing it into the template slot; a missions badge plate is still resized to its slot. (`scripts/probe_corner.js`)
+- **Character styles must be applied through the UI**, which is why generate needs Accessibility (above).
+
 ## After you clone (no technical setup)
 
 You do **not** need Homebrew or Node for day-to-day use. The dashboard UI is already built in this folder (`dashboard/dist`).

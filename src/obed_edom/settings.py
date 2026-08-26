@@ -1,4 +1,4 @@
-"""Operator-tunable reuse settings. Stored under output/.cache/settings.json."""
+"""Operator-tunable reuse settings. Stored under the cache root as settings.json."""
 
 from __future__ import annotations
 

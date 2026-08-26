@@ -16,6 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
+
 CG_WIDTH = 1920
 CG_HEIGHT = 1080
 MIN_PIN_PX = 28.0
@@ -33,6 +34,24 @@ MAP_LAYER_MAX_H = 1200.0
 MAP_NEAR_PAD = 400.0
 # Title plate / globe sit beside the map; keep that cluster on one affine.
 TITLE_NEAR_PAD = 120.0
+# The plate already describes the badge's extent, so it needs far less slack than
+# TITLE_NEAR_PAD, which had to reach from the title's own box out to the plate and
+# logo around it. Kept small so a badge near other content does not swallow it.
+BADGE_PLATE_PAD = 24.0
+# A body text box carries a paragraph, not a heading. A scripture verse runs to
+# a couple of hundred characters; a church name, a stat or a label is a handful.
+# The threshold only has to separate a sentence from a phrase.
+BODY_TEXT_MIN_CHARS = 60
+# A slide carrying this many church-name boxes is a church-name list, not a map
+# with a few labels on it. Every multi-box list in the gold decks is a church
+# list (the smallest is six); map labels come one to five at a time. Used so an
+# unticked "include lists" drops the whole list even where it sits over the map,
+# rather than protecting it as if each name were a label on the art beneath it.
+LIST_SUMMARY_MIN = 6
+# A badge plate is short relative to the page. Measured across the gold templates
+# real plates sit at 0.09-0.11 of canvas height, so half the page is far above any
+# of them and well below the full-height side columns this rejects.
+PLATE_MAX_H_FRACTION = 0.5
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
 TEXT_DOWN_SCALE = 0.42
 # Fraction of a page's visible objects that must still land on the CG canvas for
@@ -114,6 +133,10 @@ class ItemTransform:
     opacity: float | None = None
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
+    # Where the object came from on the wall. JXA has no use for it — it moves the
+    # object that is already there — but a preview that wants to draw the object
+    # rather than outline it has to know which part of the wall to cut out.
+    src: Rect | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -131,6 +154,20 @@ class ItemTransform:
         if self.role in {"map", "list", "pin", "title", "other"}:
             payload["w"] = round(self.w, 2)
             payload["h"] = round(self.h, 2)
+        elif self.role == "line" and self.start is not None and self.end is not None:
+            # A rule sent nothing but its endpoints, and Keynote does not take
+            # those: a divider came out 164px long, which is the wall's 658
+            # through the 0.25 slide-size scale — the length Keynote assigned when
+            # the canvas changed, not the one we asked for. Send the size too.
+            #
+            # Keynote reports a line's width as its *length* and its height as 0
+            # whichever way the line runs, so the bounding box this transform
+            # carries (0 wide by 383 tall, for a vertical rule) would set the
+            # length to zero and the rule would vanish outright.
+            payload["w"] = round(
+                math.hypot(self.end[0] - self.start[0], self.end[1] - self.start[1]), 2
+            )
+            payload["h"] = 0.0
         if self.font_size is not None:
             payload["fontSize"] = round(self.font_size, 2)
         if self.font:
@@ -168,6 +205,17 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 
 def item_rect(item: dict) -> Rect:
+    start = item.get("start")
+    end = item.get("end")
+    if (
+        isinstance(start, (list, tuple))
+        and isinstance(end, (list, tuple))
+        and len(start) >= 2
+        and len(end) >= 2
+    ):
+        x0, y0 = _f(start[0]), _f(start[1])
+        x1, y1 = _f(end[0]), _f(end[1])
+        return Rect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
     return Rect(_f(item.get("x")), _f(item.get("y")), _f(item.get("w")), _f(item.get("h")))
 
 
@@ -341,9 +389,13 @@ def is_visible(item: dict, slide_w: float, slide_h: float) -> bool:
     if slide_w <= 0 or slide_h <= 0:
         return True
     rect = item_rect(item)
-    if rect.w <= 0 or rect.h <= 0:
+    # Keynote reports a 90° line as width=length, height=0 (or the reverse after
+    # we rebuild the box from start/end). Zero thickness is still a visible stroke.
+    if rect.w <= 0 and rect.h <= 0:
         return False
-    return rect.x < slide_w and rect.y < slide_h and rect.x + rect.w > 0 and rect.y + rect.h > 0
+    w = rect.w if rect.w > 0 else 1.0
+    h = rect.h if rect.h > 0 else 1.0
+    return rect.x < slide_w and rect.y < slide_h and rect.x + w > 0 and rect.y + h > 0
 
 
 def is_backdrop(item: dict, slide_w: float, slide_h: float) -> bool:
@@ -354,6 +406,36 @@ def is_backdrop(item: dict, slide_w: float, slide_h: float) -> bool:
     if w <= 0 or h <= 0 or slide_w <= 0 or slide_h <= 0:
         return False
     return w >= slide_w * 0.98 and h >= slide_h * 0.98
+
+
+# The LED wall is three 1920-wide panels; the 16:9 CG keeps the centre one,
+# [1920..5760]. Content lying wholly on a side panel has nowhere to go after the
+# crop, so it is dropped when side content is not being kept.
+LW_WALL_SIZE = (7680.0, 1080.0)
+CENTRE_PANEL_RECT = Rect(1920.0, 0.0, 3840.0, 1080.0)
+
+
+def is_lw_wall(wall_w: float, wall_h: float) -> bool:
+    """The 7680×1080 LED wall, the only format the side-panel rule applies to."""
+    return round(wall_w) == round(LW_WALL_SIZE[0]) and round(wall_h) == round(LW_WALL_SIZE[1])
+
+
+def is_side_panel_item(item: dict, wall_w: float, wall_h: float) -> bool:
+    """Content that sits wholly on the wall's left/right side panels.
+
+    Only for the LW 7680×1080 wall. An on-wall item is side-panel content when its
+    rect does not overlap the centre panel [1920..5760]; an item straddling that
+    boundary is deemed inside and kept. Off-wall leftovers are `is_visible`'s
+    concern (they are off-screen, not side-panel), so they are not counted here.
+    """
+    if not is_lw_wall(wall_w, wall_h) or not is_visible(item, wall_w, wall_h):
+        return False
+    r = item_rect(item)
+    c = CENTRE_PANEL_RECT
+    overlaps_centre = (
+        r.x < c.x + c.w and r.x + r.w > c.x and r.y < c.y + c.h and r.y + r.h > c.y
+    )
+    return not overlaps_centre
 
 
 def occluder_rects(slide: dict, slide_w: float, slide_h: float) -> list[Rect]:
@@ -487,11 +569,21 @@ def slide_has_column_lists(slide: dict) -> bool:
     return any("\n" in (it.get("text") or "") for it in lists)
 
 
-def template_list_sample(slides: list[dict]) -> tuple[float | None, Rect | None]:
-    """Prefer a one-line church-name seed (Empty_Map's resized CHC Aaliana) over a column."""
+def template_list_sample(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> tuple[float | None, Rect | None]:
+    """Prefer a one-line church-name seed (Empty_Map's resized CHC Aaliana) over a column.
+
+    The page's own title is skipped. A deck titled per church matches
+    CHURCH_LIST_RE on its title, which made a 60pt heading the seed that church
+    name columns were then sized against.
+    """
     candidates: list[tuple[int, float, Rect]] = []
     for slide in slides:
+        title = slide_title_item(slide, slide_size)
         for item in slide.get("items") or []:
+            if title is not None and item is title:
+                continue
             if not is_list_item(item):
                 continue
             size = _f(item.get("size"))
@@ -506,12 +598,28 @@ def template_list_sample(slides: list[dict]) -> tuple[float | None, Rect | None]
     return candidates[0][1], candidates[0][2]
 
 
-def template_title_item(slides: list[dict]) -> dict | None:
+def template_title_item(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> dict | None:
     for slide in slides:
-        for item in slide.get("items") or []:
-            if is_title_item(item) and _f(item.get("w")) > 0:
-                return item
+        title = slide_title_item(slide, slide_size)
+        if title is not None:
+            return title
     return None
+
+
+def template_body_text(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> dict | None:
+    """The chosen template slide's body-text box, or None.
+
+    Read off the chosen slide alone — a body box describes one layout, so unlike
+    the title it is not searched for across the deck. `slides_preferring` has
+    already put the chosen slide first.
+    """
+    if not slides:
+        return None
+    return slide_body_text_item(slides[0], slide_size)
 
 
 def pack_columns_from_right(
@@ -550,13 +658,101 @@ def pack_columns_from_right(
     return placed
 
 
-def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> dict[str, Any]:
-    font, sample = template_list_sample(template_slides)
+def template_line_slots(
+    slides: list[dict], slide_number: int | None = None
+) -> list[dict[str, Any]]:
+    """The rules the template draws, left to right.
+
+    A divider between stat blocks sits in a gutter the CG crop leaves out, so the
+    group affine puts it off-canvas and the meridian rescue re-places it on the
+    document scale — near enough in x to look deliberate, but the wrong length.
+    The template already says where the rule goes; take it at its word.
+    """
+    slide = None
+    if slide_number is not None:
+        slide = next((s for s in slides if _slide_number_of(s) == slide_number), None)
+    if slide is None or not any(str(it.get("kind") or "") == "line" for it in slide.get("items") or []):
+        slide = _first_slide_with(
+            slides,
+            lambda s: any(str(it.get("kind") or "") == "line" for it in s.get("items") or []),
+        )
+    if slide is None:
+        return []
+    lines = [it for it in slide.get("items") or [] if str(it.get("kind") or "") == "line"]
+    out: list[dict[str, Any]] = []
+    for item in sorted(lines, key=lambda it: (_f(it.get("x")), _f(it.get("y")))):
+        slot: dict[str, Any] = dict(item_rect(item).as_dict())
+        if item.get("start"):
+            slot["start"] = [_f(item["start"][0]), _f(item["start"][1])]
+        if item.get("end"):
+            slot["end"] = [_f(item["end"][0]), _f(item["end"][1])]
+        out.append(slot)
+    return out
+
+
+def slides_preferring(template_slides: list[dict], number: int | None) -> list[dict]:
+    """The chosen template slide first, then the rest of the deck.
+
+    "Template slide 12" has to mean slide 12's layout, including where its title
+    sits and how big its badge is. Scanning the deck in order instead returned
+    whichever slide happened to hold the first title — so every framing produced
+    the same title box, and choosing a different one moved the map and nothing
+    else. The rest of the deck stays as a fallback for a slide that has no title
+    of its own.
+    """
+    if number is None:
+        return list(template_slides)
+    chosen = [s for s in template_slides if _slide_number_of(s) == number]
+    if not chosen:
+        return list(template_slides)
+    return chosen + [s for s in template_slides if _slide_number_of(s) != number]
+
+
+# How far two plate colours may differ and still count as the same badge. The
+# real badges and titles across these decks all carry one cyan plate; a template
+# whose "plate" is a different colour is a different object (an in-map label),
+# not the badge, and snapping the source badge onto it drags it into the map.
+PLATE_COLOR_TOLERANCE = 0.2
+
+
+def _rgb_close(a: list[float] | None, b: list[float] | None, tol: float) -> bool:
+    """Whether two RGB triples are within `tol` (Euclidean), missing → not close."""
+    if not a or not b or len(a) < 3 or len(b) < 3:
+        return False
+    return sum((x - y) ** 2 for x, y in zip(a[:3], b[:3])) <= tol * tol
+
+
+def _attach_text_style(
+    recipe: dict[str, Any],
+    template_slides: list[dict],
+    *,
+    source_plate_color: list[float] | None = None,
+) -> dict[str, Any]:
+    dest = (_f(recipe.get("destWidth"), CG_WIDTH), _f(recipe.get("destHeight"), CG_HEIGHT))
+    ordered = slides_preferring(template_slides, recipe.get("templateSlide"))
+    font, sample = template_list_sample(ordered, dest)
     if font:
         recipe["listFontSize"] = round(font, 2)
         if sample:
             recipe["listSample"] = sample.as_dict()
-    title = template_title_item(template_slides)
+    # The badge belongs top-left whatever map framing the page uses, so the badge
+    # slots are read from the template slide whose plate colour matches the source
+    # badge — not necessarily the chosen slide. A plain-map layout like template
+    # 10, whose only "plate" is a white in-map label ("CHC Qiu Cha"), would
+    # otherwise donate that label as the badge home and drag the cyan badge into
+    # the middle of the map. Skipping the colour mismatch borrows the deck's real
+    # badge slot from a slide that has one; the title box travels with it.
+    if source_plate_color is not None:
+        matched = [
+            s
+            for s in ordered
+            if (p := title_plate(s, dest)) is not None
+            and _rgb_close(source_plate_color, item_rgb(p), PLATE_COLOR_TOLERANCE)
+        ]
+        badge_ordered = matched + [s for s in ordered if s not in matched]
+    else:
+        badge_ordered = ordered
+    title = template_title_item(badge_ordered, dest)
     if title:
         recipe["titleDst"] = item_rect(title).as_dict()
         if title.get("size"):
@@ -566,6 +762,22 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         title_rgb = item_rgb(title)
         if title_rgb:
             recipe["titleColor"] = [round(c, 4) for c in title_rgb]
+    body = template_body_text(ordered, dest)
+    if body is not None:
+        body_rect = item_rect(body)
+        if body_rect.w > 0 and body_rect.h > 0:
+            recipe["bodyTextDst"] = body_rect.as_dict()
+            if body.get("size"):
+                recipe["bodyTextFontSize"] = round(_f(body.get("size")), 2)
+    slots = template_badge_slots(badge_ordered, dest)
+    if slots:
+        recipe["badgeSlots"] = slots
+    badge_plate = template_badge_plate(badge_ordered, dest)
+    if badge_plate is not None and badge_plate.w > 0:
+        recipe["badgePlateDst"] = badge_plate.as_dict()
+    rules = template_line_slots(template_slides, recipe.get("templateSlide"))
+    if rules:
+        recipe["lineSlots"] = rules
     styles = template_character_styles(template_slides)
     if styles:
         recipe["characterStyles"] = styles
@@ -578,6 +790,8 @@ def map_rect_from_slide(slide: dict) -> Rect | None:
         return None
     maps.sort(key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True)
     return item_rect(maps[0])
+
+
 
 
 def primary_map_rect(items: Iterable[dict]) -> Rect | None:
@@ -721,6 +935,66 @@ def is_layout_image(item: dict) -> bool:
     return True
 
 
+# A centre panel spans about two CG frames wide and one frame tall, centred on
+# the wall. It is a panorama meant to be shown 1:1, centre-cropped — a China map
+# that becomes the same map with a photo grid on it, one slide to the next.
+CENTRE_PANEL_MIN_WIDTH_FRAMES = 1.7
+CENTRE_PANEL_MAX_HEIGHT_FRAMES = 1.3
+CENTRE_PANEL_CENTRE_TOLERANCE = 0.25
+# An image small against the panel is something laid on top of it (a thumbnail in
+# a grid), not part of the framing. Below this share of the panel's area it rides
+# the panel's affine rather than voting on the crop.
+CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION = 0.25
+
+
+def centre_panel_image(
+    items: Iterable[dict], wall_w: float, wall_h: float, dest_w: float, dest_h: float
+) -> Rect | None:
+    """The largest full-height, ~2×-frame-wide image centred on the wall, or None.
+
+    Such a panorama is shown at 1:1 and cropped to the frame's centre, the way the
+    plain map slides on either side of a transition are. Small images overlaid on
+    it — a grid of photos over a map — otherwise out-vote it in agreement scoring
+    and drag the whole frame down to their scale. Height is capped near one frame
+    so a full-bleed image that runs off the top and bottom (a different thing) is
+    not mistaken for a centre panel.
+    """
+    if dest_w <= 0 or dest_h <= 0 or wall_w <= 0 or wall_h <= 0:
+        return None
+    best: Rect | None = None
+    for item in items:
+        if not is_pairable_image(item):
+            continue
+        r = item_rect(item)
+        if r.w < dest_w * CENTRE_PANEL_MIN_WIDTH_FRAMES:
+            continue
+        if not (wall_h * 0.9 <= r.h <= wall_h * CENTRE_PANEL_MAX_HEIGHT_FRAMES):
+            continue
+        if abs((r.x + r.w / 2) - wall_w / 2) > wall_w * CENTRE_PANEL_CENTRE_TOLERANCE:
+            continue
+        if best is None or r.w * r.h > best.w * best.h:
+            best = r
+    return best
+
+
+def _slide_for_panel_framing(slide: dict, panel: Rect) -> dict:
+    """`slide` with the small images overlaid on a centre panel removed.
+
+    Used only to choose the framing: the crop is decided as though the panel were
+    alone, matching the plain panorama slides beside it. The overlays stay in the
+    slide the transforms are planned from, so they ride the panel's affine.
+    """
+    threshold = panel.w * panel.h * CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION
+
+    def keep(item: dict) -> bool:
+        if not is_pairable_image(item):
+            return True
+        r = item_rect(item)
+        return r.w * r.h >= threshold
+
+    return {**slide, "items": [it for it in slide.get("items") or [] if keep(it)]}
+
+
 def pair_by_size(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
     """1:1 by (width, height). Same-size copies (stacked map PDFs) pair in order."""
     used: set[int] = set()
@@ -787,6 +1061,34 @@ def pairing_quality(pairs: list[tuple[dict, dict]]) -> tuple[int, int]:
     return (max(len(g["members"]) for g in groups), len(pairs))
 
 
+def drop_outlier_pairs(pairs: list[tuple[dict, dict]]) -> list[tuple[dict, dict]]:
+    """Discard pairs whose scale no other pair agrees with.
+
+    Rank pairing walks both sides by descending area, so it only holds while the
+    two sides carry the same artwork. A wall slide with 21 images against a
+    template with 8 runs out of template long before it runs out of wall, and the
+    tail pairs whatever is left: a 306x316 map inset took the template's 80x80
+    badge logo (s=0.26) and a 306x295 one took an 11x11 pin (s=0.04), against
+    three pairs agreeing on 0.85. The real 124x124 logo, ranked 13th by area,
+    never reached the slot that was waiting for it.
+
+    Judged against the median so a couple of bad pairs cannot move the consensus,
+    and only with enough pairs to have one. Wall objects that lose their pair fall
+    back to the nearest cluster, which is the consensus affine.
+    """
+    if len(pairs) < 3:
+        return pairs
+    scales = []
+    for src_item, dst_item in pairs:
+        src = item_rect(src_item)
+        scales.append(item_rect(dst_item).w / src.w if src.w > 0 else 0.0)
+    consensus = _median([s for s in scales if s > 0])
+    if consensus <= 0:
+        return pairs
+    lo, hi = consensus / OUTLIER_SCALE_FACTOR, consensus * OUTLIER_SCALE_FACTOR
+    return [pair for pair, s in zip(pairs, scales) if lo <= s <= hi]
+
+
 def best_image_pairs(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dict]]:
     """Pair wall artwork to template artwork, whichever way explains it best.
 
@@ -795,7 +1097,8 @@ def best_image_pairs(wall: list[dict], dest: list[dict]) -> list[tuple[dict, dic
     """
     exact = pair_by_size(wall, dest)
     exact = exact + pair_resized_leftovers(wall, dest, exact)
-    ranked = pair_by_area_rank(wall, dest)
+    # Exact pairing needs identical dimensions, so it cannot go wrong this way.
+    ranked = drop_outlier_pairs(pair_by_area_rank(wall, dest))
     if pairing_quality(ranked) > pairing_quality(exact):
         return ranked
     return exact
@@ -1091,8 +1394,60 @@ def _best_matching_slide(
     )
 
 
-def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
-    """Fit map rects from a 16:9 CG template inspect payload."""
+def _slide_number_of(slide: dict) -> int:
+    return int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+
+
+def rank_framing_candidates(
+    wall_slide: dict,
+    template_slides: list[dict],
+    *,
+    wall_size: tuple[float, float],
+    dest_size: tuple[float, float],
+) -> list[dict[str, Any]]:
+    """Every template framing this wall slide could use, best first.
+
+    The same ranking `_best_matching_slide` applies, exposed so the operator can
+    be shown the runners-up and pick one. Which crop of a map is wanted is an
+    editorial choice the geometry cannot express, so the point is to offer the
+    alternatives rather than to add another metric.
+    """
+    rows: list[dict[str, Any]] = []
+    for slide in template_slides:
+        score = _score_template_slide(wall_slide, slide)
+        fit = (
+            _framing_fit(wall_slide, slide, *wall_size, *dest_size)
+            if score > 0
+            else 0.0
+        )
+        rows.append(
+            {
+                "templateSlide": _slide_number_of(slide),
+                "name": str(slide.get("master") or ""),
+                # Agreement level is the real signal; fit only settles ties within
+                # one level of it. Both are shown so a close call reads as close.
+                "agreement": score // 100,
+                "pairTotal": score % 100,
+                "fit": round(fit, 4),
+            }
+        )
+    rows.sort(key=lambda r: (r["agreement"], r["fit"]), reverse=True)
+    for row in rows:
+        row["autoPick"] = False
+    if rows and rows[0]["agreement"] > 0:
+        rows[0]["autoPick"] = True
+    return rows
+
+
+def learn_recipe(
+    wall: dict, template: dict, *, template_slide: int | None = None
+) -> dict[str, Any]:
+    """Fit map rects from a 16:9 CG template inspect payload.
+
+    `template_slide` pins the framing to that template slide number, skipping the
+    automatic choice. An unknown number falls back to choosing automatically
+    rather than failing, so a stale confirmation cannot break a run.
+    """
     dest_w = int(template.get("slideWidth") or CG_WIDTH)
     dest_h = int(template.get("slideHeight") or CG_HEIGHT)
     wall_slides = wall.get("slides") or []
@@ -1103,12 +1458,36 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(
             wall_slides, is_pin_item
         )
-    g_slide = _best_matching_slide(
-        w_slide,
-        template_slides,
-        wall_size=(_f(wall.get("slideWidth"), 7680), _f(wall.get("slideHeight"), 1080)),
-        dest_size=(float(dest_w), float(dest_h)),
-    )
+    g_slide = None
+    if template_slide is not None:
+        g_slide = next(
+            (s for s in template_slides if _slide_number_of(s) == int(template_slide)),
+            None,
+        )
+    pinned = g_slide is not None
+    # A centre-panel panorama decides the crop as though the small images laid on
+    # top of it were not there, so a map with a photo grid over it frames like the
+    # plain map beside it rather than anchoring on one thumbnail. The overlays are
+    # only held out of the framing choice; they stay in the slide the transforms
+    # are planned from and ride the panel's affine.
+    wall_w0 = _f(wall.get("slideWidth"), 7680)
+    wall_h0 = _f(wall.get("slideHeight"), 1080)
+    # The colour of the source page's own badge plate, so the template's badge
+    # slots can be refused when they belong to a differently-coloured object.
+    src_plate = title_plate(w_slide, (wall_w0, wall_h0)) if w_slide is not None else None
+    source_plate_color = item_rgb(src_plate) if src_plate is not None else None
+    panel = None
+    if w_slide is not None:
+        w_vis0 = [it for it in w_slide.get("items") or [] if is_visible(it, wall_w0, wall_h0)]
+        panel = centre_panel_image(w_vis0, wall_w0, wall_h0, float(dest_w), float(dest_h))
+    framing_slide = _slide_for_panel_framing(w_slide, panel) if (w_slide and panel) else w_slide
+    if g_slide is None:
+        g_slide = _best_matching_slide(
+            framing_slide,
+            template_slides,
+            wall_size=(wall_w0, wall_h0),
+            dest_size=(float(dest_w), float(dest_h)),
+        )
     map_src = None
     map_dst = None
     list_src = None
@@ -1125,11 +1504,15 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         # its position says nothing about where visible art should land.
         w_items = [it for it in w_slide.get("items") or [] if is_visible(it, wall_w, wall_h)]
         g_items = [it for it in g_slide.get("items") or [] if is_visible(it, dest_w, dest_h)]
-        w_imgs = [it for it in w_items if is_pairable_image(it)]
+        # Pair on the panel, not the thumbnails riding it (see framing_slide above).
+        framing_imgs = [it for it in (framing_slide.get("items") or []) if is_visible(it, wall_w, wall_h)]
+        w_imgs = [it for it in framing_imgs if is_pairable_image(it)]
         g_imgs = [it for it in g_items if is_pairable_image(it)]
         size_pairs = list(best_image_pairs(w_imgs, g_imgs))
         size_pairs.extend(pair_largest_shapes(w_items, g_items))
+        size_pairs = uniform_pairs(size_pairs)
         grouped = merge_affine_groups(size_pairs) if size_pairs else []
+        grouped = drop_outlier_groups(grouped)
         if grouped:
             biggest = grouped[0]["members"][0]
             map_src = effective_wall_map_src(wall, item_rect(biggest[0]))
@@ -1191,17 +1574,30 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
     else:
         map_src = effective_wall_map_src(wall, map_src)
     if map_dst is None:
-        recipe = recipe_from_cover(map_src, dest_w=dest_w, dest_h=dest_h)
+        # No template framing paired. Cover the centre-panel panorama if there is
+        # one, not the whole wall: the side panels are chrome the 16:9 crop is
+        # meant to shed, and covering the full wall keeps them on-frame — the
+        # "off-screen object still showing" the operator sees. A genuine full-bleed
+        # image spans the wall and is itself the panel, so this does not change it.
+        cover_src = effective_wall_map_src(wall, panel) if panel is not None else map_src
+        recipe = recipe_from_cover(cover_src, dest_w=dest_w, dest_h=dest_h)
         recipe["source"] = "cover-fallback"
+        # Carry the provenance even though no template framing was usable. A pin
+        # that was applied and then found unbuildable is a different answer from a
+        # pin that was ignored, and only the first tells the operator that this
+        # template slide cannot frame this page.
+        recipe["templateSlide"] = _slide_number_of(g_slide) if g_slide else None
+        recipe["framingPinned"] = pinned
+        recipe["pairQuality"] = 0
         recipe["groups"] = [
             {
-                **affine_from_rects(map_src, _rect_from_dict(recipe["mapDst"]) or map_src).as_dict(),
-                "src": map_src.as_dict(),
+                **affine_from_rects(cover_src, _rect_from_dict(recipe["mapDst"]) or cover_src).as_dict(),
+                "src": cover_src.as_dict(),
                 "dst": recipe["mapDst"],
                 "members": 0,
             }
         ]
-        return _attach_text_style(recipe, template_slides)
+        return _attach_text_style(recipe, template_slides, source_plate_color=source_plate_color)
     recipe: dict[str, Any] = {
         "destWidth": dest_w,
         "destHeight": dest_h,
@@ -1217,9 +1613,11 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
         "pairQuality": max((len(g["members"]) for g in grouped), default=0),
         # Which template slide taught this. Worth surfacing: picking the wrong
         # framing looks like a geometry bug until you can see the choice.
-        "templateSlide": (
-            int(g_slide.get("number") or (int(g_slide.get("index") or 0) + 1)) if g_slide else None
-        ),
+        "templateSlide": (_slide_number_of(g_slide) if g_slide else None),
+        # True only when a requested framing was actually found. A stale
+        # confirmation naming a slide the template no longer has falls back to
+        # choosing automatically, and must not report itself as honoured.
+        "framingPinned": pinned,
     }
     if list_src and list_dst and list_src.w > 1 and list_src.h > 1:
         recipe["listSrc"] = list_src.as_dict()
@@ -1236,7 +1634,7 @@ def learn_recipe(wall: dict, template: dict) -> dict[str, Any]:
             }
             for g in grouped
         ]
-    return _attach_text_style(recipe, template_slides)
+    return _attach_text_style(recipe, template_slides, source_plate_color=source_plate_color)
 
 
 def cg_layout_name(name: str) -> str:
@@ -1247,6 +1645,11 @@ def cg_layout_name(name: str) -> str:
     if re.search(r"\(16:9\)\s*$", text):
         return text
     return f"{text} (16:9)"
+
+
+# Recipe sources that crop the wall to the frame's centre and shed what lies
+# beyond it — as opposed to a map framing, which places the whole page.
+_COVER_SOURCES = frozenset({"template-cover", "cover-fallback", "sibling-affine"})
 
 
 def _recipe_source(map_src: Rect, map_dst: Rect, dest_w: float) -> str:
@@ -1276,20 +1679,103 @@ def _groups_from_recipe(recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
     return []
 
 
+OUTLIER_SCALE_FACTOR = 2.0
+# A pair may differ this much between its width and height scale and still count
+# as the same artwork uniformly resized.
+PAIR_UNIFORM_TOLERANCE = 0.05
+
+
+def uniform_pairs(
+    pairs: Iterable[tuple[dict, dict]],
+) -> list[tuple[dict, dict]]:
+    """Keep only pairs that one uniform scale can actually explain.
+
+    `Affine` is a uniform scale, so a pair whose width ratio and height ratio
+    disagree cannot be represented by it: `affine_from_rects` takes the width and
+    gets the other axis wrong. On a missions map a 634x425 layer paired with a
+    473x364 one gave sx=0.746 against sy=0.856, and the layer was placed at 87% of
+    the height the rest of the map used — the white base map and the orange country
+    fill ended up at different sizes on the same slide.
+
+    A mismatched pair says the two objects are not the same artwork, or that one is
+    cropped differently, and neither can teach a transform.
+    """
+    kept: list[tuple[dict, dict]] = []
+    for src_item, dst_item in pairs:
+        src = item_rect(src_item)
+        dst = item_rect(dst_item)
+        if src.w <= 0 or src.h <= 0:
+            continue
+        sx = dst.w / src.w
+        sy = dst.h / src.h
+        if sy <= 0 or sx <= 0:
+            continue
+        if abs(sx - sy) / max(sx, sy) <= PAIR_UNIFORM_TOLERANCE:
+            kept.append((src_item, dst_item))
+    return kept
+
+
+def drop_outlier_groups(grouped: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Discard clusters whose scale no other object agrees with.
+
+    Map layers all inspect as `pasted-image.pdf`, so pairing matches on size alone
+    and sometimes matches a layer to something unrelated: on a missions map a
+    306x316 layer paired with an 80x80 template item (s=0.2532) and a 306x295 with
+    an 11x11 one (s=0.0359), against a consensus of 0.8547 that three objects
+    agreed on. Any object landing in those clusters is destroyed — the 0.0359 one
+    shrank Australia to 3.6% of its size, so it vanished from the CG.
+
+    Only outliers are dropped, and only when there is a consensus to judge them
+    against: with every cluster holding one object there is nothing to prefer, so
+    the list is left alone. Objects that lose their cluster fall back to the
+    nearest surviving one, which is the consensus affine.
+    """
+    if len(grouped) < 2:
+        return grouped
+    dominant = max(grouped, key=lambda g: len(g["members"]))
+    if len(dominant["members"]) < 2:
+        return grouped
+    scale = dominant["affine"].s
+    if scale <= 0:
+        return grouped
+    kept: list[dict[str, Any]] = []
+    dropped: list[float] = []
+    for group in grouped:
+        ratio = group["affine"].s / scale
+        if group is dominant or 1 / OUTLIER_SCALE_FACTOR <= ratio <= OUTLIER_SCALE_FACTOR:
+            kept.append(group)
+        else:
+            dropped.append(round(group["affine"].s, 4))
+    return kept
+
+
 def _group_for_item(
     item: dict, groups: list[tuple[Affine, Rect]]
 ) -> tuple[Affine | None, Rect | None]:
-    """The cluster this object belongs to: nearest by centre, smallest on a tie."""
+    """The cluster this object belongs to: nearest by centre, then the smallest
+    cluster big enough to hold it.
+
+    Ranking ties purely by smallest area let an overlay capture the artwork it sits
+    on: on a missions map, a 306x316 overlay and the 1248x771 map both contained
+    the map's own centre, so the map was placed with the overlay's affine at
+    s=0.2532 instead of its own s=0.8547 — 316px wide instead of 1067px, and
+    pushed off the left edge. A cluster smaller than the object cannot be the
+    cluster that object belongs to. Preferring clusters that can hold it keeps the
+    behaviour that matters for pins, where the smallest containing cluster is the
+    inset a pin sits in rather than the whole map.
+    """
     if not groups:
         return None, None
     rect = item_rect(item)
     cx, cy = rect.center()
+    item_area = max(rect.w * rect.h, 1.0)
     best: tuple[Affine, Rect] | None = None
-    best_key: tuple[float, float] | None = None
+    best_key: tuple[float, float, float] | None = None
     for aff, src in groups:
         d = dist_to_rect(cx, cy, src)
         area = max(src.w * src.h, 1.0)
-        key = (d, area)
+        too_small = 0 if area >= item_area else 1
+        key = (d, too_small, area)
         if best_key is None or key < best_key:
             best_key = key
             best = (aff, src)
@@ -1301,30 +1787,379 @@ def _affine_for_item(item: dict, groups: list[tuple[Affine, Rect]]) -> Affine | 
 
 
 def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
-    """Recipe groups plus a title-plate cluster so the badge stays with Global Missions."""
-    groups = list(_groups_from_recipe(recipe))
-    title = next((it for it in slide.get("items") or [] if is_title_item(it)), None)
-    dst = _rect_from_dict(recipe.get("titleDst"))
-    if title is None or dst is None or dst.w <= 0:
-        return groups
+    """Layout affines from the recipe. The badge is not one of them."""
+    return list(_groups_from_recipe(recipe))
+
+
+def title_plate(slide: dict, slide_size: tuple[float, float] | None = None) -> dict | None:
+    """The badge plate: the shape a title sits on.
+
+    Not simply the largest shape on the page. On a wall slide a side panel can be
+    bigger than the badge — `Extracted_Wall_3rd` slide 2 has one at 398x710
+    against a 485x197 plate. The badge is the shape with words on it, so require
+    a text item's centre to fall inside before considering it at all.
+
+    Words are not enough on their own, though: `Map_Extracted_CG_1st` slide 1 has
+    a 622x1080 side column with text in it, which passes that test and is still
+    not a badge. A plate is short relative to the page — every real badge in that
+    template runs 0.09 to 0.11 of canvas height against the column's 1.00 — so
+    cap the height too. This only bit once the badge affine started anchoring on
+    the plate; before that the template was reached through a title, and a column
+    carrying no title was skipped for the wrong reason.
+    """
+    items = slide.get("items") or []
+    texts = [
+        it
+        for it in items
+        if (it.get("kind") or "") == "text" and (it.get("text") or "").strip()
+    ]
+    if not texts:
+        return None
+    best: dict | None = None
+    best_key: tuple[float, float] | None = None
+    for item in items:
+        if (item.get("kind") or "") != "shape":
+            continue
+        w, h = _f(item.get("w")), _f(item.get("h"))
+        if w <= PIN_KIND_MAX and h <= PIN_KIND_MAX:
+            continue
+        if slide_size and is_backdrop(item, slide_size[0], slide_size[1]):
+            continue
+        if slide_size and slide_size[1] > 0 and h > slide_size[1] * PLATE_MAX_H_FRACTION:
+            continue
+        rect = item_rect(item)
+        if not any(point_in_rect(*item_center(t), rect) for t in texts):
+            continue
+        # Largest wins, topmost breaks the tie: a page with two lettered shapes
+        # is choosing between a badge and a caption, and the badge sits higher.
+        key = (-(w * h), rect.y)
+        if best_key is None or key < best_key:
+            best_key, best = key, item
+    return best
+
+
+def slide_title_item(
+    slide: dict, slide_size: tuple[float, float] | None = None
+) -> dict | None:
+    """The page's title — by wording where masters.yaml knows it, by structure
+    where it does not.
+
+    The phrase list is series-specific, so a deck titled per church ("CHC
+    Kuching") matched nothing and lost its whole badge path: no titleDst, no
+    badgeSlots, and the title itself read as a church-name list sample. The
+    phrase match stays first so the decks that rely on it are untouched; the
+    structural read is the fallback, and it is the largest text sitting on the
+    plate.
+    """
+    for item in slide.get("items") or []:
+        if is_title_item(item) and _f(item.get("w")) > 0:
+            return item
+    plate = title_plate(slide, slide_size)
+    if plate is None:
+        return None
+    rect = item_rect(plate)
+    inside = [
+        it
+        for it in slide.get("items") or []
+        if (it.get("kind") or "") == "text"
+        and (it.get("text") or "").strip()
+        and _f(it.get("w")) > 0
+        and point_in_rect(*item_center(it), rect)
+    ]
+    # Exactly one, or nothing. A plate carrying several words is genuinely
+    # ambiguous — `Map_Extracted_Wall_2nd` has MISSIONS, UPDATE and China on one
+    # badge, and picking the largest would collapse one of the three onto the
+    # template's single title box while the other two hunt for slots. Decks like
+    # that keep the behaviour they had, which is no structural title at all.
+    if len(inside) != 1:
+        return None
+    return inside[0]
+
+
+def slide_body_text_item(
+    slide: dict, slide_size: tuple[float, float] | None = None
+) -> dict | None:
+    """The slide's body text — the largest text box that is not the title.
+
+    A scripture slide's verse paragraph. It is told from a title or a label by
+    three things at once: it is the biggest text on the slide, it is bigger than
+    the title, and it carries a real paragraph of text rather than a few words —
+    so a church name, a stat, or a heading is never taken for a body. A slide with
+    no title cannot disambiguate one, so it returns nothing rather than guess.
+    """
+    title = slide_title_item(slide, slide_size)
+    if title is None:
+        return None
+    title_rect = item_rect(title)
+    title_area = title_rect.w * title_rect.h
+    best: dict | None = None
+    best_area = 0.0
+    for item in slide.get("items") or []:
+        if (item.get("kind") or "") != "text" or not (item.get("text") or "").strip():
+            continue
+        if item is title or is_placeholder_text(item):
+            continue
+        # A church-name column is long and tall like a verse but is a stack of
+        # short names, not a paragraph. `is_list_item` already tells them apart,
+        # and a list has its own placement path.
+        if is_list_item(item):
+            continue
+        r = item_rect(item)
+        area = r.w * r.h
+        if area > best_area:
+            best, best_area = item, area
+    if best is None or best_area <= title_area:
+        return None
+    if len((best.get("text") or "").strip()) < BODY_TEXT_MIN_CHARS:
+        return None
+    return best
+
+
+def _norm_for_overlay(text: str) -> str:
+    """Collapse whitespace so an emphasis phrase compares against the body wording."""
+    return re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip().lower()
+
+
+def sparkle_overlays(
+    slide: dict, body_item: dict | None
+) -> set[int]:
+    """Ids of the animated emphasis copies of body phrases.
+
+    A sparkle build reveals a few words in a colour by laying a second copy of
+    them over the body. That copy is a substring of the body *and* sits on top of
+    it, and the two together tell it apart from any other text. Resized on its own
+    a copy is clamped small and drifts off the words it highlights, so it is
+    identified here and later given the body's own size, keeping the two aligned.
+    """
+    if body_item is None:
+        return set()
+    body_text = _norm_for_overlay(body_item.get("text") or "")
+    if not body_text:
+        return set()
+    body_rect = item_rect(body_item)
+    out: set[int] = set()
+    for item in slide.get("items") or []:
+        if item is body_item or (item.get("kind") or "") != "text":
+            continue
+        phrase = _norm_for_overlay(item.get("text") or "")
+        if not phrase or len(phrase) >= len(body_text):
+            continue
+        if phrase in body_text and _rects_overlap(item_rect(item), body_rect):
+            out.add(id(item))
+    return out
+
+
+COINCIDENT_DUP_TOL = 4.0
+
+
+def coincident_duplicate_ids(items: list[dict]) -> set[int]:
+    """Ids of groups and text boxes that are near-exact copies of an earlier one
+    at the same spot — all but the first of each cluster.
+
+    A magic-move build can leave two copies of a group on one slide, and the
+    planner would place both. Images are never deduped: a wall deck stacks map
+    layers as coincident images on purpose, and dropping them would tear the map
+    apart. Groups match on box and child count, text on box and wording, so two
+    different objects that merely share a spot are left alone.
+    """
+    kept: list[tuple[str, Rect, str, int]] = []
+    dup: set[int] = set()
+    for item in items:
+        kind = str(item.get("kind") or "")
+        if kind not in {"group", "text"}:
+            continue
+        rect = item_rect(item)
+        sig = (
+            (item.get("text") or "").strip()
+            if kind == "text"
+            else str(item.get("childCount") or len(item.get("children") or []))
+        )
+        for k2, r2, s2, _ in kept:
+            if (
+                k2 == kind
+                and s2 == sig
+                and abs(rect.x - r2.x) <= COINCIDENT_DUP_TOL
+                and abs(rect.y - r2.y) <= COINCIDENT_DUP_TOL
+                and abs(rect.w - r2.w) <= COINCIDENT_DUP_TOL
+                and abs(rect.h - r2.h) <= COINCIDENT_DUP_TOL
+            ):
+                dup.add(id(item))
+                break
+        else:
+            kept.append((kind, rect, sig, id(item)))
+    return dup
+
+
+def badge_members(slide: dict, title: dict) -> list[dict]:
+    """Plate, logo and rule sharing the title's box — the badge minus its words."""
     src = item_rect(title)
-    cluster_items = [title]
+    out: list[dict] = []
     for item in slide.get("items") or []:
         if item is title or is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
             continue
-        if rects_near(item_rect(item), src, TITLE_NEAR_PAD):
-            cluster_items.append(item)
-    cluster = union_rect(cluster_items) or src
-    groups.append((affine_from_rects(src, dst), cluster))
-    return groups
+        cx, cy = item_center(item)
+        if point_in_rect(cx, cy, src, TITLE_NEAR_PAD):
+            out.append(item)
+    return out
 
 
-def classify_item(item: dict, map_src: Rect | None = None) -> str:
+def badge_plate_members(slide: dict, plate: dict) -> list[dict]:
+    """The badge, found by its plate rather than by its words.
+
+    `badge_members` catches objects around the *title's* box, which presumes a
+    title was identifiable. `slide_title_item` declines a plate carrying several
+    words — the report card's badge is MISSIONS, UPDATE and China — so that path
+    yields nothing at all on exactly the pages that most need a badge affine.
+
+    The plate is unambiguous either way: one shape, present whether the badge
+    carries one word or three. Everything centred on it is the badge, including
+    the plate itself, which is what the affine is anchored on.
+    """
+    src = item_rect(plate)
+    out: list[dict] = []
+    for item in slide.get("items") or []:
+        if is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
+            continue
+        if item.get("duplicateOf"):
+            continue
+        if item is plate:
+            out.append(item)
+            continue
+        if point_in_rect(*item_center(item), src, BADGE_PLATE_PAD):
+            out.append(item)
+    return out
+
+
+def badge_slot_keys(members: Iterable[dict]) -> dict[int, str]:
+    """Name each badge object `kind:n`, largest first, so wall and template agree.
+
+    Z-order differs between the wall and the CG template, and both sides carry
+    the same handful of objects, so rank within a kind by area instead.
+    """
+    counts: dict[str, int] = {}
+    keys: dict[int, str] = {}
+    ordered = sorted(
+        members,
+        key=lambda it: (-(_f(it.get("w")) * _f(it.get("h"))), _f(it.get("x"))),
+    )
+    for item in ordered:
+        kind = str(item.get("kind") or "item")
+        n = counts.get(kind, 0)
+        counts[kind] = n + 1
+        keys[id(item)] = f"{kind}:{n}"
+    return keys
+
+
+def template_badge_slots(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> dict[str, dict[str, float]]:
+    """Where the CG template parks each badge object.
+
+    The template's badge is not a uniform shrink of the wall's — its plate,
+    logo and title each moved by a different ratio — so no single affine
+    reproduces it. Record the rects and place onto them directly.
+    """
+    for slide in slides:
+        plate = title_plate(slide, slide_size)
+        if plate is None:
+            continue
+        title = slide_title_item(slide, slide_size)
+        # The words are placed by titleDst, not by a slot, so they are excluded
+        # here exactly as badge_members excluded the title it was given. Both
+        # sides must drop the same objects or badge_slot_keys ranks by area over
+        # different sets and the wall's logo lands on the template's plate.
+        members = [it for it in badge_plate_members(slide, plate) if it is not title]
+        if not members:
+            continue
+        keys = badge_slot_keys(members)
+        return {keys[id(it)]: item_rect(it).as_dict() for it in members}
+    return {}
+
+
+def template_badge_plate(
+    slides: list[dict], slide_size: tuple[float, float] | None = None
+) -> Rect | None:
+    """Where the CG template parks the badge plate — the badge affine's anchor.
+
+    Read off the same slide `template_badge_slots` reads, so the affine and the
+    slots describe one badge rather than two different ones — which means skipping
+    a plate that carries only its title (no logo or other member), the way the
+    slots do. Otherwise a title-only plate donates the anchor while the slots come
+    from a later slide, and the badge is scaled by one badge and placed by another.
+    """
+    for slide in slides:
+        plate = title_plate(slide, slide_size)
+        if plate is None:
+            continue
+        title = slide_title_item(slide, slide_size)
+        members = [it for it in badge_plate_members(slide, plate) if it is not title]
+        if not members:
+            continue
+        return item_rect(plate)
+    return None
+
+
+def _title_badge(
+    slide: dict, recipe: dict[str, Any], slide_size: tuple[float, float] | None = None
+) -> tuple[Affine | None, Rect | None, set[int], dict[int, str], dict | None]:
+    """Globe, plate and title text that share the title's vertical centre.
+
+    Returns identity ids (`id(item)`) so membership does not collide when two
+    inspect records share `index` 0, which tests and some payloads do, plus the
+    template slot each non-title object should land on.
+    """
+    title = slide_title_item(slide, slide_size)
+    plate = title_plate(slide, slide_size)
+    plate_dst = _rect_from_dict(recipe.get("badgePlateDst"))
+    # Plate to plate. Anchoring on the title's own box was H18: that box is 537
+    # wide against the template's 271, so s = 0.505 and the 124px logo landed at
+    # 63px with the 767px plate at 387x87. Plate to plate is one shape on each
+    # side, unambiguous whether the badge carries one word or three, and it needs
+    # no title at all — which is what gives the report card a badge affine.
+    if plate is not None and plate_dst is not None and plate_dst.w > 0:
+        src = item_rect(plate)
+        if src.w > 0 and src.h > 0:
+            members = badge_plate_members(slide, plate)
+            rest = [it for it in members if it is not title]
+            ids: set[int] = {id(it) for it in members}
+            if title is not None:
+                ids.add(id(title))
+            return affine_from_rects(src, plate_dst), src, ids, badge_slot_keys(rest), title
+    # No plate on the page, or a template that never taught one. The title's box
+    # is a worse anchor but it is the only one left, and a deck that relied on it
+    # before should keep working rather than lose its badge path.
+    dst = _rect_from_dict(recipe.get("titleDst"))
+    if title is None or dst is None or dst.w <= 0:
+        return None, None, set(), {}, title
+    src = item_rect(title)
+    rest = badge_members(slide, title)
+    members = [title, *rest]
+    ids = {id(it) for it in members}
+    slots = badge_slot_keys(rest)
+    aff = affine_from_rects(src, dst)
+    return aff, src, ids, slots, title
+
+
+def classify_item(
+    item: dict, map_src: Rect | None = None, title: dict | None = None
+) -> str:
+    """`title` is the page's chosen title, where one has been resolved.
+
+    Passing it matters: the structural read finds titles the phrase list does not,
+    and a page's title must be the one object classified that way — otherwise a
+    church-named heading falls through to `is_list_item` and is packed into a
+    column.
+    """
+    if (item.get("kind") or "") == "line":
+        return "line"
     if is_map_item(item, map_src):
         return "map"
     if is_pin_item(item, map_src):
         return "pin"
-    if is_title_item(item):
+    if title is not None:
+        if item is title:
+            return "title"
+    elif is_title_item(item):
         return "title"
     if is_list_item(item):
         return "list"
@@ -1343,6 +2178,17 @@ def _item_kind_index(item: dict, fallback: int) -> int:
     return fallback
 
 
+def _source_face(item: dict) -> str | None:
+    """The item's own font string, or None.
+
+    Unpaired LW text keeps this. A matched template swatch lends its size and
+    nothing else: its face equals the source's by construction — the match
+    requires the same family and weight — so re-asserting the source face is a
+    no-op that documents the intent and survives a change to the matcher.
+    """
+    return str(item.get("font") or "").strip() or None
+
+
 def _style_text_box(
     item: dict,
     aff: Affine | None,
@@ -1353,6 +2199,14 @@ def _style_text_box(
     dst_size = _f(style.get("size")) if style else 0.0
     font_name = (str(style.get("font") or "") or None) if style else None
     colour = norm_rgb(style.get("color")) if style else None
+    snippet = (item.get("text") or "").replace("\n", " ")[:48]
+    interesting = bool(
+        re.search(
+            r"global|missions|oct|183|269|total|churches|countries",
+            snippet,
+            re.I,
+        )
+    )
     if style and dst_size > 0 and wall_font > 0:
         ratio = dst_size / wall_font
         if aff is not None:
@@ -1387,6 +2241,74 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
         lists[idx].h = rect.h
 
 
+# How far, as a fraction of each frame dimension, the body verse may be nudged to
+# get back on-screen. Small, so it stays near where it was placed and an operator
+# can still recognise and adjust it.
+FIT_MAX_DELTA_FRACTION = 0.10
+FIT_MARGIN = 8.0
+
+
+def _fully_on_frame(r: Rect, dest_w: float, dest_h: float) -> bool:
+    return r.x >= 0 and r.y >= 0 and r.x + r.w <= dest_w and r.y + r.h <= dest_h
+
+
+def _couple_overlays_to_body(
+    body_tf: ItemTransform,
+    body_wall: Rect,
+    overlays: list[tuple[ItemTransform, Rect]],
+) -> None:
+    """Re-seat each sparkle overlay on the body after the body has been placed.
+
+    An emphasis copy is a sub-region of the body: it should undergo whatever the
+    body did — the template box, the affine, and the fit pass's move and narrow —
+    so it stays over the words rather than drifting off on its own. The body's
+    wall box maps to its final box by a translate and a per-axis scale; the same
+    map carries each overlay's wall box across. A heavy reflow moves words within
+    the body, so this is near, not exact, which is what the operator adjusts.
+    """
+    if body_wall.w <= 0 or body_wall.h <= 0:
+        return
+    sx = body_tf.w / body_wall.w
+    sy = body_tf.h / body_wall.h
+    for ov_tf, ov_wall in overlays:
+        ov_tf.x = body_tf.x + (ov_wall.x - body_wall.x) * sx
+        ov_tf.y = body_tf.y + (ov_wall.y - body_wall.y) * sy
+        ov_tf.w = max(8.0, ov_wall.w * sx)
+        ov_tf.h = max(8.0, ov_wall.h * sy)
+
+
+def _fit_body_to_frame(t: ItemTransform, dest_w: float, dest_h: float) -> None:
+    """Narrow and nudge the body verse so it sits on the frame, in place.
+
+    Only the body is fitted. Everything else — a corner label on its plate meant
+    to bleed off an edge, a full-bleed photo, the cropped map — is left exactly
+    where the template and affine placed it: fitting them wrapped short labels
+    and pulled them off the plates they belonged to. The body is nudged by at
+    most a tenth of the frame toward being on-screen, then, if still crossing the
+    right edge, narrowed to the space it has, reflowing taller inside the frame
+    rather than running off.
+    """
+    if dest_w <= 0 or dest_h <= 0:
+        return
+    rect = Rect(t.x, t.y, t.w, t.h)
+    if _fully_on_frame(rect, dest_w, dest_h):
+        return
+    max_dx = dest_w * FIT_MAX_DELTA_FRACTION
+    max_dy = dest_h * FIT_MAX_DELTA_FRACTION
+    if t.x < 0:
+        t.x += min(-t.x, max_dx)
+    elif t.x + t.w > dest_w:
+        t.x += max(dest_w - (t.x + t.w), -max_dx)
+    if t.y < 0:
+        t.y += min(-t.y, max_dy)
+    elif t.y + t.h > dest_h:
+        t.y += max(dest_h - (t.y + t.h), -max_dy)
+    if t.x < FIT_MARGIN:
+        t.x = FIT_MARGIN
+    if t.x + t.w > dest_w - FIT_MARGIN:
+        t.w = max(FIT_MARGIN, dest_w - FIT_MARGIN - t.x)
+
+
 def plan_slide_transforms(
     slide: dict,
     recipe: dict[str, Any],
@@ -1397,6 +2319,64 @@ def plan_slide_transforms(
     free_text_keys: set[tuple[str, int]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
+    title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
+        slide, recipe, wall_size
+    )
+    # A corner label — a plate with one word on it and no logo, like "Main
+    # Sanctuary" bleeding off a corner — is not a missions badge. Resizing it into
+    # the template's slot squares off a rounded plate (Keynote cannot script a
+    # corner radius, so any resize drops it) and squeezes a longer word into a
+    # slot cut for a shorter one. Move the plate and its label to the template's
+    # corner keeping their own size instead, so the plate stays rounded and the
+    # word still fits. A badge with a logo keeps the slot placement (see
+    # badge-affine); the size there is the template's on purpose.
+    corner_ids: set[int] = set()
+    corner_translate: Affine | None = None
+    _clabel_plate = title_plate(slide, wall_size)
+    _clabel_plate_dst = _rect_from_dict(recipe.get("badgePlateDst"))
+    if _clabel_plate is not None and _clabel_plate_dst is not None and title_item is not None:
+        _members = badge_plate_members(slide, _clabel_plate)
+        _texts = [m for m in _members if (m.get("kind") or "") == "text"]
+        _imgs = [m for m in _members if (m.get("kind") or "") == "image"]
+        _cdw = _f(recipe.get("destWidth"), CG_WIDTH)
+        _cdh = _f(recipe.get("destHeight"), CG_HEIGHT)
+        _pd = _clabel_plate_dst
+        # A corner label is designed to bleed off an edge — that is what makes it
+        # a corner label rather than a title plate, which sits on the frame.
+        _bleeds = _pd.x < 0 or _pd.y < 0 or _pd.x + _pd.w > _cdw or _pd.y + _pd.h > _cdh
+        if len(_texts) == 1 and not _imgs and _bleeds:
+            _ps = item_rect(_clabel_plate)
+            corner_translate = Affine(1.0, _clabel_plate_dst.x - _ps.x, _clabel_plate_dst.y - _ps.y)
+            corner_ids = {id(m) for m in _members}
+    # The body text lands in the template's own box, like the title, rather than
+    # riding the scene affine at its wall width. Identified once, matched by
+    # identity in the loop.
+    body_dst = _rect_from_dict(recipe.get("bodyTextDst"))
+    body_for_body = slide_body_text_item(slide, wall_size)
+    body_item = body_for_body if body_dst is not None else None
+    badge_dsts = dict(recipe.get("badgeSlots") or {})
+    styles_pre = list(recipe.get("characterStyles") or [])
+    # Sparkle-build emphasis copies of body phrases take the body's own final
+    # size, or each is clamped small on its own and drifts off the words it sits
+    # over. Their size is whatever the body itself lands at — the template box, or
+    # the matched swatch, or the down-scale fallback.
+    overlay_ids = sparkle_overlays(slide, body_for_body)
+    body_final_size: float | None = None
+    if overlay_ids and body_for_body is not None:
+        if body_dst is not None and recipe.get("bodyTextFontSize"):
+            body_final_size = float(recipe["bodyTextFontSize"])
+        else:
+            _bm, body_final_size, _bf, _bc = _style_text_box(
+                body_for_body,
+                _affine_for_item(body_for_body, _groups_for_slide(slide, recipe)),
+                match_character_style(body_for_body, styles_pre),
+            )
+    # Captured as they are placed, so the overlays can be re-seated on the body
+    # after the fit pass has moved and narrowed it — see _couple_overlays_to_body.
+    body_wall_rect = item_rect(body_for_body) if (overlay_ids and body_for_body) else None
+    body_tf: ItemTransform | None = None
+    overlay_tfs: list[tuple[ItemTransform, Rect]] = []
+    line_slots = list(recipe.get("lineSlots") or [])
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     if not groups and (map_src is None or map_dst is None):
@@ -1419,8 +2399,13 @@ def plan_slide_transforms(
     out: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
+    coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
+            continue
+        # A magic-move build's leftover second copy of a group or text box: place
+        # it once, not twice. Images are never in this set (stacked map layers).
+        if id(item) in coincident_dups:
             continue
         # Off-slide leftovers are invisible on the wall, and the affine would
         # drag some of them into the CG frame.
@@ -1445,15 +2430,71 @@ def plan_slide_transforms(
                 )
             )
             continue
+        # Content wholly on a side panel has nowhere to go after the 16:9 crop, so
+        # it is dropped unless side content is being kept. This is the general form
+        # of dropping the church-name columns: it also sheds side badges, photo
+        # strips and labels (a CHC Klang photo, a CHC Kuching map) that used to ride
+        # the affine and still show. Kept content — the map, its labels, the title —
+        # overlaps the centre panel and so is never side-panel content.
+        if not include_lists and is_side_panel_item(item, wall_w, wall_h):
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "image"),
+                    x=_f(item.get("x")),
+                    y=_f(item.get("y")),
+                    w=_f(item.get("w")),
+                    h=_f(item.get("h")),
+                    locked=bool(item.get("locked")),
+                    role="hide",
+                    kind_index=kind_index,
+                    opacity=0.0,
+                )
+            )
+            continue
+        if corner_translate is not None and id(item) in corner_ids:
+            # Move the corner label to the template's corner at its own size, so
+            # the plate keeps its rounding and the word keeps its room. Source
+            # font and colour are kept, like every other resized text.
+            mapped = corner_translate.apply_rect(item_rect(item))
+            is_text = (item.get("kind") or "") == "text"
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "shape"),
+                    x=mapped.x,
+                    y=mapped.y,
+                    w=mapped.w,
+                    h=mapped.h,
+                    locked=bool(item.get("locked")),
+                    font_size=(_f(item.get("size")) or None) if is_text else None,
+                    font=_source_face(item) if is_text else None,
+                    color=None,
+                    role="other",
+                    kind_index=kind_index,
+                )
+            )
+            continue
         # Classify against the cluster this object actually sits in. Using the
         # first group instead loses every pin belonging to a second map on the
         # same slide — on a report-card page with two country insets that dropped
         # 9 of 10 pins, because they were 700px from the group that happened to
         # be listed first.
         aff, cluster = _group_for_item(item, groups)
+        badge_dst: Rect | None = None
+        if title_aff is not None and id(item) in title_ids:
+            aff, cluster = title_aff, title_src
+            # The badge affine is plate to plate, so it no longer carries the
+            # title box's slack. The slot still wins where the template has one:
+            # the template's badge is not a uniform shrink of the wall's — plate,
+            # logo and title each moved by their own ratio — so no single affine
+            # reproduces it, and the recorded rect is the only exact answer.
+            badge_dst = _rect_from_dict(badge_dsts.get(badge_slots.get(id(item), "")))
         if cluster is None:
             cluster = map_src
-        role = classify_item(item, cluster)
+        role = classify_item(item, cluster, title_item)
         if role == "other" and aff is not None and is_layout_image(item):
             role = "map"
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
@@ -1464,8 +2505,14 @@ def plan_slide_transforms(
         # rendered slide told us which is which, honour that; blind, keep the
         # old behaviour of dropping them all, since the flag is an explicit
         # instruction and the operator can see the result.
+        #
+        # But a whole church-name list is not a set of map labels, even where it
+        # sits over the map: the background test marks the names over land as
+        # non-free and used to leave them remapped in place. A slide carrying many
+        # names is a list to drop regardless of what is beneath each one.
         loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
-        if role == "list" and not include_lists and loose:
+        is_summary_list = list_count >= LIST_SUMMARY_MIN
+        if role == "list" and not include_lists and (loose or is_summary_list):
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1501,12 +2548,50 @@ def plan_slide_transforms(
                         if recipe.get("titleFontSize")
                         else (_f(item.get("size")) or None)
                     ),
-                    font=str(recipe["titleFont"]) if recipe.get("titleFont") else None,
-                    color=norm_rgb(recipe.get("titleColor")),
+                    # The title keeps its source font family and colour like any
+                    # other text; only position (titleDst) and size (titleFontSize)
+                    # change. `titleFont` and `titleColor` stay on the recipe as a
+                    # record of what the template carries, but applying them
+                    # repainted copy the operator wrote — a white verse turned cyan
+                    # because the template's title was cyan.
+                    font=_source_face(item),
+                    color=None,
                     role="title",
                     kind_index=kind_index,
                 )
             )
+            continue
+        if body_dst is not None and item is body_item:
+            # Apply the template: the body verse takes the template's box and font
+            # size so it reflows into the frame, rather than keeping its wall width
+            # at the scene's 1:1 scale. Font is left unset (not re-asserted): a
+            # verse carries bold, coloured emphasis *runs* the inspect cannot see,
+            # and setting the box font to the item's single face flattens them —
+            # the yellow "the plague has started" lost its weight. The box is moved
+            # in place, so Keynote keeps every run; only size and position change.
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind="text",
+                    x=body_dst.x,
+                    y=body_dst.y,
+                    w=body_dst.w,
+                    h=body_dst.h,
+                    locked=bool(item.get("locked")),
+                    font_size=(
+                        float(recipe["bodyTextFontSize"])
+                        if recipe.get("bodyTextFontSize")
+                        else (_f(item.get("size")) or None)
+                    ),
+                    font=None,
+                    color=None,
+                    role="other",
+                    kind_index=kind_index,
+                )
+            )
+            if item is body_for_body:
+                body_tf = out[-1]
             continue
         # Snapping to the template's list destination only makes sense for a
         # single column. With fifteen map labels it puts all fifteen on the same
@@ -1515,11 +2600,7 @@ def plan_slide_transforms(
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
             size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
-            mapped, font, font_name, colour = _style_text_box(item, None, style or size_only)
-            if not style:
-                font_name, colour = None, None
-            if dst is not None:
-                mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
+            mapped, font, _face, _colour = _style_text_box(item, None, style or size_only)
             if dst is not None:
                 mapped = Rect(dst.x, dst.y, mapped.w, mapped.h)
             out.append(
@@ -1533,8 +2614,8 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
-                    font=font_name,
-                    color=colour,
+                    font=_source_face(item) if style else None,
+                    color=None,
                     role="list",
                     kind_index=kind_index,
                 )
@@ -1574,8 +2655,8 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
-                    font=(style.get("font") or None) if style else None,
-                    color=norm_rgb(style.get("color")) if style else None,
+                    font=_source_face(item) if style else None,
+                    color=None,
                     role="list",
                     kind_index=kind_index,
                 )
@@ -1583,7 +2664,26 @@ def plan_slide_transforms(
             continue
         if role in {"list", "other"} and (item.get("kind") or "") == "text":
             style = match_character_style(item, styles)
-            mapped, font, font_name, colour = _style_text_box(item, aff, style)
+            mapped, font, _face, _colour = _style_text_box(item, aff, style)
+            if id(item) in overlay_ids and body_final_size is not None:
+                # An emphasis copy: take the body's final size and scale the box to
+                # it, keeping its top-left on the affine, so it stays over the same
+                # words the body shows rather than being clamped small on its own.
+                src = item_rect(item)
+                own = _f(item.get("size")) or body_final_size
+                ratio = body_final_size / own if own > 0 else 1.0
+                if aff is not None:
+                    origin = aff.apply_rect(Rect(src.x, src.y, 1.0, 1.0))
+                    mapped = Rect(origin.x, origin.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+                else:
+                    mapped = Rect(src.x, src.y, max(8.0, src.w * ratio), max(8.0, src.h * ratio))
+                font = body_final_size
+            # Unpaired LW text keeps its source font family and colour; only its
+            # position (the affine) and size (the matched swatch) change. The
+            # swatch is used for size alone — its colour must not repaint the
+            # source, which shipped its own. The source face is emitted only when
+            # a swatch resized the box, so the no-match path still leaves the
+            # object untouched and rides the affine.
             out.append(
                 ItemTransform(
                     slide_number=number,
@@ -1595,19 +2695,40 @@ def plan_slide_transforms(
                     h=mapped.h,
                     locked=bool(item.get("locked")),
                     font_size=font,
-                    font=font_name,
-                    color=colour,
+                    font=_source_face(item) if style else None,
+                    color=None,
                     role="other" if role == "other" else "list",
                     kind_index=kind_index,
                 )
             )
+            if item is body_for_body:
+                body_tf = out[-1]
+            elif id(item) in overlay_ids:
+                overlay_tfs.append((out[-1], item_rect(item)))
             continue
-        if aff is None and map_src and map_dst:
+        if badge_dst is not None:
+            mapped = badge_dst
+        elif aff is None and map_src and map_dst:
             mapped = map_rect(item_rect(item), map_src, map_dst)
         elif aff is not None:
             mapped = aff.apply_rect(item_rect(item))
         else:
             continue
+        # Left-column infographics sit beside the wall map, so the map affine
+        # throws them off the CG's left edge (x≈-900). Shift them onto the
+        # canvas rather than leaving them invisible or parking them on the badge.
+        # Setting the affine-scaled w/h on a group does not scale its children:
+        # Keynote keeps wall-sized text/logo/rules, so the box clips (missing
+        # CHC logo, short inner rule, truncated date, overflow +). Restore the
+        # wall size and only move the group. Pins stay affine-scaled.
+        if str(item.get("kind") or "") == "group" and role == "other":
+            src_box = item_rect(item)
+            mapped = Rect(
+                16.0 if mapped.x < 16 else mapped.x,
+                mapped.y,
+                src_box.w,
+                src_box.h,
+            )
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -1622,6 +2743,36 @@ def plan_slide_transforms(
                     end = (aff.s * _f(x1) + aff.tx, aff.s * _f(y1) + aff.ty)
                 elif map_src and map_dst:
                     end = map_point(_f(x1), _f(y1), map_src, map_dst)
+        # The map affine parks gutter meridians at x≈-386. Leaving them unplanned
+        # used to keep the 7680→1920 leftover (~164px). Translate back onto the
+        # x the document scale already chose (on the map) and keep affine y/length.
+        dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+        if (
+            start is not None
+            and end is not None
+            and (max(start[0], end[0]) <= 0 or min(start[0], end[0]) >= dest_w)
+        ):
+            doc_s = (dest_w / wall_w) if wall_w > 0 else 1.0
+            x_keep = _f((item.get("start") or [item.get("x")])[0]) * doc_s
+            start = (x_keep, start[1])
+            end = (x_keep, end[1])
+            mapped = Rect(
+                min(start[0], end[0]),
+                min(start[1], end[1]),
+                abs(end[0] - start[0]),
+                abs(end[1] - start[1]),
+            )
+        # The template is the authority on a rule it draws itself, so a divider
+        # lands on its slot rather than wherever the crop pushed the wall's copy.
+        if role == "line" and kind_index < len(line_slots):
+            slot = line_slots[kind_index]
+            mapped = Rect(
+                _f(slot.get("x")), _f(slot.get("y")), _f(slot.get("w")), _f(slot.get("h"))
+            )
+            if slot.get("start"):
+                start = (_f(slot["start"][0]), _f(slot["start"][1]))
+            if slot.get("end"):
+                end = (_f(slot["end"][0]), _f(slot["end"][1]))
         out.append(
             ItemTransform(
                 slide_number=number,
@@ -1636,15 +2787,32 @@ def plan_slide_transforms(
                 end=end,
                 role=role,
                 kind_index=kind_index,
+                src=item_rect(item),
             )
         )
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    # Apply order *is* stacking order, and the wall's real stacking cannot be
-    # read (see inspect_keynote.js: slide.iWorkItems() reports 0). So this sort
-    # is the stacking policy, not a reconstruction: base maps first and largest
-    # first, so country overlays land on top of the plate they belong to, then
-    # pins, then loose text, with the title cluster last so it is never buried.
+    # Fit only the body verse. Labels, plates and images are left where the
+    # template and affine placed them — bleeding off an edge is often deliberate.
+    if body_tf is not None:
+        _fit_body_to_frame(
+            body_tf,
+            _f(recipe.get("destWidth"), CG_WIDTH),
+            _f(recipe.get("destHeight"), CG_HEIGHT),
+        )
+    # After the body has settled, re-seat its sparkle overlays on it so they
+    # follow the body on-screen instead of being left where they fell.
+    if body_tf is not None and overlay_tfs and body_wall_rect is not None:
+        _couple_overlays_to_body(body_tf, body_wall_rect, overlay_tfs)
+    # Apply order is stacking order for *generate*, which creates the objects.
+    # Resize inherits the source deck's stacking and cannot change it: Keynote
+    # 15.3.1 exposes no arrange vocabulary at all — `bringToFront` and friends
+    # answer "Message not understood" (scripts/probe_zorder.js) — and moving an
+    # object does not restack it. So on the resize path this sort decides only
+    # what is placed first, not what ends up on top, and "the title cluster last
+    # so it is never buried" does not hold there: on a missions wall the badge
+    # lands correctly and is still covered by map art that was already above it.
+    # Ordering is kept because it costs nothing and generate does depend on it.
     role_order = {"map": 0, "pin": 1, "other": 2, "list": 3, "hide": 4, "line": 5, "title": 6}
     out.sort(
         key=lambda t: (
@@ -1653,6 +2821,72 @@ def plan_slide_transforms(
         )
     )
     return out
+
+
+def skipped_positions(payload: dict[str, Any]) -> list[int]:
+    """Document positions of slides set to Skip Slide in Keynote."""
+    out: list[int] = []
+    for i, slide in enumerate(payload.get("slides") or []):
+        if slide.get("skipped"):
+            out.append(int(slide.get("number") or (i + 1)))
+    return out
+
+
+def to_document_range(
+    payload: dict[str, Any], slide_range: SlideRange
+) -> frozenset[int] | None:
+    """Read a range written in Keynote's numbers as document positions.
+
+    Keynote numbers the slides that will play, so navigator number V is the
+    position of the Vth slide with `skipped` false. On a deck that plays
+    everything the two are the same and this is a no-op.
+
+    A number past the end of the playable slides is kept as given rather than
+    dropped: the operator meant *a* page, and losing it silently is worse than
+    planning one that turns out not to exist.
+    """
+    wanted = expand_slide_range(slide_range)
+    if not wanted:
+        return wanted
+    positions: dict[int, int] = {}
+    seen = 0
+    for i, slide in enumerate(payload.get("slides") or []):
+        if slide.get("skipped"):
+            continue
+        seen += 1
+        positions[seen] = int(slide.get("number") or (i + 1))
+    if not positions:
+        return wanted
+    return frozenset(positions.get(int(n), int(n)) for n in wanted)
+
+
+def navigator_numbering(payload: dict[str, Any]) -> str:
+    """How this deck's positions read in Keynote's slide navigator, if they differ.
+
+    The dashboard reads a range in Keynote's numbers, so the two agree there.
+    Everything reported afterwards — the framing rows, the logs, the skipped
+    list — is in document positions, so a deck with slides set to Skip still
+    needs the operator told which is which.
+    """
+    skipped = skipped_positions(payload)
+    if not skipped:
+        return ""
+    shown: list[str] = []
+    seen = 0
+    for i, slide in enumerate(payload.get("slides") or []):
+        position = int(slide.get("number") or (i + 1))
+        if slide.get("skipped"):
+            continue
+        seen += 1
+        if seen != position and len(shown) < 4:
+            shown.append(f"{position}→{seen}")
+    where = ", ".join(str(n) for n in skipped[:6]) + ("…" if len(skipped) > 6 else "")
+    tail = f" Positions shift: {', '.join(shown)}…" if shown else ""
+    return (
+        f"{len(skipped)} slide(s) are set to Skip Slide (position {where}). "
+        f"A range is read as the numbers Keynote shows; everything reported back "
+        f"counts every slide, so the two differ.{tail}"
+    )
 
 
 def resolve_slide_range(
@@ -1939,6 +3173,20 @@ def plan_slide_reuses(
                     payload["matchText"] = text
             if payload.get("role") != "hide":
                 mutate_specs.append(payload)
+        # The delta is pasted with a select-all, so everything the donor copy
+        # already carries has to leave the original first — and that is every
+        # object except the ones being added, not merely the ones the planner
+        # looked at. `_live_items` drops placeholder text and objects inspect
+        # marked as duplicates; those never reached `strip`, so the select-all
+        # swept them across and the donor's own copies were joined by a second
+        # set. The original slide is deleted straight afterwards, so stripping
+        # it back to the delta costs nothing.
+        add_keys = {(str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) for it in add}
+        strip_items = [
+            it
+            for it in (slide.get("items") or [])
+            if (str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) not in add_keys
+        ]
         strip_builds = [
             _ref(prev)
             for curr, prev in persist_pairs
@@ -1950,7 +3198,10 @@ def plan_slide_reuses(
                 "from": from_n,
                 "persist": persist_n,
                 "remove": [_ref(it) for it in remove],
-                "strip": [_ref(it) for it in persist],
+                # The delta is pasted with a select-all on the original slide, so
+                # everything the donor copy already carries has to go first — the
+                # persisting objects, and the mutated ones the donor supplies too.
+                "strip": [_ref(it) for it in strip_items],
                 "stripBuilds": strip_builds,
                 "add": add_specs,
                 "mutate": mutate_specs,
@@ -2017,35 +3268,129 @@ def is_degenerate_scale(recipe: dict[str, Any], wall_w: float, wall_h: float) ->
     return aff.s < floor
 
 
+def _clipped(rect: Rect, wall_w: float, wall_h: float) -> Rect:
+    """The part of a rect that is actually on the wall."""
+    x0, y0 = max(rect.x, 0.0), max(rect.y, 0.0)
+    x1, y1 = min(rect.x + rect.w, wall_w), min(rect.y + rect.h, wall_h)
+    return Rect(x0, y0, max(x1 - x0, 0.0), max(y1 - y0, 0.0))
+
+
+def _replaced_item_ids(
+    slide: dict, recipe: dict[str, Any], slide_size: tuple[float, float]
+) -> set[int]:
+    """Ids of items the template re-places rather than the affine carrying.
+
+    Where such an item's affine would land is no evidence about whether a framing
+    fits, because that is not where it ends up: it snaps to a template box or a
+    slot. The set the veto must ignore, gathered in one place because it is the
+    whole difference between judging a full-bleed cover and rejecting it.
+
+    - **the badge** (plate, logo, title) lands on the template's own slots;
+    - **the title and the verse body** snap to `titleDst` / `bodyTextDst`, and a
+      body set for the 3840-wide wall panel has its centre off the 1920 frame
+      until it reflows into that box;
+    - **sparkle emphasis copies** re-seat on the body after it is placed;
+    - **the small photos overlaid on a centre panel** ride the panel's affine on
+      purpose, the way `_slide_for_panel_framing` already drops them when choosing
+      the crop.
+    """
+    ignore: set[int] = set()
+    # The badge — plate, logo and title — found by plate where there is one, for
+    # the same reason the affine is: a badge of several words has no title, so the
+    # title route alone leaves every badge object scored against a framing that
+    # never places it (six of ten objects on a report-card page).
+    if recipe.get("titleDst") or recipe.get("badgeSlots") or recipe.get("badgePlateDst"):
+        title = slide_title_item(slide, slide_size)
+        plate = title_plate(slide, slide_size)
+        if plate is not None:
+            ignore |= {id(it) for it in badge_plate_members(slide, plate)}
+            if title is not None:
+                ignore.add(id(title))
+        elif title is not None:
+            ignore |= {id(title)} | {id(it) for it in badge_members(slide, title)}
+    # The verse body and its sparkle emphasis, which reflow into the template box.
+    if recipe.get("bodyTextDst"):
+        body = slide_body_text_item(slide, slide_size)
+        if body is not None:
+            ignore.add(id(body))
+            ignore |= sparkle_overlays(slide, body)
+    # The small photos overlaid on a centre panel, which ride the panel affine.
+    panel = centre_panel_image(
+        slide.get("items") or [],
+        slide_size[0],
+        slide_size[1],
+        _f(recipe.get("destWidth"), CG_WIDTH),
+        _f(recipe.get("destHeight"), CG_HEIGHT),
+    )
+    if panel is not None:
+        threshold = panel.w * panel.h * CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION
+        for item in slide.get("items") or []:
+            if is_pairable_image(item):
+                r = item_rect(item)
+                if r.w * r.h < threshold:
+                    ignore.add(id(item))
+    return ignore
+
+
 def on_canvas_fraction(
     slide: dict,
     recipe: dict[str, Any],
     wall_w: float,
     wall_h: float,
 ) -> float:
-    """How much of this page's visible content the recipe keeps on the CG canvas.
+    """How much of the artwork this recipe's affine governs stays on the CG canvas.
 
     A template framing that does not describe a page does not fail subtly: it
-    throws most of the page off the edge. Measuring that is a direct test of
-    whether the learned affine applies here, and unlike counting agreeing object
-    pairs it does not penalise a deliberately sparse template.
+    throws that page's artwork off the edge, and measuring that is a direct test
+    of whether the learned affine applies here. But only artwork the affine is
+    *responsible for* is evidence. Two kinds are not, and counting them is the
+    same trap framing *selection* already avoids — measure the artwork that
+    paired into the affine, not everything visible:
+
+    - an item the template **re-places** (the title, verse body and its emphasis,
+      name lists, the badge, a panel's overlaid photos) lands where the template
+      puts it, on-frame, whatever the affine would have done — see
+      `_replaced_item_ids`;
+    - on a **cover** (which crops to the centre), an item outside that crop — a
+      side panel — is discarded on purpose, so where the affine sends it says
+      nothing about the affine. A map framing places the whole page, so there this
+      does not apply and off-frame content is counted as the failure it is.
+
+    Without those two exclusions a correct full-bleed cover is vetoed: its text
+    all reflows on-frame while its cropped side content maps off it, so the raw
+    count reads as "half the page thrown away" when nothing is.
     """
     groups = _groups_from_recipe(recipe)
     map_src = _rect_from_dict(recipe.get("mapSrc"))
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    ignore = _replaced_item_ids(slide, recipe, (wall_w, wall_h))
+    # A cover crops to the centre and drops what is beyond it on purpose; a map
+    # framing places the whole page, so content it sends off-frame means the
+    # framing is wrong. So the footprint exclusion below applies to covers only —
+    # judging a map framing needs that off-frame content counted.
+    crop_footprint = map_src if recipe.get("source") in _COVER_SOURCES else None
     seen = inside = 0
     for item in slide.get("items") or []:
         if is_placeholder_text(item) or item.get("duplicateOf"):
             continue
         if not is_visible(item, wall_w, wall_h) or is_chrome_bg(item):
             continue
-        # Name lists are re-placed rather than carried by the affine, so where
-        # the affine would put them says nothing about whether it fits.
-        if is_list_item(item):
+        if is_list_item(item) or id(item) in ignore:
             continue
-        rect = item_rect(item)
+        # Content whose centre lies outside a cover's centre crop — a side panel —
+        # is cropped away by design; the affine is not failing by sending it
+        # off-frame.
+        if crop_footprint is not None:
+            cx0, _cy0 = item_center(item)
+            if not (crop_footprint.x <= cx0 <= crop_footprint.x + crop_footprint.w):
+                continue
+        # The part of the object that is on the wall, not the whole of it. Full
+        # bleed art is routinely taller than the wall — 2752px on a 1080px
+        # canvas — which puts its centre off the source deck before any framing
+        # is applied, and judged a correct 1:1 framing as throwing it away.
+        rect = _clipped(item_rect(item), wall_w, wall_h)
         if rect.w <= 0 or rect.h <= 0:
             continue
         aff = _affine_for_item(item, groups)
@@ -2324,6 +3669,53 @@ def offframe_rows(
     return rows
 
 
+def _framing_unusable(
+    slide: dict, recipe: dict[str, Any], wall_w: float, wall_h: float, min_on_canvas: float
+) -> bool:
+    """A framing that throws the page off the edge or collapses it to a sliver."""
+    return (
+        on_canvas_fraction(slide, recipe, wall_w, wall_h) < min_on_canvas
+        or is_degenerate_scale(recipe, wall_w, wall_h)
+    )
+
+
+def _recipe_reusing_affine(
+    slide: dict, recipe: dict[str, Any], affine: Affine, wall_w: float, wall_h: float
+) -> dict[str, Any] | None:
+    """`recipe` re-anchored on a sibling's `affine`.
+
+    A magic-move sequence pinned to one framing shows the same artwork (a China
+    map morphing from a vector to a photo) at the same wall position across
+    adjacent slides. Their own art pairs to a degenerate scale, but the affine the
+    valid sibling learned maps that shared position identically — an affine is a
+    point transform, so re-anchoring keeps the map 1:1 down the sequence rather
+    than each slide covering to its own, shifted crop. Text styling carried on the
+    recipe is kept; only the map transform is replaced.
+
+    The src is the page's centre panel where it has one, so this reads as the cover
+    it is — the crop footprint then sheds the side panels (a portrait grid beside
+    the map), rather than a full-wall src keeping them in scope and failing the
+    on-canvas check.
+    """
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    panel = centre_panel_image(slide.get("items") or [], wall_w, wall_h, dest_w, dest_h)
+    src = panel or _rect_from_dict(recipe.get("mapSrc"))
+    if src is None or src.w <= 0 or src.h <= 0 or affine.s <= 0:
+        return None
+    dst = affine.apply_rect(src)
+    out = dict(recipe)
+    out["mapSrc"] = src.as_dict()
+    out["mapDst"] = dst.as_dict()
+    out["source"] = "sibling-affine"
+    # It is not the pinned framing itself, so it must not report as confirmed.
+    out["framingPinned"] = False
+    out["groups"] = [
+        {**affine.as_dict(), "src": src.as_dict(), "dst": dst.as_dict(), "members": 0}
+    ]
+    return out
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -2336,6 +3728,8 @@ def plan_payload_transforms(
     skipped_slides: list[int] | None = None,
     fitted_slides: list[int] | None = None,
     offframe_report: list[dict[str, Any]] | None = None,
+    framing_overrides: dict[int, int] | None = None,
+    framing_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
@@ -2344,10 +3738,22 @@ def plan_payload_transforms(
     loose text from blind right-to-left packing onto measured empty space; rows
     describing what moved land in `placement_report` for flagging. Slides hidden
     with Skip Slide are not planned, and their numbers land in `skipped_slides`.
+
+    `framing_overrides` maps a wall slide number to the template slide number the
+    operator confirmed, replacing the automatic choice for that slide only. The
+    fit-to-frame fallback still applies afterwards, so a confirmation that turns
+    out unusable degrades the same way an automatic choice does rather than
+    throwing content out of frame. What each slide ended up using lands in
+    `framing_report`.
     """
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
     transforms: list[ItemTransform] = []
+    # The previous non-skipped slide's number, its pin, and the affine it ended up
+    # using — so a degenerate pin can reuse an adjacent same-pin sibling's affine.
+    prev_number: int | None = None
+    prev_pin: int | None = None
+    prev_affine: Affine | None = None
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not wants_slide(number, slide_range):
@@ -2360,21 +3766,70 @@ def plan_payload_transforms(
                 skipped_slides.append(number)
             continue
         slide_recipe = recipe
+        wanted = None
         if template and (template.get("slides") or []):
-            slide_recipe = learn_recipe(
-                {
-                    "slideWidth": payload.get("slideWidth"),
-                    "slideHeight": payload.get("slideHeight"),
-                    "slides": [slide],
-                },
-                template,
-            )
-            # No template framing describes this page. Applying the closest one
-            # anyway either throws objects thousands of pixels out of frame or
-            # collapses them into a corner; fitting what is visible does neither.
-            unusable = on_canvas_fraction(
-                slide, slide_recipe, wall_w, wall_h
-            ) < min_on_canvas or is_degenerate_scale(slide_recipe, wall_w, wall_h)
+            single = {
+                "slideWidth": payload.get("slideWidth"),
+                "slideHeight": payload.get("slideHeight"),
+                "slides": [slide],
+            }
+            wanted = (framing_overrides or {}).get(number)
+            slide_recipe = learn_recipe(single, template, template_slide=wanted)
+            pin_overridden = False
+            reused_sibling = False
+            if wanted is not None and _framing_unusable(
+                slide, slide_recipe, wall_w, wall_h, min_on_canvas
+            ):
+                # A magic-move sequence pinned to one framing keeps its map 1:1
+                # across the morph: where this page's own art pairs to a sliver,
+                # reuse the affine of the immediately-preceding page carrying the
+                # same pin, whose art did pair. Adjacency is the grouping — magic
+                # move only runs between consecutive slides — and the shared pin is
+                # the operator's say-so, so it is never inferred.
+                if (
+                    prev_number == number - 1
+                    and prev_pin == wanted
+                    and prev_affine is not None
+                ):
+                    reused = _recipe_reusing_affine(
+                        slide, slide_recipe, prev_affine, wall_w, wall_h
+                    )
+                    if reused is not None and not _framing_unusable(
+                        slide, reused, wall_w, wall_h, min_on_canvas
+                    ):
+                        slide_recipe = reused
+                        reused_sibling = True
+                # Otherwise the pinned framing collapsing the page is worse than no
+                # pin: fall back to the page's own automatic framing — the 1:1
+                # cover the pin was reaching for — before giving up to fit-to-frame.
+                if not reused_sibling:
+                    auto_recipe = learn_recipe(single, template, template_slide=None)
+                    if not _framing_unusable(slide, auto_recipe, wall_w, wall_h, min_on_canvas):
+                        slide_recipe = auto_recipe
+                        pin_overridden = True
+            if framing_report is not None:
+                framing_report.append(
+                    {
+                        "slide": number,
+                        "templateSlide": slide_recipe.get("templateSlide"),
+                        "requested": wanted,
+                        "confirmed": bool(slide_recipe.get("framingPinned")),
+                        "source": slide_recipe.get("source"),
+                        "pairQuality": slide_recipe.get("pairQuality"),
+                        "fitted": False,
+                        # The pin could not frame the page, so its own automatic
+                        # framing was used instead. Surfaced, not silent.
+                        "pinOverridden": pin_overridden,
+                        # ...or an adjacent same-pin sibling's affine was reused to
+                        # keep a magic-move sequence 1:1.
+                        "reusedSibling": reused_sibling,
+                    }
+                )
+        # No template framing describes this page. Applying the closest one
+        # anyway either throws objects thousands of pixels out of frame or
+        # collapses them into a corner; fitting what is visible does neither.
+        if template and (template.get("slides") or []):
+            unusable = _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
             if unusable:
                 fitted = fit_to_frame_recipe(
                     slide,
@@ -2390,6 +3845,8 @@ def plan_payload_transforms(
                     slide_recipe = fitted
                     if fitted_slides is not None:
                         fitted_slides.append(number)
+                    if framing_report:
+                        framing_report[-1]["fitted"] = True
         preview = (previews or {}).get(number)
         # One raster read per slide, shared by the drop decision and the
         # placement decision so they can never disagree.
@@ -2417,6 +3874,18 @@ def plan_payload_transforms(
                 offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)
             )
         transforms.extend(planned)
+        # Remember what this slide used, so an adjacent same-pin sibling can reuse
+        # its affine. Only a usable transform is worth passing on — a fitted or
+        # collapsed one would carry the wrong crop down the sequence.
+        used_affine = frame_affine(slide_recipe)
+        prev_affine = (
+            used_affine
+            if used_affine is not None
+            and not _framing_unusable(slide, slide_recipe, wall_w, wall_h, min_on_canvas)
+            else None
+        )
+        prev_number = number
+        prev_pin = wanted
     return transforms
 
 

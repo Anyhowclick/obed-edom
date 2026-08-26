@@ -6,7 +6,7 @@ import webbrowser
 from pathlib import Path
 
 from obed_edom.map_remap import resolve_slides
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import find_repo_root, output_root
 from obed_edom.pipeline import generate
 
 
@@ -57,13 +57,16 @@ def main(argv: list[str] | None = None) -> int:
     remap.add_argument(
         "--slides",
         dest="slides",
-        help="Slides to remap, e.g. 2 or 2,4-6 (default: 2).",
+        help="Slides to remap, e.g. 2 or 2,4-6 (default: 2). Counted by document position, including any slides set to Skip Slide, so these are not the numbers Keynote's navigator shows on a deck that skips any. The dashboard reads them the other way.",
     )
     remap.add_argument(
         "--from-slide",
         type=int,
         dest="range_from",
-        help="First slide, or the only slide. Omit for every slide. Prefer --slides for gaps.",
+        help=(
+            "First slide, or the only slide. Omit for every slide. Prefer "
+            "--slides for gaps. Document position, as with --slides."
+        ),
     )
     remap.add_argument(
         "--to-slide",
@@ -132,7 +135,7 @@ def _run_remap(args: argparse.Namespace) -> int:
     if not source.exists():
         print(f"File not found: {source}", file=sys.stderr)
         return 1
-    dest = Path(args.out).expanduser() if args.out else find_repo_root() / "output" / f"{source.stem}_CG.key"
+    dest = Path(args.out).expanduser() if args.out else output_root() / f"{source.stem}_CG.key"
     template = args.template or args.gold
     if template is None:
         print("CG template .key is required (--template CG_Template.key).", file=sys.stderr)

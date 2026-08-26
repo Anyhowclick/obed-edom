@@ -1,5 +1,9 @@
 ObjC.import("Foundation");
 
+// Set from the plan in run(). Addressed by bundle id, never by name: 15.x and
+// 14.x both answer to "Keynote" and the name resolves to 14.x.
+let KEYNOTE_BUNDLE_ID = "com.apple.Keynote";
+
 function readJSON(path) {
   const data = $.NSData.dataWithContentsOfFile(path);
   const str = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
@@ -85,7 +89,7 @@ function applyOverlays(doc, overlays, slideWidth, slideHeight) {
 
 function KeynoteShape(slide, overlay, slideWidth, slideHeight) {
   try {
-    const Keynote = Application("Keynote");
+    const Keynote = Application(KEYNOTE_BUNDLE_ID);
     const x = (overlay.x || 0) * slideWidth;
     const y = (overlay.y || 0.45) * slideHeight;
     const w = (overlay.w || 1) * slideWidth;
@@ -119,7 +123,8 @@ function KeynoteShape(slide, overlay, slideWidth, slideHeight) {
 function run(argv) {
   const planPath = argv[0];
   const plan = readJSON(planPath);
-  const Keynote = Application("Keynote");
+  KEYNOTE_BUNDLE_ID = plan.bundleId || KEYNOTE_BUNDLE_ID;
+  const Keynote = Application(KEYNOTE_BUNDLE_ID);
   Keynote.includeStandardAdditions = true;
 
   const doc = Keynote.open(Path(plan.output));

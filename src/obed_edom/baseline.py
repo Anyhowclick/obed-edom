@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from obed_edom import keynote_app
 from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
@@ -22,25 +25,70 @@ HASH_CACHE_VERSION = 1
 # by deck digest, which says nothing about the reader that produced it, so
 # without this a deck inspected by an older build is reused forever — a payload
 # captured before duplicate-shape marking existed would never gain it.
+#
+# Our own build is only half of "the reader". Keynote's version is the other, and
+# it moves without us: a digest-keyed hit would otherwise hand a payload from one
+# Keynote build to a run of another, and an upgrade would look like it changed
+# nothing. Hence the `.k<version>` tag below, which partitions the cache per app
+# version instead.
+#
+# Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
+# longer read at all now that the tool is 15.x only.
 INSPECT_VERSION = 2
 DIGEST_LEN = 16
 
 
+CACHE_DIR_ENV = "OBED_EDOM_CACHE_DIR"
+
+
 def cache_root(root: Path | None = None) -> Path:
-    base = Path(root) if root else find_repo_root()
-    return base / "output" / ".cache"
+    """Where inspect payloads, previews and pairings live.
+
+    Deliberately outside `output/`. Reading a wall deck costs minutes — 63 for the
+    six gold decks — and it used to sit in `output/.cache`, so a tidy-up of the
+    output folder threw away an hour of Keynote time. `OBED_EDOM_CACHE_DIR` moves
+    it, e.g. onto an external disk.
+    """
+    if root is not None:
+        return Path(root) / ".cache"
+    override = (os.environ.get(CACHE_DIR_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return find_repo_root() / ".cache"
 
 
 def pairings_dir(root: Path | None = None) -> Path:
     return cache_root(root) / "pairings"
 
 
-def inspect_cache_path(digest: str, root: Path | None = None) -> Path:
-    return cache_root(root) / "inspect" / f"{digest}.v{INSPECT_VERSION}.json"
+def _app_tag(app_version: str | None = None) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", app_version or keynote_app.app_version())
 
 
-def preview_cache_dir(digest: str, root: Path | None = None) -> Path:
-    return cache_root(root) / "previews" / digest
+def inspect_cache_path(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Where a payload produced by this Keynote version is read and written."""
+    name = f"{digest}.v{INSPECT_VERSION}.k{_app_tag(app_version)}.json"
+    return cache_root(root) / "inspect" / name
+
+
+def preview_cache_dir(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Where previews exported by this Keynote version are read and written."""
+    return cache_root(root) / "previews" / f"{digest}.k{_app_tag(app_version)}"
+
+
+def wall_thumb_dir(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Downscaled wall previews, for showing a framing in the browser.
+
+    A wall preview is 7680x1080 and about 9 MB, so ten of them on one page is
+    ~90 MB. These are the same images at a size a row can display.
+    """
+    return cache_root(root) / "wallthumbs" / f"{digest}.k{_app_tag(app_version)}"
 
 
 def _hash_file(hasher: hashlib._Hash, path: Path, chunk: int = 1024 * 1024) -> None:

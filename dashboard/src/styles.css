@@ -9,6 +9,9 @@
   --ok: #8fd0b0;
   --info: #7a8fb5;
   --panel: #152238;
+  --sky: #8fc4e8;
+  --plum: #c79bde;
+  --rose: #e0a0c4;
 }
 
 * { box-sizing: border-box; }
@@ -603,7 +606,7 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   background: var(--panel);
 }
 .slide-card.flagged { border-color: #6b5a2e; }
-input[type="text"], input[type="number"] {
+input[type="text"], input[type="number"], select {
   background: var(--panel);
   border: 1px solid var(--line);
   color: var(--ink);
@@ -612,6 +615,9 @@ input[type="text"], input[type="number"] {
   font: inherit;
   width: 100%;
 }
+/* The OS renders the option list, so it needs the polarity told to it or the
+   text comes out dark on dark. */
+select { color-scheme: dark; }
 label.field { display: block; margin: 8px 0; font-size: 14px; color: var(--muted); }
 label.check {
   display: flex;
@@ -683,6 +689,270 @@ label.check input { margin-top: 3px; }
 
 /* Case 1: the cued outline read top to bottom, findings alongside. */
 .outline-summary { margin: 0; }
+.framing-review { display: flex; flex-direction: column; gap: 10px; }
+/* One row normally, growing to two only when the selection actions appear —
+   .playlist-bar is not a flex container, so without this the tabs and the
+   controls stack even when there is room for both. */
+.framing-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.framing-bar .playlist-controls { flex: 1 1 auto; }
+.framing-tabs { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* One colour per bucket. The same tone appears on the tab and on every button
+   that moves a page into it, so the colour carries the meaning. */
+.btn.secondary.tone-matched { border-color: var(--ok); color: var(--ok); }
+.btn.secondary.tone-alt { border-color: var(--warn); color: var(--warn); }
+.btn.secondary.tone-clear {
+  border-color: #8a6a35;
+  color: #d8b57c;
+  background: rgba(138, 106, 53, 0.18);
+}
+.btn.secondary.tone-clear:hover { border-color: var(--warn); color: var(--warn); }
+.btn.secondary.tone-template { border-color: var(--sky); color: var(--sky); }
+/* Pink for Reviewed: distinct from the purple Save and the red Resize, which are
+   the two other saturated things in the bar. */
+.btn.secondary.tone-reviewed { border-color: var(--rose); color: var(--rose); }
+.btn.secondary.tone-matched.on { background: var(--ok); color: #10241c; border-color: var(--ok); }
+.btn.secondary.tone-alt.on { background: var(--warn); color: #2c2210; border-color: var(--warn); }
+.btn.secondary.tone-template.on { background: var(--sky); color: #10222c; border-color: var(--sky); }
+.btn.secondary.tone-reviewed.on { background: var(--rose); color: #2c1020; border-color: var(--rose); }
+.btn.tone-save { background: linear-gradient(180deg, #c79bde 0%, #9a63bd 100%); color: #f7f0fb; }
+.btn.tone-save:hover:not(:disabled) { background: linear-gradient(180deg, #d4aee7 0%, #a973c9 100%); }
+
+/* The framing itself, next to its number. Hovering shows it big, because the
+   header thumbnail is too small to judge a crop by. */
+.framing-head { display: flex; gap: 10px; align-items: center; }
+.template-thumb { position: relative; display: block; flex-shrink: 0; line-height: 0; }
+.template-thumb > img {
+  width: 132px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: block;
+}
+.template-zoom {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 6;
+  display: none;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.template-thumb:hover .template-zoom { display: block; }
+.template-zoom > img { width: 520px; display: block; border-radius: 4px; }
+.framing-group {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+}
+.framing-group.flagged { border-left-color: var(--warn); }
+.framing-group .actions { flex-wrap: wrap; align-items: center; }
+.framing-group label.field { margin: 0; min-width: 0; }
+label.inline-field { display: flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
+label.inline-field select { width: auto; padding: 5px 8px; }
+
+/* The crop: a 16:9 window with the wall image positioned inside it.
+   The border is near-white on purpose — it marks the 1920x1080 edge, and a muted
+   one blended into the panel so the frame's real extent was hard to see when the
+   content only filled part of it. */
+.crop-preview {
+  position: relative;
+  overflow: hidden;
+  background: var(--navy-2);
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.crop-preview img { position: absolute; display: block; max-width: none; }
+.crop-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* Every page in a group at a glance, so a wrong one in a batch of 56 shows up. */
+/* user-select and user-drag off so dragging across the strip selects thumbnails
+   instead of highlighting their labels or picking up a preview image. */
+.framing-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  user-select: none;
+  /* Anchors the marquee, and makes each chip's offsetLeft/Top strip-relative so
+     the box can be tested against layout instead of client coordinates. */
+  position: relative;
+  /* Somewhere to start a sweep on a row the chips fill exactly. */
+  padding-bottom: 6px;
+}
+.framing-marquee {
+  position: absolute;
+  border: 1px solid rgba(244, 241, 234, 0.9);
+  background: rgba(244, 241, 234, 0.12);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.framing-marquee.removing {
+  border-color: var(--err);
+  background: rgba(240, 163, 160, 0.14);
+}
+.framing-strip img { -webkit-user-drag: none; user-drag: none; }
+.framing-chip {
+  position: relative;
+  padding: 0;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 0;
+}
+/* Green means the framing was matched, yellow means it fell back to fitting
+   content. Both are "in Matched", so the border is the only thing telling them
+   apart at a glance. */
+.framing-chip { border-color: var(--ok); }
+.framing-chip.fellback { border-color: var(--warn); }
+/* Selection has to survive being one of fifty thumbnails, so it glows rather than
+   just changing a border colour that the green/yellow states already use. White,
+   because a coloured ring reads as another state rather than as "picked". */
+.framing-chip.selected {
+  border-color: var(--ink);
+  box-shadow:
+    0 0 0 2px var(--ink),
+    0 0 14px rgba(244, 241, 234, 0.6);
+}
+.framing-chip-num {
+  position: absolute;
+  bottom: 2px;
+  left: 3px;
+  font-size: 10px;
+  line-height: 1.3;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(6, 12, 24, 0.78);
+  color: var(--ink);
+}
+.framing-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+/* Framings picked from their own thumbnails, since a native select cannot show
+   images and all of them fit anyway. */
+.framing-picker { display: flex; flex-wrap: wrap; gap: 5px; }
+.framing-option {
+  position: relative;
+  padding: 0;
+  background: none;
+  border: 2px solid var(--ok);
+  border-radius: 5px;
+  cursor: pointer;
+  line-height: 0;
+  opacity: 0.65;
+}
+.framing-option.fellback { border-color: var(--warn); }
+.framing-option.current {
+  opacity: 1;
+  box-shadow:
+    0 0 0 2px var(--sky),
+    0 0 12px rgba(143, 196, 232, 0.7);
+}
+.framing-option:disabled { cursor: not-allowed; }
+.framing-option:hover { opacity: 1; }
+
+/* The template slide behind an option, revealed on hover. */
+.option-tip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 5px);
+  z-index: 7;
+  display: none;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.framing-option:hover .option-tip { display: block; }
+.option-tip > img {
+  width: 320px;
+  display: block;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
+}
+.option-tip-label {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+/* On the small ones the button's own coloured border already shows the edge, and
+   a second line inside it just muddies a 104px thumbnail. */
+.framing-option .crop-preview,
+.framing-chip .crop-preview {
+  border: 0;
+  border-radius: 3px;
+}
+.framing-option-num {
+  position: absolute;
+  bottom: 1px;
+  left: 2px;
+  font-size: 9px;
+  line-height: 1.35;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(6, 12, 24, 0.8);
+  color: var(--ink);
+}
+.framing-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.framing-row-num { padding-top: 2px; flex-shrink: 0; min-width: 3ch; text-align: right; }
+.framing-row-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
+.framing-row-controls { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.framing-row-controls .note { margin: 0; }
+.framing-row-controls .actions { margin: 0; }
+.framing-label {
+  /* Flex, not block: the label carries an inline checkbox and the two have to
+     sit on one centre line rather than on the text baseline. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 16px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+/* The whole wall, as the "before". Wide and short at 7680x1080, so it reads as a
+   strip above the crops rather than competing with them. */
+.framing-before > img {
+  width: 100%;
+  max-width: 760px;
+  display: block;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 3px;
+}
+.framing-after { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
 .outline-reader { display: flex; flex-direction: column; gap: 4px; max-width: 96ch; }
 .outline-para {
   padding: 6px 10px;
@@ -727,3 +997,128 @@ label.check input { margin-top: 3px; }
 .final-ask input { margin-top: 3px; flex: 0 0 auto; }
 .final-ask span { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .final-ask strong { color: var(--ink); display: block; margin-bottom: 2px; }
+
+/* What the run does to each object, drawn over the crop. Outlines only: the
+   thumbnail underneath is the thing being judged, so the boxes must not hide it. */
+.plan-rect {
+  position: absolute;
+  border: 1px solid currentColor;
+  border-radius: 1px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+.plan-rect.role-map { color: rgba(120, 200, 255, 0.75); }
+.plan-rect.role-pin { color: rgba(255, 120, 120, 0.75); }
+.plan-rect.role-other { color: rgba(160, 255, 180, 0.8); }
+.plan-rect.role-list { color: rgba(255, 220, 120, 0.85); }
+.plan-rect.role-line { color: rgba(255, 255, 255, 0.95); }
+.plan-rect.role-title { color: rgba(255, 170, 255, 0.95); }
+/* Hidden objects are the ones the operator cannot see any other way. */
+.plan-rect.role-hide {
+  color: rgba(255, 90, 90, 0.7);
+  border-style: dashed;
+  background: rgba(255, 90, 90, 0.09);
+}
+
+.plan-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.plan-toggle input { margin: 0; width: 12px; height: 12px; flex-shrink: 0; }
+
+.plan-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.plan-key {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+/* A filtered-out role stays listed with its count: knowing 138 pins are hidden
+   is part of reading the picture. */
+.plan-key.off { opacity: 0.4; text-decoration: line-through; }
+.plan-key.off::before { background: none; }
+.plan-key::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 3px;
+  border: 1px solid currentColor;
+  background: currentColor;
+  vertical-align: -1px;
+}
+.plan-key.role-map { color: rgba(120, 200, 255, 0.95); }
+.plan-key.role-pin { color: rgba(255, 120, 120, 0.95); }
+.plan-key.role-other { color: rgba(160, 255, 180, 0.95); }
+.plan-key.role-list { color: rgba(255, 220, 120, 0.95); }
+.plan-key.role-line { color: rgba(255, 255, 255, 0.95); }
+.plan-key.role-title { color: rgba(255, 170, 255, 0.95); }
+.plan-key.role-hide { color: rgba(255, 90, 90, 0.95); }
+
+/* One object, cut from the wall thumbnail and drawn where the plan puts it. The
+   wall image underneath is hidden in this mode: drawn over the crop, every object
+   would show twice — once where the affine put it, once where the plan does. */
+.plan-piece {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+.plan-piece > img { position: absolute; display: block; max-width: none; }
+
+.plan-modes {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+.plan-modes button {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font: inherit;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.plan-modes button.current {
+  border-color: rgba(255, 255, 255, 0.5);
+  color: #fff;
+}
+
+
+/* A chip at the end of a row would push its tip past the panel edge, so the tip
+   hangs off the chip's right instead. Set by measurement on hover: where a row
+   wraps is a layout fact, not something a :nth-child rule can know. */
+.framing-option.tip-left .option-tip { left: auto; right: 0; }
+
+/* Loud on purpose: it is the difference between remapping the pages you named
+   and remapping different ones, and the apply cannot be taken back. */
+.danger-note {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-left-width: 4px;
+  border-radius: 4px;
+  background: rgba(240, 163, 160, 0.1);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.danger-note strong { color: var(--err); }

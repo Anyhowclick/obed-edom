@@ -354,7 +354,9 @@ function canvasSize(doc) {
 
 function run(argv) {
   const plan = readJSON(argv[0]);
-  const Keynote = Application("Keynote");
+  // By bundle id, never by name: Keynote 15 is "Keynote Creator Studio" with a
+  // different id, and both apps answer to the name "Keynote".
+  const Keynote = Application(plan.bundleId || "com.apple.Keynote");
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.path));
   const slides = doc.slides();

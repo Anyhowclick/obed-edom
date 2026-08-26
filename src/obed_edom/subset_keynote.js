@@ -8,7 +8,7 @@ function readJSON(path) {
 
 function run(argv) {
   const plan = readJSON(argv[0]);
-  const Keynote = Application("Keynote");
+  const Keynote = Application(plan.bundleId || "com.apple.Keynote");
   Keynote.includeStandardAdditions = true;
   const wanted = {};
   const nums = plan.slides || [];
