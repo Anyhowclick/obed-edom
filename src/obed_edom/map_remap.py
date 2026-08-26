@@ -2233,6 +2233,32 @@ def plan_slide_transforms(
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
         slide, recipe, wall_size
     )
+    # A corner label — a plate with one word on it and no logo, like "Main
+    # Sanctuary" bleeding off a corner — is not a missions badge. Resizing it into
+    # the template's slot squares off a rounded plate (Keynote cannot script a
+    # corner radius, so any resize drops it) and squeezes a longer word into a
+    # slot cut for a shorter one. Move the plate and its label to the template's
+    # corner keeping their own size instead, so the plate stays rounded and the
+    # word still fits. A badge with a logo keeps the slot placement (see
+    # badge-affine); the size there is the template's on purpose.
+    corner_ids: set[int] = set()
+    corner_translate: Affine | None = None
+    _clabel_plate = title_plate(slide, wall_size)
+    _clabel_plate_dst = _rect_from_dict(recipe.get("badgePlateDst"))
+    if _clabel_plate is not None and _clabel_plate_dst is not None and title_item is not None:
+        _members = badge_plate_members(slide, _clabel_plate)
+        _texts = [m for m in _members if (m.get("kind") or "") == "text"]
+        _imgs = [m for m in _members if (m.get("kind") or "") == "image"]
+        _cdw = _f(recipe.get("destWidth"), CG_WIDTH)
+        _cdh = _f(recipe.get("destHeight"), CG_HEIGHT)
+        _pd = _clabel_plate_dst
+        # A corner label is designed to bleed off an edge — that is what makes it
+        # a corner label rather than a title plate, which sits on the frame.
+        _bleeds = _pd.x < 0 or _pd.y < 0 or _pd.x + _pd.w > _cdw or _pd.y + _pd.h > _cdh
+        if len(_texts) == 1 and not _imgs and _bleeds:
+            _ps = item_rect(_clabel_plate)
+            corner_translate = Affine(1.0, _clabel_plate_dst.x - _ps.x, _clabel_plate_dst.y - _ps.y)
+            corner_ids = {id(m) for m in _members}
     # The body text lands in the template's own box, like the title, rather than
     # riding the scene affine at its wall width. Identified once, matched by
     # identity in the loop.
@@ -2312,6 +2338,30 @@ def plan_slide_transforms(
                     role="hide",
                     kind_index=kind_index,
                     opacity=0.0,
+                )
+            )
+            continue
+        if corner_translate is not None and id(item) in corner_ids:
+            # Move the corner label to the template's corner at its own size, so
+            # the plate keeps its rounding and the word keeps its room. Source
+            # font and colour are kept, like every other resized text.
+            mapped = corner_translate.apply_rect(item_rect(item))
+            is_text = (item.get("kind") or "") == "text"
+            out.append(
+                ItemTransform(
+                    slide_number=number,
+                    item_index=item_index,
+                    kind=str(item.get("kind") or "shape"),
+                    x=mapped.x,
+                    y=mapped.y,
+                    w=mapped.w,
+                    h=mapped.h,
+                    locked=bool(item.get("locked")),
+                    font_size=(_f(item.get("size")) or None) if is_text else None,
+                    font=_source_face(item) if is_text else None,
+                    color=None,
+                    role="other",
+                    kind_index=kind_index,
                 )
             )
             continue

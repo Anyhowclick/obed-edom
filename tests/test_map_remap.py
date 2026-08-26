@@ -1491,6 +1491,52 @@ def test_sparkle_overlays_follow_the_body_after_the_fit_pass():
     assert abs((overlay.font_size or 0) - (body.font_size or 0)) < 0.5
 
 
+def test_corner_label_keeps_its_plate_size_not_the_template_slot():
+    """A corner label — a plate with one word and no logo, bleeding off a corner —
+    is moved to the template's corner keeping its own size, so the rounded plate is
+    not squared off by a resize and a longer word is not squeezed into a shorter
+    word's slot. A logo makes it a missions badge, which keeps the slot."""
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="photo.png", x=1920, y=0, w=3840, h=1080),
+                    _item(kind="shape", x=1942, y=-77, w=362, h=160),  # rounded plate, bleeds off top
+                    _item(kind="text", text="Main Sanctuary", x=1957, y=11, w=333, h=64, size=50),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="photo.png", x=-830, y=1, w=3840, h=1080),
+                    _item(kind="shape", x=20, y=-77, w=227, h=160),  # narrower slot (shorter word)
+                    _item(kind="text", text="Sunday", x=20, y=-1, w=227, h=88, size=50),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe.get("badgePlateDst") == {"x": 20.0, "y": -77.0, "w": 227.0, "h": 160.0}
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    plate = next(t for t in out if t.kind == "shape")
+    label = next(t for t in out if t.kind == "text" and t.role != "hide")
+    # Plate moved to the corner but kept its own 362 width (rounding survives), not
+    # squeezed to the template's 227 slot.
+    assert (round(plate.x), round(plate.y), round(plate.w), round(plate.h)) == (20, -77, 362, 160)
+    # Label moved with it, keeping its width so the word still fits.
+    assert round(label.w) == 333
+    assert 20 <= label.x <= 382  # sits on the plate
+
+
 def test_full_bleed_image_is_not_mistaken_for_a_centre_panel():
     """A full-bleed image that runs off the top and bottom is not a centre panel:
     height is capped near one frame, so its framing is left to the usual path."""

@@ -280,6 +280,7 @@ tidy-up of the output folder once threw away an hour of Keynote time.
 | `scripts/inspect_gold.py` | Warms the cache. `--template-only` after editing the template, which is the one deck whose digest changes. |
 | `scripts/probe_runs.js` | Reproduces the unreachable-run-style result on demand. |
 | `scripts/probe_zorder.js` | Reproduces both z-order results: the mixed collection will not enumerate, and no arrange command exists. Builds its own throwaway deck, so it needs no gold deck. |
+| `scripts/probe_corner.js` | Dumps a shape's scriptable properties and resizes it: shows there is no corner-radius handle, so a rounded plate cannot be kept rounded across a resize. Builds its own throwaway deck. |
 
 Only warm the cache when a deck changes. Keep tests on the two `Map_Extracted`
 pairs; `Full_Report_Card` is 158 and 207 slides and only worth running when
@@ -430,6 +431,25 @@ of which take a bundle id as their last argument.
     buried from x≈220 onward, where the map's white landmass begins. It reads as a
     clipped plate and a title truncated to "Glob". No code can lift it; the fix is
     in the source deck or the template.
+- **A shape's corner radius can be neither read nor set.** Verified on 15.3.1 by
+  `scripts/probe_corner.js`. A shape's entire scriptable property bag is `opacity,
+  parent, pcls, reflectionShowing, backgroundFillType, position, objectText,
+  width, rotation, reflectionValue, height, locked` — there is no `cornerRadius`
+  (it raises "Can't convert types.") and no shape-type at all. So a rounded
+  rectangle's rounding is invisible to the pipeline and cannot be restored after
+  the fact.
+  - *Consequence:* setting `width`/`height` on a rounded plate squares its corners
+    — the rounding is a property we cannot carry across a resize. The only lever is
+    whether we resize at all: a plate that is only *moved* keeps its rounding.
+  - *What the resizer does:* a **corner label** — a plate with one word on it, no
+    logo, bleeding off a corner (`badgePlateDst` crosses a frame edge) — is moved
+    to the template's corner at its own wall size rather than resized into the
+    template's slot, so a rounded plate stays rounded and a longer word (English in
+    a slot cut for shorter text) still fits. See `_title_badge`'s corner-label
+    branch in `plan_slide_transforms`. A **missions badge** (a plate with a logo)
+    still takes the template slot as badge-affine intends; if such a plate were
+    rounded it would lose its corners, and there is no script fix — the template or
+    source deck is where that would be addressed.
 - **`masterSlides()` is broken in JXA, but AppleScript `master slide` is fine.**
   `doc.masterSlides()` raises "Can't convert types." while `doc.slideLayouts()`
   returns all 9. In AppleScript the same collection answers perfectly: `count of
