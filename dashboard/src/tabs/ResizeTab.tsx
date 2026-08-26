@@ -213,6 +213,40 @@ export function ResizeTab() {
         />
         <span>Validation check (Recommended: off if wall content has been checked)</span>
       </label>
+      <div className="callout important">
+        <p className="callout-title">
+          <span className="callout-icon" aria-hidden="true">!</span> Important
+        </p>
+        <p className="callout-sub">Before you run</p>
+        <ul>
+          <li>
+            <strong className="action">Delete all skipped slides</strong> — they’re
+            still read and exported, just never remapped, so they only cost time.
+          </li>
+          <li>
+            <strong className="action">Ungroup side-panel content</strong> — if the
+            left and right panels are grouped, the group spans the centre and is read
+            as centre-wall content, so it won’t be dropped even when the slide isn’t
+            whitelisted.
+          </li>
+          <li>
+            <strong className="action">Close Keynote first</strong> for better
+            performance.
+          </li>
+        </ul>
+        <p className="callout-sub">After you run</p>
+        <ul>
+          <li>
+            <strong className="action">Check the edges of every box</strong> — a
+            resize squares off rounded corners, so rounded plates may need a hand-fix.
+          </li>
+          <li>
+            <strong className="action">Check text line breaks</strong> —
+            wall-authored breaks can wrap awkwardly in the narrow CG box; fix them in
+            the source deck.
+          </li>
+        </ul>
+      </div>
       <div className="actions">
         <button className="btn" type="button" disabled={!lw || !template || busy} onClick={runResize}>
           Propose framings

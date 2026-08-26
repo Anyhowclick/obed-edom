@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FramingDecision } from "../api";
 
 /**
@@ -378,6 +378,10 @@ export function FramingReview({
   // strip's empty space, as this first did, meant the obvious gesture — press a
   // chip and drag — never began a sweep at all.
   const [marquee, setMarquee] = useState<Marquee | null>(null);
+  // Filters that narrow every category tab at once: only whitelisted pages, and/or
+  // only pages whose chosen framing uses one template slide. "all" = filter off.
+  const [keptOnly, setKeptOnly] = useState(false);
+  const [templateFilter, setTemplateFilter] = useState<string>("all");
 
   const byCategory = useMemo(() => {
     const out: Record<Category, FramingPage[]> = {
@@ -400,9 +404,49 @@ export function FramingReview({
     return out;
   }, [pages, decisions]);
 
+  // Distinct chosen-framing keys present across the deck, for the template <select>.
+  // "none" collects pages with no chosen slide (deferred, or auto with no usable
+  // framing) — the same key `groups` uses.
+  const templateOptions = useMemo(() => {
+    const keys = new Set<string>();
+    for (const page of pages) {
+      const slide = chosenSlide(page, decisions);
+      keys.add(slide == null ? "none" : String(slide));
+    }
+    return [...keys].sort((a, b) => {
+      if (a === "none") return 1;
+      if (b === "none") return -1;
+      return Number(a) - Number(b);
+    });
+  }, [pages, decisions]);
+
+  // If the pinned/chosen slide behind an active template filter disappears (e.g. the
+  // last page using it is unpinned), drop back to "all" rather than stranding every
+  // tab at zero.
+  useEffect(() => {
+    if (templateFilter !== "all" && !templateOptions.includes(templateFilter)) {
+      setTemplateFilter("all");
+    }
+  }, [templateOptions, templateFilter]);
+
+  const passesFilter = (page: FramingPage): boolean => {
+    if (keptOnly && !keepsSideContent(page)) return false;
+    if (templateFilter !== "all") {
+      const slide = chosenSlide(page, decisions);
+      if ((slide == null ? "none" : String(slide)) !== templateFilter) return false;
+    }
+    return true;
+  };
+
+  const filteredByCategory = useMemo(() => {
+    const out = {} as Record<Category, FramingPage[]>;
+    for (const key of TABS) out[key] = byCategory[key].filter(passesFilter);
+    return out;
+  }, [byCategory, keptOnly, templateFilter, decisions]);
+
   const groups = useMemo(() => {
     const map = new Map<string, FramingPage[]>();
-    for (const page of byCategory[tab]) {
+    for (const page of filteredByCategory[tab]) {
       const key = String(chosenSlide(page, decisions) ?? "none");
       const list = map.get(key);
       if (list) list.push(page);
@@ -411,7 +455,7 @@ export function FramingReview({
     return [...map.entries()]
       .map(([key, list]) => ({ key, slide: key === "none" ? null : Number(key), pages: list }))
       .sort((a, b) => b.pages.length - a.pages.length);
-  }, [byCategory, tab, decisions]);
+  }, [filteredByCategory, tab, decisions]);
 
   function thumbUrl(page: FramingPage): string | null {
     return page.thumb ? `/api/resize/${jobId}/thumb/wall/${encodeURIComponent(page.thumb)}` : null;
@@ -510,7 +554,7 @@ export function FramingReview({
                 setGroupPage(0);
               }}
             >
-              {CATEGORY_LABEL[key]} ({byCategory[key].length})
+              {CATEGORY_LABEL[key]} ({filteredByCategory[key].length})
             </button>
           ))}
         </div>
@@ -594,6 +638,47 @@ export function FramingReview({
         </div>
       </div>
 
+      <div className="framing-filter">
+        <span className="framing-filter-icon" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M1.5 2h13a.5.5 0 0 1 .4.8L10 9.2V14a.5.5 0 0 1-.72.45l-3-1.5A.5.5 0 0 1 6 12.5V9.2L1.1 2.8A.5.5 0 0 1 1.5 2Z" />
+          </svg>
+        </span>
+        <span className="framing-filter-label">Filter</span>
+        <button
+          type="button"
+          className={"btn secondary" + (keptOnly ? " on tone-reviewed" : "")}
+          aria-pressed={keptOnly}
+          title="Show only pages whose LED-wall side-panel content is whitelisted to be kept"
+          onClick={() => { setKeptOnly((v) => !v); setSelected(new Set()); setOpenGroup(null); setGroupPage(0); }}
+        >
+          Side panels kept
+        </button>
+        <label className="field inline-field">
+          Template
+          <select
+            value={templateFilter}
+            onChange={(e) => { setTemplateFilter(e.target.value); setSelected(new Set()); setOpenGroup(null); setGroupPage(0); }}
+          >
+            <option value="all">All</option>
+            {templateOptions.map((key) => (
+              <option key={key} value={key}>
+                {key === "none" ? "Needs a new template slide" : `Slide ${key}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        {(keptOnly || templateFilter !== "all") && (
+          <button
+            type="button"
+            className="btn secondary tone-clear"
+            onClick={() => { setKeptOnly(false); setTemplateFilter("all"); }}
+          >
+            Clear filter
+          </button>
+        )}
+      </div>
+
       <p className="note">
         {pages.length} page{pages.length === 1 ? "" : "s"} take a framing. {reviewed} reviewed,{" "}
         {byCategory.template.length} waiting on a new template slide.
@@ -612,7 +697,13 @@ export function FramingReview({
         </p>
       )}
 
-      {groups.length === 0 && <p className="note">Nothing in {CATEGORY_LABEL[tab].toLowerCase()}.</p>}
+      {groups.length === 0 && (
+        <p className="note">
+          {keptOnly || templateFilter !== "all"
+            ? `No ${CATEGORY_LABEL[tab].toLowerCase()} pages match the filter.`
+            : `Nothing in ${CATEGORY_LABEL[tab].toLowerCase()}.`}
+        </p>
+      )}
 
       {groups.map((group) => {
         const open = openGroup === group.key;
@@ -734,13 +825,15 @@ export function FramingReview({
                       (isSelected ? " selected" : "") +
                       // Tracks the framing the page will use, so switching one to a
                       // clean framing turns its border green immediately.
-                      (fellBackWith(page, chosenSlide(page, decisions)) ? " fellback" : "")
+                      (fellBackWith(page, chosenSlide(page, decisions)) ? " fellback" : "") +
+                      (keepsSideContent(page) ? " kept" : "")
                     }
                     title={
                       `Slide ${page.slide}` +
                       (fellBackWith(page, chosenSlide(page, decisions))
                         ? " — no framing fit, so it is scaled to the frame"
-                        : "")
+                        : "") +
+                      (keepsSideContent(page) ? " · side panels kept" : "")
                     }
                   >
                     <CropPreview
