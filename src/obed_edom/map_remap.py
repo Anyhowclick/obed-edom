@@ -678,7 +678,26 @@ def slides_preferring(template_slides: list[dict], number: int | None) -> list[d
     return chosen + [s for s in template_slides if _slide_number_of(s) != number]
 
 
-def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> dict[str, Any]:
+# How far two plate colours may differ and still count as the same badge. The
+# real badges and titles across these decks all carry one cyan plate; a template
+# whose "plate" is a different colour is a different object (an in-map label),
+# not the badge, and snapping the source badge onto it drags it into the map.
+PLATE_COLOR_TOLERANCE = 0.2
+
+
+def _rgb_close(a: list[float] | None, b: list[float] | None, tol: float) -> bool:
+    """Whether two RGB triples are within `tol` (Euclidean), missing → not close."""
+    if not a or not b or len(a) < 3 or len(b) < 3:
+        return False
+    return sum((x - y) ** 2 for x, y in zip(a[:3], b[:3])) <= tol * tol
+
+
+def _attach_text_style(
+    recipe: dict[str, Any],
+    template_slides: list[dict],
+    *,
+    source_plate_color: list[float] | None = None,
+) -> dict[str, Any]:
     dest = (_f(recipe.get("destWidth"), CG_WIDTH), _f(recipe.get("destHeight"), CG_HEIGHT))
     ordered = slides_preferring(template_slides, recipe.get("templateSlide"))
     font, sample = template_list_sample(ordered, dest)
@@ -686,7 +705,24 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
         recipe["listFontSize"] = round(font, 2)
         if sample:
             recipe["listSample"] = sample.as_dict()
-    title = template_title_item(ordered, dest)
+    # The badge belongs top-left whatever map framing the page uses, so the badge
+    # slots are read from the template slide whose plate colour matches the source
+    # badge — not necessarily the chosen slide. A plain-map layout like template
+    # 10, whose only "plate" is a white in-map label ("CHC Qiu Cha"), would
+    # otherwise donate that label as the badge home and drag the cyan badge into
+    # the middle of the map. Skipping the colour mismatch borrows the deck's real
+    # badge slot from a slide that has one; the title box travels with it.
+    if source_plate_color is not None:
+        matched = [
+            s
+            for s in ordered
+            if (p := title_plate(s, dest)) is not None
+            and _rgb_close(source_plate_color, item_rgb(p), PLATE_COLOR_TOLERANCE)
+        ]
+        badge_ordered = matched + [s for s in ordered if s not in matched]
+    else:
+        badge_ordered = ordered
+    title = template_title_item(badge_ordered, dest)
     if title:
         recipe["titleDst"] = item_rect(title).as_dict()
         if title.get("size"):
@@ -703,10 +739,10 @@ def _attach_text_style(recipe: dict[str, Any], template_slides: list[dict]) -> d
             recipe["bodyTextDst"] = body_rect.as_dict()
             if body.get("size"):
                 recipe["bodyTextFontSize"] = round(_f(body.get("size")), 2)
-    slots = template_badge_slots(ordered, dest)
+    slots = template_badge_slots(badge_ordered, dest)
     if slots:
         recipe["badgeSlots"] = slots
-    badge_plate = template_badge_plate(ordered, dest)
+    badge_plate = template_badge_plate(badge_ordered, dest)
     if badge_plate is not None and badge_plate.w > 0:
         recipe["badgePlateDst"] = badge_plate.as_dict()
     rules = template_line_slots(template_slides, recipe.get("templateSlide"))
@@ -1406,6 +1442,10 @@ def learn_recipe(
     # are planned from and ride the panel's affine.
     wall_w0 = _f(wall.get("slideWidth"), 7680)
     wall_h0 = _f(wall.get("slideHeight"), 1080)
+    # The colour of the source page's own badge plate, so the template's badge
+    # slots can be refused when they belong to a differently-coloured object.
+    src_plate = title_plate(w_slide, (wall_w0, wall_h0)) if w_slide is not None else None
+    source_plate_color = item_rgb(src_plate) if src_plate is not None else None
     panel = None
     if w_slide is not None:
         w_vis0 = [it for it in w_slide.get("items") or [] if is_visible(it, wall_w0, wall_h0)]
@@ -1527,7 +1567,7 @@ def learn_recipe(
                 "members": 0,
             }
         ]
-        return _attach_text_style(recipe, template_slides)
+        return _attach_text_style(recipe, template_slides, source_plate_color=source_plate_color)
     recipe: dict[str, Any] = {
         "destWidth": dest_w,
         "destHeight": dest_h,
@@ -1564,7 +1604,7 @@ def learn_recipe(
             }
             for g in grouped
         ]
-    return _attach_text_style(recipe, template_slides)
+    return _attach_text_style(recipe, template_slides, source_plate_color=source_plate_color)
 
 
 def cg_layout_name(name: str) -> str:
@@ -2012,12 +2052,20 @@ def template_badge_plate(
     """Where the CG template parks the badge plate — the badge affine's anchor.
 
     Read off the same slide `template_badge_slots` reads, so the affine and the
-    slots describe one badge rather than two different ones.
+    slots describe one badge rather than two different ones — which means skipping
+    a plate that carries only its title (no logo or other member), the way the
+    slots do. Otherwise a title-only plate donates the anchor while the slots come
+    from a later slide, and the badge is scaled by one badge and placed by another.
     """
     for slide in slides:
         plate = title_plate(slide, slide_size)
-        if plate is not None:
-            return item_rect(plate)
+        if plate is None:
+            continue
+        title = slide_title_item(slide, slide_size)
+        members = [it for it in badge_plate_members(slide, plate) if it is not title]
+        if not members:
+            continue
+        return item_rect(plate)
     return None
 
 

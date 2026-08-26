@@ -1247,6 +1247,64 @@ def test_centre_panel_panorama_frames_one_to_one_over_overlaid_thumbnails():
     assert len(placed) >= 10
 
 
+def test_badge_ignores_a_differently_coloured_template_label_and_borrows_the_real_slot():
+    """A plain-map layout's in-map label must not capture the source badge.
+
+    Template slide 1 is a map whose only text is a white label sitting in the
+    middle of it. The source's cyan badge (a plate, a logo and its word) must not
+    snap onto that white label mid-map; it borrows the deck's real badge slot from
+    slide 2, whose plate is the badge's own colour, and lands top-left."""
+    cyan = [0.13, 1.0, 1.0]
+    white = [1.0, 1.0, 1.0]
+    # Source: a top-left cyan badge (plate + logo + word) over a wide map.
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="China.pdf", x=2200, y=-100, w=3600, h=1280),
+                    _item(kind="shape", x=1953, y=28, w=740, h=173, color=cyan),
+                    _item(kind="image", fileName="globe.pdf", x=1992, y=52, w=124, h=124),
+                    _item(kind="text", text="China", x=2458, y=51, w=198, h=124, size=60, color=cyan),
+                ],
+            }
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            # A plain map with a white in-map province label, like template 10.
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="China.pdf", x=226, y=61, w=1364, h=947),
+                    _item(kind="shape", x=628, y=537, w=212, h=46, color=white),
+                    _item(kind="text", text="Province", x=638, y=537, w=192, h=46, size=20, color=white),
+                ],
+            },
+            # The deck's real badge slot: a cyan plate with a logo, top-left.
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="image", fileName="China.pdf", x=226, y=61, w=1364, h=947),
+                    _item(kind="shape", x=17, y=37, w=411, h=123, color=cyan),
+                    _item(kind="image", fileName="globe.pdf", x=31, y=59, w=80, h=80),
+                    _item(kind="text", text="China", x=135, y=67, w=271, h=64, size=40, color=cyan),
+                ],
+            },
+        ],
+    }
+    recipe = learn_recipe(wall, template, template_slide=1)  # pin the plain-map layout
+    # The badge home is slide 2's cyan plate, not slide 1's white label mid-map.
+    assert recipe.get("badgePlateDst") == {"x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0}
+    plate = next(t for t in plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080))
+                 if t.kind == "shape" and t.w > 300)
+    assert 0 <= plate.x + plate.w / 2 <= 1920 and plate.y + plate.h / 2 <= 300  # top-left, on-frame
+
+
 def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     """A verse paragraph lands in the template's body box at the template's size,
     rather than keeping its wall width at the scene's 1:1 scale. Source font and
