@@ -688,79 +688,94 @@ def _run_superscript_fix(
     }
 
 
-def _group_leaf_writes(container: str) -> list[str]:
-    """AppleScript that scales every LEAF (non-group iWork item) of `container`.
+def _stat_leaf_font_writes(container: str) -> list[str]:
+    """AppleScript that sets each matched stat text leaf of `container` to the size
+    the template teaches for that number, in place.
 
-    Iterates ``iWork items`` — the *distinct* children — not the per-type
-    collections, because a text-bearing shape is listed in BOTH ``text items`` and
-    ``shapes`` (SKILL: "a text box is also a shape"), so iterating those separately
-    scales it twice (``s^2``). AppleScript can enumerate and index a group's
-    ``iWork items`` (unlike JXA), so this walks them once and skips any nested group
-    (the caller recurses into sub-groups one level; a group node is never written —
-    plan B2).
-
-    Mirrors ``map_remap.child_target`` around the top-level group origin ``{ox, oy}``
-    with per-job scale ``jobScale``: width/height/font scale by ``jobScale`` and
-    position scales toward the live origin. Because JXA already moved the whole group
-    to its anchor, each leaf's live position already carries the translation, so
-    scaling around the live origin reproduces ``anchor + (wallLeaf - wallOrigin)*s``
-    with no double-count (plan B1); the arithmetic is identical at any depth, so
-    nesting cannot compound. Height scales on every leaf — a text-bearing shape keeps
-    a fixed height that must shrink, and a pure text box autofits harmlessly to the
-    same ``h*s`` because the font scaled too. Size writes only on a uniform run
-    (``size of character 1 == size of character -1``); a multi-size run is left alone
-    and counted in ``sizeSkips``. ``object text`` errors on an image, so the size
-    block's ``try`` skips it. Each leaf's writes sit in their own ``try``.
+    Iterates ``iWork items`` (the *distinct* children — a text-bearing shape is listed
+    in BOTH ``text items`` and ``shapes``, so iterating those separately would touch it
+    twice; SKILL). Skips nested groups (the caller recurses one level). For each text
+    leaf it looks the trimmed content up in ``statSizeFor`` (the template's
+    ``{number: size}`` map, embedded as a handler); a hit sets ``size of characters 1
+    thru -1`` to that size — only on a uniform run, so bold/coloured runs are never
+    flattened. Position and box are left alone: the wall crop preserves the 1080 frame
+    height, so a wall-authored number is already correctly sized *relative to the
+    frame* — the template just refines the exact point size (e.g. 269 300->200).
+    Non-number leaves (labels) match nothing and are left untouched.
     """
     return [
         f"  repeat with _i from 1 to count of iWork items of {container}",
         "    try",
         f"      set _leaf to iWork item _i of {container}",
         "      if (class of _leaf) is not group then",
-        "        set _pos to position of _leaf",
-        "        set _lx to item 1 of _pos",
-        "        set _ly to item 2 of _pos",
-        "        set _lw to width of _leaf",
-        "        set _lh to height of _leaf",
         "        try",
-        "          set _c1 to size of character 1 of object text of _leaf",
-        "          set _cN to size of character -1 of object text of _leaf",
-        "          if _c1 = _cN then",
-        "            set size of characters 1 thru -1 of object text of _leaf to _c1 * jobScale",
-        "          else",
-        "            set sizeSkips to sizeSkips + 1",
+        "          set _str to (object text of _leaf as string)",
+        "          set _tgt to my statSizeFor(_str)",
+        "          if _tgt > 0 then",
+        "            set _c1 to size of character 1 of object text of _leaf",
+        "            set _cN to size of character -1 of object text of _leaf",
+        "            if _c1 = _cN then",
+        "              set size of characters 1 thru -1 of object text of _leaf to _tgt",
+        "              set sized to sized + 1",
+        "            else",
+        "              set sizeSkips to sizeSkips + 1",
+        "            end if",
         "          end if",
         "        end try",
-        "        set width of _leaf to _lw * jobScale",
-        "        set height of _leaf to _lh * jobScale",
-        "        set position of _leaf to {ox + (_lx - ox) * jobScale, oy + (_ly - oy) * jobScale}",
-        "        set leavesWritten to leavesWritten + 1",
         "      end if",
         "    end try",
         "  end repeat",
     ]
 
 
-def _build_group_child_resize_script(dest: Path, jobs: list[dict]) -> str:
-    """Post-JXA pass: shrink each stat group's wall-size leaves to CG size in place.
+def _stat_size_handler(size_map: dict) -> list[str]:
+    """A top-level ``statSizeFor`` handler returning the template size for a number
+    string (trimmed), else 0. Keys are matched exactly after trimming whitespace."""
+    lines = ["on statSizeFor(theStr)"]
+    # Trim leading/trailing whitespace and newlines so ' 269 ' matches '269'.
+    lines += [
+        '  set _t to theStr',
+        '  repeat while _t starts with " " or _t starts with tab or _t starts with return or _t starts with linefeed',
+        "    if (count of _t) is 0 then exit repeat",
+        "    set _t to text 2 thru -1 of _t",
+        "  end repeat",
+        '  repeat while _t ends with " " or _t ends with tab or _t ends with return or _t ends with linefeed',
+        "    if (count of _t) is 0 then exit repeat",
+        "    set _t to text 1 thru -2 of _t",
+        "  end repeat",
+    ]
+    for content, size in size_map.items():
+        key = _as_escape(str(content).strip())
+        lines.append(f'  if _t is "{key}" then return {float(size)}')
+    lines += ["  return 0", "end statSizeFor"]
+    return lines
 
-    JXA parks every stat group at wall size and packs the wall-size boxes because it
-    cannot scale a group or reach its children, so the numbers render far too big for
-    a 1920 CG. This reopens the saved copy and, for each ``{slide, groupIndex, s}``
-    job, walks the group's leaves (recursing one level into nested groups) and writes
-    each leaf's size/width/position via ``child_target`` around the group's live
-    origin. Pure Keynote scripting — no ungroup, no System Events, no Accessibility.
 
-    Self-verifying: each job is wrapped in a ``try`` so a group index that does not
-    resolve is skipped and reported (the JXA whole-group move stays as the fallback),
-    and a group that resolves to zero leaves is treated as an implausible readback and
-    skipped too. Reports per-job leaf counts and skips on stdout.
+def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) -> str:
+    """Post-JXA pass: give each stat number the template's font size, then bring the
+    stat groups and the Global Missions badge to the front (above the map).
+
+    Two things the 1st (JXA) pass cannot do because a group is opaque to JXA and it
+    has no arrange command: (1) set the inner number's point size to what the template
+    teaches (e.g. 269 -> 200pt, 183 -> 150pt), and (2) lift the stat text and badge in
+    front of the map they were authored behind. Both are AppleScript: the font set is
+    plain scripting; the front-raise is Arrange > Bring to Front driven through System
+    Events on a selection set by reference (needs Accessibility, like the superscript
+    pass). If Accessibility is off, the sizes still land and the front-raise is skipped
+    and reported.
+
+    Each job is ``{slide, groupIndex}``; the group is addressed by index (JXA and
+    AppleScript agree on group order). Font sizing is guarded so a non-uniform run is
+    left alone; the whole job is wrapped so an unresolved index is skipped and reported
+    (the JXA placement stays as the fallback).
     """
     if not jobs:
         return ""
     escaped = _as_escape(str(dest))
     doc_name = _as_escape(Path(dest).name)
-    lines = [
+    slides = sorted({int(j["slide"]) for j in jobs})
+    lines: list[str] = list(_stat_size_handler(size_map))
+    lines += [
         _keynote_terms(),
         _keynote_tell(),
         "  activate",
@@ -775,65 +790,103 @@ def _build_group_child_resize_script(dest: Path, jobs: list[dict]) -> str:
         "  set theDoc to document 1",
         "  set doneJobs to 0",
         "  set skipJobs to 0",
-        "  set leavesWritten to 0",
+        "  set sized to 0",
         "  set sizeSkips to 0",
         '  set report to ""',
     ]
+    # Phase 1 — template-taught number sizes (plain scripting).
     for job in jobs:
         slide = int(job["slide"])
         group_index = int(job["groupIndex"])
-        scale = float(job["s"])
         lines += [
-            f"  -- slide {slide}, group {group_index}, s {scale}",
+            f"  -- slide {slide}, group {group_index}",
             "  try",
-            f"    set jobScale to {scale}",
             f"    set g to group {group_index} of slide {slide} of theDoc",
-            "    set _o to position of g",
-            "    set ox to item 1 of _o",
-            "    set oy to item 2 of _o",
-            "    set leafCount to (count of text items of g) + (count of shapes of g) "
-            "+ (count of images of g)",
-            "    repeat with _gi from 1 to count of groups of g",
-            "      set _sub to group _gi of g",
-            "      set leafCount to leafCount + (count of text items of _sub) "
-            "+ (count of shapes of _sub) + (count of images of _sub)",
-            "    end repeat",
-            '    if leafCount = 0 then error "no-leaves"',
         ]
-        lines += _group_leaf_writes("g")
+        lines += _stat_leaf_font_writes("g")
         lines += [
             "    repeat with _gi from 1 to count of groups of g",
             "      set _sub to group _gi of g",
         ]
-        lines += ["  " + ln for ln in _group_leaf_writes("_sub")]
+        lines += ["  " + ln for ln in _stat_leaf_font_writes("_sub")]
         lines += [
             "    end repeat",
             "    set doneJobs to doneJobs + 1",
-            f'    set report to report & " ok(s={slide},g={group_index},leaves=" '
-            "& leafCount & \")\"",
             "  on error errMsg number errNum",
             "    set skipJobs to skipJobs + 1",
             f'    set report to report & " skip(s={slide},g={group_index},err=" '
             '& errNum & ":" & errMsg & ")"',
             "  end try",
         ]
+    lines += ["  save theDoc"]
+    # Phase 2 — z-order: bring stat groups (and the badge) to the front. Selection by
+    # reference then Arrange > Bring to Front through System Events.
+    lines += ['  set frontRaised to 0', '  set frontErr to ""']
+    for job in jobs:
+        slide = int(job["slide"])
+        group_index = int(job["groupIndex"])
+        lines += [
+            "  try",
+            f"    set selection of theDoc to {{group {group_index} of slide {slide} of theDoc}}",
+            "  end try",
+        ]
+        lines += _bring_selection_to_front()
+    # The Global Missions badge: find its group / loose item on each stat slide.
+    for slide in slides:
+        lines += [
+            f"  -- badge on slide {slide}",
+            "  try",
+            f"    tell slide {slide} of theDoc",
+            "      repeat with _gi from 1 to count of groups",
+            "        set _bg to group _gi",
+            "        set _hit to false",
+            "        repeat with _ti from 1 to count of text items of _bg",
+            '          try',
+            '            if (object text of text item _ti of _bg as string) contains "Global Missions" then set _hit to true',
+            "          end try",
+            "        end repeat",
+            "        if _hit then set selection of theDoc to {_bg}",
+            "      end repeat",
+            "    end tell",
+            "  end try",
+        ]
+        lines += _bring_selection_to_front()
     lines += [
-        "  save theDoc",
         "  try",
+        "    save theDoc",
         "    close theDoc saving yes",
         "  end try",
         "  end timeout",
-        '  return "done=" & doneJobs & " skipped=" & skipJobs & " leaves=" '
-        '& leavesWritten & " sizeSkips=" & sizeSkips & " detail=" & report',
+        '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
+        '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " frontErr=" '
+        '& frontErr & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
     return "\n".join(lines)
 
 
-def _run_group_child_resize(dest: Path, jobs: list[dict]) -> dict:
-    """Run the child-resize AppleScript pass on `dest`; no-op when `jobs` is empty."""
-    script = _build_group_child_resize_script(Path(dest), jobs)
+def _bring_selection_to_front() -> list[str]:
+    """Click Arrange > Bring to Front on the current selection via System Events.
+    Counts a success in ``frontRaised``; a failure (e.g. Accessibility off) is caught
+    and appended to ``frontErr`` so the sizes still stand."""
+    return [
+        "  delay 0.35",
+        "  try",
+        "    " + _keynote_process_tell(),
+        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
+        "    end tell",
+        "    set frontRaised to frontRaised + 1",
+        "    delay 0.2",
+        "  on error errMsg number errNum",
+        '    set frontErr to frontErr & " [" & errNum & "]"',
+        "  end try",
+    ]
+
+
+def _run_stat_finalize(dest: Path, jobs: list[dict], size_map: dict) -> dict:
+    """Run the stat-finalize pass (template sizes + bring-to-front); no-op if empty."""
+    script = _build_stat_finalize_script(Path(dest), jobs, size_map or {})
     if not script:
         return {"ok": True, "skipped": True, "done": 0, "jobs": 0}
     subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
@@ -858,18 +911,113 @@ def _run_group_child_resize(dest: Path, jobs: list[dict]) -> dict:
 
     ok = proc.returncode == 0 and bool(raw)
     if not ok:
-        debug = Path(dest).with_suffix(".group-resize.applescript")
+        debug = Path(dest).with_suffix(".stat-finalize.applescript")
         debug.write_text(script, encoding="utf-8")
     return {
         "ok": ok,
         "jobs": len(jobs),
         "done": _num("done"),
         "skipped": _num("skipped"),
-        "leaves": _num("leaves"),
+        "sized": _num("sized"),
         "sizeSkips": _num("sizeSkips"),
+        "front": _num("front"),
         "raw": raw,
         "stderr": proc.stderr or "",
     }
+
+
+def read_template_stat_sizes(template: Path) -> dict[str, float]:
+    """AppleScript-read the CG template's numeric text (grouped and loose) into a
+    ``{digits: font size}`` map, so the stat-finalize pass can give a wall number the
+    size the template teaches (e.g. ``269`` -> 200pt, ``183`` -> 150pt).
+
+    JXA's swatch harvest misses numbers that sit inside a group (a group is opaque to
+    JXA), which is exactly where the hero stats live on the template — so this reads
+    them in AppleScript. Only all-digit content is kept (labels and the date are left
+    for the wall size); the largest size wins if a number appears more than once.
+    Read-only: opens, walks, closes without saving. One open per remap — cache by
+    template digest if it ever bites.
+    """
+    template = Path(template)
+    escaped = _as_escape(str(template))
+    doc_name = _as_escape(template.name)
+    lines = [
+        _keynote_terms(),
+        _keynote_tell(),
+        "  activate",
+        "  with timeout of 400 seconds",
+        "  try",
+        f'    close (every document whose name is "{doc_name}") saving no',
+        "    delay 0.3",
+        "  end try",
+        f'  set theFile to POSIX file "{escaped}"',
+        "  open theFile",
+        "  delay 0.4",
+        "  set theDoc to document 1",
+        '  set report to ""',
+        "  repeat with s from 1 to count of slides of theDoc",
+        "    tell slide s of theDoc",
+        "      repeat with ti from 1 to count of text items",
+        "        try",
+        "          set _t to text item ti",
+        '          set report to report & (object text of _t as string) & tab & (size of character 1 of object text of _t) & linefeed',
+        "        end try",
+        "      end repeat",
+        "      repeat with gi from 1 to count of groups",
+        "        set g to group gi",
+        "        repeat with ti from 1 to count of text items of g",
+        "          try",
+        "            set _t to text item ti of g",
+        '            set report to report & (object text of _t as string) & tab & (size of character 1 of object text of _t) & linefeed',
+        "          end try",
+        "        end repeat",
+        "        repeat with sgi from 1 to count of groups of g",
+        "          set sg to group sgi of g",
+        "          repeat with ti from 1 to count of text items of sg",
+        "            try",
+        "              set _t to text item ti of sg",
+        '              set report to report & (object text of _t as string) & tab & (size of character 1 of object text of _t) & linefeed',
+        "            end try",
+        "          end repeat",
+        "        end repeat",
+        "      end repeat",
+        "    end tell",
+        "  end repeat",
+        "  try",
+        "    close theDoc saving no",
+        "  end try",
+        "  end timeout",
+        "  return report",
+        "end tell",
+        "end using terms from",
+    ]
+    script = "\n".join(lines)
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osascript", str(script_path)], capture_output=True, text=True, check=False
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    sizes: dict[str, float] = {}
+    for line in (proc.stdout or "").splitlines():
+        if "\t" not in line:
+            continue
+        content, _, raw_size = line.rpartition("\t")
+        key = content.strip()
+        if not key.isdigit():
+            continue
+        try:
+            size = float(raw_size)
+        except ValueError:
+            continue
+        if size > sizes.get(key, 0.0):
+            sizes[key] = size
+    return sizes
 
 
 # Accessibility is off: System Events cannot drive Keynote's menus.

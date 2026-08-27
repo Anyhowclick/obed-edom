@@ -2917,7 +2917,10 @@ def plan_slide_transforms(
         _pack_list_transforms(out, recipe)
     # Left-column groups the affine parked at x=16: pack them so they stop stacking
     # on one margin. Unconditional — this fires whether or not side content is kept.
-    _pack_left_groups(left_groups, recipe, scale=TEXT_DOWN_SCALE)
+    # Pack the parked-left groups at wall size: the crop preserves frame height, so
+    # the wall-authored numbers are already correctly sized; the stat-finalize pass
+    # only refines each number's point size to the template and brings it to front.
+    _pack_left_groups(left_groups, recipe)
     # Fit only the body verse. Labels, plates and images are left where the
     # template and affine placed them — bleeding off an edge is often deliberate.
     if body_tf is not None:

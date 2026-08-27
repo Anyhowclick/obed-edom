@@ -11,7 +11,7 @@ from typing import Any
 
 from obed_edom import keynote_app
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
-from obed_edom.keynote import _run_group_child_resize
+from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
     navigator_numbering,
     CG_HEIGHT,
@@ -393,27 +393,36 @@ def remap_keynote(
         say(f"Canvas after remap: {actual_w}×{actual_h}.")
     if jxa.get("skippedSlides"):
         say(f"Skipped {jxa.get('skippedSlides')} other slide(s) so the preview is this slide only.")
-    # JXA parked each stat group at wall size (it cannot scale a group or reach its
-    # children), so an AppleScript pass now shrinks each group's leaves in place to
-    # CG size. No-op when the plan emitted no stat-group jobs; the JXA whole-group
-    # move stays as the fallback for any group this pass reports it could not resolve.
+    # The wall crop keeps the 1080 frame height, so a wall-authored stat number is
+    # already correctly sized relative to the frame — the JXA placement is fine. Two
+    # things JXA can't do: give each number the exact point size the template teaches
+    # (a group is opaque to JXA), and lift the stat text + Global Missions badge in
+    # front of the map they were authored behind. An AppleScript pass does both. No-op
+    # when the plan emitted no stat-group jobs.
     child_resize_result: dict[str, Any] | None = None
     if child_resize:
-        say(f"Resizing children of {len(child_resize)} stat group(s) to CG size…")
-        child_resize_result = _run_group_child_resize(dest, child_resize)
+        stat_sizes = read_template_stat_sizes(template_path)
+        say(
+            f"Finalizing {len(child_resize)} stat group(s): template sizes "
+            f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'}) "
+            "+ bring to front."
+        )
+        child_resize_result = _run_stat_finalize(dest, child_resize, stat_sizes)
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
-        leaves = child_resize_result.get("leaves") or 0
+        sized = child_resize_result.get("sized") or 0
+        front = child_resize_result.get("front") or 0
         if child_resize_result.get("ok"):
             say(
-                f"Child-resize pass: {done} group(s) done, {leaves} leaf/leaves scaled"
-                + (f", {skipped} group(s) skipped (fell back to the whole-group move)" if skipped else "")
+                f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
+                f"the template, {front} object(s) brought to front"
+                + (f", {skipped} skipped" if skipped else "")
                 + "."
             )
         else:
             say(
-                "Child-resize pass did not complete; stat groups stay at the JXA "
-                "whole-group placement. See the .group-resize.applescript dump."
+                "Stat-finalize pass did not complete; stat groups stay at the JXA "
+                "placement/size. See the .stat-finalize.applescript dump."
             )
     result: dict[str, Any] = {
         "source": str(source),
