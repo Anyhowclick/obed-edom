@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -683,6 +684,184 @@ def _run_superscript_fix(
         "boxes": verdict["boxes"],
         "accessibilityDenied": verdict["accessibilityDenied"],
         "exported": verdict["exported"],
+        "stderr": proc.stderr or "",
+    }
+
+
+def _group_leaf_writes(container: str) -> list[str]:
+    """AppleScript that scales every leaf (text item / shape / image) of `container`.
+
+    Mirrors ``map_remap.child_target`` exactly, around the top-level group origin
+    ``{ox, oy}`` with per-job scale ``jobScale``: width and font scale by ``jobScale``;
+    position scales toward the live origin. Because JXA already moved the whole group
+    to its anchor, each leaf's live position already carries the translation, so
+    scaling around the live origin reproduces ``anchor + (wallLeaf - wallOrigin)*s``
+    with no double-count (plan B1). Only leaves are written — never a group node
+    (plan B2) — so ``container`` is ``g`` or one of its sub-groups, and the arithmetic
+    is identical whatever the depth, so nesting cannot compound.
+
+    Write order per text leaf: size, then width, then position (size first so
+    autofit's nudge is overwritten by the explicit position). The size write only
+    fires on a uniform run (``size of character 1 == size of character -1``); a
+    multi-size run is left alone and counted in ``sizeSkips``. ``object text`` errors
+    on an image, so the size block's ``try`` simply skips it. Each leaf's writes sit
+    in their own ``try`` so one bad leaf cannot abort the whole job.
+    """
+    lines: list[str] = []
+    for element in ("text item", "shape", "image"):
+        lines += [
+            f"  repeat with _i from 1 to count of {element}s of {container}",
+            "    try",
+            f"      set _leaf to {element} _i of {container}",
+            "      set _pos to position of _leaf",
+            "      set _lx to item 1 of _pos",
+            "      set _ly to item 2 of _pos",
+            "      set _lw to width of _leaf",
+            "      try",
+            "        set _c1 to size of character 1 of object text of _leaf",
+            "        set _cN to size of character -1 of object text of _leaf",
+            "        if _c1 = _cN then",
+            "          set size of characters 1 thru -1 of object text of _leaf to _c1 * jobScale",
+            "        else",
+            "          set sizeSkips to sizeSkips + 1",
+            "        end if",
+            "      end try",
+            "      set width of _leaf to _lw * jobScale",
+            "      set position of _leaf to {ox + (_lx - ox) * jobScale, oy + (_ly - oy) * jobScale}",
+            "      set leavesWritten to leavesWritten + 1",
+            "    end try",
+            "  end repeat",
+        ]
+    return lines
+
+
+def _build_group_child_resize_script(dest: Path, jobs: list[dict]) -> str:
+    """Post-JXA pass: shrink each stat group's wall-size leaves to CG size in place.
+
+    JXA parks every stat group at wall size and packs the wall-size boxes because it
+    cannot scale a group or reach its children, so the numbers render far too big for
+    a 1920 CG. This reopens the saved copy and, for each ``{slide, groupIndex, s}``
+    job, walks the group's leaves (recursing one level into nested groups) and writes
+    each leaf's size/width/position via ``child_target`` around the group's live
+    origin. Pure Keynote scripting — no ungroup, no System Events, no Accessibility.
+
+    Self-verifying: each job is wrapped in a ``try`` so a group index that does not
+    resolve is skipped and reported (the JXA whole-group move stays as the fallback),
+    and a group that resolves to zero leaves is treated as an implausible readback and
+    skipped too. Reports per-job leaf counts and skips on stdout.
+    """
+    if not jobs:
+        return ""
+    escaped = _as_escape(str(dest))
+    doc_name = _as_escape(Path(dest).name)
+    lines = [
+        _keynote_terms(),
+        _keynote_tell(),
+        "  activate",
+        "  with timeout of 600 seconds",
+        "  try",
+        f'    close (every document whose name is "{doc_name}") saving no',
+        "    delay 0.3",
+        "  end try",
+        f'  set theFile to POSIX file "{escaped}"',
+        "  open theFile",
+        "  delay 0.4",
+        "  set theDoc to document 1",
+        "  set doneJobs to 0",
+        "  set skipJobs to 0",
+        "  set leavesWritten to 0",
+        "  set sizeSkips to 0",
+        '  set report to ""',
+    ]
+    for job in jobs:
+        slide = int(job["slide"])
+        group_index = int(job["groupIndex"])
+        scale = float(job["s"])
+        lines += [
+            f"  -- slide {slide}, group {group_index}, s {scale}",
+            "  try",
+            f"    set jobScale to {scale}",
+            f"    set g to group {group_index} of slide {slide} of theDoc",
+            "    set _o to position of g",
+            "    set ox to item 1 of _o",
+            "    set oy to item 2 of _o",
+            "    set leafCount to (count of text items of g) + (count of shapes of g) "
+            "+ (count of images of g)",
+            "    repeat with _gi from 1 to count of groups of g",
+            "      set _sub to group _gi of g",
+            "      set leafCount to leafCount + (count of text items of _sub) "
+            "+ (count of shapes of _sub) + (count of images of _sub)",
+            "    end repeat",
+            '    if leafCount = 0 then error "no-leaves"',
+        ]
+        lines += _group_leaf_writes("g")
+        lines += [
+            "    repeat with _gi from 1 to count of groups of g",
+            "      set _sub to group _gi of g",
+        ]
+        lines += ["  " + ln for ln in _group_leaf_writes("_sub")]
+        lines += [
+            "    end repeat",
+            "    set doneJobs to doneJobs + 1",
+            f'    set report to report & " ok(s={slide},g={group_index},leaves=" '
+            "& leafCount & \")\"",
+            "  on error errMsg number errNum",
+            "    set skipJobs to skipJobs + 1",
+            f'    set report to report & " skip(s={slide},g={group_index},err=" '
+            '& errNum & ":" & errMsg & ")"',
+            "  end try",
+        ]
+    lines += [
+        "  save theDoc",
+        "  try",
+        "    close theDoc saving yes",
+        "  end try",
+        "  end timeout",
+        '  return "done=" & doneJobs & " skipped=" & skipJobs & " leaves=" '
+        '& leavesWritten & " sizeSkips=" & sizeSkips & " detail=" & report',
+        "end tell",
+        "end using terms from",
+    ]
+    return "\n".join(lines)
+
+
+def _run_group_child_resize(dest: Path, jobs: list[dict]) -> dict:
+    """Run the child-resize AppleScript pass on `dest`; no-op when `jobs` is empty."""
+    script = _build_group_child_resize_script(Path(dest), jobs)
+    if not script:
+        return {"ok": True, "skipped": True, "done": 0, "jobs": 0}
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osascript", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    raw = (proc.stdout or "").strip()
+
+    def _num(key: str) -> int:
+        match = re.search(rf"{key}=(\d+)", raw)
+        return int(match.group(1)) if match else 0
+
+    ok = proc.returncode == 0 and bool(raw)
+    if not ok:
+        debug = Path(dest).with_suffix(".group-resize.applescript")
+        debug.write_text(script, encoding="utf-8")
+    return {
+        "ok": ok,
+        "jobs": len(jobs),
+        "done": _num("done"),
+        "skipped": _num("skipped"),
+        "leaves": _num("leaves"),
+        "sizeSkips": _num("sizeSkips"),
+        "raw": raw,
         "stderr": proc.stderr or "",
     }
 
