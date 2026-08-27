@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +27,159 @@ from obed_edom.map_remap import (
 )
 
 REMAP_JS = Path(__file__).resolve().parent / "remap_keynote.js"
+
+# AppleScript element names for the kinds the plan carries. The AppleScript index
+# is the JXA 0-based collection index plus one (same sdef collection, same order).
+_AS_KIND_NAMES = {
+    "text": "text item",
+    "image": "image",
+    "shape": "shape",
+    "movie": "movie",
+    "group": "group",
+    "line": "line",
+}
+
+
+def as_geometry_enabled() -> bool:
+    """Whether OBED_AS_GEOMETRY selects the batched-AppleScript geometry path.
+
+    Flag OFF (default) leaves the plan without the geometry keys, so the JXA
+    apply is byte-for-byte its current behaviour.
+    """
+    return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_num(value: Any) -> str:
+    """AppleScript numeric literal: an integer when whole, else a 2dp decimal."""
+    number = float(value)
+    if number == int(number):
+        return str(int(number))
+    return repr(round(number, 2))
+
+
+def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> str:
+    """One `tell slide N` block setting geometry for each object on that slide.
+
+    Written in Python (not JXA) so a pytest can lock the exact string, and safe to
+    address by slide number because non-reuse slide numbering is stable through
+    the JXA loop (a reuse duplicate is deleted before the next slide, restoring
+    the count). Objects are addressed ``<kind> (kindIndex + 1)`` — the 1-based
+    AppleScript twin of the JXA 0-based collection index.
+
+    Width/height are written before position because an AppleScript height write
+    re-anchors ~18px about the object centre, which the final position write
+    corrects; unlike JXA, AppleScript does not yank an object to (0,0) on a size
+    write, so no position-only restore pass follows. A line's geometry is its
+    endpoints (``start point``/``end point``), which AppleScript can set even
+    though JXA cannot. A group's size is owned by the separate child-resize pass,
+    so a group gets position only. Every object's writes sit inside their own
+    ``try`` so an unsupported property never abandons the rest of the slide, and a
+    locked object is unlocked before the writes and relocked after.
+    """
+    body: list[str] = []
+    for spec in specs:
+        if spec.get("role") == "hide":
+            continue
+        kind = str(spec.get("kind") or "")
+        name = _AS_KIND_NAMES.get(kind)
+        if not name:
+            continue
+        kind_index = spec.get("kindIndex")
+        if kind_index is None:
+            kind_index = spec.get("itemIndex")
+        if kind_index is None:
+            continue
+        addr = f"{name} {int(kind_index) + 1}"
+        lines = [
+            "  try",
+            f"    set theObj to {addr}",
+            "    set wasLocked to false",
+            "    try",
+            "      if locked of theObj then",
+            "        set locked of theObj to false",
+            "        set wasLocked to true",
+            "      end if",
+            "    end try",
+        ]
+        start = spec.get("start")
+        end = spec.get("end")
+        x = spec.get("x")
+        y = spec.get("y")
+        if kind == "line" and start and end:
+            lines += [
+                "    try",
+                f"      set start point of theObj to {{{_as_num(start[0])}, {_as_num(start[1])}}}",
+                "    end try",
+                "    try",
+                f"      set end point of theObj to {{{_as_num(end[0])}, {_as_num(end[1])}}}",
+                "    end try",
+            ]
+        elif kind == "group":
+            if x is not None and y is not None:
+                lines += [
+                    "    try",
+                    f"      set position of theObj to {{{_as_num(x)}, {_as_num(y)}}}",
+                    "    end try",
+                ]
+        else:
+            if spec.get("w") is not None:
+                lines += [
+                    "    try",
+                    f"      set width of theObj to {_as_num(spec['w'])}",
+                    "    end try",
+                ]
+            if spec.get("h") is not None:
+                lines += [
+                    "    try",
+                    f"      set height of theObj to {_as_num(spec['h'])}",
+                    "    end try",
+                ]
+            if x is not None and y is not None:
+                lines += [
+                    "    try",
+                    f"      set position of theObj to {{{_as_num(x)}, {_as_num(y)}}}",
+                    "    end try",
+                ]
+        lines += [
+            "    try",
+            "      if wasLocked then set locked of theObj to true",
+            "    end try",
+            "  end try",
+        ]
+        body += lines
+    if not body:
+        return ""
+    # A large deck's geometry can run well past osascript's 120s default.
+    return "\n".join(
+        ["with timeout of 3600 seconds", f"tell slide {int(slide_no)}"]
+        + body
+        + ["end tell", "end timeout"]
+    )
+
+
+def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
+    """Per-slide AppleScript geometry bodies, keyed by slide number as a string.
+
+    Built from the same transform dicts sent to JXA so the addressing matches
+    object for object. The JXA loop uses a slide's body only on the non-reuse
+    path; a slide handled by the reuse path ignores it.
+    """
+    by_slide: dict[int, list[dict[str, Any]]] = {}
+    order: list[int] = []
+    for spec in transform_dicts:
+        slide_no = int(spec.get("slide") or 0)
+        if slide_no < 1:
+            continue
+        if slide_no not in by_slide:
+            by_slide[slide_no] = []
+            order.append(slide_no)
+        by_slide[slide_no].append(spec)
+    out: dict[str, str] = {}
+    for slide_no in order:
+        body = _build_slide_geometry_script(by_slide[slide_no], slide_no)
+        if body:
+            out[str(slide_no)] = body
+    return out
 
 
 def _run_jxa(plan: dict[str, Any]) -> dict[str, Any]:
@@ -343,14 +497,24 @@ def remap_keynote(
         say(f"Copying 16:9 slide layouts from {template_path.name} onto the wall copy…")
         copy_keynote(template_path, layout_src)
         say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
+        transform_dicts = [t.as_dict() for t in transforms]
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
             "width": int(recipe.get("destWidth") or CG_WIDTH),
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
-            "transforms": [t.as_dict() for t in transforms],
+            "transforms": transform_dicts,
             "reuses": reuses,
         }
+        if as_geometry_enabled():
+            # Non-reuse slides get their w/h/position written by a batched
+            # AppleScript block (no JXA (0,0) flick); reuse slides stay on JXA.
+            plan["asGeometry"] = True
+            plan["asGeom"] = _build_as_geometry(transform_dicts)
+            say(
+                "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
+                f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."
+            )
         wanted = slides_for_plan(slide_range)
         if wanted:
             plan["slides"] = wanted

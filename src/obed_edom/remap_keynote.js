@@ -132,7 +132,18 @@ function xyOf(obj) {
   }
 }
 
-function applyGeom(obj, spec, positionOnly) {
+// mode selects what applyGeom writes:
+//   "full"  — attributes (opacity/font/size/colour) AND geometry (w/h/position).
+//             The original positionOnly=false behaviour.
+//   "pos"   — position only. The original positionOnly=true behaviour.
+//   "attrs" — attributes only, NO geometry. Used by the OBED_AS_GEOMETRY path so
+//             the yank-free AppleScript geometry block owns w/h/position and this
+//             JXA pass only touches the non-yanking attributes.
+function applyGeom(obj, spec, mode) {
+  mode = mode || "full";
+  const writeAttrs = mode !== "pos"; // opacity/font/size/colour
+  const writeSize = mode === "full"; // width/height (yanks in JXA — never in "attrs")
+  const writePos = mode !== "attrs"; // position (yanks in JXA — never in "attrs")
   let ok = false;
   let wasLocked = false;
   try {
@@ -143,20 +154,20 @@ function applyGeom(obj, spec, positionOnly) {
       obj.locked = false;
     } catch (eU) {}
   }
-  if (!positionOnly && spec.opacity != null) {
+  if (writeAttrs && spec.opacity != null) {
     try {
       obj.opacity = spec.opacity;
       ok = true;
     } catch (eO) {}
   }
   // Never set size in a position-only pass. Setting width/height yanks the object to (0,0).
-  if (!positionOnly && spec.w != null) {
+  if (writeSize && spec.w != null) {
     try {
       obj.width = spec.w;
       ok = true;
     } catch (eW) {}
   }
-  if (!positionOnly && spec.h != null) {
+  if (writeSize && spec.h != null) {
     try {
       obj.height = spec.h;
       ok = true;
@@ -166,19 +177,20 @@ function applyGeom(obj, spec, positionOnly) {
   // even on a line created with them, and *writing* them collapses the line to
   // one unit long. A 383px divider came out at w=1. `width` is the length —
   // Keynote reports it that way whichever direction the line runs — and setting
-  // it works, so the size pass above is what places a rule.
+  // it works, so the size pass above is what places a rule. (AppleScript CAN set
+  // a line's start/end points, so the OBED_AS_GEOMETRY block uses those instead.)
   // See scripts/probe_line.js.
-  if (!positionOnly && spec.font) {
+  if (writeAttrs && spec.font) {
     try {
       obj.objectText.font = spec.font;
     } catch (eFn) {}
   }
-  if (!positionOnly && spec.fontSize) {
+  if (writeAttrs && spec.fontSize) {
     try {
       obj.objectText.size = spec.fontSize;
     } catch (eF) {}
   }
-  if (!positionOnly && spec.color && spec.color.length >= 3) {
+  if (writeAttrs && spec.color && spec.color.length >= 3) {
     try {
       obj.objectText.color = spec.color;
     } catch (eC1) {
@@ -187,7 +199,7 @@ function applyGeom(obj, spec, positionOnly) {
       } catch (eC2) {}
     }
   }
-  if (spec.role !== "hide" && spec.x != null && spec.y != null) {
+  if (writePos && spec.role !== "hide" && spec.x != null && spec.y != null) {
     if (setPos(obj, spec.x, spec.y)) {
       ok = true;
     }
@@ -249,9 +261,13 @@ function keystroke(cmd) {
 }
 
 function applySpec(obj, spec) {
+  // The reuse path keeps the JXA geometry writes (full pass, then a position-only
+  // restore) regardless of OBED_AS_GEOMETRY: pasted/mutated objects land at the
+  // end of their collection, so their live index no longer equals the wall
+  // kindIndex the AppleScript block would address. See the summary's reuse note.
   if (!obj || !spec || spec.x == null) return false;
-  const a = applyGeom(obj, spec, false);
-  applyGeom(obj, spec, true);
+  const a = applyGeom(obj, spec, "full");
+  applyGeom(obj, spec, "pos");
   return a;
 }
 
@@ -503,7 +519,8 @@ function readMapGeom(slides, transforms) {
   return null;
 }
 
-function applyTransforms(slides, transforms, collectionsOut, missReasons, positionOnly) {
+function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) {
+  mode = mode || "full";
   let applied = 0;
   let missed = 0;
   for (let t = 0; t < transforms.length; t++) {
@@ -540,7 +557,12 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
       }
       continue;
     }
-    if (applyGeom(obj, spec, positionOnly)) {
+    const wrote = applyGeom(obj, spec, mode);
+    // In "attrs" mode geometry is written by the AppleScript block, not here, so a
+    // resolved object counts as applied even when it carries no JXA attribute to
+    // set (a map/pin has no opacity/font). Otherwise every geometry-only object
+    // would be miscounted as missed and could trip the "moved 0 objects" abort.
+    if (wrote || mode === "attrs") {
       applied += 1;
     } else {
       missed += 1;
@@ -719,6 +741,50 @@ function deleteTrailingSlides(dest, Keynote, keepCount) {
   return deleted;
 }
 
+function runSlideGeomScript(doc, asGeom, n, missReasons) {
+  // Run the Python-built batched geometry block for slide n against the open doc.
+  // Built in Python (see remap_keynote.py) so a pytest can lock the string, and
+  // safe to address by number because non-reuse slide numbering is stable.
+  if (!asGeom) return;
+  const body = asGeom[n];
+  if (!body) return;
+  try {
+    runAppleScript(doc, body);
+  } catch (eGeom) {
+    if (missReasons.length < 8) {
+      missReasons.push("slide " + n + " AppleScript geometry failed: " + eGeom);
+    }
+  }
+}
+
+function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missReasons, asGeometry, asGeom) {
+  const specs = transformsForSlide(transforms, n);
+  let applied = 0;
+  let missed = 0;
+  if (asGeometry) {
+    // JXA writes only the non-yanking attributes (opacity/font/size/colour); the
+    // batched AppleScript block owns w/h/position and addresses `slide n` — the
+    // SAME live slide JXA just resolved, since the reuse path restores slide
+    // numbering before the next slide runs, so a non-reuse slide's live index
+    // always equals its wall slide number n.
+    const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
+    applied += r.applied;
+    missed += r.missed;
+    runSlideGeomScript(doc, asGeom, n, missReasons);
+    // No position-only restore pass: AppleScript geometry does not yank, so the
+    // first position write sticks.
+  } else {
+    const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "full");
+    applied += r.applied;
+    missed += r.missed;
+    applyTransforms(doc.slides(), specs, null, missReasons, "pos");
+  }
+  const rd = deleteHides(doc.slides(), Keynote, specs, missReasons);
+  applied += rd.applied;
+  missed += rd.missed;
+  return { applied: applied, missed: missed };
+}
+
 function run(argv) {
   const plan = readJSON(argv[0]);
   KEYNOTE_BUNDLE_ID = plan.bundleId || KEYNOTE_BUNDLE_ID;
@@ -726,6 +792,11 @@ function run(argv) {
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.dest));
   const transforms = plan.transforms || [];
+  // OBED_AS_GEOMETRY path: Python passes asGeometry=true plus a per-slide map of
+  // pre-built AppleScript geometry bodies. Absent/false ⇒ byte-for-byte the JXA
+  // geometry behaviour.
+  const asGeometry = Boolean(plan.asGeometry);
+  const asGeom = plan.asGeom || null;
   const width = Number(plan.width) || 1920;
   const height = Number(plan.height) || 1080;
   const collections = {};
@@ -777,35 +848,22 @@ function run(argv) {
         appliedFirst += r.applied || 0;
         missedFirst += r.missed || 0;
       } else {
-        const r2 = applyTransforms(
-          doc.slides(),
-          transformsForSlide(transforms, n),
-          collections,
-          missReasons,
-          false
+        // Reuse failed: fall back to a fresh non-reuse remap of this slide. Its
+        // live index is n (the failed reuse duplicated nothing), so the same
+        // slide-number guarantee holds and AppleScript geometry is safe here too.
+        const rf = applyNonReuseSlide(
+          doc, Keynote, n, transforms, collections, missReasons, asGeometry, asGeom
         );
-        appliedFirst += r2.applied;
-        missedFirst += r2.missed;
-        applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
-        const rd = deleteHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
-        appliedFirst += rd.applied;
-        missedFirst += rd.missed;
+        appliedFirst += rf.applied;
+        missedFirst += rf.missed;
       }
       continue;
     }
-    const r = applyTransforms(
-      doc.slides(),
-      transformsForSlide(transforms, n),
-      collections,
-      missReasons,
-      false
+    const rn = applyNonReuseSlide(
+      doc, Keynote, n, transforms, collections, missReasons, asGeometry, asGeom
     );
-    appliedFirst += r.applied;
-    missedFirst += r.missed;
-    applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
-    const rd = deleteHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
-    appliedFirst += rd.applied;
-    missedFirst += rd.missed;
+    appliedFirst += rn.applied;
+    missedFirst += rn.missed;
   }
   if (appliedFirst === 0 && cloned === 0) {
     try {
