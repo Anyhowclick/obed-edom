@@ -311,6 +311,51 @@ def test_a_framing_that_throws_content_off_screen_falls_back_to_fitting():
         assert 0 <= t.y <= 1080
 
 
+def test_fit_to_frame_fills_a_wide_panorama_instead_of_shrinking_it():
+    """A centre panorama two frames wide must not letterbox to a postage stamp.
+
+    Pure fit scales the whole union in, so a 3840-wide panorama lands at ~0.49 and
+    fills a quarter of the frame — where the human simply cropped it to one frame.
+    The fill bias raises the scale toward native (1:1), capped so the binding
+    dimension is never cropped past FILL_MAX_CROP_FRACTION.
+    """
+    from obed_edom.map_remap import FILL_MAX_CROP_FRACTION, fit_to_frame_recipe
+
+    margin = 24.0
+    src_w, src_h = 3840.0, 1080.0  # two frames wide, full height, over the centre
+    slide = {"number": 1, "items": [_map(1920, 0, src_w, src_h, kindIndex=0)]}
+    fitted = fit_to_frame_recipe(slide, 7680.0, 1080.0, 1920.0, 1080.0, margin=margin)
+    assert fitted is not None
+    scale = fitted["groups"][0]["s"]
+
+    pure_fit = min((1920 - 2 * margin) / src_w, (1080 - 2 * margin) / src_h)
+    # It fills well past the letterbox fit...
+    assert scale > pure_fit + 0.2
+    # ...but never past native 1:1, and never crops the binding dimension past the cap.
+    assert scale <= 1.0 + 1e-9
+    visible_fraction = pure_fit / scale  # share of the binding dimension left on-frame
+    assert visible_fraction >= (1.0 - FILL_MAX_CROP_FRACTION) - 1e-6
+
+
+def test_fit_to_frame_leaves_a_small_map_whole():
+    """The native 1:1 cap means content already small enough to fit is not blown up
+    and cropped — only oversized content is filled toward the frame."""
+    from obed_edom.map_remap import fit_to_frame_recipe
+
+    margin = 24.0
+    src_w, src_h = 800.0, 500.0  # comfortably smaller than the frame
+    slide = {"number": 1, "items": [_map(3000, 300, src_w, src_h, kindIndex=0)]}
+    wall = {"slideWidth": 7680.0, "slideHeight": 1080.0, "slides": [slide]}
+    fitted = fit_to_frame_recipe(slide, 7680.0, 1080.0, 1920.0, 1080.0, margin=margin)
+    assert fitted is not None
+    # Pure fit already shows it whole; the bias must not push past that into cropping.
+    pure_fit = min((1920 - 2 * margin) / src_w, (1080 - 2 * margin) / src_h)
+    assert fitted["groups"][0]["s"] == pure_fit
+    for t in plan_payload_transforms(wall, fitted):
+        assert 0 <= t.x <= 1920
+        assert 0 <= t.y <= 1080
+
+
 def test_the_planner_switches_to_fitting_and_says_which_slides():
     """Wiring check. The threshold is forced, since learn_recipe is hard to fool
     with synthetic geometry — the real trigger came from a live report deck."""

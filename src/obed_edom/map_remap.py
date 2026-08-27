@@ -3413,6 +3413,21 @@ def on_canvas_fraction(
     return inside / seen
 
 
+# How much of the binding dimension the fill bias may crop away. Pure fit (min)
+# letterboxes a wide centre panorama down to a postage stamp to keep every pixel
+# on-frame; the operator wants it to fill the frame the way the human crop does,
+# which means cropping the overflow. This caps that: scale up from fit toward
+# cover (fill), but never past the point where more than this fraction of the
+# binding dimension is trimmed.
+#
+# Tuned empirically by sweeping it against the gold CG decks (sum of map+pin
+# goldRmse over the comparable slides): a shallow minimum at 0.47 (0.46–0.48 are
+# within noise), then it *worsens* past ~0.49 because the native 1:1 cap means
+# higher values just reach full cover, which overshoots how far the human actually
+# cropped. So 0.47, not higher. Lower toward 0.40 to letterbox more conservatively.
+FILL_MAX_CROP_FRACTION = 0.47
+
+
 def fit_to_frame_recipe(
     slide: dict,
     wall_w: float,
@@ -3421,22 +3436,37 @@ def fit_to_frame_recipe(
     dest_h: float,
     *,
     margin: float = 24.0,
+    max_crop: float = FILL_MAX_CROP_FRACTION,
 ) -> dict[str, Any] | None:
-    """Last resort: shrink what is visible until it fits the CG frame.
+    """Last resort: fill the CG frame with what is visible, cropping the overflow.
 
     Report-card pages are framed per country by hand, so a template can only
     teach framings it has already seen and next week's countries will not match
     any of them. Rather than apply the closest wrong affine — which put objects
-    2000px from where they belonged — scale the visible content to fit and flag
-    the slide. The operator gets everything present, readable and roughly placed,
-    which is a far better starting point than confidently wrong geometry.
+    2000px from where they belonged — scale the visible content to the frame and
+    flag the slide. The operator gets everything roughly placed, which is a far
+    better starting point than confidently wrong geometry.
+
+    Pure fit (`min`) keeps every pixel on-frame, but a centre panorama two frames
+    wide then shrinks to half size and letterboxes — where the human simply cropped
+    it to one frame at full size. So bias from fit toward cover (`max`, which fills
+    and crops the overflow), capped by `max_crop` so no more than that fraction of
+    the binding dimension is trimmed. The overflow is centred, so the crop is even.
     """
     src = visible_content_union(slide, wall_w, wall_h)
     if src is None or src.w <= 0 or src.h <= 0:
         return None
     usable_w = max(1.0, dest_w - 2 * margin)
     usable_h = max(1.0, dest_h - 2 * margin)
-    scale = min(usable_w / src.w, usable_h / src.h)
+    fit = min(usable_w / src.w, usable_h / src.h)
+    cover = max(usable_w / src.w, usable_h / src.h)
+    # Fill toward cover, bounded three ways: never crop the binding dimension past
+    # `max_crop` (`fit / (1 - max_crop)` is exactly the scale that trims that much),
+    # and never enlarge past 1:1 — the native scale the human crop used, so a wide
+    # panorama fills the frame instead of shrinking to a stamp, while a map already
+    # small enough to fit is left whole rather than blown up and cropped.
+    ceiling = fit / max(1e-6, 1.0 - max_crop)
+    scale = max(fit, min(cover, ceiling, 1.0))
     dst = Rect(
         margin + (usable_w - src.w * scale) / 2.0,
         margin + (usable_h - src.h * scale) / 2.0,
