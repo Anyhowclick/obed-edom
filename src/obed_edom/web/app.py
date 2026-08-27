@@ -1406,6 +1406,26 @@ def _side_content_slides_from_result(result: dict[str, Any]) -> set[int]:
     return slides
 
 
+def _assert_range_within_deck(name: str, total: int, slide_range: Any) -> None:
+    """Raise if the requested slide range runs past the deck's last slide.
+
+    A range typed for a bigger deck — slide 124 fed to a 9-slide extract, say —
+    would otherwise inspect nothing, propose nothing, and leave the operator on a
+    blank framing screen with no idea why. `slideCount` is the whole deck's length
+    even on a ranged read, so it is a reliable ceiling to check against.
+    """
+    if not slide_range or not total:
+        return
+    beyond = sorted(n for n in slide_range if n > total)
+    if not beyond:
+        return
+    plural = "s" if total != 1 else ""
+    raise RuntimeError(
+        f"{name} has {total} slide{plural}, but the range asks for slide "
+        f"{format_slide_range(frozenset(beyond))}. Check the deck or the slide range."
+    )
+
+
 def _run_resize_propose(
     job: Job,
     path: Path,
@@ -1437,6 +1457,10 @@ def _run_resize_propose(
                 "Propose once without a range to have Keynote's numbering used."
             )
         else:
+            # The deck is already known in full, so catch an out-of-range range now,
+            # before spending a Keynote pass that would read nothing. Navigator numbers
+            # never exceed the document count, so the typed range is a valid ceiling.
+            _assert_range_within_deck(path.name, int(known.get("slideCount") or 0), slide_range)
             slide_range = to_document_range(known, slide_range)
             numbering = navigator_numbering(known)
             if slide_range != expand_slide_range(typed):
@@ -1450,6 +1474,9 @@ def _run_resize_propose(
     if numbering:
         job.log(numbering)
     wall = inspect_keynote(path, slide_range=slide_range)
+    # Authoritative check for a deck that was never read in full (no cache to catch
+    # it above): slideCount is the whole deck's length even on this ranged read.
+    _assert_range_within_deck(path.name, int(wall.get("slideCount") or 0), slide_range)
     template_data = inspect_keynote(template)
     proposal = propose_framings(
         path,
