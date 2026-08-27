@@ -76,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     remap.add_argument("--no-export", action="store_true", help="Skip PNG preview export after remap.")
     remap.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "Read the remapped deck back to build off-frame/validation flags. OFF by "
+            "default (recommended when the wall content is already checked): skipping it "
+            "avoids a full per-object read of the output deck, and the previews come from "
+            "the remap pass either way."
+        ),
+    )
+    remap.add_argument(
         "--include-lists",
         action="store_true",
         help="Include resizing church-name lists on side panels (Special Offering Series).",
@@ -183,6 +193,7 @@ def _run_remap(args: argparse.Namespace) -> int:
             include_lists=args.include_lists,
             export_dir=export_dir,
             source_previews=source_previews,
+            validate=args.validate,
             log=log,
         )
     print(f"Wrote {info['dest']}")
