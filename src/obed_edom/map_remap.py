@@ -702,9 +702,10 @@ def child_target(
     leaf_x: float,
     leaf_y: float,
     leaf_w: float,
+    leaf_h: float,
     leaf_font: float,
     s: float,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     """The scaled geometry a group leaf lands at, around the group's live origin.
 
     JXA moves the whole group to its packed anchor, so by the time the child-resize
@@ -712,11 +713,16 @@ def child_target(
     around the group's live, post-move origin therefore reproduces the intended
     scaled position with no double-count (plan B1). The AppleScript pass mirrors this
     arithmetic verbatim, and the round-trip test asserts the two agree.
+
+    Returns ``(x, y, w, h, font)``. Both dimensions scale by ``s`` so an icon/plate
+    leaf keeps its aspect ratio; the pass applies the scaled ``h`` to non-text leaves
+    only (a text box autofits its height, so setting it would fight the autofit).
     """
     return (
         origin_x + (leaf_x - origin_x) * s,
         origin_y + (leaf_y - origin_y) * s,
         leaf_w * s,
+        leaf_h * s,
         leaf_font * s,
     )
 

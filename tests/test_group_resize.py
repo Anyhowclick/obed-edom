@@ -70,20 +70,21 @@ def test_child_target_round_trip_has_no_double_count():
     wall_origin = (5770.0, -174.0)
     anchor = (16.0, 40.0)  # where JXA moved the group's top-left
     wall_leaf = (5900.0, 20.0)
-    leaf_w, leaf_font = 200.0, 100.0
+    leaf_w, leaf_h, leaf_font = 200.0, 120.0, 100.0
 
     # JXA moves the whole group to the anchor; every child translates with it.
     leaf_live_x = wall_leaf[0] + (anchor[0] - wall_origin[0])
     leaf_live_y = wall_leaf[1] + (anchor[1] - wall_origin[1])
 
-    x, y, w, font = child_target(
-        anchor[0], anchor[1], leaf_live_x, leaf_live_y, leaf_w, leaf_font, s
+    x, y, w, h, font = child_target(
+        anchor[0], anchor[1], leaf_live_x, leaf_live_y, leaf_w, leaf_h, leaf_font, s
     )
 
     # Intended target: anchor + (wallLeaf - wallOrigin) * s.
     assert x == pytest.approx(anchor[0] + (wall_leaf[0] - wall_origin[0]) * s)
     assert y == pytest.approx(anchor[1] + (wall_leaf[1] - wall_origin[1]) * s)
     assert w == pytest.approx(leaf_w * s)
+    assert h == pytest.approx(leaf_h * s)  # both dims scale -> icon keeps aspect
     assert font == pytest.approx(leaf_font * s)
 
 
@@ -101,8 +102,8 @@ def test_child_target_nested_leaf_does_not_compound():
     nested_live_y = nested_wall[1] + (anchor[1] - wall_origin[1])
 
     # Correct: computed from the top-level origin regardless of depth.
-    x, y, _w, _f = child_target(
-        anchor[0], anchor[1], nested_live_x, nested_live_y, 50.0, 30.0, s
+    x, y, _w, _h, _f = child_target(
+        anchor[0], anchor[1], nested_live_x, nested_live_y, 50.0, 40.0, 30.0, s
     )
     assert x == pytest.approx(anchor[0] + (nested_wall[0] - wall_origin[0]) * s)
     assert y == pytest.approx(anchor[1] + (nested_wall[1] - wall_origin[1]) * s)
@@ -111,8 +112,8 @@ def test_child_target_nested_leaf_does_not_compound():
     # different, wrong answer — which is exactly why the pass only ever uses the
     # top-level origin for every leaf.
     sub_origin = (anchor[0] + 120.0, anchor[1] + 90.0)
-    wrong_x, wrong_y, _, _ = child_target(
-        sub_origin[0], sub_origin[1], nested_live_x, nested_live_y, 50.0, 30.0, s
+    wrong_x, wrong_y, _, _, _ = child_target(
+        sub_origin[0], sub_origin[1], nested_live_x, nested_live_y, 50.0, 40.0, 30.0, s
     )
     assert wrong_x != pytest.approx(x)
     assert wrong_y != pytest.approx(y)

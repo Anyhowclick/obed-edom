@@ -717,6 +717,7 @@ def _group_leaf_writes(container: str) -> list[str]:
             "      set _lx to item 1 of _pos",
             "      set _ly to item 2 of _pos",
             "      set _lw to width of _leaf",
+            "      set _lh to height of _leaf",
             "      try",
             "        set _c1 to size of character 1 of object text of _leaf",
             "        set _cN to size of character -1 of object text of _leaf",
@@ -727,6 +728,13 @@ def _group_leaf_writes(container: str) -> list[str]:
             "        end if",
             "      end try",
             "      set width of _leaf to _lw * jobScale",
+        ]
+        # A text box autofits its height, so scaling font+width is enough and setting
+        # height would fight the autofit. An icon/plate leaf keeps neither — scale its
+        # height by the same factor so it shrinks in proportion, not squished.
+        if element != "text item":
+            lines.append("      set height of _leaf to _lh * jobScale")
+        lines += [
             "      set position of _leaf to {ox + (_lx - ox) * jobScale, oy + (_ly - oy) * jobScale}",
             "      set leavesWritten to leavesWritten + 1",
             "    end try",
