@@ -105,9 +105,22 @@ about what is left.
 - **Session 4 (`feat/resize-operator-notes`)** — operator-facing polish, frontend
   only: an Important callout at the top of the CG resizer (delete skipped slides;
   ungroup side content or it reads as centre; close Keynote first; check box edges;
-  check text line breaks), a read-only whitelist summary in the framing review's
-  Reviewed tab (spans all pages, since a whitelisted page can be on auto), and custom
-  checkbox styling.
+  check text line breaks), a whitelist filter in the framing review's Reviewed tab
+  (funnel; kept-only + by-template; green dot on whitelisted chips), pill toggle
+  switches replacing every checkbox, and a hazard-tape warning callout style.
+- **Session 5 — `fit_to_frame_recipe` fills instead of letterboxing.** The fallback
+  (used when no template framing pairs) fitted the whole visible union with `min()`,
+  so a centre panorama two frames wide shrank to a postage stamp (`s≈0.48`) where the
+  human simply cropped it to one frame at native size (`s=1.0`). It now biases from
+  fit toward cover, bounded three ways: never crop the binding dimension past
+  `FILL_MAX_CROP_FRACTION` (0.45, a dial), and never enlarge past 1:1 native — so a
+  wide panorama fills and a map already small enough to fit is left whole. Measured
+  offline against gold: map+pin `goldRmse` −15.3% over 72 rows, **14 improved / 0
+  regressed** (slide 1 map 566→75, pin 334→27); matched-framing slides untouched.
+  Two tests in `test_scoring.py`. This is the one code-side gold-closeness win found
+  in the resizer-refinement dive; the rest of the gold-distance is editorial crop
+  choice (SKILL's documented trap — solved by the framing UI + more template slides)
+  or scoring artefacts (title/badge/list rows).
 
 **Known and deliberate, not a bug:** a badge can land correctly and still be buried
 by map art that was already above it — the resizer inherits the source deck's
