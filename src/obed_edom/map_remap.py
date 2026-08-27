@@ -2369,13 +2369,17 @@ def _fit_body_to_frame(t: ItemTransform, dest_w: float, dest_h: float) -> None:
 def _hide_item_transform(
     item: dict, number: int, item_index: int, kind_index: int
 ) -> ItemTransform:
-    """A zero-opacity placement that pins an object out of sight.
+    """A `role="hide"` marker that removes an object from the CG.
 
-    Hiding is not the same as leaving an object out of the plan. Changing the
+    Removing is not the same as leaving an object out of the plan. Changing the
     canvas to 16:9 makes Keynote scale-to-fit every object it still owns into the
     frame, so an object we merely skip — an off-slide leftover, a magic-move
     duplicate, a side panel — is dragged back on-frame at the scaled position
-    instead of vanishing. Pinning its opacity to zero is what actually removes it.
+    instead of vanishing. The apply side (`deleteHides` in `remap_keynote.js`)
+    deletes every hide outright, after both geometry passes so no index shifts; the
+    `opacity=0.0` carried here is only the last-resort fallback the apply falls back
+    to if Keynote refuses the delete, and the invisible ghost it once left behind
+    (which still caught clicks) is why deletion is preferred.
     """
     return ItemTransform(
         slide_number=number,
