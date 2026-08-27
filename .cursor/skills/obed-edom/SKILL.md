@@ -429,6 +429,35 @@ table for the AppleScript reality. `scripts/probe_gui_*.applescript` and
 `probe_open_group_read.applescript` / `probe_group_tree.applescript` reproduce the
 AppleScript results (local, `*.applescript` is gitignored).
 
+### Driving Keynote by script — environment gotchas (osascript/AppleScript)
+
+These are *environmental*, not logic, and each one fails in a way that looks like your code
+is wrong. They cost hours to rediscover. Check them **before** any long-running Keynote
+script — a 5-second smoke test on a tiny deck surfaces all of them before you pay the
+~2-minute open of a real deck.
+
+- **Keynote is sandboxed — it cannot open files under `/private/tmp` (or other non-user
+  dirs).** `open POSIX file "/private/tmp/…"` fails *silently*: no document appears,
+  `count of documents` stays 0, no error. Put working copies under `~/Desktop/…` or the repo
+  (`output/` is gitignored) — a location the user's Keynote can read.
+- **`open POSIX file …` returns `missing value`, not the document.** So `set doc to open …`
+  gives you nothing. And do **not** fall back to `front document`: with another deck open it
+  binds the WRONG one, and your geometry writes / `save` then land on the user's deck — a real
+  incident in this project. Bind explicitly: issue the open, then find the doc among
+  `documents` whose `POSIX path of (file of d)` equals the copy, **verify `name of doc`**
+  before any write, and abort otherwise.
+- **The default AppleEvent timeout is 120 s** (`-1712 "AppleEvent timed out"`). Any single
+  call on a large deck — the open, a `count`, a batched write loop — that exceeds it aborts
+  the whole script. Wrap the `tell` in `with timeout of 3600 seconds`.
+- **A 1 GB+ deck takes ~2 min just to open.** Never iterate script logic against the big
+  deck. Prototype on a throwaway `make new document` (opens instantly; note new docs carry
+  master-slide *placeholders*, and JXA object creation there is unreliable — re-fetch by
+  index after `push`). Then run once on the real deck, and reuse an already-open doc rather
+  than re-opening.
+- **Always work on a COPY and `close … saving no`** so the source is untouched; and never
+  force-kill Keynote while it holds the user's deck (see "never addressed by name" below —
+  a `pkill -9` mid-open once locked the deck with "Operation not permitted").
+
 - **Character and run styling is NOT scriptable — only `font`, `color`, `size`,
   and the box-write of those flattens the whole box.** This one limit governs both
   the sermon generator and the CG resizer, so check it before any text-styling

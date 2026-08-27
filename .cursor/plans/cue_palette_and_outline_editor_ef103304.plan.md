@@ -47,6 +47,9 @@ todos:
   - id: framing-confirm
     content: "Two-phase framing confirmation grouped by framing with projected wall previews, decisions remembered by digest. DONE."
     status: completed
+  - id: propose-pins-flag
+    content: "Surface pins-paired (pairQuality) in the propose UI so a '0-pin' slide is flagged, not trusted. The propose thumbnail scores are IMAGE-similarity and can invert the actual geometric fit on bespoke slides. Concrete case (Session 10, Map_Extracted_Wall_1st slide 8, the 67-node constellation): template 4 scored 0.69 (best) with a great-looking 'as it will look' preview but paired 0 objects → 42% on-canvas → correctly vetoed at remap; template 13 scored 0.06 (worst) but paired 34, 100% on-canvas, scale 0.483 (= the measured constellation compression) and was the right pick. The remap-time geometry check saved it, but the propose UI actively misled. Fix: show pins-paired / pairQuality per template tile (and a 'looks-fit-only, 0 pins' warning) so the operator doesn't trust a zero-pairing framing. Pending."
+    status: pending
   - id: navigator-numbering
     content: "Dashboard reads a range in Keynote's numbering from the cached full payload; CLI keeps document positions and says so. DONE."
     status: completed
