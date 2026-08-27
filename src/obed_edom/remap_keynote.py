@@ -71,10 +71,15 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
     corrects; unlike JXA, AppleScript does not yank an object to (0,0) on a size
     write, so no position-only restore pass follows. A line's geometry is its
     endpoints (``start point``/``end point``), which AppleScript can set even
-    though JXA cannot. A group's size is owned by the separate child-resize pass,
-    so a group gets position only. Every object's writes sit inside their own
-    ``try`` so an unsupported property never abandons the rest of the slide, and a
-    locked object is unlocked before the writes and relocked after.
+    though JXA cannot. A group gets full geometry (width, height, position) like
+    any other object: there is no separate child-resize pass on this branch, so
+    the JXA full pass this replaces was the only writer of a group's size — and a
+    role=="other" group is deliberately framed at wall size to keep wall-sized
+    children (a logo, a date) from clipping (see map_remap.py). Setting a group's
+    width in AppleScript neither yanks it nor scales its children, so it matches
+    that JXA frame write. Every object's writes sit inside their own ``try`` so an
+    unsupported property never abandons the rest of the slide, and a locked object
+    is unlocked before the writes and relocked after.
     """
     body: list[str] = []
     for spec in specs:
@@ -114,13 +119,6 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
                 f"      set end point of theObj to {{{_as_num(end[0])}, {_as_num(end[1])}}}",
                 "    end try",
             ]
-        elif kind == "group":
-            if x is not None and y is not None:
-                lines += [
-                    "    try",
-                    f"      set position of theObj to {{{_as_num(x)}, {_as_num(y)}}}",
-                    "    end try",
-                ]
         else:
             if spec.get("w") is not None:
                 lines += [
@@ -157,12 +155,46 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
     )
 
 
+def _spec_bears_geometry(spec: dict[str, Any]) -> bool:
+    """Whether this transform carries geometry the JXA full pass would place."""
+    if spec.get("w") is not None or spec.get("h") is not None:
+        return True
+    if spec.get("x") is not None and spec.get("y") is not None:
+        return True
+    if spec.get("start") is not None and spec.get("end") is not None:
+        return True
+    return False
+
+
+def _slide_geometry_addressable(specs: list[dict[str, Any]]) -> bool:
+    """Whether every geometry-bearing object on the slide has an AppleScript address.
+
+    The AppleScript block can only address the kinds in ``_AS_KIND_NAMES``. JXA's
+    ``getItem`` also resolves a ``table``/``chart``/unknown kind through its
+    iWorkItems fallback and the full pass positions it, but the AppleScript block
+    has no such fallback — so a slide carrying any geometry-bearing unaddressable
+    object is kept OFF the AppleScript path entirely and left to the JXA full pass.
+    Correctness (that object still gets moved) beats removing the flick on that one
+    edge-case slide.
+    """
+    for spec in specs:
+        if spec.get("role") == "hide":
+            continue
+        if not _spec_bears_geometry(spec):
+            continue
+        if str(spec.get("kind") or "") not in _AS_KIND_NAMES:
+            return False
+    return True
+
+
 def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
     """Per-slide AppleScript geometry bodies, keyed by slide number as a string.
 
     Built from the same transform dicts sent to JXA so the addressing matches
-    object for object. The JXA loop uses a slide's body only on the non-reuse
-    path; a slide handled by the reuse path ignores it.
+    object for object. A slide is included ONLY when every geometry-bearing object
+    on it is AppleScript-addressable (see ``_slide_geometry_addressable``); an
+    excluded slide has no key here, and the JXA loop then runs its full geometry
+    path. The reuse path ignores this map regardless.
     """
     by_slide: dict[int, list[dict[str, Any]]] = {}
     order: list[int] = []
@@ -176,7 +208,10 @@ def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
         by_slide[slide_no].append(spec)
     out: dict[str, str] = {}
     for slide_no in order:
-        body = _build_slide_geometry_script(by_slide[slide_no], slide_no)
+        specs = by_slide[slide_no]
+        if not _slide_geometry_addressable(specs):
+            continue
+        body = _build_slide_geometry_script(specs, slide_no)
         if body:
             out[str(slide_no)] = body
     return out

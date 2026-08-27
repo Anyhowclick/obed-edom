@@ -757,11 +757,17 @@ function runSlideGeomScript(doc, asGeom, n, missReasons) {
   }
 }
 
-function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missReasons, asGeometry, asGeom) {
+function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom) {
   const specs = transformsForSlide(transforms, n);
   let applied = 0;
   let missed = 0;
-  if (asGeometry) {
+  // Decide the path PER SLIDE, not on a global flag: use the AppleScript geometry
+  // path only when Python built a body for this slide (i.e. every geometry-bearing
+  // object on it is AppleScript-addressable). A slide with any unaddressable kind
+  // has no body here and falls through to the JXA full path, so no object ever
+  // silently loses its geometry. Flag OFF ⇒ asGeom is null ⇒ always the JXA path.
+  const asBody = asGeom ? asGeom[n] : null;
+  if (asBody) {
     // JXA writes only the non-yanking attributes (opacity/font/size/colour); the
     // batched AppleScript block owns w/h/position and addresses `slide n` — the
     // SAME live slide JXA just resolved, since the reuse path restores slide
@@ -792,10 +798,10 @@ function run(argv) {
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.dest));
   const transforms = plan.transforms || [];
-  // OBED_AS_GEOMETRY path: Python passes asGeometry=true plus a per-slide map of
-  // pre-built AppleScript geometry bodies. Absent/false ⇒ byte-for-byte the JXA
-  // geometry behaviour.
-  const asGeometry = Boolean(plan.asGeometry);
+  // OBED_AS_GEOMETRY path: Python passes a per-slide map of pre-built AppleScript
+  // geometry bodies (only for slides where every geometry-bearing object is
+  // addressable). Absent ⇒ null ⇒ byte-for-byte the JXA geometry behaviour. The
+  // per-slide decision lives in applyNonReuseSlide, keyed on asGeom[n].
   const asGeom = plan.asGeom || null;
   const width = Number(plan.width) || 1920;
   const height = Number(plan.height) || 1080;
@@ -852,7 +858,7 @@ function run(argv) {
         // live index is n (the failed reuse duplicated nothing), so the same
         // slide-number guarantee holds and AppleScript geometry is safe here too.
         const rf = applyNonReuseSlide(
-          doc, Keynote, n, transforms, collections, missReasons, asGeometry, asGeom
+          doc, Keynote, n, transforms, collections, missReasons, asGeom
         );
         appliedFirst += rf.applied;
         missedFirst += rf.missed;
@@ -860,7 +866,7 @@ function run(argv) {
       continue;
     }
     const rn = applyNonReuseSlide(
-      doc, Keynote, n, transforms, collections, missReasons, asGeometry, asGeom
+      doc, Keynote, n, transforms, collections, missReasons, asGeom
     );
     appliedFirst += rn.applied;
     missedFirst += rn.missed;

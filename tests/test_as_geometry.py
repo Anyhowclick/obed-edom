@@ -103,13 +103,17 @@ def test_line_uses_endpoints_not_width():
 # --- groups ----------------------------------------------------------------
 
 
-def test_group_sets_position_only():
+def test_group_gets_full_geometry():
+    # There is no child-resize pass on this branch: the JXA full pass this
+    # replaces was the only writer of a group's (wall-sized) frame, so the AS block
+    # must set width AND height AND position, exactly like any other object.
     spec = _spec(kind="group", kindIndex=0, x=50, y=60, w=400, h=300)
     script = _build_slide_geometry_script([spec], 4)
+    assert "set theObj to group 1" in script
+    assert "set width of theObj to 400" in script
+    assert "set height of theObj to 300" in script
     assert "set position of theObj to {50, 60}" in script
-    # Group size is owned by the child-resize pass, never by this block.
-    assert "set width of theObj" not in script
-    assert "set height of theObj" not in script
+    assert script.index("set width of theObj") < script.index("set position of theObj")
 
 
 # --- locked scaffold -------------------------------------------------------
@@ -171,6 +175,41 @@ def test_build_as_geometry_keys_by_slide():
 def test_build_as_geometry_drops_slideless_and_empty():
     specs = [_spec(slide=0), _spec(slide=4, role="hide")]
     assert _build_as_geometry(specs) == {}
+
+
+# --- per-slide eligibility for unaddressable kinds -------------------------
+
+
+def test_slide_with_unaddressable_kind_excluded():
+    # "table" is not AppleScript-addressable here; a whole slide carrying a
+    # geometry-bearing one falls back to the JXA full path (no key emitted),
+    # while a sibling slide of only addressable kinds is still included.
+    specs = [
+        _spec(slide=3, kind="text", kindIndex=0),
+        _spec(slide=3, kind="table", kindIndex=0),
+        _spec(slide=6, kind="image", kindIndex=0),
+    ]
+    out = _build_as_geometry(specs)
+    assert "3" not in out  # excluded: table has no AS address
+    assert "6" in out  # included: all addressable
+
+
+def test_generic_item_kind_excludes_slide():
+    # map_remap emits `item.get("kind") or "item"`, so a bare "item" can appear.
+    specs = [_spec(slide=2, kind="item", kindIndex=0)]
+    assert _build_as_geometry(specs) == {}
+
+
+def test_unaddressable_kind_without_geometry_does_not_exclude():
+    # A non-hide, non-geometry transform of an unaddressable kind is harmless: JXA
+    # would not move it either, so it must not force the whole slide off the path.
+    specs = [
+        _spec(slide=5, kind="text", kindIndex=0),
+        {"slide": 5, "kind": "table", "kindIndex": 0, "role": "other"},  # no x/y/w/h
+    ]
+    out = _build_as_geometry(specs)
+    assert "5" in out
+    assert "set theObj to text item 1" in out["5"]
 
 
 # --- integration with the real transform dict ------------------------------
