@@ -3418,9 +3418,14 @@ def on_canvas_fraction(
 # on-frame; the operator wants it to fill the frame the way the human crop does,
 # which means cropping the overflow. This caps that: scale up from fit toward
 # cover (fill), but never past the point where more than this fraction of the
-# binding dimension is trimmed. 0.45 fills strongly while still showing ~55% of
-# the longest axis. Raise toward 0.5 to match a full human crop, lower to letterbox.
-FILL_MAX_CROP_FRACTION = 0.45
+# binding dimension is trimmed.
+#
+# Tuned empirically by sweeping it against the gold CG decks (sum of map+pin
+# goldRmse over the comparable slides): a shallow minimum at 0.47 (0.46–0.48 are
+# within noise), then it *worsens* past ~0.49 because the native 1:1 cap means
+# higher values just reach full cover, which overshoots how far the human actually
+# cropped. So 0.47, not higher. Lower toward 0.40 to letterbox more conservatively.
+FILL_MAX_CROP_FRACTION = 0.47
 
 
 def fit_to_frame_recipe(
