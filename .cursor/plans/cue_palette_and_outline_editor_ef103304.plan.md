@@ -3,7 +3,10 @@ name: Cue palette and outline editor
 overview: "Read `.cursor/skills/obed-edom/SKILL.md` first — every durable Keynote finding lives there. This plan holds only what is still to do plus the reasoning a new agent would otherwise rediscover. DONE (in SKILL / git log, condensed below): Keynote 15.x migration, framing confirmation, badge-affine, structural title detection, the divider, ranges in Keynote's numbering, off-frame hiding, and the per-slide side-panel whitelist. STILL TO DO: the number block in the CG resizer; the cue-first palette; the in-dashboard outline editor; image cues; the DSK generator; stat-drift; recipe library (revisit now badge-affine exists). Operator/source or won't-fix leftovers: slide 125's grouped church names, the sparkle-overlay-on-words placement, a caption in the 'as it will look' preview, and a verse's wall-authored hard line breaks (a source-deck fix — stripping them by script destroys the un-scriptable superscript numbers and small-caps LORD)."
 todos:
   - id: text-placement
-    content: "CG resizer number block (183/86/14/269) renders as overlapping fragments. Root cause is groups sharing a left margin, not a text bug — see 'The number block' below. The immediate item. Pending."
+    content: "CG resizer number block (183/86/14/269) rendered as overlapping fragments — groups all parked at one left margin. DONE (Session 6, PR #32): packed into non-overlapping columns. Sizing the inner text is a separate limit — see gui-ungroup-stats."
+    status: completed
+  - id: gui-ungroup-stats
+    content: "TO-EXPLORE (immediate): the stat blocks (183/269/86/14/44…) are opaque groups (childCount=0), so their inner numbers can't be read or resized to match the template — only moved. Probe GUI-scripting ⇧⌘G ungroup via System Events (like the superscript pass); if it works, needs an ungroup pre-pass + re-inspect, and the template to teach sizes. If not, stays a source-deck ungroup. See 'Immediate TO-explore' below."
     status: pending
   - id: cue-palette
     content: "Cue-first palette in the dashboard, inverting masters.yaml cue maps, with adjacency and context rules enforced. Pending — design below."
@@ -142,6 +145,60 @@ about what is left.
   (`mapped.x ≥ 16`, so not parked/packed); and slide 125's church list is 46 opaque
   groups / 163 overlaps including a full-wall 7123px group — the documented source-deck
   grouping fix (ungroup), not a code fix here.
+
+- **Session 7 — delete hides (PR #33, merged) + out-of-range range guard (PR open).**
+  (a) Non-group `role="hide"` objects were left at `opacity=0` — invisible but still
+  catching clicks, so the operator kept selecting a zero-opacity ghost instead of the
+  text to edit. `deleteGroupHides` → `deleteHides` now deletes every hide after both
+  geometry passes (grouped by kind, descending index; falls back to `opacity=0` if a
+  delete is refused). Two independent sub-agent reviews confirmed no `applyTransforms`
+  path skips a hide without deleting it. (b) A slide range past the deck's last slide
+  (slide 124 fed to a 9-slide extract) used to inspect/propose nothing and leave a
+  blank framing screen; `_assert_range_within_deck` now errors, using `slideCount`
+  (the whole deck's length even on a ranged read) as the ceiling.
+
+## Immediate TO-explore: GUI-script ungrouping the stat blocks
+
+The number-block stats — "183 CHC Churches", "269 Total Churches", "86 Affiliate",
+"14 Countries", "44 Renovated Church Buildings" — are each an **opaque group**: the
+inspect shows every one with `childCount=0`, `text=""`, no readable `size`. So the
+resizer can only *move* them at wall size (Session 6's packing); it cannot read or
+resize the inner "269" to match the template. Two limits stack: grouped children are
+invisible to Keynote scripting, **and** a group can't be scaled (setting a group's
+width does not scale its children). Keynote exposes no ungroup command, so today the
+only fix is to ungroup in the source deck (same as slide 125).
+
+**Worth a probe:** GUI-script an **ungroup pass via System Events** — select each stat
+group and send **⇧⌘G** (Arrange ▸ Ungroup), the same mechanism the superscript pass
+already drives through the Format menu (needs Accessibility; see SKILL `## Later verse
+numbers need Accessibility`). If it works, the freed text items become addressable and
+resizable, turning a source-deck chore into a code fix.
+
+*Design if it works.* Planning runs off the inspect **before** apply, and ungrouping
+changes the object model the plan was built from. So this needs an ungroup **pre-pass**
+on the copy, then a **re-inspect** (of at least the affected slides) so the freed text
+is planned as real items. And the template must *teach* the freed text's target size —
+a swatch per number/label style, or the stats laid out ungrouped at CG size — or the
+freed text just rides the ~0.85 crop scale (the same "template must teach it" caveat as
+any unpaired text).
+
+*Probe to write* (like `probe_zorder.js` / `probe_corner.js`): build a throwaway deck
+with a grouped number+label, drive ⇧⌘G through System Events, and check whether the
+children become addressable afterwards (`childCount>0`, text/size readable). If yes,
+scope the pre-inspect ungroup pass; if no, it stays a source-deck fix and this note
+records that the door was tried.
+
+## Handover — CG resizer state (2026-08-27)
+
+- **Merged:** PR #31 fill fallback (`FILL_MAX_CROP_FRACTION=0.47`), #32 number-block
+  packing, #33 delete-hides. **Open PR:** the out-of-range range guard.
+- **Source-deck / operator items (no code fix today):** slide-124 ~130×11px overlap
+  between two right-side groups (`mapped.x ≥ 16`, not parked); slide-125 church list
+  (46 opaque groups); the stat-block *sizes* — ungroup, but see the TO-explore above,
+  which could turn the stat-size case into a code fix via GUI ungroup.
+- **Next code candidates:** the GUI-ungroup probe above; the recipe library (now that
+  a badge carries its own affine); then the cue palette / outline editor / image cues /
+  DSK track.
 
 **Known and deliberate, not a bug:** a badge can land correctly and still be buried
 by map art that was already above it — the resizer inherits the source deck's
