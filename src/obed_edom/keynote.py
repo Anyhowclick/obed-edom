@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -751,7 +752,9 @@ def _stat_size_handler(size_map: dict) -> list[str]:
     return lines
 
 
-def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) -> str:
+def _build_stat_finalize_script(
+    dest: Path, jobs: list[dict], size_map: dict, export_dir: Path | None = None
+) -> str:
     """Post-JXA pass: give each stat number the template's font size, then bring the
     stat groups and the Global Missions badge to the front (above the map).
 
@@ -768,6 +771,12 @@ def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) ->
     AppleScript agree on group order). Font sizing is guarded so a non-uniform run is
     left alone; the whole job is wrapped so an unresolved index is skipped and reported
     (the JXA placement stays as the fallback).
+
+    When ``export_dir`` is given, the PNG preview export is folded into this same open
+    session: after the stat sizes and z-order are saved, the still-open ``theDoc`` is
+    exported before it is closed, so the dest is not reopened a third time just to
+    render previews. The export is in its own ``try`` so a render failure never loses
+    the already-saved stat/geometry work, and the result reports whether it ran.
     """
     if not jobs:
         return ""
@@ -779,7 +788,7 @@ def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) ->
         _keynote_terms(),
         _keynote_tell(),
         "  activate",
-        "  with timeout of 600 seconds",
+        "  with timeout of 3600 seconds",
         "  try",
         f'    close (every document whose name is "{doc_name}") saving no',
         "    delay 0.3",
@@ -792,6 +801,7 @@ def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) ->
         "  set skipJobs to 0",
         "  set sized to 0",
         "  set sizeSkips to 0",
+        '  set exported to "false"',
         '  set report to ""',
     ]
     # Phase 1 — template-taught number sizes (plain scripting).
@@ -878,15 +888,32 @@ def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) ->
         ]
         lines += ["  " + ln for ln in _bring_selection_to_front()]
         lines += ["  end if"]
+    # Persist the stat sizes + z-order before the (fallible) export, so a render
+    # failure can only cost re-exportable previews, never the placement work.
     lines += [
         "  try",
         "    save theDoc",
+        "  end try",
+    ]
+    if export_dir:
+        # Fold the preview export into this already-open session (no third reopen).
+        # Its own try, so an export failure leaves the saved deck untouched.
+        lines += [
+            f'  set exportFolder to POSIX file "{_as_escape(str(export_dir))}"',
+            "  try",
+            "    export theDoc to exportFolder as slide images with properties "
+            "{image format:PNG, skipped slides:false}",
+            '    set exported to "true"',
+            "  end try",
+        ]
+    lines += [
+        "  try",
         "    close theDoc saving yes",
         "  end try",
         "  end timeout",
         '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
         '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " frontErr=" '
-        '& frontErr & " detail=" & report',
+        '& frontErr & " exported=" & exported & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -911,11 +938,21 @@ def _bring_selection_to_front() -> list[str]:
     ]
 
 
-def _run_stat_finalize(dest: Path, jobs: list[dict], size_map: dict) -> dict:
-    """Run the stat-finalize pass (template sizes + bring-to-front); no-op if empty."""
-    script = _build_stat_finalize_script(Path(dest), jobs, size_map or {})
+def _run_stat_finalize(
+    dest: Path, jobs: list[dict], size_map: dict, export_dir: Path | None = None
+) -> dict:
+    """Run the stat-finalize pass (template sizes + bring-to-front); no-op if empty.
+
+    When ``export_dir`` is given, the same open session also exports the PNG previews
+    before closing, so the dest is not reopened just to render them. The result carries
+    ``exported`` and ``previewFiles`` so the caller can skip a separate export pass.
+    """
+    export_dir = Path(export_dir) if export_dir else None
+    if export_dir is not None:
+        export_dir.mkdir(parents=True, exist_ok=True)
+    script = _build_stat_finalize_script(Path(dest), jobs, size_map or {}, export_dir)
     if not script:
-        return {"ok": True, "skipped": True, "done": 0, "jobs": 0}
+        return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
     subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
@@ -940,6 +977,16 @@ def _run_stat_finalize(dest: Path, jobs: list[dict], size_map: dict) -> dict:
     if not ok:
         debug = Path(dest).with_suffix(".stat-finalize.applescript")
         debug.write_text(script, encoding="utf-8")
+    # The folder is the ground truth for a successful render (the same check
+    # export_slide_images uses), not just the AppleScript flag.
+    preview_files: list[str] = []
+    exported = False
+    if export_dir is not None:
+        from obed_edom.inspect import preview_pngs  # noqa: PLC0415
+
+        pngs = preview_pngs(export_dir)
+        preview_files = [p.name for p in pngs]
+        exported = bool(pngs)
     return {
         "ok": ok,
         "jobs": len(jobs),
@@ -948,12 +995,14 @@ def _run_stat_finalize(dest: Path, jobs: list[dict], size_map: dict) -> dict:
         "sized": _num("sized"),
         "sizeSkips": _num("sizeSkips"),
         "front": _num("front"),
+        "exported": exported,
+        "previewFiles": preview_files,
         "raw": raw,
         "stderr": proc.stderr or "",
     }
 
 
-def read_template_stat_sizes(template: Path) -> dict[str, float]:
+def read_template_stat_sizes(template: Path, *, use_cache: bool = True) -> dict[str, float]:
     """AppleScript-read the CG template's numeric text (grouped and loose) into a
     ``{digits: font size}`` map, so the stat-finalize pass can give a wall number the
     size the template teaches (e.g. ``269`` -> 200pt, ``183`` -> 150pt).
@@ -962,9 +1011,47 @@ def read_template_stat_sizes(template: Path) -> dict[str, float]:
     JXA), which is exactly where the hero stats live on the template — so this reads
     them in AppleScript. Only all-digit content is kept (labels and the date are left
     for the wall size); the largest size wins if a number appears more than once.
-    Read-only: opens, walks, closes without saving. One open per remap — cache by
-    template digest if it ever bites.
+    Read-only: opens, walks, closes without saving.
+
+    The template is invariant across runs of the same template, so the read is cached
+    by the template's content digest (and Keynote version): on a hit the map is
+    returned straight from disk and Keynote is never opened. Pass ``use_cache=False``
+    to force a fresh read (and refresh the cache).
     """
+    template = Path(template)
+    cache_path: Path | None = None
+    if use_cache:
+        from obed_edom.baseline import (  # noqa: PLC0415
+            deck_digest,
+            template_stat_cache_path,
+        )
+
+        try:
+            cache_path = template_stat_cache_path(deck_digest(template))
+        except (FileNotFoundError, OSError):
+            cache_path = None
+        if cache_path is not None and cache_path.is_file():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    # A cache hit costs no Keynote open. The float() cast is inside
+                    # the try so a malformed-but-parseable cache (a non-numeric value)
+                    # degrades to a real read instead of crashing the remap.
+                    return {str(k): float(v) for k, v in data.items()}
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                pass
+    sizes = _read_template_stat_sizes_via_keynote(template)
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(sizes), encoding="utf-8")
+        except OSError:
+            pass
+    return sizes
+
+
+def _read_template_stat_sizes_via_keynote(template: Path) -> dict[str, float]:
+    """Open the template in Keynote and read its numeric font sizes (uncached)."""
     template = Path(template)
     escaped = _as_escape(str(template))
     doc_name = _as_escape(template.name)

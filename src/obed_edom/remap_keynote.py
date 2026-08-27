@@ -336,6 +336,7 @@ def remap_keynote(
     framing_overrides: dict[int, int] | None = None,
     side_content_slides: set[int] | None = None,
     source_previews: Path | str | None = None,
+    export_dir: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
@@ -345,6 +346,13 @@ def remap_keynote(
 
     `side_content_slides` is the per-slide side-panel whitelist (wall slide numbers):
     side content is dropped everywhere else and kept on these pages.
+
+    `export_dir`, when given, folds the PNG preview export into the stat-finalize
+    session (it runs against the already-open deck before it closes), so the dest is
+    not reopened a third time just to render previews. The result reports `exported`;
+    a run with no stat-group jobs never opens that session, so the caller still exports
+    those previews itself. Left unset (e.g. the validate=True read-back path), no
+    export is folded and behaviour is unchanged.
     """
     def say(message: str) -> None:
         if log:
@@ -602,6 +610,7 @@ def remap_keynote(
     # (a group is opaque to JXA), and lift the stat text + Global Missions badge in
     # front of the map they were authored behind. An AppleScript pass does both. No-op
     # when the plan emitted no stat-group jobs.
+    export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     child_resize_result: dict[str, Any] | None = None
     if child_resize:
         stat_sizes = read_template_stat_sizes(template_path)
@@ -609,8 +618,11 @@ def remap_keynote(
             f"Finalizing {len(child_resize)} stat group(s): template sizes "
             f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'}) "
             "+ bring to front."
+            + (" Exporting previews in the same session." if export_path else "")
         )
-        child_resize_result = _run_stat_finalize(dest, child_resize, stat_sizes)
+        child_resize_result = _run_stat_finalize(
+            dest, child_resize, stat_sizes, export_dir=export_path
+        )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
         sized = child_resize_result.get("sized") or 0
@@ -653,6 +665,12 @@ def remap_keynote(
         "offFrame": offframe,
         "framingReport": framing_rows,
         "childResize": child_resize_result,
+        # True only when the stat-finalize session actually rendered the previews;
+        # the caller falls back to a standalone export otherwise.
+        "exported": bool(child_resize_result and child_resize_result.get("exported")),
+        "previewFiles": list(
+            (child_resize_result or {}).get("previewFiles") or []
+        ),
     }
     return result
 
@@ -684,6 +702,10 @@ def remap_and_inspect(
         side_content_slides=side_content_slides,
         wall_payload=wall_payload,
         template_payload=template_payload,
+        # Fold the export into the stat-finalize session on the no-read-back path
+        # only. The validate=True path reads the deck back with inspect_keynote,
+        # which does its own export, so it must stay unchanged (export_dir unset).
+        export_dir=export_dir if not validate else None,
         log=log,
     )
     # Reading the deck back dumps every object, which is what the validation
@@ -691,7 +713,9 @@ def remap_and_inspect(
     # only wants the pictures, and those come from a Keynote pass that does not
     # walk the objects at all.
     if not validate:
-        if export_dir:
+        # The stat-finalize session already exported when it ran; only fall back to a
+        # standalone export when it didn't (no stat-group jobs, or its export failed).
+        if export_dir and not info.get("exported"):
             if log:
                 log("Exporting previews (validation off, so the deck is not read back)…")
             error = export_slide_images(Path(dest), Path(export_dir))

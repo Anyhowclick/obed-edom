@@ -8,7 +8,7 @@ sizes and the z-order/badge steps.
 
 from pathlib import Path
 
-from obed_edom.keynote import _build_stat_finalize_script
+from obed_edom.keynote import _build_stat_finalize_script, _run_stat_finalize
 from obed_edom.map_remap import plan_slide_transforms
 
 
@@ -116,3 +116,46 @@ def test_finalize_script_embeds_template_sizes_and_bring_to_front():
 
 def test_finalize_script_empty_when_no_jobs():
     assert _build_stat_finalize_script(Path("/tmp/x.key"), [], {"269": 200.0}) == ""
+
+
+# --- Folded preview export -------------------------------------------------------
+
+
+def test_finalize_script_folds_export_when_dir_given():
+    jobs = [{"slide": 4, "groupIndex": 1}]
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), jobs, {"269": 200.0}, Path("/tmp/prev")
+    )
+    # The export runs against the already-open theDoc, in its own try, and reports back.
+    assert "export theDoc to exportFolder as slide images" in script
+    assert "image format:PNG" in script
+    assert "skipped slides:false" in script
+    assert "/tmp/prev" in script
+    assert 'set exported to "true"' in script
+    assert '" exported=" & exported' in script
+    # The stat sizes/z-order are saved before the export try, so a render failure
+    # cannot lose them; the close is separate so a save/export failure still closes.
+    save_at = script.index("save theDoc")
+    export_at = script.index("export theDoc to exportFolder")
+    close_at = script.index("close theDoc saving yes")
+    assert save_at < export_at < close_at
+    # Large decks need the long timeout, not the 120s osascript default.
+    assert "with timeout of 3600 seconds" in script
+    assert "with timeout of 600 seconds" not in script
+
+
+def test_finalize_script_no_export_without_dir():
+    jobs = [{"slide": 4, "groupIndex": 1}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
+    assert "export theDoc to exportFolder" not in script
+    # The exported flag still exists and is reported (always "false" here).
+    assert 'set exported to "false"' in script
+    assert '" exported=" & exported' in script
+
+
+def test_run_stat_finalize_no_jobs_reports_not_exported():
+    # No stat-group jobs means no session opens, so nothing is exported — the caller
+    # must fall back to a standalone export. No osascript is invoked on this path.
+    result = _run_stat_finalize(Path("/tmp/x.key"), [], {"269": 200.0}, export_dir=None)
+    assert result["skipped"] is True
+    assert result["exported"] is False
