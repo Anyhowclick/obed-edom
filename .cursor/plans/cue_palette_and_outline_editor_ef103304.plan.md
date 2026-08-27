@@ -6,7 +6,7 @@ todos:
     content: "CG resizer number block (183/86/14/269) rendered as overlapping fragments — groups all parked at one left margin. DONE (Session 6, PR #32): packed into non-overlapping columns. Sizing the inner text is a separate limit — see gui-ungroup-stats."
     status: completed
   - id: gui-ungroup-stats
-    content: "TO-EXPLORE (immediate): the stat blocks (183/269/86/14/44…) are opaque groups (childCount=0), so their inner numbers can't be read or resized to match the template — only moved. Probe GUI-scripting ⇧⌘G ungroup via System Events (like the superscript pass); if it works, needs an ungroup pre-pass + re-inspect, and the template to teach sizes. If not, stays a source-deck ungroup. See 'Immediate TO-explore' below."
+    content: "REFRAMED by Session 8 probes; GUI-ungroup track DROPPED. Confirmed: AppleScript reads real source-deck group children (inner text+size: '269' size=300, '183'/'86'/'14' size=170, '44' size=70) AND writes their position/width/font-size in place (probe_gui_write_child) — the childCount=0 opacity is JXA-only, so no ungroup is needed for read OR resize. The win is an AppleScript read+write-children path (design in 'Immediate TO-explore' Session 8). Group count: JXA and AppleScript both see 6 top-level groups on slide 4 (no duplicates; the old 8-with-duplicates was a stale inspect — 'duplicate objects' parked item RETIRED); 2 of the 6 have one level of nesting (number direct, label in a nested sub-group) so the child walk recurses one level. Also unblocked: z-order via GUI Bring-to-Front on a script-set selection (buried badge now fixable). See SKILL + README."
     status: pending
   - id: cue-palette
     content: "Cue-first palette in the dashboard, inverting masters.yaml cue maps, with adjacency and context rules enforced. Pending — design below."
@@ -63,99 +63,83 @@ targeting, the verified scripting limits, cache versioning, the template contrac
 lives there. This plan holds only what is still to be done and the reasoning a new
 agent would otherwise have to rediscover.
 
-## Completed work — pointers, not detail
+## Completed work — key insights, not detail
 
-All of the following shipped; the durable findings are in SKILL.md and the
-reasoning is in the commit messages (`git log`). Condensed here so this plan stays
-about what is left.
+Everything below shipped. The durable findings are in SKILL.md and the reasoning is
+in the commit messages (`git log`); this is only the insight each session left behind
+and the pointer to find the rest. Sessions are collapsed — read them as one body of
+learned facts, not a timeline.
+
+**Infrastructure & targeting**
 
 - **Keynote 15.x migration** — bundle-id targeting through the single resolver in
-  `keynote_app.py`, version-tagged cache, 14.5 deleted after an A/B pass, gold decks
-  re-warmed. In SKILL.
-- **Framing confirmation** — `/api/resize` is a two-phase job (propose, then apply
-  after the operator confirms), reviewed in `FramingReview.tsx` grouped by framing,
-  each candidate a real wall preview under the planner's own affine. Decisions
-  remembered by digest.
-- **A badge gets its own affine** — plate-to-plate, so a page with a map and a badge
-  gets two affines. On the report card's 34 map-and-badge pages the plate went from
-  117/136 placements off-frame to none. `_title_badge`, `badge_plate_members`,
-  `template_badge_slots`, `badgePlateDst`. In SKILL/commits.
+  `keynote_app.py`, version-tagged cache, 14.5 deleted after an A/B pass. The one
+  place that decides which build; everything else addresses by id. In SKILL.
+- **Ranges in Keynote's numbering + out-of-range guard (PR #34).** The dashboard
+  translates a typed range from the cached full payload when there is one, else says
+  it is taking document positions (CLI always does, and says so). A range past the
+  deck's last slide now errors via `_assert_range_within_deck` (ceiling = `slideCount`,
+  the whole deck even on a ranged read) instead of leaving a blank framing screen.
+
+**Placement — the affine model**
+
+- **A badge gets its own affine** — plate-to-plate, so a map-and-badge page gets two
+  affines. On the report card's 34 such pages the plate went from 117/136 placements
+  off-frame to none. `_title_badge`, `badge_plate_members`, `template_badge_slots`,
+  `badgePlateDst`. *Insight: one affine per role, not per slide — the same gap the
+  reverted recipe library hit from the other side.*
 - **Structural title detection** — phrase match first, then the plate (largest shape
-  containing a text item's centre) where that plate carries exactly one word.
-- **Off-frame hiding (`e7621f8`)** — changing the wall copy to 16:9 makes Keynote
-  scale-to-fit every object it still owns, so a *skipped* object gets dragged back
-  on-frame. `plan_slide_transforms` now emits a zero-opacity hide for off-screen
-  leftovers and magic-move duplicates; `remap_keynote.js` deletes `role="hide"`
-  groups (opacity can't hide a group). This is why the operator must delete skipped
-  slides and ungroup side content — see the resizer's Important callout.
-- **Per-slide side-panel whitelist (`14ef262`, fix `7f1fa59`)** — side content dropped
-  by default, kept per whitelisted page via `Decision.keep_side_content` (orthogonal
-  to framing state, stored by digest). Threads through `plan_payload_transforms`
-  (`side_content_slides`), `remap_keynote`, the `/api/resize` endpoints, and the
-  framing review's per-page toggle + bulk action. CLI `--include-lists` stays the
-  global override.
-- **Ranges in Keynote's numbering** — the dashboard translates a typed range from the
-  cached full payload when there is one, else says it is taking the range as document
-  positions; the CLI keeps document positions and says so in `--help`.
-- **The text and framing batch (`23a8dcd..52b13cd`)** and the **Session 2 batch
-  (`cdaf271..ceaff9d`)** and **Session 3 batch** (off-frame hiding + whitelist, on
-  `feat/side-panel-whitelist`) — real-run review fixes: text keeps its source font
-  and colour, scripture body in the template box, centre-panel 1:1, sparkle overlays,
-  church-list drop over the map, magic-move de-dup, off-screen skip + body fit,
-  corner labels, cover-vs-letterbox, badge colour-reject, LW side-panel drop, verse
-  bold-run preservation, sibling-affine magic-move reuse. Each has its reasoning in
-  its commit message; the mechanisms are locked by tests.
-- **Session 4 (`feat/resize-operator-notes`)** — operator-facing polish, frontend
-  only: an Important callout at the top of the CG resizer (delete skipped slides;
-  ungroup side content or it reads as centre; close Keynote first; check box edges;
-  check text line breaks), a whitelist filter in the framing review's Reviewed tab
-  (funnel; kept-only + by-template; green dot on whitelisted chips), pill toggle
-  switches replacing every checkbox, and a hazard-tape warning callout style.
-- **Session 5 — `fit_to_frame_recipe` fills instead of letterboxing (PR #31).** The
-  fallback (used when no template framing pairs) fitted the whole visible union with
-  `min()`, so a centre panorama two frames wide shrank to a postage stamp (`s≈0.48`)
-  where the human simply cropped it to one frame at native size (`s=1.0`). It now
-  biases from fit toward cover, bounded three ways: never crop the binding dimension
-  past `FILL_MAX_CROP_FRACTION`, and never enlarge past 1:1 native — so a wide
-  panorama fills and a map already small enough to fit is left whole. Measured offline
-  against gold: map+pin `goldRmse` −15.3% over 72 rows, **14 improved / 0 regressed**
-  (slide 1 map 566→51, pin 334→43); matched-framing slides untouched. The cap was
-  tuned by a sweep: shallow minimum at **0.47** (0.46–0.48 within noise), worsening
-  past ~0.49 because the native 1:1 cap makes higher values just reach full cover,
-  overshooting the human crop — so 0.47, not higher. Two tests in `test_scoring.py`.
-  This is the one code-side gold-closeness win found in the resizer-refinement dive;
-  the rest of the gold-distance is editorial crop choice (SKILL's documented trap —
-  solved by the framing UI + more template slides) or scoring artefacts
-  (title/badge/list rows).
+  containing a text item's centre) carrying exactly one word. Not by wording.
+- **Fill, don't letterbox, in the fallback (`FILL_MAX_CROP_FRACTION=0.47`, PR #31).**
+  When no template framing pairs, `fit_to_frame_recipe` used to `min()`-fit the whole
+  visible union, shrinking a two-frame panorama to a postage stamp where the human
+  cropped one frame at native size. It now biases fit→cover, bounded twice: never crop
+  the binding dimension past the cap, never enlarge past 1:1. Offline vs gold: map+pin
+  `goldRmse` −15.3% over 72 rows, 14 improved / 0 regressed. Cap tuned by sweep
+  (shallow min at 0.47; higher just reaches full cover and overshoots the human crop).
+  *Insight: this was the one code-side gold-closeness win in the whole
+  resizer-refinement dive — the rest of the gold distance is editorial crop choice
+  (SKILL's documented trap) or scoring artefacts on title/badge/list rows, not bugs.*
 
-- **Session 6 — pack the left-column number-block groups (PR TBD).** On slide 4 of
-  `Map_Extracted_Wall_1st` (report card slide 124) the "183/86/14/269" stat block
-  lives in 4 groups that the matched template affine (centred on the map art) throws
-  off the frame's left edge, so `plan_slide_transforms` parked each individually at
-  `Rect(16, mapped.y, wall_w, wall_h)` — groups can't be scaled — and they stacked
-  into overlapping fragments. Now a branch-time flag collects the parked-left groups
-  and a post-pass `_pack_left_groups` re-places them via a new
-  `pack_columns_from_left` (left mirror of `pack_columns_from_right`, stepping to the
-  next column by the column's *max* width so unequal-width boxes don't collide),
-  sorted by wall reading order. Called unconditionally (not under `pack_lists`),
-  moves only (wall size kept), the "roughly right, staff-nudge" contract lists use.
-  Verified offline: the 4 groups pack into two non-overlapping columns; map/pin
-  placement byte-identical; 324 tests pass (2 new). **Out of scope, still open:**
-  slide 124 has a separate ~130×11px overlap between two *right-side* groups
-  (`mapped.x ≥ 16`, so not parked/packed); and slide 125's church list is 46 opaque
-  groups / 163 overlaps including a full-wall 7123px group — the documented source-deck
-  grouping fix (ungroup), not a code fix here.
+**Groups can't scale, only move**
 
-- **Session 7 — delete hides (PR #33, merged) + out-of-range range guard (PR open).**
-  (a) Non-group `role="hide"` objects were left at `opacity=0` — invisible but still
-  catching clicks, so the operator kept selecting a zero-opacity ghost instead of the
-  text to edit. `deleteGroupHides` → `deleteHides` now deletes every hide after both
-  geometry passes (grouped by kind, descending index; falls back to `opacity=0` if a
-  delete is refused). Two independent sub-agent reviews confirmed no `applyTransforms`
-  path skips a hide without deleting it. (b) A slide range past the deck's last slide
-  (slide 124 fed to a 9-slide extract) used to inspect/propose nothing and leave a
-  blank framing screen; `_assert_range_within_deck` now errors, using `slideCount`
-  (the whole deck's length even on a ranged read) as the ceiling.
+- **Pack the left-column number-block groups (PR #32).** On slide 124 the "183/86/14/
+  269" stat block lives in groups the map affine throws off the left edge, so
+  `plan_slide_transforms` parks each at `x=16` at *wall* size (a group's width does not
+  scale its children). Parked at one margin they overlapped; a post-pass
+  `_pack_left_groups` / `pack_columns_from_left` (stepping by the column's *max* width)
+  now packs them into non-overlapping columns, move-only, map/pin byte-identical.
+  *Insight: the opaque-group limit is why this is packing, not sizing — the groups'
+  inner numbers can't be read or resized. See the GUI-ungroup TO-explore below.*
+
+**Confirmation, whitelist, hiding — the operator loop**
+
+- **Framing confirmation** — `/api/resize` is two-phase (propose, then apply after the
+  operator confirms), reviewed in `FramingReview.tsx` grouped by framing, each
+  candidate a real wall preview under the planner's own affine, decisions remembered
+  by digest. *Insight: confirmation only bites where the template has a framing worth
+  picking; the count of pages with no candidate is the prompt to add template slides.*
+- **Per-slide side-panel whitelist (`14ef262`, `7f1fa59`)** — side content dropped by
+  default, kept per whitelisted page via `Decision.keep_side_content` (by digest,
+  orthogonal to framing). Threads through `plan_payload_transforms`, `remap_keynote`,
+  the endpoints, and the review's per-page toggle. CLI `--include-lists` is the global
+  override.
+- **Off-frame hiding, then deleting the hides (`e7621f8`, PR #33).** The 16:9
+  canvas-shrink makes Keynote scale-to-fit every object it owns, dragging *skipped*
+  objects back on-frame; `plan_slide_transforms` emits zero-opacity hides for
+  off-screen leftovers and magic-move duplicates. But a zero-opacity object still
+  catches clicks, so the operator kept selecting a ghost — `deleteHides` now deletes
+  every hide after both geometry passes (descending index, falls back to `opacity=0`
+  if a delete is refused; `remap_keynote.js` already deleted grouped hides, opacity
+  can't hide a group). *Insight: this is why the resizer's Important callout tells the
+  operator to delete skipped slides and ungroup side content.*
+- **Operator-facing polish (`feat/resize-operator-notes`)** — the Important callout,
+  a whitelist filter in the Reviewed tab, pill toggles, hazard-tape warnings. Frontend
+  only.
+
+**Real-run review batches** (`23a8dcd..52b13cd`, `cdaf271..ceaff9d`, `feat/side-panel-whitelist`) — text keeps its source font and colour (never re-assert a verse box — it flattens the runs; memory `lw-text-keeps-source-font-colour`), scripture body in the template box, centre-panel 1:1, sparkle overlays, church-list drop over the map, magic-move de-dup, off-screen skip + body fit, corner labels, cover-vs-letterbox, badge colour-reject, LW side-panel drop, verse bold-run preservation, sibling-affine magic-move reuse. Each has its reasoning in its commit; the mechanisms are locked by tests.
+
+**The recurring lesson.** Framing selection went through five rewrites in one session, each fixing a real case and creating the next — the signature of a metric asked to infer something the data doesn't contain (which crop the operator wants is editorial; no pixel area encodes it). When selection needs a sixth exception, *ask* — don't add a metric. The repo already has the asking pattern (the Sermon Checker's propose/correct/remember-by-digest). Full statement in SKILL and in "The metric-that-misleads pattern" below.
 
 ## Immediate TO-explore: GUI-script ungrouping the stat blocks
 
@@ -163,30 +147,150 @@ The number-block stats — "183 CHC Churches", "269 Total Churches", "86 Affilia
 "14 Countries", "44 Renovated Church Buildings" — are each an **opaque group**: the
 inspect shows every one with `childCount=0`, `text=""`, no readable `size`. So the
 resizer can only *move* them at wall size (Session 6's packing); it cannot read or
-resize the inner "269" to match the template. Two limits stack: grouped children are
-invisible to Keynote scripting, **and** a group can't be scaled (setting a group's
-width does not scale its children). Keynote exposes no ungroup command, so today the
-only fix is to ungroup in the source deck (same as slide 125).
+resize the inner "269" to match the template. Two limits were assumed to stack: grouped
+children invisible to scripting, **and** a group can't be scaled (setting a group's
+width does not scale its children). The first half turns out to be JXA-only — see the
+Session 8 results below — but the scaling limit stands, and Keynote exposes no ungroup
+command, so a source-deck ungroup (same as slide 125) is still the only *resize* fix.
 
-**Worth a probe:** GUI-script an **ungroup pass via System Events** — select each stat
-group and send **⇧⌘G** (Arrange ▸ Ungroup), the same mechanism the superscript pass
-already drives through the Format menu (needs Accessibility; see SKILL `## Later verse
-numbers need Accessibility`). If it works, the freed text items become addressable and
-resizable, turning a source-deck chore into a code fix.
+### Session 8 — GUI probe results (`scripts/probe_gui_ungroup.applescript`, throwaway)
 
-*Design if it works.* Planning runs off the inspect **before** apply, and ungrouping
-changes the object model the plan was built from. So this needs an ungroup **pre-pass**
-on the copy, then a **re-inspect** (of at least the affected slides) so the freed text
-is planned as real items. And the template must *teach* the freed text's target size —
-a swatch per number/label style, or the stats laid out ungrouped at CG size — or the
-freed text just rides the ~0.85 crop scale (the same "template must teach it" caveat as
-any unpaired text).
+Peer-reviewed plan (scripting feasibility + benchmark validity) then a throwaway
+probe. All reproducible across 3 runs at 9.2s ± 0.07s. Corrections the reviews forced
+in before running: **Ungroup is not ⇧⌘G** (it is ⌥⇧⌘G) — so drive it as a
+**menu-item click by name** (`click menu item "Ungroup" of menu "Arrange"…`), the
+superscript-pass form, not a keystroke; verify by **inline** `count of groups` /
+`object text` readback, not by re-running `inspect_keynote.js` (which closes the doc
+`saving:no` and costs a full open per round); and measure **benefit**, not just that
+ungroup runs — a fast ungroup that then rides the ~0.85 crop scale is cost with no
+benefit, and the manual baseline is a *one-time source-deck* fix vs a *recurring*
+automated pass.
 
-*Probe to write* (like `probe_zorder.js` / `probe_corner.js`): build a throwaway deck
-with a grouped number+label, drive ⇧⌘G through System Events, and check whether the
-children become addressable afterwards (`childCount>0`, text/size readable). If yes,
-scope the pre-inspect ungroup pass; if no, it stays a source-deck fix and this note
-records that the door was tried.
+Confirmed on a GUI-created group:
+- **`set selection of document to {objRefs}` works in AppleScript** (raises in JXA —
+  the documented split). A script-set selection **drives the Arrange menu** (Group
+  clicked → grouped). So objects are targeted **by reference — no Tab-cycling**, which
+  removes the whole z-order fragility this note used to assume.
+- **Ungroup round-trip works:** groups 1 → 0, freed text becomes a top-level item and
+  reads back its string + size. Nested groups take **one Ungroup round per level**
+  (depth-2 → 2 rounds); the flatten terminal test must be "0 groups" / "Ungroup came
+  back disabled", **not** count-equality (nesting holds the count steady while
+  progressing). A menu item's `enabled` state is **stale for ~0.4s after `set
+  selection`** — query too soon and the click silently no-ops.
+
+**The finding that reframes this whole TO-explore:** AppleScript reads a group's
+children — `count of iWork items`, `text items`, and the inner text's `object text` +
+`size` — **while still grouped** (`text='hello' size=48.0`). So the `childCount:0`
+opacity in the premise above is a **JXA-only limitation of `inspect_keynote.js`**, not
+a Keynote limit. If real source-deck groups behave the same, **reading** the inner
+"269" needs *no ungroup at all* — only an AppleScript group-inspection path; ungroup
+would remain only for *resizing* inner text (a group still can't be scaled), and even
+that may be dodgeable if a grouped child's geometry is writable (untested).
+
+**Pivotal check — done, confirmed.** `scripts/probe_open_group_read.applescript`
+(attach-only read of the deck opened by hand — no script `open`, after a hard
+`pkill -9` on a mid-open Keynote locked the package; graceful quit + attach-only from
+here on) read slide 4's real source-deck stat groups in 1.1s: `'269' size=300.0`,
+`'183'/'86'/'14' size=170.0`, `'44' size=70.0`, labels at 60.0 — exactly the groups
+`inspect_keynote.js` reports as `childCount:0`. **So the ungroup feature is largely
+unnecessary for *reading*:** the win is an **AppleScript group-inspection path** in
+inspect that exposes inner text + size, not a GUI ungroup pass. And the resize case
+falls away too: `scripts/probe_gui_write_child.applescript` (throwaway) confirmed a
+grouped child's `position`, `width`, and `size of character` (font size) are all
+**writable in place** while grouped (text `height` autofits; shape child width writes
+too). So the resizer can read a child's `269`/size, compute its CG target, and write
+position/width/font-size onto the grouped child directly — **no ungroup at all, for
+read or resize.** Setting the *group's* own width still doesn't scale children (that
+limit is real); you address the children instead. **The GUI-ungroup track is therefore
+dropped** — replaced by an AppleScript read+write-children path. (The "duplicate
+objects" worry is retired: on the current deck both JXA and AppleScript see 6 top-level
+groups; the old 8-with-duplicates was a stale cached inspect. Two of the six carry one
+level of nesting — see the design's point 2. See SKILL.)
+
+### Design: the AppleScript read+write-children path (replaces the ungroup track)
+
+Both group-child *read* and *write* must be AppleScript — JXA can touch neither. The
+minimal design keeps the existing JXA inspect/remap untouched and bolts on one
+self-contained AppleScript **child-resize post-pass**:
+
+1. **No payload-schema or JXA change.** The planner already derives each group's
+   placement affine (the one Session 6 used to park/pack the group). Instead of moving
+   the group as a unit at wall size, pass that per-group affine to the new pass.
+2. **Match groups by bbox, not index — and recurse one level for nesting.** JXA and
+   AppleScript agree on 6 top-level groups (`probe_group_tree.applescript` + a live JXA
+   `slide.groups()` read both give 6), so index parity is fine — but matching by
+   **position/size** is still safer than trusting a JXA `kindIndex` to line up with the
+   AppleScript enumeration, and it costs nothing. The real subtlety is **nesting**: two
+   of the six stat groups hold a nested sub-group (the number `183`/`44` is a direct
+   child; its label `CHC Churches`/`Renovated Church Buildings` sits one level deeper),
+   so the child walk must recurse one level.
+3. **Read → transform → write, all in AppleScript.** For each matched group, walk its
+   children (`text items`/`shapes` of the group **and of any nested group**, with
+   `object text` + `size of character` + geometry), apply the group's affine to each
+   child's rect, and write `position`/`width` and (for uniform runs only) `size of
+   character 1 through -1` onto the child in place. Verified writable by
+   `probe_gui_write_child.applescript`.
+4. **This supersedes the Session-6 left-pack for stat groups** — children land at real
+   CG positions/sizes from the affine, so there is nothing to pack. Keep the pack as the
+   fallback when a group's children can't be read/matched.
+
+**Guards:** only write font size on a **single-run** child (multi-run flattens, per the
+character-styling limit — same rule as top-level verse text; leave those alone); text
+`height` autofits so don't fight it; the group's bbox recomputes after child writes
+(fine); recurse one level for the two nested label sub-groups. **Cost:** this is an
+extra live AppleScript pass over the affected slides on the copy — but it reads+writes
+in place, no re-inspect/re-open.
+
+### Session 9 — pivot to template-taught sizing + z-order; JXA limits re-verified
+
+**The shrink design above (Session 8) was wrong and is superseded.** The dry-run render +
+the operator showed why: the CG crop **preserves the 1080 frame height** (only width is
+cropped 7680→1920), so a wall-authored number is *already correctly sized relative to the
+frame*. Shrinking it made it too small. The real needs were (1) the exact point size the
+**template** teaches, and (2) the stat text + Global Missions badge sit **behind the map**.
+
+Shipped on branch `feat/group-child-resize` (render-ready, not merged):
+- **Stat-finalize pass** (`keynote.py`): read the template's numeric text sizes (grouped +
+  loose, via AppleScript) into `{digits: size}` — catches the grouped `269`=200 that JXA's
+  swatch harvest misses; set each matched wall number to that size in place (`269`→200,
+  `183`→150; unmatched stay wall size); then **Bring to Front** the stat groups + the
+  (possibly loose) `Global Missions` badge. `_pack_left_groups` reverted to wall-size
+  packing. Two review rounds + a dry-run (269 landed 300→52 double-scaled → fixed by
+  deduping via `iWork items`; badge-loose gap fixed). Dead code from the shrink approach
+  removed.
+- **Open follow-up (flagged):** matching numbers to the template **by content** is
+  report-specific; a robust version matches by **style-swatch** (font+weight+colour →
+  size), with slot/position as the tiebreak for same-style duplicates. That is the next
+  iteration, not built.
+
+**JXA limits systematically re-verified — most are JXA-only (see SKILL's new matrix).**
+`iWork items of slide` enumerates in **stacking order** (so z-order is *readable* in
+AppleScript), **line endpoints** read/write, **per-character font/colour/size** writes
+don't flatten, `parent`/`master slides`/export all work — all JXA-only walls. Genuinely
+un-scriptable (absent from the sdef, both bridges): character styling beyond
+font/colour/size (superscript/underline — the verse-number raise still needs the menu),
+corner radius, a z-order *property*. **Rule recorded in SKILL: test every "limit" in
+AppleScript before believing it.**
+
+### The node-graph ("constellation") slide — staff hand-down
+
+Separate track (`Full_Report_Card` slide 134→127): a connected graph of ~67 figure-nodes
+(varied sizes) + 68 edges. Measured: the human scaled nodes **~0.85** and compressed the
+footprint to **~0.48** — which is not handwork but a **two-knob transform**: scale each
+node in place (~0.85) + pull its centre toward the constellation centroid (~0.5). With
+line endpoints now writable (AppleScript), edges re-route to follow. Recommendation
+(peer-reviewed):
+- **Option A+ (recommended, zero staff input):** the two-knob transform; the `Affine` +
+  centroid helpers mostly exist. Caveat: overlaps in dense regions → gentler `c` / local
+  de-overlap; tune `s`/`c` once against gold.
+- **Edges: match by IDENTITY, never proximity** (the documented pins trap, SKILL:286-291) —
+  record edge→node incidence on the wall, re-anchor to the *recorded* node preserving the
+  rim offset; a deleted node's edges are dropped, never re-pointed.
+- **Bare minimum staff provide:** *nothing* for A+; if A+ falls short, *the finished node
+  layout at final size* (no template authoring, no exemplar) and the tool does edges +
+  stacking. **Ask first: does the slide's content change yearly?** — that gates whether to
+  build A+, fall back to an exported image, or hand-do it. Full write-up in the session
+  scratch `constellation_plan.md`.
 
 ## Handover — CG resizer state (2026-08-27)
 
@@ -200,10 +304,15 @@ records that the door was tried.
   a badge carries its own affine); then the cue palette / outline editor / image cues /
   DSK track.
 
-**Known and deliberate, not a bug:** a badge can land correctly and still be buried
-by map art that was already above it — the resizer inherits the source deck's
-stacking and Keynote exposes no way to change it (z-order is neither readable nor
-settable; in SKILL). It reads as a clipping bug; it is a source-deck or template fix.
+**Was "known and deliberate", now fixable (Session 8):** a badge can land correctly and
+still be buried by map art the source deck stacked above it. Z-order is unreadable and
+has no dictionary command — but `scripts/probe_gui_zorder.applescript` showed a **GUI
+Bring-to-Front pass works**: select the badge by object reference (`set selection`
+works in AppleScript) and click Arrange ▸ Bring to Front; a before/after render
+confirmed the reorder. So the resizer could lift the badge with an added GUI pass
+(match the badge by its title-plate bbox, Bring to Front) — needs Accessibility. A
+source-deck/template fix is still simpler when the deck is being edited anyway, but it
+is no longer the *only* option. See SKILL z-order section.
 
 ## The number block in the CG resizer (immediate)
 
@@ -409,21 +518,27 @@ Stat drift is independent of all of these and can land whenever.
 
 ## Still parked
 
-- **Text in front. Decided 2026-08-25 — do not re-raise without new information.**
-  There is no arrange vocabulary, but *pasting* puts an object at the front and
-  `applyReuse` already drives cut/paste. The cost is real (a pasted object is new, so
-  builds and identity are lost, and it is keystroke-driven). A narrow version (title
-  + badge words) was offered and declined: the case it would address is the buried
-  badge, which is source-deck stacking no script can reach.
+- **Text in front — new information arrived (Session 8), reopen.** The 2026-08-25
+  decision ("do not re-raise without new information") rested on there being no clean
+  way to reorder: the only route was *pasting* to front (via `applyReuse`'s cut/paste),
+  which loses builds/identity and is keystroke-driven. But
+  `scripts/probe_gui_zorder.applescript` now shows a **clean GUI Bring-to-Front** on an
+  object selected *by reference* — no paste, no lost identity, no builds destroyed. The
+  buried-badge case it was declined for is exactly what this reaches. Reconsider a
+  narrow badge-to-front pass on that basis. (Still keystroke/Accessibility-bound, still
+  a GUI pass — but a far cheaper one than paste.)
 - **Slide 125's church list** — its names live in ~51 opaque groups spanning the
   centre, so neither the list-hide (text only) nor the side-panel drop reaches them.
   Source-deck **grouping** problem — ungroup so they hide like slide 124. (Now also
   surfaced to the operator in the resizer callout.)
-- **Duplicate objects in the source deck** — `Map_Extracted_Wall_1st` slide 4 has two
-  pairs of coincident groups; the planner places all four. Harmless (each pair lands
-  on the same spot), so this is object count, not appearance. Any dedupe must be
-  scoped to groups and text and **never** images (the stacked map layers are
-  coincident on purpose).
+- **Duplicate objects in the source deck — RETIRED (Session 8).** This rested on an old
+  cached inspect showing 8 groups on `Map_Extracted_Wall_1st` slide 4 with two coincident
+  pairs. A live read (`probe_group_tree.applescript` + a live JXA `slide.groups()`) shows
+  the current deck has **6 top-level groups, no duplicates** — two of them just carry a
+  nested label sub-group (8 group *objects*, but `slide.groups()` returns the 6 top-level
+  and doesn't flatten nested). So there is nothing to dedupe; the stale note is dropped.
+  (The "never dedupe images — the stacked map layers are coincident on purpose" caution
+  is still true in general and worth keeping in mind for any future dedupe.)
 - **The first ranged propose on a deck never read in full** cannot translate the range
   into Keynote's numbering, and says so rather than guessing. A flags-only Keynote
   pass would remove the caveat if it bites.

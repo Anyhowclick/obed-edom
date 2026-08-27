@@ -386,6 +386,49 @@ uninstalled, so 15.3.1 is now the only version these hold for. Re-probe after th
 *next* upgrade with `scripts/probe_runs.js` and `scripts/probe_layouts.js`, both
 of which take a bundle id as their last argument.
 
+### The JXA/AppleScript split — most "limits" are JXA-only; re-test in AppleScript
+
+**The single most important fact about scripting Keynote: JXA is crippled and
+AppleScript is not.** Almost every "limit" first recorded here was probed in JXA
+(`inspect_keynote.js`, `remap_keynote.js`, `scripts/probe_*.js`) and turns out to be a
+**JXA marshalling artefact, not a Keynote limit** — the same feature works in
+AppleScript. Systematically re-verified on 15.3.1 (throwaway decks + the real report-card
+extracts). **Before ever recording a new "can't do X", test X in AppleScript.** The
+codebase's inspect/remap are JXA, so they hit these walls and work around them; an
+AppleScript path removes most of the walls.
+
+| Capability | JXA | AppleScript | Genuine API? |
+|---|---|---|---|
+| Read a group's children (text, size, geometry), any depth | raises "Can't convert types" | **works** (`iWork items`/`text items`/`shapes of <group>`) | yes (elements in sdef) |
+| Write a grouped child's position/width/height/font | can't reach | **works** in place | yes |
+| `set selection of document to {objRef}` (target by reference) | raises | **works** | yes (`selection`, rw, on document) |
+| Line `start point` / `end point` — read *and* write | null / collapses to 1u | **works** (endpoints stick, length recomputes) | yes (both rw in sdef) |
+| `iWork items of slide` (the mixed collection) | raises | **enumerates, in *stacking order*** | yes |
+| → **Z-order READ** (which object is in front) | impossible | **works** — read the `iWork items` order (front = last); Bring-to-Front moves an item to the end | via the collection |
+| Per-character `font` / `color` / `size` write | flattens / partial | **works, isolated to that character** (setting char 1 leaves char 2 untouched) | yes — but only these three |
+| `master slides` (create slide from a master) | raises | **works** | yes |
+| `parent` of an item (its container) | — | **works** (readable) | yes (r) |
+| Export slide images | always fails (`exportError`) | **works** (AppleScript `export … as slide images`) | yes |
+
+**Genuine API gaps — absent from `Keynote.sdef`, so *neither* bridge can do them:**
+- **Character styling beyond `font`/`color`/`size`** — no `baseline shift`, `superscript`,
+  `underline`, `strikethrough`, `capitalization`/small-caps. Confirmed by sdef (rich text
+  exposes only those three) and by AppleScript **failing to compile** an unknown property.
+  *So the superscript verse-number raise still needs the GUI Copy/Paste-Style pass* — it
+  is the baseline-shift that is unreachable, not the colour (colour is per-character
+  settable). This is the one styling wall that is real.
+- **Corner radius** — no property on `shape` in the sdef. Real in both bridges.
+- **A settable z-order *property* / an arrange *command*** — none in the sdef. But z-order
+  is still fully workable via AppleScript: **read** the `iWork items` order, **set** with
+  GUI Bring-to-Front / Send-to-Back on a script-set selection, **verify** by re-reading
+  the order. So "z-order can be neither read nor set" (below, kept for history) is
+  **wrong for AppleScript** — it was a JXA statement.
+
+The entries below were the original JXA findings; read them as "true in JXA" and see this
+table for the AppleScript reality. `scripts/probe_gui_*.applescript` and
+`probe_open_group_read.applescript` / `probe_group_tree.applescript` reproduce the
+AppleScript results (local, `*.applescript` is gitignored).
+
 - **Character and run styling is NOT scriptable — only `font`, `color`, `size`,
   and the box-write of those flattens the whole box.** This one limit governs both
   the sermon generator and the CG resizer, so check it before any text-styling
@@ -431,8 +474,9 @@ of which take a bundle id as their last argument.
     space in place (delete-only merges the words), **leave verse boxes untouched;** a
     stray hard break is a source-deck fix. See memory
     `lw-text-keeps-source-font-colour`.
-- **Z-order can be neither read nor set.** Verified on 15.3.1 by
-  `scripts/probe_zorder.js`; both halves are Keynote limits, not our bugs.
+- **Z-order can't be read, and can't be set *from the dictionary* — but GUI scripting
+  reorders it, deterministically.** Verified on 15.3.1 by `scripts/probe_zorder.js`
+  (dictionary limits) and `scripts/probe_gui_zorder.applescript` (GUI reorder works).
   - *Reading:* `slide.iWorkItems()` raises "Can't convert types.", so the one
     collection that would interleave classes in stacking order is unavailable.
     Earlier notes said it returned 0 on slides holding real objects; on macOS 26 it
@@ -443,24 +487,32 @@ of which take a bundle id as their last argument.
     bring-to-front, send-to-back or z-order property on `iWork item`, whose entire
     property list is height, locked, parent, position, width. JXA hands back a
     function for any name you ask for, so `app.bringToFront` looks like it exists;
-    calling it gives "Message not understood." Reordering is GUI-only.
+    calling it gives "Message not understood." Reordering is GUI-only — **but it
+    works, and deterministically.** `scripts/probe_gui_zorder.applescript` selects a
+    buried shape *by object reference* (`set selection of document to {shape}` — works
+    in AppleScript, raises in JXA) and clicks **Arrange ▸ Bring to Front** via System
+    Events; the before/after PNG render confirms the shape moved to the front. So no
+    Tab-cycling and no readable z-order are needed to *set* stacking — select the
+    target by geometry and Bring to Front. (Needs Accessibility, like every GUI pass.)
   - *What is knowable:* per-type collections do enumerate in creation order
     (`slide.shapes()` returned the three probe shapes in the order they were made),
     so relative order **within** one class is recoverable. Cross-class is not, and
     that is the part stacking actually needs.
-  - *Consequence for resize:* the resizer duplicates a slide and then moves,
-    resizes and deletes the objects already on it, so it inherits the source deck's
-    stacking untouched. It cannot repair a bad stack, but it cannot break a good
-    one. Only generate, which creates objects, controls stacking — by creation
-    order, via the `role_order` sort in `plan_slide_transforms`. That sort's own
-    comment claims apply order *is* stacking order; read it as true for generate
-    and false for resize.
+  - *Consequence for resize:* the resizer duplicates a slide and then moves, resizes
+    and deletes the objects already on it via JXA, so it inherits the source deck's
+    stacking untouched. It cannot *read* a bad stack, but it can now **repair** one
+    with an added GUI z-order pass (select the buried object by geometry, Bring to
+    Front). Generate, which creates objects, still controls stacking by creation order
+    via the `role_order` sort in `plan_slide_transforms`; that sort's comment claims
+    apply order *is* stacking order — true for generate, and for resize it is now a
+    starting point a GUI pass can override rather than a hard ceiling.
   - *Seen in the wild:* on `Map_Extracted_Wall_1st` the map layers sit above the
     title badge in the source deck. The badge lands on its slot exactly — measured
     at `(17,37) 411x123` off the rendered preview, matching gold — and is still
     buried from x≈220 onward, where the map's white landmass begins. It reads as a
-    clipped plate and a title truncated to "Glob". No code can lift it; the fix is
-    in the source deck or the template.
+    clipped plate and a title truncated to "Glob". **This is now fixable in code** via
+    a GUI Bring-to-Front pass on the badge (above) — no longer only a source-deck or
+    template fix, though those remain simpler when the deck is being edited anyway.
 - **A shape's corner radius can be neither read nor set.** Verified on 15.3.1 by
   `scripts/probe_corner.js`. A shape's entire scriptable property bag is `opacity,
   parent, pcls, reflectionShowing, backgroundFillType, position, objectText,
@@ -488,6 +540,58 @@ of which take a bundle id as their last argument.
   layout`. Generate depends on that AppleScript path and is unaffected — but it is
   why `keynote_jxa.js` must stay unused, since porting slide creation to JXA would
   fail on the very lookup it needs.
+- **A group's children are readable in AppleScript, though `group.iWorkItems()`
+  raises in JXA — the same split as `masterSlides()`.** `inspect_keynote.js` reads
+  children via `group.iWorkItems()`, which raises "Can't convert types.", so every
+  group inspects as `childCount:0` and its inner text/size look unreadable. In
+  AppleScript the same group answers: `count of iWork items of <group>`, `text items
+  of <group>`, `shapes of <group>`, and `object text` / `size of character 1` of a
+  grouped text item all return real values *while still grouped* — verified by
+  `scripts/probe_gui_ungroup.applescript` on a GUI-created group (`text items=1`,
+  inner `text='hello' size=48.0`). So the `childCount:0` opacity is a JXA artefact,
+  not a Keynote limit.
+  - *Confirmed on the real source-deck groups*, not just an in-session one:
+    `scripts/probe_open_group_read.applescript` (attach-only read of an already-open
+    deck) dumped every stat block on `Map_Extracted_Wall_1st` slide 4 — the ones
+    `inspect_keynote.js` reports as `childCount:0` — as `text items` with real content
+    and size: `'269' size=300.0`, `'183'/'86'/'14' size=170.0`, `'44' size=70.0`,
+    labels at 60.0. So the opacity is purely a JXA artefact.
+  - *Consequence:* reading a stat block's inner "269" and its size does not require a
+    GUI ungroup — an AppleScript group-inspection path exposes it. And a grouped
+    child's geometry **is writable**: `scripts/probe_gui_write_child.applescript`
+    (throwaway) set a grouped text child's `position`, `width`, and `size of character`
+    (font size 48→24) in place, and a grouped shape child's `width` (200→90); only text
+    `height` didn't stick because a text box autofits to content. So the resizer can
+    read a grouped child, compute its CG target, and **write position/width/font-size
+    straight onto the child** — no ungroup at all, even for resizing. (Setting a
+    *group's* own width still doesn't scale its children — that limit is real and
+    unchanged; the point is you address the children directly instead.) Writes were
+    verified on an in-session group; the resizer operates on a copy, so exercising them
+    on imported groups carries no risk to the source.
+  - *Nesting, and a retired worry.* On `Map_Extracted_Wall_1st` slide 4 both JXA and
+    AppleScript agree on **6 top-level groups** (`scripts/probe_group_tree.applescript`
+    + a live JXA `slide.groups()` read); `slide.groups()` returns top-level only and does
+    **not** flatten nested groups. Two of the six carry one level of nesting — the number
+    (`183`, `44`) is a direct child, its label (`CHC Churches`, `Renovated Church
+    Buildings`) sits in a nested sub-group — so a child read/write path must recurse one
+    level. The plan's old "2 coincident duplicate groups / duplicate objects in the
+    source deck" note came from a **stale cached inspect** (8 groups); the current deck
+    has no duplicates, so that worry is retired, not real.
+- **GUI ungroup / reorder is reachable, and can target objects by reference.** The
+  dictionary has no group/ungroup/arrange command (confirmed in `Keynote.sdef` — only
+  "move slide switcher backward"), so the *action* is GUI-only via System Events, like
+  the superscript pass. Two facts make it deterministic rather than Tab-cycling:
+  `selection` is a read-write `document` property, and **`set selection of document to
+  {objRefs}` works in AppleScript** (raises "Can't convert types." in JXA); a
+  script-set selection is a real UI selection that the Arrange menu acts on. Drive the
+  action as a **menu-item click by name** (`click menu item "Ungroup" of menu "Arrange"
+  of menu bar item "Arrange" of menu bar 1`) — **not** ⇧⌘G, which is *not* Ungroup
+  (that is ⌥⇧⌘G). Two gotchas: a menu item's `enabled` state is stale for ~0.4s after
+  `set selection` (query too soon and the click silently no-ops), and index-based
+  object references go stale across a group/ungroup (re-fetch, don't hold them). Nested
+  groups take one Ungroup round per level; the flatten terminal test is "0 groups" /
+  "Ungroup disabled", never count-equality (nesting holds the count steady while
+  progressing). `scripts/probe_gui_ungroup.applescript` reproduces all of this.
 - **A text box is also a shape.** Keynote lists text-bearing shapes in both
   `textItems` and `shapes`; a third of text objects came back twice on a real
   wall deck. `inspect_keynote.js` marks the duplicate rather than dropping it,
@@ -512,6 +616,13 @@ of which take a bundle id as their last argument.
   This is why a divider survived every check — planned correctly, applied without
   error, present in the deck — and still did not appear: the endpoint writes were
   undoing the size.
+  - **AppleScript reads AND writes line endpoints correctly — this is JXA-only.**
+    `scripts/probe_gui_zorder.applescript`-style probe: a line made with
+    `{start point:{100,100}, end point:{400,300}}` reads back exactly that, and
+    `set start point`/`set end point` stick (the line spans the new endpoints, `width`
+    recomputes to the length). So the "endpoints unreachable" wall is a JXA artefact; a
+    divider (or a node-graph's edges) can be placed by true endpoints in AppleScript,
+    and edges can be re-routed to follow moved nodes. See the JXA/AppleScript table above.
 - **The JXA export always fails; the AppleScript fallback is what works.** Every
   payload that exported carries `exportError: "Keynote export as slide images
   failed."` alongside `exported: true`, on 14.5/macOS 14 as well as on both
