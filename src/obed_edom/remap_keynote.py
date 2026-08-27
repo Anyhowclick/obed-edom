@@ -41,12 +41,16 @@ _AS_KIND_NAMES = {
 
 
 def as_geometry_enabled() -> bool:
-    """Whether OBED_AS_GEOMETRY selects the batched-AppleScript geometry path.
+    """Whether the batched-AppleScript geometry path is used — default ON.
 
-    Flag OFF (default) leaves the plan without the geometry keys, so the JXA
-    apply is byte-for-byte its current behaviour.
+    AS-geometry is the validated default: no JXA (0,0) yank, ~30% faster on the
+    constellation slide (it drops setPos's readback-verify and the second
+    position pass), placement/z-order/groups confirmed correct. Set
+    ``OBED_AS_GEOMETRY=0`` (or ``false``/``no``/``off``) to force the legacy JXA
+    geometry path — kept for A/B debugging and as the per-slide fallback for
+    slides carrying an object of a kind AppleScript can't address.
     """
-    return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _as_num(value: Any) -> str:

@@ -35,18 +35,19 @@ def _spec(**over):
 # --- flag ------------------------------------------------------------------
 
 
-def test_flag_off_by_default(monkeypatch):
+def test_flag_on_by_default(monkeypatch):
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
-    assert as_geometry_enabled() is False
+    assert as_geometry_enabled() is True
 
 
-def test_flag_on_values(monkeypatch):
-    for value in ("1", "true", "TRUE", "yes", "on"):
-        monkeypatch.setenv("OBED_AS_GEOMETRY", value)
-        assert as_geometry_enabled() is True
-    for value in ("0", "", "off", "no"):
+def test_flag_forced_off_values(monkeypatch):
+    # AS-geometry is the default; only an explicit off-value falls back to JXA.
+    for value in ("0", "false", "FALSE", "no", "off"):
         monkeypatch.setenv("OBED_AS_GEOMETRY", value)
         assert as_geometry_enabled() is False
+    for value in ("1", "true", "yes", "on", "", "anything"):
+        monkeypatch.setenv("OBED_AS_GEOMETRY", value)
+        assert as_geometry_enabled() is True
 
 
 # --- addressing & geometry -------------------------------------------------
