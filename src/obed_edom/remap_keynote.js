@@ -523,11 +523,13 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
         collectionsOut[k] = counts[k];
       });
     }
-    // A group ignores `opacity` and clamps an off-canvas move, so neither hides it
-    // and the canvas shrink scales a "hidden" grouped inset back on-frame. It is
-    // deleted instead, in deleteGroupHides after both geometry passes — deferred so
-    // the removal never shifts the kindIndex a placed sibling is looked up by here.
-    if (spec.role === "hide" && spec.kind === "group") continue;
+    // Every hidden object is deleted, not left at opacity 0. An invisible leftover
+    // still catches clicks, so the operator ends up selecting a zero-opacity ghost
+    // instead of the text they want to edit. (A group never honoured opacity anyway,
+    // and the canvas shrink would scale a "hidden" grouped inset back on-frame.)
+    // Deletion is deferred to deleteHides, after both geometry passes, so removing
+    // one never shifts the kindIndex a placed sibling is looked up by here.
+    if (spec.role === "hide") continue;
     const obj = getItem(slide, spec);
     if (!obj) {
       missed += 1;
@@ -550,30 +552,44 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, positi
   return { applied: applied, missed: missed };
 }
 
-function deleteGroupHides(slides, Keynote, transforms, missReasons) {
-  // Remove the groups marked role="hide", after both geometry passes have read the
-  // collection by its original indices. Descending by (slide, kindIndex) so each
-  // deletion leaves the lower indices of the ones still to go valid.
+function deleteHides(slides, Keynote, transforms, missReasons) {
+  // Remove every object marked role="hide", after both geometry passes have read the
+  // collection by its original indices. Grouped by (slide, kind) and descending by
+  // kindIndex within each, so each deletion leaves the lower indices of the ones
+  // still to go — in that same per-kind collection — valid.
   const hides = [];
   for (let t = 0; t < transforms.length; t++) {
     const spec = transforms[t];
-    if (spec.role !== "hide" || spec.kind !== "group") continue;
+    if (spec.role !== "hide") continue;
     const slideNo = Number(spec.slide) || 1;
     if (slideNo >= 1 && slideNo <= countOf(slides)) hides.push(spec);
   }
   hides.sort(function (a, b) {
-    return Number(b.slide) - Number(a.slide) || Number(b.kindIndex) - Number(a.kindIndex);
+    if (Number(a.slide) !== Number(b.slide)) return Number(b.slide) - Number(a.slide);
+    const ka = String(a.kind || "");
+    const kb = String(b.kind || "");
+    if (ka !== kb) return ka < kb ? -1 : 1;
+    return Number(b.kindIndex) - Number(a.kindIndex);
   });
   let applied = 0;
   let missed = 0;
   for (let i = 0; i < hides.length; i++) {
     const slide = slides[Number(hides[i].slide) - 1];
-    if (deleteObj(Keynote, getItem(slide, hides[i]))) {
+    const obj = getItem(slide, hides[i]);
+    if (deleteObj(Keynote, obj)) {
       applied += 1;
     } else {
+      // Last resort if Keynote refuses the delete: pin it invisible so a hide that
+      // cannot be removed does not reappear on the CG. (No help for a group, which
+      // ignores opacity — but those were always delete-or-nothing.)
+      if (obj) {
+        try {
+          obj.opacity = 0;
+        } catch (eHideFallback) {}
+      }
       missed += 1;
       if (missReasons.length < 8) {
-        missReasons.push("slide " + hides[i].slide + " group hide delete failed");
+        missReasons.push("slide " + hides[i].slide + " hide delete failed");
       }
     }
   }
@@ -771,7 +787,7 @@ function run(argv) {
         appliedFirst += r2.applied;
         missedFirst += r2.missed;
         applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
-        const rd = deleteGroupHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
+        const rd = deleteHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
         appliedFirst += rd.applied;
         missedFirst += rd.missed;
       }
@@ -787,7 +803,7 @@ function run(argv) {
     appliedFirst += r.applied;
     missedFirst += r.missed;
     applyTransforms(doc.slides(), transformsForSlide(transforms, n), null, missReasons, true);
-    const rd = deleteGroupHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
+    const rd = deleteHides(doc.slides(), Keynote, transformsForSlide(transforms, n), missReasons);
     appliedFirst += rd.applied;
     missedFirst += rd.missed;
   }
