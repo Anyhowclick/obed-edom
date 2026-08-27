@@ -2742,3 +2742,84 @@ def test_bleed_art_is_judged_on_the_part_that_is_on_the_wall():
     }
     # All three are on frame once each is judged by its visible part.
     assert on_canvas_fraction(slide, recipe, 7680, 1080) == 1.0
+
+
+def _rects_overlap(a: Rect, b: Rect) -> bool:
+    return not (
+        a.x + a.w <= b.x or b.x + b.w <= a.x or a.y + a.h <= b.y or b.y + b.h <= a.y
+    )
+
+
+def test_pack_columns_from_left_wraps_right_by_column_max_width():
+    from obed_edom.map_remap import pack_columns_from_left
+
+    # Non-uniform widths (the real number-block sizes); heights fill the 1080
+    # frame after three boxes so the fourth must wrap into a second column.
+    boxes = [
+        Rect(0, 0, 537, 300),
+        Rect(0, 0, 496, 300),
+        Rect(0, 0, 199, 300),
+        Rect(0, 0, 237, 300),
+    ]
+    placed = pack_columns_from_left(boxes, 1920, 1080)
+    assert len(placed) == 4
+    # Sizes are untouched — only position moves.
+    for src, dst in zip(boxes, placed, strict=True):
+        assert dst.w == src.w
+        assert dst.h == src.h
+    # First box anchors the left margin.
+    assert placed[0].x == 16
+    # The first three boxes stayed in column one.
+    first_col = placed[:3]
+    assert all(r.x == 16 for r in first_col)
+    col1_max_w = max(r.w for r in first_col)
+    # The wrapped (fourth) box stepped by the widest box in column one (537),
+    # not by the previous box's width (199) — a naive prev_w step would overlap.
+    assert placed[3].x >= 16 + col1_max_w
+    # No two placed boxes overlap.
+    for i in range(len(placed)):
+        for j in range(i + 1, len(placed)):
+            assert not _rects_overlap(placed[i], placed[j])
+
+
+def test_pack_left_groups_moves_wall_size_groups_without_overlap():
+    from obed_edom.map_remap import ItemTransform, _pack_left_groups
+
+    # Four left-column number-block groups, all parked at x=16 by the affine,
+    # given in a shuffled order but each with a distinct src.y that defines the
+    # wall's reading order (100 < 400 < 700 < 1000).
+    groups = [
+        ItemTransform(
+            slide_number=1, item_index=0, kind="group", x=16, y=50, w=199, h=200,
+            role="other", src=Rect(0, 700, 199, 200),
+        ),
+        ItemTransform(
+            slide_number=1, item_index=1, kind="group", x=16, y=150, w=537, h=200,
+            role="other", src=Rect(0, 100, 537, 200),
+        ),
+        ItemTransform(
+            slide_number=1, item_index=2, kind="group", x=16, y=250, w=237, h=200,
+            role="other", src=Rect(0, 1000, 237, 200),
+        ),
+        ItemTransform(
+            slide_number=1, item_index=3, kind="group", x=16, y=350, w=496, h=200,
+            role="other", src=Rect(0, 400, 496, 200),
+        ),
+    ]
+    original_sizes = {id(g): (g.w, g.h) for g in groups}
+    _pack_left_groups(groups, {"destWidth": 1920.0, "destHeight": 1080.0})
+    # Wall size is preserved — only x/y moved.
+    for g in groups:
+        assert (g.w, g.h) == original_sizes[id(g)]
+    # No two groups overlap after packing.
+    for i in range(len(groups)):
+        for j in range(i + 1, len(groups)):
+            ri = Rect(groups[i].x, groups[i].y, groups[i].w, groups[i].h)
+            rj = Rect(groups[j].x, groups[j].y, groups[j].w, groups[j].h)
+            assert not _rects_overlap(ri, rj)
+    # Placement follows ascending src.y (wall reading order): the group with the
+    # smallest src.y lands first — leftmost margin, topmost y.
+    by_src_y = sorted(groups, key=lambda g: g.src.y)
+    ys = [g.y for g in by_src_y]
+    assert ys == sorted(ys)
+    assert by_src_y[0].x == 16

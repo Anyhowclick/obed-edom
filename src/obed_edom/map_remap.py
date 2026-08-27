@@ -658,6 +658,44 @@ def pack_columns_from_right(
     return placed
 
 
+def pack_columns_from_left(
+    boxes: list[Rect],
+    dest_w: float,
+    dest_h: float,
+    *,
+    gap: float = 10.0,
+    margin: float = 16.0,
+) -> list[Rect]:
+    """Stack boxes into columns anchored to the left edge (top to bottom, then right).
+
+    The left mirror of `pack_columns_from_right`, for the left-column stat groups the
+    map affine throws off the frame's left edge. Because left-anchored boxes extend
+    rightward — toward the step direction — a new column must clear the *widest* box
+    in the column it is leaving, not just the previous one; otherwise unequal-width
+    boxes overlap across the column break. Extra columns step right and may overlap
+    the map, which staff nudge by hand.
+    """
+    if not boxes:
+        return []
+    top = margin
+    bottom = max(margin + 8.0, dest_h - margin)
+    placed: list[Rect] = []
+    col_left = margin
+    col_max_w = 0.0
+    y = top
+    for box in boxes:
+        w = max(8.0, box.w)
+        h = max(8.0, box.h)
+        if placed and y + h > bottom + 0.5:
+            col_left = col_left + col_max_w + gap
+            y = top
+            col_max_w = 0.0
+        placed.append(Rect(col_left, y, w, h))
+        col_max_w = max(col_max_w, w)
+        y += h + gap
+    return placed
+
+
 def template_line_slots(
     slides: list[dict], slide_number: int | None = None
 ) -> list[dict[str, Any]]:
@@ -2241,6 +2279,25 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
         lists[idx].h = rect.h
 
 
+def _pack_left_groups(groups: list["ItemTransform"], recipe: dict[str, Any]) -> None:
+    """Re-place the left-column groups the affine parked at x=16 so they stop
+    overlapping. They cannot be scaled (group width does not scale children), so this
+    only moves them, packing wall-size boxes top-to-bottom then into further columns.
+    Sorted by wall reading order so a 183/86/14/269 stack stays in sequence.
+    """
+    if len(groups) < 2:
+        return
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    order = sorted(range(len(groups)), key=lambda i: (groups[i].src.y, groups[i].src.x))
+    boxes = [Rect(groups[i].x, groups[i].y, groups[i].w, groups[i].h) for i in order]
+    placed = pack_columns_from_left(boxes, dest_w, dest_h)
+    for idx, rect in zip(order, placed, strict=True):
+        groups[idx].x = rect.x
+        groups[idx].y = rect.y
+        # w/h unchanged — wall size is preserved on purpose.
+
+
 # How far, as a fraction of each frame dimension, the body verse may be nudged to
 # get back on-screen. Small, so it stays near where it was placed and an operator
 # can still recognise and adjust it.
@@ -2423,6 +2480,7 @@ def plan_slide_transforms(
     from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
 
     out: list[ItemTransform] = []
+    left_groups: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
@@ -2431,6 +2489,7 @@ def plan_slide_transforms(
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
+        parked_left = False
         # A magic-move build's leftover second copy of a group or text box: show it
         # once, not twice. Hidden, not skipped — a skipped copy is scaled back into
         # frame by the canvas change and reappears as a ghost beside the first.
@@ -2727,8 +2786,9 @@ def plan_slide_transforms(
         # wall size and only move the group. Pins stay affine-scaled.
         if str(item.get("kind") or "") == "group" and role == "other":
             src_box = item_rect(item)
+            parked_left = mapped.x < 16
             mapped = Rect(
-                16.0 if mapped.x < 16 else mapped.x,
+                16.0 if parked_left else mapped.x,
                 mapped.y,
                 src_box.w,
                 src_box.h,
@@ -2794,8 +2854,13 @@ def plan_slide_transforms(
                 src=item_rect(item),
             )
         )
+        if parked_left:
+            left_groups.append(out[-1])
     if pack_lists:
         _pack_list_transforms(out, recipe)
+    # Left-column groups the affine parked at x=16: pack them so they stop stacking
+    # on one margin. Unconditional — this fires whether or not side content is kept.
+    _pack_left_groups(left_groups, recipe)
     # Fit only the body verse. Labels, plates and images are left where the
     # template and affine placed them — bleeding off an edge is often deliberate.
     if body_tf is not None:
