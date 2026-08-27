@@ -125,6 +125,24 @@ about what is left.
   solved by the framing UI + more template slides) or scoring artefacts
   (title/badge/list rows).
 
+- **Session 6 — pack the left-column number-block groups (PR TBD).** On slide 4 of
+  `Map_Extracted_Wall_1st` (report card slide 124) the "183/86/14/269" stat block
+  lives in 4 groups that the matched template affine (centred on the map art) throws
+  off the frame's left edge, so `plan_slide_transforms` parked each individually at
+  `Rect(16, mapped.y, wall_w, wall_h)` — groups can't be scaled — and they stacked
+  into overlapping fragments. Now a branch-time flag collects the parked-left groups
+  and a post-pass `_pack_left_groups` re-places them via a new
+  `pack_columns_from_left` (left mirror of `pack_columns_from_right`, stepping to the
+  next column by the column's *max* width so unequal-width boxes don't collide),
+  sorted by wall reading order. Called unconditionally (not under `pack_lists`),
+  moves only (wall size kept), the "roughly right, staff-nudge" contract lists use.
+  Verified offline: the 4 groups pack into two non-overlapping columns; map/pin
+  placement byte-identical; 324 tests pass (2 new). **Out of scope, still open:**
+  slide 124 has a separate ~130×11px overlap between two *right-side* groups
+  (`mapped.x ≥ 16`, so not parked/packed); and slide 125's church list is 46 opaque
+  groups / 163 overlaps including a full-wall 7123px group — the documented source-deck
+  grouping fix (ungroup), not a code fix here.
+
 **Known and deliberate, not a bug:** a badge can land correctly and still be buried
 by map art that was already above it — the resizer inherits the source deck's
 stacking and Keynote exposes no way to change it (z-order is neither readable nor
