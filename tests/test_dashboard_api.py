@@ -1,8 +1,28 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from obed_edom.web.app import app
+from obed_edom.web.app import _assert_range_within_deck, app
+
+
+def test_range_past_the_last_slide_is_an_error_not_a_blank_screen():
+    # A range typed for a bigger deck (slide 124 fed to a 9-slide extract) used to
+    # inspect nothing and propose nothing, leaving the operator on an empty framing
+    # screen. It now raises a clear error naming the deck's real length.
+    with pytest.raises(RuntimeError) as err:
+        _assert_range_within_deck("wall_extracted.key", 9, frozenset({124}))
+    message = str(err.value)
+    assert "9 slides" in message
+    assert "124" in message
+    # A partly-out range names only the slides that are actually beyond the deck.
+    with pytest.raises(RuntimeError) as partial:
+        _assert_range_within_deck("deck.key", 9, frozenset({5, 10, 11}))
+    assert "10" in str(partial.value) and "5" not in str(partial.value)
+    # In range, whole-deck (no range), and an unknown length are all silent.
+    _assert_range_within_deck("deck.key", 9, frozenset({1, 9}))
+    _assert_range_within_deck("deck.key", 9, None)
+    _assert_range_within_deck("deck.key", 0, frozenset({124}))
 
 
 def test_health_and_stubs():
