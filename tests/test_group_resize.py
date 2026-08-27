@@ -1,20 +1,15 @@
-"""Pure-Python tests for the stat-group child-resize pass.
+"""Pure-Python tests for the stat-finalize pass.
 
-These lock the coordinate math (plan B1/B2) and the planner's job emission without
-touching Keynote: ``child_target`` is the single reference implementation the
-AppleScript template mirrors verbatim, so getting it right here gets it right there.
-Keynote validation of the AppleScript pass itself is a separate step.
+The pass itself is AppleScript (template-taught number sizes + bring-to-front) and is
+validated against Keynote separately. These lock the pure-Python parts: the planner
+emitting one job per stat group, and the generated AppleScript embedding the template
+sizes and the z-order/badge steps.
 """
 
-import pytest
+from pathlib import Path
 
-from obed_edom.map_remap import (
-    Rect,
-    TEXT_DOWN_SCALE,
-    child_target,
-    pack_columns_from_left,
-    plan_slide_transforms,
-)
+from obed_edom.keynote import _build_stat_finalize_script
+from obed_edom.map_remap import plan_slide_transforms
 
 
 def _item(**kwargs):
@@ -51,97 +46,6 @@ def _missions_map_recipe() -> dict:
     }
 
 
-def _overlaps(a: Rect, b: Rect) -> bool:
-    return (
-        a.x < b.x + b.w
-        and b.x < a.x + a.w
-        and a.y < b.y + b.h
-        and b.y < a.y + a.h
-    )
-
-
-# --- B1/B2 coordinate round-trip -------------------------------------------------
-
-
-def test_child_target_round_trip_has_no_double_count():
-    """Wall leaf -> JXA whole-group move -> child_target lands at the intended
-    scaled position, with no double-count of the move (plan B1)."""
-    s = 0.42
-    wall_origin = (5770.0, -174.0)
-    anchor = (16.0, 40.0)  # where JXA moved the group's top-left
-    wall_leaf = (5900.0, 20.0)
-    leaf_w, leaf_h, leaf_font = 200.0, 120.0, 100.0
-
-    # JXA moves the whole group to the anchor; every child translates with it.
-    leaf_live_x = wall_leaf[0] + (anchor[0] - wall_origin[0])
-    leaf_live_y = wall_leaf[1] + (anchor[1] - wall_origin[1])
-
-    x, y, w, h, font = child_target(
-        anchor[0], anchor[1], leaf_live_x, leaf_live_y, leaf_w, leaf_h, leaf_font, s
-    )
-
-    # Intended target: anchor + (wallLeaf - wallOrigin) * s.
-    assert x == pytest.approx(anchor[0] + (wall_leaf[0] - wall_origin[0]) * s)
-    assert y == pytest.approx(anchor[1] + (wall_leaf[1] - wall_origin[1]) * s)
-    assert w == pytest.approx(leaf_w * s)
-    assert h == pytest.approx(leaf_h * s)  # both dims scale -> icon keeps aspect
-    assert font == pytest.approx(leaf_font * s)
-
-
-def test_child_target_nested_leaf_does_not_compound():
-    """A deeper leaf uses the SAME top-level group origin (plan B2): nesting must
-    not compound. Scaling around a sub-group origin instead would be wrong, and the
-    top-level origin gives the intended position."""
-    s = 0.42
-    wall_origin = (5770.0, -174.0)
-    anchor = (16.0, 40.0)
-    # A nested leaf, further from the group origin than a top-level one.
-    nested_wall = (6300.0, 600.0)
-
-    nested_live_x = nested_wall[0] + (anchor[0] - wall_origin[0])
-    nested_live_y = nested_wall[1] + (anchor[1] - wall_origin[1])
-
-    # Correct: computed from the top-level origin regardless of depth.
-    x, y, _w, _h, _f = child_target(
-        anchor[0], anchor[1], nested_live_x, nested_live_y, 50.0, 40.0, 30.0, s
-    )
-    assert x == pytest.approx(anchor[0] + (nested_wall[0] - wall_origin[0]) * s)
-    assert y == pytest.approx(anchor[1] + (nested_wall[1] - wall_origin[1]) * s)
-
-    # A hypothetical sub-group origin (offset from the top-level one) would give a
-    # different, wrong answer — which is exactly why the pass only ever uses the
-    # top-level origin for every leaf.
-    sub_origin = (anchor[0] + 120.0, anchor[1] + 90.0)
-    wrong_x, wrong_y, _, _, _ = child_target(
-        sub_origin[0], sub_origin[1], nested_live_x, nested_live_y, 50.0, 40.0, 30.0, s
-    )
-    assert wrong_x != pytest.approx(x)
-    assert wrong_y != pytest.approx(y)
-
-
-# --- Scaled-footprint packing ----------------------------------------------------
-
-
-def test_scaled_footprints_pack_without_overlap():
-    """The group boxes shrink to leaf size, so packing their scaled footprints keeps
-    the shrunk clusters tight and non-overlapping."""
-    s = TEXT_DOWN_SCALE
-    walls = [
-        Rect(16.0, 100.0, 537.0, 271.0),
-        Rect(16.0, 400.0, 575.0, 76.0),
-        Rect(16.0, 500.0, 300.0, 300.0),
-    ]
-    scaled = [Rect(r.x, r.y, r.w * s, r.h * s) for r in walls]
-    placed = pack_columns_from_left(scaled, 1920.0, 1080.0)
-    assert len(placed) == len(walls)
-    for i in range(len(placed)):
-        for j in range(i + 1, len(placed)):
-            assert not _overlaps(placed[i], placed[j]), (i, j, placed[i], placed[j])
-
-
-# --- Job emission ----------------------------------------------------------------
-
-
 def _slide_with_groups() -> dict:
     return {
         "number": 4,
@@ -162,6 +66,9 @@ def _slide_with_groups() -> dict:
     }
 
 
+# --- Planner job emission --------------------------------------------------------
+
+
 def test_one_job_per_stat_group():
     report: list[dict] = []
     out = plan_slide_transforms(
@@ -175,7 +82,6 @@ def test_one_job_per_stat_group():
     assert len(report) == 2  # one job per stat group
     for job in report:
         assert job["slide"] == 4
-        assert job["s"] == TEXT_DOWN_SCALE
     # groupIndex is the group's 1-based AppleScript index (kindIndex + 1).
     assert {job["groupIndex"] for job in report} == {1, 2}
 
@@ -189,3 +95,24 @@ def test_no_report_when_not_requested():
         wall_size=(7680, 1080),
     )
     assert [t for t in out if t.kind == "group"]  # groups still planned
+
+
+# --- Generated AppleScript -------------------------------------------------------
+
+
+def test_finalize_script_embeds_template_sizes_and_bring_to_front():
+    jobs = [{"slide": 4, "groupIndex": 1}, {"slide": 4, "groupIndex": 6}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"183": 150.0, "269": 200.0})
+    # Template sizes are looked up per number.
+    assert 'if _t is "183" then return 150.0' in script
+    assert 'if _t is "269" then return 200.0' in script
+    # Each stat group is addressed by its index and brought to front.
+    assert "group 1 of slide 4" in script
+    assert "group 6 of slide 4" in script
+    assert script.count("Bring to Front") >= 1
+    # The badge is searched for and raised too.
+    assert "Global Missions" in script
+
+
+def test_finalize_script_empty_when_no_jobs():
+    assert _build_stat_finalize_script(Path("/tmp/x.key"), [], {"269": 200.0}) == ""

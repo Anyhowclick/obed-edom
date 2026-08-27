@@ -696,37 +696,6 @@ def pack_columns_from_left(
     return placed
 
 
-def child_target(
-    origin_x: float,
-    origin_y: float,
-    leaf_x: float,
-    leaf_y: float,
-    leaf_w: float,
-    leaf_h: float,
-    leaf_font: float,
-    s: float,
-) -> tuple[float, float, float, float, float]:
-    """The scaled geometry a group leaf lands at, around the group's live origin.
-
-    JXA moves the whole group to its packed anchor, so by the time the child-resize
-    pass runs, every leaf has already translated with the group. Scaling each leaf
-    around the group's live, post-move origin therefore reproduces the intended
-    scaled position with no double-count (plan B1). The AppleScript pass mirrors this
-    arithmetic verbatim, and the round-trip test asserts the two agree.
-
-    Returns ``(x, y, w, h, font)``. Both dimensions scale by ``s`` so an icon/plate
-    leaf keeps its aspect ratio; the pass applies the scaled ``h`` to non-text leaves
-    only (a text box autofits its height, so setting it would fight the autofit).
-    """
-    return (
-        origin_x + (leaf_x - origin_x) * s,
-        origin_y + (leaf_y - origin_y) * s,
-        leaf_w * s,
-        leaf_h * s,
-        leaf_font * s,
-    )
-
-
 def template_line_slots(
     slides: list[dict], slide_number: int | None = None
 ) -> list[dict[str, Any]]:
@@ -2310,16 +2279,13 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
         lists[idx].h = rect.h
 
 
-def _pack_left_groups(
-    groups: list["ItemTransform"], recipe: dict[str, Any], scale: float = 1.0
-) -> None:
+def _pack_left_groups(groups: list["ItemTransform"], recipe: dict[str, Any]) -> None:
     """Re-place the left-column groups the affine parked at x=16 so they stop
-    overlapping. The group box itself cannot be scaled (group width does not scale
-    children — the AppleScript child-resize pass shrinks the leaves in place after
-    JXA), so this only moves them. It packs the *scaled* footprints (``w*scale``,
-    ``h*scale``) top-to-bottom then into further columns, so the shrunk clusters
-    pack tight instead of leaving wall-size gaps. The group ItemTransform keeps its
-    wall w/h — only x/y are the packed anchor. Sorted by wall reading order so a
+    overlapping. A group box cannot be scaled (group width does not scale children),
+    so this only moves them, packing the wall-size boxes top-to-bottom then into
+    further columns. The crop preserves frame height, so the wall-authored numbers are
+    already correctly sized; the stat-finalize pass only refines each number's point
+    size to the template and brings it to front. Sorted by wall reading order so a
     183/86/14/269 stack stays in sequence.
     """
     if len(groups) < 2:
@@ -2327,16 +2293,12 @@ def _pack_left_groups(
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
     order = sorted(range(len(groups)), key=lambda i: (groups[i].src.y, groups[i].src.x))
-    boxes = [
-        Rect(groups[i].x, groups[i].y, groups[i].w * scale, groups[i].h * scale)
-        for i in order
-    ]
+    boxes = [Rect(groups[i].x, groups[i].y, groups[i].w, groups[i].h) for i in order]
     placed = pack_columns_from_left(boxes, dest_w, dest_h)
     for idx, rect in zip(order, placed, strict=True):
         groups[idx].x = rect.x
         groups[idx].y = rect.y
-        # w/h unchanged — wall size is preserved on purpose (the child-resize pass
-        # scales the leaves, not the group box).
+        # w/h unchanged — wall size is preserved on purpose.
 
 
 # How far, as a fraction of each frame dimension, the body verse may be nudged to
@@ -2848,7 +2810,7 @@ def plan_slide_transforms(
             # {slide, groupIndex == kindIndex+1, s}; the pass reads geometry live.
             if child_resize_report is not None:
                 child_resize_report.append(
-                    {"slide": number, "groupIndex": kind_index + 1, "s": TEXT_DOWN_SCALE}
+                    {"slide": number, "groupIndex": kind_index + 1}
                 )
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
