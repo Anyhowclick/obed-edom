@@ -825,32 +825,59 @@ def _build_stat_finalize_script(dest: Path, jobs: list[dict], size_map: dict) ->
     for job in jobs:
         slide = int(job["slide"])
         group_index = int(job["groupIndex"])
+        # Only bring to front when the selection was actually set — otherwise the
+        # click fires on whatever was selected before (another slide's group).
         lines += [
+            "  set _found to false",
             "  try",
             f"    set selection of theDoc to {{group {group_index} of slide {slide} of theDoc}}",
+            "    set _found to true",
             "  end try",
+            "  if _found then",
         ]
-        lines += _bring_selection_to_front()
-    # The Global Missions badge: find its group / loose item on each stat slide.
+        lines += ["  " + ln for ln in _bring_selection_to_front()]
+        lines += ["  end if"]
+    # The Global Missions badge: it may be a group OR a loose text item/shape (the
+    # template authored it loose), so scan all three; raise only if found.
     for slide in slides:
         lines += [
             f"  -- badge on slide {slide}",
+            "  set _found to false",
             "  try",
             f"    tell slide {slide} of theDoc",
             "      repeat with _gi from 1 to count of groups",
             "        set _bg to group _gi",
-            "        set _hit to false",
             "        repeat with _ti from 1 to count of text items of _bg",
-            '          try',
-            '            if (object text of text item _ti of _bg as string) contains "Global Missions" then set _hit to true',
+            "          try",
+            '            if (object text of text item _ti of _bg as string) contains "Global Missions" then',
+            "              set selection of theDoc to {_bg}",
+            "              set _found to true",
+            "            end if",
             "          end try",
             "        end repeat",
-            "        if _hit then set selection of theDoc to {_bg}",
+            "      end repeat",
+            "      repeat with _ti from 1 to count of text items",
+            "        try",
+            '          if (object text of text item _ti as string) contains "Global Missions" then',
+            "            set selection of theDoc to {text item _ti}",
+            "            set _found to true",
+            "          end if",
+            "        end try",
+            "      end repeat",
+            "      repeat with _si from 1 to count of shapes",
+            "        try",
+            '          if (object text of shape _si as string) contains "Global Missions" then',
+            "            set selection of theDoc to {shape _si}",
+            "            set _found to true",
+            "          end if",
+            "        end try",
             "      end repeat",
             "    end tell",
             "  end try",
+            "  if _found then",
         ]
-        lines += _bring_selection_to_front()
+        lines += ["  " + ln for ln in _bring_selection_to_front()]
+        lines += ["  end if"]
     lines += [
         "  try",
         "    save theDoc",
