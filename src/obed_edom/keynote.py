@@ -689,58 +689,56 @@ def _run_superscript_fix(
 
 
 def _group_leaf_writes(container: str) -> list[str]:
-    """AppleScript that scales every leaf (text item / shape / image) of `container`.
+    """AppleScript that scales every LEAF (non-group iWork item) of `container`.
 
-    Mirrors ``map_remap.child_target`` exactly, around the top-level group origin
-    ``{ox, oy}`` with per-job scale ``jobScale``: width and font scale by ``jobScale``;
+    Iterates ``iWork items`` — the *distinct* children — not the per-type
+    collections, because a text-bearing shape is listed in BOTH ``text items`` and
+    ``shapes`` (SKILL: "a text box is also a shape"), so iterating those separately
+    scales it twice (``s^2``). AppleScript can enumerate and index a group's
+    ``iWork items`` (unlike JXA), so this walks them once and skips any nested group
+    (the caller recurses into sub-groups one level; a group node is never written —
+    plan B2).
+
+    Mirrors ``map_remap.child_target`` around the top-level group origin ``{ox, oy}``
+    with per-job scale ``jobScale``: width/height/font scale by ``jobScale`` and
     position scales toward the live origin. Because JXA already moved the whole group
     to its anchor, each leaf's live position already carries the translation, so
     scaling around the live origin reproduces ``anchor + (wallLeaf - wallOrigin)*s``
-    with no double-count (plan B1). Only leaves are written — never a group node
-    (plan B2) — so ``container`` is ``g`` or one of its sub-groups, and the arithmetic
-    is identical whatever the depth, so nesting cannot compound.
-
-    Write order per text leaf: size, then width, then position (size first so
-    autofit's nudge is overwritten by the explicit position). The size write only
-    fires on a uniform run (``size of character 1 == size of character -1``); a
-    multi-size run is left alone and counted in ``sizeSkips``. ``object text`` errors
-    on an image, so the size block's ``try`` simply skips it. Each leaf's writes sit
-    in their own ``try`` so one bad leaf cannot abort the whole job.
+    with no double-count (plan B1); the arithmetic is identical at any depth, so
+    nesting cannot compound. Height scales on every leaf — a text-bearing shape keeps
+    a fixed height that must shrink, and a pure text box autofits harmlessly to the
+    same ``h*s`` because the font scaled too. Size writes only on a uniform run
+    (``size of character 1 == size of character -1``); a multi-size run is left alone
+    and counted in ``sizeSkips``. ``object text`` errors on an image, so the size
+    block's ``try`` skips it. Each leaf's writes sit in their own ``try``.
     """
-    lines: list[str] = []
-    for element in ("text item", "shape", "image"):
-        lines += [
-            f"  repeat with _i from 1 to count of {element}s of {container}",
-            "    try",
-            f"      set _leaf to {element} _i of {container}",
-            "      set _pos to position of _leaf",
-            "      set _lx to item 1 of _pos",
-            "      set _ly to item 2 of _pos",
-            "      set _lw to width of _leaf",
-            "      set _lh to height of _leaf",
-            "      try",
-            "        set _c1 to size of character 1 of object text of _leaf",
-            "        set _cN to size of character -1 of object text of _leaf",
-            "        if _c1 = _cN then",
-            "          set size of characters 1 thru -1 of object text of _leaf to _c1 * jobScale",
-            "        else",
-            "          set sizeSkips to sizeSkips + 1",
-            "        end if",
-            "      end try",
-            "      set width of _leaf to _lw * jobScale",
-        ]
-        # A text box autofits its height, so scaling font+width is enough and setting
-        # height would fight the autofit. An icon/plate leaf keeps neither — scale its
-        # height by the same factor so it shrinks in proportion, not squished.
-        if element != "text item":
-            lines.append("      set height of _leaf to _lh * jobScale")
-        lines += [
-            "      set position of _leaf to {ox + (_lx - ox) * jobScale, oy + (_ly - oy) * jobScale}",
-            "      set leavesWritten to leavesWritten + 1",
-            "    end try",
-            "  end repeat",
-        ]
-    return lines
+    return [
+        f"  repeat with _i from 1 to count of iWork items of {container}",
+        "    try",
+        f"      set _leaf to iWork item _i of {container}",
+        "      if (class of _leaf) is not group then",
+        "        set _pos to position of _leaf",
+        "        set _lx to item 1 of _pos",
+        "        set _ly to item 2 of _pos",
+        "        set _lw to width of _leaf",
+        "        set _lh to height of _leaf",
+        "        try",
+        "          set _c1 to size of character 1 of object text of _leaf",
+        "          set _cN to size of character -1 of object text of _leaf",
+        "          if _c1 = _cN then",
+        "            set size of characters 1 thru -1 of object text of _leaf to _c1 * jobScale",
+        "          else",
+        "            set sizeSkips to sizeSkips + 1",
+        "          end if",
+        "        end try",
+        "        set width of _leaf to _lw * jobScale",
+        "        set height of _leaf to _lh * jobScale",
+        "        set position of _leaf to {ox + (_lx - ox) * jobScale, oy + (_ly - oy) * jobScale}",
+        "        set leavesWritten to leavesWritten + 1",
+        "      end if",
+        "    end try",
+        "  end repeat",
+    ]
 
 
 def _build_group_child_resize_script(dest: Path, jobs: list[dict]) -> str:
