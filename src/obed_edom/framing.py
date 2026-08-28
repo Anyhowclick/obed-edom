@@ -360,6 +360,8 @@ def planned_rects(
     recipe: dict[str, Any],
     *,
     wall_size: tuple[float, float],
+    include_lists: bool = False,
+    side_content_slides: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Where every object on this page ends up, for drawing over the crop.
 
@@ -376,13 +378,31 @@ def planned_rects(
     automatically — which threw away the recipe passed here and drew every
     candidate, and every saved recipe, as the automatic choice. The caller has
     already settled which recipe it wants shown.
+
+    `include_lists` and `side_content_slides` are handed straight to
+    `plan_payload_transforms`, so the preview drops (or keeps) side-panel content
+    exactly as the real run would: an operator who whitelisted this page sees its
+    lists placed, not shown as 199 objects about to be dropped. With neither set
+    the planner drops side content as before, and every dropped object is still
+    marked so the picture shows it leaving rather than staying.
+
+    Each rect carries ``willBeInOutput``: false for anything the run deletes before
+    output (a `role="hide"` marker, or an object pinned to `opacity=0`), true
+    otherwise. Keyed off the transform, not a role string, so the frontend can draw
+    dropped objects distinctly without re-deriving what "hide" means.
     """
     from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
 
     wall_w, wall_h = wall_size
     payload = {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]}
     out: list[dict[str, Any]] = []
-    for spec in plan_payload_transforms(payload, recipe):
+    for spec in plan_payload_transforms(
+        payload,
+        recipe,
+        include_lists=include_lists,
+        side_content_slides=side_content_slides,
+    ):
+        dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
         rect = {
             "role": spec.role,
             "kind": spec.kind,
@@ -390,6 +410,7 @@ def planned_rects(
             "y": round(spec.y),
             "w": round(spec.w),
             "h": round(spec.h),
+            "willBeInOutput": not dropped,
         }
         if spec.match_text:
             rect["text"] = spec.match_text[:40]
@@ -411,6 +432,8 @@ def propose_framings(
     slide_range: Any = None,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
+    include_lists: bool = False,
+    side_content_slides: set[int] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """What the operator is asked, without touching the deck.
@@ -423,6 +446,12 @@ def propose_framings(
     falls back. Doing it for every candidate on every page means a `learn_recipe`
     per pair — about 7s on a 158-slide deck against 13 candidates — and it only
     tells the operator something on the pages they are being asked about.
+
+    `include_lists` (the global CLI keep) and `side_content_slides` (the per-slide
+    whitelist carried over by digest) are passed to the rects so the preview plans
+    what the real run will do to side-panel content, rather than always dropping
+    it. They do not affect framing selection, only which objects the boxes show as
+    kept versus dropped.
     """
     from obed_edom.baseline import deck_digest, deck_slide_digests  # noqa: PLC0415
     from obed_edom.inspect import inspect_keynote  # noqa: PLC0415
@@ -518,8 +547,16 @@ def propose_framings(
                     shown = fitted
             candidate["transform"] = _transform_of(shown)
             # The crop shows one affine; these show what the run does to every
-            # object on the page, which is where it actually goes wrong.
-            candidate["rects"] = planned_rects(slide, shown, wall_size=(wall_w, wall_h))
+            # object on the page, which is where it actually goes wrong. The same
+            # keep/whitelist the real run would use is threaded through, so a
+            # whitelisted page previews its side content placed rather than dropped.
+            candidate["rects"] = planned_rects(
+                slide,
+                shown,
+                wall_size=(wall_w, wall_h),
+                include_lists=include_lists,
+                side_content_slides=side_content_slides,
+            )
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")
         auto_candidate = next(

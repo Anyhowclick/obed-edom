@@ -441,11 +441,21 @@ script — a 5-second smoke test on a tiny deck surfaces all of them before you 
   `count of documents` stays 0, no error. Put working copies under `~/Desktop/…` or the repo
   (`output/` is gitignored) — a location the user's Keynote can read.
 - **`open POSIX file …` returns `missing value`, not the document.** So `set doc to open …`
-  gives you nothing. And do **not** fall back to `front document`: with another deck open it
-  binds the WRONG one, and your geometry writes / `save` then land on the user's deck — a real
-  incident in this project. Bind explicitly: issue the open, then find the doc among
-  `documents` whose `POSIX path of (file of d)` equals the copy, **verify `name of doc`**
-  before any write, and abort otherwise.
+  gives you nothing. And do **not** blindly fall back to `front document`: with another deck
+  open it binds the WRONG one, and your geometry writes / `save` then land on the user's deck
+  — a real incident in this project. **The proven bind** (what `_build_superscript_fix_script`
+  and the stat-finalize *reopen* path ship) is: `close (every document whose name is "<name>")
+  saving no` to evict stale same-name decks, then `open POSIX file …`, `activate`, and
+  `set theDoc to document 1` — after the close+open, `document 1` *is* the fresh copy. Verify
+  `name of theDoc` before any write.
+  - **Two Keynote-15 gotchas the earlier "just compare `POSIX path of (file of d)`" advice
+    missed** (both cost a Stage B debugging round — see `scripts/diag_doc_bind.applescript`):
+    (1) `name of document` comes back WITHOUT the extension (`cg_ON`, not `cg_ON.key`), so a
+    name check must accept the stem. (2) `POSIX path of (file of d)` **throws -1700**
+    ("Can't … into type Unicode text") — the file specifier must be coerced first:
+    `POSIX path of (file of d as alias)`. Use the path compare only when you genuinely
+    can't close-by-name first (e.g. a deck that must stay open, as Stage B's attach pass
+    needs), and confirm the coercion on a real deck before trusting it for any write.
 - **The default AppleEvent timeout is 120 s** (`-1712 "AppleEvent timed out"`). Any single
   call on a large deck — the open, a `count`, a batched write loop — that exceeds it aborts
   the whole script. Wrap the `tell` in `with timeout of 3600 seconds`.
