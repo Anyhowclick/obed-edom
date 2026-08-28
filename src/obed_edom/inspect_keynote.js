@@ -1,4 +1,7 @@
-ObjC.import("Foundation");
+// Guarded so the pure helpers below (bulk length-guard, per-object/bulk record
+// derivation) can be require()d from Node for unit tests. Under osascript ObjC
+// is defined and the import runs exactly as before.
+if (typeof ObjC !== "undefined") ObjC.import("Foundation");
 
 function readJSON(path) {
   const data = $.NSData.dataWithContentsOfFile(path);
@@ -183,6 +186,261 @@ function describeItem(obj, index, kindHint) {
   return rec;
 }
 
+// --- Bulk read ------------------------------------------------------------
+//
+// The per-object path above issues one Apple Event per object per property
+// (obj.position(), obj.width(), obj.objectText.size(), ...). A *bulk* read
+// fetches one property for a whole collection in a single Apple Event by
+// leaving the collection specifier UNEVALUATED: `slide.shapes.position()`
+// returns an array of positions. That is ~2.4x on flat single-kind collections.
+//
+// Safety (this is what makes bulk "never slower, never wrong"):
+//   1. Per-collection x per-property fallback. Every bulk fetch is TRIED; if it
+//      throws or its array length != the collection's element count, it is
+//      discarded and that property is read per-object via the SAME functions
+//      the legacy path uses (positionOf/sizeOf/fileNameOf and the inline
+//      objectText/line reads). The per-object read is the source of truth.
+//   2. Array-length-drift guard. If Keynote drops a missing value (a file-less
+//      image in images.fileName(), an empty objectText) the array is SHORTER
+//      than the collection and every subsequent zip index shifts, silently
+//      corrupting kindIndex. So bulkArray() asserts length === count for EVERY
+//      array and falls back on any mismatch. A short array is never zipped.
+//
+// Because each derive below applies the IDENTICAL transform the per-object path
+// applies to the SAME underlying value, a passing bulk array is byte-identical
+// to the per-object payload by construction.
+
+// Return `value` only when it is an array-like of exactly `count` elements,
+// else null (=> per-object fallback for this property). count 0 accepts any
+// value since an empty collection is never indexed.
+function bulkArray(value, count) {
+  if (value == null) return null;
+  let n;
+  try {
+    n = value.length;
+    if (typeof n === "function") n = n.call(value);
+    n = Number(n);
+  } catch (e) {
+    return null;
+  }
+  if (isNaN(n) || n !== count) return null;
+  return value;
+}
+
+// One bulk fetch off the UNEVALUATED specifier, length-guarded.
+function tryBulk(slide, name, prop, count) {
+  try {
+    return bulkArray(slide[name][prop](), count);
+  } catch (e) {
+    return null;
+  }
+}
+
+// Nested bulk fetch, e.g. slide.textItems.objectText.size().
+function tryBulkNested(slide, name, prop, sub, count) {
+  try {
+    return bulkArray(slide[name][prop][sub](), count);
+  } catch (e) {
+    return null;
+  }
+}
+
+// The bulk arrays applicable to `kind`. Only properties describeItem actually
+// reads for that kind are attempted, so a bulk that could only ever throw (a
+// text item has no fileName) is never fired — keeping the cost <= the legacy
+// path on every collection. Each entry is a length-checked array or null.
+function fetchBulkArrays(slide, name, kind, count) {
+  const bulk = {};
+  bulk.position = tryBulk(slide, name, "position", count);
+  bulk.width = tryBulk(slide, name, "width", count);
+  bulk.height = tryBulk(slide, name, "height", count);
+  bulk.locked = tryBulk(slide, name, "locked", count);
+  bulk.rotation = tryBulk(slide, name, "rotation", count);
+  if (kind === "image" || kind === "movie") {
+    bulk.fileName = tryBulk(slide, name, "fileName", count);
+  }
+  if (kind === "text" || kind === "shape") {
+    bulk.text = tryBulk(slide, name, "objectText", count);
+    bulk.size = tryBulkNested(slide, name, "objectText", "size", count);
+    bulk.font = tryBulkNested(slide, name, "objectText", "font", count);
+    bulk.color = tryBulkNested(slide, name, "objectText", "color", count);
+  }
+  if (kind === "line") {
+    bulk.start = tryBulk(slide, name, "startPoint", count);
+    bulk.end = tryBulk(slide, name, "endPoint", count);
+  }
+  return bulk;
+}
+
+// fileName has a secondary source (obj.file()) that bulk can't reach, so a bulk
+// element is trusted only when it yields a valid string — exactly fileNameOf's
+// first branch. Otherwise defer to fileNameOf entirely (which re-probes
+// fileName() then file()), keeping the file-less/missing-value case identical.
+function fileNameFrom(bulk, i, obj) {
+  if (bulk.fileName) {
+    const v = bulk.fileName[i];
+    if (v != null) {
+      const s = String(v);
+      if (s && s !== "[object Object]") return s;
+    }
+  }
+  return fileNameOf(obj);
+}
+
+// Bulk twin of describeItem: identical record shape and key order, but each
+// property comes from its bulk array when present, else the per-object read.
+function describeItemBulk(obj, index, kindHint, bulk, i) {
+  const kind = kindHint || kindOf(obj);
+  const rec = {
+    index: index,
+    kind: kind,
+    text: "",
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+    size: 0,
+    font: "",
+    color: null,
+    fileName: "",
+    locked: false,
+    rotation: 0,
+    buildCount: 0,
+  };
+  const pos = bulk.position ? xyFrom(bulk.position[i]) || [0, 0] : positionOf(obj);
+  rec.x = pos[0];
+  rec.y = pos[1];
+  // sizeOf reads both dimensions; reuse it (cached) whenever either can't be
+  // bulked so the fallback is byte-identical.
+  let szCache = null;
+  const sizePair = function () {
+    if (!szCache) szCache = sizeOf(obj);
+    return szCache;
+  };
+  rec.w = bulk.width ? num(bulk.width[i], 0) : sizePair()[0];
+  rec.h = bulk.height ? num(bulk.height[i], 0) : sizePair()[1];
+  rec.fileName = fileNameFrom(bulk, i, obj);
+  if (bulk.locked) {
+    rec.locked = Boolean(bulk.locked[i]);
+  } else {
+    try {
+      rec.locked = Boolean(obj.locked());
+    } catch (eLock) {}
+  }
+  if (bulk.rotation) {
+    rec.rotation = num(bulk.rotation[i], 0);
+  } else {
+    try {
+      rec.rotation = num(obj.rotation(), 0);
+    } catch (eRot) {}
+  }
+  if (kind === "text" || kind === "shape") {
+    if (bulk.text) {
+      rec.text = String(bulk.text[i]);
+    } else {
+      try {
+        rec.text = String(obj.objectText());
+      } catch (e) {}
+    }
+    if (bulk.size) {
+      rec.size = num(bulk.size[i], 0);
+    } else {
+      try {
+        rec.size = num(obj.objectText.size(), 0);
+      } catch (eSize) {}
+    }
+    if (bulk.font) {
+      rec.font = String(bulk.font[i]);
+    } else {
+      try {
+        rec.font = String(obj.objectText.font());
+      } catch (eFont) {}
+    }
+    if (bulk.color) {
+      const c = bulk.color[i];
+      if (c && c[0] != null) {
+        rec.color = [num(c[0], 0), num(c[1], 0), num(c[2], 0)];
+      }
+    } else {
+      try {
+        const c = obj.objectText.color();
+        if (c && c[0] != null) {
+          rec.color = [num(c[0], 0), num(c[1], 0), num(c[2], 0)];
+        }
+      } catch (eCol) {}
+    }
+  }
+  if (kind === "line") {
+    if (bulk.start) {
+      const pair = xyFrom(bulk.start[i]);
+      if (pair) rec.start = pair;
+    } else {
+      try {
+        const pair = xyFrom(obj.startPoint());
+        if (pair) rec.start = pair;
+      } catch (eS) {}
+    }
+    if (bulk.end) {
+      const pair = xyFrom(bulk.end[i]);
+      if (pair) rec.end = pair;
+    } else {
+      try {
+        const pair = xyFrom(obj.endPoint());
+        if (pair) rec.end = pair;
+      } catch (eE) {}
+    }
+  }
+  if (kind === "group") {
+    // Children stay per-object: the group case is ~1.1x at best and childCount
+    // is often 0 on real decks, so correctness beats a marginal bulk win here.
+    // The group's OWN geometry above is bulked where clean.
+    rec.children = [];
+    try {
+      const kids = obj.iWorkItems();
+      rec.childCount = kids.length;
+      for (let k = 0; k < kids.length; k++) {
+        rec.children.push(describeItem(kids[k], k));
+      }
+    } catch (eG) {
+      rec.childCount = 0;
+    }
+  }
+  return rec;
+}
+
+// Bulk twin of collectFrom. The evaluated `slide[name]()` array is kept exactly
+// as the legacy path uses it — it supplies the element count, the per-object
+// fallback refs, and the identity.objs refs that attachBuildCounts matches on.
+// Only the property reads switch to bulk; kindIndex/kindCounts/identity order
+// is untouched.
+function collectFromBulk(slide, name, kind, items, kindCounts, identity) {
+  try {
+    const col = slide[name]();
+    let n = col.length;
+    if (typeof n === "function") n = n.call(col);
+    n = Number(n) || 0;
+    const bulk = fetchBulkArrays(slide, name, kind, n);
+    const objs = [];
+    for (let i = 0; i < n; i++) {
+      // Per-item guard: a throw in the bulk record must degrade THIS item to the
+      // legacy per-object record, not fall to the outer catch (which would drop
+      // the tail of the collection AND skip identity.push — breaking build-count
+      // matching for the whole kind). describeItem is byte-identical anyway.
+      let rec;
+      try {
+        rec = describeItemBulk(col[i], items.length, kind, bulk, i);
+      } catch (eItem) {
+        rec = describeItem(col[i], items.length, kind);
+      }
+      rec.kindIndex = i;
+      kindCounts[kind] = (kindCounts[kind] || 0) + 1;
+      items.push(rec);
+      objs.push(col[i]);
+    }
+    if (identity) identity.push({ kind: kind, objs: objs });
+  } catch (e) {}
+}
+
 function collectFrom(slide, name, kind, items, kindCounts, identity) {
   try {
     const col = slide[name]();
@@ -230,16 +488,21 @@ function markDuplicateShapes(items) {
   return found;
 }
 
-function collectItems(slide) {
+function collectItems(slide, bulkRead) {
   const items = [];
   const kindCounts = {};
   const identity = [];
-  collectFrom(slide, "textItems", "text", items, kindCounts, identity);
-  collectFrom(slide, "images", "image", items, kindCounts, identity);
-  collectFrom(slide, "shapes", "shape", items, kindCounts, identity);
-  collectFrom(slide, "movies", "movie", items, kindCounts, identity);
-  collectFrom(slide, "groups", "group", items, kindCounts, identity);
-  collectFrom(slide, "lines", "line", items, kindCounts, identity);
+  // bulkRead defaults ON; OBED_BULK_READ=0 (plan.bulkRead === false) forces the
+  // legacy per-object path for A/B validation and as an escape hatch. The kind
+  // order below is load-bearing — kindIndex is assigned per kind in exactly this
+  // sequence and map_remap addresses geometry by it.
+  const collect = bulkRead === false ? collectFrom : collectFromBulk;
+  collect(slide, "textItems", "text", items, kindCounts, identity);
+  collect(slide, "images", "image", items, kindCounts, identity);
+  collect(slide, "shapes", "shape", items, kindCounts, identity);
+  collect(slide, "movies", "movie", items, kindCounts, identity);
+  collect(slide, "groups", "group", items, kindCounts, identity);
+  collect(slide, "lines", "line", items, kindCounts, identity);
   if (!items.length) {
     try {
       const all = slide.iWorkItems();
@@ -364,6 +627,10 @@ function run(argv) {
   const slideWidth = size[0];
   const slideHeight = size[1];
 
+  // Default ON; Python sets plan.bulkRead from OBED_BULK_READ. `!== false` so an
+  // absent key (direct JXA invocation) also gets the fast path.
+  const bulkRead = plan.bulkRead !== false;
+
   const range = plan.range || null;
   const wanted = plan.slides && plan.slides.length ? plan.slides : null;
   const start = range ? Math.max(0, range[0] - 1) : 0;
@@ -402,7 +669,7 @@ function run(argv) {
       number: i + 1,
       master: master,
       skipped: skipped,
-      items: collectItems(slides[i]),
+      items: collectItems(slides[i], bulkRead),
     });
   }
 
@@ -434,4 +701,21 @@ function run(argv) {
     exportError: exportError,
     slides: outSlides,
   });
+}
+
+// Exposed for Node unit tests only. Under osascript `module` is undefined, so
+// this is a no-op there and `run` stays the JXA entry point.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    num: num,
+    xyFrom: xyFrom,
+    kindOf: kindOf,
+    positionOf: positionOf,
+    sizeOf: sizeOf,
+    fileNameOf: fileNameOf,
+    describeItem: describeItem,
+    describeItemBulk: describeItemBulk,
+    bulkArray: bulkArray,
+    fileNameFrom: fileNameFrom,
+  };
 }

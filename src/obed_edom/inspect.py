@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -13,6 +14,20 @@ from obed_edom.map_remap import slides_for_plan
 from obed_edom.paths import output_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
+
+
+def bulk_read_enabled() -> bool:
+    """Whether the JXA inspect uses bulk (whole-collection) property reads — default ON.
+
+    Bulk reads fetch one property for a whole collection in a single Apple Event
+    (``slide.shapes.position()``) instead of one event per object, ~2.4x on flat
+    slides. inspect_keynote.js guards every bulk array with a length check and
+    falls back to the per-object read on any drift, so the payload is byte-
+    identical either way. Set ``OBED_BULK_READ=0`` (or ``false``/``no``/``off``)
+    to force the legacy per-object path — for A/B validation and as an escape
+    hatch. Mirrors ``OBED_AS_GEOMETRY``.
+    """
+    return os.environ.get("OBED_BULK_READ", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _as_escape(text: str) -> str:
@@ -128,6 +143,7 @@ def inspect_keynote(
         "close": True,
         "save": False,
         "bundleId": keynote_app.bundle_id(),
+        "bulkRead": bulk_read_enabled(),
     }
     if dest:
         plan["exportDir"] = str(dest.resolve())
