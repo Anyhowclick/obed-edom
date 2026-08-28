@@ -1,10 +1,10 @@
 ---
 name: CG resizer
-overview: "Read `.cursor/skills/obed-edom/SKILL.md` first — every durable Keynote finding lives there. This plan holds only what is still to do plus the reasoning a new agent would otherwise rediscover. DONE (in SKILL / git log, condensed below): Keynote 15.x migration, framing confirmation, badge-affine, structural title detection, the divider, ranges in Keynote's numbering, off-frame hiding, the per-slide side-panel whitelist, the stat number-block (packing + template-taught sizing), and the CG-resizer SPEED work (AppleScript geometry, Stage-A export-fold, no-validate default, and BULK-READ inspect — 227s→57s, byte-identical; slide 8 ~10min→~2min; see the Session-11 handover). STILL TO DO: Stage B (optional speed, opt-in); the in-dashboard outline editor; image cues; stat-drift; recipe library (revisit now badge-affine exists); the propose-pins-paired flag. Cue palette + DSK generator moved to cue_palette_and_dsk_generator.plan.md. Operator/source or won't-fix leftovers: slide 125's grouped church names, the sparkle-overlay-on-words placement, a caption in the 'as it will look' preview, and a verse's wall-authored hard line breaks (a source-deck fix — stripping them by script destroys the un-scriptable superscript numbers and small-caps LORD)."
+overview: "Read `.cursor/skills/obed-edom/SKILL.md` first — every durable Keynote finding lives there. This plan holds only what is still to do plus the reasoning a new agent would otherwise rediscover. DONE (in SKILL / git log, condensed below): Keynote 15.x migration, framing confirmation, badge-affine, structural title detection, the divider, ranges in Keynote's numbering, off-frame hiding, the per-slide side-panel whitelist, the stat number-block (packing + template-taught sizing), and the CG-resizer SPEED work (AppleScript geometry, Stage-A export-fold, no-validate default, BULK-READ inspect — 227s→57s, byte-identical; and geometry `set properties` ~1.25× on the write phase — see the Session-11 AND Session-12 handovers; the geometry WRITE on the heavy slide, not deleteHides/z-order, is the bottleneck). SPEED IS DONE: Stage B, batch z-order, and batch delete were all built + real-deck-tested + ABANDONED (warm-cache open = no gain; multi-select Bring-to-Front unreliable; `delete {list}` throws -1700) — see the Session-12 handover; do not rebuild. STILL TO DO (features only): the in-dashboard outline editor; image cues; stat-drift; recipe library (revisit now badge-affine exists); the propose-pins-paired flag. Cue palette + DSK generator moved to cue_palette_and_dsk_generator.plan.md. Operator/source or won't-fix leftovers: slide 125's grouped church names, the sparkle-overlay-on-words placement, a caption in the 'as it will look' preview, and a verse's wall-authored hard line breaks (a source-deck fix — stripping them by script destroys the un-scriptable superscript numbers and small-caps LORD)."
 todos:
   - id: unify-applescript-pass
-    content: "Reduce dest opens per resize. PROGRESS (slide 8 constellation: 9:58 → 6:55 → 4:58, ~halved): (1) AS-geometry now DEFAULT (OBED_AS_GEOMETRY, =0 to force JXA) — no (0,0) flick, ~30% faster, validated on a real render. (2) Stage A DONE (56c104c): preview export folded INTO the stat-finalize session (no separate export reopen), + template stat-size read cached by digest. (3) CLI now DEFAULTS to validate=False (d1234e2, --validate to opt in) — skips the read-back per-object walk of the 1.15GB deck, the biggest single cut. REMAINING = Stage B (optional, DECISION PENDING): fold the stat-finalize reopen into the geometry session — _run_jxa leaves the dest OPEN after save (skip close at remap_keynote.js:902-904, keep save :896), Python drives stat AS against the open document 1 (mirror the PROVEN superscript-fix pattern: keep `open theFile` as an idempotent bring-to-front so Phase-2's frontmost-scoped Bring-to-Front hits the right deck; add name guard). Peer-reviewed (scratchpad/stage_b_plan.md): feasible + safe IF built on that pattern + net-new failure handling (Python subprocess timeout, close-on-failure, next-run cleanup of an orphaned open deck) + shipped OPT-IN (default off). Payoff bounded to ONE ~2min open (the stat pass is index-addressed, not a full walk). Both reviewers: opt-in or stop after Stage A — the big wins are banked."
-    status: pending
+    content: "Reduce dest opens / write cost per resize. DONE + BANKED: (1) AS-geometry DEFAULT (OBED_AS_GEOMETRY). (2) Stage A (56c104c): preview export folded into the stat-finalize session + template stat-size cached. (3) CLI DEFAULTS to validate=False (d1234e2). (4) Geometry `set properties` (Session 12, 9c32084, OBED_GEOM_PROPS default ON) — folds width+height into one AS command, ~1.25× on the write phase. ABANDONED (Session 12, do NOT rebuild — see the Session-12 handover): Stage B reopen-fold (warm-cache open = no measurable gain; the '17%' was a broken run skipping the stat pass), batch z-order (multi-select Bring-to-Front doesn't reliably raise above the map), batch delete (`delete {list}` throws -1700; the '315×' was a try-hidden fast-failure; JXA per-object is already fastest). Bottleneck was the geometry WRITE on the heavy slide (~70% of run), found via OBED_WRITE_TIMING; not deleteHides/z-order."
+    status: completed
   - id: bulk-read-inspect
     content: "DONE + VALIDATED (d218350). Real-deck A/B (Map_Extracted_Wall_1st slides 1/3/8, 1035 objects, `scripts/bulk_read_ab.py`): legacy 227s → bulk 57s (75% off, ~4x) and BYTE-IDENTICAL — default-ON is safe, the nested-read reorder risk is cleared. `OBED_BULK_READ=0` forces legacy. The uncached ranged source inspect was the run's fattest cost, so this is the biggest single speed win. Design below kept for reference.\n\nSpeed up inspect_keynote by BATCHING reads. Measured (Session 11): per-property Apple Events cost ~11ms REGARDLESS of bridge (JXA 121s ≈ AS 122s — a JXA→AS switch buys NOTHING). Lever = bulk reads (`property of every element`, one event for the whole collection). Speedup ~2.4x flat / ~1.1x group-nested — BUT that 2.4x was measured on `position` (a DIRECT property). Two peer reviews (Session 11) say DON'T build yet — the value hinges on untested assumptions and the risk was mis-stated:\n\nGATE 0 (go/no-go, do FIRST): micro-benchmark the NESTED reads `slide.textItems.objectText.size()` / `.font()` / `.color()` (describeItem reads ~10 props/object incl. these 3 nested ones, L149-158 — they dominate text-heavy flat slides AND are least certain to bulk in JXA), NOT just `position`, on a REAL flat deck AND a real group-heavy deck end-to-end. If nested reads don't bulk cleanly, flat 2.4x collapses to ~1.3x → SKIP as diminishing returns (put effort into Stage B). Also: bulk reads from the UNEVALUATED specifier `slide[name].position()`, NOT the evaluated `col` (a JS array has no .position()).\n\nCORRECTNESS (the real risk, not dedup): read-only but the payload is load-bearing (remap resolves by (collection,kindIndex)) and the default resize runs validate=False → a shifted index ships mis-placed objects to the user's deck with NO catch. Killer = array-length drift: if Keynote drops a missing value (file-less image in images.fileName(), empty objectText), array length ≠ collection count → every later zip index shifts. GUARD: assert array.length === collectionCount per bulk array; PERMANENT per-collection×per-property fallback to the EXISTING per-object fns (positionOf/sizeOf/describeItem) on any throw/mismatch (bulk is all-or-nothing; per-object try/catch each read today). Keep the per-object path as a runtime fallback, not a dev flag. Preserve the single slide[name]() evaluation feeding BOTH records and identity.objs (build-count !== matching, else buildCount breaks). Dedup (markDuplicateShapes) is pure JS post-processing — auto-preserved, low risk. Group childCount is often 0 on real decks (diff_keynotes.py:91) so the group case may be moot.\n\nSCOPE: default resize = ONE ranged uncached inspect (source); full-deck inspects cache (cold-start only). So win is once/run on ranged flat decks. Validate by byte-identical payload diff (per-object vs bulk) on the REAL messy wall deck + group-heavy + file-less-image + locked + empty-text decks. Complementary to Stage B (read vs write path); build bulk-read FIRST if GATE 0 passes."
     status: completed
@@ -215,7 +215,84 @@ is gone. Shipped, all validated on a real render:
   per group). This is the `bulk-read-inspect` TODO — plan+2 reviews were in
   `scratchpad/bulk_read_plan.md` (session-local; re-derive from the TODO if gone).
 
-### NEXT TODO — Stage B: fold the stat-finalize reopen into the geometry session (with recovery)
+## Handover — Session 12 (2026-08-28, speed dive continued & CLOSED)
+
+Branch `feat/preview-drop-marking` (off main `8fc3dcd`), 3 commits, **NOT merged**.
+Continued the speed work: net **one more real win** (geometry `set properties`) plus
+**four optimizations tried and ABANDONED**, each for a load-bearing reason. The
+measure-first / probe-first / peer-review discipline caught every dead end before it
+shipped — nothing broken reached a deck. **Speed is now banked; the reopen-fold /
+z-order / delete-batching ideas are closed — do not rebuild them (see reasons).**
+
+**SHIPPED on the branch** (ready to review/merge; splits into two PRs — preview+SKILL,
+and geometry+timing):
+- **Geometry `set properties`** (`9c32084`; `OBED_GEOM_PROPS` default ON, `=0` legacy).
+  The AS-geometry block folds each object's width+height into ONE `set properties
+  {width,height}`; **position stays a separate LAST write** (an atomic
+  `{w,h,position}` re-anchors ~18px and drifts — verified), and a line's endpoints
+  fold atomically. ~1.25× on the dominant phase (real deck: slide 8 124s→101s, slide 3
+  67s→54s), validated placement-identical against the pipeline's own run-to-run noise
+  floor (Keynote's canvas-shrink already jitters the map ~8px/run, so A/B pixel-diffs
+  MUST be read against that floor — two identical runs differ by ~delta-255 over the
+  upper region).
+- **Write-timing diagnostic** (`9c32084`; `OBED_WRITE_TIMING=1`, default off, zero-cost):
+  per-slide/per-phase elapsed + slowest objects, printed by remap. **This is the tool
+  that found the real bottleneck** — the geometry WRITE on the heavy constellation slide
+  is ~70% of the run (~109s), NOT deleteHides (~4-20s) or z-order. Keep it.
+- **Preview drop-marking** (`faa611a`): "where objects land" was drawing ~199 dropped
+  church-list boxes as if they'd land. Now threads the real `include_lists` +
+  `side_content_slides` into the preview planner and marks each rect `willBeInOutput`;
+  dropped objects render ghosted/struck. Real remap path untouched.
+- **SKILL doc-bind correction** (`faa611a` + `7a415b4`): see DURABLE FINDINGS.
+
+**ABANDONED — do NOT rebuild (the reasons ARE the finding):**
+- **Stage B** (fold the stat-finalize reopen into the geometry session). Built,
+  real-deck A/B'd, dropped. The reopen it removes is **warm-cache-cheap**, not the ~2min
+  cold open the plan assumed → no measurable gain. The "17% faster" first seen was a
+  BROKEN run: the attach bind failed (`NO_DEST_DOC`) and SKIPPED the whole stat pass, so
+  it did *less* work. Premise wrong. (The Stage-B design section below is retained only
+  as the record of a dead end.)
+- **Batch z-order** (one multi-selection Bring-to-Front per slide vs N). Built,
+  real-deck A/B'd, dropped. **Keynote's Bring-to-Front on a large multi-selection does
+  NOT reliably raise all selected above non-selected** — the map blocked the badge/
+  "Missions" text again (the exact buried-text bug the pass fixes), even though
+  `front=` counted all 36. GUI limitation, unfixable without per-object raises (= the
+  cost). Proven per-object z-order stays.
+- **Batch delete** (one `delete {list}` vs N JXA deletes). Built, then PROBED and
+  dropped. **Keynote's `delete` takes a SINGLE specifier — `delete {list}` (literal OR
+  variable) throws -1700 "Can't make {…} into type specifier" and deletes nothing.** The
+  "315×" first measured was a `try`-hidden fast-FAILURE (30ms to throw+catch, 0 deleted),
+  not a fast delete. No selective batch-delete exists: `delete every X` is too broad,
+  a reverse-loop is per-object (N redraws), and **JXA per-object (~20ms/obj, current)
+  beats AS per-object (~68ms/obj)**. The one-by-one vanishing is inherent; current JXA
+  `deleteHides` is already optimal. **Lesson: verify any batch-op probe by COUNTING
+  affected objects, never by timing a `try`-wrapped call.**
+- **Shape-read skip** (skip text-property reads on empty-text shapes). Investigated,
+  NO-OP: the nested shape reads (`shapes.objectText.size/font/color`) already BULK
+  cleanly (probe: 139 shapes ~54ms vs 4693ms per-object), so bulk-read (S11) already
+  handles it. The "yellow men read slower" was actually the geometry WRITE, not a read.
+
+**DURABLE KEYNOTE-15 FINDINGS (also folded into SKILL "Driving Keynote by script"):**
+- `POSIX path of (file of d)` **throws -1700** without an `as alias` coercion:
+  `POSIX path of (file of d as alias)`. And `name of document` **drops the extension**
+  ("cg_ON", not "cg_ON.key"). The proven doc-bind is close-by-name → open → `document 1`
+  → verify name (the superscript / stat-finalize reopen path). `scripts/diag_doc_bind.applescript`
+  (throwaway, deleted) demonstrated it.
+- Keynote `delete` accepts ONE specifier only; `delete {list}` throws -1700 (above).
+- Bring-to-Front on a big multi-selection does not reliably raise all selected (above).
+- Each AppleScript command on a heavy slide **redraws (~100ms/cmd) even off-screen**
+  (navigating away measured SLOWER) — so the only geometry-write lever is FEWER commands;
+  there is no cross-object bulk WRITE (unlike bulk READ). Confirmed by
+  `probe_geom_redraw` (throwaway, deleted).
+
+**NEXT:** speed is done — geometry set-properties + bulk-read (S11) + AS-geometry +
+no-validate + Stage-A are the banked wins. The feature backlog is untouched: outline
+editor, image cues, stat-drift, recipe library, propose-pins-paired (all below).
+
+### Stage B — ABANDONED (retained as a dead-end record; see Session-12 handover above)
+_Original design kept below for history only; do not implement — warm-cache open = no gain._
+
+### NEXT TODO (SUPERSEDED) — Stage B: fold the stat-finalize reopen into the geometry session (with recovery)
 Removes the LAST avoidable dest open on the validate=False path. Two peer reviews done;
 **ship OPT-IN (default off), only after the recovery guards below.** Self-contained design:
 
