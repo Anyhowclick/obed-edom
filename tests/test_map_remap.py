@@ -2284,6 +2284,59 @@ def test_planned_rects_cover_every_role_the_page_uses():
     assert (rule["x"], rule["y"], rule["h"]) == (480, 621, 383)
 
 
+def test_planned_rects_mark_dropped_side_content_and_a_whitelist_keeps_it():
+    """A side-panel name list is dropped by default, so every one of its objects is
+    marked willBeInOutput False and the composite omits it — the box view used to
+    draw ~200 of them as landing. Whitelisting the slide (`side_content_slides`)
+    plans that content placed instead, so the same objects come back kept."""
+    from obed_edom.framing import planned_rects
+
+    slide = {
+        "number": 4,
+        "items": [
+            # Centre-panel map, kept either way — it overlaps [1920..5760].
+            _item(kind="image", kindIndex=0, fileName="pasted-image.pdf",
+                  x=3052, y=-12, w=1248, h=771),
+            # Wholly on the left panel, so side-panel content that is dropped
+            # unless the slide is whitelisted.
+            _item(kind="text", kindIndex=0, text="First Baptist Church",
+                  x=120, y=200, w=520, h=90, size=40, font="AmplitudeCond-Medium"),
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 12,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf",
+                          x=11, y=18, w=1067, h=659),
+                ],
+            }
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, template)
+
+    dropped = planned_rects(slide, recipe, wall_size=(7680, 1080))
+    assert all("willBeInOutput" in r for r in dropped)
+    gone = [r for r in dropped if r["willBeInOutput"] is False]
+    # The side panel leaves the output, and everything that leaves is a hide.
+    assert gone and all(r["role"] == "hide" for r in gone)
+    # The map is not among the casualties.
+    assert all(r["willBeInOutput"] for r in dropped if r["role"] == "map")
+
+    kept = planned_rects(
+        slide, recipe, wall_size=(7680, 1080), side_content_slides={4}
+    )
+    kept_gone = [r for r in kept if r["willBeInOutput"] is False]
+    # Whitelisting slide 4 flips its side content from dropped to kept: fewer
+    # objects leave, and the page now plans a placed (in-output) box it did not.
+    assert len(kept_gone) < len(gone)
+    assert any(r["willBeInOutput"] for r in kept if r["role"] != "map")
+
+
 def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path, monkeypatch):
     """The read-back dumps every object on every slide, and that dump exists only
     to build the validation flags. A run that does not want them should not pay

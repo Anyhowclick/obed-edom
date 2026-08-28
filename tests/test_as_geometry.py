@@ -14,6 +14,7 @@ from obed_edom.remap_keynote import (
     _build_as_geometry,
     _build_slide_geometry_script,
     as_geometry_enabled,
+    geom_props_enabled,
 )
 
 
@@ -50,6 +51,17 @@ def test_flag_forced_off_values(monkeypatch):
         assert as_geometry_enabled() is True
 
 
+def test_geom_props_on_by_default(monkeypatch):
+    monkeypatch.delenv("OBED_GEOM_PROPS", raising=False)
+    assert geom_props_enabled() is True
+    for value in ("0", "false", "FALSE", "no", "off"):
+        monkeypatch.setenv("OBED_GEOM_PROPS", value)
+        assert geom_props_enabled() is False
+    for value in ("1", "yes", "on", "", "anything"):
+        monkeypatch.setenv("OBED_GEOM_PROPS", value)
+        assert geom_props_enabled() is True
+
+
 # --- addressing & geometry -------------------------------------------------
 
 
@@ -60,12 +72,24 @@ def test_addresses_kind_index_plus_one():
     assert "tell slide 5" in script
 
 
-def test_sets_width_height_position_for_box():
+def test_sets_size_via_properties_then_position(monkeypatch):
+    # Default (OBED_GEOM_PROPS on): width+height fold into ONE `set properties`,
+    # position stays a separate LAST write so the height re-anchor is still corrected.
+    monkeypatch.delenv("OBED_GEOM_PROPS", raising=False)
+    script = _build_slide_geometry_script([_spec(w=300, h=120, x=100, y=200)], 3)
+    assert "set properties of theObj to {width:300, height:120}" in script
+    assert "set position of theObj to {100, 200}" in script
+    assert "set width of theObj to" not in script  # not written separately
+    assert script.index("set properties of theObj") < script.index("set position of theObj")
+
+
+def test_legacy_per_property_writes_when_opted_out(monkeypatch):
+    monkeypatch.setenv("OBED_GEOM_PROPS", "0")
     script = _build_slide_geometry_script([_spec(w=300, h=120, x=100, y=200)], 3)
     assert "set width of theObj to 300" in script
     assert "set height of theObj to 120" in script
     assert "set position of theObj to {100, 200}" in script
-    # Position is written after size so the height re-anchor is corrected last.
+    assert "set properties of theObj" not in script
     assert script.index("set width of theObj") < script.index("set position of theObj")
     assert script.index("set height of theObj") < script.index("set position of theObj")
 
@@ -94,9 +118,12 @@ def test_unknown_kind_skipped():
 def test_line_uses_endpoints_not_width():
     spec = _spec(kind="line", kindIndex=1, start=[10, 20], end=[10, 400], w=380, h=0)
     script = _build_slide_geometry_script([spec], 2)
-    assert "set start point of theObj to {10, 20}" in script
-    assert "set end point of theObj to {10, 400}" in script
+    # A line has no re-anchor, so its endpoints fold into one atomic `set properties`.
+    assert "start point:{10, 20}" in script
+    assert "end point:{10, 400}" in script
+    assert "set properties of theObj to {start point:{10, 20}, end point:{10, 400}}" in script
     # A line is placed by its endpoints; width/height are never written for it.
+    assert "width:" not in script
     assert "set width of theObj" not in script
     assert "set height of theObj" not in script
 
@@ -111,10 +138,9 @@ def test_group_gets_full_geometry():
     spec = _spec(kind="group", kindIndex=0, x=50, y=60, w=400, h=300)
     script = _build_slide_geometry_script([spec], 4)
     assert "set theObj to group 1" in script
-    assert "set width of theObj to 400" in script
-    assert "set height of theObj to 300" in script
+    assert "set properties of theObj to {width:400, height:300}" in script
     assert "set position of theObj to {50, 60}" in script
-    assert script.index("set width of theObj") < script.index("set position of theObj")
+    assert script.index("set properties of theObj") < script.index("set position of theObj")
 
 
 # --- locked scaffold -------------------------------------------------------
@@ -126,8 +152,8 @@ def test_locked_unlock_relock_wraps_writes():
     assert "set locked of theObj to false" in script
     assert "if wasLocked then set locked of theObj to true" in script
     # Unlock happens before the geometry writes, relock after.
-    assert script.index("set locked of theObj to false") < script.index("set width of theObj")
-    assert script.index("set width of theObj") < script.index(
+    assert script.index("set locked of theObj to false") < script.index("set properties of theObj")
+    assert script.index("set properties of theObj") < script.index(
         "if wasLocked then set locked of theObj to true"
     )
 
@@ -230,5 +256,5 @@ def test_reads_itemtransform_as_dict():
     )
     script = _build_slide_geometry_script([t.as_dict()], t.slide_number)
     assert "set theObj to image 4" in script  # kind_index 3 -> element 4
-    assert "set width of theObj to 200" in script
+    assert "set properties of theObj to {width:200, height:100}" in script
     assert "set position of theObj to {12.34, 56.78}" in script

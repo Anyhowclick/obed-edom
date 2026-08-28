@@ -32,6 +32,10 @@ export type PlannedRect = {
   sy?: number;
   sw?: number;
   sh?: number;
+  /** False for anything the run deletes before output — a hidden duplicate or
+   *  dropped side-panel object. Keyed off the plan, not the role string, so a
+   *  whitelisted page's kept lists read as staying, not leaving. */
+  willBeInOutput?: boolean;
 };
 
 /** boxes: the wall cropped by one affine, with each object's landing spot
@@ -206,9 +210,11 @@ function CropPreview({
       )}
       {composite &&
         (rects || []).map((rect, i) => {
-          // A hidden object is drawn by not drawing it — that is the whole point
-          // of showing this instead of the crop.
-          if (rect.role === "hide") return null;
+          // A dropped object is drawn by not drawing it — that is the whole point
+          // of showing this instead of the crop. Keyed on the plan's flag, not the
+          // role, so it also omits anything else the run deletes before output.
+          // Fall back to role=="hide" for a stale payload that predates the flag.
+          if (rect.willBeInOutput === false || rect.role === "hide") return null;
           if (!rect.sw || !rect.sh || rect.w <= 0 || rect.h <= 0) return null;
           const zx = rect.w / rect.sw;
           const zy = rect.h / rect.sh;
@@ -235,8 +241,15 @@ function CropPreview({
         (rects || []).map((rect, i) => (
           <span
             key={i}
-            className={`plan-rect role-${rect.role}`}
-            title={`${rect.role} · ${rect.kind}${rect.text ? ` · ${rect.text}` : ""}`}
+            // `dropped` is keyed on the plan's willBeInOutput, not the role: an
+            // object the run deletes before output is drawn as leaving (ghosted +
+            // struck), so ~200 dropped objects no longer read as landing there.
+            className={`plan-rect role-${rect.role}${
+              rect.willBeInOutput === false || rect.role === "hide" ? " dropped" : ""
+            }`}
+            title={`${rect.role} · ${rect.kind}${rect.text ? ` · ${rect.text}` : ""}${
+              rect.willBeInOutput === false || rect.role === "hide" ? " · will be removed" : ""
+            }`}
             style={{
               left: rect.x * k,
               top: rect.y * k,

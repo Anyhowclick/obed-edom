@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
 from obed_edom.baseline import (
+    deck_digest,
     deck_slide_digests,
     delete_pairing,
     folder_digests,
@@ -1478,20 +1479,18 @@ def _run_resize_propose(
     # it above): slideCount is the whole deck's length even on this ranged read.
     _assert_range_within_deck(path.name, int(wall.get("slideCount") or 0), slide_range)
     template_data = inspect_keynote(template)
-    proposal = propose_framings(
-        path,
-        template,
-        slide_range=slide_range,
-        wall_payload=wall,
-        template_payload=template_data,
-        log=job.log,
-    )
+    # Reuse is settled before proposing so the preview can plan with the same
+    # keep/whitelist the real run would use. A page whitelisted on an earlier run
+    # (carried over by content digest) should preview its side content placed, not
+    # shown as ~200 objects about to be dropped. The digests reuse needs are cheap
+    # here — one is over the in-memory wall payload, the other over the small CG
+    # template — and propose re-derives them for its own return unchanged.
     settings = load_settings()
     reuse = FramingReuse()
     if settings["reusePairings"]:
         record = load_framings(path, template)
         reuse = reuse_framings(
-            record, proposal["wallDigests"], proposal["templateDigest"]
+            record, deck_slide_digests(wall), deck_digest(template)
         )
         if reuse.carried:
             job.log(
@@ -1504,6 +1503,16 @@ def _run_resize_propose(
                 f"The template changed, so {len(reuse.resurfaced)} page(s) you deferred are "
                 "worth another look: " + ", ".join(str(i + 1) for i in reuse.resurfaced[:10]) + "."
             )
+    proposal = propose_framings(
+        path,
+        template,
+        slide_range=slide_range,
+        wall_payload=wall,
+        template_payload=template_data,
+        include_lists=include_lists,
+        side_content_slides=reuse.side_content_slides(),
+        log=job.log,
+    )
     decisions = {index: d.as_dict() for index, d in reuse.decisions.items()}
     for page in proposal["pages"]:
         saved = decisions.get(page["index"])
