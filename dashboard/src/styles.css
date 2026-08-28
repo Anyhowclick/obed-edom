@@ -482,9 +482,14 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
   justify-content: center;
 }
 .icon-expand { display: block; width: 15px; height: 15px; }
-.btn.combine {
+.btn.consolidate {
   background: #9ed9b4;
   color: #12241c;
+  border: 0;
+}
+.btn.separate {
+  background: #e6a29a;
+  color: #2c1512;
   border: 0;
 }
 .pair-slides {
