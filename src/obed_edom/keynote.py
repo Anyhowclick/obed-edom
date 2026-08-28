@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -685,6 +687,451 @@ def _run_superscript_fix(
         "exported": verdict["exported"],
         "stderr": proc.stderr or "",
     }
+
+
+def _stat_leaf_font_writes(container: str) -> list[str]:
+    """AppleScript that sets each matched stat text leaf of `container` to the size
+    the template teaches for that number, in place.
+
+    Iterates ``iWork items`` (the *distinct* children — a text-bearing shape is listed
+    in BOTH ``text items`` and ``shapes``, so iterating those separately would touch it
+    twice; SKILL). Skips nested groups (the caller recurses one level). For each text
+    leaf it looks the trimmed content up in ``statSizeFor`` (the template's
+    ``{number: size}`` map, embedded as a handler); a hit sets ``size of characters 1
+    thru -1`` to that size — only on a uniform run, so bold/coloured runs are never
+    flattened. Position and box are left alone: the wall crop preserves the 1080 frame
+    height, so a wall-authored number is already correctly sized *relative to the
+    frame* — the template just refines the exact point size (e.g. 269 300->200).
+    Non-number leaves (labels) match nothing and are left untouched.
+    """
+    return [
+        f"  repeat with _i from 1 to count of iWork items of {container}",
+        "    try",
+        f"      set _leaf to iWork item _i of {container}",
+        "      if (class of _leaf) is not group then",
+        "        try",
+        "          set _str to (object text of _leaf as string)",
+        "          set _tgt to my statSizeFor(_str)",
+        "          if _tgt > 0 then",
+        "            set _c1 to size of character 1 of object text of _leaf",
+        "            set _cN to size of character -1 of object text of _leaf",
+        "            if _c1 = _cN then",
+        "              set size of characters 1 thru -1 of object text of _leaf to _tgt",
+        "              set sized to sized + 1",
+        "            else",
+        "              set sizeSkips to sizeSkips + 1",
+        "            end if",
+        "          end if",
+        "        end try",
+        "      end if",
+        "    end try",
+        "  end repeat",
+    ]
+
+
+def _stat_size_handler(size_map: dict) -> list[str]:
+    """A top-level ``statSizeFor`` handler returning the template size for a number
+    string (trimmed), else 0. Keys are matched exactly after trimming whitespace."""
+    lines = ["on statSizeFor(theStr)"]
+    # Trim leading/trailing whitespace and newlines so ' 269 ' matches '269'.
+    lines += [
+        '  set _t to theStr',
+        '  repeat while _t starts with " " or _t starts with tab or _t starts with return or _t starts with linefeed',
+        "    if (count of _t) is 0 then exit repeat",
+        "    set _t to text 2 thru -1 of _t",
+        "  end repeat",
+        '  repeat while _t ends with " " or _t ends with tab or _t ends with return or _t ends with linefeed',
+        "    if (count of _t) is 0 then exit repeat",
+        "    set _t to text 1 thru -2 of _t",
+        "  end repeat",
+    ]
+    for content, size in size_map.items():
+        key = _as_escape(str(content).strip())
+        lines.append(f'  if _t is "{key}" then return {float(size)}')
+    lines += ["  return 0", "end statSizeFor"]
+    return lines
+
+
+def _build_stat_finalize_script(
+    dest: Path, jobs: list[dict], size_map: dict, export_dir: Path | None = None
+) -> str:
+    """Post-JXA pass: give each stat number the template's font size, then bring the
+    stat groups and the Global Missions badge to the front (above the map).
+
+    Two things the 1st (JXA) pass cannot do because a group is opaque to JXA and it
+    has no arrange command: (1) set the inner number's point size to what the template
+    teaches (e.g. 269 -> 200pt, 183 -> 150pt), and (2) lift the stat text and badge in
+    front of the map they were authored behind. Both are AppleScript: the font set is
+    plain scripting; the front-raise is Arrange > Bring to Front driven through System
+    Events on a selection set by reference (needs Accessibility, like the superscript
+    pass). If Accessibility is off, the sizes still land and the front-raise is skipped
+    and reported.
+
+    Each job is ``{slide, groupIndex}``; the group is addressed by index (JXA and
+    AppleScript agree on group order). Font sizing is guarded so a non-uniform run is
+    left alone; the whole job is wrapped so an unresolved index is skipped and reported
+    (the JXA placement stays as the fallback).
+
+    When ``export_dir`` is given, the PNG preview export is folded into this same open
+    session: after the stat sizes and z-order are saved, the still-open ``theDoc`` is
+    exported before it is closed, so the dest is not reopened a third time just to
+    render previews. The export is in its own ``try`` so a render failure never loses
+    the already-saved stat/geometry work, and the result reports whether it ran.
+    """
+    if not jobs:
+        return ""
+    escaped = _as_escape(str(dest))
+    doc_name = _as_escape(Path(dest).name)
+    slides = sorted({int(j["slide"]) for j in jobs})
+    lines: list[str] = list(_stat_size_handler(size_map))
+    lines += [
+        _keynote_terms(),
+        _keynote_tell(),
+        "  activate",
+        "  with timeout of 3600 seconds",
+        "  try",
+        f'    close (every document whose name is "{doc_name}") saving no',
+        "    delay 0.3",
+        "  end try",
+        f'  set theFile to POSIX file "{escaped}"',
+        "  open theFile",
+        "  delay 0.4",
+        "  set theDoc to document 1",
+        "  set doneJobs to 0",
+        "  set skipJobs to 0",
+        "  set sized to 0",
+        "  set sizeSkips to 0",
+        '  set exported to "false"',
+        '  set report to ""',
+    ]
+    # Phase 1 — template-taught number sizes (plain scripting).
+    for job in jobs:
+        slide = int(job["slide"])
+        group_index = int(job["groupIndex"])
+        lines += [
+            f"  -- slide {slide}, group {group_index}",
+            "  try",
+            f"    set g to group {group_index} of slide {slide} of theDoc",
+        ]
+        lines += _stat_leaf_font_writes("g")
+        lines += [
+            "    repeat with _gi from 1 to count of groups of g",
+            "      set _sub to group _gi of g",
+        ]
+        lines += ["  " + ln for ln in _stat_leaf_font_writes("_sub")]
+        lines += [
+            "    end repeat",
+            "    set doneJobs to doneJobs + 1",
+            "  on error errMsg number errNum",
+            "    set skipJobs to skipJobs + 1",
+            f'    set report to report & " skip(s={slide},g={group_index},err=" '
+            '& errNum & ":" & errMsg & ")"',
+            "  end try",
+        ]
+    lines += ["  save theDoc"]
+    # Phase 2 — z-order: bring stat groups (and the badge) to the front. Selection by
+    # reference then Arrange > Bring to Front through System Events.
+    lines += ['  set frontRaised to 0', '  set frontErr to ""']
+    for job in jobs:
+        slide = int(job["slide"])
+        group_index = int(job["groupIndex"])
+        # Only bring to front when the selection was actually set — otherwise the
+        # click fires on whatever was selected before (another slide's group).
+        lines += [
+            "  set _found to false",
+            "  try",
+            f"    set selection of theDoc to {{group {group_index} of slide {slide} of theDoc}}",
+            "    set _found to true",
+            "  end try",
+            "  if _found then",
+        ]
+        lines += ["  " + ln for ln in _bring_selection_to_front()]
+        lines += ["  end if"]
+    # The Global Missions badge: it may be a group OR a loose text item/shape (the
+    # template authored it loose), so scan all three; raise only if found.
+    for slide in slides:
+        lines += [
+            f"  -- badge on slide {slide}",
+            "  set _found to false",
+            "  try",
+            f"    tell slide {slide} of theDoc",
+            "      repeat with _gi from 1 to count of groups",
+            "        set _bg to group _gi",
+            "        repeat with _ti from 1 to count of text items of _bg",
+            "          try",
+            '            if (object text of text item _ti of _bg as string) contains "Global Missions" then',
+            "              set selection of theDoc to {_bg}",
+            "              set _found to true",
+            "            end if",
+            "          end try",
+            "        end repeat",
+            "      end repeat",
+            "      repeat with _ti from 1 to count of text items",
+            "        try",
+            '          if (object text of text item _ti as string) contains "Global Missions" then',
+            "            set selection of theDoc to {text item _ti}",
+            "            set _found to true",
+            "          end if",
+            "        end try",
+            "      end repeat",
+            "      repeat with _si from 1 to count of shapes",
+            "        try",
+            '          if (object text of shape _si as string) contains "Global Missions" then',
+            "            set selection of theDoc to {shape _si}",
+            "            set _found to true",
+            "          end if",
+            "        end try",
+            "      end repeat",
+            "    end tell",
+            "  end try",
+            "  if _found then",
+        ]
+        lines += ["  " + ln for ln in _bring_selection_to_front()]
+        lines += ["  end if"]
+    # Persist the stat sizes + z-order before the (fallible) export, so a render
+    # failure can only cost re-exportable previews, never the placement work.
+    lines += [
+        "  try",
+        "    save theDoc",
+        "  end try",
+    ]
+    if export_dir:
+        # Fold the preview export into this already-open session (no third reopen).
+        # Its own try, so an export failure leaves the saved deck untouched.
+        lines += [
+            f'  set exportFolder to POSIX file "{_as_escape(str(export_dir))}"',
+            "  try",
+            "    export theDoc to exportFolder as slide images with properties "
+            "{image format:PNG, skipped slides:false}",
+            '    set exported to "true"',
+            "  end try",
+        ]
+    lines += [
+        "  try",
+        "    close theDoc saving yes",
+        "  end try",
+        "  end timeout",
+        '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
+        '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " frontErr=" '
+        '& frontErr & " exported=" & exported & " detail=" & report',
+        "end tell",
+        "end using terms from",
+    ]
+    return "\n".join(lines)
+
+
+def _bring_selection_to_front() -> list[str]:
+    """Click Arrange > Bring to Front on the current selection via System Events.
+    Counts a success in ``frontRaised``; a failure (e.g. Accessibility off) is caught
+    and appended to ``frontErr`` so the sizes still stand."""
+    return [
+        "  delay 0.35",
+        "  try",
+        "    " + _keynote_process_tell(),
+        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
+        "    end tell",
+        "    set frontRaised to frontRaised + 1",
+        "    delay 0.2",
+        "  on error errMsg number errNum",
+        '    set frontErr to frontErr & " [" & errNum & "]"',
+        "  end try",
+    ]
+
+
+def _run_stat_finalize(
+    dest: Path, jobs: list[dict], size_map: dict, export_dir: Path | None = None
+) -> dict:
+    """Run the stat-finalize pass (template sizes + bring-to-front); no-op if empty.
+
+    When ``export_dir`` is given, the same open session also exports the PNG previews
+    before closing, so the dest is not reopened just to render them. The result carries
+    ``exported`` and ``previewFiles`` so the caller can skip a separate export pass.
+    """
+    export_dir = Path(export_dir) if export_dir else None
+    if export_dir is not None:
+        export_dir.mkdir(parents=True, exist_ok=True)
+    script = _build_stat_finalize_script(Path(dest), jobs, size_map or {}, export_dir)
+    if not script:
+        return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osascript", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    raw = (proc.stdout or "").strip()
+
+    def _num(key: str) -> int:
+        match = re.search(rf"{key}=(\d+)", raw)
+        return int(match.group(1)) if match else 0
+
+    ok = proc.returncode == 0 and bool(raw)
+    if not ok:
+        debug = Path(dest).with_suffix(".stat-finalize.applescript")
+        debug.write_text(script, encoding="utf-8")
+    # The folder is the ground truth for a successful render (the same check
+    # export_slide_images uses), not just the AppleScript flag.
+    preview_files: list[str] = []
+    exported = False
+    if export_dir is not None:
+        from obed_edom.inspect import preview_pngs  # noqa: PLC0415
+
+        pngs = preview_pngs(export_dir)
+        preview_files = [p.name for p in pngs]
+        exported = bool(pngs)
+    return {
+        "ok": ok,
+        "jobs": len(jobs),
+        "done": _num("done"),
+        "skipped": _num("skipped"),
+        "sized": _num("sized"),
+        "sizeSkips": _num("sizeSkips"),
+        "front": _num("front"),
+        "exported": exported,
+        "previewFiles": preview_files,
+        "raw": raw,
+        "stderr": proc.stderr or "",
+    }
+
+
+def read_template_stat_sizes(template: Path, *, use_cache: bool = True) -> dict[str, float]:
+    """AppleScript-read the CG template's numeric text (grouped and loose) into a
+    ``{digits: font size}`` map, so the stat-finalize pass can give a wall number the
+    size the template teaches (e.g. ``269`` -> 200pt, ``183`` -> 150pt).
+
+    JXA's swatch harvest misses numbers that sit inside a group (a group is opaque to
+    JXA), which is exactly where the hero stats live on the template — so this reads
+    them in AppleScript. Only all-digit content is kept (labels and the date are left
+    for the wall size); the largest size wins if a number appears more than once.
+    Read-only: opens, walks, closes without saving.
+
+    The template is invariant across runs of the same template, so the read is cached
+    by the template's content digest (and Keynote version): on a hit the map is
+    returned straight from disk and Keynote is never opened. Pass ``use_cache=False``
+    to force a fresh read (and refresh the cache).
+    """
+    template = Path(template)
+    cache_path: Path | None = None
+    if use_cache:
+        from obed_edom.baseline import (  # noqa: PLC0415
+            deck_digest,
+            template_stat_cache_path,
+        )
+
+        try:
+            cache_path = template_stat_cache_path(deck_digest(template))
+        except (FileNotFoundError, OSError):
+            cache_path = None
+        if cache_path is not None and cache_path.is_file():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    # A cache hit costs no Keynote open. The float() cast is inside
+                    # the try so a malformed-but-parseable cache (a non-numeric value)
+                    # degrades to a real read instead of crashing the remap.
+                    return {str(k): float(v) for k, v in data.items()}
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                pass
+    sizes = _read_template_stat_sizes_via_keynote(template)
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(sizes), encoding="utf-8")
+        except OSError:
+            pass
+    return sizes
+
+
+def _read_template_stat_sizes_via_keynote(template: Path) -> dict[str, float]:
+    """Open the template in Keynote and read its numeric font sizes (uncached)."""
+    template = Path(template)
+    escaped = _as_escape(str(template))
+    doc_name = _as_escape(template.name)
+    lines = [
+        _keynote_terms(),
+        _keynote_tell(),
+        "  activate",
+        "  with timeout of 400 seconds",
+        "  try",
+        f'    close (every document whose name is "{doc_name}") saving no',
+        "    delay 0.3",
+        "  end try",
+        f'  set theFile to POSIX file "{escaped}"',
+        "  open theFile",
+        "  delay 0.4",
+        "  set theDoc to document 1",
+        '  set report to ""',
+        "  repeat with s from 1 to count of slides of theDoc",
+        "    tell slide s of theDoc",
+        "      repeat with ti from 1 to count of text items",
+        "        try",
+        "          set _t to text item ti",
+        '          set report to report & (object text of _t as string) & tab & (size of character 1 of object text of _t) & linefeed',
+        "        end try",
+        "      end repeat",
+        "      repeat with gi from 1 to count of groups",
+        "        set g to group gi",
+        "        repeat with ti from 1 to count of text items of g",
+        "          try",
+        "            set _t to text item ti of g",
+        '            set report to report & (object text of _t as string) & tab & (size of character 1 of object text of _t) & linefeed',
+        "          end try",
+        "        end repeat",
+        "        repeat with sgi from 1 to count of groups of g",
+        "          set sg to group sgi of g",
+        "          repeat with ti from 1 to count of text items of sg",
+        "            try",
+        "              set _t to text item ti of sg",
+        '              set report to report & (object text of _t as string) & tab & (size of character 1 of object text of _t) & linefeed',
+        "            end try",
+        "          end repeat",
+        "        end repeat",
+        "      end repeat",
+        "    end tell",
+        "  end repeat",
+        "  try",
+        "    close theDoc saving no",
+        "  end try",
+        "  end timeout",
+        "  return report",
+        "end tell",
+        "end using terms from",
+    ]
+    script = "\n".join(lines)
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osascript", str(script_path)], capture_output=True, text=True, check=False
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    sizes: dict[str, float] = {}
+    for line in (proc.stdout or "").splitlines():
+        if "\t" not in line:
+            continue
+        content, _, raw_size = line.rpartition("\t")
+        key = content.strip()
+        if not key.isdigit():
+            continue
+        try:
+            size = float(raw_size)
+        except ValueError:
+            continue
+        if size > sizes.get(key, 0.0):
+            sizes[key] = size
+    return sizes
 
 
 # Accessibility is off: System Events cannot drive Keynote's menus.

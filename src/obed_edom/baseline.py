@@ -35,6 +35,10 @@ HASH_CACHE_VERSION = 1
 # Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
 # longer read at all now that the tool is 15.x only.
 INSPECT_VERSION = 2
+# Bump when the shape of the cached template stat-size map changes. Keyed per
+# Keynote version too (via the `.k<version>` tag), since the sizes are read out
+# of the template by AppleScript and a different build could read them differently.
+TEMPLATE_STAT_VERSION = 1
 DIGEST_LEN = 16
 
 
@@ -78,6 +82,19 @@ def preview_cache_dir(
 ) -> Path:
     """Where previews exported by this Keynote version are read and written."""
     return cache_root(root) / "previews" / f"{digest}.k{_app_tag(app_version)}"
+
+
+def template_stat_cache_path(
+    digest: str, root: Path | None = None, app_version: str | None = None
+) -> Path:
+    """Where a template's ``{number: font size}`` map is cached, per Keynote version.
+
+    ``read_template_stat_sizes`` opens the (invariant) CG template on every remap
+    just to read grouped stat sizes; keying that read by the template's content
+    digest lets a repeat run return the map without opening Keynote at all.
+    """
+    name = f"{digest}.v{TEMPLATE_STAT_VERSION}.k{_app_tag(app_version)}.json"
+    return cache_root(root) / "template_stat" / name
 
 
 def wall_thumb_dir(

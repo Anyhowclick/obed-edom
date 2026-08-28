@@ -2281,9 +2281,12 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
 
 def _pack_left_groups(groups: list["ItemTransform"], recipe: dict[str, Any]) -> None:
     """Re-place the left-column groups the affine parked at x=16 so they stop
-    overlapping. They cannot be scaled (group width does not scale children), so this
-    only moves them, packing wall-size boxes top-to-bottom then into further columns.
-    Sorted by wall reading order so a 183/86/14/269 stack stays in sequence.
+    overlapping. A group box cannot be scaled (group width does not scale children),
+    so this only moves them, packing the wall-size boxes top-to-bottom then into
+    further columns. The crop preserves frame height, so the wall-authored numbers are
+    already correctly sized; the stat-finalize pass only refines each number's point
+    size to the template and brings it to front. Sorted by wall reading order so a
+    183/86/14/269 stack stays in sequence.
     """
     if len(groups) < 2:
         return
@@ -2404,6 +2407,7 @@ def plan_slide_transforms(
     wall_size: tuple[float, float] | None = None,
     defer_list_packing: bool = False,
     free_text_keys: set[tuple[str, int]] | None = None,
+    child_resize_report: list[dict[str, Any]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
@@ -2797,6 +2801,17 @@ def plan_slide_transforms(
                 src_box.w,
                 src_box.h,
             )
+            # A stat group's children are still wall-size after JXA (JXA cannot
+            # scale a group or reach its leaves), so the numbers render far too big
+            # for a 1920 CG. Emit a job for the AppleScript child-resize pass to
+            # shrink the leaves in place around the group's live origin. Every group
+            # the branch handles needs it — the affine-placed ones (mapped.x >= 16)
+            # as much as the parked-left ones (plan R1). The job carries only
+            # {slide, groupIndex == kindIndex+1, s}; the pass reads geometry live.
+            if child_resize_report is not None:
+                child_resize_report.append(
+                    {"slide": number, "groupIndex": kind_index + 1}
+                )
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -2864,6 +2879,9 @@ def plan_slide_transforms(
         _pack_list_transforms(out, recipe)
     # Left-column groups the affine parked at x=16: pack them so they stop stacking
     # on one margin. Unconditional — this fires whether or not side content is kept.
+    # Pack the parked-left groups at wall size: the crop preserves frame height, so
+    # the wall-authored numbers are already correctly sized; the stat-finalize pass
+    # only refines each number's point size to the template and brings it to front.
     _pack_left_groups(left_groups, recipe)
     # Fit only the body verse. Labels, plates and images are left where the
     # template and affine placed them — bleeding off an edge is often deliberate.
@@ -3834,6 +3852,7 @@ def plan_payload_transforms(
     framing_overrides: dict[int, int] | None = None,
     framing_report: list[dict[str, Any]] | None = None,
     side_content_slides: set[int] | None = None,
+    child_resize_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves.
@@ -3855,6 +3874,11 @@ def plan_payload_transforms(
     per-slide form of `include_lists` (which stays a global override for the CLI):
     a slide is treated as keeping side content when the global flag is on or its
     number is in this set.
+
+    `child_resize_report`, when given, collects one job per stat group the group
+    branch handles — ``{"slide", "groupIndex", "s"}`` — for the AppleScript
+    child-resize pass that shrinks each group's wall-size leaves to CG size after
+    JXA (JXA cannot scale a group or reach its children).
     """
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
@@ -3978,6 +4002,7 @@ def plan_payload_transforms(
             wall_size=(wall_w, wall_h),
             defer_list_packing=slide_lists and analysis is not None,
             free_text_keys=analysis["free"] if analysis else None,
+            child_resize_report=child_resize_report,
         )
         if slide_lists and analysis is not None:
             rows = _place_free_text(planned, slide, slide_recipe, analysis)

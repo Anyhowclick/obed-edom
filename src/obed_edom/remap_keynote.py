@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ from typing import Any
 
 from obed_edom import keynote_app
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
+from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
     navigator_numbering,
     CG_HEIGHT,
@@ -25,6 +27,198 @@ from obed_edom.map_remap import (
 )
 
 REMAP_JS = Path(__file__).resolve().parent / "remap_keynote.js"
+
+# AppleScript element names for the kinds the plan carries. The AppleScript index
+# is the JXA 0-based collection index plus one (same sdef collection, same order).
+_AS_KIND_NAMES = {
+    "text": "text item",
+    "image": "image",
+    "shape": "shape",
+    "movie": "movie",
+    "group": "group",
+    "line": "line",
+}
+
+
+def as_geometry_enabled() -> bool:
+    """Whether the batched-AppleScript geometry path is used — default ON.
+
+    AS-geometry is the validated default: no JXA (0,0) yank, ~30% faster on the
+    constellation slide (it drops setPos's readback-verify and the second
+    position pass), placement/z-order/groups confirmed correct. Set
+    ``OBED_AS_GEOMETRY=0`` (or ``false``/``no``/``off``) to force the legacy JXA
+    geometry path — kept for A/B debugging and as the per-slide fallback for
+    slides carrying an object of a kind AppleScript can't address.
+    """
+    return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _as_num(value: Any) -> str:
+    """AppleScript numeric literal: an integer when whole, else a 2dp decimal."""
+    number = float(value)
+    if number == int(number):
+        return str(int(number))
+    return repr(round(number, 2))
+
+
+def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> str:
+    """One `tell slide N` block setting geometry for each object on that slide.
+
+    Written in Python (not JXA) so a pytest can lock the exact string, and safe to
+    address by slide number because non-reuse slide numbering is stable through
+    the JXA loop (a reuse duplicate is deleted before the next slide, restoring
+    the count). Objects are addressed ``<kind> (kindIndex + 1)`` — the 1-based
+    AppleScript twin of the JXA 0-based collection index.
+
+    Width/height are written before position because an AppleScript height write
+    re-anchors ~18px about the object centre, which the final position write
+    corrects; unlike JXA, AppleScript does not yank an object to (0,0) on a size
+    write, so no position-only restore pass follows. A line's geometry is its
+    endpoints (``start point``/``end point``), which AppleScript can set even
+    though JXA cannot. A group gets full geometry (width, height, position) like
+    any other object: there is no separate child-resize pass on this branch, so
+    the JXA full pass this replaces was the only writer of a group's size — and a
+    role=="other" group is deliberately framed at wall size to keep wall-sized
+    children (a logo, a date) from clipping (see map_remap.py). Setting a group's
+    width in AppleScript neither yanks it nor scales its children, so it matches
+    that JXA frame write. Every object's writes sit inside their own ``try`` so an
+    unsupported property never abandons the rest of the slide, and a locked object
+    is unlocked before the writes and relocked after.
+    """
+    body: list[str] = []
+    for spec in specs:
+        if spec.get("role") == "hide":
+            continue
+        kind = str(spec.get("kind") or "")
+        name = _AS_KIND_NAMES.get(kind)
+        if not name:
+            continue
+        kind_index = spec.get("kindIndex")
+        if kind_index is None:
+            kind_index = spec.get("itemIndex")
+        if kind_index is None:
+            continue
+        addr = f"{name} {int(kind_index) + 1}"
+        lines = [
+            "  try",
+            f"    set theObj to {addr}",
+            "    set wasLocked to false",
+            "    try",
+            "      if locked of theObj then",
+            "        set locked of theObj to false",
+            "        set wasLocked to true",
+            "      end if",
+            "    end try",
+        ]
+        start = spec.get("start")
+        end = spec.get("end")
+        x = spec.get("x")
+        y = spec.get("y")
+        if kind == "line" and start and end:
+            lines += [
+                "    try",
+                f"      set start point of theObj to {{{_as_num(start[0])}, {_as_num(start[1])}}}",
+                "    end try",
+                "    try",
+                f"      set end point of theObj to {{{_as_num(end[0])}, {_as_num(end[1])}}}",
+                "    end try",
+            ]
+        else:
+            if spec.get("w") is not None:
+                lines += [
+                    "    try",
+                    f"      set width of theObj to {_as_num(spec['w'])}",
+                    "    end try",
+                ]
+            if spec.get("h") is not None:
+                lines += [
+                    "    try",
+                    f"      set height of theObj to {_as_num(spec['h'])}",
+                    "    end try",
+                ]
+            if x is not None and y is not None:
+                lines += [
+                    "    try",
+                    f"      set position of theObj to {{{_as_num(x)}, {_as_num(y)}}}",
+                    "    end try",
+                ]
+        lines += [
+            "    try",
+            "      if wasLocked then set locked of theObj to true",
+            "    end try",
+            "  end try",
+        ]
+        body += lines
+    if not body:
+        return ""
+    # A large deck's geometry can run well past osascript's 120s default.
+    return "\n".join(
+        ["with timeout of 3600 seconds", f"tell slide {int(slide_no)}"]
+        + body
+        + ["end tell", "end timeout"]
+    )
+
+
+def _spec_bears_geometry(spec: dict[str, Any]) -> bool:
+    """Whether this transform carries geometry the JXA full pass would place."""
+    if spec.get("w") is not None or spec.get("h") is not None:
+        return True
+    if spec.get("x") is not None and spec.get("y") is not None:
+        return True
+    if spec.get("start") is not None and spec.get("end") is not None:
+        return True
+    return False
+
+
+def _slide_geometry_addressable(specs: list[dict[str, Any]]) -> bool:
+    """Whether every geometry-bearing object on the slide has an AppleScript address.
+
+    The AppleScript block can only address the kinds in ``_AS_KIND_NAMES``. JXA's
+    ``getItem`` also resolves a ``table``/``chart``/unknown kind through its
+    iWorkItems fallback and the full pass positions it, but the AppleScript block
+    has no such fallback — so a slide carrying any geometry-bearing unaddressable
+    object is kept OFF the AppleScript path entirely and left to the JXA full pass.
+    Correctness (that object still gets moved) beats removing the flick on that one
+    edge-case slide.
+    """
+    for spec in specs:
+        if spec.get("role") == "hide":
+            continue
+        if not _spec_bears_geometry(spec):
+            continue
+        if str(spec.get("kind") or "") not in _AS_KIND_NAMES:
+            return False
+    return True
+
+
+def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
+    """Per-slide AppleScript geometry bodies, keyed by slide number as a string.
+
+    Built from the same transform dicts sent to JXA so the addressing matches
+    object for object. A slide is included ONLY when every geometry-bearing object
+    on it is AppleScript-addressable (see ``_slide_geometry_addressable``); an
+    excluded slide has no key here, and the JXA loop then runs its full geometry
+    path. The reuse path ignores this map regardless.
+    """
+    by_slide: dict[int, list[dict[str, Any]]] = {}
+    order: list[int] = []
+    for spec in transform_dicts:
+        slide_no = int(spec.get("slide") or 0)
+        if slide_no < 1:
+            continue
+        if slide_no not in by_slide:
+            by_slide[slide_no] = []
+            order.append(slide_no)
+        by_slide[slide_no].append(spec)
+    out: dict[str, str] = {}
+    for slide_no in order:
+        specs = by_slide[slide_no]
+        if not _slide_geometry_addressable(specs):
+            continue
+        body = _build_slide_geometry_script(specs, slide_no)
+        if body:
+            out[str(slide_no)] = body
+    return out
 
 
 def _run_jxa(plan: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +336,7 @@ def remap_keynote(
     framing_overrides: dict[int, int] | None = None,
     side_content_slides: set[int] | None = None,
     source_previews: Path | str | None = None,
+    export_dir: Path | str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
@@ -151,6 +346,13 @@ def remap_keynote(
 
     `side_content_slides` is the per-slide side-panel whitelist (wall slide numbers):
     side content is dropped everywhere else and kept on these pages.
+
+    `export_dir`, when given, folds the PNG preview export into the stat-finalize
+    session (it runs against the already-open deck before it closes), so the dest is
+    not reopened a third time just to render previews. The result reports `exported`;
+    a run with no stat-group jobs never opens that session, so the caller still exports
+    those previews itself. Left unset (e.g. the validate=True read-back path), no
+    export is folded and behaviour is unchanged.
     """
     def say(message: str) -> None:
         if log:
@@ -202,6 +404,7 @@ def remap_keynote(
     fitted: list[int] = []
     offframe: list[dict[str, Any]] = []
     framing_rows: list[dict[str, Any]] = []
+    child_resize: list[dict[str, Any]] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -216,6 +419,7 @@ def remap_keynote(
         framing_overrides=framing_overrides,
         framing_report=framing_rows,
         side_content_slides=side_content_slides,
+        child_resize_report=child_resize,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
@@ -340,14 +544,24 @@ def remap_keynote(
         say(f"Copying 16:9 slide layouts from {template_path.name} onto the wall copy…")
         copy_keynote(template_path, layout_src)
         say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
+        transform_dicts = [t.as_dict() for t in transforms]
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
             "width": int(recipe.get("destWidth") or CG_WIDTH),
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
-            "transforms": [t.as_dict() for t in transforms],
+            "transforms": transform_dicts,
             "reuses": reuses,
         }
+        if as_geometry_enabled():
+            # Non-reuse slides get their w/h/position written by a batched
+            # AppleScript block (no JXA (0,0) flick); reuse slides stay on JXA.
+            plan["asGeometry"] = True
+            plan["asGeom"] = _build_as_geometry(transform_dicts)
+            say(
+                "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
+                f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."
+            )
         wanted = slides_for_plan(slide_range)
         if wanted:
             plan["slides"] = wanted
@@ -390,6 +604,41 @@ def remap_keynote(
         say(f"Canvas after remap: {actual_w}×{actual_h}.")
     if jxa.get("skippedSlides"):
         say(f"Skipped {jxa.get('skippedSlides')} other slide(s) so the preview is this slide only.")
+    # The wall crop keeps the 1080 frame height, so a wall-authored stat number is
+    # already correctly sized relative to the frame — the JXA placement is fine. Two
+    # things JXA can't do: give each number the exact point size the template teaches
+    # (a group is opaque to JXA), and lift the stat text + Global Missions badge in
+    # front of the map they were authored behind. An AppleScript pass does both. No-op
+    # when the plan emitted no stat-group jobs.
+    export_path = Path(export_dir).expanduser().resolve() if export_dir else None
+    child_resize_result: dict[str, Any] | None = None
+    if child_resize:
+        stat_sizes = read_template_stat_sizes(template_path)
+        say(
+            f"Finalizing {len(child_resize)} stat group(s): template sizes "
+            f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'}) "
+            "+ bring to front."
+            + (" Exporting previews in the same session." if export_path else "")
+        )
+        child_resize_result = _run_stat_finalize(
+            dest, child_resize, stat_sizes, export_dir=export_path
+        )
+        done = child_resize_result.get("done") or 0
+        skipped = child_resize_result.get("skipped") or 0
+        sized = child_resize_result.get("sized") or 0
+        front = child_resize_result.get("front") or 0
+        if child_resize_result.get("ok"):
+            say(
+                f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
+                f"the template, {front} object(s) brought to front"
+                + (f", {skipped} skipped" if skipped else "")
+                + "."
+            )
+        else:
+            say(
+                "Stat-finalize pass did not complete; stat groups stay at the JXA "
+                "placement/size. See the .stat-finalize.applescript dump."
+            )
     result: dict[str, Any] = {
         "source": str(source),
         "dest": str(dest),
@@ -415,6 +664,13 @@ def remap_keynote(
         "fittedSlides": fitted,
         "offFrame": offframe,
         "framingReport": framing_rows,
+        "childResize": child_resize_result,
+        # True only when the stat-finalize session actually rendered the previews;
+        # the caller falls back to a standalone export otherwise.
+        "exported": bool(child_resize_result and child_resize_result.get("exported")),
+        "previewFiles": list(
+            (child_resize_result or {}).get("previewFiles") or []
+        ),
     }
     return result
 
@@ -446,6 +702,10 @@ def remap_and_inspect(
         side_content_slides=side_content_slides,
         wall_payload=wall_payload,
         template_payload=template_payload,
+        # Fold the export into the stat-finalize session on the no-read-back path
+        # only. The validate=True path reads the deck back with inspect_keynote,
+        # which does its own export, so it must stay unchanged (export_dir unset).
+        export_dir=export_dir if not validate else None,
         log=log,
     )
     # Reading the deck back dumps every object, which is what the validation
@@ -453,7 +713,9 @@ def remap_and_inspect(
     # only wants the pictures, and those come from a Keynote pass that does not
     # walk the objects at all.
     if not validate:
-        if export_dir:
+        # The stat-finalize session already exported when it ran; only fall back to a
+        # standalone export when it didn't (no stat-group jobs, or its export failed).
+        if export_dir and not info.get("exported"):
             if log:
                 log("Exporting previews (validation off, so the deck is not read back)…")
             error = export_slide_images(Path(dest), Path(export_dir))
