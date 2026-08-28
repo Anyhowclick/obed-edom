@@ -74,7 +74,15 @@ def _color_of(font_color: dict | None) -> list[int] | None:
 
 
 # charProperties keys we inherit; the first value seen up the chain wins.
-_INHERITED_PROPS = ("fontColor", "bold", "italic", "fontSize", "capitalization")
+_INHERITED_PROPS = (
+    "fontColor",
+    "bold",
+    "italic",
+    "fontSize",
+    "capitalization",
+    "fontName",
+    "superscript",
+)
 
 
 def resolve_style(style_id: str, objects: dict[str, dict], cache: dict) -> dict:
@@ -115,6 +123,13 @@ def resolve_style(style_id: str, objects: dict[str, dict], cache: dict) -> dict:
         # Raw IWA capitalization enum string (e.g. "kSmallCaps") or None.
         # diff_keynotes._smallcaps_signature reads it via `"small" in cap.lower()`.
         "capitalization": props.get("capitalization"),
+        # PostScript font name (charProperties.fontName); OFTEN None because the
+        # font usually lives on the paragraph style, not the char style. None =
+        # inherited, which is correct and additive — no consumer requires it.
+        "fontName": props.get("fontName"),
+        # Raw IWA superscript enum string (e.g. "kSuperscript") or None; inherited
+        # via the same parent walk (the GW verse-number style resolves directly).
+        "superscript": props.get("superscript"),
     }
     cache[key] = result
     return result
@@ -127,6 +142,8 @@ _EMPTY_STYLE = {
     "size": None,
     "styleName": None,
     "capitalization": None,
+    "fontName": None,
+    "superscript": None,
 }
 
 
@@ -173,6 +190,8 @@ def storage_runs(storage: dict, objects: dict[str, dict], cache: dict) -> list[d
                 "size": style["size"],
                 "styleName": style["styleName"],
                 "capitalization": style["capitalization"],
+                "fontName": style["fontName"],
+                "superscript": style["superscript"],
             }
         )
     return runs
@@ -261,6 +280,79 @@ def _slide_text_objects(
 
 
 # --------------------------------------------------------------------------
+# Grouped text: recurse a slide's group subtrees for copy JXA can't see.
+# --------------------------------------------------------------------------
+def _collect_group_text(
+    group_id: str,
+    objects: dict[str, dict],
+    cache: dict,
+    seen: set[str],
+    out: list[dict],
+) -> None:
+    """Depth-first walk of one ``TSD.GroupArchive`` subtree, collecting text.
+
+    ``GroupArchive.children`` is a list of ``{identifier}`` refs to either nested
+    ``TSD.GroupArchive`` (recurse) or ``TSWP.ShapeInfoArchive`` whose
+    ``ownedStorage`` points at the ``TSWP.StorageArchive`` holding the copy. ``seen``
+    guards against a group reached twice (a nested group is only walked once, from
+    its parent) so grouped storages aren't double-counted.
+    """
+    if group_id in seen:
+        return
+    seen.add(group_id)
+    group = objects.get(group_id)
+    if not group:
+        return
+    for ref in group.get("children") or []:
+        child_id = ref.get("identifier")
+        if child_id is None:
+            continue
+        child_id = str(child_id)
+        child = objects.get(child_id)
+        if not child:
+            continue
+        ptype = child.get("_pbtype")
+        if ptype == "TSD.GroupArchive":
+            _collect_group_text(child_id, objects, cache, seen, out)
+            continue
+        if ptype != "TSWP.ShapeInfoArchive":
+            continue
+        stor_id = (child.get("ownedStorage") or {}).get("identifier")
+        if stor_id is None:
+            continue
+        storage = objects.get(str(stor_id))
+        if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
+            continue
+        runs = storage_runs(storage, objects, cache)
+        if not runs:
+            continue
+        out.append({"text": "".join(storage.get("text") or []), "runs": runs})
+
+
+def _slide_grouped_text(
+    file_ids_for_slide: list[str], objects: dict[str, dict], cache: dict
+) -> list[dict]:
+    """Grouped ``{text, runs}`` for one slide, from its top-level group subtrees.
+
+    Only TOP-LEVEL groups are seeded (parent is the slide, not another group);
+    nested groups are reached by recursion, so each grouped storage is collected
+    exactly once. Read-only: it never touches ``items``/``children``/``childCount``
+    or any geometry, so the resize plan sees exactly today's payload.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ident in file_ids_for_slide:
+        obj = objects.get(ident)
+        if not obj or obj.get("_pbtype") != "TSD.GroupArchive":
+            continue
+        parent = str(((obj.get("super") or {}).get("parent") or {}).get("identifier"))
+        if (objects.get(parent) or {}).get("_pbtype") == "TSD.GroupArchive":
+            continue  # nested group, walked via its top-level ancestor
+        _collect_group_text(str(ident), objects, cache, seen, out)
+    return out
+
+
+# --------------------------------------------------------------------------
 # Match IWA text objects -> inspect items and attach runs.
 # --------------------------------------------------------------------------
 def _match_runs_to_items(text_objects: list[dict], items: list[dict]) -> None:
@@ -307,11 +399,19 @@ def attach_runs(key_path: str | Path, payload: dict) -> None:
     # in the show's slide tree so a RANGED inspect (which ships only a subset of
     # slides, each carrying its true `index`) still looks up the right slide.
     iwa_by_index: dict[int, list[dict]] = {}
+    grouped_by_index: dict[int, list[dict]] = {}
     for idx, (slide_id, _skipped) in enumerate(order):
         fname = id_to_file.get(slide_id)
-        iwa_by_index[idx] = _slide_text_objects(file_ids.get(fname, []), objects, cache)
+        ids = file_ids.get(fname, [])
+        iwa_by_index[idx] = _slide_text_objects(ids, objects, cache)
+        grouped_by_index[idx] = _slide_grouped_text(ids, objects, cache)
     for slide in payload.get("slides") or []:
-        text_objects = iwa_by_index.get(slide.get("index"))
-        if not text_objects:
-            continue
-        _match_runs_to_items(text_objects, slide.get("items") or [])
+        idx = slide.get("index")
+        # Grouped copy JXA reports as childCount 0 -> a NEW slide-level field, read
+        # ONLY by the checker's text-scoring path. Never mutates items/geometry.
+        grouped = grouped_by_index.get(idx)
+        if grouped:
+            slide["groupedText"] = grouped
+        text_objects = iwa_by_index.get(idx)
+        if text_objects:
+            _match_runs_to_items(text_objects, slide.get("items") or [])

@@ -7,6 +7,7 @@ A single local-only integration test runs against a real deck when both the deck
 and the parser are available.
 """
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,14 @@ import obed_edom.iwa_runs as iwa
 from obed_edom.iwa_runs import (
     _match_runs_to_items,
     _normalize_text,
+    _slide_grouped_text,
     attach_runs,
     resolve_style,
 )
 
 REAL_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key")
+GW_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (GW).key")
+MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
 
 
 # --------------------------------------------------------------------------
@@ -117,12 +121,34 @@ def test_resolve_missing_color_is_none():
     resolved = resolve_style("1", objects, {})
     assert resolved["color"] is None
     assert resolved["capitalization"] is None
+    # WIN 3: both new keys are present and default to None when absent.
+    assert resolved["fontName"] is None
+    assert resolved["superscript"] is None
 
 
 def test_resolve_extracts_smallcaps_capitalization():
     objects = {"1": _charstyle("Scripture", capitalization="kSmallCaps")}
     resolved = resolve_style("1", objects, {})
     assert resolved["capitalization"] == "kSmallCaps"
+
+
+def test_resolve_extracts_fontname_and_superscript():
+    objects = {
+        "1": _charstyle("Verse Number", fontName="Amplitude-Bold", superscript="kSuperscript")
+    }
+    resolved = resolve_style("1", objects, {})
+    assert resolved["fontName"] == "Amplitude-Bold"
+    assert resolved["superscript"] == "kSuperscript"
+
+
+def test_resolve_inherits_fontname_and_superscript_up_chain():
+    objects = {
+        "1": _charstyle("Child", parent="2", bold=True),  # no font/superscript of its own
+        "2": _charstyle("Base", fontName="AzoSans-Medium", superscript="kSuperscript"),
+    }
+    resolved = resolve_style("1", objects, {})
+    assert resolved["fontName"] == "AzoSans-Medium"  # inherited
+    assert resolved["superscript"] == "kSuperscript"  # inherited
 
 
 # --------------------------------------------------------------------------
@@ -199,6 +225,121 @@ def test_attach_import_error_is_graceful(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# WIN 2 — grouped text: collection from a group subtree + the resizer invariant.
+# --------------------------------------------------------------------------
+def _grouped_deck():
+    """One slide whose only copy lives inside a nested group subtree.
+
+    Slide 210 owns top-level group 500; 500 holds a text shape ("Countries") and a
+    NESTED group 510, which holds another text shape ("CHC Churches"). No top-level
+    (ungrouped) text object exists, mirroring the Map deck's stat-block slides.
+    """
+
+    def storage(text, style_id):
+        return {
+            "_pbtype": "TSWP.StorageArchive",
+            "text": [text],
+            "tableCharStyle": {"entries": [{"characterIndex": 0, "object": {"identifier": style_id}}]},
+        }
+
+    def shape(storage_id):
+        return {"_pbtype": "TSWP.ShapeInfoArchive", "ownedStorage": {"identifier": storage_id}}
+
+    objects = {
+        "110": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "210"}},
+        "210": {"_pbtype": "KN.SlideArchive"},
+        "500": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"parent": {"identifier": "210"}},  # top-level: parent is the slide
+            "children": [{"identifier": "501"}, {"identifier": "510"}],
+        },
+        "501": shape("601"),
+        "601": storage("Countries", "400"),
+        "510": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"parent": {"identifier": "500"}},  # nested: parent is group 500
+            "children": [{"identifier": "511"}],
+        },
+        "511": shape("611"),
+        "611": storage("CHC Churches", "401"),
+        "400": _charstyle("StyleA", color=[1, 1, 0]),
+        "401": _charstyle("StyleB", color=[0, 1, 1]),
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "slideTree": {"slides": [{"identifier": "110"}]},
+        },
+    }
+    id_to_file = {k: "g0" for k in ("210", "500", "501", "601", "510", "511", "611")}
+    file_ids = {"g0": ["210", "500", "501", "601", "510", "511", "611"]}
+    return objects, id_to_file, file_ids
+
+
+def test_grouped_text_collected_from_nested_group_subtree():
+    objects, _id_to_file, file_ids = _grouped_deck()
+    grouped = _slide_grouped_text(file_ids["g0"], objects, {})
+    texts = [g["text"] for g in grouped]
+    # Both the top-level-group shape and the once-nested-group shape are collected,
+    # each exactly once (no double-count).
+    assert sorted(texts) == ["CHC Churches", "Countries"]
+    assert all(g["runs"] for g in grouped)  # runs come along via storage_runs
+    styles = {g["text"]: g["runs"][0]["styleName"] for g in grouped}
+    assert styles == {"Countries": "StyleA", "CHC Churches": "StyleB"}
+    # WIN 3 keys are present on every emitted run dict (here None: styles set none).
+    run = grouped[0]["runs"][0]
+    assert "fontName" in run and "superscript" in run
+
+
+def test_grouped_text_reaches_scoring_but_not_default_plain_text():
+    from obed_edom.inspect import slide_plain_text
+
+    objects, _id_to_file, file_ids = _grouped_deck()
+    grouped = _slide_grouped_text(file_ids["g0"], objects, {})
+    slide = {"items": [], "groupedText": grouped}
+    # Default plain text (the reuse-fingerprint path) never sees grouped copy.
+    assert slide_plain_text(slide) == ""
+    # The scoring path opts in and sees it.
+    scored = slide_plain_text(slide, include_grouped=True)
+    assert "Countries" in scored and "CHC Churches" in scored
+
+
+def test_grouped_attach_leaves_resizer_input_and_digests_untouched(monkeypatch):
+    # THE safety invariant: attaching groupedText must not perturb the resize input
+    # (items / group children / childCount / geometry) or the reuse fingerprint.
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _grouped_deck())
+    payload = {
+        "slides": [
+            {
+                "index": 0,
+                "items": [
+                    # JXA reports every group as childCount 0, children [] — exactly
+                    # what map_remap.coincident_duplicate_ids keys on.
+                    {"index": 0, "kind": "group", "children": [], "childCount": 0,
+                     "x": 10.0, "y": 20.0, "w": 30.0, "h": 40.0},
+                    {"index": 1, "kind": "group", "children": [], "childCount": 0,
+                     "x": 50.0, "y": 60.0, "w": 70.0, "h": 80.0},
+                ],
+            }
+        ]
+    }
+    from obed_edom.baseline import deck_slide_digests
+
+    items_before = copy.deepcopy(payload["slides"][0]["items"])
+    digests_before = deck_slide_digests(copy.deepcopy(payload))
+
+    attach_runs("ignored.key", payload)
+
+    # groupedText got attached...
+    grouped_texts = [g["text"] for g in payload["slides"][0]["groupedText"]]
+    assert sorted(grouped_texts) == ["CHC Churches", "Countries"]
+    # ...but items (incl. every group's children/childCount/geometry) are UNCHANGED.
+    assert payload["slides"][0]["items"] == items_before
+    for item in payload["slides"][0]["items"]:
+        assert item["children"] == [] and item["childCount"] == 0
+    # ...and the reuse fingerprint is byte-identical (groupedText not in the digest).
+    assert deck_slide_digests(payload) == digests_before
+
+
+# --------------------------------------------------------------------------
 # Consumer lights up when a yellow punctuation run is present.
 # --------------------------------------------------------------------------
 def test_highlight_punctuation_flags_fire_on_yellow_punctuation():
@@ -255,3 +396,66 @@ def test_real_deck_populates_verse_number_run():
     assert verse, "expected the yellow #FFFB00 Verse Number run to be present"
     # The DSK deck small-caps "Lord" must surface capitalization for the diff.
     assert any(str(r.get("capitalization") or "").lower().find("small") >= 0 for r in all_runs)
+
+
+def test_real_deck_gw_populates_superscript_verse_numbers():
+    # WIN 3: the GW deck's superscript verse numbers must surface as kSuperscript.
+    if not GW_DECK.is_file():
+        pytest.skip("real GW deck not present (local operator file)")
+    try:
+        import keynote_parser  # noqa: F401
+    except Exception:
+        pytest.skip("keynote-parser (iwa extra) not installed")
+
+    from obed_edom.iwa_runs import (
+        _load_deck,
+        _slide_grouped_text,
+        _slide_text_objects,
+        slide_order,
+    )
+
+    objects, id_to_file, file_ids = _load_deck(GW_DECK)
+    order = slide_order(objects)
+    cache: dict = {}
+    all_runs = []
+    for _idx, (slide_id, _skipped) in enumerate(order):
+        ids = file_ids.get(id_to_file.get(slide_id), [])
+        for to in _slide_text_objects(ids, objects, cache) + _slide_grouped_text(ids, objects, cache):
+            all_runs.extend(to["runs"])
+    assert all_runs, "expected runs on the GW deck"
+    assert any(
+        r.get("superscript") == "kSuperscript" for r in all_runs
+    ), "expected a kSuperscript verse-number run on the GW deck"
+    # fontName is best-effort (often None, lives on the paragraph style) but the
+    # deck should carry at least some resolved PostScript font names.
+    assert any(r.get("fontName") for r in all_runs)
+
+
+def test_real_deck_map_grouped_stat_labels_reach_scoring_text():
+    # WIN 2: the Map deck's grouped stat-block labels must land in the SCORING text.
+    if not MAP_DECK.is_file():
+        pytest.skip("real Map deck not present (local operator file)")
+    try:
+        import keynote_parser  # noqa: F401
+    except Exception:
+        pytest.skip("keynote-parser (iwa extra) not installed")
+
+    from obed_edom.inspect import slide_plain_text
+
+    # Re-inspect the CURRENT deck via the IWA graph (the .cache is stale). Build a
+    # payload with the group items JXA would report as childCount 0, attach, then
+    # assert the labels appear ONLY in the grouped scoring text, not the default.
+    objects, id_to_file, file_ids = iwa._load_deck(MAP_DECK)
+    order = iwa.slide_order(objects)
+    payload = {"slides": [{"index": i, "items": []} for i in range(len(order))]}
+    attach_runs(MAP_DECK, payload)
+
+    scoring = "\n".join(
+        slide_plain_text(s, include_grouped=True) for s in payload["slides"]
+    )
+    default = "\n".join(slide_plain_text(s) for s in payload["slides"])
+    scoring = _normalize_text(scoring)
+    default = _normalize_text(default)
+    for label in ("CHC Churches", "Countries", "Total Church Buildings"):
+        assert label in scoring, f"expected {label!r} in grouped scoring text"
+        assert label not in default, f"{label!r} must stay out of the default fingerprint text"

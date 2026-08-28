@@ -344,12 +344,24 @@ def _walk_items(node: dict):
         yield from _walk_items(item)
 
 
-def slide_plain_text(slide: dict) -> str:
+def slide_plain_text(slide: dict, *, include_grouped: bool = False) -> str:
+    """Plain text of a slide's visible items.
+
+    ``include_grouped`` opts in the slide-level ``groupedText`` (copy inside a
+    group, which JXA reports as ``childCount 0`` so it never reaches ``items``).
+    It is OFF by default so the reuse fingerprint (``baseline.deck_slide_digests``)
+    stays byte-identical; only the checker's text-SCORING path turns it on.
+    """
     parts: list[str] = []
     for item in _walk_items(slide):
         text = (item.get("text") or "").strip()
         if text:
             parts.append(text)
+    if include_grouped:
+        for grouped in slide.get("groupedText") or []:
+            text = (grouped.get("text") or "").strip()
+            if text:
+                parts.append(text)
     return "\n".join(parts)
 
 
