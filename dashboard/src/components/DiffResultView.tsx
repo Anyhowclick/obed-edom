@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { diffImageUrl, type Flag, type Job } from "../api";
-import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, slotsEqual, type Slot } from "../playlist";
+import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, shiftColumn, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
 import type { OutlineRow } from "../outline";
 import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
@@ -67,6 +67,49 @@ function flagOnPair(flag: Flag, pair: Pair): boolean {
   if (deck === "lw" || deck === "left") return pair.leftNumber === flag.slide;
   if (deck === "dsk" || deck === "right") return rights.includes(flag.slide);
   return pair.leftNumber === flag.slide || rights.includes(flag.slide);
+}
+
+const SEVERITY_RANK: Record<string, number> = { error: 0, warning: 1, info: 2, success: 3 };
+
+function deckSlideLabel(flag: Flag, leftLabel: string, rightLabel: string): string {
+  const deck = (flag.deck || "").toLowerCase();
+  const name = deck === "lw" || deck === "left" ? leftLabel : deck === "dsk" || deck === "right" ? rightLabel : flag.deck || "";
+  return flag.slide != null ? `${name} slide ${flag.slide}`.trim() : name;
+}
+
+/**
+ * Collapse the same finding raised once per deck within a pair into one card.
+ * `compare_inspects` validates each deck separately, so a wrong-reference passage
+ * lands as e.g. (rule, lw 54) and (rule, dsk 37); grouped on the live pair they
+ * re-separate for free when the pair is split. The merged label is built from the
+ * members' own deck/slide, not the pair's, so a 2-DSK pair where only one slide
+ * tripped reads that one slide.
+ */
+function mergeDuplicateFindings(issues: Flag[], leftLabel: string, rightLabel: string): Flag[] {
+  const groups = new Map<string, Flag[]>();
+  const order: string[] = [];
+  for (const flag of issues) {
+    const key = `${flag.rule || flag.title || ""}\u0000${flag.message}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(key);
+    }
+    groups.get(key)!.push(flag);
+  }
+  const out: Flag[] = [];
+  for (const key of order) {
+    const members = groups.get(key)!;
+    const distinct = new Map<string, Flag>();
+    for (const member of members) distinct.set(`${(member.deck || "").toLowerCase()}\u0000${member.slide}`, member);
+    if (distinct.size <= 1) {
+      out.push(...members);
+      continue;
+    }
+    const primary = [...members].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9))[0];
+    const location = [...distinct.values()].map((member) => deckSlideLabel(member, leftLabel, rightLabel)).join(" + ");
+    out.push({ ...primary, location, evidence: members.find((member) => member.evidence)?.evidence });
+  }
+  return out;
 }
 
 function present(job: Job, label: string): boolean {
@@ -427,7 +470,7 @@ export function DiffResultView({
                 (own) => own.rule === flag.rule && own.slide === flag.slide && own.message === flag.message
               )
           );
-          const issues = [...(pair.flags || []), ...extra];
+          const issues = mergeDuplicateFindings([...(pair.flags || []), ...extra], result.leftLabel, result.rightLabel);
           const rightIndexes = pair.rightIndexes?.length ? pair.rightIndexes : pair.rightIndex != null ? [pair.rightIndex] : [];
           const rightPngs = pair.rightPngs?.length ? pair.rightPngs : [pair.rightPng];
           const rightNumbers = pair.rightNumbers?.length ? pair.rightNumbers : [pair.rightNumber];
@@ -491,7 +534,7 @@ export function DiffResultView({
                   />
                 )}
               </div>
-              {canEdit && (canCombineNext(slots, row) || rightsOf(slots[row] || {}).length > 1) && (
+              {canEdit && slots[row] && (
                 <div className="row-acts">
                   {canCombineNext(slots, row) && (
                     <button
@@ -507,7 +550,7 @@ export function DiffResultView({
                   )}
                   {rightsOf(slots[row] || {}).length > 1 && (
                     <button
-                      className="btn secondary"
+                      className="btn split"
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -517,6 +560,29 @@ export function DiffResultView({
                       Split {result.rightLabel}s
                     </button>
                   )}
+                  <button
+                    className="btn shift-up"
+                    type="button"
+                    disabled={shiftColumn(slots, "right", row, -1) === slots}
+                    title={`Move this and later ${result.rightLabel} slides up one, from this slide`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSlots((current) => shiftColumn(current, "right", row, -1));
+                    }}
+                  >
+                    Shift {result.rightLabel} ↑
+                  </button>
+                  <button
+                    className="btn shift-down"
+                    type="button"
+                    title={`Move this and later ${result.rightLabel} slides down one, from this slide`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSlots((current) => shiftColumn(current, "right", row, 1));
+                    }}
+                  >
+                    Shift {result.rightLabel} ↓
+                  </button>
                 </div>
               )}
               {pair.outlineRow && (

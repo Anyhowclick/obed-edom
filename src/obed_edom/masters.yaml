@@ -10,7 +10,6 @@ cg:
     - 宣教近况
 
 lw:
-  template: Default Templates/Sermon_GW.key
   series_opener_master: TITLE
   verse_char_max: 320
   verse_body_y: 97
@@ -98,7 +97,6 @@ lw:
       body: 5
 
 dsk:
-  template: Default Templates/2026_Lower-Thirds (ENG).key
   verse_char_one_line: 80
   verse_char_max: 220
   offering_verse_char_one_line: 90

@@ -90,6 +90,54 @@ def test_inspect_overflow_from_box_geometry():
     assert not any(f.category == "overflow" for f in ok_flags)
 
 
+def test_authored_lines_that_fit_are_not_flagged_as_overflow():
+    """A multi-line title/verse whose box was grown to hold its authored lines is
+    not overflow. The old estimator re-wrapped each fitting line with a too-wide
+    per-character guess, inflating the line count so the box looked overflowed."""
+    # Wall title, three authored lines, box height == the three laid-out lines.
+    title = {
+        "path": "k.key",
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    {
+                        "kind": "text",
+                        "text": "The greatest work of the Spirit\nis what He produces\nInside your heart.",
+                        "x": 2340,
+                        "y": 300,
+                        "w": 3000,
+                        "h": 642,
+                        "size": 180,
+                    }
+                ],
+            }
+        ],
+    }
+    assert not any(
+        f.category == "overflow"
+        for f in validate_inspect(title, location_prefix="k.key")
+    )
+
+    # The same three lines crammed into a fixed box a fraction of the height is a
+    # real clip and must still be flagged.
+    clipped = {
+        **title,
+        "slides": [
+            {
+                "number": 1,
+                "items": [{**title["slides"][0]["items"][0], "h": 120}],
+            }
+        ],
+    }
+    assert any(
+        f.category == "overflow"
+        for f in validate_inspect(clipped, location_prefix="k.key")
+    )
+
+
 def test_validate_inspect_skips_hidden_slides():
     payload = {
         "path": "demo.key",
@@ -348,3 +396,57 @@ def test_outline_findings_are_pinned_to_their_paragraph(tmp_path):
     assert book.slide is not None
     para = parse_outline(path).paragraphs[book.slide - 1]
     assert "Psalms 23" in para.text
+
+
+def _punct_flags(*runs):
+    from obed_edom.models import Paragraph
+    from obed_edom.validate import _punctuation_style_flags
+
+    return _punctuation_style_flags(Paragraph(runs=list(runs)), location="t")
+
+
+def test_bold_punctuation_run_is_flagged():
+    from obed_edom.models import Run
+
+    flags = _punct_flags(Run(text="!", bold=True))
+    assert len(flags) == 1
+    assert flags[0].rule == "style.punctuation"
+
+
+def test_plain_punctuation_run_is_not_flagged():
+    from obed_edom.models import Run
+
+    assert _punct_flags(Run(text="!")) == []
+
+
+def test_highlighted_punctuation_run_is_flagged():
+    from obed_edom.models import Run
+
+    flags = _punct_flags(Run(text=":", highlight="yellow"))
+    assert len(flags) == 1
+
+
+def test_italic_punctuation_run_is_flagged():
+    from obed_edom.models import Run
+
+    flags = _punct_flags(Run(text="…", italic=True))
+    assert len(flags) == 1
+
+
+def test_explicit_black_punctuation_run_is_not_flagged():
+    from obed_edom.models import Run
+
+    assert _punct_flags(Run(text=".", color="000000")) == []
+
+
+def test_accent_colour_punctuation_run_is_flagged():
+    from obed_edom.models import Run
+
+    flags = _punct_flags(Run(text="!", color="FFCC00"))
+    assert len(flags) == 1
+
+
+def test_punctuation_inside_bold_word_run_is_not_flagged():
+    from obed_edom.models import Run
+
+    assert _punct_flags(Run(text="Amen!", bold=True)) == []

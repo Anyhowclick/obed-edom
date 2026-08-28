@@ -114,6 +114,8 @@ def outline_from_text(text: str, label: str = "inspect") -> OutlineDoc:
 def validate_outline(outline: OutlineDoc) -> list[Flag]:
     flags = list(check_bible(outline))
     flags.extend(validate_style_text(outline.full_text, location="outline"))
+    for para in outline.paragraphs:
+        flags.extend(_punctuation_style_flags(para, location="outline"))
     return flags
 
 
@@ -141,6 +143,14 @@ def validate_outline_paragraphs(outline: OutlineDoc) -> list[Flag]:
             slide=para.index + 1,
         ):
             flags.append(flag)
+        flags.extend(
+            _punctuation_style_flags(
+                para,
+                location=f"outline paragraph {para.index + 1}",
+                deck="outline",
+                slide=para.index + 1,
+            )
+        )
     flags.extend(_bible_flags_by_paragraph(outline))
     return dedupe_flags(flags)
 
@@ -316,10 +326,25 @@ def _overflow_cfg() -> dict:
         "height_slack_px": float(rules.get("height_slack_px", 8)),
         "char_em": float(rules.get("char_em", 0.58)),
         "line_height": float(rules.get("line_height", 1.18)),
+        "wrap_tolerance": float(rules.get("wrap_tolerance", 1.15)),
     }
 
 
-def _wrap_line_count(text: str, box_width: float, font_size: float, em: float) -> int:
+def _wrap_line_count(
+    text: str, box_width: float, font_size: float, em: float, tolerance: float = 1.15
+) -> int:
+    """Estimate how many display lines the text occupies.
+
+    Trusts the authored line breaks: `objectText()` returns hard paragraph
+    breaks as `\\n` (soft/visual wraps are not returned), so a box that was laid
+    out with its lines already breaking where the author put them should be
+    counted as those lines, not re-wrapped from scratch. Re-wrapping with a
+    per-character width guess is where the noise came from — a proportional font
+    is narrower than `char_em` assumes, so a line that fits was split into two
+    and the box looked overflowed. A paragraph is only wrapped when its estimated
+    width clearly exceeds the box (a genuinely flowing line with no breaks, e.g.
+    a pasted MSG paragraph), and then by word packing.
+    """
     if not (text or "").strip():
         return 0
     if box_width <= 0 or font_size <= 0:
@@ -331,20 +356,27 @@ def _wrap_line_count(text: str, box_width: float, font_size: float, em: float) -
         if not words:
             lines += 1
             continue
+        if len(para) * font_size * em <= box_width * tolerance:
+            # The authored line fits its box; keep it as one line.
+            lines += 1
+            continue
         current = 0
+        sub = 1
         for word in words:
             extra = len(word) + (1 if current else 0)
             if current and current + extra > cpl:
-                lines += 1
+                sub += 1
                 current = len(word)
             else:
                 current += extra
-        lines += 1
+        lines += sub
     return max(1, lines)
 
 
 def _text_needed_height(text: str, box_width: float, font_size: float, cfg: dict) -> float:
-    lines = _wrap_line_count(text, box_width, font_size, float(cfg["char_em"]))
+    lines = _wrap_line_count(
+        text, box_width, font_size, float(cfg["char_em"]), float(cfg["wrap_tolerance"])
+    )
     return lines * font_size * float(cfg["line_height"])
 
 
@@ -460,7 +492,12 @@ def _inspect_overflow_flags(
             continue
         font = _inspect_item_font_size(item, payload)
         needed = _text_needed_height(text, box_w, font, cfg)
-        if needed <= box_h + cfg["height_slack_px"]:
+        # Keynote grows a text box to fit, so box_h already reflects the laid-out
+        # line count; a real clip shows up as needed far exceeding it. Allow a
+        # half-line of slack on top of the flat slack so a one-line rounding
+        # difference (our line_height vs Keynote's leading) does not trip it.
+        slack = max(cfg["height_slack_px"], 0.5 * font * cfg["line_height"])
+        if needed <= box_h + slack:
             continue
         preview = re.sub(r"\s+", " ", text)
         if len(preview) > 72:
@@ -688,6 +725,57 @@ def _highlight_punctuation_flags(
                             deck=deck,
                         ),
                     )
+    return flags
+
+
+def _is_accent_colour(color: str | None) -> bool:
+    """True for a direct RGB colour that is not (near-)black.
+
+    `_color_of` only reports a direct `color.rgb`, so an inherited/theme colour
+    arrives as None and is left alone. An explicit black run IS default text, so
+    near-black is excluded. Word theme accent colours (yellow/cyan applied via a
+    theme, not direct RGB) come back None here and are invisible to this check —
+    bold/italic/highlight are the reliable signals for those.
+    """
+    if not color:
+        return False
+    hexval = str(color).lstrip("#")
+    if len(hexval) != 6:
+        return False
+    try:
+        r, g, b = (int(hexval[i : i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return False
+    return max(r, g, b) > 0x1A
+
+
+def _punctuation_style_flags(
+    para: Paragraph, location: str, deck: str = "", slide: int | None = None
+) -> list[Flag]:
+    """Punctuation should carry default text colour & style, not bold/italic/highlight.
+
+    Runs on a finalized inspected deck have no per-character style, so this runs
+    on the outline `Run` layer where bold/italic/highlight/colour survive. Scoped
+    to a run that is entirely punctuation, so a mark inside a bold word ("Amen!",
+    one run) is left alone — only a standalone punctuation run is flagged.
+    """
+    flags: list[Flag] = []
+    for run in para.runs:
+        if not run.text.strip() or not PUNCT_ONLY.match(run.text):
+            continue
+        if run.bold or run.italic or run.highlight or _is_accent_colour(run.color):
+            _keep(
+                flags,
+                make_flag(
+                    "style.punctuation",
+                    "highlight",
+                    "Punctuation should be default text colour & style "
+                    f"(not bold / italic / highlighted): {run.text!r}.",
+                    location=location,
+                    slide=slide,
+                    deck=deck,
+                ),
+            )
     return flags
 
 

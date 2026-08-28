@@ -138,6 +138,7 @@ def load_paragraphs(path: Path) -> list[Paragraph]:
                 Run(
                     text=text,
                     bold=bool(run.bold),
+                    italic=bool(run.italic),
                     highlight=_highlight_of(run),
                     superscript=_is_superscript(run),
                     color=_color_of(run),
@@ -189,6 +190,7 @@ def _split_paragraph(para: Paragraph) -> list[tuple[str, Cue | None, list[Run]]]
                     Run(
                         text=chunk,
                         bold=run.bold,
+                        italic=run.italic,
                         highlight=run.highlight,
                         superscript=run.superscript,
                         color=run.color,

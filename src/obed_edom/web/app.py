@@ -75,7 +75,6 @@ from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import remap_and_inspect
 from obed_edom.settings import load_settings, save_settings
-from obed_edom.slide_map import load_masters
 from obed_edom.validate import validate_inspect
 from obed_edom.web.jobs import (
     Job,
@@ -151,16 +150,6 @@ def create_app() -> FastAPI:
         if payload.reusePreviews is not None:
             current["reusePreviews"] = payload.reusePreviews
         return save_settings(current)
-
-    @app.get("/api/templates")
-    def templates() -> dict:
-        masters = load_masters()
-        dsk = masters.get("dsk") or {}
-        rel = dsk.get("template") or ""
-        return {
-            "dskTemplate": rel,
-            "dskTemplatePath": str(ROOT / rel) if rel else "",
-        }
 
     @app.post("/api/choose-file")
     def choose_file(prompt: str = Form("Select a Keynote file")) -> dict:
@@ -738,7 +727,6 @@ def _run_generate(
         docx,
         lw_template=lw_template,
         dsk_template=dsk_template,
-        only_provided=True,
     )
     lw_prev = result.output_dir / "previews" / "lw"
     dsk_prev = result.output_dir / "previews" / "dsk"

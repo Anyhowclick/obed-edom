@@ -14,6 +14,7 @@ Role = Literal["graphic", "pre", "post", "verse", "point"]
 class Run:
     text: str
     bold: bool = False
+    italic: bool = False
     highlight: str | None = None
     superscript: bool = False
     color: str | None = None

@@ -13,9 +13,7 @@ output/*
 .cursor/debug-*.log
 *.applescript
 
-# Keep the folders, ignore the (large) files inside.
-Default Templates/*
-!Default Templates/.gitkeep
+# Local operator fixtures, ignored (the large files inside).
 Sermon Outlines/*
 !Sermon Outlines/.gitkeep
 dashboard/node_modules/

@@ -23,6 +23,11 @@ overflow:
   height_slack_px: 8
   char_em: 0.58
   line_height: 1.18
+  # An authored line is only re-wrapped when its estimated width exceeds the box
+  # by this factor. Proportional fonts run narrower than char_em assumes, so a
+  # line that fits was being split in two and the box looked overflowed; trust
+  # the authored break unless the line is clearly too wide (a flowing paragraph).
+  wrap_tolerance: 1.15
 
 # Severity per rule: off | info | warning | error. Retunes noise without code
 # changes. Anything not listed keeps the severity the rule ships with.
@@ -109,6 +114,7 @@ rules:
   style.book_name: warning
   style.date: warning
   style.highlight: warning
+  style.punctuation: warning
   style.quote: info
   style.glossary: warning
   overflow.text: warning
@@ -162,6 +168,7 @@ titles:
   style.book_name: Style Book Name
   style.date: Style Date
   style.highlight: Style Highlight
+  style.punctuation: Punctuation Style
   style.quote: Style Quote
   style.glossary: House spelling
   overflow.text: Overflow Text

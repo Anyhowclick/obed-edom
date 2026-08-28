@@ -61,7 +61,7 @@ Never overwrite the dropped templates. Never overwrite the source outline.
 ## When to run
 
 - User drops a sermon / offering / testimony `.docx` with semantic layout cues, plus at least one Keynote template (LW, DSK, or both), in the dashboard
-- CLI generate needs `--lw-template` and/or `--dsk-template` unless a matching file still exists under local `Default Templates/`
+- CLI generate needs `--lw-template` and/or `--dsk-template` (there is no bundled template fallback; `--no-keynote` skips Keynote entirely)
 - Experiment files (local, gitignored): `Sermon Outlines/Sermon BC.docx`, `Sermon Outlines/Offering JX.docx`
 
 ## Input cues (semantic)
