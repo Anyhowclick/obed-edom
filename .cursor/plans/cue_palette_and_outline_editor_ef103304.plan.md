@@ -5,23 +5,20 @@ todos:
   - id: unify-applescript-pass
     content: "Reduce dest opens per resize. PROGRESS (slide 8 constellation: 9:58 → 6:55 → 4:58, ~halved): (1) AS-geometry now DEFAULT (OBED_AS_GEOMETRY, =0 to force JXA) — no (0,0) flick, ~30% faster, validated on a real render. (2) Stage A DONE (56c104c): preview export folded INTO the stat-finalize session (no separate export reopen), + template stat-size read cached by digest. (3) CLI now DEFAULTS to validate=False (d1234e2, --validate to opt in) — skips the read-back per-object walk of the 1.15GB deck, the biggest single cut. REMAINING = Stage B (optional, DECISION PENDING): fold the stat-finalize reopen into the geometry session — _run_jxa leaves the dest OPEN after save (skip close at remap_keynote.js:902-904, keep save :896), Python drives stat AS against the open document 1 (mirror the PROVEN superscript-fix pattern: keep `open theFile` as an idempotent bring-to-front so Phase-2's frontmost-scoped Bring-to-Front hits the right deck; add name guard). Peer-reviewed (scratchpad/stage_b_plan.md): feasible + safe IF built on that pattern + net-new failure handling (Python subprocess timeout, close-on-failure, next-run cleanup of an orphaned open deck) + shipped OPT-IN (default off). Payoff bounded to ONE ~2min open (the stat pass is index-addressed, not a full walk). Both reviewers: opt-in or stop after Stage A — the big wins are banked."
     status: pending
+  - id: bulk-read-inspect
+    content: "Speed up inspect_keynote by BATCHING reads. Measured (Session 11): per-property Apple Events cost ~11ms REGARDLESS of bridge (JXA 121s ≈ AS 122s — a JXA→AS switch buys NOTHING). Lever = bulk reads (`property of every element`, one event for the whole collection). Speedup ~2.4x flat / ~1.1x group-nested — BUT that 2.4x was measured on `position` (a DIRECT property). Two peer reviews (Session 11) say DON'T build yet — the value hinges on untested assumptions and the risk was mis-stated:\n\nGATE 0 (go/no-go, do FIRST): micro-benchmark the NESTED reads `slide.textItems.objectText.size()` / `.font()` / `.color()` (describeItem reads ~10 props/object incl. these 3 nested ones, L149-158 — they dominate text-heavy flat slides AND are least certain to bulk in JXA), NOT just `position`, on a REAL flat deck AND a real group-heavy deck end-to-end. If nested reads don't bulk cleanly, flat 2.4x collapses to ~1.3x → SKIP as diminishing returns (put effort into Stage B). Also: bulk reads from the UNEVALUATED specifier `slide[name].position()`, NOT the evaluated `col` (a JS array has no .position()).\n\nCORRECTNESS (the real risk, not dedup): read-only but the payload is load-bearing (remap resolves by (collection,kindIndex)) and the default resize runs validate=False → a shifted index ships mis-placed objects to the user's deck with NO catch. Killer = array-length drift: if Keynote drops a missing value (file-less image in images.fileName(), empty objectText), array length ≠ collection count → every later zip index shifts. GUARD: assert array.length === collectionCount per bulk array; PERMANENT per-collection×per-property fallback to the EXISTING per-object fns (positionOf/sizeOf/describeItem) on any throw/mismatch (bulk is all-or-nothing; per-object try/catch each read today). Keep the per-object path as a runtime fallback, not a dev flag. Preserve the single slide[name]() evaluation feeding BOTH records and identity.objs (build-count !== matching, else buildCount breaks). Dedup (markDuplicateShapes) is pure JS post-processing — auto-preserved, low risk. Group childCount is often 0 on real decks (diff_keynotes.py:91) so the group case may be moot.\n\nSCOPE: default resize = ONE ranged uncached inspect (source); full-deck inspects cache (cold-start only). So win is once/run on ranged flat decks. Validate by byte-identical payload diff (per-object vs bulk) on the REAL messy wall deck + group-heavy + file-less-image + locked + empty-text decks. Complementary to Stage B (read vs write path); build bulk-read FIRST if GATE 0 passes."
+    status: pending
   - id: text-placement
     content: "CG resizer number block (183/86/14/269) rendered as overlapping fragments — groups all parked at one left margin. DONE (Session 6, PR #32): packed into non-overlapping columns. Sizing the inner text is a separate limit — see gui-ungroup-stats."
     status: completed
   - id: gui-ungroup-stats
     content: "REFRAMED by Session 8 probes; GUI-ungroup track DROPPED. Confirmed: AppleScript reads real source-deck group children (inner text+size: '269' size=300, '183'/'86'/'14' size=170, '44' size=70) AND writes their position/width/font-size in place (probe_gui_write_child) — the childCount=0 opacity is JXA-only, so no ungroup is needed for read OR resize. The win is an AppleScript read+write-children path (design in 'Immediate TO-explore' Session 8). Group count: JXA and AppleScript both see 6 top-level groups on slide 4 (no duplicates; the old 8-with-duplicates was a stale inspect — 'duplicate objects' parked item RETIRED); 2 of the 6 have one level of nesting (number direct, label in a nested sub-group) so the child walk recurses one level. Also unblocked: z-order via GUI Bring-to-Front on a script-set selection (buried badge now fixable). See SKILL + README."
     status: pending
-  - id: cue-palette
-    content: "Cue-first palette in the dashboard, inverting masters.yaml cue maps, with adjacency and context rules enforced. Pending — design below."
-    status: pending
   - id: outline-editor
     content: "Editable outline view extending OutlineResultView, LibreOffice page-view toggle, in-place surgical writes to the source .docx with timestamped backups. Pending — design below."
     status: pending
   - id: image-cues
     content: "Image cues as an asset slot count + shape per cue. Both capabilities (image place, movie via file-name reassign) probed and present. Pending — taxonomy below."
-    status: pending
-  - id: dsk-generator
-    content: "DSK generator, unchanged from the superseded plan including its four corrections. Pending."
     status: pending
   - id: stat-drift
     content: "Validation rule slide.stat_drift: a figure that changes between adjacent slides then holds. Ships at warning. Independent of everything; can land anytime. Pending — below."
@@ -320,6 +317,74 @@ confirmed the reorder. So the resizer could lift the badge with an added GUI pas
 source-deck/template fix is still simpler when the deck is being edited anyway, but it
 is no longer the *only* option. See SKILL z-order section.
 
+## Handover — CG resizer SPEED WORK (2026-08-28, Session 11)
+
+Branch `feat/group-child-resize`, pushed. **Slide 8 constellation: 9:58 → 6:55 → 4:58,
+~halved.** The corner-flick (JXA yanks an object to (0,0) when you set its width/height)
+is gone. Shipped, all validated on a real render:
+
+- **AS geometry, now DEFAULT** (`OBED_AS_GEOMETRY`, =0 forces legacy JXA). Object
+  geometry (position/width/height, line start/end points) is written by a batched
+  AppleScript block emitted IN the JXA loop (remap_keynote.py `_build_slide_geometry_script`
+  / `_build_as_geometry`; JS `applyNonReuseSlide` picks the AS path per slide when Python
+  built a body). No (0,0) yank, drops `setPos`'s readback-verify + the second position
+  pass (~30%). Per-slide fallback to JXA for a slide carrying an unaddressable kind
+  (table/chart); reuse path stays JXA.
+- **Stage A** (56c104c): preview export folded INTO the stat-finalize session (no
+  separate export reopen); template stat-size read cached by digest (`baseline.py`
+  `template_stat_cache_path`).
+- **CLI defaults to `validate=False`** (d1234e2, `--validate` to opt in) — skips the
+  read-back per-object walk of the 1.15GB deck. Biggest single cut.
+- **A/B tool:** `scripts/ab_geom_diff.py` (content-keyed bounds diff of two output decks).
+
+**Key MEASURED facts (Session 11 micro-benchmarks, synthetic decks):**
+- **JXA and AppleScript READ at the same speed** (~11ms/property; 121s vs 122s for 10,890
+  reads). A JXA→AS bridge switch buys NOTHING. Wins come from doing LESS work, not the bridge.
+- **Bulk reads** (`property of every element`, one Apple Event for the whole collection)
+  are ~2.4× on flat single-kind collections, ~1.1× on group-nested (bulk needs one call
+  per group). This is the `bulk-read-inspect` TODO — plan+2 reviews were in
+  `scratchpad/bulk_read_plan.md` (session-local; re-derive from the TODO if gone).
+
+### NEXT TODO — Stage B: fold the stat-finalize reopen into the geometry session (with recovery)
+Removes the LAST avoidable dest open on the validate=False path. Two peer reviews done;
+**ship OPT-IN (default off), only after the recovery guards below.** Self-contained design:
+
+- **Mechanic (mirror the PROVEN superscript-fix pattern, keynote.py `_build_superscript_fix_script`
+  docstring):** `_run_jxa` saves geometry and returns with the dest LEFT OPEN — gate ONLY
+  the `Keynote.close` at remap_keynote.js:902-904 on a new `plan.leaveOpen`; keep the
+  `save` at :896; leave the abort-close at :876 UNCONDITIONAL. Then Python runs the stat
+  AppleScript against the already-open deck as its own osascript subprocess. In the stat
+  preamble, DROP the `close (every document whose name…)` line but **KEEP `activate` +
+  `open theFile`** — on an already-open deck that `open` is a cheap bring-to-front, and it
+  is what re-fronts the dest so Phase-2's GUI Bring-to-Front (a frontmost-window menu click,
+  keynote.py:927-938) acts on the RIGHT deck. Do NOT replace it with a bare `document 1`
+  bind (that was the v1 mistake that reintroduced the wrong-doc hazard).
+- **Wiring:** `remap_keynote()` has no `validate` param — add `attach`/`leave_open`, set
+  from `remap_and_inspect` as `attach = not validate`. One boolean `fold = bool(child_resize)
+  and attach` gates BOTH `plan["leaveOpen"]` and `_run_stat_finalize(attach=fold)`, so the
+  deck is never left open without an attaching stat pass to close it. validate=True stays
+  byte-for-byte (close-then-reopen; its readback reopens anyway).
+- **RECOVERY OPTIONS (net-new — the whole reason it's gated):**
+  1. **Save-point:** the JXA `save` (:896) runs before control returns open, so any
+     stat/export failure loses only stat sizing/z-order/previews, never placement.
+  2. **Wrong-doc guard:** before writing, assert `name of document 1` is the dest basename
+     (bind `first document whose file is theFile` for path-uniqueness); abort with a clear
+     message otherwise. The kept `open theFile` re-fronts it for the GUI raise.
+  3. **Killable hang:** add a real Python `subprocess.run(timeout=…)` (today only
+     AppleScript's 1-hour `with timeout` bounds it, and that doesn't bound a wedged System
+     Events click).
+  4. **Close-on-failure:** on stat timeout/non-zero, attempt `close (every document whose
+     file is theFile) saving yes`; if that fails, surface "dest left OPEN in Keynote — close
+     it before rerunning" (never leave silently open).
+  5. **Next-run cleanup:** before `copy_keynote`/open, detect+close an already-open
+     same-path doc, so a hang's leftover doesn't collide with the next ditto-copy+open (the
+     `pkill`→"Operation not permitted" lock class).
+- **Payoff bounded to ONE ~2min open** (the stat pass is index-addressed, `group N of slide
+  M`, NOT a full walk — measured). Validate: PNG pixel-diff (z-order + stat sizes only show
+  there) + `front=N`/`sized=N` count asserts + a manual crash-path test (kill after geometry
+  save → deck still valid + placed). Both reviewers: opt-in or stop after Stage A.
+- **Order:** build `bulk-read-inspect` FIRST (read-only, lower risk), then Stage B.
+
 ## The number block in the CG resizer (immediate)
 
 The map geometry is correct as of `cd83162`. Of the three text defects recorded
@@ -359,57 +424,13 @@ lands on the template's own rects); the badge looking clipped (source-deck stack
 no code fix); "Oct 2024 – Sep 2025" truncation; H17 (the block is groups sharing a
 left margin, not text on one `listDst`).
 
-## Decision: live preview is dropped, cue discovery replaces it
+## Cue palette + DSK generator → split out (2026-08-28)
 
-A preview is only worth building if it answers faster than editing the document
-does. A Keynote round trip cannot, and a browser overlay would still be an
-approximation. Editing the outline and typing a cue is faster, so the preview is cut.
-
-The real problem was never "does this copy fit" — it is that the cue vocabulary is
-invisible. Nine semantic cues today, with adjacency rules and context variants, and
-it grows. So the work becomes: **show the operator the layouts the template actually
-has, and let them insert the cue that produces one.**
-
-## The palette: layout and cue are many-to-many
-
-Mirroring Keynote's "Choose a Layout" panel one-for-one would be wrong.
-From `src/obed_edom/masters.yaml`:
-
-- `BLANK` backs `[FILLER-QR]`, `[GIVING-OPTIONS]`, and offering-context `[FILLER]`.
-- `VERSES` backs both `[VERSE]` and `[VERSE-CONTINUED]`.
-- The four POST layouts have no cue of their own — they come from
-  `[VERSE-AFTER-POINT]`, valid only directly after `[POINT]`/`[NUM-POINT]`, which
-  also drives the 1s Magic Move.
-- `TITLE` backs `[TITLE]` and sermon-context `[FILLER]`.
-- DSK adds selection by length, not cue: `Verse 1 Line (Variation 2)` vs
-  `Verse Standard (Variation 2)` is decided by `verse_char_one_line`.
-
-So the palette is **cue-first**, each entry carrying the layout thumbnail(s) that cue
-can produce, the context that picks between them, and its adjacency rule. That
-inverts the existing `lw.cues` / `dsk.cues` maps rather than adding a second source
-of truth.
-
-## Layout thumbnails: derive per template, cache by digest
-
-`Default Templates/` is empty and gitignored, so templates are always dropped and
-thumbnails cannot be pre-baked. Keynote's `export` works on documents, not layouts:
-
-1. Copy the dropped template to a scratch path (never touch the original).
-2. Enumerate layouts — `remap_keynote.js` has the pattern (`doc.slideLayouts()`,
-   `layoutNames()`, ~lines 543-567).
-3. Append one empty slide per layout with `{base slide: theMaster}`, as
-   `keynote.py` ~line 792 does.
-4. Export slide images, keep one PNG per layout name, discard the scratch deck.
-5. Cache under `<cache root>/layouts/{template_digest}/`, reusing `deck_digest()` and
-   the `INSPECT_VERSION` discipline in `baseline.py`. Cache root is `.cache/` at the
-   repo root now, not under `output/`.
-
-New endpoint `GET /api/template-layouts` taking a template path, returning layout
-names, thumbnail URLs, and the cues each layout is reachable from. Layouts no cue
-reaches are returned as unmapped — that list is the honest answer to "what can the
-template do that the tool cannot ask for". Both capabilities were probed on 15.3.1
-and are present (`doc.slideLayouts()` works; `doc.masterSlides()` raises in JXA but
-AppleScript's `master slide` is fine, which is why `keynote_jxa.js` stays unused).
+Moved to `.cursor/plans/cue_palette_and_dsk_generator.plan.md` so this plan stays
+focused on the CG resizer and its speed work. The cue-first palette design (drop live
+preview, invert the cue maps, per-template layout thumbnails cached by digest) and the
+DSK generator live there now. The outline editor, image cues, stat-drift, and
+recipe-library stay here.
 
 ## Outline editor in the dashboard
 
