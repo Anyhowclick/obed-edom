@@ -31,12 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument(
         "--lw-template",
         type=Path,
-        help="LW Keynote template (.key). Omit to skip the LW deck. At least one of --lw-template / --dsk-template is required unless a local Default Templates file exists.",
+        help="LW Keynote template (.key). Omit to skip the LW deck. At least one of --lw-template / --dsk-template is required (unless --no-keynote).",
     )
     gen.add_argument(
         "--dsk-template",
         type=Path,
-        help="DSK Keynote template (.key). Omit to skip the DSK deck. At least one of --lw-template / --dsk-template is required unless a local Default Templates file exists.",
+        help="DSK Keynote template (.key). Omit to skip the DSK deck. At least one of --lw-template / --dsk-template is required (unless --no-keynote).",
     )
     dash = sub.add_parser("dashboard", help="Run the local operator dashboard.")
     dash.add_argument("--host", default="127.0.0.1")
@@ -112,7 +112,6 @@ def main(argv: list[str] | None = None) -> int:
                 check_visuals=not args.no_keynote and not args.no_contrast,
                 lw_template=args.lw_template,
                 dsk_template=args.dsk_template,
-                only_provided=args.lw_template is not None or args.dsk_template is not None,
             )
         except FileNotFoundError as exc:
             print(str(exc), file=sys.stderr)

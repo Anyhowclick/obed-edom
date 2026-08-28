@@ -11,7 +11,6 @@ from pathlib import Path
 from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
 from obed_edom.paths import output_root, select_deck_template
-from obed_edom.slide_map import load_masters
 
 
 def _keynote_tell() -> str:
@@ -1506,16 +1505,9 @@ def generate_both(
     *,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
-    only_provided: bool = False,
 ) -> tuple[Path, Path | None, Path | None, dict, dict]:
-    masters = load_masters()
-    allow_fallback = not only_provided
-    lw_src = select_deck_template(
-        lw_template, fallback_rel=masters["lw"]["template"], allow_fallback=allow_fallback
-    )
-    dsk_src = select_deck_template(
-        dsk_template, fallback_rel=masters["dsk"]["template"], allow_fallback=allow_fallback
-    )
+    lw_src = select_deck_template(lw_template)
+    dsk_src = select_deck_template(dsk_template)
     if lw_src is None and dsk_src is None:
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."

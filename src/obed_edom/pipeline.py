@@ -27,7 +27,6 @@ def generate(
     check_visuals: bool = True,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
-    only_provided: bool = False,
 ) -> GenerationResult:
     docx = Path(docx).expanduser().resolve()
     outline = parse_outline(docx)
@@ -52,7 +51,6 @@ def generate(
             export=check_visuals,
             lw_template=lw_template,
             dsk_template=dsk_template,
-            only_provided=only_provided,
         )
         for result, deck in ((lw_result, "LW"), (dsk_result, "DSK")):
             if result.get("skipped"):

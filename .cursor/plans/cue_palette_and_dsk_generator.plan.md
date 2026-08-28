@@ -42,7 +42,7 @@ of truth.
 
 ## Layout thumbnails: derive per template, cache by digest
 
-`Default Templates/` is empty and gitignored, so templates are always dropped and
+Templates are always dropped (there is no bundled template folder), so
 thumbnails cannot be pre-baked. Keynote's `export` works on documents, not layouts:
 
 1. Copy the dropped template to a scratch path (never touch the original).

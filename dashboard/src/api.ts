@@ -266,11 +266,6 @@ export async function validateKeynote(
   return res.json();
 }
 
-export async function getTemplates(): Promise<{ dskTemplate: string; dskTemplatePath: string }> {
-  const res = await fetch("/api/templates");
-  return res.json();
-}
-
 export async function stubDsk(): Promise<string> {
   const res = await fetch("/api/dsk", { method: "POST" });
   const data = await res.json();

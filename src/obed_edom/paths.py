@@ -29,47 +29,27 @@ def template_path(relative: str) -> Path:
     return find_repo_root() / relative
 
 
-def resolve_keynote_template(
-    path: str | Path | None,
-    *,
-    fallback_rel: str | None = None,
-) -> Path:
-    """Prefer an explicit .key path; otherwise the repo-relative masters.yaml default."""
-    tried: list[Path] = []
+def resolve_keynote_template(path: str | Path | None) -> Path:
+    """Resolve an explicit .key path (absolute, or repo-relative)."""
+    shown: Path = Path("(none)")
     if path:
         raw = Path(str(path)).expanduser()
-        tried.append(raw)
+        shown = raw
         if raw.exists():
             return raw.resolve()
         if not raw.is_absolute():
             rel = template_path(str(path))
-            tried.append(rel)
+            shown = rel
             if rel.exists():
                 return rel.resolve()
-    if fallback_rel:
-        fb = template_path(fallback_rel)
-        tried.append(fb)
-        if fb.exists():
-            return fb.resolve()
-    shown = tried[-1] if tried else Path("(none)")
     raise FileNotFoundError(
         f"Template not found: {shown}. Drop an LW and/or DSK Keynote template in the "
         "dashboard, or pass --lw-template and/or --dsk-template."
     )
 
 
-def select_deck_template(
-    path: str | Path | None,
-    *,
-    fallback_rel: str | None = None,
-    allow_fallback: bool = True,
-) -> Path | None:
+def select_deck_template(path: str | Path | None) -> Path | None:
     """Resolve a deck template, or None to skip that deck."""
-    if path:
-        return resolve_keynote_template(path)
-    if not allow_fallback or not fallback_rel:
+    if not path:
         return None
-    try:
-        return resolve_keynote_template(None, fallback_rel=fallback_rel)
-    except FileNotFoundError:
-        return None
+    return resolve_keynote_template(path)
