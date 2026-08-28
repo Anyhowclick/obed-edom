@@ -538,7 +538,7 @@ export function DiffResultView({
                 <div className="row-acts">
                   {canCombineNext(slots, row) && (
                     <button
-                      className="btn consolidate"
+                      className="btn combine"
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -550,7 +550,7 @@ export function DiffResultView({
                   )}
                   {rightsOf(slots[row] || {}).length > 1 && (
                     <button
-                      className="btn separate"
+                      className="btn split"
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -561,7 +561,7 @@ export function DiffResultView({
                     </button>
                   )}
                   <button
-                    className="btn consolidate"
+                    className="btn shift-up"
                     type="button"
                     disabled={shiftColumn(slots, "right", row, -1) === slots}
                     title={`Move this and later ${result.rightLabel} slides up one, from this slide`}
@@ -573,7 +573,7 @@ export function DiffResultView({
                     Shift {result.rightLabel} ↑
                   </button>
                   <button
-                    className="btn separate"
+                    className="btn shift-down"
                     type="button"
                     title={`Move this and later ${result.rightLabel} slides down one, from this slide`}
                     onClick={(event) => {

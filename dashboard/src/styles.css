@@ -482,14 +482,26 @@ h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; }
   justify-content: center;
 }
 .icon-expand { display: block; width: 15px; height: 15px; }
-.btn.consolidate {
+/* DSK column shift (movement): green up / red down. */
+.btn.shift-up {
   background: #9ed9b4;
   color: #12241c;
   border: 0;
 }
-.btn.separate {
+.btn.shift-down {
   background: #e6a29a;
   color: #2c1512;
+  border: 0;
+}
+/* Pairing structure (merge/split): blue combine / yellow split. */
+.btn.combine {
+  background: #9ec4e0;
+  color: #10222c;
+  border: 0;
+}
+.btn.split {
+  background: #e6cf8a;
+  color: #2c2410;
   border: 0;
 }
 .pair-slides {
