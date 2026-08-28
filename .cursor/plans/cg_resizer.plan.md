@@ -53,6 +53,12 @@ todos:
   - id: navigator-numbering
     content: "Dashboard reads a range in Keynote's numbering from the cached full payload; CLI keeps document positions and says so. DONE."
     status: completed
+  - id: iwa-per-run-style
+    content: "Offline IWA decode → item[runs] + slide[groupedText] on FINALIZED decks (per-run colour/bold/italic/size/fontName/superscript/smallcaps + grouped text that JXA reports as childCount:0). DONE (feat/iwa-per-run-style, pushed not PR'd; INSPECT_VERSION 3; optional `iwa` extra). Lights up the previously-inert highlight/punctuation/smallcaps consumers + cuts OCR; resizer + deck_slide_digests provably untouched. Full detail in SKILL 'Reading a .key offline (IWA)'. Speed/Keynote-free-inspect NO-GO and offline-whole-deck-write NO-GO both measured — see Session-13 handover + SKILL."
+    status: completed
+  - id: iwa-surgical-write
+    content: "Spike (un-built): surgical IWA write — rewrite ONLY the target slide's IWA, copy every other IWA verbatim — to set cyan superscript verse numbers offline and retire generate's GUI Copy/Paste-Style pass 2 (Accessibility, silent-fail). Whole-deck re-serialize is byte-lossy (corrupts large decks), so surgical is the only viable path and needs per-deck openability testing. High-value for the generator, higher-risk. Pending."
+    status: pending
 isProject: false
 ---
 
@@ -288,6 +294,61 @@ and geometry+timing):
 **NEXT:** speed is done — geometry set-properties + bulk-read (S11) + AS-geometry +
 no-validate + Stage-A are the banked wins. The feature backlog is untouched: outline
 editor, image cues, stat-drift, recipe library, propose-pins-paired (all below).
+
+## Handover — Session 13 (Sermon Checker features + IWA per-run style)
+
+Two independent bodies of work this session. **Read the SKILL's new
+"Reading a `.key` offline (IWA)" section first** — every durable IWA finding lives
+there; this is only the pointer + what's parked.
+
+**MERGED to main (PR #39, `feat/checker-shift-merge-punct`):**
+- **Default Templates fallback removed** — templates are drag-drop / explicit-flag
+  only (`--lw-template`/`--dsk-template`); stripped `fallback_rel`/`allow_fallback`/
+  `only_provided`, the dead `/api/templates` endpoint + `getTemplates`, and the
+  `masters.yaml` `template:` keys. Folder + gitignore block deleted.
+- **Overflow de-noise** (`validate._wrap_line_count`/`_inspect_overflow_flags`,
+  `wrap_tolerance`) — trust authored line breaks + a half-line slack, so a
+  grown-to-fit multi-line title/verse is no longer false-flagged while a real clip
+  still is. The estimator was re-wrapping authored lines with a too-wide char guess.
+- **DSK shift buttons** (`DiffResultView.tsx`, reusing `playlist.ts shiftColumn`) —
+  per-row "Shift ↑/↓" nudge the DSK column vs the current LW, rows above untouched,
+  no `[BLANK]/[BLANK]`, ↑ disabled at the no-gap floor. The `.row-acts` guard was
+  widened so the bar shows on every editable row. Shift-up is gap-close only (2-DSK
+  stacking stays the existing "Combine next DSK").
+- **Merge duplicate findings per pair** (frontend) — a finding raised once per deck
+  in one comparison pair renders as one card "LW slide X + DSK slide Y", re-separates
+  on split. View-only (flat list / exports unchanged).
+- **Punctuation rule `style.punctuation`** — a punctuation-only OUTLINE run that is
+  bold/italic/highlighted/accent-coloured, on the `Run` layer (`validate_outline`/
+  `_paragraphs`); inspect payload has no per-run style so it can't run on a finalized
+  deck (that gap is what IWA below closes for the highlight rule). Blind to
+  THEME-applied accents (Word returns those as inherited).
+- Row-action button colours: **blue Combine / yellow Split** (pairing structure),
+  **green ↑ / red ↓** (DSK movement).
+
+**PUSHED, not PR'd (`feat/iwa-per-run-style`, rebased on the merged main):**
+- **IWA per-run style + grouped text + fontName/superscript.** See the SKILL. Net:
+  `item["runs"]` and `slide["groupedText"]` now populated offline on finalized decks;
+  the inert highlight/punctuation/smallcaps consumers light up; `INSPECT_VERSION`→3;
+  optional `iwa` extra. Resizer + saved pairings provably untouched.
+
+**DEAD ENDS this session (do NOT re-chase — reasons in the SKILL):**
+- **Keynote-free / IWA-backed inspect for SPEED** — no-go. `kindIndex` not
+  reproducible on wall decks (write-unsafe); every path needs pixels or writes so
+  Keynote opens regardless; and the real read cost is per-slide round-trips, not the
+  property reads bulk-read already collapsed (measured ≤ noise).
+- **WIN 1 line endpoints** — dropped; JXA already reads deck line endpoints correctly
+  on 15.3.1 (the SKILL's "null" is created-lines only).
+- **Offline whole-deck WRITE** — byte-lossy, corrupts large decks.
+
+**PARKED / next candidates:**
+- **Surgical IWA write spike** — rewrite one slide's IWA, copy the rest verbatim, to
+  set the cyan superscript verse numbers offline and retire generate's GUI
+  Copy/Paste-Style pass 2 (Accessibility, silent-fail). High-value for the generator,
+  higher-risk (per-deck openability testing). Un-built; needs its own spike.
+- **Merge `feat/iwa-per-run-style`** when ready (no PR yet per standing preference).
+- Feature backlog still untouched: outline editor, image cues, stat-drift, recipe
+  library, propose-pins-paired (all below).
 
 ### Stage B — ABANDONED (retained as a dead-end record; see Session-12 handover above)
 _Original design kept below for history only; do not implement — warm-cache open = no gain._

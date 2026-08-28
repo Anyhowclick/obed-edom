@@ -173,6 +173,16 @@ def inspect_keynote(
     if not raw:
         raise RuntimeError("Keynote inspect returned no JSON.")
     payload = json.loads(raw)
+    # Best-effort per-run character style from the deck's offline IWA graph. On
+    # when the optional `iwa` extra imports, gracefully off (runs stay []) when it
+    # doesn't or the decode fails. Must run before the cache write below so runs
+    # persist with the payload.
+    try:
+        from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
+
+        attach_runs(key_path, payload)
+    except Exception:  # noqa: BLE001 — missing extra / non-zip / decode error -> runs stay []
+        pass
     # Persisted, so a payload can always say which Keynote read the deck.
     payload["keynoteBundleId"] = keynote_app.bundle_id()
     payload["keynoteVersion"] = keynote_app.app_version()
@@ -334,12 +344,24 @@ def _walk_items(node: dict):
         yield from _walk_items(item)
 
 
-def slide_plain_text(slide: dict) -> str:
+def slide_plain_text(slide: dict, *, include_grouped: bool = False) -> str:
+    """Plain text of a slide's visible items.
+
+    ``include_grouped`` opts in the slide-level ``groupedText`` (copy inside a
+    group, which JXA reports as ``childCount 0`` so it never reaches ``items``).
+    It is OFF by default so the reuse fingerprint (``baseline.deck_slide_digests``)
+    stays byte-identical; only the checker's text-SCORING path turns it on.
+    """
     parts: list[str] = []
     for item in _walk_items(slide):
         text = (item.get("text") or "").strip()
         if text:
             parts.append(text)
+    if include_grouped:
+        for grouped in slide.get("groupedText") or []:
+            text = (grouped.get("text") or "").strip()
+            if text:
+                parts.append(text)
     return "\n".join(parts)
 
 

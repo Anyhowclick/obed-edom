@@ -21,10 +21,13 @@ from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
 HASH_CACHE_VERSION = 1
-# Bump whenever inspect_keynote.js changes the payload shape. The cache is keyed
-# by deck digest, which says nothing about the reader that produced it, so
-# without this a deck inspected by an older build is reused forever — a payload
-# captured before duplicate-shape marking existed would never gain it.
+# Bump whenever the payload shape changes — whether the change is in
+# inspect_keynote.js or in Python post-processing. (v3 came from Python:
+# iwa_runs.attach_runs now populates per-run character style in item["runs"],
+# which the JS never touched.) The cache is keyed by deck digest, which says
+# nothing about the reader that produced it, so without this a deck inspected by
+# an older build is reused forever — a payload captured before duplicate-shape
+# marking existed would never gain it.
 #
 # Our own build is only half of "the reader". Keynote's version is the other, and
 # it moves without us: a digest-keyed hit would otherwise hand a payload from one
@@ -34,7 +37,7 @@ HASH_CACHE_VERSION = 1
 #
 # Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
 # longer read at all now that the tool is 15.x only.
-INSPECT_VERSION = 2
+INSPECT_VERSION = 3
 # Bump when the shape of the cached template stat-size map changes. Keyed per
 # Keynote version too (via the `.k<version>` tag), since the sizes are read out
 # of the template by AppleScript and a different build could read them differently.

@@ -73,8 +73,8 @@ def _same_deck_type(left: dict, right: dict, left_label: str, right_label: str) 
     return bool(a and b and a == b)
 
 
-def _has_text(slide: dict) -> bool:
-    return bool(slide_plain_text(slide).strip())
+def _has_text(slide: dict, *, include_grouped: bool = False) -> bool:
+    return bool(slide_plain_text(slide, include_grouped=include_grouped).strip())
 
 
 def _iter_items(node: dict):
@@ -98,8 +98,8 @@ def _layout_only(slide: dict) -> bool:
     )
 
 
-def _token_count(slide: dict) -> int:
-    return len(comparable_tokens(slide_plain_text(slide)))
+def _token_count(slide: dict, *, include_grouped: bool = False) -> int:
+    return len(comparable_tokens(slide_plain_text(slide, include_grouped=include_grouped)))
 
 
 def _can_positional_pair(left_slide: dict, right_slide: dict) -> bool:
@@ -143,16 +143,27 @@ def _pair_quality(
     left_ocr: Callable[[int], str] | None = None,
     right_ocr: Callable[[int], str] | None = None,
 ) -> float:
-    score = text_score(slide_plain_text(left_slide), slide_plain_text(right_slide))
+    # Grouped copy (childCount 0 to JXA) feeds the SCORING path only, via the IWA
+    # groupedText field: it lets group slides pair on their real text and drops the
+    # OCR fallback below. The reuse fingerprint (deck_slide_digests) never sees it.
+    score = text_score(
+        slide_plain_text(left_slide, include_grouped=True),
+        slide_plain_text(right_slide, include_grouped=True),
+    )
     if score >= ALIGN_THRESHOLD:
         return score
     # Copy set inside a group or baked into a graphic is invisible to Keynote's
     # API, so those slides look blank and can never find each other on text.
-    if left_ocr and right_ocr and not (_has_text(left_slide) and _has_text(right_slide)):
+    if left_ocr and right_ocr and not (
+        _has_text(left_slide, include_grouped=True) and _has_text(right_slide, include_grouped=True)
+    ):
         score = max(score, text_score(left_ocr(li), right_ocr(ri)))
         if score >= ALIGN_THRESHOLD:
             return score
-    if _token_count(left_slide) > SHORT_TITLE_TOKENS and _token_count(right_slide) > SHORT_TITLE_TOKENS:
+    if (
+        _token_count(left_slide, include_grouped=True) > SHORT_TITLE_TOKENS
+        and _token_count(right_slide, include_grouped=True) > SHORT_TITLE_TOKENS
+    ):
         return score
     from obed_edom.photo_regions import content_regions  # noqa: PLC0415
 

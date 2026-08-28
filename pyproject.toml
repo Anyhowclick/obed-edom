@@ -29,6 +29,17 @@ test = [
     "pytest>=8.0",
     "httpx2>=0.1",
 ]
+# Offline IWA decode for per-run character style (inspect item["runs"]). Kept an
+# optional extra, not a base dep: keynote-parser advertises support up to Keynote
+# 14.5 while shipping decks are 15.x, so decode is best-effort — iwa_runs imports
+# it lazily and the inspect path degrades to empty runs when it is absent or a
+# deck won't decode. Pins are exact because that forward-compat is the top risk.
+iwa = [
+    "keynote-parser==1.14.5.0",
+    "python-snappy==0.7.3",
+    "cramjam==2.11.0",
+    "protobuf==7.36.0",
+]
 
 [project.scripts]
 obed-edom = "obed_edom.cli:main"

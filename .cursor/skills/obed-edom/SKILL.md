@@ -745,6 +745,75 @@ script — a 5-second smoke test on a tiny deck surfaces all of them before you 
   gold decks on 15.3.1 reproduced that table exactly, object for object, so the
   old set held nothing the current one does not.
 
+## Reading a `.key` offline (IWA) — what it unlocks, and its hard limits
+
+A `.key` is a zip of `Index/*.iwa` files (IWA = Snappy-framed Protobuf). Decoding
+them **offline**, with no Keynote/JXA, recovers per-run character style that the
+scripting API cannot. `src/obed_edom/iwa_runs.py` `attach_runs(key_path, payload)`
+does this (~0.4 s/deck — only the tiny `Index/*.iwa` are read, never the GB of
+embedded media). It is gated by the optional `iwa` extra (`pip install -e ".[iwa]"`
+→ `keynote-parser`, `python-snappy`, `cramjam`, `protobuf`); **default-on when the
+extra imports**, and wrapped in `try/except` at the inspect call site so a missing
+extra / non-zip / decode failure silently leaves `runs=[]` (today's behaviour).
+`INSPECT_VERSION` is 3 because the payload shape now carries these.
+
+**What it delivers (shipped).**
+- **Per-run character style into `item["runs"]`** (which the JXA inspect
+  deliberately leaves empty, `inspect_keynote.js:70-79`): `{text, color:[r,g,b]
+  0-255, bold, italic, size, fontName, superscript, capitalization, styleName}`,
+  resolved through the `charProperties` `super.parent` inheritance chain. This
+  lights up the consumers that already read `runs[]` — `_highlight_punctuation_flags`,
+  `highlighted_markup`, `_inspect_item_font_size`, `_smallcaps_signature` — on
+  **finalized** decks, where before they were inert.
+- **`superscript` is the one character attribute JXA/AppleScript genuinely cannot
+  read** (`charProperties.superscript` = `"kSuperscript"`; the cyan verse-number
+  `SuperScript` style). Read-only: this does NOT let generate *write* superscript
+  (see the write limit below) — it is for verification/detection.
+- **Grouped text** (`slide["groupedText"]`): JXA reports groups as `childCount:0`,
+  so grouped copy (stat blocks, title cards) is invisible and the checker OCRs it.
+  IWA recurses the group subtrees. Fed **only** into the checker's text-scoring
+  path (`_pair_quality`, via `slide_plain_text(..., include_grouped=True)`), so
+  group slides flip OCR→text scoring. It is kept OUT of `deck_slide_digests`
+  (`include_grouped` defaults False) so the reuse fingerprint stays byte-identical
+  and saved framings / operator pairings are untouched. It also NEVER touches
+  `item["children"]`/`childCount`/geometry — `map_remap.coincident_duplicate_ids`
+  keys on `childCount`/`len(children)`, so leaving them alone keeps the resize plan
+  provably unchanged (locked by an invariant test).
+
+**Hard limits — why IWA cannot replace the Keynote inspect (all measured via A/B
+against cached JXA payloads).**
+- **It cannot reproduce the `textItems`-vs-`shapes` collection split / `kindIndex`
+  on a wall deck** (GW: textItems right on 32/63 slides, shapes 55/63). `remap`
+  addresses every object as `<kind> (kindIndex)`, so a wrong index writes a
+  mis-placed object into the user's deck. A byte-identity gate would fail → **IWA
+  must never back a remap/write payload.** Group bounds (3/13, 10/21 match) and
+  autosize-text position (~60 px off) / height (`=0`) are also unreliable; only
+  fixed-box and image geometry (~98 % image position) come back exact.
+- **Pixels are impossible** (rendered PNG previews need Keynote). Every top-level
+  path either OCRs pixels (checker, framing, single-inspect) or writes the deck
+  (resize), so all still open Keynote.
+- **IWA is NOT an inspect speed-up.** The dominant read cost on realistic decks is
+  **per-slide round-trip overhead** (~0.83 s × N slides: collection evaluation,
+  `builds()`, `iWorkItems()`), NOT the property reads — the shipped bulk-read
+  already collapsed those. Measured A/B (stub that skips the style reads vs current)
+  on a real deck: **≤ noise under the bulk-on default** (~15 % only in the
+  non-default per-object path). Do not re-chase IWA for inspect speed; the lever is
+  reducing per-slide round-trips.
+- **Offline WRITE of a whole deck corrupts it.** `keynote-parser` *can* modify a
+  `.key`, but a full decode→re-encode→rezip is **byte-lossy** (60/80 IWA re-encode
+  with different bytes). A trivial 3-slide deck survives and opens; a **232 MB deck
+  fails to open** (valid zip, corrupt content). The ONLY viable write is
+  **surgical** — rewrite just the target slide's IWA and copy every other IWA
+  **verbatim** (20/80 already round-trip identical) — and even that needs per-deck
+  openability testing. So the generator's superscript GUI Copy/Paste-Style pass 2
+  stays the safe route until a surgical writer is proven (an un-built spike).
+- **Version fragility:** `keynote-parser` advertises support ≤ Keynote 14.5 yet
+  decoded 15.x decks with 0 failures; a future format bump could break decode → the
+  `try/except` degrades to `runs=[]`. Pin it and re-test on a Keynote upgrade.
+
+`scripts/`-style prototypes for all of the above lived in a session scratchpad
+(gitignored); re-derive from `iwa_runs.py` and this section if needed.
+
 ## Operator outline (`_CUED.docx`)
 
 Semantic cues are replaced with show-call tags:
