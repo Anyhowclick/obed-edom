@@ -1,5 +1,24 @@
 ObjC.import("Foundation");
 
+// --- write-path timing (OBED_WRITE_TIMING) -------------------------------
+// Null unless plan.timing is set. When on, records per-slide/per-phase elapsed
+// and the individual objects slower than slowMs, so one run shows exactly which
+// slide, phase, and objects eat the geometry-write time. Zero cost when off.
+var TIMING = null;
+function _now() {
+  return +new Date();
+}
+function _trec(bucket, ms, desc) {
+  if (!TIMING) return;
+  if (!TIMING.buckets[bucket]) TIMING.buckets[bucket] = { ms: 0, n: 0 };
+  TIMING.buckets[bucket].ms += ms;
+  TIMING.buckets[bucket].n += 1;
+  if (desc && ms >= TIMING.slowMs) {
+    desc.ms = Math.round(ms);
+    if (TIMING.slow.length < 400) TIMING.slow.push(desc);
+  }
+}
+
 // Set from the plan in run(). Keynote is addressed by bundle id because 15.x is
 // "Keynote Creator Studio" under com.apple.Keynote while 14.x is
 // com.apple.iWork.Keynote, and both answer to the name "Keynote".
@@ -557,7 +576,19 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
       }
       continue;
     }
+    const _t0 = TIMING ? _now() : 0;
     const wrote = applyGeom(obj, spec, mode);
+    if (TIMING) {
+      _trec("apply:" + mode, _now() - _t0, {
+        op: "apply:" + mode,
+        slide: slideNo,
+        kind: spec.kind,
+        kindIndex: spec.kindIndex,
+        role: spec.role || "",
+        x: Math.round(Number(spec.x) || 0),
+        y: Math.round(Number(spec.y) || 0),
+      });
+    }
     // In "attrs" mode geometry is written by the AppleScript block, not here, so a
     // resolved object counts as applied even when it carries no JXA attribute to
     // set (a map/pin has no opacity/font). Otherwise every geometry-only object
@@ -598,7 +629,20 @@ function deleteHides(slides, Keynote, transforms, missReasons) {
   for (let i = 0; i < hides.length; i++) {
     const slide = slides[Number(hides[i].slide) - 1];
     const obj = getItem(slide, hides[i]);
-    if (deleteObj(Keynote, obj)) {
+    const _t0 = TIMING ? _now() : 0;
+    const _okDel = deleteObj(Keynote, obj);
+    if (TIMING) {
+      _trec("deleteHide", _now() - _t0, {
+        op: "deleteHide",
+        slide: Number(hides[i].slide),
+        kind: hides[i].kind,
+        kindIndex: hides[i].kindIndex,
+        role: "hide",
+        x: Math.round(Number(hides[i].x) || 0),
+        y: Math.round(Number(hides[i].y) || 0),
+      });
+    }
+    if (_okDel) {
       applied += 1;
     } else {
       // Last resort if Keynote refuses the delete: pin it invisible so a hide that
@@ -773,19 +817,29 @@ function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missRea
     // SAME live slide JXA just resolved, since the reuse path restores slide
     // numbering before the next slide runs, so a non-reuse slide's live index
     // always equals its wall slide number n.
+    const _ta = TIMING ? _now() : 0;
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
+    if (TIMING) _trec("phase:attrs:slide" + n, _now() - _ta, null);
     applied += r.applied;
     missed += r.missed;
+    const _tg = TIMING ? _now() : 0;
     runSlideGeomScript(doc, asGeom, n, missReasons);
+    if (TIMING) _trec("phase:asGeomScript:slide" + n, _now() - _tg, null);
     // No position-only restore pass: AppleScript geometry does not yank, so the
     // first position write sticks.
   } else {
+    const _tf = TIMING ? _now() : 0;
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "full");
+    if (TIMING) _trec("phase:jxaFull:slide" + n, _now() - _tf, null);
     applied += r.applied;
     missed += r.missed;
+    const _tp = TIMING ? _now() : 0;
     applyTransforms(doc.slides(), specs, null, missReasons, "pos");
+    if (TIMING) _trec("phase:jxaPos:slide" + n, _now() - _tp, null);
   }
+  const _td = TIMING ? _now() : 0;
   const rd = deleteHides(doc.slides(), Keynote, specs, missReasons);
+  if (TIMING) _trec("phase:deleteHides:slide" + n, _now() - _td, null);
   applied += rd.applied;
   missed += rd.missed;
   return { applied: applied, missed: missed };
@@ -793,6 +847,9 @@ function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missRea
 
 function run(argv) {
   const plan = readJSON(argv[0]);
+  TIMING = plan.timing
+    ? { buckets: {}, slow: [], slowMs: Number(plan.timing.slowMs) || 150 }
+    : null;
   KEYNOTE_BUNDLE_ID = plan.bundleId || KEYNOTE_BUNDLE_ID;
   const Keynote = Application(KEYNOTE_BUNDLE_ID);
   Keynote.includeStandardAdditions = true;
@@ -916,5 +973,6 @@ function run(argv) {
     mapReadback: mapReadback,
     layouts: layoutReport,
     saved: true,
+    timing: TIMING,
   });
 }

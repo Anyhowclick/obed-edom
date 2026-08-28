@@ -53,6 +53,54 @@ def as_geometry_enabled() -> bool:
     return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def write_timing_enabled() -> bool:
+    """Diagnostic: when ON, the JXA write pass records per-slide/per-phase elapsed
+    and the individual objects slower than a threshold, and remap prints a summary
+    — so one run shows exactly which slide, phase, and objects eat the geometry-write
+    time. Default OFF (zero cost). Set ``OBED_WRITE_TIMING=1`` to enable.
+    """
+    return os.environ.get("OBED_WRITE_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def geom_props_enabled() -> bool:
+    """Whether the AS-geometry block folds each object's SIZE writes into one
+    ``set properties {width, height}`` command (position stays a separate LAST write
+    so the height re-anchor is still corrected; a line's endpoints fold into one
+    atomic set) instead of writing every property separately — default ON.
+
+    Fewer AppleScript commands is the only lever on a heavy slide: each command
+    carries a fixed ~100ms per-object cost there, and there is no cross-object bulk
+    write. Measured ~1.25× on the real report deck (slide 8 124s→101s, slide 3
+    67s→54s), and validated placement-identical against the pipeline's own
+    run-to-run noise floor (Keynote's canvas-shrink already jitters the map ~8px per
+    run). Set ``OBED_GEOM_PROPS=0`` (or ``false``/``no``/``off``) to force the legacy
+    per-property writes for A/B.
+    """
+    return os.environ.get("OBED_GEOM_PROPS", "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _say_write_timing(timing: dict[str, Any], say: Callable[[str], None]) -> None:
+    """Print the write-path timing: phases by total elapsed, then the slowest objects."""
+    buckets: dict[str, Any] = timing.get("buckets") or {}
+    rows = sorted(buckets.items(), key=lambda kv: -(kv[1].get("ms") or 0))
+    say("── write timing: phases by total elapsed (ms) ──")
+    for name, b in rows:
+        ms = int(b.get("ms") or 0)
+        n = int(b.get("n") or 0)
+        avg = ms / n if n else 0
+        say(f"    {name:32} {ms:>7} ms   {n:>4} ×   {avg:5.1f} ms/ea")
+    slow = sorted(timing.get("slow") or [], key=lambda d: -(d.get("ms") or 0))
+    if slow:
+        say(f"── slowest objects (≥{int(timing.get('slowMs') or 0)} ms), top 25 ──")
+        for d in slow[:25]:
+            say(
+                f"    {int(d.get('ms') or 0):>5} ms  {d.get('op',''):16} "
+                f"slide {d.get('slide')} {d.get('kind','')}[{d.get('kindIndex')}] "
+                f"role={d.get('role','') or '-'} @({d.get('x')},{d.get('y')})"
+            )
+        say(f"    ({len(slow)} object(s) over threshold total)")
+
+
 def _as_num(value: Any) -> str:
     """AppleScript numeric literal: an integer when whole, else a 2dp decimal."""
     number = float(value)
@@ -114,7 +162,41 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
         end = spec.get("end")
         x = spec.get("x")
         y = spec.get("y")
-        if kind == "line" and start and end:
+        if geom_props_enabled():
+            # Fewer AppleScript commands per object (each carries a fixed per-object cost
+            # on a heavy slide) — but position MUST stay a separate, LAST write. Setting
+            # height re-anchors ~18px about the object centre, and only a trailing
+            # position write corrects it; folding position into an atomic `properties`
+            # record loses that ordering and drifts the object (verified on a real deck).
+            # So: size keys combined into one `set properties`, then position on its own.
+            # A line has no re-anchor, so its endpoints stay a single atomic set.
+            if kind == "line" and start and end:
+                lines += [
+                    "    try",
+                    "      set properties of theObj to "
+                    f"{{start point:{{{_as_num(start[0])}, {_as_num(start[1])}}}, "
+                    f"end point:{{{_as_num(end[0])}, {_as_num(end[1])}}}}}",
+                    "    end try",
+                ]
+            else:
+                size_props: list[str] = []
+                if spec.get("w") is not None:
+                    size_props.append(f"width:{_as_num(spec['w'])}")
+                if spec.get("h") is not None:
+                    size_props.append(f"height:{_as_num(spec['h'])}")
+                if size_props:
+                    lines += [
+                        "    try",
+                        f"      set properties of theObj to {{{', '.join(size_props)}}}",
+                        "    end try",
+                    ]
+                if x is not None and y is not None:
+                    lines += [
+                        "    try",
+                        f"      set position of theObj to {{{_as_num(x)}, {_as_num(y)}}}",
+                        "    end try",
+                    ]
+        elif kind == "line" and start and end:
             lines += [
                 "    try",
                 f"      set start point of theObj to {{{_as_num(start[0])}, {_as_num(start[1])}}}",
@@ -566,9 +648,14 @@ def remap_keynote(
         if wanted:
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
+        if write_timing_enabled():
+            plan["timing"] = {"slowMs": 120}
+            say("OBED_WRITE_TIMING on: recording per-slide/per-phase write timing.")
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
+    if jxa.get("timing"):
+        _say_write_timing(jxa["timing"], say)
     applied = int(jxa.get("applied") or 0)
     missed = int(jxa.get("missed") or 0)
     if jxa.get("collections"):
