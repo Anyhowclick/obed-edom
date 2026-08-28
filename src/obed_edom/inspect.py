@@ -173,6 +173,16 @@ def inspect_keynote(
     if not raw:
         raise RuntimeError("Keynote inspect returned no JSON.")
     payload = json.loads(raw)
+    # Best-effort per-run character style from the deck's offline IWA graph. On
+    # when the optional `iwa` extra imports, gracefully off (runs stay []) when it
+    # doesn't or the decode fails. Must run before the cache write below so runs
+    # persist with the payload.
+    try:
+        from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
+
+        attach_runs(key_path, payload)
+    except Exception:  # noqa: BLE001 — missing extra / non-zip / decode error -> runs stay []
+        pass
     # Persisted, so a payload can always say which Keynote read the deck.
     payload["keynoteBundleId"] = keynote_app.bundle_id()
     payload["keynoteVersion"] = keynote_app.app_version()
