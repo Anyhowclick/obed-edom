@@ -443,11 +443,15 @@ script — a 5-second smoke test on a tiny deck surfaces all of them before you 
 - **`open POSIX file …` returns `missing value`, not the document.** So `set doc to open …`
   gives you nothing. And do **not** blindly fall back to `front document`: with another deck
   open it binds the WRONG one, and your geometry writes / `save` then land on the user's deck
-  — a real incident in this project. **The proven bind** (what `_build_superscript_fix_script`
-  and the stat-finalize *reopen* path ship) is: `close (every document whose name is "<name>")
-  saving no` to evict stale same-name decks, then `open POSIX file …`, `activate`, and
-  `set theDoc to document 1` — after the close+open, `document 1` *is* the fresh copy. Verify
-  `name of theDoc` before any write.
+  — a real incident in this project. **The proven bind** (what the stat-finalize *reopen*
+  path ships — `_build_stat_finalize_script`, and the size-probe / magic-move reopen sites) is:
+  `close (every document whose name is "<name>") saving no` to evict stale same-name decks,
+  then `open POSIX file …`, `activate`, and `set theDoc to document 1` — after the close+open,
+  `document 1` *is* the fresh copy. (`_build_superscript_fix_script` uses a variant: pass 1
+  leaves the deck open, so pass 2 does `activate` + `open` as an idempotent bring-to-front and
+  goes straight to `document 1` with **no** close-by-name.) Recommended, though the shipping
+  scripts don't yet do it: verify `name of theDoc` matches the expected basename (or its
+  extension-less stem — see gotcha 1) before any write, and abort otherwise.
   - **Two Keynote-15 gotchas the earlier "just compare `POSIX path of (file of d)`" advice
     missed** (both cost a Stage B debugging round — see `scripts/diag_doc_bind.applescript`):
     (1) `name of document` comes back WITHOUT the extension (`cg_ON`, not `cg_ON.key`), so a

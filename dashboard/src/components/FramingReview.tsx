@@ -213,7 +213,8 @@ function CropPreview({
           // A dropped object is drawn by not drawing it — that is the whole point
           // of showing this instead of the crop. Keyed on the plan's flag, not the
           // role, so it also omits anything else the run deletes before output.
-          if (rect.willBeInOutput === false) return null;
+          // Fall back to role=="hide" for a stale payload that predates the flag.
+          if (rect.willBeInOutput === false || rect.role === "hide") return null;
           if (!rect.sw || !rect.sh || rect.w <= 0 || rect.h <= 0) return null;
           const zx = rect.w / rect.sw;
           const zy = rect.h / rect.sh;
@@ -244,10 +245,10 @@ function CropPreview({
             // object the run deletes before output is drawn as leaving (ghosted +
             // struck), so ~200 dropped objects no longer read as landing there.
             className={`plan-rect role-${rect.role}${
-              rect.willBeInOutput === false ? " dropped" : ""
+              rect.willBeInOutput === false || rect.role === "hide" ? " dropped" : ""
             }`}
             title={`${rect.role} · ${rect.kind}${rect.text ? ` · ${rect.text}` : ""}${
-              rect.willBeInOutput === false ? " · will be removed" : ""
+              rect.willBeInOutput === false || rect.role === "hide" ? " · will be removed" : ""
             }`}
             style={{
               left: rect.x * k,

@@ -848,7 +848,7 @@ function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missRea
 function run(argv) {
   const plan = readJSON(argv[0]);
   TIMING = plan.timing
-    ? { buckets: {}, slow: [], slowMs: Number(plan.timing.slowMs) || 150 }
+    ? { buckets: {}, slow: [], slowMs: Number(plan.timing.slowMs) || 120 }
     : null;
   KEYNOTE_BUNDLE_ID = plan.bundleId || KEYNOTE_BUNDLE_ID;
   const Keynote = Application(KEYNOTE_BUNDLE_ID);

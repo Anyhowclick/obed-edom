@@ -170,6 +170,10 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
             # record loses that ordering and drifts the object (verified on a real deck).
             # So: size keys combined into one `set properties`, then position on its own.
             # A line has no re-anchor, so its endpoints stay a single atomic set.
+            # (Trade-off vs the legacy per-property form: a throw on the combined size
+            # record loses BOTH width and height rather than one — acceptable because both
+            # are universally settable on every _AS_KIND_NAMES kind, and the whole write is
+            # still wrapped in its own try so it never abandons the rest of the slide.)
             if kind == "line" and start and end:
                 lines += [
                     "    try",
