@@ -460,11 +460,34 @@ on both decks with the REAL bulk read AND one end-to-end remap run is placement-
      Real-value two-tier: `bulk_ok=True`, 2813 spliced, 0 fallback; transform diffs **0**, reuse
      diffs **0** → **plan gate GREEN.** Read-only (deck mtime untouched). **So the gate is GREEN
      on BOTH decks with the REAL bulk read.**
-   - (b) **REMAINING:** one real **end-to-end write remap** run → rendered placement-identical
-     (steps 2/3a proved plan-identity, which drives placement, but not a rendered write). Only
-     then flip `offline_read_mode` default from `off` to `on`. `verify` mode is the safe
-     intermediate (runs both, pays the 12 min, uses legacy on any divergence) for a cautious
-     rollout. Speed both decks: Map **51.8s** / Full **283.7s** — both well under 12.6 min.
+   - (b) ~~one real end-to-end write remap → placement-identical~~ — **DONE + GREEN (Session 15).**
+     `OBED_OFFLINE_READ=on` remap of the whole Map deck: log confirms *"Read … two-tier (offline
+     IWA + bulk geometry) — skipped the full Keynote source inspect"* (offline used, NO fallback),
+     and **every plan-level fact is byte-identical** to a legacy-read run (recipe map transform,
+     off-frame counts, 5-slide duplication plan, `Applied 713 missed 0`, collections, stat-finalize
+     `111/9/116`, map `{11,18,1067,659}`). Output-deck geometry (bulk_geometry both decks,
+     `scratchpad/diff_outputs2.py`): **identical frame multiset for every kind** — set-match
+     group 0/174, image 0/249, text 0/24 over-16px, 0 unmatched. The by-INDEX diff showed 142
+     group frames "diverging" — a RED HERRING: the stat-finalize **Bring-to-Front GUI pass reorders
+     the `groups` collection's kindIndex** run-to-run (read-mode-INDEPENDENT), so groups must be
+     compared as a set, not by index. **So the offline-read output is placement-identical to the
+     legacy-read output. The full flip bar is MET.** Speed both decks: Map **51.8s** / Full
+     **283.7s** — both well under 12.6 min.
+   - (c) **verify MODE FALLS BACK on these decks — by design, not a placement bug.** The shipped
+     `_plans_equivalent`/`_spec_fields_equal` (remap_keynote.py:108) excludes ONLY `itemIndex`, so
+     it is STRICTER than the validated write-affecting gate (`_wa_fields_equal`, which also excludes
+     `fontSize/font/color/opacity/matchText`). The offline read re-derives ONE autoshrink `fontSize`
+     (Map slide 7 text[1]: 29.4 vs 19.6 — Keynote re-autosizes on write, so it never lands), so
+     verify declares divergence and uses legacy. Confirmed: strict `_specs_equivalent`=False on
+     exactly that 1 fontSize field, `address-set equal`=True, write-affecting=green. **Consequence:
+     `verify` is NOT a useful confidence intermediate on autoshrink decks — it always falls back.**
+     OPEN DECISION (Session 15, put to user): align verify's check to the write-affecting field set
+     (makes verify usable, but loosens what "verified" asserts) vs leave it strict (conservative,
+     documents the fallback). Independent of the default flip, which rests on `on` (write-affecting
+     proven), not verify.
+   - **NEXT:** flip `offline_read_mode` default `off`→`on` (one line, `remap_keynote.py:70-71`) —
+     bar met. Test artifacts left in `output/`: `Map_Extracted_Wall_1st_CG.key` (legacy-read) and
+     `…_CG_ON.key` (offline-read), ~1.15 GB each, gitignored — delete when done inspecting.
 - **PPTX is NOT needed for the fallback**: it gives image/text exactly but the group `grpSp`
   stored-frame is the WRONG value for union-groups; the bulk read gives all three correctly in
   one pass. PPTX only re-enters if the bulk read measures surprisingly slow — it did not (51.8s).
