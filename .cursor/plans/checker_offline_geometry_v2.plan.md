@@ -47,3 +47,14 @@ Full peer draft + analysis probes: session scratchpad `checker_offline_geometry_
 Step 1 is Keynote-free and low-regret (calibrate against the cached JXA oracle). **Top risk:
 font substitution** — a machine missing the deck's fonts silently mis-shapes; the `NSFont`
 guard + fallback is load-bearing. The floor is the preview export (user-facing PNGs need Keynote).
+
+## KNOWN BUG — FIXED (fd79e88)
+
+DSK slide 17 rendered out of order (between 12 and 13) on a real run. ROOT CAUSE: slide 17's
+lower-third photo is FLIPPED vs its LW counterpart; the offline read composes a masked image's
+angle from frame+mask (357+357 → 354) where JXA reports 0, and `deck_slide_digests` — the
+slide-IDENTITY key that decides PAIRING — included image `rotation`, so the flip churned slide
+17's digest and floated it out of sequence. FIX: dropped `rotation` from the digest — orientation
+must not drive pairing/order; a flip-vs-LW discrepancy is caught by the paired-image COMPARISON,
+not the ordering key. Offline masked-image angle left as v1 composed it (signal preserved for the
+comparison). Regression test: `test_deck_slide_digests_ignore_image_rotation`.
