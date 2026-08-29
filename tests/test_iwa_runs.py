@@ -18,6 +18,7 @@ from obed_edom.iwa_runs import (
     _normalize_text,
     _slide_grouped_text,
     attach_runs,
+    resolve_para_style,
     resolve_style,
 )
 
@@ -149,6 +150,56 @@ def test_resolve_inherits_fontname_and_superscript_up_chain():
     resolved = resolve_style("1", objects, {})
     assert resolved["fontName"] == "AzoSans-Medium"  # inherited
     assert resolved["superscript"] == "kSuperscript"  # inherited
+
+
+def test_resolve_exposes_tracking_kerning():
+    # charProperties.kerning surfaces as `tracking` for the offline shaper; absent -> None.
+    objects = {"1": _charstyle("Spaced", kerning=1.5)}
+    assert resolve_style("1", objects, {})["tracking"] == 1.5
+    assert resolve_style("2", {"2": _charstyle("Plain")}, {})["tracking"] is None
+
+
+# --------------------------------------------------------------------------
+# Paragraph-style resolver — the metrics the offline text shaper needs.
+# --------------------------------------------------------------------------
+def _parastyle(name=None, parent=None, **pp):
+    sup: dict = {}
+    if name is not None:
+        sup["name"] = name
+    if parent is not None:
+        sup["parent"] = {"identifier": parent}
+    return {"_pbtype": "TSWP.ParagraphStyleArchive", "paraProperties": dict(pp), "super": sup}
+
+
+def test_resolve_para_style_reads_metrics():
+    objects = {"1": _parastyle(lineSpacing={"amount": 0.8}, alignment="TATvalue2",
+                               spaceBefore=6.0, firstLineIndent=12.0)}
+    m = resolve_para_style("1", objects, {})
+    assert m["lineSpacing"] == {"amount": 0.8}  # passed through unchanged
+    assert m["alignment"] == "TATvalue2"
+    assert m["spaceBefore"] == 6.0
+    assert m["firstLineIndent"] == 12.0
+
+
+def test_resolve_para_style_inherits_up_parent_chain():
+    objects = {
+        "1": _parastyle(parent="2", alignment="TATvalue0"),  # own alignment only
+        "2": _parastyle(lineSpacing={"amount": 0.7}, spaceAfter=4.0),
+    }
+    m = resolve_para_style("1", objects, {})
+    assert m["alignment"] == "TATvalue0"  # own override
+    assert m["lineSpacing"] == {"amount": 0.7}  # inherited
+    assert m["spaceAfter"] == 4.0  # inherited
+
+
+def test_resolve_para_style_none_and_cache_namespacing():
+    assert resolve_para_style(None, {}, {}) == {}
+    # A shared cache must not let the char-style entry for id "1" collide with the
+    # paragraph-style entry for id "1" (different archives can share an id space).
+    cache: dict = {}
+    resolve_style("1", {"1": _charstyle("C", fontName="AzoSans-Regular")}, cache)
+    para = resolve_para_style("1", {"1": _parastyle(alignment="TATvalue1")}, cache)
+    assert para["alignment"] == "TATvalue1"
 
 
 # --------------------------------------------------------------------------
