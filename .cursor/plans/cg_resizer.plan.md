@@ -442,15 +442,32 @@ whole-deck, now that trips are classified. Default flips to `on` only after the 
 on both decks with the REAL bulk read AND one end-to-end remap run is placement-identical.
 
 **PENDING at handover (pick up here):**
-1. Executor `a3f516a2` building the two-tier code (slim bulk-geometry JXA read + splice +
-   granular fallback + `remap_keynote` wiring), tested via the JXA-splice simulation.
-2. **Run ONE real Keynote bulk-read pass** (single-op, NO concurrency — see cache lesson) to
-   MEASURE speed (Fable est. <10s group+image; text adds more; must beat 12.6 min) and CONFIRM
-   the real values match the simulated splice → gate GREEN.
-3. Then a real end-to-end remap run → placement-identical → flip default to `on`.
+1. ~~Executor building the two-tier code~~ — **DONE**, committed `9ad2ba3` (bulk_geometry.js +
+   inspect.bulk_geometry + two_tier splice + granular fallback + remap_keynote wiring).
+2. ~~Run ONE real Keynote bulk-read pass~~ — **DONE + GREEN (Session 15, 2026-08-29).** Live
+   `bulk_geometry(Map_Extracted_Wall_1st)` single-op, Keynote clean: **51.8s** (0.86 min) vs the
+   ~12.6-min JXA inspect (**~14.6×**). All **1636/1636** real frames match the cached JXA frames
+   **<0.5px** (0 within-2px-only, 0 >2px, 0 unmatched — the real bulk read == the JXA-double the
+   gate was proven against). Real-value two-tier splice: `bulk_ok=True`, 1620 spliced, 0 fallback;
+   write-affecting transform diffs **0**, reuse diffs **0** → **plan gate GREEN with live values.**
+   Read-only (deck mtime untouched). Bench: `scratchpad/live_bulk_pass.py` (session-local;
+   re-derive from `tests/test_offline_inspect.py::test_two_tier_splice_makes_write_affecting_gate_
+   green_map_deck`, swapping `_bulk_double_from_jxa` for the real `bulk_geometry`).
+3. **STILL TO DO before flipping default to `on`** (the handover's own bar):
+   - (a) ~~same live bulk pass on `Full_Report_Card_Wall`~~ — **DONE + GREEN (Session 15).** 155
+     slides, live `bulk_geometry` single-op, Keynote clean: **283.7s** (4.73 min) vs ~12.6-min JXA
+     (**~2.7×**). All **3123/3123** real frames **<0.5px** vs cached JXA (0 >2px, 0 unmatched).
+     Real-value two-tier: `bulk_ok=True`, 2813 spliced, 0 fallback; transform diffs **0**, reuse
+     diffs **0** → **plan gate GREEN.** Read-only (deck mtime untouched). **So the gate is GREEN
+     on BOTH decks with the REAL bulk read.**
+   - (b) **REMAINING:** one real **end-to-end write remap** run → rendered placement-identical
+     (steps 2/3a proved plan-identity, which drives placement, but not a rendered write). Only
+     then flip `offline_read_mode` default from `off` to `on`. `verify` mode is the safe
+     intermediate (runs both, pays the 12 min, uses legacy on any divergence) for a cautious
+     rollout. Speed both decks: Map **51.8s** / Full **283.7s** — both well under 12.6 min.
 - **PPTX is NOT needed for the fallback**: it gives image/text exactly but the group `grpSp`
   stored-frame is the WRONG value for union-groups; the bulk read gives all three correctly in
-  one pass. PPTX only re-enters if the bulk read measures surprisingly slow.
+  one pass. PPTX only re-enters if the bulk read measures surprisingly slow — it did not (51.8s).
 
 **CACHE-CORRUPTION LESSON (cost hours this session):** concurrent Keynote access (overlapping
 warms, or Keynote re-saving mid-read) corrupts a warm → partial payload (empty tail slides),
