@@ -253,8 +253,10 @@ and geometry+timing):
 
 **ABANDONED — do NOT rebuild (the reasons ARE the finding):**
 - **Stage B** (fold the stat-finalize reopen into the geometry session). Built,
-  real-deck A/B'd, dropped. The reopen it removes is **warm-cache-cheap**, not the ~2min
-  cold open the plan assumed → no measurable gain. The "17% faster" first seen was a
+  real-deck A/B'd, dropped. The reopen it removes is **warm-cache-cheap** → no measurable
+  gain. (The premise was doubly wrong: the plan assumed a ~2min cold open, but even a cold
+  open of the ~6.8 GB deck is only ~3–4 s — measured 2026-08-28 — so there was never a
+  ~2min open to save.) The "17% faster" first seen was a
   BROKEN run: the attach bind failed (`NO_DEST_DOC`) and SKIPPED the whole stat pass, so
   it did *less* work. Premise wrong. (The Stage-B design section below is retained only
   as the record of a dead end.)
@@ -387,7 +389,9 @@ Removes the LAST avoidable dest open on the validate=False path. Two peer review
   5. **Next-run cleanup:** before `copy_keynote`/open, detect+close an already-open
      same-path doc, so a hang's leftover doesn't collide with the next ditto-copy+open (the
      `pkill`→"Operation not permitted" lock class).
-- **Payoff bounded to ONE ~2min open** (the stat pass is index-addressed, `group N of slide
+- **Payoff bounded to ONE deck open** (only ~3–4 s even on the 6.8 GB deck — measured
+  2026-08-28; the "~2min open" this design originally assumed was an exaggeration, which is
+  part of why Stage B netted no gain. The stat pass is index-addressed, `group N of slide
   M`, NOT a full walk — measured). Validate: PNG pixel-diff (z-order + stat sizes only show
   there) + `front=N`/`sized=N` count asserts + a manual crash-path test (kill after geometry
   save → deck still valid + placed). Both reviewers: opt-in or stop after Stage A.
