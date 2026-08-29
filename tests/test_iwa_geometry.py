@@ -251,6 +251,49 @@ def test_group_zero_size_child_is_residual_flagged():
     assert rec["needs_keynote"] == "group-residual"
 
 
+def test_group_union_excludes_zero_extent_child():
+    # A zero-extent connector far from the real content must NOT stretch the union
+    # (its local origin can sit hundreds of px off the group's real corner). The
+    # union is the real image alone; the group is still flagged group-residual.
+    objects = {}
+    _shape(objects, "conn", x=200.0, y=0.0, w=0.0, h=0.0)  # zero-extent, far right
+    _image(objects, "a", x=0.0, y=0.0, w=50.0, h=50.0)
+    gid = _group(objects, "g", x=0.0, y=0.0, children=["conn", "a"])
+    rec = _one(_slide(gid), objects)
+    assert (rec["x"], rec["y"], rec["w"], rec["h"]) == (0.0, 0.0, 50.0, 50.0)
+    assert rec["needs_keynote"] == "group-residual"
+
+
+def test_group_falls_back_to_stored_frame_when_no_real_child():
+    # No child has positive width AND height (only a zero-extent connector), so the
+    # union is empty and the group's own stored-frame geometry is used.
+    objects = {}
+    _shape(objects, "conn", x=0.0, y=20.0, w=0.0, h=0.0)
+    gid = _group(objects, "g", x=7.0, y=8.0, w=120.0, h=90.0, children=["conn"])
+    rec = _one(_slide(gid), objects)
+    assert (rec["x"], rec["y"], rec["w"], rec["h"]) == (7.0, 8.0, 120.0, 90.0)
+
+
+def test_masked_rect_near_zero_rotation_collapses_axis_aligned():
+    # A sub-degree residual frame rotation is reported by JXA as the axis-aligned
+    # frame+mask box (not the rotated-corner AABB, which sits ~1px off and, via the
+    # cover recipe, cascades deck-wide). Below _MASK_ANGLE_EPS => collapse, no flag.
+    (x, y, w, h), rotated = _masked_rect(
+        _geom(100.0, 50.0, 200.0, 200.0, 0.05)["geometry"],
+        _geom(10.0, 20.0, 80.0, 60.0)["geometry"])
+    assert (round(x, 6), round(y, 6), w, h) == (110.0, 70.0, 80.0, 60.0)
+    assert rotated is False
+
+
+def test_masked_image_near_zero_rotation_is_not_flagged():
+    objects = {}
+    _mask(objects, "m", x=10.0, y=20.0, w=80.0, h=60.0)
+    iid = _image(objects, "i", x=100.0, y=50.0, w=200.0, h=200.0, angle=0.05, mask="m")
+    rec = _one(_slide(iid), objects)
+    assert rec["needs_keynote"] is None
+    assert (round(rec["x"], 6), round(rec["y"], 6), rec["w"], rec["h"]) == (110.0, 70.0, 80.0, 60.0)
+
+
 def test_group_rotated_masked_child_is_residual_flagged():
     # The signal that actually catches the 7 no-effect-style residual groups:
     # a rotated masked-image child (mask corners get extra Keynote layout).

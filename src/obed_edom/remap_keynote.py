@@ -53,6 +53,171 @@ def as_geometry_enabled() -> bool:
     return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+# --------------------------------------------------------------------------
+# Offline source-wall read (OBED_OFFLINE_READ) — reconstruct the ~12-min JXA
+# `inspect_keynote(source)` from the deck's IWA graph, with the legacy read as
+# an AUTOMATIC total fallback. See obed_edom.offline_inspect + the reviewed plan.
+# --------------------------------------------------------------------------
+def offline_read_mode(explicit: str | None = None) -> str:
+    """Resolve the offline-read mode: ``off`` (default), ``on`` or ``verify``.
+
+    ``explicit`` (the ``remap()`` param) wins; otherwise ``OBED_OFFLINE_READ``;
+    otherwise ``off``. Unknown values fall to ``off`` — an unrecognised setting
+    must never silently enable an unvalidated read path. DEFAULT is ``off`` until
+    the gold-deck gate (``scratchpad/validate_remap_plan.py``) is green on both
+    decks AND one real end-to-end remap run is placement-identical.
+    """
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_READ", "")).strip().lower()
+    return raw if raw in {"on", "off", "verify"} else "off"
+
+
+def _plans_equivalent(
+    off_wall: dict[str, Any],
+    legacy_wall: dict[str, Any],
+    template_data: dict[str, Any] | None,
+    slide_range: Any,
+) -> bool:
+    """Whether the remap PLAN (transforms + reuses) is identical from both reads.
+
+    The runtime form of the gold gate: same template, geometry within 2px, all
+    other fields exact, keyed by ``(slide, kind, kindIndex)`` — the address the
+    write path uses (``itemIndex`` is a payload-order echo, ignored). Any
+    divergence => the offline read is not trusted for this run.
+    """
+    def plan(wall: dict[str, Any]):
+        recipe = recipe_for(wall, template_data or {})
+        transforms = plan_payload_transforms(
+            wall, recipe, slide_range=slide_range, template=template_data
+        )
+        specs = [t.as_dict() for t in transforms]
+        reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
+        return specs, reuses
+
+    try:
+        off_t, off_r = plan(off_wall)
+        leg_t, leg_r = plan(legacy_wall)
+    except Exception:  # noqa: BLE001 — a compare failure is treated as a divergence
+        return False
+    return _specs_equivalent(off_t, leg_t) and _reuses_equivalent(off_r, leg_r)
+
+
+def _spec_addr(spec: dict[str, Any]) -> tuple:
+    return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
+
+
+def _spec_fields_equal(a: dict[str, Any], b: dict[str, Any], tol: float = 2.0) -> bool:
+    for key in (set(a) | set(b)) - {"itemIndex"}:
+        av, bv = a.get(key), b.get(key)
+        if key in ("x", "y", "w", "h"):
+            try:
+                if abs(float(av) - float(bv)) > tol:
+                    return False
+            except (TypeError, ValueError):
+                if av != bv:
+                    return False
+        elif key in ("start", "end"):
+            if not (isinstance(av, (list, tuple)) and isinstance(bv, (list, tuple))
+                    and len(av) >= 2 and len(bv) >= 2
+                    and abs(float(av[0]) - float(bv[0])) <= tol
+                    and abs(float(av[1]) - float(bv[1])) <= tol):
+                if av != bv:
+                    return False
+        elif av != bv:
+            return False
+    return True
+
+
+def _specs_equivalent(off: list[dict], jxa: list[dict]) -> bool:
+    off_map = {_spec_addr(s): s for s in off}
+    jxa_map = {_spec_addr(s): s for s in jxa}
+    if set(off_map) != set(jxa_map):
+        return False
+    return all(_spec_fields_equal(off_map[k], jxa_map[k]) for k in off_map)
+
+
+def _ref_addr(ref: dict[str, Any]) -> tuple:
+    return (str(ref.get("kind")), int(ref.get("kindIndex", -1)))
+
+
+def _reuses_equivalent(off: list[dict], jxa: list[dict]) -> bool:
+    off_map = {int(j["slide"]): j for j in off}
+    jxa_map = {int(j["slide"]): j for j in jxa}
+    if set(off_map) != set(jxa_map):
+        return False
+    for slide in off_map:
+        jo, jj = off_map[slide], jxa_map[slide]
+        if jo.get("from") != jj.get("from") or jo.get("persist") != jj.get("persist"):
+            return False
+        for name in ("remove", "strip", "stripBuilds"):
+            if {_ref_addr(r) for r in jo.get(name) or []} != {_ref_addr(r) for r in jj.get(name) or []}:
+                return False
+        for name in ("add", "mutate"):
+            a = {_ref_addr(s): s for s in jo.get(name) or []}
+            b = {_ref_addr(s): s for s in jj.get(name) or []}
+            if set(a) != set(b) or not all(_spec_fields_equal(a[k], b[k]) for k in a):
+                return False
+    return True
+
+
+def acquire_wall_payload(
+    source: Path,
+    *,
+    slide_range: Any,
+    mode: str,
+    template_path: Path,
+    template_payload: dict[str, Any] | None,
+    say: Callable[[str], None],
+) -> dict[str, Any]:
+    """The source-wall inspect payload, honouring ``OBED_OFFLINE_READ`` ``mode``.
+
+    * ``off`` — the legacy ``inspect_keynote(source)`` (the ~12-min JXA read).
+    * ``on`` — the offline IWA read is the source of truth, with the legacy read
+      as an AUTOMATIC TOTAL fallback on EITHER (a) any offline-read exception
+      (missing ``iwa`` extra, decode error, format change) or (b) the per-run
+      structural guard flagging an unvouched item.
+    * ``verify`` — run BOTH, diff the plan at runtime, and use the offline read
+      only when the plans are identical; otherwise use legacy. Pays the 12 min.
+
+    A ``say(...)`` line always records which path actually supplied the payload.
+    """
+    if mode == "off":
+        return inspect_keynote(source, slide_range=slide_range)
+
+    try:
+        from obed_edom.offline_inspect import (  # noqa: PLC0415 (optional iwa extra)
+            offline_wall_payload,
+            unvouched_items,
+        )
+
+        offline = offline_wall_payload(source, slide_range=slide_range)
+    except Exception as exc:  # noqa: BLE001 — any offline failure drops to legacy
+        say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
+            f"using Keynote inspect of {source.name}.")
+        return inspect_keynote(source, slide_range=slide_range)
+
+    flags = unvouched_items(offline, slide_range)
+    if flags:
+        from collections import Counter  # noqa: PLC0415
+
+        reasons = dict(Counter(f["reason"] for f in flags))
+        say(f"Offline source read guard-tripped on {len(flags)} unvouched item(s) "
+            f"{reasons}; using Keynote inspect of {source.name} for the whole deck.")
+        return inspect_keynote(source, slide_range=slide_range)
+
+    if mode == "on":
+        say(f"Read {source.name} offline from its IWA graph — skipped the Keynote source inspect.")
+        return offline
+
+    # verify: cross-check the plan against the legacy read.
+    legacy = inspect_keynote(source, slide_range=slide_range)
+    template_data = template_payload if template_payload is not None else inspect_keynote(template_path)
+    if _plans_equivalent(offline, legacy, template_data, slide_range):
+        say(f"Offline source read of {source.name} verified plan-identical to Keynote inspect; using offline.")
+        return offline
+    say(f"Offline source read of {source.name} DIVERGED from Keynote inspect; using Keynote inspect.")
+    return legacy
+
+
 def write_timing_enabled() -> bool:
     """Diagnostic: when ON, the JXA write pass records per-slide/per-phase elapsed
     and the individual objects slower than a threshold, and remap prints a summary
@@ -423,6 +588,7 @@ def remap_keynote(
     side_content_slides: set[int] | None = None,
     source_previews: Path | str | None = None,
     export_dir: Path | str | None = None,
+    offline_read: str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
@@ -452,7 +618,17 @@ def remap_keynote(
     if not template_path.exists():
         raise FileNotFoundError(template_path)
 
-    wall = wall_payload if wall_payload is not None else inspect_keynote(source, slide_range=slide_range)
+    if wall_payload is not None:
+        wall = wall_payload
+    else:
+        wall = acquire_wall_payload(
+            source,
+            slide_range=slide_range,
+            mode=offline_read_mode(offline_read),
+            template_path=template_path,
+            template_payload=template_payload,
+            say=say,
+        )
     if wall_payload is None:
         if slide_range:
             label = format_slide_range(slide_range)

@@ -71,6 +71,17 @@ NEEDS_KEYNOTE_REASONS = (
 # corner-AABB collapses to the frame and no rotated-* flag is raised.
 _ANGLE_EPS = 0.01
 
+# Masked images tolerate a wider "effectively un-rotated" band than plain frames.
+# Keynote reports a masked image's laid-out box by its axis-aligned frame+mask
+# position (rounded to int); it does NOT re-place it for a sub-degree frame
+# rotation. A cohort of maps carries a 0.0357° residual rotation from an earlier
+# edit — the rotated-corner AABB shifts their top-left ~1px, which (though within
+# the 2px item tolerance) the cover recipe amplifies ~2x into a deck-wide cascade.
+# Treating |angle| below this as un-rotated snaps them back to the frame position
+# JXA reports. A genuine ~1-2° net-zero frame/mask pair stays above the band and
+# keeps its rotated-masked flag (residual, guard-covered).
+_MASK_ANGLE_EPS = 0.1
+
 
 # --------------------------------------------------------------------------
 # Level-agnostic geometry access (mirrors iwa_kindindex._geometry: walk the
@@ -176,11 +187,16 @@ def _masked_rect(frame_geom: dict, mask_geom: dict
     """
     fx, fy, fw, fh, fa = _xywha(frame_geom)
     mx, my, mw, mh, ma = _xywha(mask_geom)
+    fa_rot = min(fa % 360.0, 360.0 - fa % 360.0) > _MASK_ANGLE_EPS
+    ma_rot = min(ma % 360.0, 360.0 - ma % 360.0) > _MASK_ANGLE_EPS
+    if not fa_rot and not ma_rot:
+        # Effectively un-rotated: JXA reports the axis-aligned frame+mask position
+        # (== the corner AABB at angle 0), not a sub-degree rotated box.
+        return ((fx + mx, fy + my, mw, mh), False)
     to_image = _frame_transform(mx, my, mw, mh, ma)   # mask-local -> image-local
     to_slide = _frame_transform(fx, fy, fw, fh, fa)   # image-local -> slide
     x0, y0, _x1, _y1 = _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
-    rotated = _is_rotated(fa) or _is_rotated(ma)
-    return ((x0, y0, mw, mh), rotated)
+    return ((x0, y0, mw, mh), True)
 
 
 # --------------------------------------------------------------------------
@@ -246,9 +262,26 @@ def _leaf_bbox(obj: dict, ox: float, oy: float, objects: dict[str, dict]
     return _corners_aabb(_frame_transform(x, y, w, h, angle), w, h)
 
 
+def _is_real_box(box: tuple[float, float, float, float]) -> bool:
+    """True when an AABB has BOTH positive width and positive height.
+
+    A zero-extent child — a connector/line whose stored frame is ``w==0`` or
+    ``h==0`` and whose local origin can sit hundreds of px off the group's real
+    corner (e.g. ``(0, 220, 0, 0)``) — does not bound the group JXA reports, so it
+    is held out of the union. (Measured: including such children dragged a group's
+    min-corner off by up to ~547px on the gold decks.)
+    """
+    return (box[2] - box[0]) > 0.0 and (box[3] - box[1]) > 0.0
+
+
 def _group_union(group_id: str, ox: float, oy: float, objects: dict[str, dict],
                  seen: set[str]) -> tuple[float, float, float, float] | None:
-    """Union AABB of a group subtree's children (nested groups add their position)."""
+    """Union AABB of a group subtree's REAL children (nested groups add their position).
+
+    Only children with positive width AND height (:func:`_is_real_box`) join the
+    union; zero-extent connectors are excluded. Returns ``None`` when no real child
+    remains, so the caller falls back to the group's own stored-frame geometry.
+    """
     if group_id in seen:
         return None
     seen.add(group_id)
@@ -266,10 +299,12 @@ def _group_union(group_id: str, ox: float, oy: float, objects: dict[str, dict],
         if child.get("_pbtype") == "TSD.GroupArchive":
             cx, cy, _cw, _ch, _ca = _xywha(_geom_dict(child))
             sub = _group_union(str(child_id), ox + cx, oy + cy, objects, seen)
-            if sub:
+            if sub is not None and _is_real_box(sub):
                 boxes.append(sub)
         else:
-            boxes.append(_leaf_bbox(child, ox, oy, objects))
+            box = _leaf_bbox(child, ox, oy, objects)
+            if _is_real_box(box):
+                boxes.append(box)
     if not boxes:
         return None
     return (min(b[0] for b in boxes), min(b[1] for b in boxes),
