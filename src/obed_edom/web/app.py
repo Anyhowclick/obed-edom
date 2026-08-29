@@ -48,6 +48,7 @@ from obed_edom.inspect import (
     cached_payload,
     diff_work_dir,
     inspect_keynote,
+    inspect_keynote_checker,
     preview_inspect,
     preview_media_type,
     preview_pngs,
@@ -802,6 +803,8 @@ def _log_inspect(job: Job, name: str, payload: dict[str, Any]) -> None:
     parts = []
     if "jxa" in timing:
         parts.append(f"read {timing['jxa']:.1f}s")
+    elif "read" in timing:
+        parts.append(f"offline read {timing['read']:.1f}s")
     if "export" in timing:
         parts.append(f"export {timing['export']:.1f}s")
     extra = f" ({', '.join(parts)})" if parts else ""
@@ -836,7 +839,7 @@ def _run_diff(
         delete_pairing("diff", left, right)
 
     job.log(f"Inspecting {left.name} (read-only)…")
-    left_payload = inspect_keynote(left, export_dir=work / "left")
+    left_payload = inspect_keynote_checker(left, export_dir=work / "left")
     _log_inspect(job, left.name, left_payload)
     left_dir = Path(left_payload.get("previewDir") or work / "left")
     left_n = len(preview_pngs(left_dir))
@@ -846,7 +849,7 @@ def _run_diff(
         job.log(left_payload.get("exportError") or "LW preview export produced no PNGs.")
 
     job.log(f"Inspecting {right.name} (read-only)…")
-    right_payload = inspect_keynote(right, export_dir=work / "right")
+    right_payload = inspect_keynote_checker(right, export_dir=work / "right")
     _log_inspect(job, right.name, right_payload)
     right_dir = Path(right_payload.get("previewDir") or work / "right")
     right_n = len(preview_pngs(right_dir))

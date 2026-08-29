@@ -284,6 +284,161 @@ def bulk_geometry(
     return out
 
 
+# --------------------------------------------------------------------------
+# Checker-scoped offline inspect (Sermon Checker cold read).
+#
+# The two Sermon Checker call sites (web.app._run_diff) switch from the ~5-min
+# per-slide JXA inspect_keynote to the validated offline IWA read + a slim
+# O(slides) bulk-geometry pass — measured ~3.25x faster, overflow-flag-identical.
+# Checker-SCOPED: inspect_keynote's other callers (framing, single-inspect, remap
+# template/readback) stay on the JXA path. The payload is a byte-shape drop-in, so
+# compare_inspects / deck_slide_digests / validate_inspect are untouched.
+#
+# CACHE-SCOPE CAVEAT: this writes the SAME digest-keyed cache inspect_keynote reads,
+# so a later inspect_keynote(same deck) — e.g. single-inspect (web.app:_run_inspect) —
+# would serve this OFFLINE payload (no group childCount/children, composed rotation)
+# rather than a fresh JXA read. Harmless today: no inspect_keynote consumer reads
+# childCount on a sermon deck, and rotation is drop-in for them. Revisit if a future
+# consumer of a checker deck's cache needs JXA-native childCount or exact rotation.
+# --------------------------------------------------------------------------
+def _build_checker_offline(key_path: Path, bulk_geometry_fn: Any) -> dict[str, Any]:
+    """The offline IWA + bulk-geometry checker payload, before export/cache.
+
+    ``two_tier_wall_payload`` (offline addressing/style/shapes/lines + a bulk
+    Keynote read overwriting the three offline-soft classes' geometry) with per-run
+    character style and grouped text attached (``iwa_runs.attach_runs`` sets both
+    ``item["runs"]`` and ``slide["groupedText"]``), and a ``master`` default so the
+    slide shape matches JXA's. Split out from :func:`inspect_keynote_checker` so the
+    offline assembly can be A/B-validated against a cached JXA payload with a
+    test-double ``bulk_geometry_fn``, no Keynote. Raises ``ImportError`` when the
+    ``iwa`` extra is absent (the caller drops the whole deck to the JXA inspect).
+    """
+    from obed_edom.offline_inspect import two_tier_wall_payload  # noqa: PLC0415
+
+    payload = two_tier_wall_payload(key_path, bulk_geometry_fn=bulk_geometry_fn)
+    try:
+        from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
+
+        attach_runs(key_path, payload)
+    except Exception:  # noqa: BLE001 — decode error leaves runs=[] / no groupedText
+        pass
+    # JXA emits `master` on every slide; the offline read does not consult it (the
+    # checker never reads it either), so default it for shape parity.
+    for slide in payload.get("slides") or []:
+        slide.setdefault("master", "")
+    return payload
+
+
+def inspect_keynote_checker(
+    key_path: Path | str,
+    *,
+    export_dir: Path | str | None = None,
+    use_cache: bool | None = None,
+) -> dict[str, Any]:
+    """A drop-in for :func:`inspect_keynote` at the two Sermon Checker call sites.
+
+    Builds the payload from the deck's IWA graph (text/runs/style/addressing/shapes/
+    lines) instead of the per-slide JXA read, overwrites the three offline-soft
+    classes' geometry (groups, masked/rotated images, autosize text) with a slim
+    O(slides) bulk Keynote read (:func:`bulk_geometry`), attaches per-run character
+    style and grouped text, and exports the PNG previews the checker shows.
+
+    Fallback is fail-safe to today's behaviour:
+      * missing ``iwa`` extra / decode error / bulk read raises entirely -> the whole
+        deck drops to the legacy :func:`inspect_keynote` (JXA);
+      * any slide the bulk read could not confirm, or that carries a content guard
+        flag the bulk read cannot touch (font-size-unresolved / filename-dirty), is
+        re-read with one scoped JXA :func:`inspect_keynote` and spliced back
+        (:func:`obed_edom.remap_keynote._merge_legacy_slides`).
+
+    The payload is a byte-shape drop-in (same top-level and per-slide/per-item fields
+    as :func:`inspect_keynote`), and is cached under the same digest-keyed path so a
+    warm rerun skips Keynote entirely.
+    """
+    key_path = Path(key_path).expanduser().resolve()
+    if not key_path.exists():
+        raise FileNotFoundError(f"Keynote not found: {key_path}")
+    timing: dict[str, float] = {}
+    want_cache = _truthy_cache(use_cache, None)
+    dest = Path(export_dir) if export_dir else None
+
+    from obed_edom.baseline import (  # noqa: PLC0415
+        deck_digest,
+        inspect_cache_path,
+        preview_cache_dir,
+    )
+
+    digest = ""
+    png_dir: Path | None = None
+    if want_cache:
+        t_hash = time.perf_counter()
+        digest = deck_digest(key_path)
+        timing["digest"] = time.perf_counter() - t_hash
+        json_path = inspect_cache_path(digest)
+        png_dir = preview_cache_dir(digest)
+        pngs_ok = dest is None or bool(preview_pngs(png_dir))
+        if json_path.is_file() and pngs_ok:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            payload["_cached"] = True
+            payload["_digest"] = digest
+            payload["_timing"] = timing
+            if dest is not None:
+                payload["previewDir"] = str(png_dir)
+                payload["exported"] = bool(preview_pngs(png_dir))
+            return payload
+
+    # Build the offline+bulk payload; a hard failure drops the whole deck to legacy.
+    t_read = time.perf_counter()
+    try:
+        payload = _build_checker_offline(key_path, bulk_geometry)
+    except Exception:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
+        return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
+    sidecar = payload.get("_offline") or {}
+    fallback_slides = sidecar.get("fallback_slides") or []
+    # Bulk tier entirely unavailable AND soft classes unconfirmed: the offline
+    # geometry alone cannot be trusted, so read the whole deck the legacy way.
+    if not sidecar.get("bulk_ok") and fallback_slides:
+        return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
+    # Granular per-slide fallback: re-read only the unconfirmed slides (one scoped
+    # JXA pass) and splice their items/groupedText back over the offline payload.
+    if fallback_slides:
+        from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
+
+        _merge_legacy_slides(payload, key_path, fallback_slides)
+    timing["read"] = time.perf_counter() - t_read
+
+    payload["path"] = str(key_path)
+    payload["keynoteBundleId"] = keynote_app.bundle_id()
+    payload["keynoteVersion"] = keynote_app.app_version()
+    payload.setdefault("exported", False)
+
+    export_target = dest
+    if want_cache and dest is not None and png_dir is not None:
+        export_target = png_dir
+    if export_target is not None:
+        export_target = Path(export_target)
+        export_target.mkdir(parents=True, exist_ok=True)
+        t_export = time.perf_counter()
+        err: str | None = None
+        if not preview_pngs(export_target):
+            err = export_slide_images(key_path, export_target)
+        payload["exported"] = bool(preview_pngs(export_target))
+        if not payload["exported"]:
+            payload["exportError"] = err or payload.get("exportError") or ""
+        timing["export"] = time.perf_counter() - t_export
+        payload["previewDir"] = str(export_target.resolve())
+
+    payload["_timing"] = timing
+    payload["_cached"] = False
+    payload["_digest"] = digest
+    if want_cache and digest:
+        json_path = inspect_cache_path(digest)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        stored = {key: value for key, value in payload.items() if not str(key).startswith("_")}
+        json_path.write_text(json.dumps(stored), encoding="utf-8")
+    return payload
+
+
 PREVIEW_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 PREVIEW_VIDEO_SUFFIXES = {".mov"}
 PREVIEW_MEDIA_SUFFIXES = PREVIEW_IMAGE_SUFFIXES | PREVIEW_VIDEO_SUFFIXES

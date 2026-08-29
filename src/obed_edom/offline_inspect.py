@@ -20,8 +20,13 @@ model is plan-equivalence, not correctness:
       unchanged.
     * **buildCount** — JXA reports ``0`` for every item on these decks; emit ``0``
       (no ``BuildArchive`` parsing).
-    * **rotation / master** — never read for the wall payload (rotation reads are
-      zero; ``master`` is only consulted over template slides), so OMITTED.
+    * **rotation** — emitted (``_item_from_record``) from the composed frame angle,
+      plus the mask angle for a masked image/movie so it equals JXA's *net* visible
+      rotation (a 2°-frame / -2°-mask pair reads as 0, matching JXA). The remap
+      planner never reads it — its reads are zero — so it is plan-neutral there, but
+      the checker needs it for the photo-tilt flag and the reuse fingerprint.
+    * **master** — only consulted over template slides, never the wall payload, so
+      OMITTED (the checker never reads it either).
     * **runs[]** — the per-run character style (:mod:`obed_edom.iwa_runs`) is a
       CHECKER input; the remap write path never reads it, so it is not attached.
     * **color** — JXA's ``objectText.color()`` returns a colour-managed value that
@@ -57,7 +62,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _xywha, compose_geometry
+from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _mask_geom, _xywha, compose_geometry
 from obed_edom.iwa_runs import resolve_style
 
 # The one needs_keynote category the gold-deck gate proves plan-neutral on decks
@@ -331,11 +336,21 @@ def _item_from_record(
 
     ``rec`` is a :func:`iwa_geometry.compose_geometry` record (id/kind/kindIndex/
     text/duplicateOf + composed x/y/w/h + geom_source/needs_keynote). The returned
-    item carries only the fields the remap planner reads; ``rotation``/``master``/
+    item carries the fields the remap planner reads plus ``rotation`` (the checker's
+    photo-tilt flag and reuse fingerprint read it; the planner does not); ``master``/
     ``runs``/``childCount`` are intentionally absent (see the module docstring).
     """
     obj = objects.get(rec["id"]) or {}
     kind = rec["kind"]
+    # rotation == JXA's `obj.rotation()`: the frame angle for most drawables, but a
+    # masked image/movie's visible rotation is the frame angle plus the mask's own
+    # (mask-local) angle — the mask window's ABSOLUTE rotation. A 2°-frame / 358°-mask
+    # pair therefore reads as 0, exactly as JXA reports it.
+    angle = _xywha(_geom_dict(obj))[4]
+    if kind in _ASSET:
+        mask_geom = _mask_geom(obj, objects)
+        if mask_geom:
+            angle += _xywha(mask_geom)[4]
     # Keynote returns laid-out geometry to JXA as whole points — every x/y/w/h and
     # line start/end in an ``inspect_keynote`` payload is an integer (``obj.position()``
     # etc. round in the app, not the JS). A faithful offline payload must round too:
@@ -355,6 +370,14 @@ def _item_from_record(
         "font": "",
         "color": None,
         "fileName": "",
+        # JXA's rotation is ALWAYS a whole degree (Keynote rounds it like x/y/w/h);
+        # round the same way and normalise into [0,360) so a net 360/-2 lands on 0/358
+        # as JXA reports. A fractional value would churn the reuse fingerprint
+        # (baseline.deck_slide_digests) and risk a spurious photo-tilt flag. NOTE: the
+        # composed frame+mask angle still carries a sub-degree residual on masked images,
+        # so exact JXA parity is not attainable offline — integer rounding minimises but
+        # does not eliminate rotation-digest churn on masked-rotated decks.
+        "rotation": _round_pt(angle) % 360,
         "locked": _locked(obj),
         "buildCount": 0,
     }
