@@ -211,6 +211,14 @@ def deck_slide_digests(payload: dict) -> list[str]:
         for item in _walk_items(slide):
             if (item.get("kind") or "") != "image":
                 continue
+            # Deliberately NO `rotation`: this is the slide-IDENTITY fingerprint that
+            # decides which slides PAIR, and orientation must not drive pairing. The
+            # offline read composes a masked image's angle from frame+mask, which can
+            # differ from JXA on flipped/masked photos (e.g. a flipped DSK lower-third
+            # read 354 vs JXA 0) — including it churned the digest and floated that slide
+            # out of order. A flip/rotation that differs from the LW counterpart is a
+            # real discrepancy, but it is caught by the image COMPARISON of the paired
+            # slides, not by this ordering key.
             images.append(
                 ":".join(
                     [
@@ -219,7 +227,6 @@ def deck_slide_digests(payload: dict) -> list[str]:
                         f"{float(item.get('y') or 0):.1f}",
                         f"{float(item.get('w') or 0):.1f}",
                         f"{float(item.get('h') or 0):.1f}",
-                        f"{float(item.get('rotation') or 0):.1f}",
                     ]
                 )
             )

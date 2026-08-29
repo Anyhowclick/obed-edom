@@ -44,6 +44,20 @@ from obed_edom.offline_inspect import (
 
 MAP_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Map_Extracted_Wall_1st.key")
 FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
+def test_deck_slide_digests_ignore_image_rotation():
+    """Regression: the slide-IDENTITY digest (which decides pairing) must NOT depend on
+    image rotation. A flipped/masked photo's offline angle can differ from JXA (a flipped
+    DSK lower-third read 354 vs JXA 0); when rotation was in the digest that churn floated
+    the slide out of order in the checker. Orientation discrepancies are caught by the
+    paired-image comparison, not this ordering key."""
+    from obed_edom.baseline import deck_slide_digests
+    base = {"slides": [{"index": 0, "number": 1, "skipped": False, "items": [
+        {"kind": "image", "kindIndex": 0, "fileName": "a.jpg",
+         "x": 44, "y": 704, "w": 1832, "h": 350, "rotation": 0}]}]}
+    rotated = {"slides": [{"index": 0, "number": 1, "skipped": False, "items": [
+        {"kind": "image", "kindIndex": 0, "fileName": "a.jpg",
+         "x": 44, "y": 704, "w": 1832, "h": 350, "rotation": 354}]}]}
+    assert deck_slide_digests(base) == deck_slide_digests(rotated)
 
 
 # --------------------------------------------------------------------------
