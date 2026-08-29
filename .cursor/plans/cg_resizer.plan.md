@@ -397,6 +397,66 @@ Removes the LAST avoidable dest open on the validate=False path. Two peer review
   save → deck still valid + placed). Both reviewers: opt-in or stop after Stage A.
 - **Order:** build `bulk-read-inspect` FIRST (read-only, lower risk), then Stage B.
 
+## Handover — Session 14 (offline remap READ: kindindex + geometry + the two-tier read)
+
+Branch `feat/iwa-kind-index` (pushed, NOT PR'd). Commits: `1b6d8c8` derive_kind_index +
+count-guard; `08c98ca` iwa_geometry (offline composed geometry); `98fdc9d`/earlier SKILL;
+`bbe2fb8` offline_inspect (JXA-shaped offline payload) + geometry fixes. Rebased on main
+(PR #40 merged). **Goal: replace remap's ~12-min JXA source inspect with an offline read.**
+
+**WHERE IT LANDED — the TWO-TIER read makes it work (proven, code building at handover).**
+Pure-offline geometry does NOT reproduce the remap PLAN: autosize text (needs Keynote text
+layout) and group frames (union-vs-stored) diverge, and a plan-equivalence gate
+(`scratchpad/validate_remap_plan.py`, offline diff of `plan_payload_transforms` +
+`plan_slide_reuses`) caught it (started RED 345 Map / 702 Full). Fixes cut it to 42/244, all
+guard-detected. **The answer (Fable): TWO-TIER read = offline for everything + one O(slides)
+BULK Keynote read of `position`/`size` of every group/image/text per slide, overwriting just
+those three classes' frames.** PROVEN offline by splicing the JXA values a bulk read returns →
+gate **GREEN (0 write-affecting) on BOTH decks**. The group/image/text frames are top-level
+slide properties, so the bulk read never descends into children — O(slides), not O(objects).
+
+**Durable discoveries (in SKILL too):**
+- **Keynote returns INTEGER geometry** (verified 0/30k fractional); offline sub-px values drift
+  the learned affine — `iwa_geometry` now rounds half-away-from-zero.
+- **Line endpoints had a MIRROR-FLIP bug** (opposite diagonal of the right bbox; written
+  verbatim so it drew a flipped line) — fixed: R(-θ) about frame centre, order from bezier
+  moveTo→lineTo + h/v-flip; 391/391 <0.5px.
+- **Masked near-zero (<~1°) rotation**: collapse to the axis-aligned frame+mask box (JXA does),
+  killed a ~2× deck-wide cascade.
+- **The group residual IS the autosize defect one level down** (Fable's unifying hypothesis —
+  11/15 stored-frame groups have autosize children): stale child heights break the union, so
+  ONE correct autosize source (the bulk read, or a future font-metric model) fixes text AND
+  groups. Not two group rules.
+- **The pipeline is ill-conditioned** (a 30px input → 1257px output via `visible_content_union`
+  → recipe), but fixing the geometry INPUTS resolved it — `map_remap` UNTOUCHED (empty diff),
+  JXA plan provably unchanged; the map→hide role-flip cascade vanished. Robust-recipe (prong 2)
+  became moot.
+- **Diagnosis trap the pressure-test caught:** ~85% of raw gate divergences looked like
+  artifacts, but only `role="hide"` geometry is truly write-dead; lines and group w/h ARE
+  written. Verify "is this field written?" against `remap_keynote.js`, never assume.
+
+**Safety model (built):** `OBED_OFFLINE_READ` = off (default, legacy) / on (offline + guard +
+AUTOMATIC total legacy fallback on any exception OR guard-trip) / verify (run both, diff at
+runtime, use legacy on divergence). Fallback must be GRANULAR per class/slide (Fable), not
+whole-deck, now that trips are classified. Default flips to `on` only after the gate is GREEN
+on both decks with the REAL bulk read AND one end-to-end remap run is placement-identical.
+
+**PENDING at handover (pick up here):**
+1. Executor `a3f516a2` building the two-tier code (slim bulk-geometry JXA read + splice +
+   granular fallback + `remap_keynote` wiring), tested via the JXA-splice simulation.
+2. **Run ONE real Keynote bulk-read pass** (single-op, NO concurrency — see cache lesson) to
+   MEASURE speed (Fable est. <10s group+image; text adds more; must beat 12.6 min) and CONFIRM
+   the real values match the simulated splice → gate GREEN.
+3. Then a real end-to-end remap run → placement-identical → flip default to `on`.
+- **PPTX is NOT needed for the fallback**: it gives image/text exactly but the group `grpSp`
+  stored-frame is the WRONG value for union-groups; the bulk read gives all three correctly in
+  one pass. PPTX only re-enters if the bulk read measures surprisingly slow.
+
+**CACHE-CORRUPTION LESSON (cost hours this session):** concurrent Keynote access (overlapping
+warms, or Keynote re-saving mid-read) corrupts a warm → partial payload (empty tail slides),
+cached under a stale digest. Warm ONE deck at a time, force decks CLOSED, keep all agents
+OFFLINE. Verify a fresh payload has no empty slides + image count == IWA before trusting it.
+
 ## The number block — DONE
 
 The 183/86/14/269 block: packing shipped (#32) and template-taught sizing shipped

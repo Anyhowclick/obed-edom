@@ -830,13 +830,23 @@ count. The rules, each independently agent-verified:
     negligible next to the ~12 min inspect) against derive; on any disagreement fall
     back to the JXA read for that slide. So 162/163 slides go offline, the odd one
     degrades safely.
-- **GEOMETRY is LARGELY RECOVERABLE offline — it is no longer the write-blocker it was
-  recorded to be** (cracked 2026-08-29, differential-tested per class vs the exact-bytes
-  JXA payloads on both decks). Shipped as **`src/obed_edom/iwa_geometry.py`**
-  (`compose_geometry` / `compose_deck_geometry` — `derive_kind_index` records with the raw
-  geometry REPLACED by composed JXA-frame `(x,y,w,h)` + a `needs_keynote` flag; every
-  non-flagged record is <2px vs JXA, ~0.5px floor). Raw IWA geometry diverges, but each
-  divergence is a *composition* the reader hadn't done, with a proven closed form:
+- **GEOMETRY: mostly recoverable offline for READS, but NOT enough to reproduce the remap
+  WRITE plan on its own** (differential-tested 2026-08-29 vs exact-bytes JXA payloads; then
+  gate-tested against the actual remap plan). Shipped as **`src/obed_edom/iwa_geometry.py`**
+  (`compose_geometry` — `derive_kind_index` records with raw geometry REPLACED by composed
+  JXA-frame `(x,y,w,h)` + a `needs_keynote` flag). Per-object it is <2px vs JXA on most
+  classes, BUT a plan-equivalence gate (`plan_payload_transforms`+`plan_slide_reuses`,
+  offline-vs-JXA) is RED on it: **autosize text** (needs Keynote text layout — `naturalSize`
+  is stale) and **group frames** (JXA uses child-union for some groups, the stored frame for
+  others — really the same autosize defect one level down, so no single offline rule matches)
+  diverge, and the ill-conditioned recipe amplifies them. **The write-safe answer is the
+  TWO-TIER READ:** offline for addressing/style/shapes/lines + one O(slides) BULK Keynote read
+  of `position`/`size` of every group/image/text per slide, overwriting just those three
+  classes' frames → gate GREEN on both decks. See the CG-plan "Handover — Session 14". Also
+  note: **Keynote returns whole-point (integer) geometry** — round offline values or sub-px
+  noise drifts the learned affine. The per-class composition formulas below are correct for
+  READING and for the offline half of the two-tier read; each is a *composition* the raw
+  reader hadn't done, with a proven closed form:
   - **Masked images.** The mask is a `TSD.MaskArchive` at `ImageArchive.mask`; its
     `super.geometry` is the visible crop rect in the image's local frame. Axis-aligned
     (the vast majority): `JXA = (img_x+mask_x, img_y+mask_y, mask_w, mask_h)` —
@@ -848,11 +858,12 @@ count. The rules, each independently agent-verified:
     **image ORDER geometry-verifiable** — closing the one write-safety hole review found
     (raw masked bounds carried no ordering signal, and JXA `fileName` is non-unique — it
     collapses every image to `pasted-image.pdf`).
-  - **Lines.** The offset is pure ROTATION: IWA stores the *un-rotated* frame + `angle`;
-    JXA reports the rotated line's AABB. `L=size.width` (= JXA width = length, exact);
-    `JXA.x = cx − (L/2)|cos θ|`, `JXA.y = cy − (L/2)|sin θ|`. **391/391 within 0.5px.**
-    remap needs position+length (not endpoints — the endpoint setter collapses the line,
-    `remap_keynote.js:195`), both offline-exact.
+  - **Lines.** The frame `x/y/w/h` offset is pure ROTATION (`L=size.width`=length exact;
+    `JXA.x = cx − (L/2)|cos θ|` etc.). BUT remap writes the actual `start`/`end` ENDPOINTS
+    verbatim, and the first offline attempt drew the MIRROR-FLIPPED diagonal (opposite corners
+    of the same bbox) — a real write bug. Correct endpoints (`offline_inspect._line_endpoints`):
+    `R(-θ)` about the frame centre with the endpoint order taken from the bezier `moveTo→lineTo`
+    direction and `horizontalFlip`/`verticalFlip`. Now 391/391 start/end <0.5px.
   - **Groups.** JXA reports the UNION of children's *transformed* bounds (recurse nested,
     rotate each child, use the mask rect for masked-image children); the stored group
     frame is stale (the 335px tail). Union → **~89% within 2px**; remap only sets a
