@@ -753,7 +753,14 @@ def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
     off = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
     assert off["_offline"]["bulk_ok"] is True
     assert off["_offline"]["fallback_slides"] == [], "full bulk => no slide falls back"
-    assert off["_offline"]["spliced"] > 1000
+    # Every bulk-kind item is spliced EXCEPT the <=2-per-slide trailing empty
+    # placeholder text boxes JXA appends and the offline read omits (placement-
+    # neutral; SKILL "Placeholders"). Assert that invariant rather than a magic
+    # count, so an edit to the gold deck doesn't falsely fail this.
+    bulk_items = sum(1 for s in jxa["slides"]
+                     for it in (s.get("items") or []) if it["kind"] in BULK_KINDS)
+    slide_count = len(jxa["slides"])
+    assert bulk_items - 2 * slide_count <= off["_offline"]["spliced"] <= bulk_items
 
     def plan(wall):
         rc = recipe_for(wall, template)
