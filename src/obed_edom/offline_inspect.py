@@ -72,6 +72,37 @@ from obed_edom.iwa_runs import resolve_style
 # be trusted. See iwa_geometry.NEEDS_KEYNOTE_REASONS for the full set.
 VOUCHED_NEEDS_KEYNOTE = frozenset({"autosize-soft"})
 
+# --------------------------------------------------------------------------
+# Two-tier read (offline + bulk-geometry) constants.
+# --------------------------------------------------------------------------
+# The three object classes whose laid-out geometry the offline read cannot
+# reproduce exactly and which the bulk Keynote read (bulk_geometry.js) overwrites:
+# groups (stored frame vs child-union), masked/rotated images+movies, and autosize
+# text (stale naturalSize vs the reflowed box). Shapes and lines are EXACT offline,
+# so they are never spliced. "text" here is the JXA ``textItems`` collection; a
+# text-bearing shape stays under "shape" and is not touched.
+BULK_KINDS = frozenset({"group", "image", "movie", "text"})
+
+# geom_source values whose offline geometry is only best-effort, so the item MUST
+# be confirmed by the bulk read to be trusted (group-union diverges on ~11% of
+# groups; autosize on ~20% of boxes — see iwa_geometry). An item with either source
+# that the bulk read did NOT return is a real, unconfirmed divergence -> its slide
+# falls back to the legacy read. Plain "iwa"/"line" frames and axis-aligned masks
+# are exact and need no bulk confirmation.
+SOFT_GEOM_SOURCES = frozenset({"group-union", "autosize"})
+
+# needs_keynote reasons that are pure GEOMETRY divergences (as opposed to content):
+# once the bulk read overwrites the item's frame, these no longer describe a write
+# divergence and are cleared. (autosize-soft is already vouched and never a flag.)
+GEOMETRY_GUARD_REASONS = frozenset(
+    {"rotated-masked", "masked-unresolved", "rotated-group", "group-residual"}
+)
+
+# Guard reasons that describe CONTENT the bulk geometry read does NOT touch (it
+# reads no font/size/fileName), so they survive the splice and still force a
+# per-slide fallback. Emitted by :func:`_item_from_record`, not by iwa_geometry.
+CONTENT_GUARD_REASONS = frozenset({"font-size-unresolved", "filename-dirty"})
+
 # A finalized asset's zip member is ``Data/<display-name>-<dataId>.<ext>``; the
 # ``-<dataId>`` suffix is Keynote's, not part of the name the object reports. An id
 # that does not resolve to exactly this shape (renamed / " copy" / path asset) is
@@ -411,6 +442,7 @@ def offline_wall_payload(
     style_cache: dict = {}
     slides_out: list[dict[str, Any]] = []
     guard: list[dict[str, Any]] = []
+    soft_geometry: list[dict[str, Any]] = []
     for index, (slide_id, skipped) in enumerate(order):
         slide = objects.get(slide_id)
         if slide is None:
@@ -430,6 +462,21 @@ def offline_wall_payload(
                         "reason": reason,
                     }
                 )
+            # An item whose offline geometry is only best-effort (a group frame or
+            # an autosize box) — or which already carries a geometry guard reason —
+            # is soft: the two-tier read must confirm it against the bulk Keynote
+            # geometry, or its slide falls back. Recorded from the record's
+            # geom_source (which the item dict does not carry).
+            if (
+                item["kind"] in BULK_KINDS
+                and (
+                    rec.get("geom_source") in SOFT_GEOM_SOURCES
+                    or rec.get("needs_keynote") in GEOMETRY_GUARD_REASONS
+                )
+            ):
+                soft_geometry.append(
+                    {"slide": index + 1, "kind": item["kind"], "kindIndex": item["kindIndex"]}
+                )
         slides_out.append(
             {
                 "index": index,
@@ -446,7 +493,11 @@ def offline_wall_payload(
         "slideHeight": height,
         "slideCount": len(slides_out),
         "slides": slides_out,
-        "_offline": {"guard": guard, "tripped": tripped},
+        "_offline": {
+            "guard": guard,
+            "tripped": tripped,
+            "soft_geometry": soft_geometry,
+        },
     }
 
 
@@ -474,3 +525,164 @@ def unvouched_items(payload: dict[str, Any], slide_range: Any = None) -> list[di
     from obed_edom.map_remap import wants_slide  # noqa: PLC0415
 
     return [flag for flag in guard if wants_slide(int(flag["slide"]), slide_range)]
+
+
+# --------------------------------------------------------------------------
+# Two-tier read: offline payload + a bulk Keynote geometry overwrite.
+# --------------------------------------------------------------------------
+def _slide_index_by_number(payload: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """``{document_number: slide}`` — the number the guard/soft flags key on."""
+    out: dict[int, dict[str, Any]] = {}
+    for slide in payload.get("slides") or []:
+        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+        out[number] = slide
+    return out
+
+
+def _splice_bulk_geometry(
+    payload: dict[str, Any], bulk: dict[int, dict[str, list]]
+) -> set[tuple[int, str, int]]:
+    """Overwrite each group/image/movie/text item's x/y/w/h from ``bulk``, in place.
+
+    ``bulk`` is ``{slideIndex: {kind: [[x, y, w, h], … by kindIndex]}}`` (the
+    :func:`obed_edom.inspect.bulk_geometry` shape), keyed by the 0-based document
+    index that equals ``slide["index"]``. Only the four :data:`BULK_KINDS` are
+    touched, and ONLY x/y/w/h — addressing, style, fileName, locked, childCount,
+    buildCount and text stay exactly as the offline read produced them. Values are
+    rounded to whole points to match JXA's integer geometry (see
+    :func:`_item_from_record`). Returns the set of ``(number, kind, kindIndex)``
+    actually spliced, so the caller knows which soft items the bulk read confirmed.
+    """
+    spliced: set[tuple[int, str, int]] = set()
+    for slide in payload.get("slides") or []:
+        index = int(slide.get("index") or 0)
+        number = int(slide.get("number") or (index + 1))
+        rows_by_kind = bulk.get(index)
+        if not rows_by_kind:
+            continue
+        for item in slide.get("items") or []:
+            kind = item.get("kind")
+            if kind not in BULK_KINDS:
+                continue
+            rows = rows_by_kind.get(kind)
+            if rows is None:
+                continue
+            ki = int(item.get("kindIndex", -1))
+            if ki < 0 or ki >= len(rows):
+                continue
+            row = rows[ki]
+            if row is None or len(row) < 4:
+                continue
+            x, y, w, h = row[0], row[1], row[2], row[3]
+            item["x"] = _round_pt(float(x))
+            item["y"] = _round_pt(float(y))
+            item["w"] = _round_pt(float(w))
+            item["h"] = _round_pt(float(h))
+            spliced.add((number, kind, ki))
+    return spliced
+
+
+def two_tier_wall_payload(
+    key_path: str | Path,
+    bulk_geometry_fn: Any = None,
+    slide_range: Any = None,
+) -> dict[str, Any]:
+    """The offline wall payload with the three soft classes' geometry read from Keynote.
+
+    Tier 1 is :func:`offline_wall_payload` (exact for shapes/lines/plain frames).
+    Tier 2 is ``bulk_geometry_fn(key_path, slides=…)`` — a callable returning
+    ``{slideIndex: {kind: [[x, y, w, h], …]}}`` (see
+    :func:`obed_edom.inspect.bulk_geometry`); its values OVERWRITE each
+    group/image/movie/text item's frame, which is where the offline read diverges.
+    With ``bulk_geometry_fn=None`` this is exactly the tier-1 payload (pure offline).
+
+    GRANULAR FALLBACK (per Fable) — the fallback unit is the object CLASS or SLIDE,
+    never the whole deck. The ``_offline`` sidecar gains:
+
+        * ``bulk_ok`` — False if the whole bulk read raised (tier 2 unavailable);
+          the caller then treats the deck the pure-offline way (whole-deck legacy
+          on any trip). True when a bulk map was obtained, even a partial one.
+        * ``spliced`` — count of items overwritten.
+        * ``fallback`` — the items that still need the legacy read, each
+          ``{slide, kind, kindIndex, reason}``. A slide appears here only for its
+          OWN unresolved items; every other slide is served offline+bulk.
+        * ``fallback_slides`` — the sorted document numbers in ``fallback`` (the
+          set the caller re-reads with one scoped ``inspect_keynote`` and merges).
+
+    The reworked guard (documented): because groups/images/text are now READ, the
+    geometry reasons ``group-residual`` / ``rotated-masked`` / ``masked-unresolved``
+    / ``rotated-group`` no longer force a fallback once the bulk read CONFIRMS the
+    item — they are cleared for spliced items. What remains a fallback trigger is
+    (a) a CONTENT guard reason the bulk read cannot touch (``font-size-unresolved``,
+    ``filename-dirty``), and (b) a SOFT-geometry item (group frame / autosize box,
+    or a geometry-flagged one) the bulk read did NOT return — an unconfirmed
+    divergence. Both are scoped to their slide, never the deck.
+    """
+    payload = offline_wall_payload(key_path, slide_range)
+    sidecar = payload.setdefault("_offline", {})
+    guard = sidecar.get("guard") or []
+    soft = sidecar.get("soft_geometry") or []
+
+    # Content guard reasons are never fixed by a geometry read.
+    content_flags = [f for f in guard if f.get("reason") in CONTENT_GUARD_REASONS]
+
+    if bulk_geometry_fn is None:
+        # Pure offline: every soft item is unconfirmed, so it is a fallback unit —
+        # this degrades to the offline read's own whole-deck-trip semantics via the
+        # union of content + soft flags, but expressed granularly.
+        fallback = content_flags + [{**s, "reason": "bulk-missing"} for s in soft]
+        _finalize_two_tier(payload, sidecar, bulk_ok=False, spliced=0, fallback=fallback,
+                           slide_range=slide_range)
+        return payload
+
+    from obed_edom.map_remap import wants_slide  # noqa: PLC0415
+
+    wanted = None
+    if slide_range is not None:
+        from obed_edom.map_remap import slides_for_plan  # noqa: PLC0415
+
+        wanted = slides_for_plan(slide_range)
+    try:
+        bulk = bulk_geometry_fn(key_path, slides=wanted)
+    except Exception:  # noqa: BLE001 — any bulk failure => tier 2 unavailable
+        fallback = content_flags + [{**s, "reason": "bulk-missing"} for s in soft]
+        _finalize_two_tier(payload, sidecar, bulk_ok=False, spliced=0, fallback=fallback,
+                           slide_range=slide_range)
+        return payload
+
+    spliced = _splice_bulk_geometry(payload, bulk or {})
+    # A soft item the bulk read did not confirm is still an unconfirmed divergence.
+    unconfirmed = [
+        {**s, "reason": "bulk-missing"}
+        for s in soft
+        if (int(s["slide"]), s["kind"], int(s["kindIndex"])) not in spliced
+    ]
+    fallback = content_flags + unconfirmed
+    if slide_range is not None:
+        fallback = [f for f in fallback if wants_slide(int(f["slide"]), slide_range)]
+    _finalize_two_tier(payload, sidecar, bulk_ok=True, spliced=len(spliced),
+                       fallback=fallback, slide_range=slide_range)
+    return payload
+
+
+def _finalize_two_tier(
+    payload: dict[str, Any],
+    sidecar: dict[str, Any],
+    *,
+    bulk_ok: bool,
+    spliced: int,
+    fallback: list[dict[str, Any]],
+    slide_range: Any,
+) -> None:
+    """Attach the two-tier bookkeeping to the ``_offline`` sidecar (in place)."""
+    if slide_range is not None:
+        from obed_edom.map_remap import wants_slide  # noqa: PLC0415
+
+        fallback = [f for f in fallback if wants_slide(int(f["slide"]), slide_range)]
+    sidecar["bulk_ok"] = bulk_ok
+    sidecar["spliced"] = spliced
+    sidecar["fallback"] = fallback
+    sidecar["fallback_slides"] = sorted({int(f["slide"]) for f in fallback})
+    # ``tripped`` now means "the whole deck cannot be served two-tier": true only
+    # when the bulk tier is unavailable AND there is anything to fall back on.
+    sidecar["tripped"] = bool(not bulk_ok and fallback)

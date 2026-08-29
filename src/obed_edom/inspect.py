@@ -14,6 +14,7 @@ from obed_edom.map_remap import slides_for_plan
 from obed_edom.paths import output_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
+BULK_GEOMETRY_JS = Path(__file__).resolve().parent / "bulk_geometry.js"
 
 
 def bulk_read_enabled() -> bool:
@@ -209,6 +210,78 @@ def inspect_keynote(
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(json.dumps(stored), encoding="utf-8")
     return payload
+
+
+def bulk_geometry(
+    key_path: Path | str,
+    slides: list[int] | None = None,
+) -> dict[int, dict[str, list[list[float]]]]:
+    """Bulk-read Keynote's laid-out geometry for the three offline-soft classes.
+
+    The "second tier" of the two-tier remap read (see
+    :func:`obed_edom.offline_inspect.two_tier_wall_payload`): opens the deck once
+    and, per slide, bulk-reads ONLY ``position``/``width``/``height`` of
+    ``textItems``/``images``/``movies``/``groups`` — the collections whose geometry
+    the offline IWA read cannot reproduce exactly. Runs ``bulk_geometry.js``, which
+    is O(slides) in Apple Events (<= 12 per slide, none per object on the fast path).
+
+    Returns ``{slideIndex: {kind: [[x, y, w, h], … by kindIndex]}}`` with the
+    0-based DOCUMENT index as the key, matching ``offline_wall_payload``'s
+    ``slides[].index``. A ``(slide, kind)`` the read could not evaluate is simply
+    absent, so the caller can fall back for just that slide/kind rather than the
+    whole deck. ``slides`` scopes the read to those 1-based document numbers (the
+    ``slides_for_plan`` shape); ``None`` reads every slide.
+
+    Raises ``RuntimeError`` on any osascript failure or unparseable output — the
+    caller catches it and drops to the legacy read, so a broken bulk tier can never
+    ship wrong geometry.
+    """
+    key_path = Path(key_path).expanduser().resolve()
+    if not key_path.exists():
+        raise FileNotFoundError(f"Keynote not found: {key_path}")
+    plan: dict[str, Any] = {
+        "path": str(key_path),
+        "bundleId": keynote_app.bundle_id(),
+    }
+    if slides:
+        wanted = sorted({int(n) for n in slides})
+        plan["slides"] = wanted
+        plan["range"] = [wanted[0], wanted[-1]]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(plan, handle)
+        plan_path = handle.name
+    try:
+        proc = subprocess.run(
+            ["osascript", "-l", "JavaScript", str(BULK_GEOMETRY_JS), plan_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        Path(plan_path).unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Bulk geometry read failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
+        )
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        raise RuntimeError("Bulk geometry read returned no JSON.")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Bulk geometry read returned invalid JSON: {exc}") from exc
+    geometry = parsed.get("geometry") or {}
+    # JSON object keys are strings; normalise back to the int slide index the
+    # splice addresses by, and coerce every row to plain floats.
+    out: dict[int, dict[str, list[list[float]]]] = {}
+    for slide_key, kinds in geometry.items():
+        rows_by_kind: dict[str, list[list[float]]] = {}
+        for kind, rows in (kinds or {}).items():
+            rows_by_kind[str(kind)] = [
+                [float(v) for v in row] for row in (rows or [])
+            ]
+        out[int(slide_key)] = rows_by_kind
+    return out
 
 
 PREVIEW_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}

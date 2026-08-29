@@ -159,6 +159,37 @@ def _reuses_equivalent(off: list[dict], jxa: list[dict]) -> bool:
     return True
 
 
+def _merge_legacy_slides(
+    payload: dict[str, Any], source: Path, slide_numbers: list[int]
+) -> None:
+    """Replace the given slides' items in ``payload`` with a scoped legacy read, in place.
+
+    The granular-fallback merge: only ``slide_numbers`` (document numbers) are
+    re-read, in a SINGLE ``inspect_keynote`` scoped to them, and each returned
+    slide's item-bearing fields overwrite the offline+bulk slide of the same
+    number. Addressing (index/number) and every other slide are left untouched, so
+    the payload stays a drop-in for the planner. A legacy read that comes back
+    without a wanted slide leaves that slide's offline data in place (best effort).
+    """
+    if not slide_numbers:
+        return
+    legacy = inspect_keynote(source, slide_range=frozenset(int(n) for n in slide_numbers))
+    by_number = {
+        int(s.get("number") or (int(s.get("index") or 0) + 1)): s
+        for s in legacy.get("slides") or []
+    }
+    for slide in payload.get("slides") or []:
+        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+        repl = by_number.get(number)
+        if repl is None:
+            continue
+        # Overwrite the content the legacy read authoritatively supplies; keep the
+        # offline index/number so downstream addressing is unchanged.
+        for key in ("items", "groupedText", "master", "skipped"):
+            if key in repl:
+                slide[key] = repl[key]
+
+
 def acquire_wall_payload(
     source: Path,
     *,
@@ -171,12 +202,19 @@ def acquire_wall_payload(
     """The source-wall inspect payload, honouring ``OBED_OFFLINE_READ`` ``mode``.
 
     * ``off`` — the legacy ``inspect_keynote(source)`` (the ~12-min JXA read).
-    * ``on`` — the offline IWA read is the source of truth, with the legacy read
-      as an AUTOMATIC TOTAL fallback on EITHER (a) any offline-read exception
-      (missing ``iwa`` extra, decode error, format change) or (b) the per-run
-      structural guard flagging an unvouched item.
-    * ``verify`` — run BOTH, diff the plan at runtime, and use the offline read
-      only when the plans are identical; otherwise use legacy. Pays the 12 min.
+    * ``on`` — the TWO-TIER read is the source of truth: the offline IWA payload
+      (tier 1, exact for shapes/lines/plain frames) with a slim bulk Keynote read
+      (tier 2) overwriting the geometry of the three offline-soft classes
+      (groups, masked/rotated images, autosize text). Fallback is GRANULAR — the
+      unit is the object CLASS or SLIDE, never the whole deck: only slides whose
+      soft items the bulk read did not confirm, or that carry a content guard flag
+      (font/fileName the bulk read cannot touch), are re-read with one scoped
+      legacy ``inspect_keynote`` and merged back. The whole deck drops to legacy
+      only when tier 1 itself raises (missing ``iwa`` extra, decode error) or the
+      bulk tier is entirely unavailable AND something still needs confirming.
+    * ``verify`` — build the two-tier read (granular fallback included), then diff
+      the plan against a full legacy read and use two-tier only when identical.
+      Pays the 12 min.
 
     A ``say(...)`` line always records which path actually supplied the payload.
     """
@@ -184,28 +222,49 @@ def acquire_wall_payload(
         return inspect_keynote(source, slide_range=slide_range)
 
     try:
+        from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
         from obed_edom.offline_inspect import (  # noqa: PLC0415 (optional iwa extra)
-            offline_wall_payload,
-            unvouched_items,
+            two_tier_wall_payload,
         )
 
-        offline = offline_wall_payload(source, slide_range=slide_range)
-    except Exception as exc:  # noqa: BLE001 — any offline failure drops to legacy
+        offline = two_tier_wall_payload(
+            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range
+        )
+    except Exception as exc:  # noqa: BLE001 — any tier-1 failure drops to legacy
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
             f"using Keynote inspect of {source.name}.")
         return inspect_keynote(source, slide_range=slide_range)
 
-    flags = unvouched_items(offline, slide_range)
-    if flags:
+    sidecar = offline.get("_offline") or {}
+    fallback_slides = sidecar.get("fallback_slides") or []
+
+    # Tier 2 (bulk geometry) unavailable AND something still needs confirming:
+    # the offline geometry alone cannot be trusted for the soft classes, so drop
+    # the whole deck to legacy — the pre-two-tier safe behaviour.
+    if not sidecar.get("bulk_ok") and fallback_slides:
         from collections import Counter  # noqa: PLC0415
 
-        reasons = dict(Counter(f["reason"] for f in flags))
-        say(f"Offline source read guard-tripped on {len(flags)} unvouched item(s) "
-            f"{reasons}; using Keynote inspect of {source.name} for the whole deck.")
+        reasons = dict(Counter(f["reason"] for f in sidecar.get("fallback") or []))
+        say(f"Bulk geometry read of {source.name} unavailable and "
+            f"{len(fallback_slides)} slide(s) need it {reasons}; "
+            f"using Keynote inspect for the whole deck.")
         return inspect_keynote(source, slide_range=slide_range)
 
+    # Granular per-slide fallback: re-read only the flagged slides (one scoped
+    # legacy pass) and splice their items back over the offline payload.
+    if fallback_slides:
+        from collections import Counter  # noqa: PLC0415
+
+        reasons = dict(Counter(f["reason"] for f in sidecar.get("fallback") or []))
+        say(f"Two-tier read of {source.name}: {sidecar.get('spliced', 0)} item(s) "
+            f"bulk-confirmed; {len(fallback_slides)} slide(s) fall back to Keynote "
+            f"inspect {reasons}: {fallback_slides}.")
+        _merge_legacy_slides(offline, source, fallback_slides)
+
     if mode == "on":
-        say(f"Read {source.name} offline from its IWA graph — skipped the Keynote source inspect.")
+        confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
+        say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
+            f"skipped the full Keynote source inspect.")
         return offline
 
     # verify: cross-check the plan against the legacy read.

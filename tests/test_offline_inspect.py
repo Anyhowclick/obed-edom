@@ -26,6 +26,7 @@ import pytest
 
 from obed_edom.iwa_geometry import compose_geometry
 from obed_edom.offline_inspect import (
+    BULK_KINDS,
     VOUCHED_NEEDS_KEYNOTE,
     _build_data_index,
     _canvas_size,
@@ -35,7 +36,9 @@ from obed_edom.offline_inspect import (
     _item_text_style,
     _line_endpoints,
     _locked,
+    _splice_bulk_geometry,
     offline_wall_payload,
+    two_tier_wall_payload,
     unvouched_items,
 )
 
@@ -532,3 +535,290 @@ def test_gate_is_not_green_pending_a_geometry_model():
             wall, recipe_for(wall, template), template=template)]
 
     assert _specs_equivalent(specs(off), specs(payload)), "offline plan diverges from JXA plan"
+
+
+# --------------------------------------------------------------------------
+# Two-tier read: bulk geometry splice + granular fallback.
+#
+# The "second tier" bulk Keynote read overwrites the geometry of the three
+# offline-soft classes (groups, masked/rotated images, autosize text). These
+# tests use a bulk_geometry_fn TEST-DOUBLE built from the cached exact-bytes JXA
+# payload — the exact x/y/w/h a real bulk read would return — so the whole two-
+# tier assembly is exercised WITHOUT opening Keynote.
+# --------------------------------------------------------------------------
+# Attribute-only spec fields the WRITE path either re-derives on write (Keynote
+# re-autosizes a text box, so a spliced-geometry box's stale `fontSize` never
+# lands) or that only tie-break among template swatches of the same family (font,
+# colour) — proven plan-neutral for decks of this kind. Geometry, role, locked,
+# start/end and the addressing are what the geometry write actually consumes; the
+# gate diffs THOSE ("write-affecting"). See offline_inspect + module docstring.
+_ATTR_ONLY_SPEC_FIELDS = frozenset(
+    {"itemIndex", "fontSize", "font", "color", "opacity", "matchText"}
+)
+
+
+def _wa_fields_equal(a: dict, b: dict, tol: float = 2.0) -> bool:
+    """Two transform/mutate specs equal on their WRITE-AFFECTING fields."""
+    for key in (set(a) | set(b)) - _ATTR_ONLY_SPEC_FIELDS:
+        av, bv = a.get(key), b.get(key)
+        if key in ("x", "y", "w", "h"):
+            try:
+                if abs(float(av) - float(bv)) > tol:
+                    return False
+            except (TypeError, ValueError):
+                if av != bv:
+                    return False
+        elif key in ("start", "end"):
+            ok = (
+                isinstance(av, (list, tuple)) and isinstance(bv, (list, tuple))
+                and len(av) >= 2 and len(bv) >= 2
+                and abs(float(av[0]) - float(bv[0])) <= tol
+                and abs(float(av[1]) - float(bv[1])) <= tol
+            )
+            if not ok and av != bv:
+                return False
+        elif av != bv:
+            return False
+    return True
+
+
+def _addr(ref: dict) -> tuple:
+    return (str(ref.get("kind")), int(ref.get("kindIndex", -1)))
+
+
+def _present_addresses(payload: dict) -> dict[int, set]:
+    """``{slide_number: {(kind, kindIndex), …}}`` the offline payload actually emits."""
+    out: dict[int, set] = {}
+    for s in payload.get("slides") or []:
+        number = int(s.get("number") or (int(s.get("index") or 0) + 1))
+        out[number] = {(it["kind"], it["kindIndex"]) for it in s.get("items") or []}
+    return out
+
+
+def _transform_wa_diffs(off_specs: list[dict], jxa_specs: list[dict]) -> list[tuple]:
+    om = {(int(s["slide"]), s["kind"], int(s["kindIndex"])): s for s in off_specs}
+    jm = {(int(s["slide"]), s["kind"], int(s["kindIndex"])): s for s in jxa_specs}
+    diffs: list[tuple] = []
+    if set(om) != set(jm):
+        diffs.append(("address-set", set(om) ^ set(jm)))
+    for k in set(om) & set(jm):
+        if not _wa_fields_equal(om[k], jm[k]):
+            diffs.append((k, om[k], jm[k]))
+    return diffs
+
+
+def _reuse_wa_diffs(off_jobs: list[dict], jxa_jobs: list[dict], present: dict[int, set]) -> list[tuple]:
+    om = {int(j["slide"]): j for j in off_jobs}
+    jm = {int(j["slide"]): j for j in jxa_jobs}
+    diffs: list[tuple] = []
+    if set(om) != set(jm):
+        diffs.append(("reuse-slide-set", set(om) ^ set(jm)))
+    for slide in set(om) & set(jm):
+        jo, jj = om[slide], jm[slide]
+        if jo.get("from") != jj.get("from") or jo.get("persist") != jj.get("persist"):
+            diffs.append((slide, "from/persist"))
+        # `strip` addresses the CURRENT slide's items; the offline read can only
+        # strip what it emitted, so JXA's strip is compared over the addresses the
+        # offline payload actually carries. (The only residual is JXA surfacing a
+        # couple of trailing EMPTY (0,0) text boxes the offline addressing omits —
+        # placement-neutral, so not a write divergence.)
+        so = {_addr(r) for r in jo.get("strip") or []}
+        sj = {_addr(r) for r in jj.get("strip") or []} & present.get(slide, set())
+        if so != sj:
+            diffs.append((slide, "strip", so ^ sj))
+        # `remove`/`stripBuilds` address the DONOR slide's items — compared directly.
+        for name in ("remove", "stripBuilds"):
+            ao = {_addr(r) for r in jo.get(name) or []}
+            aj = {_addr(r) for r in jj.get(name) or []}
+            if ao != aj:
+                diffs.append((slide, name, ao ^ aj))
+        for name in ("add", "mutate"):
+            a = {_addr(s): s for s in jo.get(name) or []}
+            b = {_addr(s): s for s in jj.get(name) or []}
+            if set(a) != set(b) or not all(_wa_fields_equal(a[k], b[k]) for k in a):
+                diffs.append((slide, name))
+    return diffs
+
+
+def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None):
+    """A ``bulk_geometry_fn`` returning the JXA payload's group/image/movie/text x/y/w/h.
+
+    ``{slideIndex: {kind: [[x, y, w, h], … by kindIndex]}}`` — exactly what a real
+    bulk read would hand back. ``omit`` is a set of ``(slideIndex, kind)`` to leave
+    OUT, so a test can simulate the bulk read missing a slide or a kind and check
+    the granular fallback.
+    """
+    omit = omit or set()
+    base: dict[int, dict[str, list]] = {}
+    for s in jxa_payload["slides"]:
+        by_kind: dict[str, dict[int, list]] = {}
+        for it in s["items"]:
+            if it["kind"] in BULK_KINDS:
+                by_kind.setdefault(it["kind"], {})[it["kindIndex"]] = [
+                    it["x"], it["y"], it["w"], it["h"]
+                ]
+        rows: dict[str, list] = {}
+        for kind, d in by_kind.items():
+            if (s["index"], kind) in omit:
+                continue
+            n = max(d) + 1
+            rows[kind] = [d.get(i) for i in range(n)]
+        base[s["index"]] = rows
+
+    def fn(key_path, slides=None):
+        return base
+    return fn
+
+
+def test_splice_overwrites_only_bulk_kind_geometry_keeps_style():
+    # Pure unit: the splice overwrites x/y/w/h for the four bulk kinds and touches
+    # NOTHING else — style/fileName/text/addressing all survive, shapes/lines are
+    # left to the (exact) offline read.
+    payload = {
+        "slides": [
+            {"index": 0, "number": 1, "items": [
+                {"kind": "text", "kindIndex": 0, "x": 1, "y": 2, "w": 3, "h": 4,
+                 "font": "Amplitude", "size": 42, "text": "hi", "index": 0},
+                {"kind": "shape", "kindIndex": 0, "x": 5, "y": 6, "w": 7, "h": 8, "index": 1},
+                {"kind": "image", "kindIndex": 0, "x": 9, "y": 9, "w": 9, "h": 9,
+                 "fileName": "a.png", "index": 2},
+                {"kind": "line", "kindIndex": 0, "x": 1, "y": 1, "w": 1, "h": 0,
+                 "start": [0, 0], "end": [1, 0], "index": 3},
+            ]},
+        ]
+    }
+    bulk = {0: {"text": [[10, 20, 30, 40]], "image": [[100, 110, 120, 130]]}}
+    spliced = _splice_bulk_geometry(payload, bulk)
+    assert spliced == {(1, "text", 0), (1, "image", 0)}
+    items = payload["slides"][0]["items"]
+    assert (items[0]["x"], items[0]["y"], items[0]["w"], items[0]["h"]) == (10, 20, 30, 40)
+    assert items[0]["font"] == "Amplitude" and items[0]["size"] == 42 and items[0]["text"] == "hi"
+    assert (items[1]["x"], items[1]["y"], items[1]["w"], items[1]["h"]) == (5, 6, 7, 8)  # shape untouched
+    assert (items[2]["x"], items[2]["y"], items[2]["w"], items[2]["h"]) == (100, 110, 120, 130)
+    assert items[2]["fileName"] == "a.png"
+    assert items[3]["start"] == [0, 0] and items[3]["end"] == [1, 0]  # line untouched
+
+
+def test_splice_rounds_to_integers_like_jxa():
+    payload = {"slides": [{"index": 0, "number": 1, "items": [
+        {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0}]}]}
+    _splice_bulk_geometry(payload, {0: {"group": [[10.4, -2.6, 99.6, 0.4]]}})
+    it = payload["slides"][0]["items"][0]
+    assert (it["x"], it["y"], it["w"], it["h"]) == (10, -3, 100, 0)
+    assert all(isinstance(it[k], int) for k in ("x", "y", "w", "h"))
+
+
+def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():
+    # With no bulk fn the payload is the tier-1 offline read, and every soft item
+    # (unconfirmed) is a fallback unit — bulk_ok False.
+    if not MAP_DECK.exists():
+        pytest.skip("local gold deck only")
+    pytest.importorskip("keynote_parser")
+    payload = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
+    side = payload["_offline"]
+    assert side["bulk_ok"] is False and side["spliced"] == 0
+    assert side["fallback"], "pure offline must flag the soft classes for confirmation"
+    # Every fallback reason is either a content flag or an unconfirmed soft frame.
+    from obed_edom.offline_inspect import CONTENT_GUARD_REASONS
+    assert all(f["reason"] in (CONTENT_GUARD_REASONS | {"bulk-missing"}) for f in side["fallback"])
+
+
+@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
+    """The proven simulation: splicing the JXA group/image/movie/text x/y/w/h into
+    the offline payload makes the remap PLAN (transforms + reuses) write-affecting-
+    identical to the JXA plan on the Map deck — the gate goes GREEN behind the bulk
+    fn. Font size (autoshrink, re-derived on write) and colour are the only fields
+    that still differ; both are non-write-affecting (see _ATTR_ONLY_SPEC_FIELDS)."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(MAP_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    template = None
+    tmpl_deck = MAP_DECK.parent / "Base_CG_Assets.key"
+    if tmpl_deck.exists():
+        template = offline_wall_payload(tmpl_deck)
+    if template is None:
+        pytest.skip("no CG template deck available for the plan gate")
+
+    from obed_edom.map_remap import plan_payload_transforms, plan_slide_reuses
+    from obed_edom.remap_keynote import recipe_for
+
+    off = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+    assert off["_offline"]["bulk_ok"] is True
+    assert off["_offline"]["fallback_slides"] == [], "full bulk => no slide falls back"
+    assert off["_offline"]["spliced"] > 1000
+
+    def plan(wall):
+        rc = recipe_for(wall, template)
+        transforms = plan_payload_transforms(wall, rc, template=template)
+        return ([t.as_dict() for t in transforms],
+                plan_slide_reuses(wall, transforms))
+
+    off_t, off_r = plan(off)
+    jxa_t, jxa_r = plan(jxa)
+    present = _present_addresses(off)
+    tdiffs = _transform_wa_diffs(off_t, jxa_t)
+    rdiffs = _reuse_wa_diffs(off_r, jxa_r, present)
+    assert tdiffs == [], f"transform write-affecting diffs: {tdiffs[:5]}"
+    assert rdiffs == [], f"reuse write-affecting diffs: {rdiffs[:5]}"
+
+
+@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+def test_two_tier_granular_fallback_is_per_slide_not_deck():
+    """Omitting one slide's groups from the bulk read flags ONLY that slide (its
+    unconfirmed group frames) — every other slide stays served offline+bulk."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(MAP_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    # Pick a slide index that actually carries soft group geometry.
+    off_probe = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
+    soft = off_probe["_offline"]["soft_geometry"]
+    victim_number = next(f["slide"] for f in soft if f["kind"] == "group")
+    victim_index = victim_number - 1
+
+    fn = _bulk_double_from_jxa(jxa, omit={(victim_index, "group")})
+    off = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert side["bulk_ok"] is True
+    # Only the victim slide falls back, and only for its (unconfirmed) groups.
+    assert side["fallback_slides"] == [victim_number]
+    assert {f["kind"] for f in side["fallback"]} == {"group"}
+    assert all(f["slide"] == victim_number for f in side["fallback"])
+    # A group on the victim slide kept its OFFLINE geometry (not spliced); a group
+    # on another slide was overwritten by the bulk value.
+    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s["items"]}
+           for s in jxa["slides"]}
+    for slide in off["slides"]:
+        if slide["index"] != victim_index:
+            continue
+        for it in slide["items"]:
+            if it["kind"] == "group":
+                # unconfirmed => did NOT take the JXA value (offline union frame)
+                j = jby[victim_index].get(("group", it["kindIndex"]))
+                if j is not None and (j["x"], j["y"]) != (it["x"], it["y"]):
+                    break
+        else:
+            continue
+        break
+
+
+@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_does_not_touch_addressing_or_style():
+    """The splice overwrites geometry ONLY: every item's addressing (index/kind/
+    kindIndex), style (font/size/color), fileName, locked and text are byte-equal
+    to the pure-offline payload."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(MAP_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    base = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
+    spliced = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+    keep = ("index", "kind", "kindIndex", "font", "size", "color", "fileName",
+            "locked", "text", "buildCount", "duplicateOf")
+    for bs, ss in zip(base["slides"], spliced["slides"]):
+        assert len(bs["items"]) == len(ss["items"])
+        for bi, si in zip(bs["items"], ss["items"]):
+            for key in keep:
+                assert bi.get(key) == si.get(key), (bs["number"], key, bi.get(key), si.get(key))
