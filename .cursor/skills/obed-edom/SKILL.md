@@ -832,8 +832,11 @@ count. The rules, each independently agent-verified:
     degrades safely.
 - **GEOMETRY is LARGELY RECOVERABLE offline — it is no longer the write-blocker it was
   recorded to be** (cracked 2026-08-29, differential-tested per class vs the exact-bytes
-  JXA payloads on both decks). Raw IWA geometry diverges, but each divergence is a
-  *composition* the reader hadn't done, with a proven closed form:
+  JXA payloads on both decks). Shipped as **`src/obed_edom/iwa_geometry.py`**
+  (`compose_geometry` / `compose_deck_geometry` — `derive_kind_index` records with the raw
+  geometry REPLACED by composed JXA-frame `(x,y,w,h)` + a `needs_keynote` flag; every
+  non-flagged record is <2px vs JXA, ~0.5px floor). Raw IWA geometry diverges, but each
+  divergence is a *composition* the reader hadn't done, with a proven closed form:
   - **Masked images.** The mask is a `TSD.MaskArchive` at `ImageArchive.mask`; its
     `super.geometry` is the visible crop rect in the image's local frame. Axis-aligned
     (the vast majority): `JXA = (img_x+mask_x, img_y+mask_y, mask_w, mask_h)` —
@@ -856,15 +859,19 @@ count. The rules, each independently agent-verified:
     group's *position* (it cannot scale a group), which is exactly this. The ~11%
     residual (zero-size connector children / effect margins) is offline-detectable by
     child signature → flag for a JXA read.
-  - **Shapes** carry a systematic ~2px inset (median 2.2, max 12.5), which the wall→CG
-    downscale (0.25–0.5×) shrinks to sub-pixel — within budget, no fallback.
-  - **Autosize text** is the one partial gap. Position recovers EXACT — `x`=left edge,
-    and `geometry.position.y` is the vertical CENTER so `JXA_top = y − h/2` (1191/1191
-    <0.5px). Height = `naturalSize.height` on *fresh* boxes (200/200), but that cache
-    goes stale on re-sized text (recompute from run font size: `h ≈ 1.15·fontSize+9.5`,
-    per-font). **Width is NOT recoverable** (`naturalSize.width` is stale AND shuffled —
-    needs glyph shaping); but the name lists whose width would matter are **re-flowed by
-    hand anyway** (SKILL packing note), and loose labels need only position.
+  - **Shapes.** The apparent "~2px systematic inset" (median 2.2, max 12.5) is actually
+    small ROTATION on those shapes — applying the same corner-AABB rule as images
+    (un-rotated size, AABB top-left) brings **1884 real rotated shapes to <0.5px** on
+    both decks; non-rotated shapes pass through unchanged. So shape geometry is exact,
+    not merely within-budget.
+  - **Autosize text** is the one partial gap. `x` recovers EXACT (left-aligned:
+    1191/1191 <0.5px; centre/right-aligned `x` is the anchor, soft). `geometry.position.y`
+    is the vertical CENTRE, so `top = y − h/2` — but this rides `h = naturalSize.height`,
+    which is **stale on ~20%** of boxes, so `top` is wrong (to ~750px) on ~1-in-5 and
+    `h` likewise (recompute from run font size, `h ≈ 1.15·fontSize+9.5`, per-font, to
+    harden). **Width is NOT recoverable** (`naturalSize.width` is stale AND shuffled —
+    needs glyph shaping). So EVERY autosize box is flagged (`autosize-soft`); the name
+    lists whose w/h matter are **re-flowed by hand anyway** (SKILL packing note).
 - **The PPTX-export route — the geometry read fully laid out, in one Apple Event.**
   `export doc as Microsoft PowerPoint` runs in **~21 s (1.2 GB) / ~77 s (6.8 GB)** — vs
   the 12.6-min inspect — and `ppt/slides/slideN.xml` carries every shape's `a:off`/`a:ext`
