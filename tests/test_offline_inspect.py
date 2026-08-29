@@ -511,11 +511,17 @@ def test_integration_offline_field_parity_map_deck():
                           "fixed. See scratchpad/validate_remap_plan.py + module docstring.",
                    strict=False)
 def test_gate_is_not_green_pending_a_geometry_model():
-    """Records the open gap: the offline plan does NOT equal the JXA plan yet.
+    """Records the open gap: the PURE-OFFLINE plan (tier 1, no bulk read) does NOT
+    equal the JXA plan under the STRICT check (`_specs_equivalent`, all fields but
+    itemIndex).
 
-    Expected to xfail. When a font-metric text-layout model + a group-frame model
-    land and close the divergence, this flips to xpass — the signal to revisit the
-    guard's vouched set and the default flip.
+    NOTE (Session 15): the default already flipped to `on` — that rests on the
+    TWO-TIER (offline + bulk geometry) read passing the WRITE-AFFECTING gate on both
+    decks, not on this stricter pure-offline gate. This test tracks a separate,
+    harder goal: whether a font-metric text-layout model + a group-frame model could
+    make the read exact enough to skip the bulk Keynote pass entirely. Expected to
+    xfail until then; an xpass is a bonus (pure-offline sufficiency), not a flip
+    trigger. See scratchpad/validate_remap_plan.py + module docstring.
     """
     pytest.importorskip("keynote_parser")
     payload = _cached_payload(MAP_DECK)

@@ -59,46 +59,22 @@ def as_geometry_enabled() -> bool:
 # an AUTOMATIC total fallback. See obed_edom.offline_inspect + the reviewed plan.
 # --------------------------------------------------------------------------
 def offline_read_mode(explicit: str | None = None) -> str:
-    """Resolve the offline-read mode: ``off`` (default), ``on`` or ``verify``.
+    """Resolve the offline-read mode: ``on`` (default) or ``off``.
 
     ``explicit`` (the ``remap()`` param) wins; otherwise ``OBED_OFFLINE_READ``;
-    otherwise ``off``. Unknown values fall to ``off`` — an unrecognised setting
-    must never silently enable an unvalidated read path. DEFAULT is ``off`` until
-    the gold-deck gate (``scratchpad/validate_remap_plan.py``) is green on both
-    decks AND one real end-to-end remap run is placement-identical.
+    otherwise the default. Unknown values fall to the default. DEFAULT is ``on``
+    (Session 15): the gold-deck plan gate is green on both decks with the real bulk
+    read, and one real end-to-end ``on`` remap wrote a deck placement-identical to a
+    legacy-read run. ``OBED_OFFLINE_READ=off`` forces the legacy ~12-min JXA inspect.
+
+    (The old ``verify`` mode — build both reads and diff at runtime — was removed:
+    its check was stricter than the validated write-affecting gate, so a re-derived
+    autoshrink ``fontSize`` that never lands on write made it always fall back on
+    real decks. The granular per-slide fallback inside the ``on`` path is the safety
+    net; force ``off`` for a full legacy read.)
     """
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_READ", "")).strip().lower()
-    return raw if raw in {"on", "off", "verify"} else "off"
-
-
-def _plans_equivalent(
-    off_wall: dict[str, Any],
-    legacy_wall: dict[str, Any],
-    template_data: dict[str, Any] | None,
-    slide_range: Any,
-) -> bool:
-    """Whether the remap PLAN (transforms + reuses) is identical from both reads.
-
-    The runtime form of the gold gate: same template, geometry within 2px, all
-    other fields exact, keyed by ``(slide, kind, kindIndex)`` — the address the
-    write path uses (``itemIndex`` is a payload-order echo, ignored). Any
-    divergence => the offline read is not trusted for this run.
-    """
-    def plan(wall: dict[str, Any]):
-        recipe = recipe_for(wall, template_data or {})
-        transforms = plan_payload_transforms(
-            wall, recipe, slide_range=slide_range, template=template_data
-        )
-        specs = [t.as_dict() for t in transforms]
-        reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
-        return specs, reuses
-
-    try:
-        off_t, off_r = plan(off_wall)
-        leg_t, leg_r = plan(legacy_wall)
-    except Exception:  # noqa: BLE001 — a compare failure is treated as a divergence
-        return False
-    return _specs_equivalent(off_t, leg_t) and _reuses_equivalent(off_r, leg_r)
+    return raw if raw in {"on", "off"} else "on"
 
 
 def _spec_addr(spec: dict[str, Any]) -> tuple:
@@ -133,30 +109,6 @@ def _specs_equivalent(off: list[dict], jxa: list[dict]) -> bool:
     if set(off_map) != set(jxa_map):
         return False
     return all(_spec_fields_equal(off_map[k], jxa_map[k]) for k in off_map)
-
-
-def _ref_addr(ref: dict[str, Any]) -> tuple:
-    return (str(ref.get("kind")), int(ref.get("kindIndex", -1)))
-
-
-def _reuses_equivalent(off: list[dict], jxa: list[dict]) -> bool:
-    off_map = {int(j["slide"]): j for j in off}
-    jxa_map = {int(j["slide"]): j for j in jxa}
-    if set(off_map) != set(jxa_map):
-        return False
-    for slide in off_map:
-        jo, jj = off_map[slide], jxa_map[slide]
-        if jo.get("from") != jj.get("from") or jo.get("persist") != jj.get("persist"):
-            return False
-        for name in ("remove", "strip", "stripBuilds"):
-            if {_ref_addr(r) for r in jo.get(name) or []} != {_ref_addr(r) for r in jj.get(name) or []}:
-                return False
-        for name in ("add", "mutate"):
-            a = {_ref_addr(s): s for s in jo.get(name) or []}
-            b = {_ref_addr(s): s for s in jj.get(name) or []}
-            if set(a) != set(b) or not all(_spec_fields_equal(a[k], b[k]) for k in a):
-                return False
-    return True
 
 
 def _merge_legacy_slides(
@@ -195,16 +147,14 @@ def acquire_wall_payload(
     *,
     slide_range: Any,
     mode: str,
-    template_path: Path,
-    template_payload: dict[str, Any] | None,
     say: Callable[[str], None],
 ) -> dict[str, Any]:
     """The source-wall inspect payload, honouring ``OBED_OFFLINE_READ`` ``mode``.
 
     * ``off`` — the legacy ``inspect_keynote(source)`` (the ~12-min JXA read).
-    * ``on`` — the TWO-TIER read is the source of truth: the offline IWA payload
-      (tier 1, exact for shapes/lines/plain frames) with a slim bulk Keynote read
-      (tier 2) overwriting the geometry of the three offline-soft classes
+    * ``on`` (default) — the TWO-TIER read is the source of truth: the offline IWA
+      payload (tier 1, exact for shapes/lines/plain frames) with a slim bulk Keynote
+      read (tier 2) overwriting the geometry of the three offline-soft classes
       (groups, masked/rotated images, autosize text). Fallback is GRANULAR — the
       unit is the object CLASS or SLIDE, never the whole deck: only slides whose
       soft items the bulk read did not confirm, or that carry a content guard flag
@@ -212,9 +162,6 @@ def acquire_wall_payload(
       legacy ``inspect_keynote`` and merged back. The whole deck drops to legacy
       only when tier 1 itself raises (missing ``iwa`` extra, decode error) or the
       bulk tier is entirely unavailable AND something still needs confirming.
-    * ``verify`` — build the two-tier read (granular fallback included), then diff
-      the plan against a full legacy read and use two-tier only when identical.
-      Pays the 12 min.
 
     A ``say(...)`` line always records which path actually supplied the payload.
     """
@@ -261,20 +208,11 @@ def acquire_wall_payload(
             f"inspect {reasons}: {fallback_slides}.")
         _merge_legacy_slides(offline, source, fallback_slides)
 
-    if mode == "on":
-        confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
-        say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
-            f"skipped the full Keynote source inspect.")
-        return offline
-
-    # verify: cross-check the plan against the legacy read.
-    legacy = inspect_keynote(source, slide_range=slide_range)
-    template_data = template_payload if template_payload is not None else inspect_keynote(template_path)
-    if _plans_equivalent(offline, legacy, template_data, slide_range):
-        say(f"Offline source read of {source.name} verified plan-identical to Keynote inspect; using offline.")
-        return offline
-    say(f"Offline source read of {source.name} DIVERGED from Keynote inspect; using Keynote inspect.")
-    return legacy
+    # mode == "on": the two-tier read is the source of truth.
+    confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
+    say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
+        f"skipped the full Keynote source inspect.")
+    return offline
 
 
 def write_timing_enabled() -> bool:
@@ -684,8 +622,6 @@ def remap_keynote(
             source,
             slide_range=slide_range,
             mode=offline_read_mode(offline_read),
-            template_path=template_path,
-            template_payload=template_payload,
             say=say,
         )
     if wall_payload is None:

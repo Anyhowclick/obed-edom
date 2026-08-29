@@ -435,11 +435,15 @@ slide properties, so the bulk read never descends into children — O(slides), n
   artifacts, but only `role="hide"` geometry is truly write-dead; lines and group w/h ARE
   written. Verify "is this field written?" against `remap_keynote.js`, never assume.
 
-**Safety model (built):** `OBED_OFFLINE_READ` = off (default, legacy) / on (offline + guard +
-AUTOMATIC total legacy fallback on any exception OR guard-trip) / verify (run both, diff at
-runtime, use legacy on divergence). Fallback must be GRANULAR per class/slide (Fable), not
-whole-deck, now that trips are classified. Default flips to `on` only after the gate is GREEN
-on both decks with the REAL bulk read AND one end-to-end remap run is placement-identical.
+**Safety model (SHIPPED, Session 15):** `OBED_OFFLINE_READ` = **on (DEFAULT)** — offline two-tier
+read + guard + GRANULAR per-slide/-class legacy fallback (whole-deck legacy only on a tier-1
+raise or bulk-tier-unavailable); **off** — forces the legacy ~12-min JXA inspect. The old
+**`verify`** mode (run both reads, diff at runtime) was **REMOVED**: its check (`_spec_fields_equal`,
+itemIndex-only-excluded) was stricter than the validated write-affecting gate, so a re-derived
+autoshrink `fontSize` that never lands on write made it ALWAYS fall back on real decks — useless
+as an intermediate (a stale `OBED_OFFLINE_READ=verify` now resolves to `on`). The default flip
+bar was met and the flip shipped: gate GREEN on both decks with the REAL bulk read AND one
+end-to-end `on` write remap placement-identical to a legacy-read run (Session-15 handover above).
 
 **PENDING at handover (pick up here):**
 1. ~~Executor building the two-tier code~~ — **DONE**, committed `9ad2ba3` (bulk_geometry.js +
