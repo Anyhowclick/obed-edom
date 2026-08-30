@@ -102,3 +102,30 @@ the bulk pass. Full detail + coordination in that plan.
 - **`r-nested-bulk-probe` / `r-bulk-counts-plan`** would cut the 61s bulk tier (~94s→~45-55s) — but v2
   aims to DROP the checker's bulk pass, so likely MOOT for the checker (durable for the resizer remap
   read + write verifier). Revisit only if step-3 keeps a slim group-only bulk.
+
+### Second peer fact-check (all 4 claims hold) + additions
+
+All four claims above CONFIRMED against HEAD, except nested-bulk/bulk-counts is PARTIAL not
+moot — it still speeds TODAY's checker (full 61s bulk runs until v2 ships), and if step-3 keeps
+a slim group-only bulk the nested read still trims it (smaller win). Additions the first pass
+under-weighted:
+
+- **REVERSE cross-serve is a CHECKER CORRECTNESS BUG — raise `r-misc-cleanups`(4) to HIGH.** Item
+  (4) as written only covers checker→propose. The dangerous direction is JXA→checker: the JXA path
+  emits NO `runs[]` (`inspect_keynote.js:71`), but the checker reads runs (`validate.py:466,711`,
+  `diff_keynotes.py:931`). If a sermon deck is single-inspected (app.py:1266 caches a runs-less JXA
+  payload under the digest) then diffed, the checker's cache-hit (inspect.py:380/388) returns that
+  payload with NO `attach_runs` → highlight/small-caps/style diffs SILENTLY under-report. Fix: the
+  provenance (`reader`) field, and the checker cache-read must REJECT/ignore a non-offline (runs-less)
+  payload and rebuild. Higher priority than the propose-side A/B.
+- **`r-digest-sidecar` — modest checker win.** `inspect_keynote_checker` SHA-256-hashes the whole
+  deck every inspect (inspect.py:375), twice per diff; a byte-current mtime/size sidecar
+  (`baseline._cached_file_digest` pattern) skips re-hashing an unchanged deck on repeat diffs — ~a few
+  seconds/deck (sermon decks ~0.5–0.7GB), Keynote-free, low risk.
+- **`r-misc-cleanups`(6): dead `_slide_index_by_number`** (offline_inspect.py:556-562, zero refs) is
+  in the checker's module — fold the delete into the r-count-guard edit.
+- **NOT checker-applicable (peer-confirmed):** `r-readback-nocache-fix` (checker sets previewDir to the
+  dir it exported into — no bug), `w-skipped-slide-options`(1) (deck_slide_digests fingerprints ALL
+  slides incl. skipped — the DSK17 surface, so keep full bulk for the checker), `w-tmp-path-fix`,
+  `w-statfinalize-parity-audit`, `r-propose-*`, `r-acquire-cache-read`, `r-readback-two-tier` (resizer
+  apply/write paths the checker never traverses).
