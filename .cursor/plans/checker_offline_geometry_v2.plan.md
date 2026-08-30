@@ -129,3 +129,26 @@ under-weighted:
   slides incl. skipped — the DSK17 surface, so keep full bulk for the checker), `w-tmp-path-fix`,
   `w-statfinalize-parity-audit`, `r-propose-*`, `r-acquire-cache-read`, `r-readback-two-tier` (resizer
   apply/write paths the checker never traverses).
+
+## Execution status (branch `fix/checker-followups`, off merged main)
+
+**DONE + committed `2733a91` (497 passed, 1 xfailed; Keynote never opened):** the four low-risk
+checker follow-ups — r-count-guard (reconcile offline-vs-bulk counts in `_splice_bulk_geometry`,
+placeholder-tail check, force fallback on mismatch even with zero soft items), reverse cross-serve
+(`reader` provenance field; checker rejects a cached non-offline/runs-less payload and rebuilds),
+r-cache-hit-export-only (export-only path + `len(preview_pngs)==slideCount` hardening), and
+r-misc-cleanups (3) single IWA decode + (6) dead-code delete. New tests in `tests/test_inspect_checker.py`
++ count-guard tests in `tests/test_offline_inspect.py`.
+
+**IN FLIGHT:** 2 verify peers on `2733a91` (2+1+2 workflow). If they surface a should-fix, address on
+this branch and re-commit.
+
+**STILL TODO (deferred / not started):**
+- Higher-blast-radius opt items (own pass): r-misc-cleanups (5) `export_applescript` doc-bind (no
+  close-by-name → could export wrong bytes; touches ALL exports), (2) fold-export into the bulk session,
+  and the r-count-guard "(a)" extension (per-slide shape/line counts in `bulk_geometry.js`).
+- **End-to-end GW+DSK run-parity** (needs Keynote free): run the real checker via the new path vs a
+  full-JXA run, diff pairings/flags/markup. This is the outstanding v1 "verify todo" gate.
+- v2 step-3 wiring blockers (from the step-1 peer-verify): close the shaper's paragraph-metric /
+  uncalibrated-font / bold-italic generalization gaps + the JXA A/B before wiring.
+- Merge `fix/checker-followups` → main when the verify peers are green (user merges).
