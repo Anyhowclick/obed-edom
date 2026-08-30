@@ -203,8 +203,61 @@ addressed post-verify: added a `trait-unsatisfiable` gate test (was the one unco
 tightened the flags-0 docstring claim. Suite **503→504 passed, 1 xfailed** (17 shaper tests);
 Keynote never opened.
 
-**STILL TODO for v2 (unchanged):** step-2 regroup re-measure; step-3 wiring (new exact geom_source +
-INSPECT_VERSION 4→5 + PPTX/scoped-JXA fallback); end-to-end GW+DSK run-parity (needs Keynote);
-OPTIONAL calibration widening (OhnoBlazeface 30 DSK boxes / CodecPro — perf only, they safely gate
-today). The higher-blast-radius opt items (`export_applescript` doc-bind, fold-export-into-bulk) also
-remain.
+### STEP-3 REFRAMED (2026-08-30) — "drop the bulk pass" is NOT viable; guards+fallback instead
+
+Step-2 (group collapse) + a fallback-rate measurement killed the original ~9x premise, and a
+Fable analysis reframed the work. Measured Keynote-free:
+- **Drop-bulk fallback is fatal:** GW 46% / DSK 88% of slides. Images (DSK 27 rotated-masked),
+  groups (GW 12/DSK 11), flags-0 text (GW 17), ArgentCF-multiline (DSK 8) all still need Keynote
+  under a naive drop-bulk. So the bulk pass CANNOT be dropped for the checker.
+- **But the fallback is inflated by CATEGORY guards, not real needs-Keynote objects:**
+  rotated-masked images are **25/27 DSK offline-EXACT (~0.5px)** — only 2 miss (slide 2: 6.9px;
+  slide 17: 95px = a flip encoded as frame357+mask357, the DSK17 root cause). GW 4, ≤9.4px.
+- **Step-2 group collapse:** with shaped text children, 0 UNFLAGGED groups exceed 2px on either
+  deck (all >2px groups already needs_keynote-flagged; huge residuals GW 819→18, DSK 924→13 gone).
+- **Slim-bulk (drop text kind) measured:** DSK bulk 22→12s (~45%), GW 63→50s (~20%) — a FLOOR,
+  not the plan; and NOT standalone (dropping text from the JS while `BULK_KINDS` keeps "text"
+  detonates the count-guard → every slide falls back; it needs shaper-wired + a new
+  `TEXT_GUARD_REASONS` fallback trigger, and the text branch is resizer-SHARED).
+
+Reframed levers (full detail: session scratchpad `step3_reframed.plan.md`, peer-reviewed):
+- **L4 item-level fallback** (checker-only; DONE below) — the safe foundation.
+- **L1 rotated-masked accuracy guard** (flag only the flip/compound case; DSK image fallback
+  27→~2) — HIGH value but shared `iwa_geometry`; needs the resizer gold-deck plan-equivalence gate.
+- **L2 group dissection** (accuracy-based `_group_residual_reason`, shaped text children in
+  `_group_union`) — shared; likely shrinks for free after L1.
+- **L3 accuracy-not-category guards; L5 content-hash geometry cache** (steady-state ~0 on
+  re-runs — the real edit-loop win). Slim-bulk = cold-cache floor after wiring.
+- **Shaper wiring** (prereq for slim-bulk): resizer-SHARED (`autosize-soft` is the one
+  plan-neutral VOUCHED reason because the resizer re-autosizes on write) — needs the gold-deck
+  gate + `TEXT_GUARD_REASONS`. NOT a bounded slice.
+
+### L4 DONE + VERIFIED (2/1/2) — item-level fallback, checker-only
+
+Committed on `fix/checker-followups`. Files: `inspect.py` (`inspect_items`, `_partition_fallback`,
+`_splice_item_record`, `_merge_legacy_items`, caller partition in `inspect_keynote_checker`),
+`inspect_keynote.js` (additive `plan.items` mode, gated — reuses `describeItem` for field parity,
+with a live-vs-`plan.counts` count guard). NO change to `two_tier_wall_payload`/`iwa_geometry`/
+shaper/`BULK_KINDS`; INSPECT_VERSION still 4; resizer path (`acquire_wall_payload`) untouched.
+
+The checker fallback now re-reads only the tripping ITEMS (content+geometry) not whole slides:
+`sidecar["fallback"]` already carries per-item `{slide,kind,kindIndex,reason}`; a slide whose
+entries are ALL item-addressable (no `count-mismatch`, `kindIndex>=0`) → item-scoped read; a
+count-mismatch/kindIndex<0 slide → `_merge_legacy_slides` (DSK17 net). Two count-guard layers
+(Python partition + JXA `plan.counts` reconcile, whole-slide `unreadable` on drift) make a
+mis-addressed splice impossible.
+
+**Honest win:** with bulk ON both decks have ZERO fallback today → L4 is a provable no-op
+(byte-identical payload) on real decks; it's the SAFE FOUNDATION that makes L1/slim-bulk
+non-fatal, not a standalone speedup. Forced-fallback test: re-read items field-identical to a
+full inspect; item-scoping is MORE consistent than the old slide-level path (which stripped
+`runs` from fallback slides and imported JXA colour/placeholder/index artifacts onto just those
+slides). **2 peers SOUND** (scope clean; DSK17 safety two-layer; no wrong-splice path; preserving
+offline `index` load-bearing; caveat sound — no flags/pairings regression). Suite **519 passed,
+1 xfailed**; JS 9+19.
+
+**STILL TODO for v2:** L1 (rotated-masked accuracy, gated on resizer gold decks) — the next high
+value; L2 group dissection; shaper wiring + `TEXT_GUARD_REASONS` + slim-bulk (INSPECT_VERSION 4→5,
+gold-deck gate); L5 content-hash cache; end-to-end GW+DSK run-parity (needs Keynote). OPTIONAL
+calibration widening (OhnoBlazeface/CodecPro — perf only). Higher-blast-radius opt items
+(`export_applescript` doc-bind, fold-export-into-bulk) also remain.

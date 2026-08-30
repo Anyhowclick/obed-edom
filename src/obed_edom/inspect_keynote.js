@@ -615,6 +615,111 @@ function canvasSize(doc) {
   return [1920, 1080];
 }
 
+// --- Item-scoped read (plan.items) ----------------------------------------
+//
+// ADDITIVE mode, gated entirely on `plan.items` being present, so the resizer /
+// framing / single-inspect callers (which never set it) are completely unaffected.
+// When `plan.items` is a list of {slide:<1-based>, kind, kindIndex}, describe ONLY
+// those items — addressed directly on the slide's kind collection — with the SAME
+// describeItem path a full inspect uses, so each returned record is FIELD-IDENTICAL
+// to a full inspect's item. This is the L4 item-level checker fallback: re-read the
+// few unconfirmed objects, not the whole slide.
+
+// Kind -> the slide collection accessor whose 0-based element index equals that
+// kind's kindIndex. MUST match collectItems' collect() order/names so a kindIndex
+// carried in plan.items (produced by the offline read against the same convention)
+// addresses the SAME object a full inspect would.
+const COLLECTION_FOR = {
+  text: "textItems",
+  image: "images",
+  shape: "shapes",
+  movie: "movies",
+  group: "groups",
+  line: "lines",
+};
+
+// COUNT GUARD (preserves the DSK17 protection): before addressing by kindIndex, the
+// live collection's element count is reconciled against the count the offline payload
+// expects for that (slide, kind). image/movie/group/shape/line must match EXACTLY;
+// text tolerates `live - expected` in [0, slack] trailing empty placeholders (the
+// same allowance the bulk read makes). On any drift — or a kindIndex out of range —
+// the WHOLE slide is marked unreadable so the Python caller falls it back to the
+// slide-level legacy merge instead of splicing a wrong object.
+function readSlideItems(slide, entries, kindCounts, slack) {
+  const byKind = {};
+  for (let e = 0; e < entries.length; e++) {
+    const k = entries[e].kind;
+    if (!byKind[k]) byKind[k] = [];
+    byKind[k].push(entries[e]);
+  }
+  const records = [];
+  for (const kind in byKind) {
+    if (!byKind.hasOwnProperty(kind)) continue;
+    const name = COLLECTION_FOR[kind];
+    if (!name) return { unreadable: true, items: [] };
+    let col = null;
+    try {
+      col = slide[name]();
+    } catch (eCol) {
+      return { unreadable: true, items: [] };
+    }
+    if (col == null) return { unreadable: true, items: [] };
+    const n = lenOf(col);
+    const expected =
+      kindCounts && kindCounts[kind] != null ? Number(kindCounts[kind]) : null;
+    if (expected != null) {
+      const drift =
+        kind === "text" ? n < expected || n - expected > slack : n !== expected;
+      if (drift) return { unreadable: true, items: [] };
+    }
+    const wanted = byKind[kind];
+    for (let w = 0; w < wanted.length; w++) {
+      const ki = Number(wanted[w].kindIndex);
+      if (isNaN(ki) || ki < 0 || ki >= n) return { unreadable: true, items: [] };
+      const rec = describeItem(col[ki], ki, kind);
+      rec.kindIndex = ki;
+      records.push(rec);
+    }
+  }
+  return { unreadable: false, items: records };
+}
+
+function readPlanItems(doc, plan) {
+  const slides = doc.slides();
+  const counts = plan.counts || {};
+  let slack = Number(plan.textPlaceholderSlack);
+  if (isNaN(slack)) slack = 0;
+  const bySlide = {};
+  for (let a = 0; a < plan.items.length; a++) {
+    const it = plan.items[a];
+    const key = String(Number(it.slide));
+    if (!bySlide[key]) bySlide[key] = [];
+    bySlide[key].push(it);
+  }
+  const out = {};
+  for (const sKey in bySlide) {
+    if (!bySlide.hasOwnProperty(sKey)) continue;
+    const i = Number(sKey) - 1; // 1-based document number -> 0-based index
+    const key0 = String(i);
+    if (i < 0 || i >= slides.length) {
+      out[key0] = { unreadable: true, items: [] };
+      continue;
+    }
+    out[key0] = readSlideItems(slides[i], bySlide[sKey], counts[sKey] || null, slack);
+  }
+  return out;
+}
+
+function closeDoc(Keynote, doc) {
+  try {
+    Keynote.close(doc, { saving: "no" });
+  } catch (e3) {
+    try {
+      doc.close({ saving: "no" });
+    } catch (e4) {}
+  }
+}
+
 function run(argv) {
   const plan = readJSON(argv[0]);
   // By bundle id, never by name: Keynote 15 is "Keynote Creator Studio" with a
@@ -622,6 +727,13 @@ function run(argv) {
   const Keynote = Application(plan.bundleId || "com.apple.Keynote");
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.path));
+  // Additive item-scoped read: describe only plan.items, then close. Skips the
+  // whole per-slide inspect below (that item-scoping is the point).
+  if (plan.items) {
+    const itemsBySlide = readPlanItems(doc, plan);
+    closeDoc(Keynote, doc);
+    return JSON.stringify({ path: plan.path, itemsBySlide: itemsBySlide });
+  }
   const slides = doc.slides();
   const size = canvasSize(doc);
   const slideWidth = size[0];
@@ -717,5 +829,8 @@ if (typeof module !== "undefined" && module.exports) {
     describeItemBulk: describeItemBulk,
     bulkArray: bulkArray,
     fileNameFrom: fileNameFrom,
+    COLLECTION_FOR: COLLECTION_FOR,
+    readSlideItems: readSlideItems,
+    readPlanItems: readPlanItems,
   };
 }

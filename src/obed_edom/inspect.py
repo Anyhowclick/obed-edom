@@ -293,6 +293,219 @@ def bulk_geometry(
 
 
 # --------------------------------------------------------------------------
+# Item-scoped Keynote read (checker L4 item-level fallback).
+#
+# When the two-tier checker read leaves a handful of items unconfirmed (a soft
+# frame the bulk read did not return, or a content guard the bulk read cannot
+# touch — font-size-unresolved / filename-dirty), re-read ONLY those items rather
+# than the whole slide. Reuses inspect_keynote.js's additive `plan.items` mode so
+# every record is field-identical to a full inspect; the count guard there falls a
+# whole slide back to the slide-level merge on any collection-count drift.
+# --------------------------------------------------------------------------
+def inspect_items(
+    key_path: Path | str,
+    items: list[dict[str, Any]],
+    counts: dict[int, dict[str, int]] | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Describe ONLY ``items`` with a single scoped ``inspect_keynote.js`` pass.
+
+    ``items`` is a list of ``{slide, kind, kindIndex}`` (1-based document
+    ``slide``). Mirrors :func:`bulk_geometry`'s osascript invocation — builds a plan
+    with ``path``/``bundleId``/``items`` (+ ``counts`` and ``textPlaceholderSlack``
+    for the DSK17 count guard) and runs the SAME ``inspect_keynote.js`` in its
+    additive ``plan.items`` mode, so each returned record is field-identical to a
+    full inspect's ``describeItem``.
+
+    ``counts`` is ``{slideNumber: {kind: expectedCount}}`` — the per-(slide, kind)
+    item counts the offline payload expects, against which the JXA side reconciles
+    the live collection size before addressing by ``kindIndex``.
+
+    Returns ``{slideIndex0based: {"unreadable": bool, "records": {(kind, kindIndex):
+    record}}}``. A slide the read could not address safely (count drift or an
+    out-of-range kindIndex) comes back ``unreadable=True`` with no records, so the
+    caller falls that whole slide back to the slide-level legacy merge. Raises
+    ``RuntimeError`` on any osascript failure or unparseable output — the caller
+    catches nothing extra here (the slide-level path can raise identically).
+    """
+    key_path = Path(key_path).expanduser().resolve()
+    if not key_path.exists():
+        raise FileNotFoundError(f"Keynote not found: {key_path}")
+    if not items:
+        return {}
+    from obed_edom.iwa_kindindex import TEXT_PLACEHOLDER_SLACK  # noqa: PLC0415
+
+    plan: dict[str, Any] = {
+        "path": str(key_path),
+        "bundleId": keynote_app.bundle_id(),
+        "items": [
+            {
+                "slide": int(it["slide"]),
+                "kind": str(it["kind"]),
+                "kindIndex": int(it["kindIndex"]),
+            }
+            for it in items
+        ],
+        "textPlaceholderSlack": int(TEXT_PLACEHOLDER_SLACK),
+    }
+    if counts:
+        plan["counts"] = {
+            str(int(slide)): {str(k): int(v) for k, v in kinds.items()}
+            for slide, kinds in counts.items()
+        }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(plan, handle)
+        plan_path = handle.name
+    try:
+        proc = subprocess.run(
+            ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        Path(plan_path).unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Item-scoped inspect failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
+        )
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        raise RuntimeError("Item-scoped inspect returned no JSON.")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Item-scoped inspect returned invalid JSON: {exc}") from exc
+    items_by_slide = parsed.get("itemsBySlide") or {}
+    out: dict[int, dict[str, Any]] = {}
+    for slide_key, result in items_by_slide.items():
+        records: dict[tuple[str, int], dict[str, Any]] = {}
+        for rec in (result or {}).get("items") or []:
+            records[(str(rec.get("kind")), int(rec.get("kindIndex", -1)))] = rec
+        out[int(slide_key)] = {
+            "unreadable": bool((result or {}).get("unreadable")),
+            "records": records,
+        }
+    return out
+
+
+def _partition_fallback(
+    fallback: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Split per-item fallback entries into item-scoped reads vs slide-level reads.
+
+    Groups ``fallback`` (each ``{slide, kind, kindIndex, reason}``) by document
+    number. A slide whose entries are ALL item-addressable — no ``count-mismatch``
+    reason and every ``kindIndex >= 0`` — is read item-scoped (its entries go in the
+    first list). Any slide carrying a ``count-mismatch`` entry (or a ``kindIndex <
+    0``) goes whole-slide (its number in the second list), preserving the DSK17
+    count-drift safety net.
+    """
+    from collections import defaultdict  # noqa: PLC0415
+
+    by_slide: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for flag in fallback:
+        by_slide[int(flag["slide"])].append(flag)
+    item_entries: list[dict[str, Any]] = []
+    slide_numbers: list[int] = []
+    for number, entries in by_slide.items():
+        addressable = all(
+            entry.get("reason") != "count-mismatch"
+            and int(entry.get("kindIndex", -1)) >= 0
+            for entry in entries
+        )
+        if addressable:
+            item_entries.extend(
+                {
+                    "slide": number,
+                    "kind": entry["kind"],
+                    "kindIndex": int(entry["kindIndex"]),
+                }
+                for entry in entries
+            )
+        else:
+            slide_numbers.append(number)
+    return item_entries, sorted(slide_numbers)
+
+
+# The item addressing keys the splice must KEEP from the offline item (never let a
+# JXA record's own index clobber them): the payload's item order and (kind,kindIndex)
+# address are authoritative and identical across both reads.
+_ITEM_ADDRESS_KEYS = ("index", "kindIndex")
+
+
+def _splice_item_record(item: dict[str, Any], rec: dict[str, Any]) -> None:
+    """Overwrite ``item`` with the JXA ``rec``'s fields, keeping offline addressing.
+
+    ``rec`` is a full ``describeItem`` record, so this replaces exactly the fields a
+    whole-slide :func:`obed_edom.remap_keynote._merge_legacy_slides` would (it swaps
+    the entire item for the JXA one). Offline-only fields the JXA record does not
+    carry — ``runs`` (attach_runs) and a ``duplicateOf`` the offline read set — are
+    left in place, matching what the slide-level path lands after its own attach_runs.
+    """
+    saved = {key: item.get(key) for key in _ITEM_ADDRESS_KEYS}
+    item.update(rec)
+    for key, value in saved.items():
+        if value is not None:
+            item[key] = value
+
+
+def _merge_legacy_items(
+    payload: dict[str, Any], source: Path, item_entries: list[dict[str, Any]]
+) -> list[int]:
+    """Splice item-scoped Keynote reads over the matching payload items, in place.
+
+    ``item_entries`` is the item-addressable fallback set (``{slide, kind,
+    kindIndex}``). Each referenced item is re-read with one scoped
+    :func:`inspect_items` pass and spliced over the offline item of the same
+    ``(slide, kind, kindIndex)`` (:func:`_splice_item_record`). Any slide the item
+    read could not address safely (count drift / out-of-range) is routed through the
+    whole-slide :func:`obed_edom.remap_keynote._merge_legacy_slides` instead — the
+    DSK17 net — and returned in the list so the caller can log it.
+    """
+    if not item_entries:
+        return []
+    # Expected per-(slide, kind) counts from the offline payload: the count guard's
+    # reference. A live collection whose size drifted from these forces the slide to
+    # the slide-level merge rather than a mis-addressed splice.
+    referenced = {int(entry["slide"]) for entry in item_entries}
+    by_number = {
+        int(slide.get("number") or (int(slide.get("index") or 0) + 1)): slide
+        for slide in payload.get("slides") or []
+    }
+    counts: dict[int, dict[str, int]] = {}
+    for number in referenced:
+        slide = by_number.get(number)
+        if slide is None:
+            continue
+        per_kind: dict[str, int] = {}
+        for item in slide.get("items") or []:
+            kind = item.get("kind")
+            per_kind[kind] = per_kind.get(kind, 0) + 1
+        counts[number] = per_kind
+    reads = inspect_items(source, item_entries, counts=counts)
+    unreadable_numbers: list[int] = []
+    for slide in payload.get("slides") or []:
+        index0 = int(slide.get("index") or 0)
+        number = int(slide.get("number") or (index0 + 1))
+        result = reads.get(index0)
+        if result is None:
+            continue
+        if result.get("unreadable"):
+            unreadable_numbers.append(number)
+            continue
+        records = result.get("records") or {}
+        for item in slide.get("items") or []:
+            rec = records.get((str(item.get("kind")), int(item.get("kindIndex", -1))))
+            if rec is not None:
+                _splice_item_record(item, rec)
+    if unreadable_numbers:
+        from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
+
+        _merge_legacy_slides(payload, source, sorted(unreadable_numbers))
+    return sorted(unreadable_numbers)
+
+
+# --------------------------------------------------------------------------
 # Checker-scoped offline inspect (Sermon Checker cold read).
 #
 # The two Sermon Checker call sites (web.app._run_diff) switch from the ~5-min
@@ -436,17 +649,26 @@ def inspect_keynote_checker(
     except Exception:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
         return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
     sidecar = payload.get("_offline") or {}
+    fallback = sidecar.get("fallback") or []
     fallback_slides = sidecar.get("fallback_slides") or []
     # Bulk tier entirely unavailable AND soft classes unconfirmed: the offline
     # geometry alone cannot be trusted, so read the whole deck the legacy way.
     if not sidecar.get("bulk_ok") and fallback_slides:
         return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
-    # Granular per-slide fallback: re-read only the unconfirmed slides (one scoped
-    # JXA pass) and splice their items/groupedText back over the offline payload.
-    if fallback_slides:
-        from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
+    # Granular fallback, per item where possible (L4). A slide whose unconfirmed
+    # items are ALL item-addressable (no count-mismatch, kindIndex >= 0) is re-read
+    # item-scoped — only those objects, not the whole slide. A slide with a
+    # count-mismatch entry (kindIndex desync, the DSK17 class) falls back whole via
+    # the slide-level merge. Both land the SAME payload the old slide-level path did,
+    # read more cheaply. The resizer caller (acquire_wall_payload) is unchanged.
+    if fallback:
+        item_entries, slide_numbers = _partition_fallback(fallback)
+        if item_entries:
+            _merge_legacy_items(payload, key_path, item_entries)
+        if slide_numbers:
+            from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
 
-        _merge_legacy_slides(payload, key_path, fallback_slides)
+            _merge_legacy_slides(payload, key_path, slide_numbers)
     timing["read"] = time.perf_counter() - t_read
 
     payload["path"] = str(key_path)
