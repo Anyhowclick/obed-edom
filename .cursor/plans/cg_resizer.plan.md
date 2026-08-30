@@ -253,8 +253,10 @@ and geometry+timing):
 
 **ABANDONED — do NOT rebuild (the reasons ARE the finding):**
 - **Stage B** (fold the stat-finalize reopen into the geometry session). Built,
-  real-deck A/B'd, dropped. The reopen it removes is **warm-cache-cheap**, not the ~2min
-  cold open the plan assumed → no measurable gain. The "17% faster" first seen was a
+  real-deck A/B'd, dropped. The reopen it removes is **warm-cache-cheap** → no measurable
+  gain. (The premise was doubly wrong: the plan assumed a ~2min cold open, but even a cold
+  open of the ~6.8 GB deck is only ~3–4 s — measured 2026-08-28 — so there was never a
+  ~2min open to save.) The "17% faster" first seen was a
   BROKEN run: the attach bind failed (`NO_DEST_DOC`) and SKIPPED the whole stat pass, so
   it did *less* work. Premise wrong. (The Stage-B design section below is retained only
   as the record of a dead end.)
@@ -387,11 +389,117 @@ Removes the LAST avoidable dest open on the validate=False path. Two peer review
   5. **Next-run cleanup:** before `copy_keynote`/open, detect+close an already-open
      same-path doc, so a hang's leftover doesn't collide with the next ditto-copy+open (the
      `pkill`→"Operation not permitted" lock class).
-- **Payoff bounded to ONE ~2min open** (the stat pass is index-addressed, `group N of slide
+- **Payoff bounded to ONE deck open** (only ~3–4 s even on the 6.8 GB deck — measured
+  2026-08-28; the "~2min open" this design originally assumed was an exaggeration, which is
+  part of why Stage B netted no gain. The stat pass is index-addressed, `group N of slide
   M`, NOT a full walk — measured). Validate: PNG pixel-diff (z-order + stat sizes only show
   there) + `front=N`/`sized=N` count asserts + a manual crash-path test (kill after geometry
   save → deck still valid + placed). Both reviewers: opt-in or stop after Stage A.
 - **Order:** build `bulk-read-inspect` FIRST (read-only, lower risk), then Stage B.
+
+## Handover — Session 14 (offline remap READ: kindindex + geometry + the two-tier read)
+
+Branch `feat/iwa-kind-index` (pushed, NOT PR'd). Commits: `1b6d8c8` derive_kind_index +
+count-guard; `08c98ca` iwa_geometry (offline composed geometry); `98fdc9d`/earlier SKILL;
+`bbe2fb8` offline_inspect (JXA-shaped offline payload) + geometry fixes. Rebased on main
+(PR #40 merged). **Goal: replace remap's ~12-min JXA source inspect with an offline read.**
+
+**WHERE IT LANDED — the TWO-TIER read makes it work (proven, code building at handover).**
+Pure-offline geometry does NOT reproduce the remap PLAN: autosize text (needs Keynote text
+layout) and group frames (union-vs-stored) diverge, and a plan-equivalence gate
+(`scratchpad/validate_remap_plan.py`, offline diff of `plan_payload_transforms` +
+`plan_slide_reuses`) caught it (started RED 345 Map / 702 Full). Fixes cut it to 42/244, all
+guard-detected. **The answer (Fable): TWO-TIER read = offline for everything + one O(slides)
+BULK Keynote read of `position`/`size` of every group/image/text per slide, overwriting just
+those three classes' frames.** PROVEN offline by splicing the JXA values a bulk read returns →
+gate **GREEN (0 write-affecting) on BOTH decks**. The group/image/text frames are top-level
+slide properties, so the bulk read never descends into children — O(slides), not O(objects).
+
+**Durable discoveries (in SKILL too):**
+- **Keynote returns INTEGER geometry** (verified 0/30k fractional); offline sub-px values drift
+  the learned affine — `iwa_geometry` now rounds half-away-from-zero.
+- **Line endpoints had a MIRROR-FLIP bug** (opposite diagonal of the right bbox; written
+  verbatim so it drew a flipped line) — fixed: R(-θ) about frame centre, order from bezier
+  moveTo→lineTo + h/v-flip; 391/391 <0.5px.
+- **Masked near-zero (<~1°) rotation**: collapse to the axis-aligned frame+mask box (JXA does),
+  killed a ~2× deck-wide cascade.
+- **The group residual IS the autosize defect one level down** (Fable's unifying hypothesis —
+  11/15 stored-frame groups have autosize children): stale child heights break the union, so
+  ONE correct autosize source (the bulk read, or a future font-metric model) fixes text AND
+  groups. Not two group rules.
+- **The pipeline is ill-conditioned** (a 30px input → 1257px output via `visible_content_union`
+  → recipe), but fixing the geometry INPUTS resolved it — `map_remap` UNTOUCHED (empty diff),
+  JXA plan provably unchanged; the map→hide role-flip cascade vanished. Robust-recipe (prong 2)
+  became moot.
+- **Diagnosis trap the pressure-test caught:** ~85% of raw gate divergences looked like
+  artifacts, but only `role="hide"` geometry is truly write-dead; lines and group w/h ARE
+  written. Verify "is this field written?" against `remap_keynote.js`, never assume.
+
+**Safety model (SHIPPED, Session 15):** `OBED_OFFLINE_READ` = **on (DEFAULT)** — offline two-tier
+read + guard + GRANULAR per-slide/-class legacy fallback (whole-deck legacy only on a tier-1
+raise or bulk-tier-unavailable); **off** — forces the legacy ~12-min JXA inspect. The old
+**`verify`** mode (run both reads, diff at runtime) was **REMOVED**: its check (`_spec_fields_equal`,
+itemIndex-only-excluded) was stricter than the validated write-affecting gate, so a re-derived
+autoshrink `fontSize` that never lands on write made it ALWAYS fall back on real decks — useless
+as an intermediate (a stale `OBED_OFFLINE_READ=verify` now resolves to `on`). The default flip
+bar was met and the flip shipped: gate GREEN on both decks with the REAL bulk read AND one
+end-to-end `on` write remap placement-identical to a legacy-read run (Session-15 handover above).
+
+**PENDING at handover (pick up here):**
+1. ~~Executor building the two-tier code~~ — **DONE**, committed `9ad2ba3` (bulk_geometry.js +
+   inspect.bulk_geometry + two_tier splice + granular fallback + remap_keynote wiring).
+2. ~~Run ONE real Keynote bulk-read pass~~ — **DONE + GREEN (Session 15, 2026-08-29).** Live
+   `bulk_geometry(Map_Extracted_Wall_1st)` single-op, Keynote clean: **51.8s** (0.86 min) vs the
+   ~12.6-min JXA inspect (**~14.6×**). All **1636/1636** real frames match the cached JXA frames
+   **<0.5px** (0 within-2px-only, 0 >2px, 0 unmatched — the real bulk read == the JXA-double the
+   gate was proven against). Real-value two-tier splice: `bulk_ok=True`, 1620 spliced, 0 fallback;
+   write-affecting transform diffs **0**, reuse diffs **0** → **plan gate GREEN with live values.**
+   Read-only (deck mtime untouched). Bench: `scratchpad/live_bulk_pass.py` (session-local;
+   re-derive from `tests/test_offline_inspect.py::test_two_tier_splice_makes_write_affecting_gate_
+   green_map_deck`, swapping `_bulk_double_from_jxa` for the real `bulk_geometry`).
+3. **STILL TO DO before flipping default to `on`** (the handover's own bar):
+   - (a) ~~same live bulk pass on `Full_Report_Card_Wall`~~ — **DONE + GREEN (Session 15).** 155
+     slides, live `bulk_geometry` single-op, Keynote clean: **283.7s** (4.73 min) vs ~12.6-min JXA
+     (**~2.7×**). All **3123/3123** real frames **<0.5px** vs cached JXA (0 >2px, 0 unmatched).
+     Real-value two-tier: `bulk_ok=True`, 2813 spliced, 0 fallback; transform diffs **0**, reuse
+     diffs **0** → **plan gate GREEN.** Read-only (deck mtime untouched). **So the gate is GREEN
+     on BOTH decks with the REAL bulk read.**
+   - (b) ~~one real end-to-end write remap → placement-identical~~ — **DONE + GREEN (Session 15).**
+     `OBED_OFFLINE_READ=on` remap of the whole Map deck: log confirms *"Read … two-tier (offline
+     IWA + bulk geometry) — skipped the full Keynote source inspect"* (offline used, NO fallback),
+     and **every plan-level fact is byte-identical** to a legacy-read run (recipe map transform,
+     off-frame counts, 5-slide duplication plan, `Applied 713 missed 0`, collections, stat-finalize
+     `111/9/116`, map `{11,18,1067,659}`). Output-deck geometry (bulk_geometry both decks,
+     `scratchpad/diff_outputs2.py`): **identical frame multiset for every kind** — set-match
+     group 0/174, image 0/249, text 0/24 over-16px, 0 unmatched. The by-INDEX diff showed 142
+     group frames "diverging" — a RED HERRING: the stat-finalize **Bring-to-Front GUI pass reorders
+     the `groups` collection's kindIndex** run-to-run (read-mode-INDEPENDENT), so groups must be
+     compared as a set, not by index. **So the offline-read output is placement-identical to the
+     legacy-read output. The full flip bar is MET.** Speed both decks: Map **51.8s** / Full
+     **283.7s** — both well under 12.6 min.
+   - (c) **verify MODE FALLS BACK on these decks — by design, not a placement bug.** The shipped
+     `_plans_equivalent`/`_spec_fields_equal` (remap_keynote.py:108) excludes ONLY `itemIndex`, so
+     it is STRICTER than the validated write-affecting gate (`_wa_fields_equal`, which also excludes
+     `fontSize/font/color/opacity/matchText`). The offline read re-derives ONE autoshrink `fontSize`
+     (Map slide 7 text[1]: 29.4 vs 19.6 — Keynote re-autosizes on write, so it never lands), so
+     verify declares divergence and uses legacy. Confirmed: strict `_specs_equivalent`=False on
+     exactly that 1 fontSize field, `address-set equal`=True, write-affecting=green. **Consequence:
+     `verify` is NOT a useful confidence intermediate on autoshrink decks — it always falls back.**
+     OPEN DECISION (Session 15, put to user): align verify's check to the write-affecting field set
+     (makes verify usable, but loosens what "verified" asserts) vs leave it strict (conservative,
+     documents the fallback). Independent of the default flip, which rests on `on` (write-affecting
+     proven), not verify.
+   - **NEXT:** flip `offline_read_mode` default `off`→`on` (one line, `remap_keynote.py:70-71`) —
+     bar met. Test artifacts left in `output/`: `Map_Extracted_Wall_1st_CG.key` (legacy-read) and
+     `…_CG_ON.key` (offline-read), ~1.15 GB each, gitignored — delete when done inspecting.
+- **PPTX is NOT needed for the fallback**: it gives image/text exactly but the group `grpSp`
+  stored-frame is the WRONG value for union-groups; the bulk read gives all three correctly in
+  one pass. PPTX only re-enters if the bulk read measures surprisingly slow — it did not (51.8s).
+
+**CACHE-CORRUPTION LESSON (cost hours this session):** concurrent Keynote access (overlapping
+warms, or Keynote re-saving mid-read) corrupts a warm → partial payload (empty tail slides),
+cached under a stale digest. Warm ONE deck at a time, force decks CLOSED, keep all agents
+OFFLINE. Verify a fresh payload has no empty slides + image count == IWA before trusting it.
 
 ## The number block — DONE
 

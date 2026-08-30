@@ -24,10 +24,20 @@ HASH_CACHE_VERSION = 1
 # Bump whenever the payload shape changes — whether the change is in
 # inspect_keynote.js or in Python post-processing. (v3 came from Python:
 # iwa_runs.attach_runs now populates per-run character style in item["runs"],
-# which the JS never touched.) The cache is keyed by deck digest, which says
-# nothing about the reader that produced it, so without this a deck inspected by
-# an older build is reused forever — a payload captured before duplicate-shape
-# marking existed would never gain it.
+# which the JS never touched. v4: the Sermon Checker's cold inspect switched to the
+# offline IWA read + a slim bulk-geometry pass (inspect.inspect_keynote_checker). The
+# reason for the bump is rotation-VALUE CONSISTENCY: JXA reports whole-degree rotation
+# read from the app, while the offline read *composes* frame+mask angle and carries a
+# sub-degree residual on masked images that survives rounding — so a v3 JXA payload on
+# one side of a checker comparison and a fresh offline payload on the other could churn
+# deck_slide_digests and spuriously fire the photo-tilt flag. The one-time all-offline
+# re-read forces both sides onto the same rotation convention. (The offline payload also
+# omits group childCount/children, but that is harmless — only the resizer's
+# coincident_duplicate_ids reads them, and never on a checker deck.))
+# The cache is keyed by deck digest, which says nothing about the reader that
+# produced it, so without this a deck inspected by an older build is reused
+# forever — a payload captured before duplicate-shape marking existed would never
+# gain it.
 #
 # Our own build is only half of "the reader". Keynote's version is the other, and
 # it moves without us: a digest-keyed hit would otherwise hand a payload from one
@@ -37,7 +47,7 @@ HASH_CACHE_VERSION = 1
 #
 # Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
 # longer read at all now that the tool is 15.x only.
-INSPECT_VERSION = 3
+INSPECT_VERSION = 4
 # Bump when the shape of the cached template stat-size map changes. Keyed per
 # Keynote version too (via the `.k<version>` tag), since the sizes are read out
 # of the template by AppleScript and a different build could read them differently.
@@ -201,6 +211,14 @@ def deck_slide_digests(payload: dict) -> list[str]:
         for item in _walk_items(slide):
             if (item.get("kind") or "") != "image":
                 continue
+            # Deliberately NO `rotation`: this is the slide-IDENTITY fingerprint that
+            # decides which slides PAIR, and orientation must not drive pairing. The
+            # offline read composes a masked image's angle from frame+mask, which can
+            # differ from JXA on flipped/masked photos (e.g. a flipped DSK lower-third
+            # read 354 vs JXA 0) — including it churned the digest and floated that slide
+            # out of order. A flip/rotation that differs from the LW counterpart is a
+            # real discrepancy, but it is caught by the image COMPARISON of the paired
+            # slides, not by this ordering key.
             images.append(
                 ":".join(
                     [
@@ -209,7 +227,6 @@ def deck_slide_digests(payload: dict) -> list[str]:
                         f"{float(item.get('y') or 0):.1f}",
                         f"{float(item.get('w') or 0):.1f}",
                         f"{float(item.get('h') or 0):.1f}",
-                        f"{float(item.get('rotation') or 0):.1f}",
                     ]
                 )
             )

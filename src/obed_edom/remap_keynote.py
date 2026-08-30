@@ -53,6 +53,168 @@ def as_geometry_enabled() -> bool:
     return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+# --------------------------------------------------------------------------
+# Offline source-wall read (OBED_OFFLINE_READ) — reconstruct the ~12-min JXA
+# `inspect_keynote(source)` from the deck's IWA graph, with the legacy read as
+# an AUTOMATIC total fallback. See obed_edom.offline_inspect + the reviewed plan.
+# --------------------------------------------------------------------------
+def offline_read_mode(explicit: str | None = None) -> str:
+    """Resolve the offline-read mode: ``on`` (default) or ``off``.
+
+    ``explicit`` (the ``remap()`` param) wins; otherwise ``OBED_OFFLINE_READ``;
+    otherwise the default. Unknown values fall to the default. DEFAULT is ``on``
+    (Session 15): the gold-deck plan gate is green on both decks with the real bulk
+    read, and one real end-to-end ``on`` remap wrote a deck placement-identical to a
+    legacy-read run. ``OBED_OFFLINE_READ=off`` forces the legacy ~12-min JXA inspect.
+
+    (The old ``verify`` mode — build both reads and diff at runtime — was removed:
+    its check was stricter than the validated write-affecting gate, so a re-derived
+    autoshrink ``fontSize`` that never lands on write made it always fall back on
+    real decks. The granular per-slide fallback inside the ``on`` path is the safety
+    net; force ``off`` for a full legacy read.)
+    """
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_READ", "")).strip().lower()
+    return raw if raw in {"on", "off"} else "on"
+
+
+def _spec_addr(spec: dict[str, Any]) -> tuple:
+    return (int(spec.get("slide", -1)), str(spec.get("kind")), int(spec.get("kindIndex", -1)))
+
+
+def _spec_fields_equal(a: dict[str, Any], b: dict[str, Any], tol: float = 2.0) -> bool:
+    for key in (set(a) | set(b)) - {"itemIndex"}:
+        av, bv = a.get(key), b.get(key)
+        if key in ("x", "y", "w", "h"):
+            try:
+                if abs(float(av) - float(bv)) > tol:
+                    return False
+            except (TypeError, ValueError):
+                if av != bv:
+                    return False
+        elif key in ("start", "end"):
+            if not (isinstance(av, (list, tuple)) and isinstance(bv, (list, tuple))
+                    and len(av) >= 2 and len(bv) >= 2
+                    and abs(float(av[0]) - float(bv[0])) <= tol
+                    and abs(float(av[1]) - float(bv[1])) <= tol):
+                if av != bv:
+                    return False
+        elif av != bv:
+            return False
+    return True
+
+
+def _specs_equivalent(off: list[dict], jxa: list[dict]) -> bool:
+    off_map = {_spec_addr(s): s for s in off}
+    jxa_map = {_spec_addr(s): s for s in jxa}
+    if set(off_map) != set(jxa_map):
+        return False
+    return all(_spec_fields_equal(off_map[k], jxa_map[k]) for k in off_map)
+
+
+def _merge_legacy_slides(
+    payload: dict[str, Any], source: Path, slide_numbers: list[int]
+) -> None:
+    """Replace the given slides' items in ``payload`` with a scoped legacy read, in place.
+
+    The granular-fallback merge: only ``slide_numbers`` (document numbers) are
+    re-read, in a SINGLE ``inspect_keynote`` scoped to them, and each returned
+    slide's item-bearing fields overwrite the offline+bulk slide of the same
+    number. Addressing (index/number) and every other slide are left untouched, so
+    the payload stays a drop-in for the planner. A legacy read that comes back
+    without a wanted slide leaves that slide's offline data in place (best effort).
+    """
+    if not slide_numbers:
+        return
+    legacy = inspect_keynote(source, slide_range=frozenset(int(n) for n in slide_numbers))
+    by_number = {
+        int(s.get("number") or (int(s.get("index") or 0) + 1)): s
+        for s in legacy.get("slides") or []
+    }
+    for slide in payload.get("slides") or []:
+        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+        repl = by_number.get(number)
+        if repl is None:
+            continue
+        # Overwrite the content the legacy read authoritatively supplies; keep the
+        # offline index/number so downstream addressing is unchanged.
+        for key in ("items", "groupedText", "master", "skipped"):
+            if key in repl:
+                slide[key] = repl[key]
+
+
+def acquire_wall_payload(
+    source: Path,
+    *,
+    slide_range: Any,
+    mode: str,
+    say: Callable[[str], None],
+) -> dict[str, Any]:
+    """The source-wall inspect payload, honouring ``OBED_OFFLINE_READ`` ``mode``.
+
+    * ``off`` — the legacy ``inspect_keynote(source)`` (the ~12-min JXA read).
+    * ``on`` (default) — the TWO-TIER read is the source of truth: the offline IWA
+      payload (tier 1, exact for shapes/lines/plain frames) with a slim bulk Keynote
+      read (tier 2) overwriting the geometry of the three offline-soft classes
+      (groups, masked/rotated images, autosize text). Fallback is GRANULAR — the
+      unit is the object CLASS or SLIDE, never the whole deck: only slides whose
+      soft items the bulk read did not confirm, or that carry a content guard flag
+      (font/fileName the bulk read cannot touch), are re-read with one scoped
+      legacy ``inspect_keynote`` and merged back. The whole deck drops to legacy
+      only when tier 1 itself raises (missing ``iwa`` extra, decode error) or the
+      bulk tier is entirely unavailable AND something still needs confirming.
+
+    A ``say(...)`` line always records which path actually supplied the payload.
+    """
+    if mode == "off":
+        return inspect_keynote(source, slide_range=slide_range)
+
+    try:
+        from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
+        from obed_edom.offline_inspect import (  # noqa: PLC0415 (optional iwa extra)
+            two_tier_wall_payload,
+        )
+
+        offline = two_tier_wall_payload(
+            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range
+        )
+    except Exception as exc:  # noqa: BLE001 — any tier-1 failure drops to legacy
+        say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
+            f"using Keynote inspect of {source.name}.")
+        return inspect_keynote(source, slide_range=slide_range)
+
+    sidecar = offline.get("_offline") or {}
+    fallback_slides = sidecar.get("fallback_slides") or []
+
+    # Tier 2 (bulk geometry) unavailable AND something still needs confirming:
+    # the offline geometry alone cannot be trusted for the soft classes, so drop
+    # the whole deck to legacy — the pre-two-tier safe behaviour.
+    if not sidecar.get("bulk_ok") and fallback_slides:
+        from collections import Counter  # noqa: PLC0415
+
+        reasons = dict(Counter(f["reason"] for f in sidecar.get("fallback") or []))
+        say(f"Bulk geometry read of {source.name} unavailable and "
+            f"{len(fallback_slides)} slide(s) need it {reasons}; "
+            f"using Keynote inspect for the whole deck.")
+        return inspect_keynote(source, slide_range=slide_range)
+
+    # Granular per-slide fallback: re-read only the flagged slides (one scoped
+    # legacy pass) and splice their items back over the offline payload.
+    if fallback_slides:
+        from collections import Counter  # noqa: PLC0415
+
+        reasons = dict(Counter(f["reason"] for f in sidecar.get("fallback") or []))
+        say(f"Two-tier read of {source.name}: {sidecar.get('spliced', 0)} item(s) "
+            f"bulk-confirmed; {len(fallback_slides)} slide(s) fall back to Keynote "
+            f"inspect {reasons}: {fallback_slides}.")
+        _merge_legacy_slides(offline, source, fallback_slides)
+
+    # mode == "on": the two-tier read is the source of truth.
+    confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
+    say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
+        f"skipped the full Keynote source inspect.")
+    return offline
+
+
 def write_timing_enabled() -> bool:
     """Diagnostic: when ON, the JXA write pass records per-slide/per-phase elapsed
     and the individual objects slower than a threshold, and remap prints a summary
@@ -423,6 +585,7 @@ def remap_keynote(
     side_content_slides: set[int] | None = None,
     source_previews: Path | str | None = None,
     export_dir: Path | str | None = None,
+    offline_read: str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
@@ -452,7 +615,15 @@ def remap_keynote(
     if not template_path.exists():
         raise FileNotFoundError(template_path)
 
-    wall = wall_payload if wall_payload is not None else inspect_keynote(source, slide_range=slide_range)
+    if wall_payload is not None:
+        wall = wall_payload
+    else:
+        wall = acquire_wall_payload(
+            source,
+            slide_range=slide_range,
+            mode=offline_read_mode(offline_read),
+            say=say,
+        )
     if wall_payload is None:
         if slide_range:
             label = format_slide_range(slide_range)

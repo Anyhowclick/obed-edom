@@ -257,7 +257,17 @@ roughly zero means the planner failed to apply the affine it derived.
 
 ### Measuring without opening Keynote
 
-Reading a wall deck costs minutes (a 6.8 GB deck took 11½, a 7.2 GB one 21), and
+A full inspect costs minutes, and **items-per-slide — not the deck's GB — drives it**
+(re-measured 2026-08-29, bulk-read on, cache bypassed; `scratchpad/bench_inspect.py`):
+`Full_Report_Card_Wall` (6.8 GB, 155 slides, 4991 items, group-heavy) took **12.6 min**
+(756 s, ~4.9 s/slide); `Map_Extracted_Wall_1st` (1.2 GB but only 8 *very* dense slides,
+2408 items) took **3.3 min** (199 s, ~25 s/slide — 5× the big deck's per-slide cost).
+So a 1 GB deck of dense constellation slides is slower per slide than a 6.8 GB deck of
+light ones. The old "6.8 GB → 11½ min, 7.2 GB → 21 min" figures land close for the big
+deck but framed it as a GB/open-size cost, which mis-predicts the dense small deck.
+Bulk-read (default on) helps flat/ungrouped slides a lot (~4× in the A/B harness) but
+group-nested slides barely (~1.1×), so a group-heavy deck like the report card stays
+object-read-bound at ~12 min — the lever is fewer per-slide round-trips, not the bridge.
 Keynote is single-instance, so iterating through it is painful. Everything below
 runs from the cache root — `.cache/` at the repo root, moved with
 `OBED_EDOM_CACHE_DIR` — in seconds. It sits outside `output/` deliberately: a
@@ -463,8 +473,13 @@ script — a 5-second smoke test on a tiny deck surfaces all of them before you 
 - **The default AppleEvent timeout is 120 s** (`-1712 "AppleEvent timed out"`). Any single
   call on a large deck — the open, a `count`, a batched write loop — that exceeds it aborts
   the whole script. Wrap the `tell` in `with timeout of 3600 seconds`.
-- **A 1 GB+ deck takes ~2 min just to open.** Never iterate script logic against the big
-  deck. Prototype on a throwaway `make new document` (opens instantly; note new docs carry
+- **Opening a big deck is fast — ~3–4 s even for the ~6.8 GB `Full_Report_Card_Wall`**
+  (measured 2026-08-28). The earlier "~2 min just to open" figure carried here across
+  several sessions was a large exaggeration — the open itself is not the expensive part; the
+  per-slide *read* and per-object geometry *write* passes are (a full inspect still costs
+  minutes: 11½ min on the 6.8 GB deck, 21 on a 7.2 GB one). Still, don't iterate script
+  logic against the big deck — the read/write passes, not the open, are what make each
+  round painful. Prototype on a throwaway `make new document` (opens instantly; note new docs carry
   master-slide *placeholders*, and JXA object creation there is unreliable — re-fetch by
   index after `push`). Then run once on the real deck, and reuse an already-open doc rather
   than re-opening.
@@ -780,25 +795,120 @@ extra / non-zip / decode failure silently leaves `runs=[]` (today's behaviour).
   keys on `childCount`/`len(children)`, so leaving them alone keeps the resize plan
   provably unchanged (locked by an invariant test).
 
-**Hard limits — why IWA cannot replace the Keynote inspect (all measured via A/B
-against cached JXA payloads).**
-- **It cannot reproduce the `textItems`-vs-`shapes` collection split / `kindIndex`
-  on a wall deck** (GW: textItems right on 32/63 slides, shapes 55/63). `remap`
-  addresses every object as `<kind> (kindIndex)`, so a wrong index writes a
-  mis-placed object into the user's deck. A byte-identity gate would fail → **IWA
-  must never back a remap/write payload.** Group bounds (3/13, 10/21 match) and
-  autosize-text position (~60 px off) / height (`=0`) are also unreliable; only
-  fixed-box and image geometry (~98 % image position) come back exact.
+**`kindIndex` IS reconstructible offline — the real write-blocker is GEOMETRY, not
+addressing (re-derived + differential-tested 2026-08-29; supersedes the old "cannot
+reproduce the collection split" claim, which used text/file-order matching, not the
+z-order walk below).** `scripts`-style prototype `derive_kind_index(slide, objects)`
+(session scratchpad) walks the `KN.SlideArchive` and reproduces Keynote's
+`(kind, kindIndex)` addressing on **162/163 slides** across `Map_Extracted_Wall_1st`
+(8) + `Full_Report_Card_Wall` (155) — ~5000 objects, validated against fresh
+exact-bytes JXA payloads by per-kind ordering (median position delta ~0) and per-kind
+count. The rules, each independently agent-verified:
+  - **Spine / ordering.** `kindIndex` = rank among same-kind drawables walking the
+    slide's **`drawablesZOrder`** list (== `ownedDrawables` on all 163 slides here, so
+    the two are indistinguishable on this data; either works). Confirmed exact for
+    text (by content) and image/shape/movie/group/line (by geometry; lines by *width*
+    since their position convention differs from JXA's).
+  - **Classification.** `TSD.ImageArchive`→image, `TSD.MovieArchive`→movie,
+    `TSD.GroupArchive`→group, `TST.TableInfoArchive`→table, `TSCH.ChartArchive`→chart.
+    A `TSWP.ShapeInfoArchive` is a **line** iff its bezier path is a single open
+    segment (`bezierPathSource.path.elements == [moveTo, lineTo]` ⇔ a zero-dim
+    `naturalSize`); else it is in **`textItems` iff `isTextBox`** (NOT merely carrying
+    text — a text-bearing shape with `isTextBox=False`, e.g. a "UPG"/"CHC" label, is
+    shape-**only**), and in **`shapes` iff `not isTextBox` OR it has a custom path**
+    (`editableBezierPathSource`); a plain text-box rectangle is text-only, a shape
+    that also carries text is a dual (its shape entry marked `duplicateOf` the text).
+  - **Placeholders.** JXA appends 0–2 EMPTY title/body placeholders
+    (`KN.PlaceholderArchive`, at 0,0, off-canvas, not in `drawablesZOrder`) to the END
+    of `textItems` on some slides; derive omits them (their emission isn't reliably
+    predictable offline) — harmless, since being last they never shift a real object's
+    index. The count-guard must allow `jxa_text_count − derived ∈ [0,2]`.
+  - **The one residual edge** (`Full` slide 73): a filled/variation text box that JXA
+    lists in *both* text and shape via subtle style-variation metadata not cleanly
+    recoverable offline — 1/163 slides. This is exactly what the **runtime count-guard**
+    is for: compare `count of <kind> of slide N` (one cheap Apple Event per kind,
+    negligible next to the ~12 min inspect) against derive; on any disagreement fall
+    back to the JXA read for that slide. So 162/163 slides go offline, the odd one
+    degrades safely.
+- **GEOMETRY: mostly recoverable offline for READS, but NOT enough to reproduce the remap
+  WRITE plan on its own** (differential-tested 2026-08-29 vs exact-bytes JXA payloads; then
+  gate-tested against the actual remap plan). Shipped as **`src/obed_edom/iwa_geometry.py`**
+  (`compose_geometry` — `derive_kind_index` records with raw geometry REPLACED by composed
+  JXA-frame `(x,y,w,h)` + a `needs_keynote` flag). Per-object it is <2px vs JXA on most
+  classes, BUT a plan-equivalence gate (`plan_payload_transforms`+`plan_slide_reuses`,
+  offline-vs-JXA) is RED on it: **autosize text** (needs Keynote text layout — `naturalSize`
+  is stale) and **group frames** (JXA uses child-union for some groups, the stored frame for
+  others — really the same autosize defect one level down, so no single offline rule matches)
+  diverge, and the ill-conditioned recipe amplifies them. **The write-safe answer is the
+  TWO-TIER READ:** offline for addressing/style/shapes/lines + one O(slides) BULK Keynote read
+  of `position`/`size` of every group/image/text per slide, overwriting just those three
+  classes' frames → gate GREEN on both decks. See the CG-plan "Handover — Session 14". Also
+  note: **Keynote returns whole-point (integer) geometry** — round offline values or sub-px
+  noise drifts the learned affine. The per-class composition formulas below are correct for
+  READING and for the offline half of the two-tier read; each is a *composition* the raw
+  reader hadn't done, with a proven closed form:
+  - **Masked images.** The mask is a `TSD.MaskArchive` at `ImageArchive.mask`; its
+    `super.geometry` is the visible crop rect in the image's local frame. Axis-aligned
+    (the vast majority): `JXA = (img_x+mask_x, img_y+mask_y, mask_w, mask_h)` —
+    **151/151 (Map) and 1188/1188 (report card) EXACT**. Rotated: compose the mask rect
+    through the mask transform then the frame transform (`T(p)=R(angle)·(p−center)+…`),
+    AABB top-left = position. Only **masked AND rotated** (≤2%, **0 on the wall/CG map
+    decks**) leaves a residual; it is `angle≠0`-detectable, so flag it for a JXA read.
+    This also makes image geometry ~exact (66→**96.6%** within 2px), which is what makes
+    **image ORDER geometry-verifiable** — closing the one write-safety hole review found
+    (raw masked bounds carried no ordering signal, and JXA `fileName` is non-unique — it
+    collapses every image to `pasted-image.pdf`).
+  - **Lines.** The frame `x/y/w/h` offset is pure ROTATION (`L=size.width`=length exact;
+    `JXA.x = cx − (L/2)|cos θ|` etc.). BUT remap writes the actual `start`/`end` ENDPOINTS
+    verbatim, and the first offline attempt drew the MIRROR-FLIPPED diagonal (opposite corners
+    of the same bbox) — a real write bug. Correct endpoints (`offline_inspect._line_endpoints`):
+    `R(-θ)` about the frame centre with the endpoint order taken from the bezier `moveTo→lineTo`
+    direction and `horizontalFlip`/`verticalFlip`. Now 391/391 start/end <0.5px.
+  - **Groups.** JXA reports the UNION of children's *transformed* bounds (recurse nested,
+    rotate each child, use the mask rect for masked-image children); the stored group
+    frame is stale (the 335px tail). Union → **~89% within 2px**; remap only sets a
+    group's *position* (it cannot scale a group), which is exactly this. The ~11%
+    residual (zero-size connector children / effect margins) is offline-detectable by
+    child signature → flag for a JXA read.
+  - **Shapes.** The apparent "~2px systematic inset" (median 2.2, max 12.5) is actually
+    small ROTATION on those shapes — applying the same corner-AABB rule as images
+    (un-rotated size, AABB top-left) brings **1884 real rotated shapes to <0.5px** on
+    both decks; non-rotated shapes pass through unchanged. So shape geometry is exact,
+    not merely within-budget.
+  - **Autosize text** is the one partial gap. `x` recovers EXACT (left-aligned:
+    1191/1191 <0.5px; centre/right-aligned `x` is the anchor, soft). `geometry.position.y`
+    is the vertical CENTRE, so `top = y − h/2` — but this rides `h = naturalSize.height`,
+    which is **stale on ~20%** of boxes, so `top` is wrong (to ~750px) on ~1-in-5 and
+    `h` likewise (recompute from run font size, `h ≈ 1.15·fontSize+9.5`, per-font, to
+    harden). **Width is NOT recoverable** (`naturalSize.width` is stale AND shuffled —
+    needs glyph shaping). So EVERY autosize box is flagged (`autosize-soft`); the name
+    lists whose w/h matter are **re-flowed by hand anyway** (SKILL packing note).
+- **The PPTX-export route — the geometry read fully laid out, in one Apple Event.**
+  `export doc as Microsoft PowerPoint` runs in **~21 s (1.2 GB) / ~77 s (6.8 GB)** — vs
+  the 12.6-min inspect — and `ppt/slides/slideN.xml` carries every shape's `a:off`/`a:ext`
+  (EMU/12700 = points) in **z-order == `drawablesZOrder`**, so `PPTX[i]` zips to
+  `derive_kind_index`'s i-th drawable with no matching. It is JXA-exact for images
+  (incl. masked), shapes, movies, and **autosize text position+height+WIDTH** (Keynote
+  did the glyph shaping — the one thing offline can't). It is NOT good for lines
+  (exports the bbox width, not the length — use the offline closed form) and group
+  frames diverge (use the offline union). So offline-composition and PPTX are
+  COMPLEMENTARY: offline nails lines/groups and needs no Keynote; PPTX nails autosize
+  width. A resizer read = `derive_kind_index` (addressing, 0.4 s) + offline-composed
+  geometry (seconds), with a PPTX export only if precise autosize width is needed —
+  either way the ~12-min inspect is gone. `scripts`-style prototypes (mask/line/group
+  compose, PPTX parse+validate) live in the session scratchpad.
 - **Pixels are impossible** (rendered PNG previews need Keynote). Every top-level
   path either OCRs pixels (checker, framing, single-inspect) or writes the deck
   (resize), so all still open Keynote.
-- **IWA is NOT an inspect speed-up.** The dominant read cost on realistic decks is
-  **per-slide round-trip overhead** (~0.83 s × N slides: collection evaluation,
-  `builds()`, `iWorkItems()`), NOT the property reads — the shipped bulk-read
-  already collapsed those. Measured A/B (stub that skips the style reads vs current)
-  on a real deck: **≤ noise under the bulk-on default** (~15 % only in the
-  non-default per-object path). Do not re-chase IWA for inspect speed; the lever is
-  reducing per-slide round-trips.
+- **IWA is NOT a drop-in speed-up for the *full JXA payload*** — but the *remap read
+  specifically now can go offline* (see the geometry section above). Reproducing the
+  whole inspect payload in IWA is still per-slide-round-trip bound (~0.83 s × N slides:
+  collection evaluation, `builds()`, `iWorkItems()`), which bulk-read already collapsed
+  (A/B ≤ noise under the bulk default). **What changed 2026-08-29:** remap needs only
+  `(kind, kindIndex)` + geometry, and BOTH are now obtainable without the per-slide JXA
+  walk — `derive_kind_index` (addressing, 0.4 s) + offline-composed geometry (seconds),
+  or a single ~77 s PPTX export. So "don't re-chase IWA for inspect speed" still holds
+  for the generic payload, but the remap read is no longer gated on the 12.6-min inspect.
 - **Offline WRITE of a whole deck corrupts it.** `keynote-parser` *can* modify a
   `.key`, but a full decode→re-encode→rezip is **byte-lossy** (60/80 IWA re-encode
   with different bytes). A trivial 3-slide deck survives and opens; a **232 MB deck

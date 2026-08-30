@@ -82,6 +82,7 @@ _INHERITED_PROPS = (
     "capitalization",
     "fontName",
     "superscript",
+    "kerning",  # character tracking (points); absent on the gold/checker decks
 )
 
 
@@ -130,6 +131,9 @@ def resolve_style(style_id: str, objects: dict[str, dict], cache: dict) -> dict:
         # Raw IWA superscript enum string (e.g. "kSuperscript") or None; inherited
         # via the same parent walk (the GW verse-number style resolves directly).
         "superscript": props.get("superscript"),
+        # Character tracking/kerning in points (charProperties.kerning) for the
+        # offline text shaper; None (== 0) on the gold/checker decks, which carry none.
+        "tracking": props.get("kerning"),
     }
     cache[key] = result
     return result
@@ -145,6 +149,54 @@ _EMPTY_STYLE = {
     "fontName": None,
     "superscript": None,
 }
+
+
+# paraProperties keys the offline text shaper needs; the first value seen up the
+# ParagraphStyleArchive.super.parent chain wins (same inheritance as resolve_style).
+_INHERITED_PARA_PROPS = (
+    "lineSpacing",       # {amount, mode?}; relative multiple when mode is unset
+    "spaceBefore",       # points added above the paragraph
+    "spaceAfter",        # points added below the paragraph
+    "firstLineIndent",   # points
+    "leftIndent",        # points
+    "rightIndent",       # points
+    "alignment",         # TATvalue0..N enum string (left/center/right/justify)
+)
+
+
+def resolve_para_style(style_id: str | None, objects: dict[str, dict], cache: dict) -> dict:
+    """Effective PARAGRAPH metrics for a ``ParagraphStyleArchive`` id, with inheritance.
+
+    Sibling of :func:`resolve_style` (which resolves CHARACTER properties): a
+    paragraph style typically stores only its overrides plus a ``super.parent`` to a
+    base style, so walk the parent chain and take the FIRST value for each of
+    :data:`_INHERITED_PARA_PROPS`. Used by :mod:`obed_edom.iwa_text_shape` to build the
+    ``NSParagraphStyle`` that drives wrapped-height / natural-width text layout; every
+    value is passed through unchanged (``lineSpacing`` stays the raw ``{amount, mode}``
+    dict). A cached result is keyed ``"para:<id>"`` so it never collides with
+    :func:`resolve_style`'s character-style cache entry for the same id.
+    """
+    if style_id is None:
+        return {}
+    key = f"para:{style_id}"
+    if key in cache:
+        return cache[key]
+    props: dict[str, Any] = {}
+    cur: str | None = str(style_id)
+    seen: set[str] = set()
+    while cur and cur not in seen:
+        seen.add(cur)
+        obj = objects.get(cur)
+        if not obj:
+            break
+        para_props = obj.get("paraProperties") or {}
+        for prop in _INHERITED_PARA_PROPS:
+            if prop not in props and prop in para_props:
+                props[prop] = para_props[prop]
+        parent = ((obj.get("super") or {}).get("parent") or {}).get("identifier")
+        cur = str(parent) if parent else None
+    cache[key] = props
+    return props
 
 
 def storage_runs(storage: dict, objects: dict[str, dict], cache: dict) -> list[dict]:
