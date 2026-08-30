@@ -1,6 +1,6 @@
 ---
 name: Checker offline inspect (cold-inspect speedup)
-overview: "Replace the Sermon Checker's per-slide JXA inspect (89% of cold time) with the validated offline IWA read + a slim O(slides) bulk-geometry pass. MEASURED on Sermon_PK (GW).key (63 slides, 2026-08-29): current cold inspect 305.9s (jxa read 273.6s / export 31.7s) → proposed ~94s (offline 0.8s + bulk 61.4s + export 31.7s) = ~3.25x, accuracy-IDENTICAL (overflow-flag A/B 63/63 identical, 0 fallback with the real bulk splice). Read `.cursor/skills/obed-edom/SKILL.md` 'Reading a .key offline (IWA)' first. Checker-SCOPED — inspect_keynote has 6+ callers; do NOT change it globally."
+overview: "Replace the Sermon Checker's per-slide JXA inspect (89% of cold time) with the validated offline IWA read + a slim O(slides) bulk-geometry pass. MEASURED on Sermon_PK (GW).key (63 slides, 2026-08-29): current cold inspect 305.9s (jxa read 273.6s / export 31.7s) → proposed ~94s (offline 0.8s + bulk 61.4s + export 31.7s) = ~3.25x, accuracy-IDENTICAL (overflow-flag A/B 63/63 identical, 0 fallback with the real bulk splice). Read `.agents/skills/obed-edom/SKILL.md` 'Reading a .key offline (IWA)' first. Checker-SCOPED — inspect_keynote has 6+ callers; do NOT change it globally."
 todos:
   - id: emit-rotation
     content: "DONE. offline_inspect._item_from_record emits `rotation` = the COMPOSED frame angle + (for masked image/movie) the mask angle — JXA's net visible rotation. INTEGER-rounded via _round_pt %360 to match JXA's whole-degree convention (a fractional value churns the reuse fingerprint + risks a spurious photo-tilt flag — peer-caught). Verified: 0 fractional-rotation items, 0 rotation-VALUE mismatches vs JXA on GW/Full/Map. Checker decks (GW) deck_slide_digests 0 churn (offline+bulk). CAVEAT (honest): a sub-degree residual in the mask+frame angle sum leaves ~3/155 churned framing digests on masked-rotated RESIZER decks (Full) — a one-time framing-memory re-align, not accuracy loss, and NOT on checker decks; exact JXA rotation parity is unattainable offline."
@@ -25,7 +25,7 @@ isProject: false
 
 # Checker offline inspect — cold-inspect speedup
 
-**Read `.cursor/skills/obed-edom/SKILL.md` 'Reading a .key offline (IWA)' first.** This
+**Read `.agents/skills/obed-edom/SKILL.md` 'Reading a .key offline (IWA)' first.** This
 plan is peer-reviewed (two independent planning agents, reconciled) and MEASURED offline
 before any code. It reuses the validated two-tier offline read shipped for the resizer
 (`offline_inspect.py`, `inspect.bulk_geometry`, default-on `OBED_OFFLINE_READ`).

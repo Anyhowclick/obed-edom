@@ -9,8 +9,8 @@ output/*
 # Inspect payloads and previews. Outside output/ on purpose: rebuilding costs
 # about an hour of Keynote time, and it used to be lost to an output tidy-up.
 .cache/
-# Debug-session logs. The rest of .cursor/ is tracked on purpose.
-.cursor/debug-*.log
+# Debug-session logs. The rest of .agents/ is tracked on purpose.
+.agents/debug-*.log
 *.applescript
 
 # Local operator fixtures, ignored (the large files inside).

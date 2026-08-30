@@ -521,7 +521,7 @@ def test_later_verse_numbers_get_the_template_character_style():
     """Pass 2 must stay GUI-driven and must carry the template's character style.
 
     Verified against Keynote 14.5 (see the "Later verse numbers" section of
-    .cursor/skills/obed-edom/SKILL.md). Keynote's AppleScript dictionary has
+    .agents/skills/obed-edom/SKILL.md). Keynote's AppleScript dictionary has
     no style support at all, and superscript is not a character property, so the
     deck's own verse-number style can only be applied through the UI. Do not
     "simplify" this into a pure-AppleScript pass: every scriptable route asserted
