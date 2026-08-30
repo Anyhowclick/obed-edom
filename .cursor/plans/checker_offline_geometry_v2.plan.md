@@ -58,3 +58,47 @@ slide-IDENTITY key that decides PAIRING — included image `rotation`, so the fl
 must not drive pairing/order; a flip-vs-LW discrepancy is caught by the paired-image COMPARISON,
 not the ordering key. Offline masked-image angle left as v1 composed it (signal preserved for the
 comparison). Regression test: `test_deck_slide_digests_ignore_image_rotation`.
+
+## Step-1 peer-verify (62b39eb) — VERDICT: correct, safe, INERT; not yet generalization-safe
+
+Nothing calls `iwa_text_shape` (checker/resizer still use `bulk_geometry`; `resolve_para_style`/
+`tracking` additive) → cannot regress v1. Mode composer correct (0x1=W/0x2=H); flags=1 y=TOP anchor
+fix real & large (50–178px); AppKit lazy-imported; font-missing guard gates; 35 tests pass. **CLOSE
+BEFORE STEP-3 WIRING** (should-fix, GENERALIZATION — none affect GW): (1) shaper IGNORES resolved
+paragraph metrics — inter-para spacing (only one absolute `VERTICAL_PAD`), `lineSpacing.mode` (always
+applied as relative multiple), indents → multi-para/non-GW drift; (2) an installed-but-UNCALIBRATED
+font/size is silently vouched (`DEFAULT_LINE_CORRECTION`/absolute `VERTICAL_PAD`, `reason=None`) — gate
+or widen calibration before DSK; (3) bold/italic traits not applied (relies on fontName weight) — a
+bold run inheriting a `-Regular` name shapes too narrow. Nits: flags==2 short-circuits to a stale
+frame width, vouched; para-level `tracking` dropped; flags==7 (0x4) undocumented (non-text). **Caveat:
+NO test asserts a shaped value vs a JXA oracle — the ~2px/6px accuracy is self-reported; real JXA A/B
+(step-1 verify item) still PENDING.** Next: close (1)(2)(3) + JXA A/B, then step 2.
+
+## Checker items to pull from `resizer_optimizations.plan.md`
+
+Independent of the v2 shaper track; land the correctness/cheap ones regardless of whether v2 drops
+the bulk pass. Full detail + coordination in that plan.
+
+- **`r-count-guard` (correctness — HIGH; do first).** `_splice_bulk_geometry` overwrites items by
+  `kindIndex` with NO offline-vs-Keynote count check; a dropped/added mid-list BULK_KIND item silently
+  hands every later item the previous object's frame. The DSK17 bug was this class (a dropped
+  placeholder — harmless to ordering only after rotation left the digest; a mid-list IMAGE drop would
+  silently mis-splice geometry with no catch). The guard `iwa_kindindex.reconcile_counts` is BUILT but
+  wired into nothing. Wire it into `two_tier_wall_payload`/`_splice_bulk_geometry`: per (slide,kind)
+  compare bulk-rows vs offline count (text tolerates keynote−derived ∈ [0,2] trailing placeholders —
+  verify tail rows are placeholder-shaped), image/movie/group exact; on mismatch mark unspliced AND
+  force the slide into `fallback_slides` even with zero soft items.
+- **`r-cache-hit-export-only` (~62s checker win).** Cached JSON present + PNGs evicted → the checker
+  does a full offline+bulk re-read (~62s) when only the ~32s export is needed. ~10-line fix in
+  `inspect_keynote_checker`'s cache block (inspect.py ~379). HARDEN the hit to require
+  `len(preview_pngs) == slideCount` (Session-14 partial-state lesson).
+- **`r-misc-cleanups` (cheap, checker-touching):** (3) `_build_checker_offline` decodes the deck TWICE
+  (`two_tier`→`_load_deck` then `attach_runs`→`_load_deck`) — single decode saves ~0.4–1s; (2) fold
+  the preview export into the bulk_geometry session (a cold diff opens Keynote 4×) → ~8s/diff; (5)
+  `export_applescript` (inspect.py:44) uses the disproven doc-bind (no close-by-name) → could silently
+  export the WRONG deck's bytes; every checker export goes through it; (4) checker-written v4 payloads
+  land in the SHARED digest cache served to resize-propose/single-inspect — A/B one cross-serve + add
+  a `reader` provenance field.
+- **`r-nested-bulk-probe` / `r-bulk-counts-plan`** would cut the 61s bulk tier (~94s→~45-55s) — but v2
+  aims to DROP the checker's bulk pass, so likely MOOT for the checker (durable for the resizer remap
+  read + write verifier). Revisit only if step-3 keeps a slim group-only bulk.
