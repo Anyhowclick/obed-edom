@@ -152,3 +152,20 @@ this branch and re-commit.
 - v2 step-3 wiring blockers (from the step-1 peer-verify): close the shaper's paragraph-metric /
   uncalibrated-font / bold-italic generalization gaps + the JXA A/B before wiring.
 - Merge `fix/checker-followups` → main when the verify peers are green (user merges).
+
+### VERIFIED (2+1+2 complete) — `acc9634`
+
+2 verify peers on `2733a91`: both correctness items (count-guard, cross-serve) SOUND and
+fail-safe; cache-export-only + single-decode CORRECT and resizer-regression-free (single decode
+byte-identical; `deck=` param keyword-only, resizer untouched). Findings addressed in `acc9634`:
+tightened `_is_placeholder_row` (at-origin AND degenerate — closed a text-only false-accept),
+corrected the cross-serve comment. Suite 497 passed, 1 xfailed. Keynote never opened.
+
+**OPEN DECISION FOR USER (non-blocking):** the reverse cross-serve guard rests on a corrected
+premise — a JXA payload is NOT runs-less (attach_runs runs on inspect_keynote), and JXA geometry
+is EXACT. So the guard enforces provenance *consistency* (don't diff offline-composed vs
+JXA-geometry) at the cost of a ~62s rebuild on a rare single-inspect→checker cache hit. KEEP (safe,
+consistent) or NARROW/REVERT (JXA payloads are valid + exact, avoid the rebuild)? Left as-is (keep);
+your call. Everything else stands.
+
+**Branch `fix/checker-followups`** ready to merge → main when you're happy (user merges).
