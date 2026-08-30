@@ -187,8 +187,13 @@ def inspect_keynote(
     # Persisted, so a payload can always say which Keynote read the deck.
     payload["keynoteBundleId"] = keynote_app.bundle_id()
     payload["keynoteVersion"] = keynote_app.app_version()
-    # Provenance: this is the JXA reader (no runs[]). Persists past the cache-write
-    # underscore strip so inspect_keynote_checker can reject a runs-less cross-serve.
+    # Provenance tag (persists past the cache-write underscore strip). CORRECTION: a
+    # JXA payload is NOT runs-less — attach_runs ran above (line ~184) and sets runs[]
+    # + groupedText. So inspect_keynote_checker's reject guards provenance CONSISTENCY
+    # (don't diff an offline-composed deck against a JXA-geometry one), NOT a runs
+    # under-report. Trade-off: a ~62s rebuild on a rare JXA(single-inspect)→checker
+    # cache hit. Whether to keep this or narrow it (JXA payloads are valid + exact) is
+    # a user design call — see the v2 plan handover.
     payload["reader"] = "jxa"
     if dest:
         t_export = time.perf_counter()

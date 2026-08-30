@@ -559,22 +559,22 @@ def unvouched_items(payload: dict[str, Any], slide_range: Any = None) -> list[di
 def _is_placeholder_row(row: list | None, width: float, height: float) -> bool:
     """Whether a bulk geometry row looks like a JXA empty text placeholder.
 
-    JXA appends 0-2 empty title/body placeholders (``KN.PlaceholderArchive``, at
-    ~0,0 / off-canvas) to the END of ``textItems`` on some slides; derive omits them
-    (SKILL "Placeholders"). A real trailing text box carrying content sits ON-canvas
-    at a non-origin position, so a row that is neither at the origin nor wholly off
-    the canvas is treated as a real object — a mid-list text drop then cannot hide
-    behind the count slack.
+    JXA appends 0-2 empty title/body placeholders (``KN.PlaceholderArchive``) to the
+    END of ``textItems`` on some slides; derive omits them (SKILL "Placeholders").
+    A real placeholder is at the origin AND degenerate (observed ``(0,0,0,0)``).
+    Requiring BOTH closes the false-accept a peer caught: an at-origin case must also
+    be degenerate-size (a real title box at the origin has real size), and a box merely
+    parked off-canvas is NOT a placeholder — otherwise a mid-list text drop whose real
+    tail box happens to sit at the origin (or off-canvas) would slip the count slack.
+    A missed sized/off-canvas placeholder only yields a safe-side spurious JXA
+    fallback, never a mis-splice.
     """
     if not row or len(row) < 4:
         return False
     x, y, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
     at_origin = abs(x) < 1.0 and abs(y) < 1.0
-    off_canvas = (
-        (width > 0 and (x >= width or x + w <= 0))
-        or (height > 0 and (y >= height or y + h <= 0))
-    )
-    return at_origin or off_canvas
+    degenerate = w < 1.0 or h < 1.0
+    return at_origin and degenerate
 
 
 def _splice_bulk_geometry(
