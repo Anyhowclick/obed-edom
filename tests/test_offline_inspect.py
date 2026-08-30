@@ -708,8 +708,9 @@ def test_splice_overwrites_only_bulk_kind_geometry_keeps_style():
         ]
     }
     bulk = {0: {"text": [[10, 20, 30, 40]], "image": [[100, 110, 120, 130]]}}
-    spliced = _splice_bulk_geometry(payload, bulk)
+    spliced, mismatch = _splice_bulk_geometry(payload, bulk)
     assert spliced == {(1, "text", 0), (1, "image", 0)}
+    assert mismatch == set()
     items = payload["slides"][0]["items"]
     assert (items[0]["x"], items[0]["y"], items[0]["w"], items[0]["h"]) == (10, 20, 30, 40)
     assert items[0]["font"] == "Amplitude" and items[0]["size"] == 42 and items[0]["text"] == "hi"
@@ -726,6 +727,85 @@ def test_splice_rounds_to_integers_like_jxa():
     it = payload["slides"][0]["items"][0]
     assert (it["x"], it["y"], it["w"], it["h"]) == (10, -3, 100, 0)
     assert all(isinstance(it[k], int) for k in ("x", "y", "w", "h"))
+
+
+def test_count_guard_exact_kind_mismatch_is_unspliced_and_flagged():
+    # An image count disagreement (bulk returns one fewer row than the offline read
+    # has image items) desyncs kindIndex: the kind is left UNspliced and returned in
+    # count_mismatch, while a matching kind on the same slide still splices.
+    payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [
+        {"index": 0, "number": 1, "items": [
+            {"kind": "image", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0},
+            {"kind": "image", "kindIndex": 1, "x": 0, "y": 0, "w": 0, "h": 0, "index": 1},
+            {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 2},
+        ]},
+    ]}
+    bulk = {0: {"image": [[10, 10, 10, 10]], "group": [[20, 20, 20, 20]]}}
+    spliced, mismatch = _splice_bulk_geometry(payload, bulk)
+    assert mismatch == {(1, "image")}
+    assert spliced == {(1, "group", 0)}  # matching kind still spliced
+    items = payload["slides"][0]["items"]
+    assert (items[0]["x"], items[0]["y"]) == (0, 0)  # image left offline
+    assert (items[2]["x"], items[2]["y"]) == (20, 20)  # group overwritten
+
+
+def test_count_guard_text_slack_requires_placeholder_tail():
+    # The text slack [0,2] must not mask a mid-list drop: when keynote-derived is in
+    # {1,2} the extra TAIL rows must be placeholder-shaped (at ~0,0 / off-canvas),
+    # else the (slide, text) is a real count mismatch (a dropped mid-list box pushed
+    # a real object to the end).
+    def deck():
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": [
+            {"index": 0, "number": 1, "items": [
+                {"kind": "text", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0},
+                {"kind": "text", "kindIndex": 1, "x": 0, "y": 0, "w": 0, "h": 0, "index": 1},
+            ]}]}
+    # Tail row is a real on-canvas box, not a placeholder => flagged, text unspliced.
+    real_tail = {0: {"text": [[10, 20, 30, 40], [50, 60, 70, 80], [500, 400, 200, 50]]}}
+    spliced, mismatch = _splice_bulk_geometry(deck(), real_tail)
+    assert mismatch == {(1, "text")}
+    assert spliced == set()
+    # A genuine placeholder tail (at 0,0) is allowed: text splices, no mismatch.
+    ph_tail = {0: {"text": [[10, 20, 30, 40], [50, 60, 70, 80], [0, 0, 0, 0]]}}
+    spliced2, mismatch2 = _splice_bulk_geometry(deck(), ph_tail)
+    assert mismatch2 == set()
+    assert spliced2 == {(1, "text", 0), (1, "text", 1)}
+
+
+def test_count_mismatch_forces_fallback_even_with_zero_soft_items(monkeypatch):
+    """A per-(slide, kind) bulk-vs-offline count disagreement forces the slide into
+    fallback_slides EVEN when the slide carries no soft item — closes the soft-free
+    mis-splice hole (r-count-guard). Today's soft-only fallback logic would keep the
+    offline item list the mismatch just proved wrong. The tier-1 read is stubbed so
+    the two_tier fallback wiring is exercised on a deliberately soft-free slide."""
+    from obed_edom import offline_inspect
+
+    def fake_offline(key_path, slide_range=None, *, deck=None):
+        # A soft-free slide (empty soft_geometry/guard) with two image items.
+        return {
+            "slideWidth": 1920, "slideHeight": 1080,
+            "slides": [{"index": 0, "number": 1, "items": [
+                {"kind": "image", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0},
+                {"kind": "image", "kindIndex": 1, "x": 0, "y": 0, "w": 0, "h": 0, "index": 1},
+            ]}],
+            "_offline": {"guard": [], "soft_geometry": []},
+        }
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", fake_offline)
+
+    # Bulk returns ONE image row for a slide the offline read has TWO images on.
+    def fn(key_path, slides=None):
+        return {0: {"image": [[10, 10, 10, 10]]}}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert side["bulk_ok"] is True
+    assert side["fallback_slides"] == [1]
+    assert any(
+        f["slide"] == 1 and f["reason"] == "count-mismatch" and f["kind"] == "image"
+        for f in side["fallback"]
+    )
+    # And the mismatched kind was left UNspliced (offline geometry stands).
+    assert side["spliced"] == 0
 
 
 def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():

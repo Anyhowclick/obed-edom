@@ -437,14 +437,18 @@ def _match_runs_to_items(text_objects: list[dict], items: list[dict]) -> None:
         item["runs"] = queue.popleft() if queue else []
 
 
-def attach_runs(key_path: str | Path, payload: dict) -> None:
+def attach_runs(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
     """Populate ``item["runs"]`` in an inspect payload from the deck's IWA graph.
 
     Read-only, best-effort. Raises ``ImportError`` if the ``iwa`` extra is absent
     (the caller catches it), and simply leaves ``runs = []`` for any item it can't
     confidently match.
+
+    ``deck`` is an already-decoded ``_load_deck`` 3-tuple; pass it to reuse the
+    decode ``offline_wall_payload`` already did (the checker builds both from ONE
+    decode) instead of decoding the deck a second time.
     """
-    objects, id_to_file, file_ids = _load_deck(key_path)
+    objects, id_to_file, file_ids = deck if deck is not None else _load_deck(key_path)
     order = slide_order(objects)
     cache: dict = {}
     # Full deck: true slide index -> that slide's text objects. Keyed by position

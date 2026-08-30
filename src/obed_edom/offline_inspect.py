@@ -438,7 +438,7 @@ def _canvas_size(objects: dict[str, dict]) -> tuple[float, float]:
 # Public entry points.
 # --------------------------------------------------------------------------
 def offline_wall_payload(
-    key_path: str | Path, slide_range: Any = None
+    key_path: str | Path, slide_range: Any = None, *, deck: Any = None
 ) -> dict[str, Any]:
     """A JXA-``inspect_keynote``-shaped payload for the wall deck, read offline.
 
@@ -453,10 +453,13 @@ def offline_wall_payload(
     ``{"guard": [{slide, kind, kindIndex, reason}, …], "tripped": bool}``. A
     caller must fall back to the legacy read when ``tripped`` is true (see
     :func:`unvouched_items`). Raises ``ImportError`` without the ``iwa`` extra.
+
+    ``deck`` is an already-decoded ``_load_deck`` 3-tuple; pass it to share ONE IWA
+    decode with :func:`obed_edom.iwa_runs.attach_runs` (the checker reads both).
     """
     from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional extra)
 
-    objects, _id_to_file, _file_ids = _load_deck(key_path)
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
     with zipfile.ZipFile(key_path) as zf:
         data_index = _build_data_index(zf.namelist())
     width, height = _canvas_size(objects)
@@ -553,18 +556,30 @@ def unvouched_items(payload: dict[str, Any], slide_range: Any = None) -> list[di
 # --------------------------------------------------------------------------
 # Two-tier read: offline payload + a bulk Keynote geometry overwrite.
 # --------------------------------------------------------------------------
-def _slide_index_by_number(payload: dict[str, Any]) -> dict[int, dict[str, Any]]:
-    """``{document_number: slide}`` — the number the guard/soft flags key on."""
-    out: dict[int, dict[str, Any]] = {}
-    for slide in payload.get("slides") or []:
-        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
-        out[number] = slide
-    return out
+def _is_placeholder_row(row: list | None, width: float, height: float) -> bool:
+    """Whether a bulk geometry row looks like a JXA empty text placeholder.
+
+    JXA appends 0-2 empty title/body placeholders (``KN.PlaceholderArchive``, at
+    ~0,0 / off-canvas) to the END of ``textItems`` on some slides; derive omits them
+    (SKILL "Placeholders"). A real trailing text box carrying content sits ON-canvas
+    at a non-origin position, so a row that is neither at the origin nor wholly off
+    the canvas is treated as a real object — a mid-list text drop then cannot hide
+    behind the count slack.
+    """
+    if not row or len(row) < 4:
+        return False
+    x, y, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+    at_origin = abs(x) < 1.0 and abs(y) < 1.0
+    off_canvas = (
+        (width > 0 and (x >= width or x + w <= 0))
+        or (height > 0 and (y >= height or y + h <= 0))
+    )
+    return at_origin or off_canvas
 
 
 def _splice_bulk_geometry(
     payload: dict[str, Any], bulk: dict[int, dict[str, list]]
-) -> set[tuple[int, str, int]]:
+) -> tuple[set[tuple[int, str, int]], set[tuple[int, str]]]:
     """Overwrite each group/image/movie/text item's x/y/w/h from ``bulk``, in place.
 
     ``bulk`` is ``{slideIndex: {kind: [[x, y, w, h], … by kindIndex]}}`` (the
@@ -573,19 +588,64 @@ def _splice_bulk_geometry(
     touched, and ONLY x/y/w/h — addressing, style, fileName, locked, childCount,
     buildCount and text stay exactly as the offline read produced them. Values are
     rounded to whole points to match JXA's integer geometry (see
-    :func:`_item_from_record`). Returns the set of ``(number, kind, kindIndex)``
-    actually spliced, so the caller knows which soft items the bulk read confirmed.
+    :func:`_item_from_record`).
+
+    COUNT GUARD (per (slide, kind), before splicing that kind): the bulk row count
+    (Keynote's collection size) is reconciled against the offline item count for
+    that kind (:func:`obed_edom.iwa_kindindex.reconcile_counts`) — image/movie/group
+    must match EXACTLY, text tolerates ``keynote − derived ∈ [0,2]`` trailing empty
+    placeholders. When that text slack is actually used the extra rows must sit at
+    the TAIL as placeholder-shaped frames (:func:`_is_placeholder_row`), else a
+    mid-list text drop masked by placeholders would pass. A mismatch means a
+    dropped/added mid-list item has desynced ``kindIndex`` from the bulk rows, so the
+    kind is left UNspliced (its offline geometry stands until the slide falls back).
+
+    Returns ``(spliced, count_mismatch)``: ``spliced`` is the set of
+    ``(number, kind, kindIndex)`` actually overwritten (so the caller knows which
+    soft items the bulk read confirmed); ``count_mismatch`` is the set of
+    ``(number, kind)`` whose counts disagreed (so the caller can force those slides
+    to fall back even when they carry no soft item).
     """
+    from obed_edom.iwa_kindindex import (  # noqa: PLC0415
+        TEXT_PLACEHOLDER_SLACK,
+        reconcile_counts,
+    )
+
+    width = float(payload.get("slideWidth") or 0.0)
+    height = float(payload.get("slideHeight") or 0.0)
     spliced: set[tuple[int, str, int]] = set()
+    count_mismatch: set[tuple[int, str]] = set()
     for slide in payload.get("slides") or []:
         index = int(slide.get("index") or 0)
         number = int(slide.get("number") or (index + 1))
         rows_by_kind = bulk.get(index)
         if not rows_by_kind:
             continue
-        for item in slide.get("items") or []:
+        items = slide.get("items") or []
+        # Per-kind offline (derived) vs bulk (Keynote) counts for the 4 BULK_KINDS.
+        derived: dict[str, int] = {}
+        for item in items:
             kind = item.get("kind")
-            if kind not in BULK_KINDS:
+            if kind in BULK_KINDS:
+                derived[kind] = derived.get(kind, 0) + 1
+        keynote = {
+            kind: len(rows)
+            for kind, rows in rows_by_kind.items()
+            if kind in BULK_KINDS and rows is not None
+        }
+        bad_kinds = set(reconcile_counts(derived, keynote))
+        # The text slack can hide a mid-list drop when placeholders are present: if
+        # it was actually used, the extra rows must be placeholder-shaped and at the
+        # tail, else treat the (slide, text) as a real count mismatch.
+        extra = keynote.get("text", 0) - derived.get("text", 0)
+        if "text" not in bad_kinds and 1 <= extra <= TEXT_PLACEHOLDER_SLACK:
+            tail = (rows_by_kind.get("text") or [])[-extra:]
+            if not (tail and all(_is_placeholder_row(r, width, height) for r in tail)):
+                bad_kinds.add("text")
+        count_mismatch.update((number, kind) for kind in bad_kinds)
+        for item in items:
+            kind = item.get("kind")
+            if kind not in BULK_KINDS or kind in bad_kinds:
                 continue
             rows = rows_by_kind.get(kind)
             if rows is None:
@@ -602,13 +662,15 @@ def _splice_bulk_geometry(
             item["w"] = _round_pt(float(w))
             item["h"] = _round_pt(float(h))
             spliced.add((number, kind, ki))
-    return spliced
+    return spliced, count_mismatch
 
 
 def two_tier_wall_payload(
     key_path: str | Path,
     bulk_geometry_fn: Any = None,
     slide_range: Any = None,
+    *,
+    deck: Any = None,
 ) -> dict[str, Any]:
     """The offline wall payload with the three soft classes' geometry read from Keynote.
 
@@ -640,8 +702,11 @@ def two_tier_wall_payload(
     ``filename-dirty``), and (b) a SOFT-geometry item (group frame / autosize box,
     or a geometry-flagged one) the bulk read did NOT return — an unconfirmed
     divergence. Both are scoped to their slide, never the deck.
+
+    ``deck`` is an already-decoded ``_load_deck`` 3-tuple, forwarded to tier 1 so the
+    checker can share ONE IWA decode across this read and ``attach_runs``.
     """
-    payload = offline_wall_payload(key_path, slide_range)
+    payload = offline_wall_payload(key_path, slide_range, deck=deck)
     sidecar = payload.setdefault("_offline", {})
     guard = sidecar.get("guard") or []
     soft = sidecar.get("soft_geometry") or []
@@ -673,14 +738,23 @@ def two_tier_wall_payload(
                            slide_range=slide_range)
         return payload
 
-    spliced = _splice_bulk_geometry(payload, bulk or {})
+    spliced, count_mismatch = _splice_bulk_geometry(payload, bulk or {})
     # A soft item the bulk read did not confirm is still an unconfirmed divergence.
     unconfirmed = [
         {**s, "reason": "bulk-missing"}
         for s in soft
         if (int(s["slide"]), s["kind"], int(s["kindIndex"])) not in spliced
     ]
-    fallback = content_flags + unconfirmed
+    # A per-(slide, kind) count disagreement means a mid-list BULK_KIND item was
+    # dropped/added, so kindIndex no longer lines the bulk rows up with the offline
+    # items — the whole slide must fall back EVEN IF it carries no soft item (a
+    # soft-free count mismatch would otherwise silently mis-splice every later frame,
+    # the DSK17 bug class). Its kind stayed unspliced above.
+    count_flags = [
+        {"slide": number, "kind": kind, "kindIndex": -1, "reason": "count-mismatch"}
+        for number, kind in sorted(count_mismatch)
+    ]
+    fallback = content_flags + unconfirmed + count_flags
     if slide_range is not None:
         fallback = [f for f in fallback if wants_slide(int(f["slide"]), slide_range)]
     _finalize_two_tier(payload, sidecar, bulk_ok=True, spliced=len(spliced),

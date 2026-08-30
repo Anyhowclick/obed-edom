@@ -187,6 +187,9 @@ def inspect_keynote(
     # Persisted, so a payload can always say which Keynote read the deck.
     payload["keynoteBundleId"] = keynote_app.bundle_id()
     payload["keynoteVersion"] = keynote_app.app_version()
+    # Provenance: this is the JXA reader (no runs[]). Persists past the cache-write
+    # underscore strip so inspect_keynote_checker can reject a runs-less cross-serve.
+    payload["reader"] = "jxa"
     if dest:
         t_export = time.perf_counter()
         pngs = preview_pngs(dest)
@@ -313,14 +316,18 @@ def _build_checker_offline(key_path: Path, bulk_geometry_fn: Any) -> dict[str, A
     test-double ``bulk_geometry_fn``, no Keynote. Raises ``ImportError`` when the
     ``iwa`` extra is absent (the caller drops the whole deck to the JXA inspect).
     """
+    from obed_edom.iwa_runs import _load_deck, attach_runs  # noqa: PLC0415
     from obed_edom.offline_inspect import two_tier_wall_payload  # noqa: PLC0415
 
-    payload = two_tier_wall_payload(key_path, bulk_geometry_fn=bulk_geometry_fn)
+    # Decode the IWA graph ONCE and share it across both readers (the offline
+    # addressing/geometry pass and the per-run/grouped-text pass) — each used to
+    # decode the deck independently (~0.4-1s/deck). A missing `iwa` extra raises
+    # ImportError here, which the caller drops to the legacy JXA inspect.
+    deck = _load_deck(key_path)
+    payload = two_tier_wall_payload(key_path, bulk_geometry_fn=bulk_geometry_fn, deck=deck)
     try:
-        from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
-
-        attach_runs(key_path, payload)
-    except Exception:  # noqa: BLE001 — decode error leaves runs=[] / no groupedText
+        attach_runs(key_path, payload, deck=deck)
+    except Exception:  # noqa: BLE001 — run-matching error leaves runs=[] / no groupedText
         pass
     # JXA emits `master` on every slide; the offline read does not consult it (the
     # checker never reads it either), so default it for shape parity.
@@ -376,16 +383,46 @@ def inspect_keynote_checker(
         timing["digest"] = time.perf_counter() - t_hash
         json_path = inspect_cache_path(digest)
         png_dir = preview_cache_dir(digest)
-        pngs_ok = dest is None or bool(preview_pngs(png_dir))
-        if json_path.is_file() and pngs_ok:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-            payload["_cached"] = True
-            payload["_digest"] = digest
-            payload["_timing"] = timing
-            if dest is not None:
-                payload["previewDir"] = str(png_dir)
-                payload["exported"] = bool(preview_pngs(png_dir))
-            return payload
+        if json_path.is_file():
+            cached = json.loads(json_path.read_text(encoding="utf-8"))
+            # REVERSE CROSS-SERVE GUARD: only serve a payload this checker built
+            # (offline IWA + attach_runs). A JXA / single-inspect payload cached
+            # under the SHARED digest carries NO runs[] (inspect_keynote.js emits
+            # none), so serving it to a diff would skip attach_runs and silently
+            # under-report highlight/small-caps/style diffs. A missing `reader`
+            # (legacy pre-provenance payload) is rejected too — fall through and
+            # rebuild the offline payload.
+            if cached.get("reader") == "offline":
+                slide_count = int(
+                    cached.get("slideCount") or len(cached.get("slides") or [])
+                )
+                have = 0 if png_dir is None else len(preview_pngs(png_dir))
+                # HARDENED HIT: require the FULL preview set (export uses skipped
+                # slides:false, so a complete run has exactly slideCount PNGs), else
+                # a partial export would be served forever from the digest-keyed dir.
+                if dest is None or have == slide_count:
+                    cached["_cached"] = True
+                    cached["_digest"] = digest
+                    cached["_timing"] = timing
+                    if dest is not None:
+                        cached["previewDir"] = str(png_dir)
+                        cached["exported"] = bool(preview_pngs(png_dir))
+                    return cached
+                # JSON cached but previews evicted/partial and an export is wanted:
+                # run ONLY the export (~32s the checker needs), never the ~62s
+                # offline+bulk rebuild.
+                png_dir.mkdir(parents=True, exist_ok=True)
+                t_export = time.perf_counter()
+                err = export_slide_images(key_path, png_dir)
+                cached["_cached"] = True
+                cached["_digest"] = digest
+                cached["exported"] = bool(preview_pngs(png_dir))
+                if not cached["exported"]:
+                    cached["exportError"] = err or cached.get("exportError") or ""
+                cached["previewDir"] = str(png_dir)
+                timing["export"] = time.perf_counter() - t_export
+                cached["_timing"] = timing
+                return cached
 
     # Build the offline+bulk payload; a hard failure drops the whole deck to legacy.
     t_read = time.perf_counter()
@@ -410,6 +447,9 @@ def inspect_keynote_checker(
     payload["path"] = str(key_path)
     payload["keynoteBundleId"] = keynote_app.bundle_id()
     payload["keynoteVersion"] = keynote_app.app_version()
+    # Provenance: the offline IWA reader (runs[] attached). Persists past the
+    # cache-write underscore strip; the cache-read above serves ONLY this reader.
+    payload["reader"] = "offline"
     payload.setdefault("exported", False)
 
     export_target = dest
