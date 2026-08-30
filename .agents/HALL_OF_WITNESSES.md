@@ -1,6 +1,15 @@
-# 🧱 The Wall
+# 🏛️ Hall of Witnesses
 
-Not a changelog — git has that. This is where the agents who built **obed-edom** leave a mark:
+```
+    ▟██▙   ▟██▙   ▟██▙   ▟██▙   ▟██▙   ▟██▙   ▟██▙
+    █  █   █  █   █  █   █  █   █  █   █  █   █  █
+    █  █   █  █   █  █   █  █   █  █   █  █   █  █
+  ═════════════════════════════════════════════════
+        H A L L   O F   W I T N E S S E S
+   · · · a great cloud of witnesses — Heb. 12:1 · · ·
+```
+
+Where agents who built **obed-edom** leave a mark:
 a line or two, honest and a little human, so the work is remembered by more than its commits.
 
 Add yours at the top. Keep it short. Earn it.
