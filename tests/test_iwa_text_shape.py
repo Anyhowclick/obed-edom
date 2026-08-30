@@ -40,12 +40,25 @@ def _geom(x, y, w, h, flags, angle=0.0):
 
 
 def _textbox(objects, ident, *, flags, x=0.0, y=0.0, w=0.0, h=0.0, nw=0.0, nh=0.0,
-             font="AzoSans-Regular", size=70.0, text="Hi", amount=0.8):
+             font="AzoSans-Regular", size=70.0, text="Hi", amount=0.8, mode=None,
+             bold=False, italic=False, left_indent=0.0, right_indent=0.0):
+    char_props = {"fontName": font, "fontSize": size}
+    if bold:
+        char_props["bold"] = True
+    if italic:
+        char_props["italic"] = True
     objects[f"{ident}-c"] = {"_pbtype": "TSWP.CharacterStyleArchive",
-                             "charProperties": {"fontName": font, "fontSize": size}}
+                             "charProperties": char_props}
+    line_spacing = {"amount": amount}
+    if mode is not None:
+        line_spacing["mode"] = mode
+    para_props = {"lineSpacing": line_spacing, "alignment": "TATvalue2"}
+    if left_indent:
+        para_props["leftIndent"] = left_indent
+    if right_indent:
+        para_props["rightIndent"] = right_indent
     objects[f"{ident}-p"] = {"_pbtype": "TSWP.ParagraphStyleArchive",
-                             "paraProperties": {"lineSpacing": {"amount": amount},
-                                                "alignment": "TATvalue2"}}
+                             "paraProperties": para_props}
     objects[f"{ident}-st"] = {
         "_pbtype": "TSWP.StorageArchive", "text": [text],
         "tableCharStyle": {"entries": [{"characterIndex": 0,
@@ -150,11 +163,119 @@ def test_font_missing_marks_unvouched():
 
 
 @needs_appkit
-def test_installed_font_is_vouched():
+def test_calibrated_installed_font_is_vouched():
+    # AzoSans is installed on the calibration host AND in HEIGHT_MODEL -> vouched.
     objects: dict = {}
     rec = _textbox(objects, "ok", flags=1, x=0.0, y=0.0, nw=300.0,
-                   font="Helvetica", text=_WRAP)
+                   font="AzoSans-Regular", text=_WRAP)
     assert compose_text_geometry(rec, objects, {}).reason is None
+
+
+# --------------------------------------------------------------------------
+# Gate B1 — an installed-but-UNCALIBRATED font (no HEIGHT_MODEL entry) gates.
+# --------------------------------------------------------------------------
+@needs_appkit
+def test_installed_uncalibrated_font_gates():
+    # Helvetica is installed (so NOT font-missing) but absent from HEIGHT_MODEL.
+    objects: dict = {}
+    rec = _textbox(objects, "unc", flags=1, x=0.0, y=0.0, nw=300.0,
+                   font="Helvetica", text=_WRAP)
+    tg = compose_text_geometry(rec, objects, {})
+    assert tg.reason == "uncalibrated-font"
+    assert tg.w == 300.0 and tg.h > 0.0  # still emits best-effort geometry
+
+
+# --------------------------------------------------------------------------
+# Gate B3 — a flags==0 (auto-width) box is always gated autowidth-soft.
+# --------------------------------------------------------------------------
+@needs_appkit
+def test_flags0_is_gated_autowidth_soft():
+    objects: dict = {}
+    rec = _textbox(objects, "aw", flags=0, x=1000.0, y=500.0, font="AzoSans-Regular",
+                   text="Centered")
+    assert compose_text_geometry(rec, objects, {}).reason == "autowidth-soft"
+
+
+# --------------------------------------------------------------------------
+# Gate B4 — a non-relative lineSpacing.mode gates (defensive; 0 occur on GW/DSK).
+# --------------------------------------------------------------------------
+@needs_appkit
+def test_linespacing_mode_gates():
+    objects: dict = {}
+    rec = _textbox(objects, "ls", flags=1, x=0.0, y=0.0, nw=300.0,
+                   font="AzoSans-Regular", text=_WRAP, mode=1)
+    assert compose_text_geometry(rec, objects, {}).reason == "linespacing-mode"
+
+
+# --------------------------------------------------------------------------
+# Gate B2 — an ArgentCF (single-line-only calibrated) MULTI-line box gates;
+# a single-line ArgentCF box still vouches.
+# --------------------------------------------------------------------------
+@needs_appkit
+def test_argentcf_multiline_gates_but_singleline_vouches():
+    objects: dict = {}
+    multi = _textbox(objects, "am", flags=1, x=0.0, y=0.0, nw=200.0,
+                     font="ArgentCF-Regular", text=_WRAP)  # narrow -> wraps
+    assert compose_text_geometry(multi, objects, {}).reason == "uncalibrated-multiline"
+    single = _textbox(objects, "as", flags=1, x=0.0, y=0.0, nw=4000.0,
+                      font="ArgentCF-Regular", text="Short line")  # wide -> one line
+    assert compose_text_geometry(single, {**objects}, {}).reason is None
+
+
+# --------------------------------------------------------------------------
+# Gap D — a left/right indent narrows the wrap width, so the box shapes TALLER.
+# --------------------------------------------------------------------------
+@needs_appkit
+def test_indent_increases_shaped_height():
+    objects: dict = {}
+    plain = _textbox(objects, "ip", flags=1, x=0.0, y=0.0, nw=600.0,
+                     font="AzoSans-Regular", text=_WRAP)
+    indented = _textbox(objects, "ii", flags=1, x=0.0, y=0.0, nw=600.0,
+                        font="AzoSans-Regular", text=_WRAP,
+                        left_indent=120.0, right_indent=120.0)
+    hp = compose_text_geometry(plain, {**objects}, {}).h
+    hi = compose_text_geometry(indented, {**objects}, {}).h
+    assert hi > hp  # narrower wrap -> more lines -> taller
+
+
+# --------------------------------------------------------------------------
+# Gap C — bold/italic traits: applied when the font has the face, verified.
+# --------------------------------------------------------------------------
+@needs_appkit
+def test_bold_trait_applied_when_face_exists():
+    from AppKit import NSBoldFontMask, NSFontManager
+
+    from obed_edom.iwa_text_shape import _ns_font
+
+    # Helvetica has a real bold face; the request is satisfiable (trait_bad False)
+    # and the returned font actually carries the bold trait.
+    font, missing, trait_bad = _ns_font("Helvetica", 40.0, bold=True, italic=False)
+    assert missing is False and trait_bad is False
+    assert NSFontManager.sharedFontManager().traitsOfFont_(font) & NSBoldFontMask
+    # Requesting bold on an already-bold face applies nothing (idempotent, family kept).
+    font2, _m, trait_bad2 = _ns_font("Helvetica-Bold", 40.0, bold=True, italic=False)
+    assert trait_bad2 is False
+    assert font2.familyName() == "Helvetica"
+
+
+@needs_appkit
+def test_trait_unsatisfiable_gates(monkeypatch):
+    # An unsynthesizable bold/italic (AppKit would change family / drop the trait) is
+    # rare with real fonts, so force `_ns_font` to report trait_bad and assert the gate
+    # maps it to `trait-unsatisfiable`. Uses a calibrated+installed family so the earlier
+    # font-missing / uncalibrated-font gates do not pre-empt this branch.
+    import obed_edom.iwa_text_shape as mod
+
+    def fake_ns_font(font_name, size, bold=False, italic=False):
+        from AppKit import NSFont  # noqa: PLC0415
+        f = NSFont.fontWithName_size_(font_name, size) or NSFont.systemFontOfSize_(size)
+        return (f, False, True)  # installed (not missing), but trait unsatisfiable
+
+    monkeypatch.setattr(mod, "_ns_font", fake_ns_font)
+    objects: dict = {}
+    rec = _textbox(objects, "tb", flags=1, x=0.0, y=0.0, nw=300.0,
+                   font="AzoSans-Regular", text=_WRAP, bold=True)
+    assert compose_text_geometry(rec, objects, {}).reason == "trait-unsatisfiable"
 
 
 # --------------------------------------------------------------------------

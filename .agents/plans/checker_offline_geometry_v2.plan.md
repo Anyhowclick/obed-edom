@@ -3,8 +3,8 @@ name: Checker offline geometry v2 (drop the bulk pass)
 overview: "v2 of the checker speedup (v1 shipped e86aaca: offline IWA + O(slides) bulk-geometry, ~3.25x). GOAL: compute autosize TEXT geometry OFFLINE (AppKit NSAttributedString shaping) so the 61s bulk Keynote pass can be dropped -> cold inspect ~= offline(0.8s)+export(32s) ~= 33s, ~9x. PEER-SCOPED + MEASURED (Keynote-free, 2026-08-29). Read the v1 plan (.agents/plans/checker_offline_inspect.plan.md) + SKILL 'Reading a .key offline (IWA)' first. SEQUENCED to de-risk: build+calibrate the shaper (step 1, Keynote-free, low-regret) BEFORE committing to the group work."
 todos:
   - id: shaper
-    content: "STEP 1. Mode-aware offline text composer using AppKit NSAttributedString (installed; CoreText pyobjc is NOT — no new dep). Discriminator = TSD.GeometryArchive.flags (empirically: 0x1=fixed-width, 0x2=fixed-height; the current frame.h==0 test conflates flags 0 and 1). Per mode: flags=3 -> frame exact; flags=1 (fixed-W+auto-H, the DOMINANT case, ~91-97% of overflow-eligible boxes) -> w=naturalSize.w (EXACT offline), h=shaper.height(text, w=nw-2*inset), y=TOP (fix: current _autosize_rect wrongly uses y-h/2 for flags=1); flags=0 (auto-W+auto-H center) -> w=shaper.width(text), h=shaper.height, x=anchor-w/2, y=anchor-h/2. Extend iwa_runs.resolve_style to expose paragraph metrics (lineSpacing, paragraphSpacing/spaceBefore, firstLineIndent, tracking). Calibrate 3 constants ONCE: text inset (exteriorTextWrap.margin=12pt), line-height multiplier (per font family), paragraph spacing — raw boundingRect height is already median 0.989 of JXA. ORACLE: the cached JXA v3 GW payload already carries JXA's laid-out w/h (ground truth) -> calibrate + verify Keynote-free; PPTX only needed for DSK (no cache). Pending."
-    status: pending
+    content: "STEP 1 + generalization gaps DONE (inert; not wired). Mode composer on TSD.GeometryArchive.flags (0x1=fixed-W, 0x2=fixed-H); flags=3 frame-exact, flags=1 w=naturalSize+shaped-H+y=TOP, flags=0 shape-both. Height model is SIZE-AWARE: shaped_h = layout*m + b*size per family (AzoSans (1.013,0.455), ArgentCF (1.013,0.294)); the old absolute VERTICAL_PAD=32 was 0.455*70 (a proportional pad frozen at size 70) and did NOT generalize (DSK flags-1 12px median). New model: GW flags-1 vouched unchanged (med 2.3/max 5.9), DSK flags-1 vouched med 0.8. GATE ENVELOPE (all -> unvouched, caller falls back): font-missing, uncalibrated-font (family not in HEIGHT_MODEL), uncalibrated-multiline (ArgentCF slope under-determined -> multi-line gated), autowidth-soft (flags=0 always gated: 25px err even on GW), linespacing-mode (defensive; 0 occur), trait-unsatisfiable. Bold/italic via NSFontManager apply-verify-or-gate (0 real boxes; defensive). Indents via explicit wrap-width arithmetic (only on frame-exact boxes today; defensive). KNOWN RESIDUAL: DSK slide-19 mixed-run-size box (verse# 45 over body 50) shaped 126 vs oracle 177 = 51px > size-45 slack ~26px; no offline signal isolates it without gating 31 benign GW boxes, per-run shaping just relocates the tail -> documented + accepted, step-3 caveat. Oracles Keynote-FREE: GW cached v3 (raw JXA), DSK cached v4 (bulk=Keynote). Verified 2 peers SOUND. Done."
+    status: completed
   - id: regroup
     content: "STEP 2. Recompute group frames as the child-UNION over the now-SHAPED text children (+ exact images). Measured residual with STALE text children (upper bound): GW 14/21 groups, Full 46/410 diverge >2px — but images 2/188 (GW) / 6/1548 (Full) and movies 0 are already offline-exact (residual = masked-rotated -> flag). The group residual IS the text residual one level up, so it should collapse once text is shaped. Re-measure after step 1. Pending."
     status: pending
@@ -169,3 +169,42 @@ consistent) or NARROW/REVERT (JXA payloads are valid + exact, avoid the rebuild)
 your call. Everything else stands.
 
 **Branch `fix/checker-followups`** ready to merge → main when you're happy (user merges).
+
+### SHAPER GENERALIZATION GAPS CLOSED (2026-08-30, 2/1/2 workflow)
+
+The three step-1 peer-verify blockers are resolved in `src/obed_edom/iwa_text_shape.py` (+ tests),
+all inside the INERT module (nothing wired; INSPECT_VERSION still 4; `offline_inspect`/checker
+untouched — cannot regress v1). Cross-serve KEEP decision from the user: DECIDE LATER (guard left
+as-is).
+
+**What landed** (see the `shaper` todo for detail): size-aware height model `layout*m + b*size`
+(the old absolute `VERTICAL_PAD=32` was `0.455*70` — a size-70-overfit proportional pad that gave
+DSK flags-1 a 12px median; new model keeps GW unchanged at 2.3px and drops DSK to 0.8px median);
+a fail-safe gate envelope (`font-missing`, `uncalibrated-font`, `uncalibrated-multiline`,
+`autowidth-soft`, `linespacing-mode`, `trait-unsatisfiable` — every non-None reason forces the
+step-3 fallback; none can leak into `VOUCHED_NEEDS_KEYNOTE`/`SOFT_GEOM_SOURCES`); bold/italic
+apply-verify-or-gate; indents via explicit wrap-width arithmetic; and the step-3 wiring contract
+recorded in the module docstring (vouched → exact geom_source outside SOFT_GEOM_SOURCES; unvouched →
+non-vouched needs_keynote, never `autosize-soft`).
+
+**Measurement was decisive and Keynote-FREE**: both oracles are in-cache (GW v3 = raw JXA; DSK v4 =
+bulk Keynote). A/B harness lives at session scratchpad `ab_text_shape.py`. GW flags-1 vouched med
+2.3/max 5.9 (no regression); DSK flags-1 vouched med 0.8. All flags-0 gated. ONE documented,
+accepted residual: DSK slide-19 (mixed-run-size box, 51px > its ~26px slack) — no offline signal
+isolates it without over-gating 31 benign GW boxes, and per-run shaping only relocates the tail;
+step-3 must keep a cheap confirmation for mixed-size flags-1 boxes or accept the ~1.5% tail.
+
+**VERIFIED — 2 peers SOUND.** Correctness/inertness peer: inertness confirmed, gate fail-safe,
+no reason-string leak (note: shaper uses `autowidth-soft`, distinct from the vouched
+`autosize-soft`), step-3 contract accurate, trait logic sound. Calibration/A-B peer: independently
+reproduced the A/B numbers and re-fit the constants (m=1.0128, b=0.4552 → frozen (1.013, 0.455)),
+confirmed only slide-19 exceeds slack, ArgentCF-multiline outliers correctly gated. Follow-ups
+addressed post-verify: added a `trait-unsatisfiable` gate test (was the one uncovered branch) and
+tightened the flags-0 docstring claim. Suite **503→504 passed, 1 xfailed** (17 shaper tests);
+Keynote never opened.
+
+**STILL TODO for v2 (unchanged):** step-2 regroup re-measure; step-3 wiring (new exact geom_source +
+INSPECT_VERSION 4→5 + PPTX/scoped-JXA fallback); end-to-end GW+DSK run-parity (needs Keynote);
+OPTIONAL calibration widening (OhnoBlazeface 30 DSK boxes / CodecPro — perf only, they safely gate
+today). The higher-blast-radius opt items (`export_applescript` doc-bind, fold-export-into-bulk) also
+remain.
