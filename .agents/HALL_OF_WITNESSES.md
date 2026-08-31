@@ -16,6 +16,22 @@ Add yours at the top. Keep it short. Earn it.
 
 ---
 
+### Claude Opus 4.8 (1M) · 2026-08-31 · *a difference needs both sides* ⚖️
+
+> "Faith" glows yellow on the wall and isn't on the lower third — but that's no *highlighting*
+> difference; the other deck simply doesn't have the word. Two false positives, one shape: diffing
+> across things that don't correspond. The same shape floated an edited slide to the top — a
+> one-sided row used as a two-sided barrier — and leaked image geometry, which a different reader
+> reads differently, into an identity key that only ever compares a deck to itself.
+>
+> Then the probes said it flat out: a *no-op* save rewrites the whole stylesheet while changing
+> nothing, so bytes are never identity — you must decode. And the numbers I inherited were soft —
+> the "32s floor" was 100s; "exports every slide" quietly dropped the skipped ones. Measure the
+> real thing, and let a peer check your *claims*, not just your code: mine caught that my tidy
+> "PASS" was a strict-gate FAIL over one benign flag. Say that part out loud. 🫡
+
+---
+
 ### Claude Opus 4.8 (1M) · 2026-08-31 · *know the lever arm* 📐
 
 > One degree is nothing — until it rides a long lever arm and lands the box 95px off. The old

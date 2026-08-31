@@ -61,7 +61,17 @@ todos:
       (ditto + open + ~150 per-slide deletes + save) vs the ~32s whole-deck export floor.
       subset_keynote.py/js EXIST but are UNEXERCISED (no caller, no test, dormant since
       1524ab6) — a primitive, not a shipped path.
-    status: pending
+      DONE (measured 2026-08-31, peer-verified; see "Probe results" below). P1: byte-level
+      keys are DEAD — a NO-OP open+save churns Document.iwa AND DocumentStylesheet.iwa (the
+      stylesheet even compacts 526→512 styles); Document.iwa is otherwise decode-stable, so the
+      fingerprint must be decoded + style-RESOLVED. P2: `skipped slides:false` EXCLUDES skipped
+      slides (subset-export mechanism works) AND exposes a shipped bug — a deck with any skipped
+      slide never satisfies have==slideCount and re-exports on every warm hit. P3: the export
+      floor is ~0.64s/slide (~100s for the 155-slide Full, NOT ~32s); APFS ditto of 6.8 GB is
+      ~4s (CoW), so subset work is directionally cheaper than a whole-deck export — Route A
+      (subset-copy) is the fair comparison; do NOT lean on Route B's headline (its timer skips
+      the deck open and is dominated by the O(N) skip-marking loop).
+    status: done
   - id: slide-fingerprint
     content: >-
       INERT per-slide fingerprint module (P1 decides byte-level vs decoded-graph
@@ -158,7 +168,13 @@ todos:
       the offline+bulk path vs a full-JXA run and diff pairings/flags/markup end-to-end.
       Geometry A/B is proven (overflow-flag 63/63 on GW, 0 fallback); this is the last
       whole-pipeline confirmation the v1 plan left open.
-    status: pending
+      DONE (measured 2026-08-31, peer-verified). offline+bulk vs full-JXA on GW(LW)+DSK:
+      pairing IDENTICAL (47), highlighted markup IDENTICAL, flags 43/44 identical. The single
+      divergence is LW slide 21's photo — offline `photo.rotated` (composed 354°) vs JXA
+      `photo.differs` — same slide, same `warning`, the documented masked/flipped-image
+      angle-composition edge (why rotation is out of the digest); benign, a difference in
+      specificity not accuracy. The strict byte-identical harness gate reports FAIL on that one.
+    status: done
   - id: opt-higher-blast
     content: >-
       Higher-blast-radius optimisations (own pass, careful — they touch ALL exports): (1)
@@ -220,6 +236,46 @@ they are not chased again. **Read the SKILL "Reading a `.key` offline (IWA)" fir
 - **The shaper.** `iwa_text_shape` is BUILT, calibrated, generalization-gaps-closed — and
   INERT (nothing calls it). It is the prerequisite for slim-bulk's text drop (see the
   `shaper-wiring` todo).
+
+## Probe results — measured 2026-08-31 (peer-verified)
+
+Scratch probes (no product code) that settle `hash-probes` + `e2e-run-parity`. The
+edit-loop levers give **no cold-read gain** (the ~3.25x two-tier read already did that);
+their only value is a faster reload after a *small edit to an already-seen deck*.
+
+- **P1 save-churn → byte-level keys are DEAD; use the decoded, style-RESOLVED graph.** On
+  scratch copies of the DSK deck: a **no-op open+save** changes the CRC of `Index/Document.iwa`
+  AND `Index/DocumentStylesheet.iwa` (plus `CalculationEngine`, `DocumentMetadata`, `Metadata`,
+  a `TemplateSlide`, one `Slide-*.iwa`; `ViewState` renumbers). Decoding the two globals: the
+  no-op churn of `Document.iwa` (the slide tree — order/skip) is **2 id-like scalars, 0
+  structural** (cheap to normalize), but `DocumentStylesheet.iwa` genuinely **compacts its style
+  table 526→512** and renumbers archives on every save. So the global stylesheet cannot be
+  byte- or position-hashed; the safe design folds each slide's *resolved* referenced-style
+  properties into that slide's key (the `iwa_runs` super.parent resolver already does this)
+  rather than hashing the churning global table. Confirms `slide-fingerprint`'s style-RESOLVED
+  branch is REQUIRED, not optional.
+- **P2 skipped-flag export → the SKILL is wrong here, and there is a shipped bug.**
+  `export … as slide images with properties {skipped slides:false}` **EXCLUDES** skipped
+  slides (35 PNGs, contiguously renumbered 001–035, on a 42-slide deck with 7 skipped). So the
+  subset-export mechanism for `incremental-previews` works. It also means today's hardened cache
+  hit (`have == slideCount`, inspect.py) **can never be satisfied by a deck that has a skipped
+  slide** — such a deck re-exports (~its export cost) on EVERY warm run. Worth fixing in
+  `opt-higher-blast`: count against `slideCount − skipped`, or export `skipped slides:true`.
+- **P3 subset timing → floor corrected; subset is directionally worth it, not "3x".** The
+  whole-deck export floor is **~0.64 s/slide (~100 s for the 155-slide Full deck), NOT the
+  ~32 s cited elsewhere** (that figure was a smaller deck). APFS `ditto` of the 6.8 GB deck is
+  **~4 s** (copy-on-write clone — the copy is nearly free, correcting the "copy is expensive"
+  assumption). Both subset routes land ~31–33 s keeping 2 of 155, but the honest comparison is
+  **Route A** (subset-copy: ~4 s ditto + ~29 s open/delete/save) — Route B's timer starts after
+  the deck open and is dominated by an O(N) 153-slide skip-marking loop, so its number is not
+  comparable. Takeaway: exporting only the changed slides beats a whole-deck export on large
+  decks, capped by the O(N) per-slide skip/delete overhead.
+- **e2e-run-parity → offline+bulk is end-to-end sound (one benign divergence).** GW(LW)+DSK,
+  offline+bulk vs full-JXA, same previews reused for both diffs: pairing IDENTICAL (47), markup
+  IDENTICAL, flags 43/44 identical. The lone difference — LW slide 21, `photo.rotated` (offline,
+  composed 354°) vs `photo.differs` (JXA), same slide/severity — is the documented masked/flipped
+  angle-composition edge (an L1 residual), benign. The strict byte-identical harness gate reports
+  FAIL on that single flag; the operator sees the same slide flagged either way.
 
 ## Dead-ends — measured, keep so they aren't chased again
 
