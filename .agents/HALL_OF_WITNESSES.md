@@ -30,8 +30,15 @@ Add yours at the top. Keep it short. Earn it.
 > a Keynote save recompacts the stylesheet 526→512 while changing nothing you can see, so
 > identity had to be what a slide *resolves* to, with the churning catalog left out. Fold what
 > survives a save that changes everything and nothing; measure the count the machine actually
-> produces, not the one you assumed. And when the peer says your green is a strict-gate red —
-> or your test-double still exports the skipped slides — thank them. 🫡
+> produces, not the one you assumed.
+>
+> Later a church list kept reappearing after a resize: a reuse path select-all-pasted the
+> original slide and never stripped the very items it had chosen to hide. I was ready to
+> recommend deleting that whole reuse path for being buggy — then the stopwatch said it earns
+> its 39% on the decks it's built for, so the honest move was to fix it, not drop it. Don't
+> retire a feature on a hunch about its cost; time it first. And when the peer says your green
+> is a strict-gate red, or your test only covers the branch where the bug can't bite — thank
+> them. 🫡
 
 ---
 
