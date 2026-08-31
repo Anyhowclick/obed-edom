@@ -397,6 +397,72 @@ def test_highlight_diff_names_differing_words():
     assert "mercy" in msg and "grace" in msg
 
 
+def _highlight_diff(lw: dict, dsk: dict) -> str | None:
+    """Reproduce the call site: filter run styles to the shared vocabulary first."""
+    from obed_edom.diff_keynotes import (
+        _canonical_words,
+        _highlighted_run_words,
+        _shared_style_words,
+        _style_diff_message,
+    )
+    from obed_edom.inspect import slide_plain_text
+
+    shared = _canonical_words(slide_plain_text(lw)) & _canonical_words(slide_plain_text(dsk))
+    left, right = _shared_style_words(
+        _highlighted_run_words(lw), _highlighted_run_words(dsk), shared
+    )
+    return _style_diff_message("Highlighting differs", "highlights", left, right)
+
+
+def _run_item(*runs: dict) -> dict:
+    return {"text": "".join(r["text"] for r in runs), "runs": list(runs)}
+
+
+def test_highlight_diff_ignores_lw_only_point_title():
+    # LW carries the sermon-theme point title "Faith" (yellow) on the bumper; the
+    # DSK lower third never shows it. A word only one deck has is content the other
+    # lacks, not a divergent highlight, so it must not raise style.highlight —
+    # whether or not the verse copy happens to repeat the word (real slides 52↔35
+    # fired, 53↔36 didn't; both are false positives).
+    yellow = [65535, 65535, 0]
+    white = [65535, 65535, 65535]
+
+    def title(word):
+        return _run_item({"text": word, "color": yellow})
+
+    def verse(highlight, plain):
+        return _run_item({"text": highlight, "color": yellow}, {"text": plain, "color": white})
+
+    lw52 = {"items": [title("Faith"), verse("lowered", " him on his mat")]}
+    dsk35 = {"items": [verse("lowered", " him on his mat")]}
+    assert _highlight_diff(lw52, dsk35) is None
+
+    lw53 = {"items": [title("Faith"), verse("When Jesus saw their faith", ", He said")]}
+    dsk53 = {"items": [verse("When Jesus saw their faith", ", He said")]}
+    assert _highlight_diff(lw53, dsk53) is None
+
+
+def test_highlight_diff_still_flags_a_shared_word():
+    # The word both decks show is highlighted on LW only — a genuine difference.
+    yellow = [65535, 65535, 0]
+    white = [65535, 65535, 65535]
+    lw = {"items": [_run_item({"text": "mercy", "color": yellow}, {"text": " and grace", "color": white})]}
+    dsk = {"items": [_run_item({"text": "mercy and grace", "color": white})]}
+    msg = _highlight_diff(lw, dsk)
+    assert msg is not None and "mercy" in msg
+
+
+def test_bullet_prefix_is_not_a_wording_diff():
+    from obed_edom.text_diff import classify_text_diff, comparable_tokens
+
+    # A bulleted verse box extracts / OCRs the line as "•the"; folded it is "the".
+    assert comparable_tokens("•the") == ["the"]
+    assert comparable_tokens("·item") == ["item"]
+    lw = "While the harpist was playing •the hand of the Lord came on Elisha"
+    dsk = "While the harpist was playing the hand of the Lord came on Elisha"
+    assert classify_text_diff(lw, dsk, "LW", "DSK") is None
+
+
 def test_smallcaps_no_flag_on_text_difference_without_small_caps():
     from obed_edom.diff_keynotes import _smallcaps_words, _style_diff_message
 

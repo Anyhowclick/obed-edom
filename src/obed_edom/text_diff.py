@@ -12,7 +12,11 @@ import re
 from dataclasses import dataclass
 
 _SOFT_WS = re.compile(r"[\s\u2028\u2029\xa0]+")
-_EDGE_PUNCT = re.compile(r"^[\s.,;:!?…'\"“”‘’()\[\]{}—–-]+|[\s.,;:!?…'\"“”‘’()\[\]{}—–-]+$")
+# Trailing/leading punctuation to fold off a token, including list bullets
+# (a bulleted verse box extracts / OCRs as "•the", which must match "the").
+_EDGE_PUNCT = re.compile(
+    r"^[\s.,;:!?…'\"“”‘’()\[\]{}—–\-•·‣▪◦∙]+|[\s.,;:!?…'\"“”‘’()\[\]{}—–\-•·‣▪◦∙]+$"
+)
 _STANDALONE_NUMBER = re.compile(r"^\d{1,2}$")
 
 TRANSLATIONS = {

@@ -21,6 +21,7 @@ from obed_edom.models import Flag
 from obed_edom.rendered import CENTER_WALL, center_wall_box, point_number_lines, render_slide
 from obed_edom.text_diff import (
     BIBLE_BOOK_WORDS,
+    canonical_token,
     classify_text_diff,
     collapse_repeat as _collapse_repeat,
     comparable_tokens,
@@ -952,10 +953,13 @@ def _style_diff_message(
     """A specific style-difference message, or None when the two sets match.
 
     Names only the side(s) carrying extra words so the reader sees exactly what
-    diverged instead of a bare "differs".
+    diverged instead of a bare "differs". A stray capital is not a style change,
+    so words are matched case-insensitively while the original spelling is shown.
     """
-    left_only = sorted(left - right)
-    right_only = sorted(right - left)
+    left_keys = {canonical_token(w) for w in left}
+    right_keys = {canonical_token(w) for w in right}
+    left_only = sorted(w for w in left if canonical_token(w) not in right_keys)
+    right_only = sorted(w for w in right if canonical_token(w) not in left_keys)
     if not left_only and not right_only:
         return None
     parts: list[str] = []
@@ -1015,6 +1019,25 @@ def _highlighted_run_words(slide: dict) -> set[str]:
                 continue
             words.update(comparable_tokens(text))
     return words
+
+
+def _canonical_words(text: str) -> set[str]:
+    return {canonical_token(t) for t in comparable_tokens(text)}
+
+
+def _shared_style_words(left_words: set[str], right_words: set[str], shared: set[str]) -> tuple[set[str], set[str]]:
+    """Keep only style-run words the two slides have in common.
+
+    A style difference (highlight, small caps) is only meaningful for a word both
+    slides actually show. A word carried on one deck alone — e.g. LW's point-title
+    theme on the bumper, absent from the DSK lower third — is content the other
+    deck simply does not have, not a divergent style, so comparing on it flags the
+    layout instead of a mistake. Membership in ``shared`` is by canonical form (so
+    a title "Faith" matches a verse's "faith"); the original spelling is kept for
+    display, since ``_style_diff_message`` folds case for the comparison itself.
+    """
+    keep = lambda words: {w for w in words if canonical_token(w) in shared}
+    return keep(left_words), keep(right_words)
 
 
 def _brief(text: str, limit: int = 140) -> str:
@@ -1449,41 +1472,41 @@ def compare_inspects(
                 _add_flag(pair_flags, flags, text_flag)
                 if text_flag.severity in {"warning", "error"}:
                     copy_warning = True
-        elif (
-            highlight_msg := _style_diff_message(
-                "Highlighting differs",
-                "highlights",
-                _highlighted_run_words(ls),
-                {w for _, slide in right_hits for w in _highlighted_run_words(slide)},
-            )
-        ):
-            _add_flag(
-                pair_flags,
-                flags,
-                make_flag(
+        else:
+            # A style run only "differs" on a word both slides carry. Restrict to
+            # the shared vocabulary so LW-only copy (the point-title theme on the
+            # bumper) is not read as a divergent style — see _shared_style_words.
+            shared = _canonical_words(slide_plain_text(ls))
+            for _, slide in right_hits:
+                shared &= _canonical_words(slide_plain_text(slide))
+            style_flag = None
+            left_high = _highlighted_run_words(ls)
+            right_high = {w for _, slide in right_hits for w in _highlighted_run_words(slide)}
+            left_high, right_high = _shared_style_words(left_high, right_high, shared)
+            if highlight_msg := _style_diff_message(
+                "Highlighting differs", "highlights", left_high, right_high
+            ):
+                style_flag = make_flag(
                     "style.highlight", "diff", highlight_msg, location=loc,
                     slide=left_num, deck="lw",
-                ),
-            )
-        else:
-            right_small: set[str] = set()
-            for _, slide in right_hits:
-                right_small |= _smallcaps_words(slide)
-            left_small = _smallcaps_words(ls)
-            # Only meaningful when Keynote actually returned run styling; on most
-            # decks it returns none and both sides come back empty.
-            smallcaps_msg = _style_diff_message(
-                "Small caps differ", "small-caps", left_small, right_small
-            )
-            if smallcaps_msg:
-                _add_flag(
-                    pair_flags,
-                    flags,
-                    make_flag(
+                )
+            else:
+                right_small: set[str] = set()
+                for _, slide in right_hits:
+                    right_small |= _smallcaps_words(slide)
+                left_small = _smallcaps_words(ls)
+                left_small, right_small = _shared_style_words(left_small, right_small, shared)
+                # Only meaningful when Keynote actually returned run styling; on most
+                # decks it returns none and both sides come back empty.
+                if smallcaps_msg := _style_diff_message(
+                    "Small caps differ", "small-caps", left_small, right_small
+                ):
+                    style_flag = make_flag(
                         "style.smallcaps", "diff", smallcaps_msg, location=loc,
                         slide=left_num, deck="lw",
-                    ),
-                )
+                    )
+            if style_flag:
+                _add_flag(pair_flags, flags, style_flag)
 
         extra_photo = [
             (slide, png, right_size)
