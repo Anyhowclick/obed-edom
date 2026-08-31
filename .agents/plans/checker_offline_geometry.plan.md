@@ -116,12 +116,15 @@ todos:
       export_applescript (inspect.py:44) uses the disproven doc-bind (no close-by-name) →
       could silently export the WRONG deck's bytes; every checker export goes through it.
       (2) fold the preview export into the bulk_geometry Keynote session (a cold diff opens
-      Keynote ~4×) → ~8s/diff. (3) r-count-guard "(a)" extension: per-slide shape/line
-      counts in bulk_geometry.js. (4) SHIPPED BUG (found by P2): the hardened cache hit needs
-      have == slideCount PNGs, but `export … skipped slides:false` writes only
-      slideCount − skipped, so ANY deck with a skipped slide re-exports on every warm hit —
-      fix by comparing against slideCount − skipped, or export `skipped slides:true`. OPTIONAL:
-      calibration widening (OhnoBlazeface/CodecPro — perf only, no accuracy change).
+      Keynote ~4×) → ~8s/diff — NOTE the export must stay AppleScript (JXA export has never
+      produced a PNG), so the fold means leaving the doc open after the bulk read, which
+      walks into (1)'s doc-bind territory: do (1)+(2) together. (3) r-count-guard "(a)"
+      extension: per-slide shape/line counts in bulk_geometry.js. (4) DONE (4143aba): the
+      hardened cache hit compared have against slideCount, but `export … skipped
+      slides:false` writes only slideCount − skipped, so ANY deck with a skipped slide
+      re-exported on every warm hit — now compares against slideCount − skipped
+      (inspect.py:615-626). OPTIONAL: calibration widening (OhnoBlazeface/CodecPro — perf
+      only, no accuracy change).
     status: pending
   - id: cache-cleanup
     content: >-
