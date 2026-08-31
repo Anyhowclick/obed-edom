@@ -823,28 +823,26 @@ def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():
     assert all(f["reason"] in (CONTENT_GUARD_REASONS | {"bulk-missing"}) for f in side["fallback"])
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
-def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
-    """The proven simulation: splicing the JXA group/image/movie/text x/y/w/h into
-    the offline payload makes the remap PLAN (transforms + reuses) write-affecting-
-    identical to the JXA plan on the Map deck — the gate goes GREEN behind the bulk
-    fn. Font size (autoshrink, re-derived on write) and colour are the only fields
-    that still differ; both are non-write-affecting (see _ATTR_ONLY_SPEC_FIELDS)."""
+def _assert_two_tier_gate_green(deck: Path):
+    """THE RESIZER GOLD-DECK GATE. Splicing the JXA group/image/movie/text x/y/w/h
+    into the offline payload must make the remap PLAN (transforms + reuses) write-
+    affecting-identical to the JXA plan — the gate goes GREEN behind the bulk fn. Font
+    size (autoshrink, re-derived on write) and colour are the only fields that still
+    differ; both are non-write-affecting (see _ATTR_ONLY_SPEC_FIELDS). Skips when the
+    deck / cached payload / CG template is absent (all local-only, Keynote-free)."""
     pytest.importorskip("keynote_parser")
-    jxa = _cached_payload(MAP_DECK)
+    jxa = _cached_payload(deck)
     if jxa is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    template = None
-    tmpl_deck = MAP_DECK.parent / "Base_CG_Assets.key"
-    if tmpl_deck.exists():
-        template = offline_wall_payload(tmpl_deck)
-    if template is None:
+    tmpl_deck = deck.parent / "Base_CG_Assets.key"
+    if not tmpl_deck.exists():
         pytest.skip("no CG template deck available for the plan gate")
+    template = offline_wall_payload(tmpl_deck)
 
     from obed_edom.map_remap import plan_payload_transforms, plan_slide_reuses
     from obed_edom.remap_keynote import recipe_for
 
-    off = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+    off = two_tier_wall_payload(deck, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
     assert off["_offline"]["bulk_ok"] is True
     assert off["_offline"]["fallback_slides"] == [], "full bulk => no slide falls back"
     # Every bulk-kind item is spliced EXCEPT the <=2-per-slide trailing empty
@@ -869,6 +867,74 @@ def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
     rdiffs = _reuse_wa_diffs(off_r, jxa_r, present)
     assert tdiffs == [], f"transform write-affecting diffs: {tdiffs[:5]}"
     assert rdiffs == [], f"reuse write-affecting diffs: {rdiffs[:5]}"
+
+
+@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
+    # Map deck: 0 rotated-masked images, so it does not exercise the L1 guard; it pins
+    # the shape/line/group/autosize-text plan neutrality of the two-tier read.
+    _assert_two_tier_gate_green(MAP_DECK)
+
+
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_makes_write_affecting_gate_green_full_deck():
+    # Full report-card deck carries the rotated-masked images the Map deck lacks (10
+    # pre-L1), so THIS is the gate that proves L1's masked-image change is plan-neutral
+    # for the resizer: whether L1 flags or vouches those images, the bulk splice
+    # overwrites their geometry and the remap plan stays JXA-identical.
+    _assert_two_tier_gate_green(FULL_DECK)
+
+
+@pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])
+def test_l1_cleared_rotated_masked_images_are_write_safe(deck):
+    """L1's load-bearing property: a masked image the guard CLEARS (rotated-masked no
+    longer flagged) is within the 2px write tolerance of the JXA oracle, so a path that
+    trusts it without a bulk read (the tier-1 guard, or a future slim-bulk that drops
+    the image kind) stays write-safe. Only the VOUCHED masks are checked — a still-
+    flagged image falls back and its best-effort value never lands.
+
+    On FULL we also assert that at least one OFF-AXIS mask (frame or mask angle not a
+    90° multiple) is vouched — otherwise a regression to the old flag-every-rotated
+    guard would leave this test green while silently losing all L1 coverage. MAP has no
+    off-axis masks (all vouched masks are axis-aligned), so that leg is FULL-only."""
+    pytest.importorskip("keynote_parser")
+    if not deck.exists():
+        pytest.skip("local gold deck only")
+    jxa = _cached_payload(deck)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    from obed_edom.iwa_geometry import _geom_dict, _mask_geom, _xywha
+    from obed_edom.iwa_runs import _load_deck, slide_order
+
+    def _off_axis(angle: float) -> bool:
+        r = angle % 90.0
+        return min(r, 90.0 - r) > 0.5
+
+    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s.get("items") or []}
+           for s in jxa["slides"]}
+    objects, _a, _b = _load_deck(deck)
+    checked = off_axis_vouched = 0
+    for index, (sid, _skip) in enumerate(slide_order(objects)):
+        if sid not in objects:
+            continue
+        jmap = jby.get(index, {})
+        for rec in compose_geometry(objects[sid], objects):
+            if rec.get("geom_source") != "mask" or rec.get("needs_keynote") is not None:
+                continue  # only vouched (cleared) masked images
+            obj = objects.get(rec["id"]) or {}
+            mg = _mask_geom(obj, objects)
+            if _off_axis(_xywha(_geom_dict(obj))[4]) or (mg and _off_axis(_xywha(mg)[4])):
+                off_axis_vouched += 1  # an image L1 cleared that the old guard flagged
+            j = jmap.get((rec["kind"], rec["kindIndex"]))
+            if not j or j.get("x") is None:
+                continue
+            assert abs(rec["x"] - j["x"]) <= 2 and abs(rec["y"] - j["y"]) <= 2, (
+                deck.name, index + 1, rec["kind"], rec["kindIndex"],
+                (rec["x"], rec["y"]), (j["x"], j["y"]))
+            checked += 1
+    assert checked > 0, "no vouched masked images found to check"
+    if deck == FULL_DECK:
+        assert off_axis_vouched > 0, "L1 vouched no off-axis mask — lost its coverage"
 
 
 @pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")

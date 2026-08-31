@@ -127,14 +127,32 @@ def test_masked_rect_axis_aligned_is_image_plus_mask():
     assert rotated is False
 
 
-def test_masked_rect_rotated_mask_known_answer():
-    # Frame unrotated (identity to slide); mask 4x2 at (2,3) rotated 90 about its
-    # own centre (4,4) -> corner AABB (3,2)-(5,6). Size stays the mask's (4,2).
+def test_masked_rect_exact_90_mask_is_vouched():
+    # Frame unrotated (identity to slide); mask 4x2 at (2,3) rotated EXACTLY 90 about
+    # its own centre (4,4) -> corner AABB (3,2)-(5,6). Size stays the mask's (4,2). An
+    # exact 90-multiple composes integer-exact (snapped == raw, zero displacement), so
+    # L1 VOUCHES it — rotated is False. (Before L1 the category guard flagged it.)
     (x, y, w, h), rotated = _masked_rect(_geom(0.0, 0.0, 10.0, 10.0)["geometry"],
                                          _geom(2.0, 3.0, 4.0, 2.0, 90.0)["geometry"])
     assert (round(x, 6), round(y, 6)) == (3.0, 2.0)
     assert (w, h) == (4.0, 2.0)
-    assert rotated is True
+    assert rotated is False
+
+
+def test_masked_rect_flag_is_displacement_not_angle():
+    # The same 1-degree FRAME residual flags or vouches by LEVER ARM, not by angle: a
+    # mask far from the frame centre swings past the trust radius, a near one does not.
+    # Frame 4000x1000 rotated 1 deg about its centre (2000,500); mask un-rotated.
+    frame = _geom(0.0, 0.0, 4000.0, 1000.0, 1.0)["geometry"]
+    # Mask at the frame centre: the 1 deg frame spin barely moves it -> vouched.
+    (_nx, _ny, _nw, _nh), near_rot = _masked_rect(
+        frame, _geom(1950.0, 470.0, 100.0, 60.0)["geometry"])
+    assert near_rot is False
+    # Mask at the far corner (~1994px from centre): the same 1 deg swings it ~35px,
+    # well past 1.5px -> flagged.
+    (_fx, _fy, _fw, _fh), far_rot = _masked_rect(
+        frame, _geom(10.0, 10.0, 100.0, 60.0)["geometry"])
+    assert far_rot is True
 
 
 def test_masked_image_axis_aligned_record():

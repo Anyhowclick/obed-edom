@@ -17,9 +17,12 @@ against fresh exact-bytes JXA payloads on ``Map_Extracted_Wall_1st`` (8 slides) 
     * **image / movie** — unmasked axis-aligned frames match to <0.5px. A rotated
       frame's JXA box is the axis-aligned bounding box (AABB) of the four rotated
       corners, position only; SIZE stays the un-rotated ``(w, h)``. A *masked* image
-      reports the MASK rectangle: axis-aligned this collapses to
-      ``(img+mask, mask_size)`` (exact, 1339/1339); rotated it is best-effort and
-      always flagged ``rotated-masked`` (residual to ~36px).
+      reports the MASK rectangle: at a 90°-multiple rotation (incl. 0°, where it
+      collapses to ``(img+mask, mask_size)``) the mask-corner AABB is integer-exact
+      and VOUCHED; only a real OFF-axis residual — where snapping to the nearest 90°
+      moves the box more than ``_MASK_TRUST_PX`` — is best-effort and flagged
+      ``rotated-masked`` (residual up to ~95px — the DSK17 flip). See
+      :func:`_masked_rect`.
     * **line** — the endpoints, from the length + rotation closed form; <0.5px.
     * **shape** — same rotation rule as image (AABB position, un-rotated size);
       100% <2px both decks. (Raw geometry alone leaves rotated shapes ~2-12px inset,
@@ -71,16 +74,24 @@ NEEDS_KEYNOTE_REASONS = (
 # corner-AABB collapses to the frame and no rotated-* flag is raised.
 _ANGLE_EPS = 0.01
 
-# Masked images tolerate a wider "effectively un-rotated" band than plain frames.
-# Keynote reports a masked image's laid-out box by its axis-aligned frame+mask
-# position (rounded to int); it does NOT re-place it for a sub-degree frame
-# rotation. A cohort of maps carries a 0.0357° residual rotation from an earlier
-# edit — the rotated-corner AABB shifts their top-left ~1px, which (though within
-# the 2px item tolerance) the cover recipe amplifies ~2x into a deck-wide cascade.
-# Treating |angle| below this as un-rotated snaps them back to the frame position
-# JXA reports. A genuine ~1-2° net-zero frame/mask pair stays above the band and
-# keeps its rotated-masked flag (residual, guard-covered).
-_MASK_ANGLE_EPS = 0.1
+# Masked-image accuracy guard (L1). Keynote lays a masked image out at a CLEAN
+# rotation: at an exact 90° multiple (0/90/180/270) the composed mask-corner AABB is
+# integer-exact vs JXA (measured ≤0.5px on the DSK/GW/FULL/MAP decks), because sin/cos
+# of a 90-multiple are exact 0/±1. Error appears only with a small OFF-axis residual
+# (1-3°), where the corner-AABB applies a rotation Keynote did not and the miss scales
+# with the mask offset's LEVER ARM (measured to 95px — the DSK17 flip is frame357+
+# mask357). So the guard composes the mask box at the angles SNAPPED to their nearest
+# 90° multiple (the clean layout JXA reports) and vouches it only when that snap moved
+# the box no further than this many points from the RAW-angle composition. That
+# displacement bounds the composition error up to integer rounding: JXA lays the image
+# out at either the snapped rotation (error≈0) or the raw one (our shipped snapped
+# value is `displacement` from it), and both sides are rounded to whole points, so
+# error_vs_JXA ≤ displacement + ~0.5px — an angle threshold gives no such bound at all,
+# because a 1° residual on a long lever arm still misses by px. 1.5 sits in a wide
+# measured gap (accurate cases ≤1.48px, wrong ones ≥2.45px); with the rounding term the
+# worst vouched case measured 1.56px, ~0.44px under the 2px write tolerance, so do NOT
+# raise this. A displacement above it keeps the flag → Keynote fallback.
+_MASK_TRUST_PX = 1.5
 
 
 # --------------------------------------------------------------------------
@@ -177,26 +188,38 @@ def _mask_geom(obj: dict, objects: dict[str, dict]) -> dict:
     return _geom_dict(objects.get(str(ref)) or {})
 
 
+def _mask_corner_topleft(fx: float, fy: float, fw: float, fh: float, fa: float,
+                         mx: float, my: float, mw: float, mh: float, ma: float
+                         ) -> tuple[float, float]:
+    """AABB top-left of the mask rect mapped mask-local -> image-local -> slide."""
+    to_image = _frame_transform(mx, my, mw, mh, ma)   # mask-local -> image-local
+    to_slide = _frame_transform(fx, fy, fw, fh, fa)   # image-local -> slide
+    x0, y0, _x1, _y1 = _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
+    return (x0, y0)
+
+
 def _masked_rect(frame_geom: dict, mask_geom: dict
                  ) -> tuple[tuple[float, float, float, float], bool]:
     """``((x, y, w, h), rotated)`` for a masked frame.
 
-    ``rotated`` is True when either the frame or the mask carries rotation — the
-    caller flags those ``rotated-masked`` (the corner value is best-effort there;
-    Keynote applies extra layout the closed form cannot reproduce, residual ~36px).
+    The mask box is composed at the frame/mask angles SNAPPED to their nearest 90°
+    multiple — the clean rotation JXA lays a masked image out at (integer-exact). It is
+    VOUCHED (``rotated`` False) only when that snap moved the top-left no more than
+    :data:`_MASK_TRUST_PX` from the RAW-angle composition; that displacement bounds the
+    error to within ~0.5px integer rounding whatever the offset (see the constant's
+    note). A larger displacement means
+    a real off-axis residual whose laid-out position the closed form cannot pin down, so
+    ``rotated`` is True and the caller flags ``rotated-masked`` → Keynote fallback. At
+    snapped 0°/0° the corner AABB collapses to ``(fx+mx, fy+my)`` — the axis-aligned
+    frame+mask position JXA reports for an un-rotated masked image.
     """
     fx, fy, fw, fh, fa = _xywha(frame_geom)
     mx, my, mw, mh, ma = _xywha(mask_geom)
-    fa_rot = min(fa % 360.0, 360.0 - fa % 360.0) > _MASK_ANGLE_EPS
-    ma_rot = min(ma % 360.0, 360.0 - ma % 360.0) > _MASK_ANGLE_EPS
-    if not fa_rot and not ma_rot:
-        # Effectively un-rotated: JXA reports the axis-aligned frame+mask position
-        # (== the corner AABB at angle 0), not a sub-degree rotated box.
-        return ((fx + mx, fy + my, mw, mh), False)
-    to_image = _frame_transform(mx, my, mw, mh, ma)   # mask-local -> image-local
-    to_slide = _frame_transform(fx, fy, fw, fh, fa)   # image-local -> slide
-    x0, y0, _x1, _y1 = _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
-    return ((x0, y0, mw, mh), True)
+    fa_s, ma_s = round(fa / 90.0) * 90.0, round(ma / 90.0) * 90.0
+    sx, sy = _mask_corner_topleft(fx, fy, fw, fh, fa_s, mx, my, mw, mh, ma_s)
+    rx, ry = _mask_corner_topleft(fx, fy, fw, fh, fa, mx, my, mw, mh, ma)
+    displacement = max(abs(sx - rx), abs(sy - ry))
+    return ((sx, sy, mw, mh), displacement > _MASK_TRUST_PX)
 
 
 # --------------------------------------------------------------------------
