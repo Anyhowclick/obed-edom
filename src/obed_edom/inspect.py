@@ -611,14 +611,19 @@ def inspect_keynote_checker(
             # (legacy pre-provenance payload) is rejected too — fall through and
             # rebuild the offline payload.
             if cached.get("reader") == "offline":
-                slide_count = int(
-                    cached.get("slideCount") or len(cached.get("slides") or [])
-                )
+                slides = cached.get("slides") or []
+                slide_count = int(cached.get("slideCount") or len(slides))
+                # A COMPLETE preview set is one PNG per NON-skipped slide: the export
+                # runs `skipped slides:false` (export_applescript), so it never writes a
+                # PNG for a skipped slide. Comparing `have` against the full slideCount
+                # made ANY deck with a skipped slide miss forever and re-export the whole
+                # preview set on every warm run (measured: 35 PNGs vs a slideCount of 42).
+                skipped = sum(1 for slide in slides if slide.get("skipped"))
+                expected_pngs = slide_count - skipped
                 have = 0 if png_dir is None else len(preview_pngs(png_dir))
-                # HARDENED HIT: require the FULL preview set (export uses skipped
-                # slides:false, so a complete run has exactly slideCount PNGs), else
-                # a partial export would be served forever from the digest-keyed dir.
-                if dest is None or have == slide_count:
+                # HARDENED HIT: require the FULL preview set (== expected_pngs), else a
+                # partial export would be served forever from the digest-keyed dir.
+                if dest is None or have == expected_pngs:
                     cached["_cached"] = True
                     cached["_digest"] = digest
                     cached["_timing"] = timing

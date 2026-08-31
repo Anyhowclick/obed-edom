@@ -124,6 +124,86 @@ def test_cache_hit_export_only_skips_the_rebuild(deck, monkeypatch, tmp_path):
     assert "export" in out["_timing"]
 
 
+def test_complete_preview_set_with_a_skipped_slide_is_a_hit(deck, monkeypatch, tmp_path):
+    # A skipped slide gets NO preview (export uses skipped slides:false), so a COMPLETE
+    # set is one PNG per non-skipped slide (2 of 3 here) — this must be served as a warm
+    # hit, not re-exported every run. Guards the off-by-skipped-count fix.
+    _seed_cache(deck, {"reader": "offline", "slideCount": 3,
+                       "slides": [{"index": 0, "number": 1, "items": []},
+                                  {"index": 1, "number": 2, "items": [], "skipped": True},
+                                  {"index": 2, "number": 3, "items": []}],
+                       "sentinel": "CACHED"})
+    png_dir = preview_cache_dir(deck_digest(deck))
+    png_dir.mkdir(parents=True, exist_ok=True)
+    for n in (1, 3):  # only the 2 non-skipped slides have a PNG
+        (png_dir / f"slide-{n}.png").write_bytes(b"\x89PNG")
+
+    def boom(*a, **k):  # pragma: no cover - neither may run on a complete-set hit
+        raise AssertionError("a complete preview set (minus skipped) must be a warm hit")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", boom)
+
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
+    assert out["_cached"] is True
+    assert out["sentinel"] == "CACHED"
+    assert out["previewDir"] == str(png_dir)
+    assert "export" not in out["_timing"], "no re-export on a complete-set hit"
+
+
+def test_partial_set_on_a_skipped_deck_still_re_exports(deck, monkeypatch, tmp_path):
+    # Intersection of the two behaviours: a deck WITH a skipped slide but an INCOMPLETE
+    # preview set (1 PNG when 2 non-skipped slides are expected) must NOT be served — the
+    # skipped-count fix must narrow the hit, not over-serve a genuinely partial set.
+    _seed_cache(deck, {"reader": "offline", "slideCount": 3,
+                       "slides": [{"index": 0, "number": 1, "items": []},
+                                  {"index": 1, "number": 2, "items": [], "skipped": True},
+                                  {"index": 2, "number": 3, "items": []}],
+                       "sentinel": "CACHED"})
+    png_dir = preview_cache_dir(deck_digest(deck))
+    png_dir.mkdir(parents=True, exist_ok=True)
+    (png_dir / "slide-1.png").write_bytes(b"\x89PNG")  # only 1 of the 2 expected
+
+    def boom(*a, **k):  # pragma: no cover
+        raise AssertionError("rebuild must not run")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+
+    filled: dict = {"calls": 0}
+
+    def fake_export(key_path, export_dir):
+        filled["calls"] += 1
+        (Path(export_dir) / "slide-3.png").write_bytes(b"\x89PNG")
+        return None
+
+    monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
+
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
+    assert filled["calls"] == 1, "a partial set on a skipped deck must still re-export"
+    assert out["exported"] is True
+
+
+def test_all_slides_skipped_empty_set_is_a_hit(deck, monkeypatch, tmp_path):
+    # Degenerate case: every slide skipped => expected_pngs == 0, so an empty preview dir
+    # IS a complete set and must be served as a hit with no export.
+    _seed_cache(deck, {"reader": "offline", "slideCount": 2,
+                       "slides": [{"index": 0, "number": 1, "items": [], "skipped": True},
+                                  {"index": 1, "number": 2, "items": [], "skipped": True}],
+                       "sentinel": "CACHED"})
+    preview_cache_dir(deck_digest(deck)).mkdir(parents=True, exist_ok=True)  # empty
+
+    def boom(*a, **k):  # pragma: no cover - neither may run
+        raise AssertionError("all-skipped empty set must be a warm hit")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", boom)
+
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
+    assert out["_cached"] is True
+    assert out["sentinel"] == "CACHED"
+    assert "export" not in out["_timing"]
+
+
 def test_partial_preview_set_is_not_served_as_a_hit(deck, monkeypatch, tmp_path):
     # Hardened hit: a partial preview set (< slideCount) must NOT be served as a hit;
     # the export-only path re-runs the export instead of returning the partial dir.
