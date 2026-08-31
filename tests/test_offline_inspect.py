@@ -937,6 +937,87 @@ def test_l1_cleared_rotated_masked_images_are_write_safe(deck):
         assert off_axis_vouched > 0, "L1 vouched no off-axis mask — lost its coverage"
 
 
+@pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])
+def test_l2a_cleared_masked_child_groups_are_write_safe(deck):
+    """L2a's load-bearing property: a GROUP vouched (needs_keynote None) whose subtree
+    contains a masked child is within the 2px write tolerance of the JXA oracle AND
+    derives the SAME pin/map role as the JXA frame — so propagating L1's snap into the
+    group union (_leaf_bbox) is write-safe for any path that trusts the offline group
+    frame (a role flip is the write-affecting failure the px check alone would miss).
+    Also asserts ≥1 such vouched group has an OFF-AXIS masked child, else a regression
+    to the old flag-every-rotated-masked-child rule would leave this green while losing
+    L2a's coverage. (Asserted for BOTH decks — unlike the L1 test's FULL-only guard —
+    because MAP's off-axis masks live only as in-group children, never as top-level
+    masked-image records, so MAP exercises L2a even though it did not exercise L1.)"""
+    pytest.importorskip("keynote_parser")
+    if not deck.exists():
+        pytest.skip("local gold deck only")
+    jxa = _cached_payload(deck)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    from obed_edom.iwa_geometry import _geom_dict, _mask_geom, _xywha
+    from obed_edom.iwa_runs import _load_deck, slide_order
+    from obed_edom.map_remap import is_map_item, is_pin_item
+
+    def _off_axis(angle: float) -> bool:
+        r = angle % 90.0
+        return min(r, 90.0 - r) > 0.5
+
+    def _masked_children(gid, objects, seen):
+        """(has_masked_child, has_off_axis_masked_child) over the group subtree."""
+        if gid in seen:
+            return (False, False)
+        seen.add(gid)
+        group = objects.get(gid) or {}
+        has = off = False
+        for ref in group.get("children") or []:
+            cid = ref.get("identifier")
+            child = objects.get(str(cid)) if cid is not None else None
+            if not child:
+                continue
+            if child.get("_pbtype") == "TSD.GroupArchive":
+                h2, o2 = _masked_children(str(cid), objects, seen)
+                has, off = has or h2, off or o2
+            elif child.get("_pbtype") in ("TSD.ImageArchive", "TSD.MovieArchive"):
+                mg = _mask_geom(child, objects)
+                if mg:
+                    has = True
+                    if _off_axis(_xywha(_geom_dict(child))[4]) or _off_axis(_xywha(mg)[4]):
+                        off = True
+        return (has, off)
+
+    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s.get("items") or []}
+           for s in jxa["slides"]}
+    objects, _a, _b = _load_deck(deck)
+    checked = off_axis_vouched = 0
+    for index, (sid, _skip) in enumerate(slide_order(objects)):
+        if sid not in objects:
+            continue
+        jmap = jby.get(index, {})
+        for rec in compose_geometry(objects[sid], objects):
+            if rec["kind"] != "group" or rec.get("needs_keynote") is not None:
+                continue  # only vouched groups
+            has, off = _masked_children(rec["id"], objects, set())
+            if not has:
+                continue
+            if off:
+                off_axis_vouched += 1  # a group L2a cleared that the old rule flagged
+            j = jmap.get((rec["kind"], rec["kindIndex"]))
+            if not j or j.get("x") is None:
+                continue
+            for f in ("x", "y", "w", "h"):
+                assert abs(rec[f] - j[f]) <= 2, (deck.name, index + 1, f, rec[f], j[f])
+            # Role parity: the offline frame must derive the same pin/map role as JXA —
+            # a size-driven pin<->other flip is write-affecting even inside the 2px band
+            # (the property a future slim-bulk that trusts this frame depends on).
+            off_item = {**j, "x": rec["x"], "y": rec["y"], "w": rec["w"], "h": rec["h"]}
+            assert is_pin_item(off_item) == is_pin_item(j), (deck.name, index + 1, "pin")
+            assert is_map_item(off_item) == is_map_item(j), (deck.name, index + 1, "map")
+            checked += 1
+    assert checked > 0, "no vouched masked-child groups found to check"
+    assert off_axis_vouched > 0, "L2a vouched no off-axis masked-child group"
+
+
 @pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
 def test_two_tier_granular_fallback_is_per_slide_not_deck():
     """Omitting one slide's groups from the bulk read flags ONLY that slide (its

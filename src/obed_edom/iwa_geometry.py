@@ -27,10 +27,11 @@ against fresh exact-bytes JXA payloads on ``Map_Extracted_Wall_1st`` (8 slides) 
     * **shape** — same rotation rule as image (AABB position, un-rotated size);
       100% <2px both decks. (Raw geometry alone leaves rotated shapes ~2-12px inset,
       so this composes the rotation even though shapes are never masked.)
-    * **group** — union of the children's transformed bounds; ~89% of distinct
-      groups <2px. The residual cases carry a detectable signal (zero-size connector
-      child, rotated-masked child, or an effect style) and are flagged
-      ``group-residual``; a rotated group itself is flagged ``rotated-group``.
+    * **group** — union of the children's transformed bounds (a masked child bounds
+      the union via the same snapped composition as a top-level masked image, L2a). The
+      residual cases carry a detectable signal (zero-size connector child, a masked
+      child too far off its 90° multiple to compose accurately, or an effect style) and
+      are flagged ``group-residual``; a rotated group itself is flagged ``rotated-group``.
     * **text** — a fixed box is its frame; an autosize box (zero-height frame)
       recovers ``x`` exactly (left-aligned) but ``y``/``h``/``w`` from a
       ``naturalSize`` that is stale on ~20% of boxes, so every autosize box is
@@ -188,14 +189,18 @@ def _mask_geom(obj: dict, objects: dict[str, dict]) -> dict:
     return _geom_dict(objects.get(str(ref)) or {})
 
 
-def _mask_corner_topleft(fx: float, fy: float, fw: float, fh: float, fa: float,
-                         mx: float, my: float, mw: float, mh: float, ma: float
-                         ) -> tuple[float, float]:
-    """AABB top-left of the mask rect mapped mask-local -> image-local -> slide."""
+def _snap90(angle_deg: float) -> float:
+    """``angle_deg`` rounded to its nearest 90° multiple."""
+    return round(angle_deg / 90.0) * 90.0
+
+
+def _mask_corner_aabb(fx: float, fy: float, fw: float, fh: float, fa: float,
+                      mx: float, my: float, mw: float, mh: float, ma: float
+                      ) -> tuple[float, float, float, float]:
+    """AABB ``(x0, y0, x1, y1)`` of the mask rect mapped mask-local -> image-local -> slide."""
     to_image = _frame_transform(mx, my, mw, mh, ma)   # mask-local -> image-local
     to_slide = _frame_transform(fx, fy, fw, fh, fa)   # image-local -> slide
-    x0, y0, _x1, _y1 = _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
-    return (x0, y0)
+    return _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
 
 
 def _masked_rect(frame_geom: dict, mask_geom: dict
@@ -213,11 +218,17 @@ def _masked_rect(frame_geom: dict, mask_geom: dict
     snapped 0°/0° the corner AABB collapses to ``(fx+mx, fy+my)`` — the axis-aligned
     frame+mask position JXA reports for an un-rotated masked image.
     """
+    if not mask_geom:  # defensive: an unresolved mask has no geometry to trust
+        return ((0.0, 0.0, 0.0, 0.0), True)
     fx, fy, fw, fh, fa = _xywha(frame_geom)
     mx, my, mw, mh, ma = _xywha(mask_geom)
-    fa_s, ma_s = round(fa / 90.0) * 90.0, round(ma / 90.0) * 90.0
-    sx, sy = _mask_corner_topleft(fx, fy, fw, fh, fa_s, mx, my, mw, mh, ma_s)
-    rx, ry = _mask_corner_topleft(fx, fy, fw, fh, fa, mx, my, mw, mh, ma)
+    sx, sy, _sx1, _sy1 = _mask_corner_aabb(fx, fy, fw, fh, _snap90(fa), mx, my, mw, mh, _snap90(ma))
+    rx, ry, _rx1, _ry1 = _mask_corner_aabb(fx, fy, fw, fh, fa, mx, my, mw, mh, ma)
+    # Gate on the TOP-LEFT (min-corner) displacement. The full AABB's MAX corner drives a
+    # group child's w/h (via _leaf_bbox), but under a small residual rotation about the
+    # mask/frame centres both corners displace equally — measured max-corner == top-left
+    # to 0.00px across all 313 (Map) / 1621 (Full) masked images — so this one number
+    # bounds the whole box.
     displacement = max(abs(sx - rx), abs(sy - ry))
     return ((sx, sy, mw, mh), displacement > _MASK_TRUST_PX)
 
@@ -269,9 +280,12 @@ def _leaf_bbox(obj: dict, ox: float, oy: float, objects: dict[str, dict]
                ) -> tuple[float, float, float, float]:
     """Absolute AABB ``(x0, y0, x1, y1)`` of a leaf child at parent origin ``(ox, oy)``.
 
-    A masked-image child contributes its mask rectangle; every leaf's own rotation
-    is folded into its AABB about its own centre. (Rotated masked/zero-size children
-    make the union approximate — those groups are flagged ``group-residual``.)
+    A masked-image child contributes its mask rectangle, composed through the SAME
+    snapped two-stage transform as a top-level masked image (:func:`_masked_rect`) so a
+    near-90° masked child bounds the group's union accurately (L2a — a mask off its 90°
+    multiple by more than :data:`_MASK_TRUST_PX` is caught one level up by
+    :func:`_group_residual_reason`, which flags the group ``group-residual``). Every
+    other leaf's own rotation is folded into its AABB about its own centre.
     """
     geom = _geom_dict(obj)
     x, y, w, h, angle = _xywha(geom)
@@ -280,8 +294,8 @@ def _leaf_bbox(obj: dict, ox: float, oy: float, objects: dict[str, dict]
     if obj.get("_pbtype") in ("TSD.ImageArchive", "TSD.MovieArchive"):
         mask_geom = _mask_geom(obj, objects)
         if mask_geom:
-            mx, my, mw, mh, _ma = _xywha(mask_geom)
-            return _corners_aabb(_frame_transform(x + mx, y + my, mw, mh, angle), mw, mh)
+            mx, my, mw, mh, ma = _xywha(mask_geom)
+            return _mask_corner_aabb(x, y, w, h, _snap90(angle), mx, my, mw, mh, _snap90(ma))
     return _corners_aabb(_frame_transform(x, y, w, h, angle), w, h)
 
 
@@ -358,9 +372,11 @@ def _group_residual_reason(group_id: str, objects: dict[str, dict], seen: set[st
 
     Signals (each ships the group with a residual JXA cannot match offline):
       * a zero-size ``ShapeInfoArchive`` (a connector — its drawn box is not its frame);
-      * a rotated masked image/movie (mask corners get extra Keynote layout — this is
-        the same uncertainty as a top-level ``rotated-masked`` image, inherited by the
-        group; it is what actually catches the 7 no-effect-style residual groups);
+      * a masked image/movie whose frame or mask is far enough off its 90° multiple to
+        exceed the :func:`_masked_rect` displacement gate — the same uncertainty as a
+        top-level ``rotated-masked`` image, inherited by the group. A near-90 masked
+        child does NOT trip this (L2a): :func:`_leaf_bbox` composes it accurately, so the
+        union holds and the group is vouched;
       * a detectable shadow/reflection effect style.
     """
     if group_id in seen:
@@ -386,14 +402,18 @@ def _group_residual_reason(group_id: str, objects: dict[str, dict], seen: set[st
             if _group_residual_reason(str(child_id), objects, seen):
                 return True
             continue
-        _cx, _cy, cw, ch, cangle = _xywha(_geom_dict(child))
+        _cx, _cy, cw, ch, _cangle = _xywha(_geom_dict(child))
         if pbtype == "TSWP.ShapeInfoArchive" and (cw == 0.0 or ch == 0.0):
             return True
         if pbtype in ("TSD.ImageArchive", "TSD.MovieArchive"):
             mask_geom = _mask_geom(child, objects)
             if mask_geom:
-                _mx, _my, _mw, _mh, mangle = _xywha(mask_geom)
-                if _is_rotated(cangle) or _is_rotated(mangle):
+                # Only a mask FAR OFF its 90° multiple makes the union approximate
+                # (L2a): a near-90 masked child is composed accurately by _leaf_bbox, so
+                # it no longer forces the group to fall back. Reuse the SAME displacement
+                # gate as a top-level masked image so the two decisions never diverge.
+                _rect, off_axis = _masked_rect(_geom_dict(child), mask_geom)
+                if off_axis:
                     return True
         if _has_effect_style(child):
             return True

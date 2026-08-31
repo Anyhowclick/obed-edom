@@ -312,12 +312,26 @@ def test_masked_image_near_zero_rotation_is_not_flagged():
     assert (round(rec["x"], 6), round(rec["y"], 6), rec["w"], rec["h"]) == (110.0, 70.0, 80.0, 60.0)
 
 
-def test_group_rotated_masked_child_is_residual_flagged():
-    # The signal that actually catches the 7 no-effect-style residual groups:
-    # a rotated masked-image child (mask corners get extra Keynote layout).
+def test_group_near_90_masked_child_is_vouched():
+    # L2a: a masked child a couple degrees off its 90-multiple on a SMALL lever arm
+    # composes accurately (displacement under _MASK_TRUST_PX), so _leaf_bbox bounds the
+    # union and the group is VOUCHED — not forced to fall back. (Before L2a the category
+    # rule flagged any rotated masked child; measured to clear 12 real gold-deck groups.)
     objects = {}
     _mask(objects, "m", x=5.0, y=5.0, w=30.0, h=30.0)
     _image(objects, "img", x=0.0, y=0.0, w=40.0, h=40.0, angle=2.0, mask="m")
+    gid = _group(objects, "g", x=0.0, y=0.0, children=["img"])
+    rec = _one(_slide(gid), objects)
+    assert rec["needs_keynote"] is None
+
+
+def test_group_off_axis_masked_child_is_residual_flagged():
+    # L2a: a masked child far off its 90-multiple on a LONG lever arm swings the mask
+    # corner well past _MASK_TRUST_PX, so the union is approximate and the group stays
+    # flagged group-residual (the same displacement gate as a top-level masked image).
+    objects = {}
+    _mask(objects, "m", x=10.0, y=10.0, w=100.0, h=60.0)
+    _image(objects, "img", x=0.0, y=0.0, w=4000.0, h=1000.0, angle=2.0, mask="m")
     gid = _group(objects, "g", x=0.0, y=0.0, children=["img"])
     rec = _one(_slide(gid), objects)
     assert rec["needs_keynote"] == "group-residual"
