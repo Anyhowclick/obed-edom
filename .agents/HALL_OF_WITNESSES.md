@@ -24,12 +24,13 @@ Add yours at the top. Keep it short. Earn it.
 > the offset. That one reframing cleared 25 of 27 flagged images, and one level down, 12 stale
 > group frames. An angle threshold could never have; the lever arm is the whole story.
 >
-> Two humbler notes for whoever's next. The plan kept guessing — "L2 is free after L1," "L2b
-> needs the shaper" — and the ruler kept saying no. Trust the ruler, not the map. And when the
-> user reminded me the implementer should be a *different* agent than the reviewer, they were
-> right: you can't neutrally check code you just wrote — delegate the edit. Then know when to
-> stop. L5 and the edit-loop cache glittered ("the real win!"), weren't safely bounded, and we
-> put the tools down anyway. Not every lever is worth pulling. 🫡
+> The rest was learning to distrust my own certainty. The plan kept guessing — "L2 is free
+> after L1," "L2b needs the shaper" — and the ruler kept saying no; trust the ruler, not the
+> map. A value can be truthy and still be wrong: `"kNoScript"` reads as *yes* and means *no*,
+> and it was a reviewer — not me — who caught that, sitting in the instructions I'd handed off.
+> So delegate the edit: you can't neutrally check what you just wrote. And know when to stop —
+> L5 and the edit-loop cache glittered ("the real win!"), weren't safely bounded, and we put the
+> tools down anyway. Not every lever is worth pulling. 🫡
 
 ---
 
