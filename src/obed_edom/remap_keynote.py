@@ -989,7 +989,18 @@ def remap_and_inspect(
         return info
     if log:
         log("Inspecting remapped deck…")
-    payload = inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range)
+    # use_cache=False on the readback. `dest` is a freshly-written output deck with a
+    # unique digest every run, so a digest-keyed cache entry never hits again — caching
+    # it only hashes the just-written (multi-GB) deck for nothing and pollutes
+    # .cache/inspect + .cache/previews with a never-reused full preview set. It also
+    # fixes the served-previews bug: with want_cache on, inspect_keynote redirects the
+    # export into preview_cache_dir(digest) (inspect.py:138-140), but remap_and_inspect
+    # and _run_resize build previewFiles/previewDir from the ORIGINAL export_dir, which
+    # is then empty ⇒ the dashboard shows nothing. use_cache=False keeps the export in
+    # export_dir where the web layer serves it from.
+    payload = inspect_keynote(
+        dest, export_dir=export_dir, slide_range=slide_range, use_cache=False
+    )
     info["inspect"] = {
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
