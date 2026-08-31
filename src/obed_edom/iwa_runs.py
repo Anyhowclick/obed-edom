@@ -3,7 +3,7 @@
 The JXA inspect pass reports each text item's plain string but no per-run style, so
 ``item["runs"]`` is always ``[]`` and the consumers that read it
 (``validate._highlight_punctuation_flags``, ``inspect.highlighted_markup``,
-``validate._inspect_item_font_size``, ``diff_keynotes._smallcaps_signature``) stay
+``diff_keynotes._smallcaps_words``, ``diff_keynotes._highlighted_run_words``) stay
 dark on finalized decks. This module decodes the deck's ``Index/*.iwa`` objects
 (Snappy + Protobuf, no Keynote/JXA involvement), pulls the real per-run colour /
 weight / size / small-caps straight out of the character-style graph, and attaches
@@ -122,7 +122,7 @@ def resolve_style(style_id: str, objects: dict[str, dict], cache: dict) -> dict:
         "size": props.get("fontSize"),
         "styleName": name,
         # Raw IWA capitalization enum string (e.g. "kSmallCaps") or None.
-        # diff_keynotes._smallcaps_signature reads it via `"small" in cap.lower()`.
+        # diff_keynotes._smallcaps_words reads it via `"small" in cap.lower()`.
         "capitalization": props.get("capitalization"),
         # PostScript font name (charProperties.fontName); OFTEN None because the
         # font usually lives on the paragraph style, not the char style. None =

@@ -334,6 +334,105 @@ def test_small_caps_signature_diff(tmp_path):
     result = compare_inspects(left, right, tmp_path, tmp_path, tmp_path / "heat", left_label="LW", right_label="DSK")
     diffs = [f for f in result["flags"] if f.category == "diff"]
     assert any("Small caps" in f.message for f in diffs)
+    # The genuine divergence names the word so the reader knows what to check.
+    assert any("Lord" in f.message for f in diffs if "Small caps" in f.message)
+
+
+def test_highlight_diff_ignores_verse_number_superscript():
+    from obed_edom.diff_keynotes import _highlighted_run_words, _style_diff_message
+
+    yellow = [65535, 65535, 0]
+    # Both decks highlight the same phrase; DSK additionally paints the yellow
+    # superscript verse number "4" — a numbering style, not word highlighting.
+    lw = {"items": [{"runs": [{"text": "so that we may make a name", "color": yellow}]}]}
+    dsk = {
+        "items": [
+            {
+                "runs": [
+                    {"text": "4", "color": yellow, "superscript": "kSuperscript"},
+                    {"text": "so that we may make a name", "color": yellow},
+                ]
+            }
+        ]
+    }
+    assert _highlighted_run_words(lw) == _highlighted_run_words(dsk)
+    assert (
+        _style_diff_message(
+            "Highlighting differs",
+            "highlights",
+            _highlighted_run_words(lw),
+            _highlighted_run_words(dsk),
+        )
+        is None
+    )
+
+
+def test_highlight_diff_keeps_baseline_digit():
+    # superscript is an enum ("kSuperscript" / "kNoScript" / None), all truthy but
+    # only "kSuperscript" is a verse/point number. A baseline (kNoScript) highlighted
+    # digit is a real number in the copy, so it must NOT be excluded — highlighting it
+    # is a genuine difference the checker should still catch.
+    from obed_edom.diff_keynotes import _highlighted_run_words
+
+    yellow = [65535, 65535, 0]
+    slide = {"items": [{"runs": [{"text": "40", "color": yellow, "superscript": "kNoScript"}]}]}
+    assert _highlighted_run_words(slide) == {"40"}
+    verse = {"items": [{"runs": [{"text": "40", "color": yellow, "superscript": "kSuperscript"}]}]}
+    assert _highlighted_run_words(verse) == set()  # verse number dropped
+
+
+def test_highlight_diff_names_differing_words():
+    from obed_edom.diff_keynotes import _highlighted_run_words, _style_diff_message
+
+    yellow = [65535, 65535, 0]
+    lw = {"items": [{"runs": [{"text": "mercy", "color": yellow}]}]}
+    dsk = {"items": [{"runs": [{"text": "grace", "color": yellow}]}]}
+    msg = _style_diff_message(
+        "Highlighting differs",
+        "highlights",
+        _highlighted_run_words(lw),
+        _highlighted_run_words(dsk),
+    )
+    assert msg is not None
+    assert "mercy" in msg and "grace" in msg
+
+
+def test_smallcaps_no_flag_on_text_difference_without_small_caps():
+    from obed_edom.diff_keynotes import _smallcaps_words, _style_diff_message
+
+    # Different layout/text, but neither run is small caps (real slides 57↔39).
+    lw = {
+        "items": [
+            {
+                "runs": [
+                    {"text": "Spiritual", "smallCaps": False},
+                    {"text": "Actions", "smallCaps": False},
+                    {"text": "4", "smallCaps": False},
+                ]
+            }
+        ]
+    }
+    dsk = {"items": [{"runs": [{"text": "Spiritual Actions", "smallCaps": False}]}]}
+    assert _smallcaps_words(lw) == set()
+    assert _smallcaps_words(dsk) == set()
+    assert (
+        _style_diff_message(
+            "Small caps differ", "small-caps", _smallcaps_words(lw), _smallcaps_words(dsk)
+        )
+        is None
+    )
+
+
+def test_smallcaps_flag_names_the_word():
+    from obed_edom.diff_keynotes import _smallcaps_words, _style_diff_message
+
+    lw = {"items": [{"runs": [{"text": "Lord", "smallCaps": True}]}]}
+    dsk = {"items": [{"runs": [{"text": "Lord", "smallCaps": False}]}]}
+    msg = _style_diff_message(
+        "Small caps differ", "small-caps", _smallcaps_words(lw), _smallcaps_words(dsk)
+    )
+    assert msg is not None
+    assert "Lord" in msg
 
 
 def test_align_preserves_order_across_gap():

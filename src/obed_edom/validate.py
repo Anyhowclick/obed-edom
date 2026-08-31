@@ -462,23 +462,20 @@ def validate_slide_specs(lw: list[SlideSpec], dsk: list[SlideSpec], masters: dic
     return flags
 
 
-def _inspect_item_font_size(item: dict, payload: dict) -> float:
-    for run in item.get("runs") or []:
-        size = run.get("size")
-        if size:
-            return float(size)
-    if item.get("size"):
-        return float(item["size"])
-    width = float(payload.get("slideWidth") or 1920)
-    return 70.0 if width >= 3000 else 45.0
-
-
 def _inspect_overflow_flags(
     slide: dict, location: str, payload: dict, number: int | None = None, deck: str = ""
 ) -> list[Flag]:
     cfg = _overflow_cfg()
     if not cfg["enabled"]:
         return []
+    # Keynote grows a text box to fit its copy, so an over-count against box_h
+    # cannot tell a wrapped-but-visible box from a clipped one. What is actually
+    # broken is text that leaves the canvas, so flag only when the box runs off
+    # the top or bottom edge. slideHeight defaults to the 1080-tall center wall.
+    slide_height = float(payload.get("slideHeight") or 1080)
+    # A box laid out flush to an edge can end a couple of px past it from leading
+    # and rounding; require a small margin so that does not false-positive.
+    slack = cfg["height_slack_px"]
     flags: list[Flag] = []
     for item in slide.get("items") or []:
         if (item.get("kind") or "text") != "text":
@@ -490,14 +487,13 @@ def _inspect_overflow_flags(
         box_h = float(item.get("h") or 0)
         if box_w < 40 or box_h < 20:
             continue
-        font = _inspect_item_font_size(item, payload)
-        needed = _text_needed_height(text, box_w, font, cfg)
-        # Keynote grows a text box to fit, so box_h already reflects the laid-out
-        # line count; a real clip shows up as needed far exceeding it. Allow a
-        # half-line of slack on top of the flat slack so a one-line rounding
-        # difference (our line_height vs Keynote's leading) does not trip it.
-        slack = max(cfg["height_slack_px"], 0.5 * font * cfg["line_height"])
-        if needed <= box_h + slack:
+        top = float(item.get("y") or 0)
+        bottom = top + box_h
+        if bottom > slide_height + slack:
+            edge, edge_pos, pos = "bottom", "bottom", bottom
+        elif top < -slack:
+            edge, edge_pos, pos = "top", "top", top
+        else:
             continue
         preview = re.sub(r"\s+", " ", text)
         if len(preview) > 72:
@@ -507,8 +503,8 @@ def _inspect_overflow_flags(
             make_flag(
                 "overflow.text",
                 "overflow",
-                f"Text may overflow this box (needs about {int(needed)}px, box is {int(box_h)}px). "
-                f"How overflow should be handled is not decided yet. {preview}",
+                f"Text runs off the {edge} of the screen (box {edge_pos} {int(pos)}px, "
+                f"screen is {int(slide_height)}px). {preview}",
                 location=location,
                 slide=number,
                 deck=deck,

@@ -11,6 +11,7 @@ from PIL import Image, ImageChops, ImageOps
 from obed_edom.images import open_rgb
 from obed_edom.inspect import (
     PREVIEW_VIDEO_SUFFIXES,
+    _looks_highlight,
     highlighted_markup,
     preview_media,
     preview_pngs,
@@ -925,17 +926,44 @@ def image_item_diff(
     }
 
 
-def _smallcaps_signature(slide: dict) -> list[tuple[str, bool]]:
-    out: list[tuple[str, bool]] = []
+def _smallcaps_words(slide: dict) -> set[str]:
+    """The set of tokens a slide renders in small caps.
+
+    Comparing full ``(text, small)`` run signatures fired on plain text
+    differences (a stacked title vs an inline one) even when neither deck set
+    small caps. Comparing only the words actually marked small caps isolates a
+    real LORD-vs-Lord divergence from a layout difference.
+    """
+    words: set[str] = set()
     for item in slide.get("items") or []:
         for run in item.get("runs") or []:
             text = run.get("text") or ""
             if not text.strip():
                 continue
             cap = str(run.get("capitalization") or "")
-            small = bool(run.get("smallCaps")) or "small" in cap.lower()
-            out.append((text, small))
-    return out
+            if bool(run.get("smallCaps")) or "small" in cap.lower():
+                words.update(comparable_tokens(text))
+    return words
+
+
+def _style_diff_message(
+    header: str, verb: str, left: set[str], right: set[str]
+) -> str | None:
+    """A specific style-difference message, or None when the two sets match.
+
+    Names only the side(s) carrying extra words so the reader sees exactly what
+    diverged instead of a bare "differs".
+    """
+    left_only = sorted(left - right)
+    right_only = sorted(right - left)
+    if not left_only and not right_only:
+        return None
+    parts: list[str] = []
+    if left_only:
+        parts.append(f"LW {verb}: '{' '.join(left_only)}'")
+    if right_only:
+        parts.append(f"DSK {verb}: '{' '.join(right_only)}'")
+    return f"{header} — {'; '.join(parts)}."
 
 
 def _pair_location(
@@ -964,10 +992,28 @@ def _skipped(slide: dict | None) -> bool:
     return bool(slide and slide.get("skipped"))
 
 
-def _highlighted_words(markup: str) -> set[str]:
+def _highlighted_run_words(slide: dict) -> set[str]:
+    """Words a slide highlights, read from its colour runs.
+
+    Reads the per-run ``superscript`` flag (absent from the flattened markup), so
+    a coloured verse/point NUMBER — ``superscript == "kSuperscript"`` AND all
+    digits — is dropped as a legitimate numbering style, not word/punctuation
+    highlighting. The field is an enum (``"kSuperscript"`` / ``"kNoScript"`` /
+    ``None``), so match the exact superscript value: a baseline digit
+    (``"kNoScript"``/``None``) is a real number in the copy and IS kept, so
+    highlighting it still counts.
+    """
     words: set[str] = set()
-    for chunk in re.findall(r"\*([^*]+)\*", markup or ""):
-        words.update(comparable_tokens(chunk))
+    for item in slide.get("items") or []:
+        for run in item.get("runs") or []:
+            text = run.get("text") or ""
+            if not text.strip():
+                continue
+            if not _looks_highlight(run.get("color")):
+                continue
+            if run.get("superscript") == "kSuperscript" and text.strip().isdigit():
+                continue
+            words.update(comparable_tokens(text))
     return words
 
 
@@ -1330,8 +1376,6 @@ def compare_inspects(
         pair["leftRendered"] = a_text
         pair["rightRendered"] = b_text
         pair["ocr"] = a_render.ocr_used or any(r.ocr_used for r in b_renders)
-        a_mark = pair.get("leftMarkup") or ""
-        b_mark = pair.get("rightMarkup") or ""
 
         def compare(left_source: str, right_source: str):
             text = left_source
@@ -1405,28 +1449,38 @@ def compare_inspects(
                 _add_flag(pair_flags, flags, text_flag)
                 if text_flag.severity in {"warning", "error"}:
                     copy_warning = True
-        elif _highlighted_words(a_mark) and _highlighted_words(a_mark) != _highlighted_words(b_mark):
+        elif (
+            highlight_msg := _style_diff_message(
+                "Highlighting differs",
+                "highlights",
+                _highlighted_run_words(ls),
+                {w for _, slide in right_hits for w in _highlighted_run_words(slide)},
+            )
+        ):
             _add_flag(
                 pair_flags,
                 flags,
                 make_flag(
-                    "style.highlight", "diff", "Highlighting differs.", location=loc,
+                    "style.highlight", "diff", highlight_msg, location=loc,
                     slide=left_num, deck="lw",
                 ),
             )
         else:
-            right_sig: list[tuple[str, bool]] = []
+            right_small: set[str] = set()
             for _, slide in right_hits:
-                right_sig.extend(_smallcaps_signature(slide))
-            left_sig = _smallcaps_signature(ls)
+                right_small |= _smallcaps_words(slide)
+            left_small = _smallcaps_words(ls)
             # Only meaningful when Keynote actually returned run styling; on most
             # decks it returns none and both sides come back empty.
-            if (left_sig or right_sig) and left_sig != right_sig:
+            smallcaps_msg = _style_diff_message(
+                "Small caps differ", "small-caps", left_small, right_small
+            )
+            if smallcaps_msg:
                 _add_flag(
                     pair_flags,
                     flags,
                     make_flag(
-                        "style.smallcaps", "diff", "Small caps differ.", location=loc,
+                        "style.smallcaps", "diff", smallcaps_msg, location=loc,
                         slide=left_num, deck="lw",
                     ),
                 )
