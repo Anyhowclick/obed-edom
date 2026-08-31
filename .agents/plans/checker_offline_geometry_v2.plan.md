@@ -261,3 +261,44 @@ value; L2 group dissection; shaper wiring + `TEXT_GUARD_REASONS` + slim-bulk (IN
 gold-deck gate); L5 content-hash cache; end-to-end GW+DSK run-parity (needs Keynote). OPTIONAL
 calibration widening (OhnoBlazeface/CodecPro — perf only). Higher-blast-radius opt items
 (`export_applescript` doc-bind, fold-export-into-bulk) also remain.
+
+### L1 + L2a DONE + VERIFIED (2026-08-31) — separate plans; STOP point
+
+Both shipped as their own peer-verified plans/commits on this branch:
+- **L1** (`checker_l1_rotated_masked.plan.md`): displacement-gated snap-to-90 for masked
+  images. DSK rotated-masked fallback 27→2, GW 4→2, FULL 10→5; every vouched image ≤1.56px.
+  Gold-deck gate (FULL two-tier) + cleared-accuracy test. 1-peer verify.
+- **L2a** (`checker_l2a_masked_child_union.plan.md`): propagate the snap into the group
+  union (`_leaf_bbox` full snapped AABB) + a displacement-gated masked-child residual.
+  group-residual MAP 53→47, FULL 100→94; 2 independent peers SOUND; role-parity locked.
+
+**Weighing of the remaining levers (2026-08-31, me + 1 peer) — DEFER BOTH; stop here:**
+- **L5 (content-hash geometry cache) — highest-value future lever, but NO bounded safe
+  slice today.** Laid-out geometry is NOT a fully-hashable pure fn of the offline data:
+  font availability/substitution, master/theme/document geometry, and the Keynote layout
+  version are inputs the per-slide offline hash doesn't see — a slide-local hash silently
+  misses a master/theme edit → **stale geometry served → checker silently misreports**. A
+  safe hash must be provably-complete over (slide-local ⊕ global layout context ⊕ Keynote
+  version) — a research problem, not a slice. The whole-deck `deck_digest` cache already
+  zeroes the no-edit re-run; L5's marginal value is the partial-edit loop (~50-60s bulk
+  saved/edit), but the ~32s **export floor remains**. Needs its own plan + a complete-hash
+  proof + fail-safe (full re-read on any doubt).
+- **INCREMENTAL EXPORT (user idea, complements L5).** Detect changed slides offline (same
+  per-slide hash, wider surface — must capture pixels: image bytes/effects/colour too) and
+  export only those. Keynote `export … as slide images` is whole-doc (no range param); a
+  subset needs either toggling the per-slide `skipped` flag (UNVERIFIED — the SKILL's
+  "Keynote reads and exports every slide regardless" is ambiguous; needs a probe) or a
+  copy-changed-slides-to-scratch-deck export. Real win if export is per-slide-render-bound,
+  but same hash hazard + Keynote-scripting work → part of the L5 "incremental edit-loop"
+  project, not bounded.
+- **L2b (zero-size-shape group-residual) — separable but ZERO present value; fold into the
+  slim-bulk plan, don't do standalone.** Peer found (corrects the "needs the shaper" note —
+  these groups have 0 text/autosize children): for the has-real-child half (MAP 27, FULL
+  70), **vouch iff every zero-connector origin lies inside the real-children union** — a
+  clean wide-margin separator (vouched ≤0.5px / flagged ≥136px; 0 false-vouch, 0 over-flag;
+  vouches 43 over-flagged groups). The no-real-child half (MAP 20, FULL 23) ships the raw
+  group frame, bimodal 0/~82px stale, NO offline signal → genuinely unbounded. But
+  `group ∈ BULK_KINDS` → bulk overwrites group geometry → these cause **zero fallback
+  today**; L2b only serves a future slim-bulk (deferred, and only partially unblocked). Its
+  gate is correlational, not a rigorous error bound like L1/L2a. → Record the origin-inside-
+  union gate here and validate it against the gold decks WHEN slim-bulk is planned.
