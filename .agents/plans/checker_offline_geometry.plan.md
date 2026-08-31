@@ -1,15 +1,20 @@
 ---
 name: Checker offline geometry — deferred levers & dead-ends
 overview: >-
-  Consolidated plan for the Sermon Checker's offline-geometry read (supersedes the v1
-  cold-inspect plan, the v2 "drop the bulk pass" plan, and the L1/L2a plans — all
-  shipped). The FOUNDATION IS DONE: the checker reads a deck offline (IWA addressing +
-  style + exact shape/line geometry) and splices a slim O(slides) bulk Keynote pass for
-  the three soft classes (group/image/movie/text), ~3.25x cold, accuracy-identical, with
-  item-level fallback. This file keeps ONLY what is still open: the deferred levers
-  (each with its known blocker) and the measured dead-ends, so they are not re-derived.
-  Read the SKILL "Reading a .key offline (IWA)" first. iwa_geometry is resizer-SHARED —
-  any change to it lands behind the gold-deck gate (tests/test_offline_inspect.py).
+  Single source of truth for the Sermon Checker's offline read. The FOUNDATION IS SHIPPED
+  (in git, not to redo): the checker reads a deck offline (IWA addressing + style + exact
+  shape/line geometry) and splices a slim O(slides) bulk Keynote pass for the soft classes
+  (group/image/movie/text), ~3.25x cold, accuracy-identical, with item-level fallback. The
+  Keynote PROBES are now DONE too (see "Probe results"): e2e-run-parity passed, and the
+  hash-probes decided the incremental edit-loop design (byte keys dead → decoded +
+  style-RESOLVED fingerprint). This file keeps only what is OPEN — the deferred levers with
+  their blockers and the measured dead-ends. Two independent tracks remain: (A) the
+  EDIT-LOOP project (slide-fingerprint → l5-bulk-cache → incremental-previews) — now
+  unblocked, and the ONLY thing that speeds a small-edit reload (cold reads already got
+  their ~3.25x); (B) slim-bulk (shaper-wiring → slim-bulk, folding in l2b-group-frame) to
+  cut the cold bulk tier. See "Next up". Read the SKILL "Reading a .key offline (IWA)"
+  first. iwa_geometry is resizer-SHARED — changes land behind the gold-deck gate
+  (tests/test_offline_inspect.py).
 todos:
   - id: slim-bulk
     content: >-
@@ -37,46 +42,15 @@ todos:
       benign GW boxes, and per-run shaping only relocates the tail — slim-bulk must keep a
       cheap confirmation for mixed-size flags-1 boxes OR accept the ~1.5% tail.
     status: pending
-  - id: hash-probes
-    content: >-
-      BOUNDED PROBES (scratch scripts, no product code; needs Keynote free — batch with
-      e2e-run-parity) gating the incremental edit-loop project (slide-fingerprint →
-      l5-bulk-cache → incremental-previews). P1 SAVE-CHURN (decisive): on a scratch copy
-      of a gold deck, edit ONE slide in Keynote + save, plus a no-op open/save, and diff
-      the FULL zip central directory (all members STORED, per-entry CRC-32+size, ~ms to
-      read). Named suspects are the GLOBAL files, not the slide files: Document.iwa holds
-      the slide tree (order/skip — verified) and DocumentStylesheet.iwa holds the
-      document-wide style table a one-slide text edit can rewrite; if either churns on
-      every save, byte-level keys are worth zero even with clean Slide-*.iwa behaviour.
-      Outcomes: (a) only the edited slide file + noise (Metadata/*, preview*.jpg,
-      ViewState*) churn → byte-level fingerprints; (b) churn/id-renumbering → hash the
-      decoded per-slide graph instead — id-normalized, or style-RESOLVED if the
-      stylesheet renumbers (decode measured 1.5s Map / 3.5s Full; inherits _load_deck's
-      silent skip of undecodable IWAs → such slides are uncacheable). P2 SKIPPED-FLAG
-      EXPORT probe on a scratch copy: settles the SKILL's ambiguous "exports every slide
-      regardless" — and NOTE it validates an assumption today's code ALREADY makes: the
-      hardened cache hit requires have == slideCount PNGs under `skipped slides:false`
-      (inspect.py:614-621), so if skipped slides are excluded, a deck with skipped slides
-      re-exports ~32s on EVERY warm hit today. P3 TIMING: subset_keynote keep-2-of-155
-      (ditto + open + ~150 per-slide deletes + save) vs the ~32s whole-deck export floor.
-      subset_keynote.py/js EXIST but are UNEXERCISED (no caller, no test, dormant since
-      1524ab6) — a primitive, not a shipped path.
-      DONE (measured 2026-08-31, peer-verified; see "Probe results" below). P1: byte-level
-      keys are DEAD — a NO-OP open+save churns Document.iwa AND DocumentStylesheet.iwa (the
-      stylesheet even compacts 526→512 styles); Document.iwa is otherwise decode-stable, so the
-      fingerprint must be decoded + style-RESOLVED. P2: `skipped slides:false` EXCLUDES skipped
-      slides (subset-export mechanism works) AND exposes a shipped bug — a deck with any skipped
-      slide never satisfies have==slideCount and re-exports on every warm hit. P3: the export
-      floor is ~0.64s/slide (~100s for the 155-slide Full, NOT ~32s); APFS ditto of 6.8 GB is
-      ~4s (CoW), so subset work is directionally cheaper than a whole-deck export — Route A
-      (subset-copy) is the fair comparison; do NOT lean on Route B's headline (its timer skips
-      the deck open and is dominated by the O(N) skip-marking loop).
-    status: done
   - id: slide-fingerprint
     content: >-
-      INERT per-slide fingerprint module (P1 decides byte-level vs decoded-graph
-      representation; nothing consumes it → zero risk). Supersedes L5's "provably-
-      complete hash" demand with a CONSERVATIVE PARTITION: hash EVERYTHING, split
+      NEXT — the edit-loop keystone, now unblocked. P1 DECIDED the representation: byte
+      keys are dead (every save churns the globals), so hash the DECODED per-slide graph,
+      id-normalized AND style-RESOLVED (the stylesheet compacts on save; resolve each
+      slide's referenced style props via the iwa_runs super.parent chain rather than
+      hashing the churning global table). INERT module — nothing consumes it → zero risk.
+      Supersedes L5's "provably-complete hash" demand with a CONSERVATIVE PARTITION: hash
+      EVERYTHING, split
       slide-local vs global, so over-inclusion costs only cache misses, never staleness.
       Per-slide key = H(the slide's Index/Slide iwa entry ⊕ referenced Data/* entries'
       central-directory CRC+size ⊕ the slide's DOCUMENT POSITION — position closes the
@@ -103,8 +77,8 @@ todos:
   - id: l5-bulk-cache
     content: >-
       The L5 lever, bounded to the checker's BULK TIER (~50-60s/edit → the changed-slide
-      fraction; the ~32s export floor remains → incremental-previews; the whole-deck
-      deck_digest cache already zeroes the no-edit rerun — L5's value is ONLY the
+      fraction; the export floor remains (~0.64s/slide, P3) → incremental-previews; the
+      whole-deck deck_digest cache already zeroes the no-edit rerun — L5's value is ONLY the
       partial-edit loop). Rationale unchanged from the original blocker: laid-out
       geometry is NOT a pure fn of slide-local bytes (fonts, master/theme/document
       geometry, Keynote version) — the slide-fingerprint keys operationalize exactly that
@@ -128,9 +102,11 @@ todos:
     status: pending
   - id: incremental-previews
     content: >-
-      Beat the ~32s export floor for the partial-edit loop (gated on P2+P3 +
-      slide-fingerprint; same project as l5-bulk-cache and shares its hash hazard).
-      Keynote `export … as slide images` is whole-doc (no range param). Per-slide preview
+      Beat the whole-deck export floor (~0.64s/slide, P3) for the partial-edit loop — now
+      gated only on slide-fingerprint (P2+P3 done; same project as l5-bulk-cache, shares its
+      hash hazard). P2 CONFIRMED the skipped-flag route excludes skipped slides, so it is a
+      viable subset-export mechanism. Keynote `export … as slide images` is whole-doc (no
+      range param). Per-slide preview
       cache keyed by the slide fingerprint — its WIDER pixel surface is already covered:
       Data CRCs capture image bytes, the slide iwa captures effects/colour, the global
       key captures theme/master backgrounds. Export only missed slides via
@@ -162,19 +138,6 @@ todos:
       correlational, not a rigorous error bound like L1/L2a. → Fold into the slim-bulk plan
       and validate against the gold decks there; do NOT ship standalone.
     status: pending
-  - id: e2e-run-parity
-    content: >-
-      OUTSTANDING VERIFY GATE (needs Keynote free): run the real checker on GW + DSK via
-      the offline+bulk path vs a full-JXA run and diff pairings/flags/markup end-to-end.
-      Geometry A/B is proven (overflow-flag 63/63 on GW, 0 fallback); this is the last
-      whole-pipeline confirmation the v1 plan left open.
-      DONE (measured 2026-08-31, peer-verified). offline+bulk vs full-JXA on GW(LW)+DSK:
-      pairing IDENTICAL (47), highlighted markup IDENTICAL, flags 43/44 identical. The single
-      divergence is LW slide 21's photo — offline `photo.rotated` (composed 354°) vs JXA
-      `photo.differs` — same slide, same `warning`, the documented masked/flipped-image
-      angle-composition edge (why rotation is out of the digest); benign, a difference in
-      specificity not accuracy. The strict byte-identical harness gate reports FAIL on that one.
-    status: done
   - id: opt-higher-blast
     content: >-
       Higher-blast-radius optimisations (own pass, careful — they touch ALL exports): (1)
@@ -182,8 +145,11 @@ todos:
       could silently export the WRONG deck's bytes; every checker export goes through it.
       (2) fold the preview export into the bulk_geometry Keynote session (a cold diff opens
       Keynote ~4×) → ~8s/diff. (3) r-count-guard "(a)" extension: per-slide shape/line
-      counts in bulk_geometry.js. OPTIONAL: calibration widening (OhnoBlazeface/CodecPro —
-      perf only, no accuracy change).
+      counts in bulk_geometry.js. (4) SHIPPED BUG (found by P2): the hardened cache hit needs
+      have == slideCount PNGs, but `export … skipped slides:false` writes only
+      slideCount − skipped, so ANY deck with a skipped slide re-exports on every warm hit —
+      fix by comparing against slideCount − skipped, or export `skipped slides:true`. OPTIONAL:
+      calibration widening (OhnoBlazeface/CodecPro — perf only, no accuracy change).
     status: pending
   - id: cache-cleanup
     content: >-
@@ -212,8 +178,28 @@ isProject: false
 
 Single source of truth for the checker's offline-geometry read. The build history (v1
 cold-inspect, the four low-risk follow-ups, L4 item-level fallback, L1, L2a) is shipped
-and lives in git; this file keeps only what is still open, and the measured dead-ends so
-they are not chased again. **Read the SKILL "Reading a `.key` offline (IWA)" first.**
+and lives in git; the Keynote probes (hash-probes, e2e-run-parity) are done (see "Probe
+results"); this file keeps only what is still open, and the measured dead-ends so they are
+not chased again. **Read the SKILL "Reading a `.key` offline (IWA)" first.**
+
+## Next up (ordered)
+
+Two independent tracks. Each lever follows the 2+1+2 loop (peer-reviewed plan → sub-agent
+implements → independent verify).
+
+- **Track A — edit-loop (faster small-edit reloads; NO cold-read gain).** The payoff the
+  user cares about, now unblocked by the probes.
+  1. **`slide-fingerprint`** — START HERE. Build the INERT decoded + style-RESOLVED
+     per-slide/global key (P1 decided the representation; zero risk, nothing consumes it).
+  2. **`l5-bulk-cache`** — cache bulk-geometry rows per unchanged slide, keyed by the
+     fingerprint (wrapper at the `bulk_geometry_fn` injection point).
+  3. **`incremental-previews`** — export only changed slides (P2 confirmed the skipped-flag
+     route excludes); merge with cached PNGs.
+- **Track B — cold bulk slimming (independent).**
+  4. **`shaper-wiring`** — wire the inert `iwa_text_shape` (prereq for the text drop).
+  5. **`slim-bulk`** — drop kinds from `BULK_KINDS`; folds in `l2b-group-frame`.
+- **Standalone.** **`opt-higher-blast`** now has a quick win: the P2 skipped-slide
+  re-export bug. **`cache-cleanup`** (parked) and **`cross-serve-decision`** (user's call).
 
 ## Shipped foundation (context, not to redo)
 
