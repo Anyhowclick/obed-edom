@@ -9,8 +9,8 @@ overview: >-
   hash-probes decided the incremental edit-loop design (byte keys dead → decoded +
   style-RESOLVED fingerprint). This file keeps only what is OPEN — the deferred levers with
   their blockers and the measured dead-ends. Two independent tracks remain: (A) the
-  EDIT-LOOP project (slide-fingerprint → l5-bulk-cache → incremental-previews) — now
-  unblocked, and the ONLY thing that speeds a small-edit reload (cold reads already got
+  EDIT-LOOP project (slide-fingerprint SHIPPED → l5-bulk-cache → incremental-previews) —
+  the ONLY thing that speeds a small-edit reload (cold reads already got
   their ~3.25x); (B) slim-bulk (shaper-wiring → slim-bulk, folding in l2b-group-frame) to
   cut the cold bulk tier. See "Next up". Read the SKILL "Reading a .key offline (IWA)"
   first. iwa_geometry is resizer-SHARED — changes land behind the gold-deck gate
@@ -42,41 +42,13 @@ todos:
       benign GW boxes, and per-run shaping only relocates the tail — slim-bulk must keep a
       cheap confirmation for mixed-size flags-1 boxes OR accept the ~1.5% tail.
     status: pending
-  - id: slide-fingerprint
-    content: >-
-      NEXT — the edit-loop keystone, now unblocked. P1 DECIDED the representation: byte
-      keys are dead (every save churns the globals), so hash the DECODED per-slide graph,
-      id-normalized AND style-RESOLVED (the stylesheet compacts on save; resolve each
-      slide's referenced style props via the iwa_runs super.parent chain rather than
-      hashing the churning global table). INERT module — nothing consumes it → zero risk.
-      Supersedes L5's "provably-complete hash" demand with a CONSERVATIVE PARTITION: hash
-      EVERYTHING, split
-      slide-local vs global, so over-inclusion costs only cache misses, never staleness.
-      Per-slide key = H(the slide's Index/Slide iwa entry ⊕ referenced Data/* entries'
-      central-directory CRC+size ⊕ the slide's DOCUMENT POSITION — position closes the
-      duplicate-slides / slide-number-field hazard for free, since reorders already
-      invalidate the global hash via Document.iwa). Global key = H(ordered canonical
-      concatenation — NOT xor — of every non-slide entry minus a TINY per-file-justified
-      noise exclusion list ⊕ font-env fingerprint ⊕ OS build); Keynote app version rides
-      the existing .k cache tag (baseline.py:89). The exclusion list is THE one staleness
-      door: anything doubtful stays hashed (a miss, never a stale serve). Partition
-      gotchas (measured): bare Index/Slide.iwa IS a real slide's file on Full (id
-      17558158) — key slide files off slide_order ids, never a Slide-<digits> glob;
-      ViewState is id-suffixed. REACHABILITY VALIDATOR via _load_deck's id_to_file: walk
-      each slide's reachable graph, assert every ref lands in the slide's own file or a
-      global file (measured: ZERO cross-slide refs on both gold decks; 0.2s/1.9s on the
-      decode the checker already shares); numeric refs only (string `identifier`s are
-      style names), classify Data-id numerics, dangling id (Map has one: 1344) or an
-      undecodable slide file → slide UNCACHEABLE; assert id uniqueness. Font fingerprint:
-      _ns_font/font_missing give only missing/trait booleans — add the resolved font's
-      file URL + mtime/size (CTFontDescriptor) and enumerate names referenced from
-      masters too. CRC-32 is non-cryptographic — accident detection for a personal
-      workflow, stated as such. Ships with tests against P1's scratch decks (edit slide
-      k → only key k changes; touch the theme → global key changes).
-    status: pending
   - id: l5-bulk-cache
     content: >-
-      The L5 lever, bounded to the checker's BULK TIER (~50-60s/edit → the changed-slide
+      NEXT — now unblocked (slide-fingerprint SHIPPED). Consume `slide_fingerprint.
+      fingerprint_deck`: gate the whole store on the `global` key (rebuild all on a bump),
+      key each cached bulk-geometry row on the per-slide `slides[i]` key, and treat a slide in
+      `uncacheable` as always-changed (never cache it). The L5 lever, bounded to the checker's
+      BULK TIER (~50-60s/edit → the changed-slide
       fraction; the export floor remains (~0.64s/slide, P3) → incremental-previews; the
       whole-deck deck_digest cache already zeroes the no-edit rerun — L5's value is ONLY the
       partial-edit loop). Rationale unchanged from the original blocker: laid-out
@@ -189,10 +161,10 @@ implements → independent verify).
 
 - **Track A — edit-loop (faster small-edit reloads; NO cold-read gain).** The payoff the
   user cares about, now unblocked by the probes.
-  1. **`slide-fingerprint`** — START HERE. Build the INERT decoded + style-RESOLVED
-     per-slide/global key (P1 decided the representation; zero risk, nothing consumes it).
-  2. **`l5-bulk-cache`** — cache bulk-geometry rows per unchanged slide, keyed by the
-     fingerprint (wrapper at the `bulk_geometry_fn` injection point).
+  1. **`slide-fingerprint`** — SHIPPED (`src/obed_edom/slide_fingerprint.py`, INERT). See
+     "Shipped foundation".
+  2. **`l5-bulk-cache`** — START HERE. Cache bulk-geometry rows per unchanged slide, keyed
+     by the fingerprint (wrapper at the `bulk_geometry_fn` injection point).
   3. **`incremental-previews`** — export only changed slides (P2 confirmed the skipped-flag
      route excludes); merge with cached PNGs.
 - **Track B — cold bulk slimming (independent).**
@@ -222,6 +194,27 @@ implements → independent verify).
 - **The shaper.** `iwa_text_shape` is BUILT, calibrated, generalization-gaps-closed — and
   INERT (nothing calls it). It is the prerequisite for slim-bulk's text drop (see the
   `shaper-wiring` todo).
+- **The slide fingerprint.** `src/obed_edom/slide_fingerprint.py` `fingerprint_deck(key_path,
+  *, deck=None, font_env=None) -> {"global": hex, "slides": [hex|None], "uncacheable":
+  {i: reason}}`. INERT (nothing consumes it) — the save-churn-immune content key `l5-bulk-cache`
+  / `incremental-previews` build on. Per-slide key = id-normalized BFS closure of the slide's
+  decoded graph (numeric refs → positional tokens so a save's renumber washes out), folding
+  every DIRECTLY-referenced style archive (~20 reached types, not just char/para) + image bytes
+  as `data:CRC:size` (central directory, media never read) + document position/skip. Global key
+  = id-masked non-slide files (masters + `Document.iwa` stay in) minus a justified exclusion
+  set + font-env + OS build; Keynote version rides `baseline._app_tag`. **The one design fact
+  a consumer must know:** `TSS.StylesheetArchive` is a HARD closure boundary — it is a
+  `canCullStyles` name→id catalog Keynote recompacts on EVERY save, so folding it churned 42/42
+  DSK keys per no-op save; bounding it out gives 0/42 with zero style-coverage loss (applied
+  styles are reached by direct ref). Uncacheable (a MISS, never stale) on undecodable-slide /
+  cross-slide-ref / dangling-ref. Built + independently verified via the 2+1+2 loop; the
+  acceptance contract is proven end-to-end on the real DSK deck (no-op save → 0 keys move,
+  global identical; edit slide k → only key k moves) plus 28 unit tests (incl. churn-immunity
+  under an order-scrambling id bijection). CRC-32 is non-cryptographic (accident detection for
+  a personal workflow, stated as such). The Phase-0 measurement corrected two literal-P1 points:
+  (a) "resolve char+para props" was incomplete (slides reach ~20 style types) → fold the whole
+  id-normalized closure instead; (b) global "byte-concat of non-slide entries" churns every save
+  → NORMALIZE (id-mask) those files, don't byte-hash.
 
 ## Probe results — measured 2026-08-31 (peer-verified)
 
