@@ -3272,7 +3272,14 @@ def plan_slide_reuses(
         # swept them across and the donor's own copies were joined by a second
         # set. The original slide is deleted straight afterwards, so stripping
         # it back to the delta costs nothing.
-        add_keys = {(str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) for it in add}
+        # Keys of the delta ACTUALLY being pasted — the kept `add_specs`, not the raw
+        # `add`. `add_specs` has already dropped every `role="hide"` item (the side-panel
+        # church-name lists the planner marked for removal, map_remap.py ~3256); those
+        # must therefore land in `strip` and be deleted from the original BEFORE the
+        # select-all paste (remap_keynote.js applyReuse), or they ride the paste back onto
+        # the finished slide even with side content turned off. When there are no hide
+        # specs (transforms empty / fresh reuse) this is identical to the raw-add key set.
+        add_keys = {(str(p.get("kind") or ""), int(p.get("kindIndex") or 0)) for p in add_specs}
         strip_items = [
             it
             for it in (slide.get("items") or [])

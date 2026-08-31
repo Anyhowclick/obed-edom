@@ -1042,6 +1042,45 @@ def test_reuse_duplicates_donor_then_only_text_delta():
     assert jobs[9]["remove"] == []
 
 
+def test_reuse_strips_hidden_side_panel_delta_before_the_paste():
+    # A reuse TARGET whose delta includes a side-panel church-name list the planner
+    # marked role="hide". It must NOT ride the select-all paste back onto the finished
+    # slide: it is filtered out of `add` (never repositioned) AND it must land in `strip`
+    # so it is deleted from the original before the paste. Regression for the church list
+    # reappearing on slide 125 despite "keep side panel content" being off.
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    title = _item(kind="text", kindIndex=0, text="Global Missions", x=2147, y=52, w=537, h=124, size=100)
+    # Slide 3's delta over the donor: a GENUINE new photo (kept) AND a side-panel church
+    # list the planner hid. Both are in `add`; only the hidden one must be stripped.
+    photo = _item(kind="image", kindIndex=1, fileName="CHC-New.png", x=3200, y=300, w=278, h=88)
+    church = _item(kind="text", kindIndex=1, text="CHC Foo\nCHC Bar", x=6946, y=9, w=474, h=954, size=42)
+    wall = {
+        "slides": [
+            {"number": 2, "items": [map_img, *pins, dict(title)]},
+            {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], dict(title), photo, church]},
+        ]
+    }
+    # The planner hid the church list (side panel, side content off); the photo has no
+    # hide transform, so it stays a real delta.
+    hide = ItemTransform(
+        slide_number=3, item_index=42, kind="text", kind_index=1,
+        x=6946, y=9, w=474, h=954, role="hide",
+    )
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [hide])}
+    job = jobs[3]
+    assert job["from"] == 2
+    # The genuine photo IS a real add and must NOT be stripped (over-strip guard)…
+    assert any(a.get("kind") == "image" and a.get("kindIndex") == 1 for a in job["add"])
+    assert not any(r.get("kind") == "image" and r.get("kindIndex") == 1 for r in job["strip"])
+    # …the hidden church list is never re-added (filtered from add_specs)…
+    assert not any(a.get("kind") == "text" and a.get("kindIndex") == 1 for a in job["add"])
+    # …and it IS stripped from the original, so the select-all paste can't carry it back.
+    assert any(r.get("kind") == "text" and r.get("kindIndex") == 1 for r in job["strip"])
+
+
 def test_unpaired_text_resizes_when_swatch_face_differs():
     wall = {
         "slideWidth": 7680,
