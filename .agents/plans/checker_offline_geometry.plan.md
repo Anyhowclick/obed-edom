@@ -282,6 +282,11 @@ their only value is a faster reload after a *small edit to an already-seen deck*
 
 ## Notes for whoever picks up a lever
 
+- **Re-run `scripts/e2e_run_parity.py` after any read-path change** (slim-bulk, l5-bulk-cache,
+  incremental-previews) to confirm no operator-visible finding (pairing/flags/markup) moved.
+  It runs the checker offline+bulk vs full-JXA on the Sermon_PK pair; the known-good baseline
+  (one benign slide-21 photo divergence) is in its docstring — a different/extra diff is the
+  regression signal.
 - Anything touching `iwa_geometry` is **resizer-SHARED** → it must keep the gold-deck gate
   (`_assert_two_tier_gate_green` MAP+FULL) green and add a cleared-accuracy test in the L1/
   L2a mould (vouched ⇒ within 2px AND same pin/map role as JXA).
