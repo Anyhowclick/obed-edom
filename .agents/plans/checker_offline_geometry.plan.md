@@ -37,29 +37,106 @@ todos:
       benign GW boxes, and per-run shaping only relocates the tail — slim-bulk must keep a
       cheap confirmation for mixed-size flags-1 boxes OR accept the ~1.5% tail.
     status: pending
-  - id: l5-geometry-cache
+  - id: hash-probes
     content: >-
-      Content-hash geometry cache — the HIGHEST-VALUE future lever (steady-state ~0 on the
-      edit loop), but NO bounded safe slice today. Laid-out geometry is NOT a fully-
-      hashable pure fn of offline data: font availability/substitution, master/theme/
-      document geometry, and the Keynote layout version are inputs a per-slide offline
-      hash doesn't see, so a slide-local hash silently serves STALE geometry → the checker
-      misreports. Needs a PROVABLY-COMPLETE hash over (slide-local ⊕ global layout context
-      ⊕ Keynote version) + fail-safe (full re-read on any doubt). The whole-deck deck_digest
-      cache already zeroes the no-edit re-run; L5's value is only the partial-edit loop
-      (~50-60s bulk saved/edit), and the ~32s export floor remains. Own plan.
+      BOUNDED PROBES (scratch scripts, no product code; needs Keynote free — batch with
+      e2e-run-parity) gating the incremental edit-loop project (slide-fingerprint →
+      l5-bulk-cache → incremental-previews). P1 SAVE-CHURN (decisive): on a scratch copy
+      of a gold deck, edit ONE slide in Keynote + save, plus a no-op open/save, and diff
+      the FULL zip central directory (all members STORED, per-entry CRC-32+size, ~ms to
+      read). Named suspects are the GLOBAL files, not the slide files: Document.iwa holds
+      the slide tree (order/skip — verified) and DocumentStylesheet.iwa holds the
+      document-wide style table a one-slide text edit can rewrite; if either churns on
+      every save, byte-level keys are worth zero even with clean Slide-*.iwa behaviour.
+      Outcomes: (a) only the edited slide file + noise (Metadata/*, preview*.jpg,
+      ViewState*) churn → byte-level fingerprints; (b) churn/id-renumbering → hash the
+      decoded per-slide graph instead — id-normalized, or style-RESOLVED if the
+      stylesheet renumbers (decode measured 1.5s Map / 3.5s Full; inherits _load_deck's
+      silent skip of undecodable IWAs → such slides are uncacheable). P2 SKIPPED-FLAG
+      EXPORT probe on a scratch copy: settles the SKILL's ambiguous "exports every slide
+      regardless" — and NOTE it validates an assumption today's code ALREADY makes: the
+      hardened cache hit requires have == slideCount PNGs under `skipped slides:false`
+      (inspect.py:614-621), so if skipped slides are excluded, a deck with skipped slides
+      re-exports ~32s on EVERY warm hit today. P3 TIMING: subset_keynote keep-2-of-155
+      (ditto + open + ~150 per-slide deletes + save) vs the ~32s whole-deck export floor.
+      subset_keynote.py/js EXIST but are UNEXERCISED (no caller, no test, dormant since
+      1524ab6) — a primitive, not a shipped path.
     status: pending
-  - id: incremental-export
+  - id: slide-fingerprint
     content: >-
-      Complements l5-geometry-cache: detect changed slides offline (same per-slide hash,
-      WIDER surface — must capture pixels: image bytes/effects/colour) and export only
-      those to beat the ~32s whole-deck export floor. Keynote `export … as slide images`
-      is whole-doc (no range param); a subset needs EITHER toggling the per-slide `skipped`
-      flag then exporting `skipped slides:false` (UNVERIFIED — the SKILL's "Keynote exports
-      every slide regardless" is ambiguous; needs a Keynote probe, and exported filenames
-      renumber over non-skipped slides so map back to original numbers) OR copy-changed-
-      slides-to-scratch-deck + export. Shares L5's hash hazard + real Keynote-scripting
-      work → part of the same "incremental edit-loop" project, not bounded.
+      INERT per-slide fingerprint module (P1 decides byte-level vs decoded-graph
+      representation; nothing consumes it → zero risk). Supersedes L5's "provably-
+      complete hash" demand with a CONSERVATIVE PARTITION: hash EVERYTHING, split
+      slide-local vs global, so over-inclusion costs only cache misses, never staleness.
+      Per-slide key = H(the slide's Index/Slide iwa entry ⊕ referenced Data/* entries'
+      central-directory CRC+size ⊕ the slide's DOCUMENT POSITION — position closes the
+      duplicate-slides / slide-number-field hazard for free, since reorders already
+      invalidate the global hash via Document.iwa). Global key = H(ordered canonical
+      concatenation — NOT xor — of every non-slide entry minus a TINY per-file-justified
+      noise exclusion list ⊕ font-env fingerprint ⊕ OS build); Keynote app version rides
+      the existing .k cache tag (baseline.py:89). The exclusion list is THE one staleness
+      door: anything doubtful stays hashed (a miss, never a stale serve). Partition
+      gotchas (measured): bare Index/Slide.iwa IS a real slide's file on Full (id
+      17558158) — key slide files off slide_order ids, never a Slide-<digits> glob;
+      ViewState is id-suffixed. REACHABILITY VALIDATOR via _load_deck's id_to_file: walk
+      each slide's reachable graph, assert every ref lands in the slide's own file or a
+      global file (measured: ZERO cross-slide refs on both gold decks; 0.2s/1.9s on the
+      decode the checker already shares); numeric refs only (string `identifier`s are
+      style names), classify Data-id numerics, dangling id (Map has one: 1344) or an
+      undecodable slide file → slide UNCACHEABLE; assert id uniqueness. Font fingerprint:
+      _ns_font/font_missing give only missing/trait booleans — add the resolved font's
+      file URL + mtime/size (CTFontDescriptor) and enumerate names referenced from
+      masters too. CRC-32 is non-cryptographic — accident detection for a personal
+      workflow, stated as such. Ships with tests against P1's scratch decks (edit slide
+      k → only key k changes; touch the theme → global key changes).
+    status: pending
+  - id: l5-bulk-cache
+    content: >-
+      The L5 lever, bounded to the checker's BULK TIER (~50-60s/edit → the changed-slide
+      fraction; the ~32s export floor remains → incremental-previews; the whole-deck
+      deck_digest cache already zeroes the no-edit rerun — L5's value is ONLY the
+      partial-edit loop). Rationale unchanged from the original blocker: laid-out
+      geometry is NOT a pure fn of slide-local bytes (fonts, master/theme/document
+      geometry, Keynote version) — the slide-fingerprint keys operationalize exactly that
+      surface. Implementation: a caching WRAPPER passed as bulk_geometry_fn at the
+      inspect.py:545 injection point — NEVER inside inspect.bulk_geometry itself
+      (resizer-SHARED via acquire_wall_payload, remap_keynote.py:171). The wrapper MUST
+      merge cached rows for unchanged slides into a COMPLETE bulk map before the splice:
+      _splice_bulk_geometry skips slides absent from the map and every soft item there
+      becomes a bulk-missing fallback (offline_inspect.py:621,743) — so pass only changed
+      indices to the already-subset-capable bulk read (bulk_geometry.js plan.slides) AND
+      splice cached rows for the rest, else the scheme detonates into mass fallback on
+      precisely the slides it meant to skip. SAFETY, stated precisely: on a cache hit the
+      count-guard is a TAUTOLOGY (a hit means offline counts are unchanged — cached rows
+      get compared against the very payload they were validated on); it catches
+      cache-scheme addressing bugs, NOT stale values. Staleness protection = key
+      completeness + a VERIFY-SAMPLE burn-in (re-read k random cached slides per run,
+      compare, alarm on any mismatch → a measured staleness rate before trust). No
+      INSPECT_VERSION bump (payload shape and values unchanged); reverse cross-serve
+      guard unaffected (reader stays "offline"; separate store). The new store must carry
+      a source-path marker so cache-cleanup's protected-paths split still works.
+    status: pending
+  - id: incremental-previews
+    content: >-
+      Beat the ~32s export floor for the partial-edit loop (gated on P2+P3 +
+      slide-fingerprint; same project as l5-bulk-cache and shares its hash hazard).
+      Keynote `export … as slide images` is whole-doc (no range param). Per-slide preview
+      cache keyed by the slide fingerprint — its WIDER pixel surface is already covered:
+      Data CRCs capture image bytes, the slide iwa captures effects/colour, the global
+      key captures theme/master backgrounds. Export only missed slides via
+      subset_keynote OR P2's skipped-flag route — a subset deck's filenames renumber
+      sequentially over kept slides in kept order, so map-back to original numbers is
+      deterministic. RENDER-DIVERGENCE hazards of a subset deck: slide-number
+      placeholders (position-dependent digits; offline detection is a TO-BUILD —
+      iwa_runs strips the attachment char untyped, and masters can carry the field),
+      auto date/time fields (also stale in today's whole-deck preview cache), and the
+      subset copy being re-SAVED by Keynote (render parity of the laundered copy vs the
+      original is assumed — verify on gold decks). The doc-bind bug (opt-higher-blast
+      item 1) is WORST-CASE here — give every scratch deck a unique basename per run.
+      MERGE contract: rename cached+fresh PNGs to ONE uniform prefix carrying original
+      document numbers, exactly slideCount files (folder_digests orders by filename sort;
+      mapping parses the last stem integer; the hardened hit needs have == slideCount).
+      Verify: pixel-compare incremental vs full export on the gold decks + DSK.
     status: pending
   - id: l2b-group-frame
     content: >-
