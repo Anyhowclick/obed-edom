@@ -60,6 +60,20 @@ def test_deck_slide_digests_ignore_image_rotation():
     assert deck_slide_digests(base) == deck_slide_digests(rotated)
 
 
+def test_deck_slide_digests_ignore_image_geometry():
+    """Same class as rotation: offline-composed x/y/w/h can drift from JXA between
+    runs, so the slide-IDENTITY digest must not depend on image position or size —
+    otherwise an unedited image churns its digest and floats out of order."""
+    from obed_edom.baseline import deck_slide_digests
+    a = {"slides": [{"index": 0, "number": 1, "skipped": False, "items": [
+        {"kind": "image", "kindIndex": 0, "fileName": "a.jpg",
+         "x": 44, "y": 704, "w": 1832, "h": 350}]}]}
+    b = {"slides": [{"index": 0, "number": 1, "skipped": False, "items": [
+        {"kind": "image", "kindIndex": 0, "fileName": "a.jpg",
+         "x": 45, "y": 700, "w": 1830, "h": 351}]}]}
+    assert deck_slide_digests(a) == deck_slide_digests(b)
+
+
 # --------------------------------------------------------------------------
 # Synthetic IWA archive builders.
 # --------------------------------------------------------------------------

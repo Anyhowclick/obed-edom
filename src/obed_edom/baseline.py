@@ -211,25 +211,16 @@ def deck_slide_digests(payload: dict) -> list[str]:
         for item in _walk_items(slide):
             if (item.get("kind") or "") != "image":
                 continue
-            # Deliberately NO `rotation`: this is the slide-IDENTITY fingerprint that
-            # decides which slides PAIR, and orientation must not drive pairing. The
-            # offline read composes a masked image's angle from frame+mask, which can
-            # differ from JXA on flipped/masked photos (e.g. a flipped DSK lower-third
-            # read 354 vs JXA 0) — including it churned the digest and floated that slide
-            # out of order. A flip/rotation that differs from the LW counterpart is a
-            # real discrepancy, but it is caught by the image COMPARISON of the paired
-            # slides, not by this ordering key.
-            images.append(
-                ":".join(
-                    [
-                        str(item.get("fileName") or ""),
-                        f"{float(item.get('x') or 0):.1f}",
-                        f"{float(item.get('y') or 0):.1f}",
-                        f"{float(item.get('w') or 0):.1f}",
-                        f"{float(item.get('h') or 0):.1f}",
-                    ]
-                )
-            )
+            # Deliberately NO geometry (rotation, position OR size): this is the
+            # slide-IDENTITY fingerprint that decides which slides PAIR, and it
+            # compares a deck to ITSELF across runs (index_map). Offline-composed
+            # geometry can differ from JXA on masked/rotated/autosize reads, so
+            # folding x/y/w/h (or rotation) in churned the digest and floated an
+            # UNEDITED slide out of order in the checker. fileName is the stable
+            # image identity; a genuine move/resize/flip is a real discrepancy, but
+            # it is caught by the image COMPARISON of the paired slides, not by this
+            # ordering key. (framing.reuse_framings consumes this via index_map too.)
+            images.append(str(item.get("fileName") or ""))
         images.sort()
         skipped = "1" if slide.get("skipped") else "0"
         blob = f"{skipped}|{text}|{'|'.join(images)}"
@@ -377,7 +368,15 @@ def remap_slots(
 
 
 def insert_unpaired(slots: list[dict], n_left: int, n_right: int) -> list[dict]:
-    """Put leftover slides into the playlist in deck order, as unpaired rows."""
+    """Put leftover slides into the playlist in deck order, as unpaired rows.
+
+    Each surviving row flushes only the dimension it anchors: a left-only row
+    flushes leftover LW slides up to its own left index and leaves the DSK side
+    alone (and a right-only row vice-versa). Using ``n_right``/``n_left`` as the
+    limit for the dimension a one-sided row does NOT anchor made that row a
+    "flush everything" barrier — it dumped every later leftover of the opposite
+    deck in front of it, which floated an edited slide to the top of the diff.
+    """
     used_left = {int(s["leftIndex"]) for s in slots if s.get("leftIndex") is not None}
     used_right: set[int] = set()
     for slot in slots:
@@ -387,27 +386,27 @@ def insert_unpaired(slots: list[dict], n_left: int, n_right: int) -> list[dict]:
     out: list[dict] = []
     mi = mj = 0
 
-    def flush(left_limit: int, right_limit: int) -> None:
-        nonlocal mi, mj
-        while True:
-            take_l = mi < len(missing_left) and missing_left[mi] < left_limit
-            take_r = mj < len(missing_right) and missing_right[mj] < right_limit
-            if not take_l and not take_r:
-                return
-            if take_l:
-                out.append(slot_dict(missing_left[mi], []))
-                mi += 1
-            if take_r:
-                out.append(slot_dict(None, [missing_right[mj]]))
-                mj += 1
+    def flush_left(limit: int) -> None:
+        nonlocal mi
+        while mi < len(missing_left) and missing_left[mi] < limit:
+            out.append(slot_dict(missing_left[mi], []))
+            mi += 1
+
+    def flush_right(limit: int) -> None:
+        nonlocal mj
+        while mj < len(missing_right) and missing_right[mj] < limit:
+            out.append(slot_dict(None, [missing_right[mj]]))
+            mj += 1
 
     for slot in slots:
         rec = normalize_slot(slot)
-        left_limit = rec["leftIndex"] if rec["leftIndex"] is not None else n_left
-        right_limit = min(rec["rightIndexes"]) if rec["rightIndexes"] else n_right
-        flush(left_limit, right_limit)
+        if rec["leftIndex"] is not None:
+            flush_left(int(rec["leftIndex"]))
+        if rec["rightIndexes"]:
+            flush_right(min(int(r) for r in rec["rightIndexes"]))
         out.append(rec)
-    flush(n_left, n_right)
+    flush_left(n_left)
+    flush_right(n_right)
     return out
 
 
