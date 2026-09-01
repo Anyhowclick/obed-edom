@@ -3238,21 +3238,43 @@ def plan_slide_reuses(
         by_slide.setdefault(spec.slide_number, []).append(spec)
     jobs: list[dict[str, Any]] = []
     done: list[tuple[int, dict]] = []
+
+    def _keyed(items: list[dict]) -> dict[tuple[Any, ...], dict]:
+        # Disambiguate co-located same-content objects with a per-slide
+        # occurrence-ordinal so N physical objects yield N distinct partition
+        # entries instead of collapsing to one dict slot. The Nth item sharing a
+        # content_key on this slide keys to ``(content_key, N)``; `_live_items`
+        # order (`_index`) makes N deterministic. The map image duplicated across
+        # wall panels legitimately keys to ordinals 0/1 on every slide, so a
+        # donor's map#0/#1 stay paired with the target's (identical geometry ⇒
+        # interchangeable).
+        seen: dict[tuple[Any, ...], int] = {}
+        out: dict[tuple[Any, ...], dict] = {}
+        for it in items:
+            ck = item_content_key(it)
+            ordinal = seen.get(ck, 0)
+            seen[ck] = ordinal + 1
+            out[(ck, ordinal)] = it
+        return out
+
     for slide in slides:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not done:
             done.append((number, slide))
             continue
         curr_items = _live_items(slide)
-        curr_keys = {item_content_key(it): it for it in curr_items}
+        curr_keys = _keyed(curr_items)
         best: tuple[int, int, int, dict, list, list, list] | None = None
         for prev_n, prev in done:
             prev_items = _live_items(prev)
-            prev_keys = {item_content_key(it): it for it in prev_items}
+            prev_keys = _keyed(prev_items)
             persist = [curr_keys[k] for k in curr_keys if k in prev_keys]
             persist_pairs = [(curr_keys[k], prev_keys[k]) for k in curr_keys if k in prev_keys]
             if len(persist) < REUSE_MIN_PERSIST:
                 continue
+            # Reverse-lookup a donor item's ordinal-key (each item is a unique
+            # dict value, so id() is a 1:1 handle back to its partition key).
+            prev_key_of = {id(it): k for k, it in prev_keys.items()}
             prev_by_id: dict[tuple[Any, ...], dict] = {}
             for it in prev_items:
                 ident = item_identity(it)
@@ -3269,10 +3291,10 @@ def plan_slide_reuses(
                 donor_it = prev_by_id.get(ident)
                 if donor_it is not None and ident[0] == "text" and ident[1]:
                     mutate.append((donor_it, it))
-                    mutate_prev_keys.add(item_content_key(donor_it))
+                    mutate_prev_keys.add(prev_key_of[id(donor_it)])
                 else:
                     add.append(it)
-            remove = [it for it in remove if item_content_key(it) not in mutate_prev_keys]
+            remove = [it for it in remove if prev_key_of[id(it)] not in mutate_prev_keys]
             cost = len(remove) + len(add)
             rank = (len(persist), -cost)
             if best is None or rank > (best[0], -best[1]):

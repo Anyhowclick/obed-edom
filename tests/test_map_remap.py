@@ -2915,3 +2915,173 @@ def test_pack_left_groups_moves_wall_size_groups_without_overlap():
     ys = [g.y for g in by_src_y]
     assert ys == sorted(ys)
     assert by_src_y[0].x == 16
+
+
+# --- Part A: per-slide occurrence-ordinal partition key (co-located dedup) ---
+
+
+def test_reuse_colocated_group_pair_yields_two_partition_entries():
+    """Two co-located identical GROUPS (same content_key, like real slide 3's
+    stat pairs) must each get their own partition slot. Pre-fix the dict keyed by
+    bare content_key collapsed them to one, so only ONE of the twins was ever
+    addressed; with the occurrence-ordinal both land in `add`."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    # A co-located twin: identical geometry, so the same content_key twice.
+    twin_a = _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50)
+    twin_b = _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50)
+    wall = {
+        "slides": [
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins]]},
+            {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], dict(twin_a), dict(twin_b)]},
+        ]
+    }
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
+    assert job["from"] == 2
+    # Both physical twins are distinct partition entries -> both added (was 1 pre-fix).
+    assert len([a for a in job["add"] if a.get("kind") == "group"]) == 2
+
+
+def test_reuse_duplicated_map_images_stay_ordinal_paired_and_persist():
+    """The map image is legitimately duplicated across wall panels (per SKILL).
+    Both copies key to ordinals 0/1 on donor and target, pair 0<->0 / 1<->1, and
+    both persist unchanged — never dropped, never re-added. Pre-fix the second
+    copy was collapsed away (only one map persisted)."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map0 = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    map1 = _item(kind="image", kindIndex=1, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    wall = {
+        "slides": [
+            {"number": 2, "items": [dict(map0), dict(map1), *[dict(p) for p in pins]]},
+            {"number": 3, "items": [dict(map0), dict(map1), *[dict(p) for p in pins]]},
+        ]
+    }
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
+    assert job["from"] == 2
+    # 40 pins + BOTH map copies persist (== 42); pre-fix a collapsed map gave 41.
+    assert job["persist"] == 42
+    assert not any(r.get("kind") == "image" for r in job["remove"])
+    assert not any(a.get("kind") == "image" for a in job["add"])
+
+
+def test_reuse_persisting_collided_pair_aligns_by_ordinal_across_slides():
+    """A PERSISTING collided pair (the Map deck never exercises this) proves the
+    donor pair aligns to the current pair BY ORDINAL, not cross-matched/collapsed:
+    the donor's ordinal-0 member carries a build the target lost, the ordinal-1
+    member does not. `stripBuilds` must name exactly the ordinal-0 donor. Pre-fix
+    the dict kept only the last (ordinal-1, build-free) copy, so the lost build was
+    invisible and `stripBuilds` was empty."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    # Donor: co-located pair, ordinal-0 (ki 0) animates, ordinal-1 (ki 1) is static.
+    donor_pair = [
+        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, buildCount=1),
+        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, buildCount=0),
+    ]
+    # Target: same co-located pair, both static (the ordinal-0 build was dropped).
+    curr_pair = [
+        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, buildCount=0),
+        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, buildCount=0),
+    ]
+    wall = {
+        "slides": [
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], *donor_pair]},
+            {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], *curr_pair]},
+        ]
+    }
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
+    assert job["from"] == 2
+    # 40 pins + 1 map + both twins persist.
+    assert job["persist"] == 43
+    build_refs = [r for r in job["stripBuilds"] if r.get("kind") == "group"]
+    # Exactly the ordinal-0 donor (ki 0) — proves per-ordinal pairing, not collapse.
+    assert build_refs == [{"kind": "group", "kindIndex": 0, "itemIndex": 0}]
+
+
+def test_reuse_collision_free_wall_all_ordinals_zero():
+    """On a collision-free wall (single map, distinct pins) every content_key
+    occurs once, so all ordinals are 0 and behaviour is identical to the pre-fix
+    partition: exactly 40 pins + 1 map persist, no phantom ordinal-1 entry."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    wall = {
+        "slides": [
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins],
+                                     _item(kind="text", kindIndex=0, text="CHC Zui", x=6946, y=9, w=474, h=954, size=42)]},
+            {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins],
+                                    _item(kind="text", kindIndex=0, text="CHC Aaliana", x=262, y=9, w=215, h=58, size=42)]},
+        ]
+    }
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
+    assert job["from"] == 2
+    # 40 pins + 1 map; the differing text is not in persist. No duplication.
+    assert job["persist"] == 41
+
+
+def _reuse_gold_cache_payload(name):
+    """Return the CACHED inspect payload for a wall deck, or None if the cache is
+    cold. Never opens Keynote: it hashes the file offline and only reads the cache
+    if the digest-keyed JSON already exists on disk."""
+    from pathlib import Path
+
+    from obed_edom.baseline import deck_digest, inspect_cache_path
+
+    deck = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs") / name
+    if not deck.exists():
+        return None
+    try:
+        if not inspect_cache_path(deck_digest(deck)).is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    from obed_edom.inspect import inspect_keynote
+
+    payload = inspect_keynote(deck, use_cache=True)
+    return payload if payload.get("_cached") else None
+
+
+def test_gold_map_deck_donor_selection_unchanged():
+    """Offline gold gate (no Keynote): the ordinal key must not disturb donor
+    SELECTION or the REUSE_MIN_PERSIST gate on the real Map wall deck. The chain
+    and per-slide persist counts below are the live values AFTER the ordinal fix;
+    each persist is exactly the pre-fix value + 1 (the second map copy that used to
+    be collapsed now counts), and the donor chain is byte-identical to pre-fix."""
+    import pytest
+
+    from obed_edom.map_remap import REUSE_MIN_PERSIST, plan_slide_reuses
+
+    payload = _reuse_gold_cache_payload("Map_Extracted_Wall_1st.key")
+    if payload is None:
+        pytest.skip("Map wall deck cache is cold; refuse to open Keynote")
+    jobs = {j["slide"]: j for j in plan_slide_reuses(payload, [])}
+    # Donor chain unchanged vs pre-fix (verified by A/B run on the cached payload).
+    assert {s: j["from"] for s, j in sorted(jobs.items())} == {2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6}
+    # Gating not tripped, and persist == pre-fix + 1 (the recovered second map).
+    prefix_persist = {2: 160, 3: 160, 4: 166, 5: 169, 6: 169, 7: 168}
+    for s, j in jobs.items():
+        assert j["persist"] >= REUSE_MIN_PERSIST
+        assert j["persist"] == prefix_persist[s] + 1
+
+
+def test_gold_full_report_card_deck_if_warm():
+    """Full_Report_Card_Wall gold gate — runs ONLY if its cache is already warm
+    (never opens Keynote). If cold it skips, leaving Full unverified as flagged."""
+    import pytest
+
+    from obed_edom.map_remap import REUSE_MIN_PERSIST, plan_slide_reuses
+
+    payload = _reuse_gold_cache_payload("Full_Report_Card_Wall.key")
+    if payload is None:
+        pytest.skip("Full_Report_Card_Wall cache is cold; refuse to open Keynote")
+    jobs = plan_slide_reuses(payload, [])
+    # Whatever donor selection this deck makes, gating must never trip.
+    for j in jobs:
+        assert j["persist"] >= REUSE_MIN_PERSIST
