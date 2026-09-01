@@ -921,14 +921,33 @@ count. The rules, each independently agent-verified:
   walk — `derive_kind_index` (addressing, 0.4 s) + offline-composed geometry (seconds),
   or a single ~77 s PPTX export. So "don't re-chase IWA for inspect speed" still holds
   for the generic payload, but the remap read is no longer gated on the 12.6-min inspect.
-- **Offline WRITE of a whole deck corrupts it.** `keynote-parser` *can* modify a
-  `.key`, but a full decode→re-encode→rezip is **byte-lossy** (60/80 IWA re-encode
-  with different bytes). A trivial 3-slide deck survives and opens; a **232 MB deck
-  fails to open** (valid zip, corrupt content). The ONLY viable write is
-  **surgical** — rewrite just the target slide's IWA and copy every other IWA
-  **verbatim** (20/80 already round-trip identical) — and even that needs per-deck
-  openability testing. So the generator's superscript GUI Copy/Paste-Style pass 2
-  stays the safe route until a surgical writer is proven (an un-built spike).
+- **Offline WRITE: a WHOLE-deck re-encode corrupts, but a SURGICAL single-member
+  patch is PROVEN openable (2026-09-01).** A full decode→re-encode→rezip of *every*
+  IWA is byte-lossy and a **232 MB deck fails to open**. The surgical write —
+  rewrite just the ONE target member and copy every other member **verbatim** — now
+  has an end-to-end proof on a make-new-document deck (`scratchpad/spike0_patch.py`,
+  w-spike0): object-level (`IWAFile.to_dict` → mutate one `geometry.position.x` →
+  `from_dict().to_buffer()`, rewrite that one **STORED** zip member) → **Keynote
+  opens the deck cleanly, the patched value survives the open, and a Keynote re-save
+  round-trips it back as a first-class value.** Key facts that make object-level
+  safe: the per-file byte-identity failures are **pure snappy re-compression churn,
+  not protobuf loss** — a VALUE-level round-trip is 31/31 (Map) / 20/20 (Full
+  sampled) identical, and a single-file re-encode changes exactly ONE object with 0
+  headers disturbed; members are STORED so Keynote re-decodes rather than byte-diffs.
+  So **wire-level fixed32 in-place patching is NOT needed** (feasible but harder —
+  custom snappy literal-tracker + protobuf wire-walker — reserve it only if a target
+  file ever fails the VALUE round-trip). Two load-bearing constraints for the
+  patcher: **derive the target member from `_load_deck`'s `id_to_file[drawable_id]`,
+  never from the slide id** — the first content slide can be the unsuffixed
+  `Index/Slide.iwa`, not `Slide-<slideId>.iwa`; and **locality holds** — each
+  slide's drawables live in exactly one `.iwa`, exclusive to that slide (Map & Full,
+  0 violations), so a per-slide patch touches one member and refuse any cross-file
+  object. STILL UNVERIFIED here (environment-limited): opening a patched *real* 1.2 GB+
+  wall deck in Keynote (its open is impractically slow / wedges) — the mechanism +
+  locality argue it transfers; confirm it behind `OBED_OFFLINE_WRITE`'s read-back gate.
+  The generator's superscript GUI Copy/Paste-Style pass 2 stays the route for
+  *character styling* (unreachable by any API), not because surgical geometry write
+  is unproven.
 - **Version fragility:** `keynote-parser` advertises support ≤ Keynote 14.5 yet
   decoded 15.x decks with 0 failures; a future format bump could break decode → the
   `try/except` degrades to `runs=[]`. Pin it and re-test on a Keynote upgrade.
