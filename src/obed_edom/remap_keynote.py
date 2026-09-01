@@ -54,6 +54,29 @@ def as_geometry_enabled() -> bool:
     return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def suppress_geometry_slides() -> set[int]:
+    """1-based slide numbers whose pass-1 write must place attrs but NO geometry.
+
+    Reads ``OBED_SUPPRESS_GEOMETRY`` (default empty) as a comma/space-separated list
+    of slide numbers. A listed NON-reuse slide gets ``applyTransforms(…, "attrs")``
+    only — its width/height/position are left exactly as pass 1 found them, taking
+    neither the batched-AppleScript geometry branch nor the JXA full-geometry branch
+    (``deleteHides`` still runs). This is the pass-1-only baseline the offline
+    surgical patcher (:mod:`obed_edom.iwa_write`) writes onto: without it an
+    empty-``asGeom`` slide silently falls through to the JXA full path and gets its
+    geometry written anyway. Non-numeric tokens are ignored, so a typo degrades to
+    "suppress nothing" rather than raising mid-remap.
+    """
+    raw = os.environ.get("OBED_SUPPRESS_GEOMETRY", "")
+    slides: set[int] = set()
+    for token in raw.replace(",", " ").split():
+        try:
+            slides.add(int(token))
+        except ValueError:
+            continue
+    return slides
+
+
 # --------------------------------------------------------------------------
 # Offline source-wall read (OBED_OFFLINE_READ) — reconstruct the ~12-min JXA
 # `inspect_keynote(source)` from the deck's IWA graph, with the legacy read as
@@ -440,7 +463,10 @@ def _slide_geometry_addressable(specs: list[dict[str, Any]]) -> bool:
     return True
 
 
-def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
+def _build_as_geometry(
+    transform_dicts: list[dict[str, Any]],
+    suppress: set[int] | frozenset[int] = frozenset(),
+) -> dict[str, str]:
     """Per-slide AppleScript geometry bodies, keyed by slide number as a string.
 
     Built from the same transform dicts sent to JXA so the addressing matches
@@ -448,6 +474,11 @@ def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
     on it is AppleScript-addressable (see ``_slide_geometry_addressable``); an
     excluded slide has no key here, and the JXA loop then runs its full geometry
     path. The reuse path ignores this map regardless.
+
+    A slide in ``suppress`` (see :func:`suppress_geometry_slides`) is omitted here
+    too, so it carries no geometry body at all; ``applyNonReuseSlide`` then writes
+    its attrs only and skips geometry entirely rather than falling through to the
+    JXA full path.
     """
     by_slide: dict[int, list[dict[str, Any]]] = {}
     order: list[int] = []
@@ -461,6 +492,8 @@ def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
         by_slide[slide_no].append(spec)
     out: dict[str, str] = {}
     for slide_no in order:
+        if slide_no in suppress:
+            continue
         specs = by_slide[slide_no]
         if not _slide_geometry_addressable(specs):
             continue
@@ -812,6 +845,7 @@ def remap_keynote(
         copy_keynote(template_path, layout_src)
         say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
         transform_dicts = [t.as_dict() for t in transforms]
+        suppressed = suppress_geometry_slides()
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
@@ -819,12 +853,22 @@ def remap_keynote(
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
             "transforms": transform_dicts,
             "reuses": reuses,
+            # Non-reuse slides listed here write attrs but NO geometry (the offline
+            # patcher's pass-1-only baseline). Read in applyNonReuseSlide alongside
+            # asGeom; empty by default so behaviour is unchanged.
+            "suppressGeometry": sorted(suppressed),
         }
+        if suppressed:
+            say(
+                "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for non-reuse "
+                f"slide(s) {sorted(suppressed)}."
+            )
         if as_geometry_enabled():
             # Non-reuse slides get their w/h/position written by a batched
             # AppleScript block (no JXA (0,0) flick); reuse slides stay on JXA.
+            # A suppressed slide is omitted from the map so it stays attrs-only.
             plan["asGeometry"] = True
-            plan["asGeom"] = _build_as_geometry(transform_dicts)
+            plan["asGeom"] = _build_as_geometry(transform_dicts, suppress=suppressed)
             say(
                 "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
                 f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."

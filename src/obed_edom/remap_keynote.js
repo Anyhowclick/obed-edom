@@ -1,4 +1,7 @@
-ObjC.import("Foundation");
+// Guarded so the pure decision helper below (geometryPathForSlide) can be
+// require()d from Node for unit tests. Under osascript ObjC is defined and the
+// import runs exactly as before.
+if (typeof ObjC !== "undefined") ObjC.import("Foundation");
 
 // --- write-path timing (OBED_WRITE_TIMING) -------------------------------
 // Null unless plan.timing is set. When on, records per-slide/per-phase elapsed
@@ -801,17 +804,43 @@ function runSlideGeomScript(doc, asGeom, n, missReasons) {
   }
 }
 
-function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom) {
+// Pure branch decision for a non-reuse slide's geometry write. Kept out of
+// applyNonReuseSlide (which needs a live Keynote doc) so the correctness lynchpin
+// — that a suppressed slide takes NEITHER geometry branch — is Node-unit-testable.
+//   "attrs" — write non-yanking attributes only, NO geometry (slide in
+//             plan.suppressGeometry). Must win over "as" so a suppressed slide
+//             that also has an asGeom body is still geometry-free.
+//   "as"    — the batched AppleScript geometry body Python built (asGeom[n]).
+//   "jxa"   — the JXA full-geometry pass (flag off, or no addressable body).
+function geometryPathForSlide(n, asGeom, suppressGeometry) {
+  if (suppressGeometry && suppressGeometry.indexOf(n) !== -1) return "attrs";
+  if (asGeom && asGeom[n]) return "as";
+  return "jxa";
+}
+
+function applyNonReuseSlide(
+  doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom, suppressGeometry
+) {
   const specs = transformsForSlide(transforms, n);
   let applied = 0;
   let missed = 0;
-  // Decide the path PER SLIDE, not on a global flag: use the AppleScript geometry
-  // path only when Python built a body for this slide (i.e. every geometry-bearing
-  // object on it is AppleScript-addressable). A slide with any unaddressable kind
-  // has no body here and falls through to the JXA full path, so no object ever
-  // silently loses its geometry. Flag OFF ⇒ asGeom is null ⇒ always the JXA path.
-  const asBody = asGeom ? asGeom[n] : null;
-  if (asBody) {
+  // Decide the path PER SLIDE, not on a global flag: a suppressed slide writes
+  // attrs only; otherwise use the AppleScript geometry path only when Python built
+  // a body for this slide (i.e. every geometry-bearing object on it is
+  // AppleScript-addressable). A slide with any unaddressable kind has no body here
+  // and falls through to the JXA full path, so no object ever silently loses its
+  // geometry. Flag OFF ⇒ asGeom is null ⇒ the JXA path (unless suppressed).
+  const path = geometryPathForSlide(n, asGeom, suppressGeometry);
+  if (path === "attrs") {
+    // Suppressed: write the non-yanking attributes and STOP. No AppleScript geom
+    // body, no JXA full/pos pass — the object keeps whatever geometry pass 1 gave
+    // it, which is exactly the baseline the offline patcher then writes onto.
+    const _ta = TIMING ? _now() : 0;
+    const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
+    if (TIMING) _trec("phase:attrsSuppressed:slide" + n, _now() - _ta, null);
+    applied += r.applied;
+    missed += r.missed;
+  } else if (path === "as") {
     // JXA writes only the non-yanking attributes (opacity/font/size/colour); the
     // batched AppleScript block owns w/h/position and addresses `slide n` — the
     // SAME live slide JXA just resolved, since the reuse path restores slide
@@ -837,6 +866,8 @@ function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missRea
     applyTransforms(doc.slides(), specs, null, missReasons, "pos");
     if (TIMING) _trec("phase:jxaPos:slide" + n, _now() - _tp, null);
   }
+  // deleteHides runs on every non-reuse slide regardless of the geometry path —
+  // suppression removes geometry, not the hide deletion.
   const _td = TIMING ? _now() : 0;
   const rd = deleteHides(doc.slides(), Keynote, specs, missReasons);
   if (TIMING) _trec("phase:deleteHides:slide" + n, _now() - _td, null);
@@ -860,6 +891,9 @@ function run(argv) {
   // addressable). Absent ⇒ null ⇒ byte-for-byte the JXA geometry behaviour. The
   // per-slide decision lives in applyNonReuseSlide, keyed on asGeom[n].
   const asGeom = plan.asGeom || null;
+  // Non-reuse slide numbers whose geometry pass 1 must skip (attrs only). Read
+  // here alongside asGeom and passed into applyNonReuseSlide's per-slide decision.
+  const suppressGeometry = plan.suppressGeometry || null;
   const width = Number(plan.width) || 1920;
   const height = Number(plan.height) || 1080;
   const collections = {};
@@ -915,7 +949,7 @@ function run(argv) {
         // live index is n (the failed reuse duplicated nothing), so the same
         // slide-number guarantee holds and AppleScript geometry is safe here too.
         const rf = applyNonReuseSlide(
-          doc, Keynote, n, transforms, collections, missReasons, asGeom
+          doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
         );
         appliedFirst += rf.applied;
         missedFirst += rf.missed;
@@ -923,7 +957,7 @@ function run(argv) {
       continue;
     }
     const rn = applyNonReuseSlide(
-      doc, Keynote, n, transforms, collections, missReasons, asGeom
+      doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
     );
     appliedFirst += rn.applied;
     missedFirst += rn.missed;
@@ -975,4 +1009,12 @@ function run(argv) {
     saved: true,
     timing: TIMING,
   });
+}
+
+// Exposed for Node unit tests only. Under osascript `module` is undefined, so
+// this is a no-op there and `run` stays the JXA entry point.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    geometryPathForSlide: geometryPathForSlide,
+  };
 }
