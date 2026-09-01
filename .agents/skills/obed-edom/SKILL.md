@@ -552,10 +552,22 @@ script — a 5-second smoke test on a tiny deck surfaces all of them before you 
     Events; the before/after PNG render confirms the shape moved to the front. So no
     Tab-cycling and no readable z-order are needed to *set* stacking — select the
     target by geometry and Bring to Front. (Needs Accessibility, like every GUI pass.)
-  - *What is knowable:* per-type collections do enumerate in creation order
+  - *What is knowable:* per-type collections enumerate in creation order
     (`slide.shapes()` returned the three probe shapes in the order they were made),
     so relative order **within** one class is recoverable. Cross-class is not, and
-    that is the part stacking actually needs.
+    that is the part stacking actually needs. **But only until an arrange op:** a GUI
+    **Bring to Front moves the raised item to the END of its own per-type collection**,
+    shifting every later index down (verified 2026-09-01, `probe_phase2_shapes`: three
+    shapes at x=95,100,300,500 → after Bring-to-Front of index 1 → 100,300,500,95 →
+    again → 300,500,95,100 — the front item is always last). So `shape N` / `group N`
+    addressing is **not stable across successive raises on one slide**: the resizer's
+    stat-finalize phase-2 z-order pass (`keynote.py`), which raises `group N of slide`
+    for each stat job in ascending order, mis-targets after the first raise on any slide
+    with **multiple** stat groups (the intended group is never raised, a wrong one is).
+    Phase-1 sizing is safe because all sizing runs before any raise. This is the real
+    mechanism behind the "Session-15 red herring" and what `w-zorder-patch` (offline
+    `drawablesZOrder` reorder) retires. It also confirms the SKILL's creation-order note
+    holds only for a deck with no arrange ops applied since creation.
   - *Consequence for resize:* the resizer duplicates a slide and then moves, resizes
     and deletes the objects already on it via JXA, so it inherits the source deck's
     stacking untouched. It cannot *read* a bad stack, but it can now **repair** one
