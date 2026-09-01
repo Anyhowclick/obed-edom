@@ -9,7 +9,11 @@ sizes and the z-order/badge steps.
 from pathlib import Path
 
 from obed_edom.keynote import _build_stat_finalize_script, _run_stat_finalize
-from obed_edom.map_remap import plan_slide_transforms
+from obed_edom.map_remap import (
+    ItemTransform,
+    adjust_child_resize_for_deleted_hides,
+    plan_slide_transforms,
+)
 
 
 def _item(**kwargs):
@@ -159,3 +163,59 @@ def test_run_stat_finalize_no_jobs_reports_not_exported():
     result = _run_stat_finalize(Path("/tmp/x.key"), [], {"269": 200.0}, export_dir=None)
     assert result["skipped"] is True
     assert result["exported"] is False
+
+
+# --- deleteHides index adjustment ------------------------------------------------
+
+
+def _hide(slide: int, kind_index: int, kind: str = "group") -> ItemTransform:
+    """A role="hide" transform, mirroring how _hide_item_transform builds one."""
+    return ItemTransform(
+        slide_number=slide,
+        item_index=kind_index,
+        kind=kind,
+        x=0.0,
+        y=0.0,
+        w=10.0,
+        h=10.0,
+        role="hide",
+        kind_index=kind_index,
+        opacity=0.0,
+    )
+
+
+def test_adjust_shifts_job_down_by_lower_group_hides():
+    # Two group hides below the stat group (kind_index 0 and 3); the job addresses
+    # group 5 (kind_index 4), so it drops by 2 to group 3.
+    transforms = [_hide(5, 0), _hide(5, 3)]
+    child_resize = [{"slide": 5, "groupIndex": 5}]
+    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, set())
+    assert child_resize[0]["groupIndex"] == 3
+    assert adjustments == [{"slide": 5, "from": 5, "to": 3}]
+
+
+def test_adjust_excludes_reuse_slides():
+    transforms = [_hide(5, 0), _hide(5, 3)]
+    child_resize = [{"slide": 5, "groupIndex": 5}]
+    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, {5})
+    assert child_resize[0]["groupIndex"] == 5  # untouched
+    assert adjustments == []
+
+
+def test_adjust_only_counts_hides_lower_than_job():
+    # A group hide ABOVE the job (kind_index 5 vs the job's kind_index 1) does not
+    # shift it.
+    transforms = [_hide(5, 5)]
+    child_resize = [{"slide": 5, "groupIndex": 2}]
+    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, set())
+    assert child_resize[0]["groupIndex"] == 2
+    assert adjustments == []
+
+
+def test_adjust_only_counts_group_hides():
+    # A lower role="hide" of kind "image" must not shift a group job.
+    transforms = [_hide(5, 0, kind="image")]
+    child_resize = [{"slide": 5, "groupIndex": 5}]
+    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, set())
+    assert child_resize[0]["groupIndex"] == 5
+    assert adjustments == []

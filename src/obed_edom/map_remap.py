@@ -3160,6 +3160,62 @@ def _spec_key(spec: ItemTransform) -> tuple[str, int]:
     return (str(spec.kind), int(spec.kind_index if spec.kind_index is not None else spec.item_index))
 
 
+def adjust_child_resize_for_deleted_hides(
+    child_resize: list[dict[str, Any]],
+    transforms: list[ItemTransform],
+    reuse_slides: set[int],
+) -> list[dict[str, int]]:
+    """Compensate stat child-resize group indexes for hides deleted before pass 2.
+
+    Fixes ONLY the shift caused by ``deleteHides`` (``remap_keynote.js``) on
+    NON-reuse slides. That pass runs from ``applyNonReuseSlide`` before the deck is
+    reopened for the AppleScript stat-finalize pass and deletes every ``role="hide"``
+    object. A deleted GROUP hide with a kindIndex lower than a stat group's shifts
+    that group's live index down by one, so the phase-1 (font) / phase-2 addressing
+    of ``group N of slide`` would otherwise reach the wrong group. Each affected
+    job's ``groupIndex`` is lowered by the count of lower group hides on its slide,
+    in place, and an adjustment record is returned.
+
+    Scope is deliberately narrow. This does NOT address the phase-2 Bring-to-Front
+    self-shift when several stat groups share one slide, nor reuse-target addressing —
+    both are separate and remain unaddressed here.
+
+    Residuals (honest caveats, not handled):
+    (a) The reuse-FALLBACK path: if ``applyReuse`` fails at runtime it falls back to
+        ``applyNonReuseSlide``, which DOES run ``deleteHides``. Such a slide is in
+        ``reuse_slides`` and so is excluded here and stays unadjusted. This matches
+        today's behavior (it is NOT a regression), but the guard is blind to it.
+    (b) If a group-hide DELETE fails at runtime, ``deleteHides`` falls back to
+        opacity=0 and the group STAYS in the collection (see remap_keynote.js
+        ~648-655), so this subtraction over-counts and would address one group too
+        low. Rare (group deletes seldom fail), and the only case where this helper
+        could mis-address relative to today.
+    """
+    group_hides: dict[int, list[int]] = {}
+    for t in transforms:
+        if t.role != "hide" or str(t.kind) != "group":
+            continue
+        ki = t.kind_index if t.kind_index is not None else t.item_index
+        group_hides.setdefault(int(t.slide_number), []).append(int(ki))
+    adjustments: list[dict[str, int]] = []
+    for job in child_resize:
+        slide = int(job["slide"])
+        if slide in reuse_slides:
+            continue
+        job_ki = int(job["groupIndex"]) - 1
+        shift = sum(1 for ki in group_hides.get(slide, []) if ki < job_ki)
+        if shift:
+            adjustments.append(
+                {
+                    "slide": slide,
+                    "from": int(job["groupIndex"]),
+                    "to": int(job["groupIndex"]) - shift,
+                }
+            )
+            job["groupIndex"] = int(job["groupIndex"]) - shift
+    return adjustments
+
+
 def plan_slide_reuses(
     payload: dict[str, Any],
     transforms: list[ItemTransform],

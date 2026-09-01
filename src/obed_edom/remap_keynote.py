@@ -14,6 +14,7 @@ from obed_edom import keynote_app
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
+    adjust_child_resize_for_deleted_hides,
     navigator_numbering,
     CG_HEIGHT,
     CG_WIDTH,
@@ -734,6 +735,15 @@ def remap_keynote(
             + ". Un-skip in Keynote and re-run to include them."
         )
     reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
+    reuse_slides = {int(r["slide"]) for r in reuses}
+    stat_adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, reuse_slides)
+    if stat_adjustments:
+        say(
+            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides on "
+            "non-reuse slide(s): "
+            + ", ".join(f"slide {a['slide']} {a['from']}→{a['to']}" for a in stat_adjustments[:8])
+            + "."
+        )
     counts = summarize_plan(transforms)
     say(
         f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
