@@ -6,6 +6,7 @@ emitting one job per stat group, and the generated AppleScript embedding the tem
 sizes and the z-order/badge steps.
 """
 
+import re
 from pathlib import Path
 
 from obed_edom.keynote import _build_stat_finalize_script, _run_stat_finalize
@@ -116,6 +117,62 @@ def test_finalize_script_embeds_template_sizes_and_bring_to_front():
     assert script.count("Bring to Front") >= 1
     # The badge is searched for and raised too.
     assert "Global Missions" in script
+
+
+def test_finalize_phase2_raises_groups_descending_per_slide():
+    """Phase 2 z-order must raise groups in descending order per slide. Bring to Front
+    moves the raised group to the end of the groups collection, shifting later indices
+    down. Ascending-order raises would mis-address later groups; descending order keeps
+    each group N addressing its intended group (raising a higher index never disturbs
+    lower ones)."""
+    # Input jobs in ascending order across two slides.
+    jobs = [
+        {"slide": 4, "groupIndex": 1},
+        {"slide": 4, "groupIndex": 3},
+        {"slide": 4, "groupIndex": 6},
+        {"slide": 5, "groupIndex": 2},
+        {"slide": 5, "groupIndex": 4},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
+
+    # Extract all phase-2 z-order "set selection" lines. Phase 2 uses
+    # "set selection of theDoc to {group N of slide S of theDoc}", unique to phase 2.
+    # Phase 1 uses "set g to group N" instead.
+    phase2_pattern = r"set selection of theDoc to \{group (\d+) of slide (\d+) of theDoc\}"
+    phase2_matches = re.findall(phase2_pattern, script)
+    assert len(phase2_matches) == 5, f"Expected 5 phase-2 selections, got {len(phase2_matches)}"
+
+    # Group matches by slide and assert descending group indices per slide.
+    by_slide = {}
+    for group_str, slide_str in phase2_matches:
+        group_idx = int(group_str)
+        slide_num = int(slide_str)
+        if slide_num not in by_slide:
+            by_slide[slide_num] = []
+        by_slide[slide_num].append(group_idx)
+
+    # Slide 4 should have groups in order [6, 3, 1] (descending).
+    assert by_slide[4] == [6, 3, 1], f"Slide 4 groups should be [6, 3, 1], got {by_slide[4]}"
+    # Slide 5 should have groups in order [4, 2] (descending).
+    assert by_slide[5] == [4, 2], f"Slide 5 groups should be [4, 2], got {by_slide[5]}"
+
+    # Verify phase-1 sizing lines still exist for all groups (order not asserted).
+    # Phase 1 uses "set g to group N of slide S" pattern.
+    phase1_pattern = r"set g to group (\d+) of slide (\d+) of theDoc"
+    phase1_matches = re.findall(phase1_pattern, script)
+    assert len(phase1_matches) == 5, f"Expected 5 phase-1 sizing groups, got {len(phase1_matches)}"
+
+    # Verify the expected groups appear in phase-1 sizing.
+    phase1_groups_by_slide = {}
+    for group_str, slide_str in phase1_matches:
+        group_idx = int(group_str)
+        slide_num = int(slide_str)
+        if slide_num not in phase1_groups_by_slide:
+            phase1_groups_by_slide[slide_num] = set()
+        phase1_groups_by_slide[slide_num].add(group_idx)
+
+    assert phase1_groups_by_slide[4] == {1, 3, 6}
+    assert phase1_groups_by_slide[5] == {2, 4}
 
 
 def test_finalize_script_empty_when_no_jobs():

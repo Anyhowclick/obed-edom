@@ -831,7 +831,11 @@ def _build_stat_finalize_script(
     # Phase 2 — z-order: bring stat groups (and the badge) to the front. Selection by
     # reference then Arrange > Bring to Front through System Events.
     lines += ['  set frontRaised to 0', '  set frontErr to ""']
-    for job in jobs:
+    # Bring to Front moves the raised group to the end of the per-slide groups collection,
+    # shifting all later indices down and leaving earlier indices untouched. Raise in
+    # descending order per slide so each group N always addresses its intended group
+    # (raising a higher index never disturbs lower ones).
+    for job in sorted(jobs, key=lambda j: (int(j["slide"]), -int(j["groupIndex"]))):
         slide = int(job["slide"])
         group_index = int(job["groupIndex"])
         # Only bring to front when the selection was actually set — otherwise the
