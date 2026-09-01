@@ -29,6 +29,7 @@ from obed_edom.iwa_runs import _load_deck  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
     PatchResult,
     _apply_geom_fields,
+    _masked_image_fields,
     _shape_fields,
     _text_fields,
     bridge_kind_index,
@@ -341,3 +342,99 @@ def test_reconcile_pass_when_base_matches(deck):
 def test_out_of_range_slide_refused(deck):
     res = patch_slide_geometry(deck, 9, [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0}])
     assert res.refused and "out of range" in (res.reason or "")
+
+
+# --------------------------------------------------------------------------
+# Hardening 1: require_reconcile makes the reconcile gate MANDATORY.
+# --------------------------------------------------------------------------
+def test_require_reconcile_refuses_when_source_counts_missing(deck):
+    original = deck.read_bytes()
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs, require_reconcile=True)
+    assert res.refused
+    assert res.reason == "reconcile required but source_counts missing"
+    assert res.applied == 0
+    assert deck.read_bytes() == original  # nothing written
+
+
+def test_require_reconcile_proceeds_when_source_counts_present(deck):
+    # Armed with a matching base, the mandatory gate lets the write through.
+    source_counts = {"shape": 1, "line": 1, "text": 1, "image": 1, "group": 1}
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs, source_counts=source_counts, require_reconcile=True)
+    assert not res.refused and res.applied == 1
+
+
+# --------------------------------------------------------------------------
+# Hardening 2: soft_fallbacks counts soft-class specs with no reported frame.
+# --------------------------------------------------------------------------
+def test_soft_fallbacks_counted_for_group_without_reported(deck):
+    # group is a soft class: with no reported frame its delta falls back to the offline
+    # composed frame, which must be COUNTED so the gate can insist on 0.
+    specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.applied == 1 and res.soft_fallbacks == 1
+
+
+def test_soft_fallbacks_zero_when_reported_supplied(deck):
+    before = _composed(deck)
+    rep = [before[("group", 0)][k] for k in "xywh"]
+    specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs, reported={("group", 0): rep})
+    assert res.applied == 1 and res.soft_fallbacks == 0
+
+
+def test_soft_fallbacks_ignores_hard_classes(deck):
+    # shape/line take absolute specs (no reported delta), so they never count as soft.
+    specs = [
+        {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0, "role": "other"},
+        {"kind": "line", "kindIndex": 0, "start": [150.0, 420.0], "end": [560.0, 560.0], "role": "other"},
+    ]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.applied == 2 and res.soft_fallbacks == 0
+
+
+# --------------------------------------------------------------------------
+# Hardening 3: rotated masked image / mask is a MISS, never mis-written.
+# --------------------------------------------------------------------------
+def _build_rotated_mask_deck(path, *, img_angle=0.0, mask_angle=0.0):
+    mask = _arch(231, "TSD.MaskArchive", {"super": _geom(5, 5, 80, 40, angle=mask_angle)})
+    img = _arch(230, "TSD.ImageArchive",
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=img_angle)})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, img, mask]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_masked_image_fields_refuses_rotated_image():
+    mask = {"_pbtype": "TSD.MaskArchive", "super": _geom(5, 5, 80, 40, angle=0.0)}
+    img = {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=90.0)}
+    ops, mask_id = _masked_image_fields(
+        {"id": "230"}, img, {"231": mask}, {"x": 1.0, "y": 2.0, "w": 10.0, "h": 20.0}, [0, 0, 0, 0]
+    )
+    assert ops == [] and mask_id == "231"  # rotated: refuse the axis-aligned crop write
+
+
+def test_masked_image_fields_refuses_rotated_mask():
+    mask = {"_pbtype": "TSD.MaskArchive", "super": _geom(5, 5, 80, 40, angle=90.0)}
+    img = {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=0.0)}
+    ops, mask_id = _masked_image_fields(
+        {"id": "230"}, img, {"231": mask}, {"x": 1.0, "y": 2.0, "w": 10.0, "h": 20.0}, [0, 0, 0, 0]
+    )
+    assert ops == [] and mask_id == "231"
+
+
+@pytest.mark.parametrize("img_angle,mask_angle", [(90.0, 0.0), (0.0, 45.0)])
+def test_rotated_masked_image_missed_not_written(tmp_path, img_angle, mask_angle):
+    deck = _build_rotated_mask_deck(tmp_path / "rot.key", img_angle=img_angle, mask_angle=mask_angle)
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.missed == 1 and res.applied == 0
+    assert deck.read_bytes() == original  # rotated masked image left untouched

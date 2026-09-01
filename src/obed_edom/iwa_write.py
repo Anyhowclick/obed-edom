@@ -90,6 +90,11 @@ class PatchResult:
     obj_diffs: int = 0
     header_diffs: int = 0
     edited_ids: list[str] = field(default_factory=list)
+    # Soft classes (group / text / masked image) whose delta fell back to the offline
+    # COMPOSED frame because no ``reported`` frame was supplied for their (kind, saved
+    # kindIndex). The gate asserts this is 0 — every soft frame must come from the bulk
+    # pre-patch read, never from the offline compose (which is stale for those kinds).
+    soft_fallbacks: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -280,8 +285,14 @@ def _masked_image_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: d
     mask_obj = objects.get(mask_id)
     if not mask_obj:
         return ([], None)
-    fx, fy, fw, fh, _fa = _xywha(_geom_dict(obj))
-    _mx, _my, mw, mh, _ma = _xywha(_geom_dict(mask_obj))
+    fx, fy, fw, fh, fa = _xywha(_geom_dict(obj))
+    _mx, _my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
+    # The composed-crop formula (image_pos + mask_pos, mask_size) is AXIS-ALIGNED only:
+    # a rotated image or mask would be mis-placed by it. Refuse such a spec here (the
+    # caller counts it a MISS) rather than silently corrupt the layout. SKILL: rotated-
+    # masked is 0 on the gold decks, so this never fires there — it is a corruption net.
+    if fa % 360.0 or ma % 360.0:
+        return ([], mask_id)
     tx = float(spec["x"]) if spec.get("x") is not None else reported[0]
     ty = float(spec["y"]) if spec.get("y") is not None else reported[1]
     tw = float(spec["w"]) if spec.get("w") is not None else mw
@@ -367,6 +378,7 @@ def patch_slide_geometry(
     reported: dict | None = None,
     address: str = "positional",
     source_counts: dict[str, int] | None = None,
+    require_reconcile: bool = False,
 ) -> PatchResult:
     """Surgically write the geometry of ``slide_number``'s drawables, in place.
 
@@ -377,11 +389,15 @@ def patch_slide_geometry(
     where a class needs a delta and no reported frame is supplied, the offline COMPOSED
     frame stands in. ``address`` selects the strategy (``"positional"`` default, or
     ``"identity"``); ``source_counts`` (source-wall per-kind counts) arms the positional
-    reconcile REFUSE gate.
+    reconcile REFUSE gate. ``require_reconcile`` makes that gate MANDATORY: with it True
+    and ``source_counts`` unset the slide is REFUSED outright (the gate cannot be armed),
+    so the harness can never write a positional slide with the reconcile check disarmed.
 
     Returns a :class:`PatchResult`; on a reconcile mismatch or a cross-member slide it
     REFUSES (writes nothing) and the caller falls back to the scoped AppleScript write.
     """
+    if require_reconcile and source_counts is None:
+        return PatchResult(refused=True, reason="reconcile required but source_counts missing")
     saved_deck = Path(saved_deck)
     reported = reported or {}
     objects, id_to_file, _file_ids = _load_deck(saved_deck)
@@ -422,6 +438,7 @@ def patch_slide_geometry(
     # --- resolve each spec to a saved-deck record + build its field ops ---------
     edits: dict[str, dict] = {}
     missed = 0
+    soft_fallbacks = 0
     for spec in specs:
         if spec.get("role") == "hide" or not _spec_bears_geometry(spec):
             continue
@@ -436,6 +453,8 @@ def patch_slide_geometry(
         obj = objects.get(rec["id"]) or {}
         stored = _xywha(_geom_dict(obj))
         saved_ki = rec["kindIndex"]
+        masked = kind in ("image", "movie") and (obj.get("mask") or {}).get("identifier") is not None
+        have_reported = (kind, saved_ki) in reported
         rep = list(reported.get((kind, saved_ki)) or [rec["x"], rec["y"], rec["w"], rec["h"]])
 
         if kind == "line":
@@ -447,10 +466,13 @@ def patch_slide_geometry(
         elif kind == "text":
             ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
-            if (obj.get("mask") or {}).get("identifier") is not None:
+            if masked:
                 ops, mask_id = _masked_image_fields(rec, obj, objects, spec, rep)
-                if mask_id is not None and id_to_file.get(mask_id) != target_member:
-                    missed += 1  # mask in another member: single-member rewrite can't reach it
+                # An unresolved mask, a cross-member mask (a single-member rewrite can't
+                # reach it), or a rotated masked image the axis-aligned crop formula
+                # can't place: skip as a MISS rather than mis-write.
+                if not ops or mask_id is None or id_to_file.get(mask_id) != target_member:
+                    missed += 1
                     continue
             else:  # unmasked image/movie: plain frame, same as a shape (position + size)
                 ops = _shape_fields(rec, spec)
@@ -458,13 +480,20 @@ def patch_slide_geometry(
             missed += 1
             continue
 
+        # Soft classes (group / text / masked image) carry a delta off the pre-patch
+        # frame; when the bulk read supplied none for this (kind, saved kindIndex) the
+        # offline composed frame stood in — count it so the gate can insist on 0.
+        if (kind in ("group", "text") or masked) and not have_reported and ops:
+            soft_fallbacks += 1
+
         for obj_id, fields in ops:
             if not fields:
                 continue
             edits.setdefault(obj_id, {}).update(fields)
 
     if not edits:
-        return PatchResult(applied=0, missed=missed, target_member=target_member, value_clean=True)
+        return PatchResult(applied=0, missed=missed, target_member=target_member,
+                           value_clean=True, soft_fallbacks=soft_fallbacks)
 
     # --- apply to the target member, self-check value-clean, rewrite in place ---
     with zipfile.ZipFile(saved_deck) as zf:
@@ -518,4 +547,5 @@ def patch_slide_geometry(
         obj_diffs=obj_diffs,
         header_diffs=header_diffs,
         edited_ids=sorted(edits),
+        soft_fallbacks=soft_fallbacks,
     )

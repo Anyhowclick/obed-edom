@@ -620,6 +620,7 @@ def remap_keynote(
     source_previews: Path | str | None = None,
     export_dir: Path | str | None = None,
     offline_read: str | None = None,
+    plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
@@ -636,6 +637,11 @@ def remap_keynote(
     a run with no stat-group jobs never opens that session, so the caller still exports
     those previews itself. Left unset (e.g. the validate=True read-back path), no
     export is folded and behaviour is unchanged.
+
+    `plan_out`, when given, is filled (just before the JXA hand-off) with the planned
+    `transforms`/`reuses`/`suppressGeometry`/`asGeom` this run applied, so an offline
+    caller (the A/B write gate) can address the same specs without re-deriving them. It
+    is a pure read-out; nothing about the remap changes.
     """
     def say(message: str) -> None:
         if log:
@@ -880,6 +886,16 @@ def remap_keynote(
         if write_timing_enabled():
             plan["timing"] = {"slowMs": 120}
             say("OBED_WRITE_TIMING on: recording per-slide/per-phase write timing.")
+        if plan_out is not None:
+            # Expose the planned geometry to an offline caller (the A/B write gate,
+            # scripts/write_gate_ab.py) without re-deriving it: the exact per-slide
+            # transform dicts this run applied, plus the reuse jobs and the suppress/
+            # asGeom maps. Populated just before the JXA hand-off so it mirrors what
+            # Keynote actually received. Read-only for the caller.
+            plan_out["transforms"] = transform_dicts
+            plan_out["reuses"] = reuses
+            plan_out["suppressGeometry"] = plan.get("suppressGeometry")
+            plan_out["asGeom"] = plan.get("asGeom")
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
@@ -1005,6 +1021,7 @@ def remap_and_inspect(
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     validate: bool = True,
+    plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
@@ -1018,6 +1035,7 @@ def remap_and_inspect(
         side_content_slides=side_content_slides,
         wall_payload=wall_payload,
         template_payload=template_payload,
+        plan_out=plan_out,
         # Fold the export into the stat-finalize session on the no-read-back path
         # only. The validate=True path reads the deck back with inspect_keynote,
         # which does its own export, so it must stay unchanged (export_dir unset).
