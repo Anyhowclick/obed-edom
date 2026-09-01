@@ -948,6 +948,34 @@ count. The rules, each independently agent-verified:
   The generator's superscript GUI Copy/Paste-Style pass 2 stays the route for
   *character styling* (unreachable by any API), not because surgical geometry write
   is unproven.
+- **Surgical geometry-write semantics, per class (w-spike1, 2026-09-01).** A
+  multi-object, multi-class patch of ONE slide member (2 shapes + line + text)
+  opened clean in Keynote with every value surviving. What each class needs:
+  - **Shape/line SIZE is laid out from `super.pathsource.bezierPathSource.naturalSize`,
+    and Keynote IGNORES `geometry.size` when the two disagree** — so a size patch must
+    set BOTH `geometry.size` AND `naturalSize` (independently re-verified:
+    geometry.size-only 300→180 read back 300; both → 180). The plan's old "shape stored
+    == reported, 1:1" holds for **position only**, not size.
+  - **A line's rendered length is `naturalSize.width`** (patch it too, or the endpoint
+    snaps back to the stale length). Place a line by the inverse of
+    `offline_inspect._line_endpoints` (via `_line_direction`, honouring flips); leave the
+    bezier `moveTo/lineTo` untouched.
+  - **Shape position** = `geometry.position.x/y`, absolute, 1:1 with Keynote.
+  - **Autosize text**: `position.x` exact (left-aligned); `position.y` is the vertical
+    CENTRE — a pure translation on the stored centre lands exactly, but `realH/w` are not
+    offline-recoverable (compose rides a stale `naturalSize`), so any non-translation
+    needs a live bulk read.
+  - **Masked-image and group** w/h write semantics are NOT yet proven (no script path to
+    synthesize a mask or a script-created group here); their delta must be seeded from a
+    pre-patch **bulk** read (`stored += plan_target − bulk_reported`), offline compose is
+    not accurate enough. Groups compared as a SET after any reorder.
+  - **`com.apple.macl` gotcha**: a patched deck written as a NEW file (a fresh
+    `zipfile`/`cp`) has no `com.apple.macl` xattr, so sandboxed Keynote refuses to open it
+    with "Operation not permitted" — an EPERM *sandbox* denial, NOT content rejection.
+    Write the patched bytes **in place** (`os.open(..., O_TRUNC)`) over the file Keynote
+    created to keep the inode and its macl. The production flow patches the saved copy in
+    place, so it is naturally satisfied; any harness that copies the patched deck must
+    preserve or re-grant the macl.
 - **Version fragility:** `keynote-parser` advertises support ≤ Keynote 14.5 yet
   decoded 15.x decks with 0 failures; a future format bump could break decode → the
   `try/except` degrades to `runs=[]`. Pin it and re-test on a Keynote upgrade.
