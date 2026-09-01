@@ -303,6 +303,33 @@ def test_masked_image_mask_and_size_write_value_clean(deck):
     assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
 
 
+def test_value_clean_allows_noop_edit_below_edit_count(deck):
+    # A no-op masked-image edit: spec == the CURRENT composed crop (305,105,80,40) with
+    # crop ratio 1.0, so the written mask+image values EQUAL the stored ones and neither
+    # archive's bytes change. Two archives are in the edit set (230,231) but obj_diffs is
+    # 0 (< len(edits)). The relaxed self-check (obj_diffs <= len(edits)) must still call
+    # this value-clean — the OLD `==` check would have spuriously failed it.
+    specs = [{"kind": "image", "kindIndex": 0, "x": 305.0, "y": 105.0, "w": 80.0, "h": 40.0,
+              "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert not res.refused
+    assert set(res.edited_ids) == {"230", "231"}
+    assert res.obj_diffs == 0 < len(res.edited_ids)  # no-op: fewer diffs than edits
+    assert res.header_diffs == 0
+    assert res.value_clean  # relaxed check: obj_diffs <= len(edits) and no header change
+
+
+def test_value_clean_boundary_real_edit_is_clean(deck):
+    # A genuine single-archive edit sits at the boundary obj_diffs == len(edits) == 1
+    # (one archive changed, one in the edit set) -> still value-clean. The relaxation
+    # only widened the ACCEPTED band downward (no-op edits); the collateral direction
+    # obj_diffs > len(edits) is unchanged and still fails.
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.obj_diffs == 1 == len(res.edited_ids)
+    assert res.value_clean and res.header_diffs == 0
+
+
 def test_target_member_from_id_to_file(deck):
     # The target is the drawables' member, never the slide id's (here they coincide,
     # but the derivation is via id_to_file of a drawable).

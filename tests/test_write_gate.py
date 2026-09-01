@@ -18,17 +18,24 @@ import pytest
 pytest.importorskip("keynote_parser")
 
 from scripts.write_gate_ab import (  # noqa: E402
+    build_aprime_applescript,
     build_reported,
+    build_reported_offline,
     byte_reveal,
     changed_members,
     check_preconditions,
     compare_signature,
     compare_slides,
+    group_child_scale_report,
+    id_match_rate,
+    load_specs_sidecar,
     match_units,
     positional_crosscheck,
     slide_has_resized_image,
     slide_units,
+    specs_hide_count,
     text_autosize_shapes,
+    write_specs_sidecar,
 )
 
 
@@ -310,3 +317,139 @@ def test_changed_members_flags_added_or_removed_member(tmp_path):
     a.write_bytes(_zip_bytes({"Index/Document.iwa": b"doc"}))
     b.write_bytes(_zip_bytes({"Index/Document.iwa": b"doc", "Index/Extra.iwa": b"x"}))
     assert changed_members(a, b) == {"Index/Extra.iwa"}
+
+
+# --------------------------------------------------------------------------
+# ID-match rate: A' and B share B-pre's ids, so id-match must be ~100%; a
+# different-id pairing FELL BACK to positional and the whole result is UNTRUSTED.
+# --------------------------------------------------------------------------
+def test_id_match_rate_and_id_stable_flag():
+    a = _rich_deck()
+    # Same ids on both sides -> every pair matches by id -> rate 1.0, id-stable.
+    same = compare_slides(a, copy.deepcopy(a), 1)
+    assert same["id_match_rate"] == pytest.approx(1.0)
+    assert same["id_stable"] and same["pass"]
+    # id_match_rate is a pure function of the pairs' `how`.
+    pairs, _ua, _ub = match_units(slide_units(a, 1), slide_units(a, 1))
+    assert id_match_rate(pairs) == pytest.approx(1.0)
+
+
+def test_positional_fallback_is_untrusted_even_when_geometry_matches():
+    # DIFFERENT ids but IDENTICAL geometry: the positional fallback would call this a
+    # clean pass, but the gate must mark it UNTRUSTED (id_stable False) and force pass
+    # False, because A' is supposed to share B-pre's ids.
+    a = _deck(["200", "201"], {"200": _shape(10, 20, 100, 50), "201": _shape(400, 300, 60, 60)})
+    b = _deck(["300", "301"], {"300": _shape(10, 20, 100, 50), "301": _shape(400, 300, 60, 60)})
+    report = compare_slides(a, b, 1)
+    assert report["id_match_rate"] == pytest.approx(0.0)
+    assert not report["id_stable"]
+    assert not report["pass"]  # untrusted -> never green
+    # every per-class geometry compare individually matched...
+    assert all(c["pass"] for c in report["per_class"].values())
+    # ...yet the overall gate is RED purely because it fell back to positional.
+
+
+# --------------------------------------------------------------------------
+# Group-child transform measurement (A'/B child size ratios, id-matched).
+# --------------------------------------------------------------------------
+def _group_scale_decks(a_child_sizes, b_child_sizes):
+    """Two decks sharing ids: a group with children sized per the given lists."""
+    def mk(sizes):
+        extra = {"250": _group(0, 0, ["251", "252"])}
+        for cid, (w, h) in zip(("251", "252"), sizes):
+            extra[cid] = _shape(0, 0, w, h)
+        return _deck(["250"], extra)
+    return mk(a_child_sizes), mk(b_child_sizes)
+
+
+def test_group_child_scale_uniform():
+    # A' children are 2x B's children on both axes -> a clean uniform scale.
+    a, b = _group_scale_decks([(30, 30), (40, 40)], [(15, 15), (20, 20)])
+    pairs, _ua, _ub = match_units(slide_units(a, 1), slide_units(b, 1))
+    scale = group_child_scale_report(pairs)
+    assert len(scale) == 1
+    (root, summary), = scale.items()
+    assert root == ("top", "group", 0)
+    assert summary["n"] == 2
+    assert summary["sx_range"][0] == pytest.approx(2.0)
+    assert summary["sx_range"][1] == pytest.approx(2.0)
+    assert summary["uniform"]
+    # all children matched by id.
+    assert all(c["how"] == "id" for c in summary["children"])
+
+
+def test_group_child_scale_non_uniform_flagged():
+    # child 0 scales 2x in x but 1x in y (sx != sy) -> NOT a clean uniform scale.
+    a, b = _group_scale_decks([(30, 15), (40, 40)], [(15, 15), (20, 20)])
+    pairs, _ua, _ub = match_units(slide_units(a, 1), slide_units(b, 1))
+    scale = group_child_scale_report(pairs)
+    (_root, summary), = scale.items()
+    assert not summary["uniform"]
+
+
+# --------------------------------------------------------------------------
+# Autosize carve-out is ENFORCED (not just warned): the shape is excluded from
+# the compare even when its frame differs between A' and B.
+# --------------------------------------------------------------------------
+def _autosize_shape(x):
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": False,
+            "super": {"pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 50.0}}},
+                      "super": _geom(x, 20, 100, 0)}}
+
+
+def test_autosize_carveout_enforced_in_compare():
+    # An autosize shape (frame h==0) at DIFFERENT x on each side would fail a frame
+    # compare; enforcement drops it from both sides, so the gate passes and lists it.
+    a = _deck(["200"], {"200": _autosize_shape(10.0)})
+    b = _deck(["200"], {"200": _autosize_shape(999.0)})
+    report = compare_slides(a, b, 1)
+    assert report["carved"] == ["200"]
+    assert "shape" not in report["per_class"]  # carved out entirely
+    assert report["pass"]  # nothing left to fail
+    # A real (non-autosize) shape at a different x is NOT carved and DOES fail.
+    a2 = _deck(["201"], {"201": _shape(10, 20, 100, 50)})
+    b2 = _deck(["201"], {"201": _shape(999, 20, 100, 50)})
+    report2 = compare_slides(a2, b2, 1)
+    assert report2["carved"] == []
+    assert not report2["per_class"]["shape"]["pass"]
+
+
+# --------------------------------------------------------------------------
+# Specs sidecar round-trip + offline reported + hide guard + A' scaffold.
+# --------------------------------------------------------------------------
+def test_specs_sidecar_round_trip(tmp_path):
+    specs = [{"slide": 9, "kind": "image", "kindIndex": 0, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}]
+    counts = {"image": 5, "group": 2}
+    path = tmp_path / "specs_slide9.json"
+    write_specs_sidecar(path, slide_number=9, source="/w.key", template="/t.key",
+                        specs=specs, source_counts=counts)
+    loaded = load_specs_sidecar(path)
+    assert loaded["slide"] == 9
+    assert loaded["source"] == "/w.key" and loaded["template"] == "/t.key"
+    assert loaded["specs"] == specs
+    assert loaded["source_counts"] == counts
+
+
+def test_build_reported_offline_composes_soft_frames():
+    # A masked image + a group: both soft classes' composed frames come out offline.
+    deck = _deck(["230", "250"],
+                 {"230": _image(300, 100, 120, 60, "231"), "231": _mask(5, 5, 80, 40),
+                  "250": _group(0, 0, ["251"]), "251": _shape(10, 20, 30, 40)})
+    reported = build_reported_offline(deck, 1)
+    # masked image composed crop = (image_pos + mask_pos, mask_size).
+    assert reported[("image", 0)] == pytest.approx([305.0, 105.0, 80.0, 40.0])
+    assert ("group", 0) in reported
+
+
+def test_specs_hide_count():
+    assert specs_hide_count([{"role": "hide"}, {"role": "other"}, {"role": "hide"}]) == 2
+    assert specs_hide_count([{"role": "other"}]) == 0
+
+
+def test_build_aprime_applescript_wraps_body():
+    body = "with timeout of 3600 seconds\ntell slide 9\n  end tell\nend timeout"
+    script = build_aprime_applescript("/tmp/x.key", body)
+    assert body in script
+    assert "open POSIX file" in script and "/tmp/x.key" in script
+    assert "tell theDoc" in script and "save theDoc" in script
+    assert "close theDoc saving yes" in script

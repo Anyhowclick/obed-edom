@@ -3,16 +3,25 @@
 
 Proves that an OFFLINE surgical patch of ONE non-reuse content slide reproduces the
 PRODUCTION scripted-AppleScript geometry write, so the gate can flip ``OBED_OFFLINE_WRITE``.
-Two output decks of the same wall/template are compared on slide N (default 9):
 
-    A     = production remap (OBED_AS_GEOMETRY=1, OBED_GEOM_PROPS=1) — ground truth.
     B-pre = attrs-only pass 1 (OBED_SUPPRESS_GEOMETRY=N) — slide N carries NO geometry.
     B     = B-pre with slide N patched offline by ``iwa_write.patch_slide_geometry``.
+    A'    = an ID-STABLE reference: a COPY of B-pre with the PRODUCTION AppleScript
+            geometry body (``remap_keynote._build_slide_geometry_script``) applied to it.
+    A     = full production remap (OBED_AS_GEOMETRY=1) — OPTIONAL (``--full-a``), kept
+            only as a cross-check; it is an INDEPENDENT Keynote run with different drawable
+            ids and different group z-order, so it can only be positionally matched.
 
-The PRIMARY oracle is OFFLINE and value-level: the two decks' decoded slide-N geometry,
-composed to the render-accurate frame JXA would report (mask crop, line endpoints, group
-child-union), matched object-by-object and compared within ±2px (§Gate-compare). JXA
-frame parity + a full-slide PNG pixel-diff (step 7) are the live CO-GATE.
+The PRIMARY oracle is the OFFLINE value-level comparison of A' vs B. Because A' is
+produced by applying production AppleScript to a COPY of B-pre, A' and B share B-pre's
+drawable ids EXACTLY, so every object (and every group CHILD) matches by id — the gate
+is id-stable, never blindly positional. Each object's raw IWA is composed to the
+render-accurate frame JXA would report (mask crop, line endpoints, group child-union)
+and compared within ±2px (§Gate-compare). JXA frame parity + a full-slide PNG pixel-diff
+(``--live``) are the live CO-GATE.
+
+Banking: B-pre, its specs sidecar, and A' are all reusable (``--reuse-bpre`` /
+``--reuse-specs`` / ``--reuse-aprime``) so patcher-fix iterations need NO Keynote.
 
 The Keynote-touching orchestration lives in :func:`main` (the LEAD runs it, guarded —
 see the plan's Piece 4). Everything the gate DECIDES on — the §Gate-compare comparator,
@@ -27,13 +36,18 @@ Keynote open can wedge.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
+import subprocess
+import tempfile
 import time
 import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+from obed_edom import keynote_app
 
 from obed_edom.iwa_geometry import (
     _geom_dict,
@@ -119,6 +133,99 @@ def source_kind_counts(source_deck: Path | str, slide_number: int) -> dict[str, 
 
 
 # ==========================================================================
+# Specs sidecar — bank ``specs_N`` + source counts so a re-run needs no Keynote.
+# ==========================================================================
+def write_specs_sidecar(path: Path | str, *, slide_number: int, source: Path | str,
+                        template: Path | str, specs: list[dict],
+                        source_counts: dict[str, int]) -> Path:
+    """Persist everything the patcher + A' need for slide N, so a later run can SKIP
+    the B-pre remap entirely (``--reuse-bpre`` / ``--reuse-specs``).
+
+    Holds the slide number, the source/template paths, the planned transform dicts
+    (``specs``) and the source-wall per-kind counts (the reconcile base). Written next
+    to the banked B-pre deck as ``specs_slide<N>.json``.
+    """
+    path = Path(path)
+    payload = {
+        "slide": int(slide_number),
+        "source": str(source),
+        "template": str(template),
+        "specs": specs,
+        "source_counts": source_counts,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    return path
+
+
+def load_specs_sidecar(path: Path | str) -> dict:
+    """Round-trips :func:`write_specs_sidecar`. Returns the decoded dict."""
+    return json.loads(Path(path).read_text())
+
+
+def specs_hide_count(specs: list[dict]) -> int:
+    """Number of ``role="hide"`` specs on the slide — the A' hide-addressing guard.
+
+    ``_build_slide_geometry_script`` addresses objects by WALL kindIndex, but B-pre has
+    already run ``deleteHides``; a non-zero count here means those indices are shifted
+    and the production body would hit the wrong objects on the A' copy.
+    """
+    return sum(1 for s in specs if s.get("role") == "hide")
+
+
+# ==========================================================================
+# A' — the ID-STABLE reference: production AppleScript geometry on a COPY of B-pre.
+# ==========================================================================
+def build_aprime_applescript(deck_path: Path | str, body: str) -> str:
+    """The scoped AppleScript that opens ``deck_path``, applies the production geometry
+    ``body`` (``remap_keynote._build_slide_geometry_script`` output — a ``with timeout
+    ... tell slide N ... end tell ... end timeout`` block), SAVES, and closes.
+
+    Mirrors ``remap_keynote.js``'s ``runAppleScript``: the body's ``tell slide N``
+    resolves inside a ``tell <document>`` context, exactly as production applies it —
+    so A' gets the byte-for-byte same geometry write, only against a COPY of B-pre
+    (which is what makes the ids stable). Written as a pure function so a pytest can
+    lock the scaffold with no Keynote.
+    """
+    key = str(Path(deck_path).resolve()).replace("\\", "\\\\").replace('"', '\\"')
+    app = keynote_app.bundle_id()
+    return "\n".join([
+        f'tell application id "{app}"',
+        f'  set theDoc to open POSIX file "{key}"',
+        "  tell theDoc",
+        body,
+        "  end tell",
+        "  save theDoc",
+        "  try",
+        "    close theDoc saving yes",
+        "  end try",
+        "end tell",
+    ])
+
+
+def run_aprime(deck_path: Path | str, body: str, log=_log) -> None:
+    """Run :func:`build_aprime_applescript` under ``osascript`` (Keynote-touching).
+
+    The LEAD runs this (under the bounded-open guard). Raises ``RuntimeError`` on any
+    osascript failure so the harness never treats a wedged/failed A' write as valid.
+    """
+    script = build_aprime_applescript(deck_path, body)
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
+    time.sleep(0.4)
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["osascript", str(script_path)],
+                              capture_output=True, text=True, check=False)
+    finally:
+        script_path.unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise RuntimeError("A' geometry write failed:\n"
+                           + (proc.stderr or "") + "\n" + (proc.stdout or ""))
+    log(f"A': production geometry applied to {Path(deck_path).name} (saved).")
+
+
+# ==========================================================================
 # Soft-class ``reported`` seed from the B-pre inspect payload — step 2.
 # ==========================================================================
 def build_reported(payload: dict, slide_number: int, soft_kinds=SOFT_KINDS
@@ -146,6 +253,34 @@ def build_reported(payload: dict, slide_number: int, soft_kinds=SOFT_KINDS
                     float(item.get("w") or 0.0), float(item.get("h") or 0.0),
                 ]
     return reported
+
+
+def build_reported_offline(objects: dict[str, dict], slide_number: int,
+                           soft_kinds=SOFT_KINDS) -> dict[tuple[str, int], list[float]]:
+    """``{(kind, kindIndex): [x, y, w, h]}`` for the soft classes, composed OFFLINE
+    from the B-pre deck itself (no Keynote payload needed — the ``--reuse-bpre`` path).
+
+    A' is produced by applying production AppleScript to a COPY of this very B-pre, so
+    B-pre's own composed frames are the exact pre-patch reference the delta is taken
+    off. For a masked image the composed crop (image_pos + mask_pos) and a group's
+    child-union ARE offline-recoverable, so this matches the payload read on slide 9.
+    CAVEAT: a text-autosize box's laid-out w/h is NOT offline-recoverable (Keynote
+    derives it on OPEN); slide 9 has text=0, so this is exact there — on a text-bearing
+    slide prefer the Keynote-payload :func:`build_reported`.
+    """
+    reported: dict[tuple[str, int], list[float]] = {}
+    for rec in compose_geometry(_slide_archive(objects, slide_number), objects):
+        if rec["kind"] in soft_kinds:
+            reported[(rec["kind"], rec["kindIndex"])] = [
+                float(rec["x"]), float(rec["y"]), float(rec["w"]), float(rec["h"])]
+    return reported
+
+
+def _slide_archive(objects: dict[str, dict], slide_number: int) -> dict:
+    order = slide_order(objects)
+    if not (1 <= slide_number <= len(order)):
+        raise ValueError(f"slide {slide_number} out of range (deck has {len(order)} slides)")
+    return objects[order[slide_number - 1][0]]
 
 
 # ==========================================================================
@@ -321,6 +456,19 @@ def match_units(a_units: list[dict], b_units: list[dict]
     return pairs, unmatched_a, unmatched_b
 
 
+def id_match_rate(pairs: list[tuple[dict, dict, str]]) -> float:
+    """Fraction of matched pairs paired by drawable IDENTITY (``how == "id"``).
+
+    A' and B share B-pre's ids, so this must be ~1.0; a rate below the gate's threshold
+    means the comparison silently FELL BACK to positional (kind, kindIndex) matching —
+    which, on slide 9's 110 masked images + 67 reordered groups, mis-pairs objects and
+    makes the whole result UNTRUSTED. The gate logs that loudly and fails.
+    """
+    if not pairs:
+        return 1.0
+    return sum(1 for _a, _b, how in pairs if how == "id") / len(pairs)
+
+
 def _sig_center(sig: dict) -> tuple[float, float]:
     box = sig.get("frame") or sig.get("crop") or sig.get("union")
     if box:
@@ -360,6 +508,77 @@ def positional_crosscheck(a_units: list[dict], b_units: list[dict],
                 notes[kind] = f"index {i} nearest B index {nearest}: possible coincident swap"
                 break
     return notes
+
+
+def _sig_size(sig: dict) -> tuple[float, float]:
+    """``(w, h)`` of a render signature's box (frame / crop / union / line span)."""
+    box = sig.get("frame") or sig.get("crop") or sig.get("union")
+    if box:
+        return (float(box[2]), float(box[3]))
+    if "endpoints" in sig:
+        (sx, sy), (ex, ey) = sig["endpoints"]
+        return (abs(ex - sx), abs(ey - sy))
+    return (0.0, 0.0)
+
+
+def _root_addr(addr: tuple) -> tuple:
+    """Unwrap a nested ``(parent_addr, "child", i)`` chain to the owning ``("top", ...)``."""
+    cur: Any = addr
+    while isinstance(cur, tuple) and len(cur) == 3 and cur[1] == "child":
+        cur = cur[0]
+    return cur
+
+
+def group_child_scale_report(pairs: list[tuple[dict, dict, str]],
+                             ratio_tol: float = 0.02) -> dict[tuple, dict]:
+    """Per-group child-transform diagnostic (the lead needs this to decide whether the
+    patcher can be extended to scale group CHILDREN with a clean uniform scale).
+
+    For every group-child pair matched A'↔B by id, records the size ratio
+    ``A'_child_size / B_child_size`` per axis, then summarizes per owning top-level
+    group: ``sx``/``sy`` min–max across children and whether it is a UNIFORM scale
+    (every child's sx≈sy AND the sx band and sy band are each tight within
+    ``ratio_tol``). Uniform ⇒ extending the patcher is a scale-about-the-group-origin;
+    non-uniform ⇒ something messier the lead must inspect. Keyed by the group's root
+    address ``("top", "group", kindIndex)``.
+    """
+    by_group: dict[tuple, list[dict]] = {}
+    for ua, ub, how in pairs:
+        addr = ua["addr"]
+        root = _root_addr(addr)
+        if not (isinstance(root, tuple) and len(root) == 3
+                and root[0] == "top" and root[1] == "group"):
+            continue
+        if addr == root:  # the group's own union unit, not a child
+            continue
+        aw, ah = _sig_size(ua["sig"])
+        bw, bh = _sig_size(ub["sig"])
+        by_group.setdefault(root, []).append({
+            "id": ua["id"], "kind": ua["kind"], "how": how,
+            "sx": (aw / bw) if bw else None,
+            "sy": (ah / bh) if bh else None,
+        })
+
+    def _tight(vals: list[float]) -> bool:
+        vals = [v for v in vals if v is not None]
+        return bool(vals) and (max(vals) - min(vals)) <= ratio_tol
+
+    summary: dict[tuple, dict] = {}
+    for root, children in by_group.items():
+        sxs = [c["sx"] for c in children if c["sx"] is not None]
+        sys_ = [c["sy"] for c in children if c["sy"] is not None]
+        per_child_iso = all(
+            c["sx"] is not None and c["sy"] is not None and abs(c["sx"] - c["sy"]) <= ratio_tol
+            for c in children
+        )
+        summary[root] = {
+            "n": len(children),
+            "sx_range": (min(sxs), max(sxs)) if sxs else None,
+            "sy_range": (min(sys_), max(sys_)) if sys_ else None,
+            "uniform": bool(children) and per_child_iso and _tight(sxs) and _tight(sys_),
+            "children": children,
+        }
+    return summary
 
 
 def compare_signature(a_sig: dict, b_sig: dict, tol: float = TOL_PX
@@ -404,16 +623,37 @@ def compare_signature(a_sig: dict, b_sig: dict, tol: float = TOL_PX
 
 
 def compare_slides(a_objects: dict[str, dict], b_objects: dict[str, dict],
-                   slide_number: int, tol: float = TOL_PX) -> dict:
-    """Full §Gate-compare of slide N between deck A and deck B (both decoded id→object).
+                   slide_number: int, tol: float = TOL_PX,
+                   id_rate_floor: float = 0.95) -> dict:
+    """Full §Gate-compare of slide N between deck A' and deck B (both decoded id→object).
 
-    Returns a report ``{pass, per_class, unmatched_a, unmatched_b, crosscheck}`` where
+    Returns a report ``{pass, per_class, unmatched_a, unmatched_b, crosscheck,
+    id_match_rate, id_stable, carved, group_child_scale}`` where
     ``per_class[kind] = {pass, worst, n, fails}``.
+
+    ENFORCES two §Gate-compare rules:
+      * text-autosize shapes are EXCLUDED from the frame compare (their
+        ``naturalSize`` re-derives on OPEN, so A' and B legitimately differ) — listed
+        under ``carved``, never silently compared;
+      * the id-match RATE is computed; below ``id_rate_floor`` the comparison fell back
+        to positional matching (``id_stable`` False) and the whole result is UNTRUSTED
+        — the overall ``pass`` is forced False.
     """
     a_units = slide_units(a_objects, slide_number)
     b_units = slide_units(b_objects, slide_number)
+
+    # ENFORCE the autosize carve-out: drop text-autosize shapes from BOTH sides before
+    # matching so they never enter the frame compare (per §Gate-compare, SKILL:954).
+    carve = {u["id"] for u in text_autosize_shapes(a_units)}
+    carve |= {u["id"] for u in text_autosize_shapes(b_units)}
+    a_units = [u for u in a_units if u["id"] not in carve]
+    b_units = [u for u in b_units if u["id"] not in carve]
+
     pairs, unmatched_a, unmatched_b = match_units(a_units, b_units)
     crosscheck = positional_crosscheck(a_units, b_units)
+    rate = id_match_rate(pairs)
+    id_stable = rate >= id_rate_floor
+    group_child_scale = group_child_scale_report(pairs)
 
     per_class: dict[str, dict] = {}
     for ua, ub, _how in pairs:
@@ -432,9 +672,12 @@ def compare_slides(a_objects: dict[str, dict], b_objects: dict[str, dict],
     overall = (
         all(c["pass"] for c in per_class.values())
         and not unmatched_a and not unmatched_b and not crosscheck
+        and id_stable
     )
     return {"pass": overall, "per_class": per_class,
-            "unmatched_a": unmatched_a, "unmatched_b": unmatched_b, "crosscheck": crosscheck}
+            "unmatched_a": unmatched_a, "unmatched_b": unmatched_b, "crosscheck": crosscheck,
+            "id_match_rate": rate, "id_stable": id_stable,
+            "carved": sorted(carve), "group_child_scale": group_child_scale}
 
 
 # ==========================================================================
@@ -521,80 +764,155 @@ def _remap_env(*, suppress: str = "", as_geometry: str = "1", geom_props: str = 
     os.environ["OBED_GEOM_PROPS"] = geom_props
 
 
+def _log_group_child_scale(scale: dict[tuple, dict]) -> None:
+    """Compact per-group table of the A'↔B group-CHILD size ratios (the lead's
+    diagnostic for whether the patcher can scale group children with a uniform scale)."""
+    if not scale:
+        _log("GROUP-CHILD SCALE: no group children on this slide.")
+        return
+    _log(f"GROUP-CHILD SCALE (A'/B child size ratios, {len(scale)} group(s)):")
+    _log(f"    {'group':22} {'n':>3}  {'sx range':>18}  {'sy range':>18}  uniform")
+    for root, s in sorted(scale.items(), key=lambda kv: str(kv[0])):
+        sx = s["sx_range"]
+        sy = s["sy_range"]
+        sx_s = f"{sx[0]:.4f}..{sx[1]:.4f}" if sx else "—"
+        sy_s = f"{sy[0]:.4f}..{sy[1]:.4f}" if sy else "—"
+        _log(f"    {str(root):22} {s['n']:>3}  {sx_s:>18}  {sy_s:>18}  "
+             f"{'YES' if s['uniform'] else 'no'}")
+
+
 def main(argv: list[str] | None = None) -> int:
     # Imported here so the pure comparator above imports without Keynote deps present.
     import shutil
 
     from obed_edom.inspect import export_slide_images, inspect_keynote
-    from obed_edom.remap_keynote import remap_and_inspect
+    from obed_edom.remap_keynote import _build_slide_geometry_script, remap_and_inspect
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", type=Path, required=True, help="wall (source) .key")
-    ap.add_argument("--template", type=Path, required=True, help="CG template .key")
+    ap.add_argument("--source", type=Path, help="wall (source) .key (required for a fresh B-pre)")
+    ap.add_argument("--template", type=Path, help="CG template .key (required for a fresh B-pre)")
     ap.add_argument("--slide", type=int, default=DEFAULT_SLIDE, help="slide number to gate (default 9)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parent.parent / "output" / "write-gate",
-                    help="scratch dir for the A/B/B-pre decks + PNGs (Keynote-writable, not /tmp)")
+                    help="scratch dir for the A'/B/B-pre decks + PNGs (Keynote-writable, not /tmp)")
     ap.add_argument("--tol", type=float, default=TOL_PX, help=f"px tolerance (default {TOL_PX})")
+    ap.add_argument("--reuse-bpre", type=Path,
+                    help="banked B-pre .key — SKIP the B-pre remap (needs --reuse-specs)")
+    ap.add_argument("--reuse-specs", type=Path,
+                    help="specs sidecar json from a prior run — SKIP the B-pre remap")
+    ap.add_argument("--reuse-aprime", type=Path,
+                    help="banked A' .key (built from the SAME B-pre) — SKIP regenerating A'")
+    ap.add_argument("--full-a", action="store_true",
+                    help="also run the full INDEPENDENT production remap A (positional-only "
+                         "cross-check; different ids, so NOT id-stable — never gates)")
     ap.add_argument("--live", action="store_true",
-                    help="also run the live CO-GATE (step 7) — needs the lead's bounded-open guard")
+                    help="also run the live CO-GATE — needs the lead's bounded-open guard")
     args = ap.parse_args(argv)
 
-    for label, deck in (("source", args.source), ("template", args.template)):
-        if not deck.exists():
-            ap.error(f"{label} deck not found: {deck}")
     N = args.slide
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
-    a_deck = out / "A_production.key"
     bpre_deck = out / "B_pre.key"
     b_deck = out / "B_offline.key"
-    a_png, bpre_png, b_png = out / "A_png", out / "Bpre_png", out / "B_png"
+    aprime_deck = out / "A_prime.key"
+    a_deck = out / "A_production.key"
+    specs_path = out / f"specs_slide{N}.json"
+    aprime_png, b_png, a_png = out / "Aprime_png", out / "B_png", out / "A_png"
 
-    # --- step 2: B-pre (attrs-only for slide N) + capture the plan's transforms --------
-    _log(f"B-pre: remap {args.source.name} with OBED_SUPPRESS_GEOMETRY={N}")
-    _remap_env(suppress=str(N))
-    plan_out: dict[str, Any] = {}
-    bpre_info = remap_and_inspect(
-        args.source, bpre_deck, template=args.template,
-        slide_range=None, export_dir=bpre_png, plan_out=plan_out, log=_log,
-    )
-    specs_N = slide_specs(plan_out.get("transforms") or [], N)
-    reuses = plan_out.get("reuses") or []
+    if (args.reuse_bpre is None) != (args.reuse_specs is None):
+        ap.error("--reuse-bpre and --reuse-specs go together (a banked B-pre needs its "
+                 "specs sidecar). Run ONE fresh pass (no reuse flags) to bank both, then "
+                 "reuse them. A banked B-pre alone cannot yield specs — the target geometry "
+                 "lives in the plan's transforms, not in the attrs-only deck.")
+    reuse = args.reuse_bpre is not None and args.reuse_specs is not None
 
-    # --- step 1: preconditions (offline) ----------------------------------------------
-    errors = check_preconditions(specs_N, reuse_slide_numbers(reuses), N)
+    # ============================ B-pre + specs =================================
+    if reuse:
+        # SKIP the B-pre remap entirely: load the banked deck + specs sidecar. This is
+        # the cheap patcher-iteration path (no Keynote for B-pre).
+        for label, p in (("reuse-bpre", args.reuse_bpre), ("reuse-specs", args.reuse_specs)):
+            if not Path(p).exists():
+                ap.error(f"--{label} not found: {p}")
+        sidecar = load_specs_sidecar(args.reuse_specs)
+        specs_N = slide_specs(sidecar.get("specs") or [], N)
+        src_counts = sidecar.get("source_counts") or {}
+        shutil.copyfile(args.reuse_bpre, bpre_deck)  # never mutate the bank
+        _log(f"REUSE: banked B-pre {args.reuse_bpre} + specs {args.reuse_specs} "
+             f"({len(specs_N)} spec(s) for slide {N}).")
+        errors = check_preconditions(specs_N, set(), N)  # reuse already validated at bank time
+    else:
+        if args.source is None or args.template is None:
+            ap.error("--source and --template are required for a fresh B-pre "
+                     "(or pass --reuse-bpre + --reuse-specs)")
+        for label, deck in (("source", args.source), ("template", args.template)):
+            if not deck.exists():
+                ap.error(f"{label} deck not found: {deck}")
+        _log(f"B-pre: remap {args.source.name} with OBED_SUPPRESS_GEOMETRY={N}")
+        _remap_env(suppress=str(N))
+        plan_out: dict[str, Any] = {}
+        bpre_info = remap_and_inspect(
+            args.source, bpre_deck, template=args.template,
+            slide_range=None, export_dir=None, plan_out=plan_out, log=_log,
+        )
+        specs_N = slide_specs(plan_out.get("transforms") or [], N)
+        reuses = plan_out.get("reuses") or []
+        errors = check_preconditions(specs_N, reuse_slide_numbers(reuses), N)
+        src_counts = source_kind_counts(args.source, N)
+        # Bank the sidecar so later runs can --reuse-bpre + --reuse-specs (no Keynote).
+        if not errors:
+            write_specs_sidecar(specs_path, slide_number=N, source=args.source,
+                                template=args.template, specs=specs_N, source_counts=src_counts)
+            _log(f"Banked specs sidecar → {specs_path}")
+
     if errors:
         for e in errors:
             _log(f"PRECONDITION FAILED: {e}")
         return 2
-    _log(f"Preconditions OK: slide {N} is non-reuse and resizes a masked image "
-         f"({len(specs_N)} transform(s)).")
+    _log(f"Preconditions OK: slide {N} resizes a masked image ({len(specs_N)} transform(s)).")
 
-    reported = build_reported(bpre_info.get("payload") or {}, N)
-    _log(f"reported seed: {len(reported)} soft-class frame(s) from the B-pre bulk read.")
+    # Hide-addressing guard: the production geometry body (A') addresses by WALL
+    # kindIndex, but B-pre already ran deleteHides. A hide-bearing slide would mis-hit.
+    n_hides = specs_hide_count(specs_N)
+    if n_hides:
+        _log(f"ABORT: slide {N} has {n_hides} role=hide spec(s); A' addresses by wall "
+             "kindIndex on a post-deleteHides deck. Bridge the indices (iwa_write."
+             "bridge_kind_index) or pick a hide-free slide (9 is expected hide-free).")
+        return 2
 
-    # --- step 3: A (production geometry) ----------------------------------------------
-    _log(f"A: remap {args.source.name} with OBED_AS_GEOMETRY=1 OBED_GEOM_PROPS=1")
-    _remap_env(suppress="", as_geometry="1", geom_props="1")
-    remap_and_inspect(args.source, a_deck, template=args.template,
-                      slide_range=None, export_dir=a_png, log=_log)
-
-    a_objects, _a_idf, _a_fi = _load_deck(a_deck)
     bpre_objects, _bp_idf, _bp_fi = _load_deck(bpre_deck)
+    if reuse:
+        reported = build_reported_offline(bpre_objects, N)
+        _log(f"reported seed: {len(reported)} soft-class frame(s) composed OFFLINE from B-pre.")
+    else:
+        reported = build_reported(bpre_info.get("payload") or {}, N)
+        _log(f"reported seed: {len(reported)} soft-class frame(s) from the B-pre bulk read.")
 
-    # --- step 4: byte-reveal (A vs B-pre) ---------------------------------------------
-    a_units = slide_units(a_objects, N)
-    bpre_units = slide_units(bpre_objects, N)
-    reveal_pairs, _ua, _ub = match_units(a_units, bpre_units)
-    reveal = byte_reveal(a_objects, bpre_objects, reveal_pairs)
-    _log("BYTE-REVEAL (production AS mutations, A vs B-pre) — the masked-image rule input:")
+    # ==================== A' — ID-STABLE production reference ====================
+    if args.reuse_aprime is not None:
+        if not Path(args.reuse_aprime).exists():
+            ap.error(f"--reuse-aprime not found: {args.reuse_aprime}")
+        shutil.copyfile(args.reuse_aprime, aprime_deck)
+        _log(f"REUSE: banked A' {args.reuse_aprime}.")
+    else:
+        shutil.copyfile(bpre_deck, aprime_deck)  # A' shares B-pre's drawable ids
+        body = _build_slide_geometry_script(specs_N, N)
+        if not body:
+            _log(f"ABORT: no AppleScript geometry body built for slide {N}.")
+            return 2
+        _log(f"A': applying production geometry (osascript) to a copy of B-pre …")
+        run_aprime(aprime_deck, body, _log)
+    aprime_objects, _ap_idf, _ap_fi = _load_deck(aprime_deck)
+
+    # ---- byte-reveal: which fields the production AS mutated (A' vs B-pre, id-matched) --
+    reveal_pairs, _rua, _rub = match_units(slide_units(aprime_objects, N),
+                                           slide_units(bpre_objects, N))
+    reveal = byte_reveal(aprime_objects, bpre_objects, reveal_pairs)
+    _log("BYTE-REVEAL (production AS mutations, A' vs B-pre) — the masked-image rule input:")
     for kind, counter in sorted(reveal.items()):
         _log(f"  {kind}: {dict(counter)}")
 
-    # --- step 5: B = copy B-pre, patch slide N offline --------------------------------
+    # ==================== B — copy B-pre, patch slide N offline ==================
     shutil.copyfile(bpre_deck, b_deck)
-    src_counts = source_kind_counts(args.source, N)
     res: PatchResult = patch_slide_geometry(
         b_deck, N, specs_N, reported=reported,
         source_counts=src_counts, require_reconcile=True,
@@ -603,18 +921,28 @@ def main(argv: list[str] | None = None) -> int:
          f"soft_fallbacks={res.soft_fallbacks} value_clean={res.value_clean} "
          f"target={res.target_member}")
     assert not res.refused, f"patch refused: {res.reason}"
-    assert res.soft_fallbacks == 0, "soft frames must all come from the bulk read"
+    assert res.soft_fallbacks == 0, "soft frames must all come from the reported seed"
     assert res.value_clean, "member rewrite was not value-clean"
     assert res.missed == 0, f"{res.missed} spec(s) missed"
 
-    # --- step 6: OFFLINE GATE (§Gate-compare) + cross-slide locality ------------------
+    # ================ OFFLINE GATE (§Gate-compare A' vs B) + locality ============
     b_objects, _b_idf, _b_fi = _load_deck(b_deck)
-    shapes_bad = text_autosize_shapes(slide_units(a_objects, N))
-    if shapes_bad:
-        _log(f"WARNING: {len(shapes_bad)} shape(s) on slide {N} are text-autosize; "
-             "carve them out of the frame compare (SKILL:954).")
-    report = compare_slides(a_objects, b_objects, N, tol=args.tol)
-    _log("OFFLINE GATE (§Gate-compare A vs B):")
+    report = compare_slides(aprime_objects, b_objects, N, tol=args.tol)
+
+    rate = report["id_match_rate"]
+    if not report["id_stable"]:
+        _log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        _log(f"!! ID-MATCH RATE {rate:.1%} < floor — the compare FELL BACK to positional")
+        _log("!! (kind, kindIndex) matching. A' and B are supposed to share B-pre's ids,")
+        _log("!! so this means A' was NOT built from this B-pre. RESULT IS UNTRUSTED.")
+        _log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    else:
+        _log(f"ID-MATCH RATE: {rate:.1%} of {len(reveal_pairs)} pairs by drawable id (id-stable).")
+    if report["carved"]:
+        _log(f"AUTOSIZE CARVE-OUT: excluded {len(report['carved'])} text-autosize shape(s) "
+             f"from the frame compare: {report['carved']}")
+
+    _log("OFFLINE GATE (§Gate-compare A' vs B):")
     for kind, cls in sorted(report["per_class"].items()):
         status = "PASS" if cls["pass"] else "FAIL"
         _log(f"  {kind}: {status}  n={cls['n']}  worst={cls['worst']:.2f}px")
@@ -622,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
             _log(f"      {f['addr']} worst={f['worst']:.2f} {f['reasons']}")
     if report["crosscheck"]:
         _log(f"  positional cross-check: {report['crosscheck']}")
+    _log_group_child_scale(report["group_child_scale"])
 
     only_n = changed_members(bpre_deck, b_deck)
     tgt = target_member_for_slide(bpre_objects, _bp_idf, N)
@@ -632,14 +961,33 @@ def main(argv: list[str] | None = None) -> int:
     gate_ok = report["pass"] and locality_ok
     _log("OFFLINE GATE: GREEN" if gate_ok else "OFFLINE GATE: RED (see per-class above)")
 
-    # --- step 7: LIVE CO-GATE (wired; run only with --live under the lead's guard) ----
+    # ============ FULL-A cross-check (optional; positional, never gates) =========
+    if args.full_a:
+        if args.source is None or args.template is None:
+            _log("FULL-A skipped: --source/--template not supplied.")
+        else:
+            _log(f"FULL-A: independent production remap {args.source.name} "
+                 "(OBED_AS_GEOMETRY=1 OBED_GEOM_PROPS=1) — positional cross-check only.")
+            _remap_env(suppress="", as_geometry="1", geom_props="1")
+            remap_and_inspect(args.source, a_deck, template=args.template,
+                              slide_range=None, export_dir=a_png, log=_log)
+            a_objects, _a_idf, _a_fi = _load_deck(a_deck)
+            a_report = compare_slides(a_objects, b_objects, N, tol=args.tol)
+            _log(f"  FULL-A id-match rate {a_report['id_match_rate']:.1%} "
+                 "(low is EXPECTED — A is an independent run; positional, untrusted). "
+                 "Top-level classes are validated against A' above.")
+            for kind, cls in sorted(a_report["per_class"].items()):
+                _log(f"    {kind}: n={cls['n']} worst={cls['worst']:.2f}px "
+                     f"{'PASS' if cls['pass'] else 'FAIL'}")
+
+    # ==================== LIVE CO-GATE (run only with --live) ====================
     if args.live:
-        _log("LIVE CO-GATE: scoped inspect + PNG pixel-diff of slide N (A vs B)")
-        a_scope = inspect_keynote(a_deck, slide_range={N}, use_cache=False)
+        _log("LIVE CO-GATE: scoped inspect + PNG pixel-diff of slide N (A' vs B)")
+        a_scope = inspect_keynote(aprime_deck, slide_range={N}, use_cache=False)
         b_scope = inspect_keynote(b_deck, slide_range={N}, use_cache=False)
-        _log(f"  A slide {N} items={_scoped_item_count(a_scope, N)} "
+        _log(f"  A' slide {N} items={_scoped_item_count(a_scope, N)} "
              f"B slide {N} items={_scoped_item_count(b_scope, N)}")
-        export_slide_images(a_deck, a_png)
+        export_slide_images(aprime_deck, aprime_png)
         export_slide_images(b_deck, b_png)
         _log("  PNG export done — pixel-diff slide-N frames at near-zero threshold (lead compares).")
 

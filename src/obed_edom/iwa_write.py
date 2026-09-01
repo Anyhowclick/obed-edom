@@ -75,10 +75,12 @@ class PatchResult:
 
     ``refused`` marks a slide the addressing gate would not touch (``reason`` says
     why); the caller falls back to the scoped AppleScript geometry write for it.
-    ``value_clean`` is the in-member self-check: exactly the edited archives differ
-    and no archive HEADER changed (``obj_diffs == edited archives`` and
-    ``header_diffs == 0``) — a False here means the rewrite mutated more than intended
-    and MUST NOT be trusted.
+    ``value_clean`` is the in-member self-check: no archive OUTSIDE the edit set
+    changed and no archive HEADER changed (``obj_diffs <= edited archives`` and
+    ``header_diffs == 0``) — a no-op edit (written values == stored) leaves an edited
+    archive's bytes unchanged, so ``obj_diffs`` may be BELOW the edit count on a clean
+    rewrite; only collateral (``obj_diffs > edited archives``) or a header change means
+    the rewrite mutated more than intended and MUST NOT be trusted.
     """
 
     applied: int = 0
@@ -521,7 +523,12 @@ def patch_slide_geometry(
                 obj_diffs += 1
             if a0["header"] != a1["header"]:
                 header_diffs += 1
-    value_clean = obj_diffs == len(edits) and header_diffs == 0
+    # A no-op edit (e.g. a masked image with crop ratio == 1.0 whose written values
+    # equal the stored ones) touches an archive in ``edits`` yet leaves its bytes
+    # unchanged, so ``obj_diffs`` can be LESS than ``len(edits)`` on a clean rewrite —
+    # that is fine. The dangerous direction is collateral: an archive NOT in ``edits``
+    # changing bytes pushes ``obj_diffs`` ABOVE ``len(edits)``, which still trips here.
+    value_clean = obj_diffs <= len(edits) and header_diffs == 0
 
     # In-place rewrite (O_TRUNC over the existing file) preserves the inode and its
     # com.apple.macl xattr, without which sandboxed Keynote refuses to open the deck.

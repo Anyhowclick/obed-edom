@@ -100,16 +100,52 @@ read this plan coordinates with — now SHIPPED; see the status note below).
 >   a line's length is `naturalSize.width`. `com.apple.macl` gotcha → write patched bytes IN PLACE. Per-class
 >   semantics for shape/line/text are in the SKILL.
 >
-> **IMMEDIATE TODO FOR THE NEXT AGENT — build the VALIDATION GATE first, not the opt-in patcher.**
-> The gate = the real-slide A/B (patch a real content slide, pre-patch `bulk_geometry` read as
-> `composed_reported` for the soft trio, two-tier read both output decks, compare frame multiset per kind /
-> groups as a SET) run on Map slide 8. It is the prerequisite because it is the ONLY thing that RESOLVES the
-> still-unproven **masked-image and group write semantics** that `w-offline-write-optin`'s patcher depends on
-> — building that patcher for those classes first is building on unproven ground. It needs a machine where
-> the 1.2 GB+ gold deck opens promptly (it wedges in the session env this was written in). IN PARALLEL, the
-> offline-safe pieces of `w-offline-write-optin` CAN proceed here and be unit-tested: the shape/line/text
-> patcher (proven), the deleteHides↔kindIndex renumber decision, and wiring `iwa_kindindex.reconcile_counts`
-> on the saved deck. Then `w-offline-write-optin` integration, then the true `w-zorder-patch` reorder.
+> **VALIDATION GATE — BUILT + RUN ON THE REAL DECK 2026-09-01 (this session; plan v3.1, me + 3 peer reviews).**
+> Target corrected: the constellation is **Map slide 9** (110 masked imgs / 67 groups / 68 lines), NOT slide 8
+> (off-by-one; census in `scratchpad/target_census.py`). The 1.2 GB deck **opens in ~8 s here** — the
+> "wedges" caveat was env-specific, now retired. Shipped this session:
+> - **Piece 1 — `OBED_SUPPRESS_GEOMETRY` knob** + **Piece 2 — `src/obed_edom/iwa_write.py`** offline patcher
+>   (`5707d4d`): per-class writes, `(kind,kindIndex)` addressing on the saved deck, deleteHides bridge,
+>   `reconcile_counts` REFUSE gate, in-place O_TRUNC (macl-preserving) single-member rewrite.
+> - **Piece 3 — `scripts/write_gate_ab.py`** A/B gate (`210b1c6`), then revised to an **id-stable A′ oracle**
+>   (A′ = production AppleScript geometry applied to a COPY of B-pre → shares B-pre ids) + specs sidecar +
+>   id-match gate + group-child scale measurement + `plan_out` seam in `remap_keynote`.
+> - **PROVEN on the real deck (A vs B, kindIndex-stable classes, ~0.5 px):** top-level **masked-image SIZE
+>   writes 108/108 @0.54 px** (the whole unproven class — the TENTATIVE mask-crop-rect + scaled-image-size
+>   rule is CORRECT), **lines 68/68 @0.5 px**, **shapes @0.41 px**; single-member locality holds (only slide
+>   9's member changed); patch armed clean (applied 365, `value_clean`, `soft_fallbacks=0`, `refused=False`).
+>   → **Upgrade the SKILL masked-image write note from TENTATIVE to PROVEN** (currently SKILL:968).
+>
+> **UP NEXT (in order):**
+> 1. **Bridge A′'s hide indices, then get the clean id-stable verdict.** The id-stable run ABORTED fail-safe:
+>    **slide 9 has 2 role=hide specs**, so A′'s AS body (wall kindIndex, via `_build_slide_geometry_script`)
+>    would mis-address on the post-`deleteHides` B-pre. Fix: build A′'s body with `iwa_write.bridge_kind_index`
+>    (or suppress deleteHides while building A′). **B_pre.key + `specs_slide9.json` are banked in
+>    `output/write-gate/`**, so re-run is CHEAP: `write_gate_ab.py --reuse-bpre …/B_pre.key --reuse-specs
+>    …/specs_slide9.json` (no 1.2 GB remap). Watch-items (from verify): use the FRESH run for the group
+>    verdict (fresh vs reuse `reported` keying can diverge); read the **ID-MATCH RATE** line — <95 % means the
+>    A′ save renumbered ids (artifact, not a patch bug), not a write failure.
+> 2. **Group-child scaling gap (the real find; DECIDE extend-vs-fallback).** The offline patch handles
+>    TOP-LEVEL geometry only; it does NOT scale geometry INSIDE groups. Matching-free proof: group union w
+>    median A=78.5 vs **B==B-pre=24.8** — production enlarges constellation group children ~3×, the patch
+>    leaves them untouched. This DISPROVES the plan's old "groups are pure translation / w-h inert" assumption
+>    for SCALED groups. The constellation is the ~70 %-of-run write hotspot, so falling it back to AS forfeits
+>    the biggest win — but scaling group children is a harder byte class (per-child structural geometry). The
+>    byte-reveal (A′ vs B-pre) is the input to characterise the child transform (uniform scale?). User steer
+>    2026-09-01: fix the harness first (id-stable), measure the child transform clean, THEN decide.
+> 3. Then `w-offline-write-optin` integration (opt-in flow), then `w-zorder-patch`.
+>
+> **PRE-EXISTING PRODUCTION BUGS — flagged by the user 2026-09-01 from `output/write-gate/A_png` (the full
+> PRODUCTION remap output); confirmed PRE-EXISTING, NOT from this session's changes (the suppress knob /
+> `plan_out` / `_build_as_geometry(suppress=)` are all behavior-preserving with the env unset — verified).**
+> These are framing/reuse/z-order defects, SEPARATE from the write track, for a dedicated session:
+> (a) **Church-name lists dropped** (centre AND side) though centre should always be kept — the recipe logs
+>     `0 list, 424 hidden names (side content dropped)`; framing/recipe layer. (b) **Yellow "269 churches"
+>     text deleted on several slides** yet present + mis-positioned in slide-7 PNG. (c) **Duplicate "44
+>     Renovated Church Buildings" object** (reuse select-all-paste family — cf. the HALL note about the reuse
+>     path re-pasting hidden items). (d) **Right-side photo z-order wrong on slides 4 & 5.** (e) **Constellation
+>     nested-group render wonky** (relates to the group-child gap above). Get the known-good CG baseline to
+>     confirm each and localise.
 >
 > **STATUS (2026-08-31, verified against source after the checker probes).** Brought over
 > verbatim from the `docs/resizer-optimizations-plan` branch (the reviewed record is
