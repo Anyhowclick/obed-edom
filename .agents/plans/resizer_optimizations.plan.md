@@ -145,7 +145,8 @@ read this plan coordinates with — now SHIPPED; see the status note below).
 >    exported slide 9; pixel-diffed vs the A′ production render. Diff is thin 1px edge halos ONLY (mean 9.1/255,
 >    top half pixel-identical), no doubled/ghosted/oversized objects — sub-pixel antialiasing from the ≤0.84px
 >    deltas + raw-write-vs-Keynote-save serialization. **No double-scale: the offline-scaled group children
->    survive a real Keynote open.** Evidence: `output/write-gate/{live_B_png/*.009.png, slide9_diff_amplified.png}`.
+>    survive a real Keynote open.** Evidence: `output/write-gate/live_B_png/*.009.png` (patched-B slide-9
+>    render); the amplified pixel-diff vs A′ was delivered to the user inline (regenerable via a re-export).
 >    So the offline group-child write is fully validated — nothing gates it into `w-offline-write-optin` now.
 > 3. Then `w-offline-write-optin` integration (opt-in flow), then `w-zorder-patch`.
 >
