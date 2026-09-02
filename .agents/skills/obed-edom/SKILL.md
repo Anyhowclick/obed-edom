@@ -334,6 +334,14 @@ Load-bearing rules:
 * line length comes from `naturalSize.width`;
 * autosize text translation is safe only when its live geometry is known;
 * masked-image and group write semantics require a live bulk geometry seed.
+* image strokes (`TSD.MediaStyleArchive.mediaProperties.stroke.width`) live in the
+  global `Index/DocumentStylesheet.iwa`, never in slide members; a single-member
+  float patch there survives a Keynote open and save (probed 2026-09-02). Select
+  styles by colour/pattern/ref-count, never by id;
+* `drawablesZOrder` + `ownedDrawables` (kept identical) can be permuted offline;
+  Keynote honours the order on open, keeps it on save, and the AppleScript
+  per-kind collection order follows it (probed 2026-09-02). A reorder changes
+  every kindIndex on the slide, so it must be the last patch on that slide.
 
 ---
 
