@@ -141,12 +141,12 @@ read this plan coordinates with — now SHIPPED; see the status note below).
 >    line/shape unchanged, `value_clean`, applied=671, missed=0; full suite 664 pass. Cheap Keynote-free
 >    re-run: add `--reuse-aprime output/write-gate/A_prime.key` to the #1 command (A′ banked there durably
 >    2026-09-02 — gitignored but on disk; rebuild costs one Keynote open if ever lost).
->    **ONE VALIDATION STILL OPEN:** the offline gate proves B's STORED geometry == A′; it can NOT prove B
->    survives a Keynote OPEN without double-scaling (Keynote scales children when a group is resized). Low
->    risk — A′ is the Keynote-SAVED oracle and carries own-size·s + scaled children yet opens clean, and
->    w-spike proved raw-written floats survive open — but do ONE live open of patched B + scoped
->    `bulk_geometry` read of slide 9 (children land at target, not target×s). Naturally folds into
->    `w-offline-write-optin`'s read-back-verify gate.
+>    **LIVE DOUBLE-SCALE CHECK — DONE (2026-09-02, PASS).** Opened the raw-written patched B in Keynote and
+>    exported slide 9; pixel-diffed vs the A′ production render. Diff is thin 1px edge halos ONLY (mean 9.1/255,
+>    top half pixel-identical), no doubled/ghosted/oversized objects — sub-pixel antialiasing from the ≤0.84px
+>    deltas + raw-write-vs-Keynote-save serialization. **No double-scale: the offline-scaled group children
+>    survive a real Keynote open.** Evidence: `output/write-gate/{live_B_png/*.009.png, slide9_diff_amplified.png}`.
+>    So the offline group-child write is fully validated — nothing gates it into `w-offline-write-optin` now.
 > 3. Then `w-offline-write-optin` integration (opt-in flow), then `w-zorder-patch`.
 >
 > **PRE-EXISTING PRODUCTION BUGS — flagged by the user 2026-09-01 from `output/write-gate/A_png` (the full
