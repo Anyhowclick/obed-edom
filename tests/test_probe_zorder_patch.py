@@ -18,6 +18,7 @@ from obed_edom.iwa_runs import _load_deck  # noqa: E402
 
 from scripts.probe_zorder_patch import (  # noqa: E402
     permute_front,
+    permute_front_within,
     read_zorder,
     reorder_slide_zorder,
 )
@@ -60,6 +61,16 @@ def test_permute_front_rotates_back_to_front():
     ids = ["a", "b", "c"]
     permute_front(ids)
     assert ids == ["a", "b", "c"]  # input not mutated
+
+
+def test_permute_front_within_rotates_only_the_subset_slots():
+    order = ["p1", "p2", "a", "b", "c"]
+    assert permute_front_within(order, ["a", "b", "c"]) == ["p1", "p2", "b", "c", "a"]
+    assert order == ["p1", "p2", "a", "b", "c"]  # input not mutated
+
+    interleaved = ["a", "p", "b", "c"]
+    assert permute_front_within(interleaved, ["a", "b", "c"]) == ["b", "p", "c", "a"]
+    assert interleaved == ["a", "p", "b", "c"]  # input not mutated
 
 
 def test_reorder_is_value_clean_and_writes_both_lists(deck):

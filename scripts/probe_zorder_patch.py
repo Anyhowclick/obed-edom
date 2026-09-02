@@ -46,6 +46,18 @@ def permute_front(ids: list[str]) -> list[str]:
     return ids[1:] + ids[:1] if len(ids) > 1 else list(ids)
 
 
+def permute_front_within(order: list[str], subset: list[str]) -> list[str]:
+    """``permute_front``, restricted to the slots ``subset`` occupies in ``order``; every
+    other id (e.g. the default theme's placeholder drawables) stays in place."""
+    subset_ids = set(subset)
+    positions = [i for i, x in enumerate(order) if x in subset_ids]
+    rotated = permute_front([order[i] for i in positions])
+    result = list(order)
+    for pos, val in zip(positions, rotated):
+        result[pos] = val
+    return result
+
+
 def read_zorder(deck: Path, slide_number: int) -> tuple[list[str], list[str]]:
     """(drawablesZOrder ids, ownedDrawables ids) as strings, via _load_deck + slide_order."""
     try:
@@ -300,16 +312,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     z_before, owned_before = read_zorder(deck_path, 1)
-    if len(z_before) != 3 or z_before != owned_before:
-        print(f"ABORT: expected 3 identical drawables, got z={z_before} owned={owned_before}")
+    labels = _object_text_by_id(deck_path, 1)
+    shape_ids = [i for i in z_before if labels.get(i) in {"ONE", "TWO", "THREE"}]
+    if len(shape_ids) != 3 or z_before != owned_before:
+        print(f"ABORT: expected our 3 shapes among the drawables, got z={z_before} owned={owned_before}")
         return 2
     print(f"before: drawablesZOrder={z_before} ownedDrawables={owned_before}")
+    print(f"shape ids: {[(i, labels[i]) for i in shape_ids]}")
 
-    new_order = permute_front(z_before)
-    print(f"permute_front -> {new_order}")
+    # The default theme's slide 1 carries its own placeholder drawables (title/body/etc);
+    # rotate only OUR shapes' slots, leaving placeholders exactly where they are.
+    new_order = permute_front_within(z_before, shape_ids)
+    print(f"permute_front_within -> {new_order}")
 
-    labels = _object_text_by_id(deck_path, 1)
-    expected_front = labels.get(new_order[-1], "?")
+    expected_front_id = [i for i in new_order if i in shape_ids][-1]
+    expected_front = labels[expected_front_id]
 
     result = reorder_slide_zorder(deck_path, 1, new_order)
     if result.get("refused"):
