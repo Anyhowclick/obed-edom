@@ -129,16 +129,24 @@ read this plan coordinates with — now SHIPPED; see the status note below).
 >    @0.50 px.** Banked `B_pre.key`/`specs_slide9.json` unchanged; re-run: `write_gate_ab.py --reuse-bpre
 >    output/write-gate/B_pre.key --reuse-specs output/write-gate/specs_slide9.json --slide 9 --out <scratch>`
 >    (must point `--out` off the bank dir — SameFileError otherwise; env `PYTHONPATH=src`).
-> 2. **Group-child scaling gap — CHARACTERISED clean; DECISION PENDING (extend-vs-fallback).** The sole
->    failing dimension. `child`/`group`/`image` all FAIL for ONE root cause: the offline patch writes
->    TOP-LEVEL geometry only and leaves geometry INSIDE groups untouched (`group` compares the child-UNION
->    box, so its FAIL is derivative of the unscaled children, not an independent group-frame write miss).
->    **The child transform is a clean UNIFORM per-group scale: sx==sy for all 67 groups**, clustering at
->    **~1.93× and ~4.0×** (two framings). Worst deltas 146–269 px (unscaled children in a 4×-enlarged group).
->    The constellation (Map slide 9) is the ~70 %-of-run write hotspot, so fallback-to-AS forfeits the biggest
->    win; extend = write per-child geometry (position+size, +naturalSize for shape/masked-image children)
->    scaled by the group's uniform factor — a harder byte class but the transform is now proven simple.
->    Full run log: `scratchpad/write-gate-run/…/gate_run.log` (this session).
+> 2. **Group-child scaling — EXTENDED + SHIPPED (`fe3cd87`, 2026-09-02).** User chose extend over fallback.
+>    `_group_child_scale_ops` in `iwa_write.py` recursively rescales every group descendant; `_group_fields`
+>    moves the group origin + writes its own size. **Rule (peer-derived vs the A′ oracle, corrected twice):**
+>    scale `s = spec / REPORTED (child-union) size` — NOT stored group size (that fails 24/67, ≤494 px); group
+>    origin = `spec + (stored − reported)·s` (a pure translation fails 28/67, ≤250 px); group own size =
+>    `stored·s`; each descendant's LOCAL pos/size/naturalSize ×s (masked children also scale their mask).
+>    Top-left anchor (residual 0.00 px), uniform sx==sy. Fail-safe: an unscalable descendant (rotated mask,
+>    cross-member mask, unresolved, or ANY rotated child under an anisotropic scale — a shear the angle can't
+>    express) misses the WHOLE group. **Gate GREEN, id-stable 100 %:** child/group/image PASS ≤0.84 px,
+>    line/shape unchanged, `value_clean`, applied=671, missed=0; full suite 664 pass. Cheap Keynote-free
+>    re-run: add `--reuse-aprime output/write-gate/A_prime.key` to the #1 command (A′ banked there durably
+>    2026-09-02 — gitignored but on disk; rebuild costs one Keynote open if ever lost).
+>    **ONE VALIDATION STILL OPEN:** the offline gate proves B's STORED geometry == A′; it can NOT prove B
+>    survives a Keynote OPEN without double-scaling (Keynote scales children when a group is resized). Low
+>    risk — A′ is the Keynote-SAVED oracle and carries own-size·s + scaled children yet opens clean, and
+>    w-spike proved raw-written floats survive open — but do ONE live open of patched B + scoped
+>    `bulk_geometry` read of slide 9 (children land at target, not target×s). Naturally folds into
+>    `w-offline-write-optin`'s read-back-verify gate.
 > 3. Then `w-offline-write-optin` integration (opt-in flow), then `w-zorder-patch`.
 >
 > **PRE-EXISTING PRODUCTION BUGS — flagged by the user 2026-09-01 from `output/write-gate/A_png` (the full
