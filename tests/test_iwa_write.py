@@ -12,9 +12,11 @@ directly with no deck at all.
 
 Per class: shape writes geometry.size AND naturalSize (Keynote lays out from
 naturalSize). Line length goes in both geometry.size.width and naturalSize.width.
-Group is translation only — never write group w/h. Text y is a centre delta off
-the reported frame. Masked-image crop is axis-aligned only; rotated masks miss
-rather than mis-place.
+Group is translation only when the spec lacks w/h; given both, a uniform scale
+(spec size / child-union size) also writes the group's own w/h and rescales every
+descendant's local geometry — an unscalable descendant misses the whole group.
+Text y is a centre delta off the reported frame. Masked-image crop is
+axis-aligned only; rotated masks miss rather than mis-place.
 
 In-place O_TRUNC preserves inode + com.apple.macl; a new file is refused by
 sandboxed Keynote. Positional addressing refuses the slide on reconcile_counts
@@ -35,11 +37,13 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom import iwa_write  # noqa: E402
-from obed_edom.iwa_geometry import compose_geometry  # noqa: E402
+from obed_edom.iwa_geometry import _geom_dict, _xywha, compose_geometry  # noqa: E402
 from obed_edom.iwa_runs import _load_deck  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
     PatchResult,
     _apply_geom_fields,
+    _group_child_scale_ops,
+    _group_fields,
     _masked_image_fields,
     _shape_fields,
     _text_fields,
@@ -476,3 +480,188 @@ def test_rotated_masked_image_missed_not_written(tmp_path, img_angle, mask_angle
     res = patch_slide_geometry(deck, 1, specs)
     assert res.missed == 1 and res.applied == 0
     assert deck.read_bytes() == original  # rotated masked image left untouched
+
+
+# --------------------------------------------------------------------------
+# Group child scaling: own frame (_group_fields) + descendant walk
+# (_group_child_scale_ops), pure-function level.
+# --------------------------------------------------------------------------
+def test_group_fields_pure_translation_when_size_not_scaled():
+    # sx=sy=1, write_size=False must degenerate to the old translation-only rule.
+    rec = {"id": "250"}
+    stored = (500.0, 500.0, 30.0, 30.0, 0.0)
+    reported = [500.0, 500.0, 30.0, 30.0]
+    spec = {"x": 540.0, "y": 560.0}
+    (obj_id, fields), = _group_fields(rec, spec, reported, stored, 1.0, 1.0, False)
+    assert obj_id == "250"
+    assert fields == {"pos_x": 540.0, "pos_y": 560.0}
+
+
+def test_group_fields_scaled_moves_origin_and_writes_own_size():
+    rec = {"id": "250"}
+    stored = (500.0, 500.0, 30.0, 30.0, 0.0)
+    reported = [480.0, 490.0, 15.0, 10.0]  # child-union denominator, not stored size
+    spec = {"x": 540.0, "y": 560.0, "w": 60.0, "h": 40.0}
+    sx, sy = 60.0 / 15.0, 40.0 / 10.0
+    (obj_id, fields), = _group_fields(rec, spec, reported, stored, sx, sy, True)
+    assert obj_id == "250"
+    assert fields["pos_x"] == pytest.approx(540.0 + (500.0 - 480.0) * sx)
+    assert fields["pos_y"] == pytest.approx(560.0 + (500.0 - 490.0) * sy)
+    assert fields["size_w"] == pytest.approx(30.0 * sx)
+    assert fields["size_h"] == pytest.approx(30.0 * sy)
+
+
+def test_group_child_scale_ops_scales_leaves_and_nested_group():
+    objects = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "super": _shape_super(10, 20, 100, 50)},
+        "2": {"_pbtype": "TSWP.ShapeInfoArchive", "super": _shape_super(200, 30, 40, 40)},
+        "3": {"_pbtype": "TSD.GroupArchive", "super": _geom(50, 60, 0, 0),
+              "children": [{"identifier": 4}]},
+        "4": {"_pbtype": "TSWP.ShapeInfoArchive", "super": _shape_super(5, 5, 20, 20)},
+    }
+    group = {"super": _geom(0, 0, 0, 0),
+             "children": [{"identifier": 1}, {"identifier": 2}, {"identifier": 3}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 3.0, {}, "member")
+    assert ok
+    by_id = dict(ops)
+    assert by_id["1"] == {"pos_x": 20.0, "pos_y": 60.0, "size_w": 200.0, "size_h": 150.0,
+                          "natural_w": 200.0, "natural_h": 150.0}
+    assert by_id["2"]["pos_x"] == 400.0 and by_id["2"]["pos_y"] == 90.0
+    # nested group's own frame scaled once, about the top group's origin.
+    assert by_id["3"] == {"pos_x": 100.0, "pos_y": 180.0, "size_w": 0.0, "size_h": 0.0}
+    # nested leaf's LOCAL (parent-relative) position takes the SAME (sx,sy) — no
+    # compounding across nesting levels.
+    assert by_id["4"]["pos_x"] == 10.0 and by_id["4"]["pos_y"] == 15.0
+    assert by_id["4"]["size_w"] == 40.0 and by_id["4"]["size_h"] == 60.0
+
+
+def test_group_child_scale_ops_masked_child_scales_mask_uniformly():
+    objects = {
+        "5": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "6"}, "super": _geom(10, 10, 80, 40)},
+        "6": {"_pbtype": "TSD.MaskArchive", "super": _geom(2, 2, 60, 30)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 5}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {"5": "M", "6": "M"}, "M")
+    assert ok
+    by_id = dict(ops)
+    assert by_id["6"] == {"pos_x": 4.0, "pos_y": 4.0, "size_w": 120.0, "size_h": 60.0}
+    assert by_id["5"]["pos_x"] == 20.0 and by_id["5"]["pos_y"] == 20.0
+    assert by_id["5"]["size_w"] == 160.0 and by_id["5"]["size_h"] == 80.0
+
+
+@pytest.mark.parametrize("img_angle,mask_angle", [(90.0, 0.0), (0.0, 45.0)])
+def test_group_child_scale_ops_refuses_rotated_masked_child(img_angle, mask_angle):
+    objects = {
+        "5": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "6"},
+              "super": _geom(10, 10, 80, 40, angle=img_angle)},
+        "6": {"_pbtype": "TSD.MaskArchive", "super": _geom(2, 2, 60, 30, angle=mask_angle)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 5}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {"5": "M", "6": "M"}, "M")
+    assert not ok and ops == []
+
+
+def test_group_child_scale_ops_rotated_leaf_uniform_ok_anisotropic_refused():
+    # A rotated NON-masked leaf: fine under a uniform scale (rotation commutes), but an
+    # anisotropic scale would shear it (angle isn't settable) → refuse the whole group.
+    objects = {"1": {"_pbtype": "TSWP.ShapeInfoArchive",
+                     "super": _shape_super(10, 20, 100, 50)}}
+    objects["1"]["super"]["super"]["geometry"]["angle"] = 30.0
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    assert ok and dict(ops)["1"]["size_w"] == 200.0  # uniform: scaled
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 3.0, {}, "member")
+    assert not ok and ops == []  # anisotropic + rotated: whole-group miss
+
+
+def test_group_child_scale_ops_refuses_cross_member_mask():
+    objects = {
+        "5": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "6"}, "super": _geom(10, 10, 80, 40)},
+        "6": {"_pbtype": "TSD.MaskArchive", "super": _geom(2, 2, 60, 30)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 5}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {"5": "M", "6": "OTHER"}, "M")
+    assert not ok and ops == []
+
+
+# --------------------------------------------------------------------------
+# Group child scaling: end-to-end through patch_slide_geometry.
+# --------------------------------------------------------------------------
+def _build_nested_group_deck(path):
+    """group 250 (own frame == child union 500,500,80,65): leaves 251/252 plus
+    nested group 253 (own leaf 254)."""
+    leaf251 = _arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 30, 30)})
+    leaf252 = _arch(252, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(60, 0, 20, 20)})
+    leaf254 = _arch(254, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(5, 5, 10, 10)})
+    nested = _arch(253, "TSD.GroupArchive", {"super": _geom(0, 50, 0, 0), "children": [{"identifier": 254}]})
+    group = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 80, 65),
+                  "children": [{"identifier": 251}, {"identifier": 252}, {"identifier": 253}]})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 250}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, group, leaf251, leaf252, nested, leaf254]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_group_children_scaled_end_to_end(tmp_path):
+    deck = _build_nested_group_deck(tmp_path / "nested.key")
+    specs = [{"kind": "group", "kindIndex": 0, "x": 500.0, "y": 500.0, "w": 160.0, "h": 130.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert not res.refused and res.missed == 0
+    assert res.applied == 5  # group + 2 leaves + nested group + its leaf
+    assert res.value_clean and res.header_diffs == 0
+    assert set(res.edited_ids) == {"250", "251", "252", "253", "254"}
+
+    objects, _idf, _fi = _load_deck(deck)
+
+    def xywh(oid):
+        return _xywha(_geom_dict(objects[oid]))[:4]
+
+    assert xywh("250") == pytest.approx((500.0, 500.0, 160.0, 130.0))
+    assert xywh("251") == pytest.approx((0.0, 0.0, 60.0, 60.0))
+    assert xywh("252") == pytest.approx((120.0, 0.0, 40.0, 40.0))
+    assert xywh("253") == pytest.approx((0.0, 100.0, 0.0, 0.0))
+    assert xywh("254") == pytest.approx((10.0, 10.0, 20.0, 20.0))
+
+
+def test_group_zero_reported_size_falls_back_to_translation(deck):
+    # rep w/h == 0 must not divide-by-zero; the guard falls back to pure
+    # translation (no size/child writes), same as a spec lacking w/h.
+    before = _composed(deck)
+    specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "w": 100.0, "h": 100.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs, reported={("group", 0): [500.0, 500.0, 0.0, 0.0]})
+    assert not res.refused and res.missed == 0
+    assert set(res.edited_ids) == {"250"}  # only the group itself; no child scaled
+    after = _composed(deck)
+    assert [after[("group", 0)][k] for k in "xy"] == pytest.approx([540.0, 560.0])
+    assert [after[("group", 0)][k] for k in "wh"] == pytest.approx(
+        [before[("group", 0)]["w"], before[("group", 0)]["h"]]
+    )
+
+
+def _build_masked_group_deck(path, *, img_angle=0.0, mask_angle=0.0):
+    mask = _arch(261, "TSD.MaskArchive", {"super": _geom(2, 2, 60, 30, angle=mask_angle)})
+    img = _arch(260, "TSD.ImageArchive", {"mask": {"identifier": 261}, "super": _geom(10, 10, 80, 40, angle=img_angle)})
+    group = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 80, 40), "children": [{"identifier": 260}]})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 250}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, group, img, mask]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_group_with_rotated_masked_child_misses_whole_group(tmp_path):
+    deck = _build_masked_group_deck(tmp_path / "rotgrp.key", img_angle=90.0)
+    original = deck.read_bytes()
+    specs = [{"kind": "group", "kindIndex": 0, "x": 500.0, "y": 500.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.missed == 1 and res.applied == 0
+    assert deck.read_bytes() == original  # unscalable child: whole group left untouched

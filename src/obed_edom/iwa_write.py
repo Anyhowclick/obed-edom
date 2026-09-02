@@ -1,9 +1,14 @@
 """Surgical in-place geometry write for one slide of a finalized .key.
 
 shape: write geometry.size AND naturalSize. line: length in both
-geometry.size.width and naturalSize.width. group: translation only; do not write
-group w/h. In-place rewrite (O_TRUNC) preserves com.apple.macl. Positional
-addressing refuses the slide on reconcile_counts mismatch.
+geometry.size.width and naturalSize.width. group: pure translation when spec
+lacks w/h; when both are given, a uniform scale (spec size / child-union size)
+also writes the group's own w/h and recursively rescales every descendant's
+local geometry (masked children rescale their mask too). A descendant that
+can't be safely scaled (rotated mask, cross-member mask) misses the whole
+group rather than partially scaling it. In-place rewrite (O_TRUNC) preserves
+com.apple.macl. Positional addressing refuses the slide on reconcile_counts
+mismatch.
 """
 from __future__ import annotations
 
@@ -155,14 +160,79 @@ def _text_fields(rec: dict, spec: dict, reported: list[float],
 
 
 def _group_fields(rec: dict, spec: dict, reported: list[float],
-                  stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
-    # Pure translation on the stored frame; the group's own w/h is never written.
+                  stored: tuple[float, float, float, float, float],
+                  sx: float, sy: float, write_size: bool) -> list[tuple[str, dict]]:
+    """Own frame: origin moved so the (scaled) child union lands on spec; size = stored*s.
+
+    sx=sy=1, write_size=False degenerates to the old pure-translation rule.
+    """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:
-        fields["pos_x"] = stored[0] + (float(spec["x"]) - reported[0])
+        fields["pos_x"] = float(spec["x"]) + (stored[0] - reported[0]) * sx
     if spec.get("y") is not None:
-        fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
+        fields["pos_y"] = float(spec["y"]) + (stored[1] - reported[1]) * sy
+    if write_size:
+        fields["size_w"] = stored[2] * sx
+        fields["size_h"] = stored[3] * sy
     return [(rec["id"], fields)] if fields else []
+
+
+def _group_child_scale_ops(
+    group_obj: dict, objects: dict[str, dict], sx: float, sy: float,
+    id_to_file: dict[str, str], target_member: str,
+) -> tuple[list[tuple[str, dict]], bool]:
+    """Recursively rescale a group's descendants (parent-relative local geometry) by (sx, sy).
+
+    ok=False refuses the WHOLE group: an unresolved child, a rotated masked
+    child/mask, a mask outside target_member, or ANY rotated child under an
+    anisotropic scale (sx!=sy would shear it — angle is preserved, not settable).
+    """
+    anisotropic = abs(sx - sy) > 1e-3 * max(abs(sx), abs(sy), 1.0)
+    ops: list[tuple[str, dict]] = []
+    for cref in group_obj.get("children") or []:
+        child_id = cref.get("identifier")
+        if child_id is None:
+            continue
+        child_id = str(child_id)
+        child = objects.get(child_id)
+        if not child:
+            return ([], False)
+        cx, cy, cw, ch, ca = _xywha(_geom_dict(child))
+        if ca % 360.0 and anisotropic:
+            return ([], False)
+        pbtype = child.get("_pbtype")
+
+        if pbtype == "TSD.GroupArchive":
+            ops.append((child_id, {
+                "pos_x": cx * sx, "pos_y": cy * sy,
+                "size_w": cw * sx, "size_h": ch * sy,
+            }))
+            sub_ops, ok = _group_child_scale_ops(child, objects, sx, sy, id_to_file, target_member)
+            if not ok:
+                return ([], False)
+            ops.extend(sub_ops)
+            continue
+
+        mask_ref = (child.get("mask") or {}).get("identifier")
+        if pbtype in ("TSD.ImageArchive", "TSD.MovieArchive") and mask_ref is not None:
+            mask_id = str(mask_ref)
+            mask_obj = objects.get(mask_id)
+            if not mask_obj or id_to_file.get(mask_id) != target_member:
+                return ([], False)
+            mx, my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
+            if ca % 360.0 or ma % 360.0:
+                return ([], False)
+            ops.append((mask_id, {
+                "pos_x": mx * sx, "pos_y": my * sy,
+                "size_w": mw * sx, "size_h": mh * sy,
+            }))
+
+        ops.append((child_id, {
+            "pos_x": cx * sx, "pos_y": cy * sy,
+            "size_w": cw * sx, "size_h": ch * sy,
+            "natural_w": cw * sx, "natural_h": ch * sy,
+        }))
+    return (ops, True)
 
 
 def _masked_image_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
@@ -318,7 +388,18 @@ def patch_slide_geometry(
         elif kind == "shape":
             ops = _shape_fields(rec, spec)
         elif kind == "group":
-            ops = _group_fields(rec, spec, rep, stored)
+            spec_w, spec_h = spec.get("w"), spec.get("h")
+            rep_w, rep_h = rep[2], rep[3]
+            scaled = spec_w is not None and spec_h is not None and rep_w > 0 and rep_h > 0
+            sx = float(spec_w) / rep_w if scaled else 1.0
+            sy = float(spec_h) / rep_h if scaled else 1.0
+            ops = _group_fields(rec, spec, rep, stored, sx, sy, scaled)
+            if scaled:
+                child_ops, ok = _group_child_scale_ops(obj, objects, sx, sy, id_to_file, target_member)
+                if not ok:
+                    missed += 1
+                    continue
+                ops = ops + child_ops
         elif kind == "text":
             ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
