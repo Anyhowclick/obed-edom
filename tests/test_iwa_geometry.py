@@ -6,6 +6,15 @@ mask-transform sign is never exercised by the axis-aligned integration decks, so
 is pinned here by hand-computed corners). A local-only integration test reproduces
 the composition on a real deck and asserts the plan's per-kind acceptance targets
 against that deck's cached exact-bytes JXA payload.
+
+Raw IWA vs JXA: masked images report the mask rect; rotated frames report AABB
+position + unrotated size; groups are a child-union (stale stored frames);
+autosize text has a zero-height frame and stale naturalSize (~20%, flagged
+autosize-soft). Lines come from length + rotation.
+
+_MASK_TRUST_PX is a displacement gate, not an angle threshold: a 1° residual on
+a long lever arm still misses by tens of pixels (DSK17 flip). needs_keynote is
+always paired with best-effort geometry. Addressing (kind/kindIndex) is unchanged.
 """
 from __future__ import annotations
 

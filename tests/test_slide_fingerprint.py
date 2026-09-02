@@ -6,6 +6,21 @@ synthetic ``objects``/``id_to_file``/``file_ids`` graph (mirroring
 (which takes an injected ``data_map``/``font_env``/``os_build`` so no zip, fonts or
 Keynote are touched). One gated test runs the full :func:`fingerprint_deck` against a
 real local deck when it and the parser are present.
+
+Byte hashes churn on a no-op save (id renumber). The key hashes the decoded
+id-normalized graph. Numeric {identifier: N} refs become positional @ref tokens;
+string identifiers are style names and stay as content. Assets fold in as
+@data CRC:size from the zip central directory (no media bytes read).
+
+TSS.StylesheetArchive is a hard closure boundary: Keynote recompacts it every
+save (canCullStyles). Folding it churned 42/42 DSK keys; skipping it loses no
+style coverage because applied styles are reached by id. Over-inclusion costs a
+cache miss, never a stale serve.
+
+Global key: non-slide Index/*.iwa minus DocumentStylesheet / Metadata /
+ViewState* / CalculationEngine / DocumentMetadata / AnnotationAuthorStorage.
+Font env + OS build are folded in; Keynote version is not (it already rides
+baseline._app_tag).
 """
 from __future__ import annotations
 

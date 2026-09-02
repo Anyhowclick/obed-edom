@@ -60,8 +60,6 @@ export type DiffResult = {
 function flagOnPair(flag: Flag, pair: Pair): boolean {
   if (flag.slide == null) return false;
   const deck = (flag.deck || "").toLowerCase();
-  // Outline findings count paragraphs, not slides, so the fallback below would
-  // match them against unrelated slide numbers.
   if (deck === "outline") return false;
   const rights = pair.rightNumbers?.length ? pair.rightNumbers : pair.rightNumber != null ? [pair.rightNumber] : [];
   if (deck === "lw" || deck === "left") return pair.leftNumber === flag.slide;
@@ -77,14 +75,6 @@ function deckSlideLabel(flag: Flag, leftLabel: string, rightLabel: string): stri
   return flag.slide != null ? `${name} slide ${flag.slide}`.trim() : name;
 }
 
-/**
- * Collapse the same finding raised once per deck within a pair into one card.
- * `compare_inspects` validates each deck separately, so a wrong-reference passage
- * lands as e.g. (rule, lw 54) and (rule, dsk 37); grouped on the live pair they
- * re-separate for free when the pair is split. The merged label is built from the
- * members' own deck/slide, not the pair's, so a 2-DSK pair where only one slide
- * tripped reads that one slide.
- */
 function mergeDuplicateFindings(issues: Flag[], leftLabel: string, rightLabel: string): Flag[] {
   const groups = new Map<string, Flag[]>();
   const order: string[] = [];
@@ -349,8 +339,6 @@ export function DiffResultView({
   const canEdit = Boolean(result.leftCatalog && result.rightCatalog);
   const rawDeck = matching ? [] : (result.flags || []).filter((flag) => flag.category !== "diff");
   const deckFlags = rawDeck.filter((flag) => !pairs.some((pair) => flagOnPair(flag, pair)));
-  // Cue-grammar findings are about the script, so they sit under the pairs
-  // rather than competing with them.
   const outlineFlags = result.outlineFlags || [];
   const leftWide = isWideDeck(result.leftLabel);
   const rightWide = isWideDeck(result.rightLabel);

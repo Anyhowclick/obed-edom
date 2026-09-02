@@ -1,9 +1,7 @@
 """What the audience actually reads on a slide.
 
-`inspect_keynote` sees only what Keynote's scripting API exposes: loose text
-items. Anything inside a group, or set as part of an image, comes back empty.
-This module merges that extraction with OCR of the exported preview so every
-text rule compares the rendered slide rather than a partial one.
+inspect_keynote only sees loose text items. Merge with OCR of the exported
+preview so grouped / in-image copy is not invisible to text rules.
 """
 
 from __future__ import annotations
@@ -22,7 +20,7 @@ _STANDALONE_NUMBER = re.compile(r"^\d{1,2}$")
 
 
 def center_wall_box(slide_w: float, slide_h: float) -> tuple[float, float, float, float]:
-    """Slide-space box for the 3840x1080 center wall. Sides outside it are decorative."""
+    """Slide-space box for the 3840×1080 center wall. Sides outside it are decorative."""
     wall_w, wall_h = CENTER_WALL
     if slide_w <= 0 or slide_h <= 0:
         return (0.0, 0.0, 0.0, 0.0)
@@ -41,7 +39,7 @@ def normal_line(text: str) -> str:
 def _pixel_wall_box(
     png: Path, slide_size: tuple[float, float]
 ) -> tuple[float, float, float, float] | None:
-    """Convert the center wall into preview pixels, or None to read the whole frame."""
+    """Center wall in preview pixels, or None to read the whole frame."""
     slide_w, slide_h = slide_size
     if slide_w <= CENTER_WALL[0] or slide_h <= 0:
         return None
@@ -66,13 +64,7 @@ NEAR_DUPLICATE_MIN_CHARS = 18
 
 
 def dedup_lines(lines: list[str]) -> list[str]:
-    """Keep the first occurrence of each line.
-
-    An LW wall repeats the same text box on the left and right of the center
-    panel; without this every verse would look like it was written twice. The
-    mirrored copy is often clipped, so near-duplicates are folded in too, which
-    also stops a half-read verse marker from being taken for a second verse.
-    """
+    """Keep the first occurrence. LW mirrors the same box left and right of the center panel."""
     from obed_edom.text_diff import text_score  # noqa: PLC0415
 
     seen: set[str] = set()
@@ -88,8 +80,6 @@ def dedup_lines(lines: list[str]) -> list[str]:
         seen.add(key)
         kept.append((key, line.strip()))
 
-    # A clipped mirror reads as a fragment of the full line, and OCR drops the
-    # space after a verse marker often enough that similarity alone misses it.
     squashed = [(key.replace(" ", ""), text) for key, text in kept]
     out: list[str] = []
     for index, (bare, text) in enumerate(squashed):
@@ -106,11 +96,7 @@ def dedup_lines(lines: list[str]) -> list[str]:
 def _slide_box_of(
     line, wall: tuple[float, float, float, float], slide_size: tuple[float, float]
 ) -> tuple[float, float, float, float]:
-    """An OCR line's box in slide coordinates.
-
-    Vision normalises to the image it was handed, which is the center-wall crop
-    on a wide LW export, so the crop's slide rect is what the fractions span.
-    """
+    """OCR line box in slide coordinates. Vision fractions span the center-wall crop on a wide LW export."""
     if wall[2] > wall[0]:
         x0, y0, x1, y1 = wall
     else:
@@ -126,12 +112,7 @@ def _slide_box_of(
 
 
 def _outside_photos(lines, slide: dict, slide_size: tuple[float, float]) -> list[str]:
-    """OCR lines that are not sitting inside a pasted graphic.
-
-    Text baked into a screenshot belongs to the `photo.*` rules, which compare
-    the picture itself. Reading it as slide copy turns a stylised logo into a
-    wording difference every time OCR spells it differently.
-    """
+    """OCR lines not sitting inside a pasted graphic. Baked-in screenshot text belongs to ``photo.*``."""
     if not lines:
         return []
     from obed_edom.photo_regions import content_regions  # noqa: PLC0415
@@ -163,8 +144,7 @@ class RenderedSlide:
     ocr: str
     ocr_used: bool = False
     lines: tuple[str, ...] = field(default_factory=tuple)
-    # `text` minus OCR that lands inside a pasted graphic. Used for the wording
-    # diff so a stylised logo does not read as rewritten copy.
+    # ``text`` minus OCR that lands inside a pasted graphic (wording diff).
     outside_photos: str = ""
 
     @property
@@ -173,11 +153,7 @@ class RenderedSlide:
 
     @property
     def typed(self) -> str:
-        """`extracted` with the wall's mirrored boxes folded, as `text` already is.
-
-        The LW repeats a verse box either side of the center panel, so the raw
-        extraction reads as the verse written twice.
-        """
+        """``extracted`` with mirrored wall boxes folded, as ``text`` already is."""
         return "\n".join(dedup_lines([ln for ln in self.extracted.split("\n") if ln.strip()]))
 
 
@@ -220,8 +196,6 @@ def _merge_ocr(extracted_lines: list[str], ocr_text_lines: list[str]) -> list[st
         key = normal_line(line)
         if not key or (covered and key in covered):
             continue
-        # An OCR line that swallows an extracted one saw more than the scripting
-        # API did, e.g. a point number set as part of the title graphic.
         superset = next(
             (
                 index
@@ -238,10 +212,7 @@ def _merge_ocr(extracted_lines: list[str], ocr_text_lines: list[str]) -> list[st
 
 
 def point_number_lines(source: RenderedSlide | str) -> set[str]:
-    """Standalone point numbers, e.g. the '3' beside a Faith title on the wall.
-
-    LW carries them; the DSK lower third does not. They are layout, not copy.
-    """
+    """Standalone point numbers (LW layout, not copy). The DSK lower third does not carry them."""
     if isinstance(source, RenderedSlide):
         lines = source.lines
     else:
@@ -258,11 +229,7 @@ def word_is_small_caps(
     word: str,
     slide_size: tuple[float, float] = (0.0, 0.0),
 ) -> bool | None:
-    """Is every rendering of `word` on this slide set in small caps?
-
-    None when the shape could not be measured, so callers stay quiet rather
-    than guess.
-    """
+    """True if every rendering of ``word`` is small-caps. None when unmeasured (do not guess)."""
     if not png:
         return None
     box = _pixel_wall_box(Path(png), slide_size)

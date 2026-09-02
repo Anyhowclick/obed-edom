@@ -71,12 +71,10 @@ def _split_run_clean(run, local_index: int) -> None:
 
 
 def _apply_ops(paragraph, ops: list[_Op]) -> None:
-    """Apply delete/insert ops using original coordinates, right to left."""
     if not ops:
         return
     ordered = sorted(ops, key=lambda o: (o.start, o.order), reverse=True)
     for op in ordered:
-        # Refresh run map each time because previous splits changed the tree.
         mapping = _run_map(paragraph)
         if not mapping and op.start == 0 and op.end == 0:
             for text, hl in reversed(op.tags):
@@ -122,7 +120,6 @@ def _apply_ops(paragraph, ops: list[_Op]) -> None:
             insert_after = anchor._element if anchor is not None else None
             _insert_runs(paragraph, insert_after, op.tags)
         else:
-            # Pure insert at op.start. Leave a space before the original text when needed.
             tags = list(op.tags)
             if tags:
                 last_text, last_hl = tags[-1]
@@ -176,13 +173,11 @@ def _highlight_for(tag: str) -> str:
 def _cue_ops_for_block(draft, specs: list[SlideSpec]) -> _Op | None:
     cue_specs = [s for s in specs if s.bind == "cue"]
     if not cue_specs:
-        # Still delete the semantic cue (e.g. [VERSE] whose slides bind to the body).
         if draft.cue_tag in SEMANTIC_TAGS:
             return _Op(start=draft.cue_offset, end=draft.cue_end, tags=[], order=0)
         return None
     tags: list[tuple[str, str]] = []
     seen: list[str] = []
-    # Keep deck order: LW then DSK, PRE before anything else at the cue.
     ordered = sorted(
         cue_specs,
         key=lambda s: (0 if s.deck == "lw" else 1, 0 if s.role == "pre" else 1, s.chunk_index),
@@ -197,7 +192,6 @@ def _cue_ops_for_block(draft, specs: list[SlideSpec]) -> _Op | None:
 
 
 def _chunk_search_needle(spec: SlideSpec) -> str:
-    """Distinctive leading text of a verse chunk, without a leading verse number."""
     body = re.sub(r"\s+", " ", (spec.body or "").replace("\xa0", " ")).strip()
     body = re.sub(r"^\d+\s*", "", body)
     body = re.sub(r"^[.…\s]+", "", body).strip()
@@ -260,7 +254,6 @@ def _locate_verse_chunk(
 
 
 def _verse_positions(outline: OutlineDoc, para_indices: list[int]) -> list[tuple[int, int, str]]:
-    """Return (para_index, offset, verse_number) for superscript verse numbers."""
     wanted = set(para_indices)
     found: list[tuple[int, int, str]] = []
     for para in outline.paragraphs:
@@ -296,10 +289,8 @@ def _body_insert_ops(
     specs: list[SlideSpec],
     cue_spans: dict[int, tuple[int, int]] | None = None,
 ) -> dict[int, list[_Op]]:
-    """Insert operator tags at each chunk start in verse body paragraphs."""
     by_para: dict[int, list[_Op]] = {}
-    # POST uses the same [LW]/[DSK-PP] labels as the following verse slides.
-    # Putting those on the verse line doubles cues; PRE already marks the point.
+    # POST shares [LW]/[DSK-PP] with the following verse; putting them on the verse line doubles cues.
     body_specs = [s for s in specs if s.bind == "verse_body" and s.role == "verse"]
     if not body_specs:
         return by_para
@@ -353,7 +344,6 @@ def annotate_outline(
     dsk: list[SlideSpec],
     dest: Path,
 ) -> Path:
-    """Copy the source outline and replace semantic cues with operator [LW]/[DSK] tags."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(outline.path, dest)
@@ -401,7 +391,6 @@ def annotate_outline(
 
 
 def extract_operator_cues(path: Path | str) -> list[str]:
-    """Flatten operator cue tags in document order (for tests / golden checks)."""
     doc = Document(str(path))
     tags: list[str] = []
     for para in doc.paragraphs:

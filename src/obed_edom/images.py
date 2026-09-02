@@ -20,7 +20,6 @@ def _key(path: Path) -> tuple[str, int, int] | None:
 
 
 def open_rgb(path: Path | str) -> Image.Image:
-    """Decoded RGB image. Callers must not close or mutate the returned object."""
     png = Path(path)
     key = _key(png)
     if key and key in _CACHE:

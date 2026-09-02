@@ -298,9 +298,7 @@ export async function startResize(
   return res.json();
 }
 
-/** One page's framing answer. `templateSlide` is set only when state is "pinned".
- * `keepSideContent` whitelists the page to keep its LW side-panel content, and is
- * independent of framing state — an auto page can still be whitelisted. */
+/** One page's framing answer. `templateSlide` only when pinned. `keepSideContent` is orthogonal. */
 export type FramingDecision = {
   wallIndex: number;
   state: "auto" | "pinned" | "deferred";
@@ -318,7 +316,6 @@ export async function saveResizeFramings(jobId: string, decisions: FramingDecisi
   return res.json();
 }
 
-/** Phase two: remap with the confirmed framings. Saves them first if given. */
 export async function applyResize(jobId: string, decisions?: FramingDecision[]): Promise<Job> {
   const res = await fetch(`/api/resize/${jobId}/apply`, {
     method: "POST",

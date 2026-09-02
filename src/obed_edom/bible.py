@@ -229,7 +229,6 @@ def _content_tokens(text: str) -> set[str]:
 
 
 def _token_overlap(a: str, b: str) -> float:
-    """How much of the outline wording appears in the fetched passage."""
     ta = _content_tokens(a)
     tb = _content_tokens(b)
     if not ta or not tb:
@@ -296,8 +295,7 @@ def _parse_gateway_html(html: str) -> str:
     chunk = re.sub(
         r"(?is)<sup[^>]*class=['\"][^'\"]*crossreference[^'\"]*['\"][^>]*>.*?</sup>", "", chunk
     )
-    # Bible Gateway sets the divine name in small caps. Flattening it to "Lord"
-    # would lose the very distinction the house style cares about.
+    # Bible Gateway small-caps the divine name; flatten to UPPER, not "Lord".
     chunk = re.sub(
         r"(?is)<span[^>]*class=['\"][^'\"]*small-caps[^'\"]*['\"][^>]*>(.*?)</span>",
         lambda m: re.sub(r"(?is)<[^>]+>", "", m.group(1)).upper(),
@@ -318,7 +316,6 @@ def _parse_gateway_html(html: str) -> str:
 
 
 def _disk_cache_path(key: tuple[str, int, int, int, str]) -> Path | None:
-    """Passages never change; keep them between runs so re-checks are offline."""
     try:
         from obed_edom.paths import find_repo_root  # noqa: PLC0415
 
@@ -354,7 +351,6 @@ def _write_disk_cache(key: tuple[str, int, int, int, str], text: str) -> None:
 
 
 def fetch_passage(book: str, chapter: int, verse: int, verse_end: int | None, translation: str) -> tuple[str | None, str]:
-    """Return (text, source_label) from Bible Gateway. Never invents wording."""
     wanted = (translation or "NIV").upper()
     if wanted in {"THE MESSAGE", "MESSAGE"}:
         wanted = "MSG"
@@ -486,10 +482,6 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
             cursor.verse_end = hit.verse_end
             if hit.translation:
                 cursor.translation = hit.translation
-            # The cursor position and each book change used to be reported. On a
-            # deck that is one info per reference per slide and says nothing an
-            # operator can act on, so the cursor is now tracked silently.
-            # Track spoken vs heading range mismatches in nearby lines.
             if hit.verse and hit.verse_end:
                 if "turn" in loc.lower() or "bibles" in loc.lower():
                     spoken_range = (hit.verse, hit.verse_end)
@@ -591,7 +583,6 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
 
     abs_hits = [h for h in hits if h.kind == "absolute"]
 
-    # Compare quoted verse bodies on slides against fetched text.
     seen_refs: set[str] = set()
     for draft in outline.blocks:
         if not draft.has_verse_numbers:
@@ -702,9 +693,8 @@ def check_bible(outline: OutlineDoc) -> list[Flag]:
     return flags
 
 
-# A verse number is a small number that starts a sentence on the same line.
-# "120 priests" is followed by a lowercase word, so it never qualifies, and a
-# point number sits alone on its own line, so it is stripped before this runs.
+# Verse number: small digits that start a sentence. "120 priests" fails (lowercase follow).
+# Point numbers sit alone on a line and are stripped first.
 _VERSE_NUMBER = re.compile(r"(?:^|[^\S\n\r])?(\d{1,3})[^\S\n\r]*(?=[A-Z“\"‘'(])", re.MULTILINE)
 _NUMBER_ONLY_LINE = re.compile(r"^\s*\d{1,3}\s*$")
 _LABEL_LINE = re.compile(
@@ -726,7 +716,6 @@ class SlideReference:
 
 
 def slide_reference(text: str) -> SlideReference | None:
-    """Pull the cited passage and quoted verses out of one slide's rendered text."""
     if not (text or "").strip():
         return None
     lines = [ln for ln in text.split("\n") if ln.strip()]
@@ -740,8 +729,6 @@ def slide_reference(text: str) -> SlideReference | None:
             if match.group("translation"):
                 translation = match.group("translation").upper()
             continue
-        # A line holding nothing but a number is the point number on the wall,
-        # not a verse marker.
         if _NUMBER_ONLY_LINE.match(line):
             continue
         body_lines.append(line)
@@ -772,11 +759,7 @@ def _ref_label(book: str, chapter: int, start: int, end: int) -> str:
 def _better_reference(
     quoted: str, ref: SlideReference, baseline: float
 ) -> tuple[str, float] | None:
-    """Look for the passage the wording actually came from.
-
-    A wrong chapter is the common slip (2 Corinthians 2 for 2 Corinthians 1),
-    and the Gospels get confused with each other.
-    """
+    """Wrong chapter is the common slip; Gospels also get swapped."""
     candidates: list[tuple[str, int]] = []
     for delta in (-1, 1):
         if ref.chapter + delta >= 1:
@@ -803,11 +786,7 @@ def _smallcaps_flag(
     png: object = None,
     slide_size: tuple[float, float] = (0.0, 0.0),
 ) -> Flag | None:
-    """NIV sets the divine name as LORD; check the slide really does too.
-
-    Neither Keynote's text nor OCR reports small caps as uppercase, so the
-    answer comes from measuring the letter shapes on the rendered preview.
-    """
+    """NIV sets LORD in small caps; Keynote/OCR report it as \"Lord\" — measure the preview."""
     if "LORD" not in official:
         return None
     if re.search(r"\bLORD\b", quoted):
@@ -838,11 +817,7 @@ def check_slide_passages(
     ocr: dict[int, str] | None = None,
     pngs: dict[int, object] | None = None,
 ) -> list[Flag]:
-    """Verify each slide's quoted verses against Bible Gateway.
-
-    Replaces the old cursor commentary: one finding per slide, only when the
-    wording and the citation disagree.
-    """
+    """One finding per slide when wording and citation disagree."""
     from obed_edom.validate import make_flag  # noqa: PLC0415
 
     flags: list[Flag] = []
@@ -868,8 +843,6 @@ def check_slide_passages(
         )
         quoted = _quote_without_refs(ref.body)
         if official is None:
-            # No text at all usually means the verse does not exist in that
-            # chapter, which is itself the mistake: look for the real chapter.
             better = _better_reference(quoted, ref, 0.0) if "no passage text" in source else None
             if better:
                 flag = make_flag(

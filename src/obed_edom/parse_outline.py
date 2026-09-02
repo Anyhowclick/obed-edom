@@ -75,9 +75,7 @@ _SEMANTIC_NORMALIZE = {
     "NUM POINT": "NUM-POINT",
 }
 
-# Spellings that still parse but should no longer be written. `VERSE-FROM-PREVIOUS`
-# reads almost identically to `VERSE-AFTER-POINT` on a printed script while doing
-# something unrelated: one continues a passage, the other pairs a verse with a point.
+# Still parses; do not write. Easy to confuse with VERSE-AFTER-POINT (point+verse vs continuation).
 DEPRECATED_ALIASES = {
     "VERSE-FROM-PREVIOUS": "VERSE-CONTINUED",
     "VERSE FROM PREVIOUS": "VERSE-CONTINUED",
@@ -93,7 +91,6 @@ def _cue_inner(raw: str) -> str:
 
 
 def deprecated_alias(raw: str) -> str | None:
-    """Canonical cue name when `raw` is a retired spelling, else None."""
     return DEPRECATED_ALIASES.get(_cue_inner(raw))
 
 
@@ -163,7 +160,6 @@ def normalize_cue(raw: str) -> Cue:
 
 
 def _split_paragraph(para: Paragraph) -> list[tuple[str, Cue | None, list[Run]]]:
-    """Split a paragraph into (kind, cue_or_none, runs_in_segment) tokens."""
     full = para.text
     tokens: list[tuple[str, Cue | None, list[Run]]] = []
     matches = list(CUE_RE.finditer(full))
@@ -364,8 +360,6 @@ def _new_draft(
 
 
 class ListNumberResolver:
-    """Resolve Word auto-numbering values (e.g. outline point 9.)."""
-
     def __init__(self, doc: Document):
         self.num_to_abstract: dict[str, str] = {}
         self.abstract_levels: dict[str, dict[str, int]] = {}
@@ -436,11 +430,7 @@ def _literal_point_number(text: str) -> int | None:
 
 
 def _mark_verse_follows(blocks: list[SlideDraft]) -> None:
-    """Link a point to the [VERSE-AFTER-POINT] that Magic Moves out of it.
-
-    Only that cue produces the point-plus-verse slide. A plain [VERSE] after a
-    point is a verse-only slide, so the point stays a static PRE.
-    """
+    """Only [VERSE-AFTER-POINT] is point+verse; a following [VERSE] leaves the point as static PRE."""
     for i, draft in enumerate(blocks):
         if draft.cue_tag not in POINT_TAGS:
             continue
@@ -523,7 +513,6 @@ def parse_outline(path: Path | str) -> OutlineDoc:
                         close_current()
                         current = _new_draft(cue, paragraphs, point_number=para_numbers.get(para.index))
                     else:
-                        # Legacy DSK-only cue: still a content block if no semantic outline.
                         close_current()
                         current = _new_draft(cue, paragraphs, point_number=para_numbers.get(para.index))
                 elif kind == "text":

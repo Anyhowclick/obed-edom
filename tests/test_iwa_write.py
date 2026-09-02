@@ -9,6 +9,17 @@ fields (KN.Show/SlideNode/Slide) so the deck round-trips; the drawable archives
 carry only the geometry the composition rules read. The pure addressing/delta math
 (deleteHides bridge, reconcile base, per-class field builders) is unit-tested
 directly with no deck at all.
+
+Per class: shape writes geometry.size AND naturalSize (Keynote lays out from
+naturalSize). Line length goes in both geometry.size.width and naturalSize.width.
+Group is translation only — never write group w/h. Text y is a centre delta off
+the reported frame. Masked-image crop is axis-aligned only; rotated masks miss
+rather than mis-place.
+
+In-place O_TRUNC preserves inode + com.apple.macl; a new file is refused by
+sandboxed Keynote. Positional addressing refuses the slide on reconcile_counts
+mismatch. obj_diffs < len(edits) is a no-op rewrite; obj_diffs > len(edits) is
+collateral and fails.
 """
 from __future__ import annotations
 

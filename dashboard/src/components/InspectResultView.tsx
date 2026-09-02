@@ -21,7 +21,6 @@ function present(job: Job, label: string): boolean {
   return !job.artifacts?.missing?.includes(label);
 }
 
-/** Slide number a finding belongs to, from the field or the location text. */
 function slideOf(flag: Flag): number | null {
   if (flag.slide != null) return flag.slide;
   return parseSlideTarget(flag.location)?.index ?? null;
@@ -46,8 +45,6 @@ export function InspectResultView({
   const flags = result?.flags || [];
   const outlineFlags = result?.outlineFlags || [];
 
-  // Group by slide so a finding sits next to the slide it is about, the way
-  // the Diff Checker already shows them.
   const { bySlide, deckWide } = useMemo(() => {
     const grouped = new Map<number, Flag[]>();
     const rest: Flag[] = [];

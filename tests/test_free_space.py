@@ -1,3 +1,16 @@
+"""Pixel occupancy for packing loose CG text (obed_edom.free_space).
+
+Church-name lists live on wall side panels. After the 16:9 crop they have nowhere
+to go, and rect occupancy cannot help: the map image covers the whole CG frame
+while most of it is ocean. Emptiness is therefore pixels — background-coloured
+cells are free — against a raster of the slide with the lists left out.
+
+DEFAULT_CELL=8 at 1920x1080 is a 240x135 grid. DEFAULT_TOLERANCE=38 survives PNG
+noise / Keynote vignette on flat brand navy. DEFAULT_INK_FRACTION=0.12 so
+antialiased coastlines still read as content. overlap>0 means the list is present
+but wants a hand breakup. Never drop text: the least-overlapping slot is used
+and the overlap is reported.
+"""
 from PIL import Image, ImageDraw
 
 from obed_edom.free_space import (

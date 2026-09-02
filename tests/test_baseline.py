@@ -1,3 +1,18 @@
+"""Content identity and pairing reuse (obed_edom.baseline).
+
+Jobs are keyed by id; this module remaps saved slots onto current slides by
+content digest so unchanged pairings carry over.
+
+INSPECT_VERSION is the payload-shape cache partition (v4 = offline IWA + bulk
+geometry). The cache is keyed by deck digest, which says nothing about the
+reader, so without the bump a deck inspected by an older build is reused
+forever. Rotation-value consistency is the v4 reason: JXA reports whole-degree
+rotation, the offline read composes frame+mask angle and carries a sub-degree
+residual on masked images — mixing v3 JXA with a fresh offline payload churns
+deck_slide_digests and fires photo-tilt. Keynote's app version is the other half
+of "the reader" (.k<version> tag). Untagged payloads were 14.5 and are no longer
+read.
+"""
 from pathlib import Path
 
 from obed_edom.baseline import (

@@ -14,7 +14,6 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
 
 export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   generate: "Open in Generator",
-  // Saved Diff Checker runs open in the Sermon Checker, which absorbed it.
   diff: "Open in Sermon Checker",
   visual: "Open in Visual Checker",
   check: "Open in Sermon Checker",

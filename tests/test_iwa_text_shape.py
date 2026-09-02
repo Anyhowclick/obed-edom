@@ -5,6 +5,17 @@ exercised on synthetic IWA archive dicts (no keynote-parser, no Keynote). The Ap
 text engine is a real dependency of the shaping paths, so tests that actually shape
 are skipped when the ``AppKit`` pyobjc bridge is not importable (e.g. off macOS);
 the frame-mode and no-style paths need no AppKit and always run.
+
+geometry.flags: 0x1 width fixed, 0x2 height fixed. flags==1 is top-anchored
+(x,y=frame; w=naturalSize.width; h=shaped). flags==0 is centre-anchored
+(x,y = anchor − size/2) and is gated autowidth-soft. Height = layout*m + b*size;
+wrap at width − 2*TEXT_INSET. Do not set paragraph indents on NSParagraphStyle —
+wrap-width arithmetic already subtracts them.
+
+ArgentCF is SINGLE_LINE_ONLY (slope under-determined). Mixed-run boxes are
+approximated from the leading run (accepted residual). Wiring: a vouched box's
+geom_source must sit outside offline_inspect.SOFT_GEOM_SOURCES; an unvouched box
+must never be autosize-soft.
 """
 from __future__ import annotations
 

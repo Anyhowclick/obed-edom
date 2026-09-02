@@ -1,9 +1,7 @@
 """Content identity and pairing reuse across checker runs.
 
-Jobs are keyed by id, so matching the same two decks again used to start from
-scratch. This module keys a pairing baseline to the input paths, then remaps
-saved slots onto the current slides by content digest. Unchanged pairings carry
-over; only the gaps are re-aligned.
+Pairings are keyed to input paths, then remapped onto current slides by content
+digest. Unchanged pairings carry over; only the gaps are re-aligned.
 """
 
 from __future__ import annotations
@@ -21,36 +19,9 @@ from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
 HASH_CACHE_VERSION = 1
-# Bump whenever the payload shape changes — whether the change is in
-# inspect_keynote.js or in Python post-processing. (v3 came from Python:
-# iwa_runs.attach_runs now populates per-run character style in item["runs"],
-# which the JS never touched. v4: the Sermon Checker's cold inspect switched to the
-# offline IWA read + a slim bulk-geometry pass (inspect.inspect_keynote_checker). The
-# reason for the bump is rotation-VALUE CONSISTENCY: JXA reports whole-degree rotation
-# read from the app, while the offline read *composes* frame+mask angle and carries a
-# sub-degree residual on masked images that survives rounding — so a v3 JXA payload on
-# one side of a checker comparison and a fresh offline payload on the other could churn
-# deck_slide_digests and spuriously fire the photo-tilt flag. The one-time all-offline
-# re-read forces both sides onto the same rotation convention. (The offline payload also
-# omits group childCount/children, but that is harmless — only the resizer's
-# coincident_duplicate_ids reads them, and never on a checker deck.))
-# The cache is keyed by deck digest, which says nothing about the reader that
-# produced it, so without this a deck inspected by an older build is reused
-# forever — a payload captured before duplicate-shape marking existed would never
-# gain it.
-#
-# Our own build is only half of "the reader". Keynote's version is the other, and
-# it moves without us: a digest-keyed hit would otherwise hand a payload from one
-# Keynote build to a run of another, and an upgrade would look like it changed
-# nothing. Hence the `.k<version>` tag below, which partitions the cache per app
-# version instead.
-#
-# Untagged payloads predate the tag, were produced by Keynote 14.5, and are no
-# longer read at all now that the tool is 15.x only.
+# Bump on payload-shape change. Digest-keyed cache; `.k<version>` partitions Keynote builds. Untagged = 14.5, unread.
 INSPECT_VERSION = 4
-# Bump when the shape of the cached template stat-size map changes. Keyed per
-# Keynote version too (via the `.k<version>` tag), since the sizes are read out
-# of the template by AppleScript and a different build could read them differently.
+# Bump on template stat-size map shape change. Also `.k<version>` (AppleScript read).
 TEMPLATE_STAT_VERSION = 1
 DIGEST_LEN = 16
 
@@ -59,13 +30,7 @@ CACHE_DIR_ENV = "OBED_EDOM_CACHE_DIR"
 
 
 def cache_root(root: Path | None = None) -> Path:
-    """Where inspect payloads, previews and pairings live.
-
-    Deliberately outside `output/`. Reading a wall deck costs minutes — 63 for the
-    six gold decks — and it used to sit in `output/.cache`, so a tidy-up of the
-    output folder threw away an hour of Keynote time. `OBED_EDOM_CACHE_DIR` moves
-    it, e.g. onto an external disk.
-    """
+    """Inspect payloads, previews, pairings. Outside ``output/`` so a tidy-up cannot throw away Keynote time."""
     if root is not None:
         return Path(root) / ".cache"
     override = (os.environ.get(CACHE_DIR_ENV) or "").strip()
@@ -85,7 +50,7 @@ def _app_tag(app_version: str | None = None) -> str:
 def inspect_cache_path(
     digest: str, root: Path | None = None, app_version: str | None = None
 ) -> Path:
-    """Where a payload produced by this Keynote version is read and written."""
+    """Payload produced by this Keynote version."""
     name = f"{digest}.v{INSPECT_VERSION}.k{_app_tag(app_version)}.json"
     return cache_root(root) / "inspect" / name
 
@@ -93,19 +58,14 @@ def inspect_cache_path(
 def preview_cache_dir(
     digest: str, root: Path | None = None, app_version: str | None = None
 ) -> Path:
-    """Where previews exported by this Keynote version are read and written."""
+    """Previews exported by this Keynote version."""
     return cache_root(root) / "previews" / f"{digest}.k{_app_tag(app_version)}"
 
 
 def template_stat_cache_path(
     digest: str, root: Path | None = None, app_version: str | None = None
 ) -> Path:
-    """Where a template's ``{number: font size}`` map is cached, per Keynote version.
-
-    ``read_template_stat_sizes`` opens the (invariant) CG template on every remap
-    just to read grouped stat sizes; keying that read by the template's content
-    digest lets a repeat run return the map without opening Keynote at all.
-    """
+    """Cached ``{number: font size}`` map for the CG template, per Keynote version."""
     name = f"{digest}.v{TEMPLATE_STAT_VERSION}.k{_app_tag(app_version)}.json"
     return cache_root(root) / "template_stat" / name
 
@@ -113,11 +73,7 @@ def template_stat_cache_path(
 def wall_thumb_dir(
     digest: str, root: Path | None = None, app_version: str | None = None
 ) -> Path:
-    """Downscaled wall previews, for showing a framing in the browser.
-
-    A wall preview is 7680x1080 and about 9 MB, so ten of them on one page is
-    ~90 MB. These are the same images at a size a row can display.
-    """
+    """Downscaled wall previews for the framing UI. Full wall PNGs are 7680×1080."""
     return cache_root(root) / "wallthumbs" / f"{digest}.k{_app_tag(app_version)}"
 
 
@@ -211,15 +167,7 @@ def deck_slide_digests(payload: dict) -> list[str]:
         for item in _walk_items(slide):
             if (item.get("kind") or "") != "image":
                 continue
-            # Deliberately NO geometry (rotation, position OR size): this is the
-            # slide-IDENTITY fingerprint that decides which slides PAIR, and it
-            # compares a deck to ITSELF across runs (index_map). Offline-composed
-            # geometry can differ from JXA on masked/rotated/autosize reads, so
-            # folding x/y/w/h (or rotation) in churned the digest and floated an
-            # UNEDITED slide out of order in the checker. fileName is the stable
-            # image identity; a genuine move/resize/flip is a real discrepancy, but
-            # it is caught by the image COMPARISON of the paired slides, not by this
-            # ordering key. (framing.reuse_framings consumes this via index_map too.)
+            # Identity only: no geometry. Offline vs JXA frames would churn pairing of unedited slides.
             images.append(str(item.get("fileName") or ""))
         images.sort()
         skipped = "1" if slide.get("skipped") else "0"
@@ -319,12 +267,7 @@ def normalize_slot(slot: dict) -> dict:
 
 
 def index_map(old: list[str], new: list[str]) -> dict[int, int]:
-    """Map old indices onto new ones.
-
-    Equal runs from SequenceMatcher cover insertions, deletions and in-place
-    edits. Digests that appear exactly once on each leftover side cover a
-    reorder of unique slides.
-    """
+    """Map old indices onto new ones. Equal runs plus unique leftover digests cover insert/delete/reorder."""
     import difflib  # noqa: PLC0415
 
     mapping: dict[int, int] = {}
@@ -368,15 +311,7 @@ def remap_slots(
 
 
 def insert_unpaired(slots: list[dict], n_left: int, n_right: int) -> list[dict]:
-    """Put leftover slides into the playlist in deck order, as unpaired rows.
-
-    Each surviving row flushes only the dimension it anchors: a left-only row
-    flushes leftover LW slides up to its own left index and leaves the DSK side
-    alone (and a right-only row vice-versa). Using ``n_right``/``n_left`` as the
-    limit for the dimension a one-sided row does NOT anchor made that row a
-    "flush everything" barrier — it dumped every later leftover of the opposite
-    deck in front of it, which floated an edited slide to the top of the diff.
-    """
+    """Insert leftover slides in deck order. A one-sided row flushes only the side it anchors."""
     used_left = {int(s["leftIndex"]) for s in slots if s.get("leftIndex") is not None}
     used_right: set[int] = set()
     for slot in slots:

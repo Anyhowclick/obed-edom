@@ -42,7 +42,6 @@ def load_rules() -> dict:
 
 
 def rule_severity(rule: str, default: str = "warning") -> str | None:
-    """Configured severity for a rule id, or None when the rule is switched off."""
     configured = (load_rules().get("rules") or {}).get(rule, default)
     text = str(configured).strip().lower()
     if text in {"off", "none", "false", "silent"}:
@@ -71,7 +70,6 @@ def make_flag(
     evidence: str = "",
     resolved: str | None = None,
 ) -> Flag | None:
-    """Build a Flag honouring the configured severity. None when the rule is off."""
     severity = rule_severity(rule, default)
     if severity is None:
         return None
@@ -120,17 +118,7 @@ def validate_outline(outline: OutlineDoc) -> list[Flag]:
 
 
 def validate_outline_paragraphs(outline: OutlineDoc) -> list[Flag]:
-    """Outline findings pinned to the paragraph they are about.
-
-    `validate_outline` reports against the whole document, which is fine for a
-    review PDF but leaves the dashboard nothing to sit a finding beside. Style
-    rules run per paragraph here; the Bible check stays whole-document because
-    its cursor is what resolves a relative reference like "Instead, v33", and
-    its hits are mapped back afterwards.
-
-    Scoped with `deck="outline"` and a 1-based paragraph in `slide`, so the
-    existing Flag plumbing carries them with no new fields.
-    """
+    """Style per paragraph; Bible stays whole-document then remapped. `deck=\"outline\"`, 1-based `slide`."""
     flags: list[Flag] = []
     for para in outline.paragraphs:
         text = (para.text or "").strip()
@@ -156,11 +144,6 @@ def validate_outline_paragraphs(outline: OutlineDoc) -> list[Flag]:
 
 
 def _bible_flags_by_paragraph(outline: OutlineDoc) -> list[Flag]:
-    """Re-pin whole-document Bible findings onto their paragraph.
-
-    `check_bible` sets `location` to the line it found, and `full_text` is a
-    newline join of the paragraphs, so the line is the paragraph.
-    """
     lookup: dict[str, int] = {}
     for para in outline.paragraphs:
         key = (para.text or "").strip()
@@ -190,7 +173,6 @@ def validate_inspect(
     rendered: dict[int, str] | None = None,
     ocr: dict[int, str] | None = None,
 ) -> list[Flag]:
-    """House-style checks for one inspected Keynote. Never modifies the deck."""
     from obed_edom.diff_keynotes import map_preview_pngs  # noqa: PLC0415
     from obed_edom.rendered import render_slide  # noqa: PLC0415
 
@@ -254,11 +236,7 @@ def validate_inspect(
 
 
 def dedupe_flags(flags: list[Flag]) -> list[Flag]:
-    """One finding per slide per message.
-
-    A wall slide holds the same text box twice, once per side of the center
-    panel, so every box-level rule would otherwise report itself twice.
-    """
+    """One finding per slide per message (LW duplicates the same box on both sides)."""
     seen: set[tuple] = set()
     out: list[Flag] = []
     for flag in flags:
@@ -271,7 +249,6 @@ def dedupe_flags(flags: list[Flag]) -> list[Flag]:
 
 
 def _glossary_flags(text: str, location: str, slide: int, deck: str) -> list[Flag]:
-    """Catch near-misses of house proper nouns, e.g. First Loved Conference."""
     entries = load_rules().get("glossary") or []
     if not text.strip() or not entries:
         return []
@@ -283,8 +260,6 @@ def _glossary_flags(text: str, location: str, slide: int, deck: str) -> list[Fla
         words = wanted.split()
         if len(words) < 2:
             continue
-        # Anchor on the distinctive tail so "First Loved Conference" is compared
-        # with "First Love Conference" but unrelated slides are left alone.
         anchor = re.escape(words[-1])
         head = re.escape(words[0])
         near = re.search(rf"{head}\w*(?:\s+\S+){{0,2}}\s+{anchor}", text, re.I)
@@ -333,18 +308,7 @@ def _overflow_cfg() -> dict:
 def _wrap_line_count(
     text: str, box_width: float, font_size: float, em: float, tolerance: float = 1.15
 ) -> int:
-    """Estimate how many display lines the text occupies.
-
-    Trusts the authored line breaks: `objectText()` returns hard paragraph
-    breaks as `\\n` (soft/visual wraps are not returned), so a box that was laid
-    out with its lines already breaking where the author put them should be
-    counted as those lines, not re-wrapped from scratch. Re-wrapping with a
-    per-character width guess is where the noise came from — a proportional font
-    is narrower than `char_em` assumes, so a line that fits was split into two
-    and the box looked overflowed. A paragraph is only wrapped when its estimated
-    width clearly exceeds the box (a genuinely flowing line with no breaks, e.g.
-    a pasted MSG paragraph), and then by word packing.
-    """
+    """Authored `\\n` is a hard break. Re-wrap only when estimated width clearly exceeds the box."""
     if not (text or "").strip():
         return 0
     if box_width <= 0 or font_size <= 0:
@@ -357,7 +321,6 @@ def _wrap_line_count(
             lines += 1
             continue
         if len(para) * font_size * em <= box_width * tolerance:
-            # The authored line fits its box; keep it as one line.
             lines += 1
             continue
         current = 0
@@ -407,7 +370,6 @@ def _overflow_message(spec: SlideSpec, n: int, limit: int) -> str:
 
 
 def validate_slide_specs(lw: list[SlideSpec], dsk: list[SlideSpec], masters: dict | None = None) -> list[Flag]:
-    """Flag copy that will not fit the mapped Keynote box. Does not rewrite decks."""
     cfg = _overflow_cfg()
     if not cfg["enabled"]:
         return []
@@ -468,13 +430,7 @@ def _inspect_overflow_flags(
     cfg = _overflow_cfg()
     if not cfg["enabled"]:
         return []
-    # Keynote grows a text box to fit its copy, so an over-count against box_h
-    # cannot tell a wrapped-but-visible box from a clipped one. What is actually
-    # broken is text that leaves the canvas, so flag only when the box runs off
-    # the top or bottom edge. slideHeight defaults to the 1080-tall center wall.
     slide_height = float(payload.get("slideHeight") or 1080)
-    # A box laid out flush to an edge can end a couple of px past it from leading
-    # and rounding; require a small margin so that does not false-positive.
     slack = cfg["height_slack_px"]
     flags: list[Flag] = []
     for item in slide.get("items") or []:
@@ -546,7 +502,6 @@ def _trinity_flags(
                 deck=deck,
             ),
         )
-    # Avoid every “father”; flag lowercase “father” near God/Lord/pray.
     window = 40
     for match in LOWER_FATHER.finditer(text):
         ctx = text[max(0, match.start() - window) : match.end() + window].lower()
@@ -596,7 +551,6 @@ def _book_name_flags(
 ) -> list[Flag]:
     flags: list[Flag] = []
     mapping = (rules.get("book_names") or {}) if rules else {}
-    # Psalms → Psalm (as a book label, not the word in a sentence like "the psalms")
     if re.search(r"\bPsalms\s+\d", text) or re.search(r"\bPsalms\b", text):
         want = mapping.get("Psalms", "Psalm")
         _keep(
@@ -606,7 +560,6 @@ def _book_name_flags(
                 location=location, slide=slide, deck=deck,
             ),
         )
-    # House style: Revelations, not Revelation
     if re.search(r"\bRevelation\s+\d", text) and not re.search(r"\bRevelations\s+\d", text):
         want = mapping.get("Revelation", "Revelations")
         _keep(
@@ -725,14 +678,7 @@ def _highlight_punctuation_flags(
 
 
 def _is_accent_colour(color: str | None) -> bool:
-    """True for a direct RGB colour that is not (near-)black.
-
-    `_color_of` only reports a direct `color.rgb`, so an inherited/theme colour
-    arrives as None and is left alone. An explicit black run IS default text, so
-    near-black is excluded. Word theme accent colours (yellow/cyan applied via a
-    theme, not direct RGB) come back None here and are invisible to this check —
-    bold/italic/highlight are the reliable signals for those.
-    """
+    """Direct RGB that is not near-black. Theme/inherited colours arrive as None."""
     if not color:
         return False
     hexval = str(color).lstrip("#")
@@ -748,13 +694,7 @@ def _is_accent_colour(color: str | None) -> bool:
 def _punctuation_style_flags(
     para: Paragraph, location: str, deck: str = "", slide: int | None = None
 ) -> list[Flag]:
-    """Punctuation should carry default text colour & style, not bold/italic/highlight.
-
-    Runs on a finalized inspected deck have no per-character style, so this runs
-    on the outline `Run` layer where bold/italic/highlight/colour survive. Scoped
-    to a run that is entirely punctuation, so a mark inside a bold word ("Amen!",
-    one run) is left alone — only a standalone punctuation run is flagged.
-    """
+    """Standalone punctuation runs only; a mark inside a bold word is left alone."""
     flags: list[Flag] = []
     for run in para.runs:
         if not run.text.strip() or not PUNCT_ONLY.match(run.text):
@@ -775,14 +715,12 @@ def _punctuation_style_flags(
     return flags
 
 
-# A sliver of a bounding box past an edge is shadow and letter overhang, not a
-# cut-off object. Only flag when a viewer would actually see something missing.
+# Sliver past an edge is shadow/overhang; flag only a visible cut.
 CUT_FRACTION = 0.05
 CUT_MIN_PX = 24
 
 
 def _cut_share(lo: float, hi: float, edge_lo: float, edge_hi: float) -> float:
-    """Fraction of an object's width/height that falls outside a boundary pair."""
     span = hi - lo
     if span <= 0:
         return 0.0
@@ -791,7 +729,6 @@ def _cut_share(lo: float, hi: float, edge_lo: float, edge_hi: float) -> float:
 
 
 def _is_backdrop(item: dict, slide_w: float, slide_h: float, wall_w: float) -> bool:
-    """Full-bleed art and panel-sized fillers are meant to run to the edges."""
     name = str(item.get("fileName") or "")
     if re.search(r"(filler|blank|background|bg[_\- ])", name, re.I):
         return True
@@ -799,7 +736,6 @@ def _is_backdrop(item: dict, slide_w: float, slide_h: float, wall_w: float) -> b
     h = float(item.get("h") or 0)
     if slide_h and h >= slide_h - 1:
         return True
-    # A 1920-wide panel graphic on a 7680 wall is one physical screen.
     panel = slide_w / 4 if slide_w >= wall_w * 2 else slide_w
     return bool(panel and abs(w - panel) < 2 and h >= slide_h - 2)
 
@@ -812,7 +748,7 @@ def _bounds_flags(
     png_map: dict[int, Path] | None = None,
     evidence_dir: Path | None = None,
 ) -> list[Flag]:
-    """Flag objects the wall will visibly cut. Objects inside a side panel are fine."""
+    """Objects inside a side panel are fine; flag what the wall will visibly cut."""
     rules = load_rules()
     wall = rules.get("center_wall") or {}
     max_w = float(wall.get("width") or 3840)
@@ -916,7 +852,6 @@ def _bounds_evidence(
     evidence_dir: Path | None,
     name: str,
 ) -> str:
-    """Crop the preview around the object and mark the wall edge. Returns a filename."""
     if not png_map or evidence_dir is None:
         return ""
     png = png_map.get(slide_index)

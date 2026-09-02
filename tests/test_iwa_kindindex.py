@@ -4,6 +4,20 @@ The classification / ordering / guard logic is pure and exercised WITHOUT keynot
 by building synthetic IWA drawable dicts. A local-only integration test reproduces the
 addressing on a real deck and diffs it against that deck's cached exact-bytes JXA payload
 when the deck, the parser, and the cached payload are all present.
+
+KIND_ORDER is the same six kinds, same order as inspect_keynote.js collectItems
+(text, image, shape, movie, group, line). Tables/charts are omitted because JXA
+never enumerates them.
+
+Membership: isTextBox drives textItems; shapes = not-textbox or custom path;
+a custom-path text box is a dual. A line is an open two-point bezier or a zero
+natural dimension — multi-point freeforms stay shapes.
+
+reconcile_counts is cardinality-only. text/shape/line/movie order is verified;
+image/group order is inferred from the z-order walk and still needs composed
+geometry before a write. Empty title/body placeholders JXA appends last are not
+in drawablesZOrder (TEXT_PLACEHOLDER_SLACK). Full slide 73 is a filled/variation
+box listed in both textItems and shapes — the count guard falls back on it.
 """
 from __future__ import annotations
 

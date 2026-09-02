@@ -1,7 +1,6 @@
 ObjC.import("Foundation");
 
-// Set from the plan in run(). Addressed by bundle id, never by name: 15.x and
-// 14.x both answer to "Keynote" and the name resolves to 14.x.
+// Address by bundle id, never by name (15.x and 14.x both answer to "Keynote").
 let KEYNOTE_BUNDLE_ID = "com.apple.Keynote";
 
 function readJSON(path) {
@@ -34,7 +33,6 @@ function fillTextItems(slide, textItems) {
       try {
         items[idx].objectText = String(value);
       } catch (err) {
-        // Some items are not writable; skip.
       }
     });
 }

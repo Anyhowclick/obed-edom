@@ -58,10 +58,6 @@ export function FlagCard({
   );
 }
 
-/**
- * Findings for one slide or pair. Info findings are the running commentary an
- * operator only wants when they go looking, so they stay behind a chip.
- */
 export function SlideFindings({
   flags,
   jobId,

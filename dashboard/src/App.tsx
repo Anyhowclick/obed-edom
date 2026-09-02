@@ -63,8 +63,6 @@ export function App() {
 
   function openInFeature(feature: FeatureId, jobId: string) {
     setOpenRun({ feature, jobId });
-    // The Diff Checker folded into the Sermon Checker, so runs saved under the
-    // old feature still have somewhere to open.
     setTab(feature === "diff" ? "check" : feature);
   }
 

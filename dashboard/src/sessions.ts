@@ -109,7 +109,6 @@ export function useJobSessions(feature?: string) {
   };
 }
 
-/** Runs saved before the Diff Checker folded into the Sermon Checker. */
 function absorbs(feature: FeatureId, saved: FeatureId): boolean {
   return saved === feature || (feature === "check" && saved === "diff");
 }

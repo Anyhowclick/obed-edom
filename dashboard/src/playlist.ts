@@ -147,7 +147,6 @@ export function placeItem(slots: Slot[], side: "left" | "right", slideIndex: num
   );
 }
 
-/** Fold the next row's first DSK onto this LW. One wall can hold two DSKs. */
 export function combineNext(slots: Slot[], row: number): Slot[] {
   if (row < 0 || row >= slots.length - 1) return slots;
   const here = slots[row];

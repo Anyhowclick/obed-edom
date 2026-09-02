@@ -3,8 +3,21 @@
 The batched AppleScript geometry block is built in pure Python so it can be
 exercised without Keynote. These tests pin the address form (`<kind> N` where
 ``N`` == kindIndex + 1), the line/group special cases, the locked unlock/relock
-scaffold, the timeout wrapper, and that the flag is off by default (so the plan
-that reaches JXA is unchanged).
+scaffold, and the timeout wrapper.
+
+Default ON: no JXA (0,0) yank, ~30% faster (drops setPos readback-verify and
+the second position pass). OBED_AS_GEOMETRY=0 forces legacy JXA, also the
+per-slide fallback for kinds AppleScript can't address.
+
+Position MUST stay a separate LAST write. Setting height re-anchors ~18px about
+the object centre; folding position into an atomic properties record loses that
+ordering. Lines have no re-anchor, so endpoints stay one atomic set. A throw on
+the combined size record loses both width and height — acceptable because both
+are settable on every _AS_KIND_NAMES kind, and the write has its own try.
+
+OBED_SUPPRESS_GEOMETRY: listed non-reuse slides get attrs only (no AS or JXA
+geometry). Without it an empty-asGeom slide falls through to JXA full path.
+Non-numeric tokens are ignored (typo = suppress nothing).
 """
 
 from __future__ import annotations

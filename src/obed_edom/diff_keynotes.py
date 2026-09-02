@@ -42,11 +42,7 @@ _SOFT_WS = re.compile(r"[\s\u2028\u2029\xa0]+")
 
 
 def _deck_type(payload: dict, label: str = "") -> str | None:
-    """Classify a Keynote as lw or dsk. Filename/label beat canvas width.
-
-    GW/LW LED walls are often 1920×1080, same as DSK, so width alone cannot
-    tell mixed-type compares apart.
-    """
+    """Filename/label beat canvas width — GW/LW is often 1920×1080 like DSK."""
     path = str(payload.get("path") or "")
     stem = Path(path).stem.upper().replace("-", "_").replace(" ", "_")
     name = Path(path).name.upper()
@@ -87,11 +83,9 @@ def _iter_items(node: dict):
 
 
 def _layout_only(slide: dict) -> bool:
-    """Blank TITLE/FILLER chrome. Real photos or copy on those masters still count."""
+    """Blank TITLE/FILLER chrome. Real photos or copy still count."""
     if _has_text(slide):
         return False
-    # Keynote reports every group as childCount 0, so a slide whose only content
-    # is a group of screenshots looks empty here. Its bounding box does not lie.
     return not any(
         (item.get("kind") or "") in {"image", "group"}
         and float(item.get("w") or 0) > 0
@@ -105,7 +99,6 @@ def _token_count(slide: dict, *, include_grouped: bool = False) -> int:
 
 
 def _can_positional_pair(left_slide: dict, right_slide: dict) -> bool:
-    """Empty LW graphic vs short DSK title (event thumbs / title cards)."""
     return _token_count(left_slide) <= GRAPHIC_TOKENS and _token_count(right_slide) <= SHORT_TITLE_TOKENS
 
 
@@ -145,17 +138,12 @@ def _pair_quality(
     left_ocr: Callable[[int], str] | None = None,
     right_ocr: Callable[[int], str] | None = None,
 ) -> float:
-    # Grouped copy (childCount 0 to JXA) feeds the SCORING path only, via the IWA
-    # groupedText field: it lets group slides pair on their real text and drops the
-    # OCR fallback below. The reuse fingerprint (deck_slide_digests) never sees it.
     score = text_score(
         slide_plain_text(left_slide, include_grouped=True),
         slide_plain_text(right_slide, include_grouped=True),
     )
     if score >= ALIGN_THRESHOLD:
         return score
-    # Copy set inside a group or baked into a graphic is invisible to Keynote's
-    # API, so those slides look blank and can never find each other on text.
     if left_ocr and right_ocr and not (
         _has_text(left_slide, include_grouped=True) and _has_text(right_slide, include_grouped=True)
     ):
@@ -193,12 +181,7 @@ def align_slides(
     right_size: tuple[float, float] = (0.0, 0.0),
     use_ocr: bool = True,
 ) -> list[tuple[int | None, int | None, float]]:
-    """Walk visible slides. Extra LW photos stay unmatched when a later LW fits.
-
-    Skipped slides are ignored unless a visible slide on the other deck is similar.
-    Title graphics with little extracted text pair positionally with short DSK titles.
-    Photo hash is flip-tolerant for matching only; flips are flagged later.
-    """
+    """Walk visible slides. Extra LW photos stay unmatched when a later LW fits."""
     n_left = len(left_slides)
     n_right = len(right_slides)
     left_map = map_preview_pngs(left_slides, left_pngs or [])
@@ -325,7 +308,6 @@ def align_slides(
 
 
 def _covers(whole: str, parts: str) -> bool:
-    """True when one wall slide carries everything the DSK split over two."""
     if texts_equivalent(whole, parts):
         return True
     have = {t.lower() for t in comparable_tokens(whole)}
@@ -340,11 +322,7 @@ def _combine_split_verses(
     left_slides: list[dict],
     right_slides: list[dict],
 ) -> list[tuple[int | None, int | None | list[int], float]]:
-    """Fold an unmatched DSK slide into the wall slide that already shows it.
-
-    The wall fits two verses side by side where the lower third needs two
-    slides, so the second DSK slide is not missing, it is part of the same pair.
-    """
+    """Fold an unmatched DSK slide into the wall slide that already shows it."""
     out: list[tuple[int | None, int | None | list[int], float]] = []
     i = 0
     while i < len(ordered):
@@ -361,12 +339,8 @@ def _combine_split_verses(
             next_li, next_ri, next_score = ordered[j]
             if next_ri is None:
                 break
-            # A following DSK slide can also be sitting in a weak pair of its
-            # own; take it only when this wall slide clearly already shows it.
             if next_li is not None and next_score >= ALIGN_THRESHOLD:
                 break
-            # Only verses fold in. A text-less photo slide adds no tokens, so
-            # the coverage test would absorb it and hide whatever is on it.
             if not comparable_tokens(slide_plain_text(right_slides[next_ri])):
                 break
             candidate = merged + [next_ri]
@@ -398,7 +372,6 @@ def realign_gaps(
     right_size: tuple[float, float] = (0.0, 0.0),
     use_ocr: bool = True,
 ) -> list[dict]:
-    """Re-run alignment only on leftover rows that sit between surviving pairs."""
     from obed_edom.baseline import normalize_slot, slot_dict, unpaired_gaps  # noqa: PLC0415
 
     gaps = unpaired_gaps(slots)
@@ -433,12 +406,7 @@ def realign_gaps(
 def build_repeat_indices(
     left_slides: list[dict], matched: set[int], window: int = 6
 ) -> set[int]:
-    """Wall slides that only repeat a nearby matched slide's copy.
-
-    Magic Move keeps a point title on screen while the verses change, so the
-    wall carries the same title several times. The DSK carries it once, and
-    calling each repeat a missing slide is noise.
-    """
+    """Wall slides that only repeat a nearby matched slide's copy (Magic Move titles)."""
     visible = [i for i, slide in enumerate(left_slides) if not _skipped(slide)]
     prints = {i: fingerprint(slide_plain_text(left_slides[i])) for i in visible}
     repeats: set[int] = set()
@@ -458,7 +426,6 @@ _TITLE_FILLER = {"and", "or", "the", "a", "an", "to", "of", "your"}
 
 
 def point_title_keys(slides: list[dict]) -> list[str]:
-    """Normalised titles from short PRE slides (point number plus a few words)."""
     titles: list[str] = []
     seen: set[str] = set()
     for slide in slides:
@@ -479,12 +446,7 @@ def point_title_keys(slides: list[dict]) -> list[str]:
 
 
 def strip_carried_point_title(lw_text: str, dsk_text: str, titles: list[str]) -> tuple[str, str | None]:
-    """Drop LW lines that are a carried PRE title, but only on verse slides.
-
-    The point slide itself is left alone so "Faith" vs "Your Faith" still flags.
-    A title word that also appears inside the verse ("saw their faith") is not
-    a reason to keep the standalone title line.
-    """
+    """Drop LW lines that are a carried PRE title, but only on verse slides."""
     if not titles:
         return lw_text, None
     title_set = set(titles)
@@ -552,11 +514,7 @@ def visual_diff(a_png: Path, b_png: Path, out_png: Path, threshold: int = 18) ->
 
 
 def map_preview_pngs(slides: list[dict], pngs: list[Path]) -> dict[int, Path]:
-    """Map 0-based slide index → preview PNG.
-
-    Keynote names exports left.001.png in export order. With skipped slides
-    omitted, file numbers are visible-order, not Keynote slide numbers.
-    """
+    """0-based index → PNG. Sequential files are visible-order, not Keynote numbers."""
     if not pngs:
         return {}
     pngs = list(pngs)
@@ -627,14 +585,12 @@ def _hamming(a: list[int], b: list[int]) -> int:
 
 
 def _hash_distances(left_bits: list[int], right_bits: list[int]) -> tuple[int, int]:
-    """Return (direct hamming, flipped hamming). Flip is matching-only similarity."""
     direct = _hamming(left_bits, right_bits)
     flipped = _hamming(left_bits, _hflip_bits(right_bits))
     return direct, flipped
 
 
 def crop_center_wall(im: Image.Image, slide_w: float, slide_h: float) -> Image.Image:
-    """Keep the center wall; drop LW side wings for pixel/hash compares."""
     x0, y0, x1, y1 = center_wall_box(slide_w, slide_h)
     if x1 <= x0 or y1 <= y0 or slide_w <= 0 or slide_h <= 0:
         return im
@@ -696,8 +652,6 @@ def _image_items(slide: dict) -> list[dict]:
     ]
 
 
-# Backgrounds and chrome that every deck carries. Comparing them across decks
-# only ever produces noise, because LW and DSK use different furniture.
 _CHROME_NAMES = re.compile(r"(filler|blank|background|bg[_\- ]|lower[_\- ]?third|logo|frame)", re.I)
 _LABEL_MAX_HEIGHT = 120
 
@@ -710,17 +664,12 @@ def _is_chrome(item: dict, slide_size: tuple[float, float]) -> bool:
     height = float(item.get("h") or 0)
     slide_w, slide_h = slide_size
     if slide_h and height >= slide_h - 1:
-        # A background fills the whole canvas, and a full-height panel that never
-        # reaches the center wall is a side wing. A photo spanning the wall is
-        # neither, even on a 7680-wide LW where a wing is 1920 across.
         if width >= slide_w - 1 or not _overlaps_center_wall(item, slide_w, slide_h):
             return True
-    # The reference chip behind "2 Chronicles 5" is a pasted image on DSK only.
     return bool(height and height <= _LABEL_MAX_HEIGHT and width and width <= 600)
 
 
 def content_photos(slide: dict, slide_size: tuple[float, float]) -> list[dict]:
-    """Photos an operator would call content, with backgrounds and chrome removed."""
     return [item for item in _image_items(slide) if not _is_chrome(item, slide_size)]
 
 
@@ -750,11 +699,7 @@ def photo_findings_for_pair(
     left_size: tuple[float, float] = (0.0, 0.0),
     right_size: tuple[float, float] = (0.0, 0.0),
 ) -> list[PhotoFinding]:
-    """Compare photos by what Keynote records about them, not by pixels.
-
-    File names catch a stale asset that a pixel hash would call "slightly
-    different", and the rotation field catches a tilt exactly.
-    """
+    """Compare photos by Keynote metadata (file name, rotation), not pixels."""
     left_photos = content_photos(left_slide, left_size)
     right_photos: list[dict] = []
     for slide in right_slides:
@@ -841,7 +786,6 @@ def image_item_diff(
     hamming_limit: int = IMAGE_HAMMING,
     skip_full_frame: bool = False,
 ) -> dict:
-    """Compare photo items after cropping; ignores full-frame layout chrome."""
     left_im, left_crops = _photo_crops(left_slide, left_png, left_size)
     right_im, right_crops = _photo_crops(right_slide, right_png, right_size)
     right_has_text = _has_text(right_slide)
@@ -928,13 +872,6 @@ def image_item_diff(
 
 
 def _smallcaps_words(slide: dict) -> set[str]:
-    """The set of tokens a slide renders in small caps.
-
-    Comparing full ``(text, small)`` run signatures fired on plain text
-    differences (a stacked title vs an inline one) even when neither deck set
-    small caps. Comparing only the words actually marked small caps isolates a
-    real LORD-vs-Lord divergence from a layout difference.
-    """
     words: set[str] = set()
     for item in slide.get("items") or []:
         for run in item.get("runs") or []:
@@ -950,12 +887,6 @@ def _smallcaps_words(slide: dict) -> set[str]:
 def _style_diff_message(
     header: str, verb: str, left: set[str], right: set[str]
 ) -> str | None:
-    """A specific style-difference message, or None when the two sets match.
-
-    Names only the side(s) carrying extra words so the reader sees exactly what
-    diverged instead of a bare "differs". A stray capital is not a style change,
-    so words are matched case-insensitively while the original spelling is shown.
-    """
     left_keys = {canonical_token(w) for w in left}
     right_keys = {canonical_token(w) for w in right}
     left_only = sorted(w for w in left if canonical_token(w) not in right_keys)
@@ -997,16 +928,7 @@ def _skipped(slide: dict | None) -> bool:
 
 
 def _highlighted_run_words(slide: dict) -> set[str]:
-    """Words a slide highlights, read from its colour runs.
-
-    Reads the per-run ``superscript`` flag (absent from the flattened markup), so
-    a coloured verse/point NUMBER — ``superscript == "kSuperscript"`` AND all
-    digits — is dropped as a legitimate numbering style, not word/punctuation
-    highlighting. The field is an enum (``"kSuperscript"`` / ``"kNoScript"`` /
-    ``None``), so match the exact superscript value: a baseline digit
-    (``"kNoScript"``/``None``) is a real number in the copy and IS kept, so
-    highlighting it still counts.
-    """
+    """Drop coloured verse/point NUMBERS with superscript == \"kSuperscript\"."""
     words: set[str] = set()
     for item in slide.get("items") or []:
         for run in item.get("runs") or []:
@@ -1026,16 +948,7 @@ def _canonical_words(text: str) -> set[str]:
 
 
 def _shared_style_words(left_words: set[str], right_words: set[str], shared: set[str]) -> tuple[set[str], set[str]]:
-    """Keep only style-run words the two slides have in common.
-
-    A style difference (highlight, small caps) is only meaningful for a word both
-    slides actually show. A word carried on one deck alone — e.g. LW's point-title
-    theme on the bumper, absent from the DSK lower third — is content the other
-    deck simply does not have, not a divergent style, so comparing on it flags the
-    layout instead of a mistake. Membership in ``shared`` is by canonical form (so
-    a title "Faith" matches a verse's "faith"); the original spelling is kept for
-    display, since ``_style_diff_message`` folds case for the comparison itself.
-    """
+    """Keep style-run words both slides show. Membership is canonical; spelling is kept."""
     keep = lambda words: {w for w in words if canonical_token(w) in shared}
     return keep(left_words), keep(right_words)
 
@@ -1056,27 +969,14 @@ def _share(part: str, whole: str) -> float:
 
 
 def _covers_slide(part: str, whole: str) -> bool:
-    """Does this flavour of the copy account for most of what the slide shows?
-
-    Keynote reports loose text items only, so a verse inside a group comes back
-    as the point number on its own. Diffing that against the other deck's full
-    copy reports the extraction rather than the slide.
-    """
     return _share(part, whole) >= TYPED_COVERAGE
 
 
 def _filter_symmetric(a_clean: str, a_text: str, b_clean: str, b_text: str) -> bool:
-    """Is dropping photo-baked OCR fair to both decks?
-
-    A verse set over a full-bleed photo sits inside a region on the wall and
-    outside one on the lower third. Filtering one deck and not the other reports
-    the filter instead of the slide.
-    """
     return abs(_share(a_clean, a_text) - _share(b_clean, b_text)) <= FILTER_TOLERANCE
 
 
 def wording_message(left: str, right: str, left_label: str, right_label: str) -> str | None:
-    """Back-compat wrapper. New callers should use classify_text_diff directly."""
     finding = classify_text_diff(left, right, left_label, right_label)
     return finding.message if finding else None
 
@@ -1143,7 +1043,6 @@ def _flag_on_pair(flag: Flag, pair: dict) -> bool:
 
 
 def attach_slide_flags(pairs: list[dict], flags: list[Flag]) -> list[Flag]:
-    """Copy slide-scoped findings onto the pair row they belong to."""
     leftover: list[Flag] = []
     for flag in flags:
         if flag.slide is None:
@@ -1417,14 +1316,8 @@ def compare_inspects(
                 text,
             )
 
-        # What Keynote reports is the copy someone typed, so diff that first: it
-        # names "&" against "and" precisely, where the OCR-merged text would only
-        # say the slide reads differently. OCR still gets a pass afterwards for
-        # text the scripting API cannot see, minus anything inside a picture.
         a_typed = a_render.typed
         b_typed = "\n".join(r.typed for r in b_renders)
-        # Exported JPEGs and .movs carry no selectable text, so anything read
-        # from them is an OCR guess. Downstream checks demote on this.
         pair["typed"] = bool(a_typed.strip() or b_typed.strip())
         both_typed = bool(a_typed.strip() and b_typed.strip())
         finding = carried = None
@@ -1473,9 +1366,6 @@ def compare_inspects(
                 if text_flag.severity in {"warning", "error"}:
                     copy_warning = True
         else:
-            # A style run only "differs" on a word both slides carry. Restrict to
-            # the shared vocabulary so LW-only copy (the point-title theme on the
-            # bumper) is not read as a divergent style — see _shared_style_words.
             shared = _canonical_words(slide_plain_text(ls))
             for _, slide in right_hits:
                 shared &= _canonical_words(slide_plain_text(slide))
@@ -1496,8 +1386,6 @@ def compare_inspects(
                     right_small |= _smallcaps_words(slide)
                 left_small = _smallcaps_words(ls)
                 left_small, right_small = _shared_style_words(left_small, right_small, shared)
-                # Only meaningful when Keynote actually returned run styling; on most
-                # decks it returns none and both sides come back empty.
                 if smallcaps_msg := _style_diff_message(
                     "Small caps differ", "small-caps", left_small, right_small
                 ):
@@ -1623,7 +1511,6 @@ def compare_inspects(
                         "warning",
                     )
                 if not same_copy and rule == "photo.differs":
-                    # The copy already differs; a pixel difference adds nothing.
                     rule = ""
                 if rule:
                     _add_flag(

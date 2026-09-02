@@ -1,57 +1,9 @@
-"""INERT save-churn-immune content key for a finalized ``.key`` deck.
+"""Save-churn-immune content keys for a finalized ``.key`` deck.
 
-Nothing consumes this module yet. It exists so a *later* incremental lever
-(``l5-bulk-cache`` / ``incremental-previews``) can cache bulk-geometry rows and
-per-slide previews for slides Keynote did NOT edit, and re-read only the ones that
-changed. The whole value here is the keying scheme's correctness — over-inclusion
-costs only a cache miss, never a stale serve, so every doubtful input stays IN the
-key and the few genuinely-unsafe conditions surface a slide as *uncacheable*.
-
-Raw byte keys are dead: every no-op open+save recompresses and RENUMBERS the object
-ids across the deck's ``Index/*.iwa`` files, so a byte hash of a slide's file (or of
-the global files) churns on every save. This module instead hashes the DECODED,
-id-NORMALIZED object graph:
-
-* **Per-slide key** — a BFS closure from the slide's ``KN.SlideArchive``, following
-  only NUMERIC ``{identifier: N}`` refs (a string ``identifier`` is a style *name*,
-  kept verbatim as content). Each visited object is emitted in BFS *discovery* order
-  with its header id dropped and every numeric ref rewritten to a positional
-  ``{"@ref": <discovery-index>}`` token — so a save's id-renumber washes out while an
-  actual content edit still moves the key. An asset ref (image/movie ``data``) folds
-  in as ``{"@data": "<CRC>:<size>"}`` from the zip central directory, capturing the
-  media bytes without ever reading them. The document position and skip flag are
-  mixed into the hash so a reorder / show-hide moves the key.
-
-  THE ``TSS.StylesheetArchive`` HARD BOUNDARY (:data:`_CLOSURE_BOUNDARY`). Every
-  slide reaches the single ``TSS.StylesheetArchive`` — a mutable name→style-id
-  catalog Keynote recompacts on *every* save (``canCullStyles``). Folding it churned
-  all 42/42 DSK slide keys per no-op save; skipping it entirely (its content is never
-  emitted and its refs are never traversed) gives 0/42 churn with ZERO style-coverage
-  loss, because applied styles are stored by id and reached DIRECTLY by the closure —
-  the catalog is only a name lookup, not rendering content. The boundary is a
-  ``frozenset`` so another recompacted catalog can be added should a future deck's
-  acceptance test trip.
-
-* **Global key** — an id-MASKED canonical form of every NON-slide ``Index/*.iwa``
-  file (masters/templates/``Document.iwa`` stay IN so a theme/master edit still bumps
-  it), minus a tiny, per-file-justified EXCLUSION set (:data:`_GLOBAL_EXCLUDE_EXACT`
-  / :data:`_GLOBAL_EXCLUDE_PREFIX`) — THE one staleness door. Excluded:
-  ``DocumentStylesheet.iwa`` (its styles are folded per-slide; its catalog churns),
-  ``Metadata.iwa`` (preview thumbnails), ``ViewState*.iwa`` (view-only, id-suffixed),
-  ``CalculationEngine`` / ``DocumentMetadata`` / ``AnnotationAuthorStorage`` (all
-  churn, none affect the rendered slide). The masked form replaces every numeric id
-  with a constant token, and files are ordered by their canonical content (not by an
-  id-suffixed filename, which would renumber), so a save's renumber leaves the global
-  key unchanged. Folded alongside are the FONT ENV (rendering depends on the
-  installed fonts, which are absent from the deck) and the OS build. The Keynote app
-  version is NOT folded — it already rides ``baseline._app_tag`` on the cache path.
-
-Public entry point: :func:`fingerprint_deck`.
-
-``keynote_parser`` (the optional ``iwa`` extra) is imported LAZILY, and the font
-resolution is wrapped so the module imports and runs headless; a decode failure
-surfaces as ``ImportError`` for the caller to catch, matching
-:func:`obed_edom.iwa_runs.attach_runs`.
+Byte hashes churn on no-op save (id renumber); hash the decoded id-normalized
+graph. ``TSS.StylesheetArchive`` is a hard closure boundary (recompacts every
+save). The global exclude set is the staleness door; font env + OS are folded
+in, Keynote version is not. Raises ImportError without the ``iwa`` extra.
 """
 from __future__ import annotations
 
@@ -67,15 +19,10 @@ from typing import Any
 
 from obed_edom.offline_inspect import _DATA_MEMBER
 
-# --------------------------------------------------------------------------
-# Constants.
-# --------------------------------------------------------------------------
-# Object types that are a HARD closure boundary: never emitted, never traversed.
-# See the module docstring for why ``TSS.StylesheetArchive`` must be bounded out.
+# Never emitted, never traversed. StylesheetArchive recompacts on every save.
 _CLOSURE_BOUNDARY = frozenset({"TSS.StylesheetArchive"})
 
-# Non-slide files kept OUT of the global key (the one staleness door). Matched on the
-# member's basename: an exact name, or a prefix for the id-suffixed view-state files.
+# Non-slide files kept OUT of the global key (the one staleness door).
 _GLOBAL_EXCLUDE_EXACT = frozenset(
     {
         "DocumentStylesheet.iwa",  # styles folded per-slide; catalog recompacts on save
@@ -87,28 +34,18 @@ _GLOBAL_EXCLUDE_EXACT = frozenset(
 )
 _GLOBAL_EXCLUDE_PREFIX = ("ViewState",)  # ViewState-<id>.iwa — view-only, renumbers
 
-# Float precision the canonical encoder quantizes to, so sub-bit layout noise on a
-# stored coordinate can never move a key.
+# Quantize so sub-bit layout noise cannot move a key.
 _FLOAT_DP = 6
 
-# Fallback when the font APIs are unavailable (headless / no pyobjc bridge). Tests
-# inject ``font_env`` anyway, so this only affects a real headless run.
+# Headless / no pyobjc. Tests inject ``font_env``.
 _FONT_ENV_SENTINEL = "FONT_ENV_UNAVAILABLE"
 
-# Strips the ``-<digits>`` id suffix Keynote embeds in a master/template filename, so
-# the global key's per-file identity survives a save-renumber of that id.
+# Strip ``-<digits>`` so a master/template filename survives save-renumber.
 _FILE_ID_SUFFIX = re.compile(r"-\d+(?=\.[^./]+$)")
 
 
-# --------------------------------------------------------------------------
-# Canonical encoder.
-# --------------------------------------------------------------------------
 def _prepare(node: Any) -> Any:
-    """Recursively quantize floats so the encoder is stable under sub-bit noise.
-
-    ``-0.0`` is folded to ``0.0`` (``+ 0.0``) so a signed zero can't produce two
-    encodings of the same value.
-    """
+    """Quantize floats; fold ``-0.0`` to ``0.0`` so signed zero cannot split a key."""
     if isinstance(node, bool):
         return node
     if isinstance(node, float):
@@ -121,14 +58,7 @@ def _prepare(node: Any) -> Any:
 
 
 def _canon(obj: Any) -> str:
-    """Deterministic JSON of a pre-tagged primitive tree (float-quantized, key-sorted).
-
-    Type tags keep the token spaces disjoint under JSON: a positional ``{"@ref": 0}``,
-    a ``{"@data": "..."}`` asset token, a ``{"@boundary": "..."}`` boundary token, a
-    bare int id and a genuine string style-name each serialize distinctly, so none can
-    collide with another. NEVER uses Python ``hash()`` / set-iteration order (which
-    honour ``PYTHONHASHSEED``); ``sort_keys`` + ``separators`` make it byte-stable.
-    """
+    """Byte-stable JSON (sort_keys). Never Python ``hash()`` / set order (PYTHONHASHSEED)."""
     return json.dumps(_prepare(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
@@ -136,17 +66,8 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# --------------------------------------------------------------------------
-# Numeric-ref detection + structural graph walk (id-independent order).
-# --------------------------------------------------------------------------
 def _ref_id(node: Any) -> str | None:
-    """The referenced id of a ``{"identifier": N}`` ref dict, or ``None``.
-
-    Only a NUMERIC identifier (an int, or an all-digits string as the parser emits)
-    is a ref; a string style-name identifier (e.g. ``"motionBackground-9-..."``) is
-    ordinary content and returns ``None``. The id is normalized to ``str`` to match
-    the ``_load_deck`` maps.
-    """
+    """Numeric ``{"identifier": N}`` only. A string style-name identifier is content, not a ref."""
     if not isinstance(node, dict):
         return None
     ident = node.get("identifier")
@@ -160,13 +81,7 @@ def _ref_id(node: Any) -> str | None:
 
 
 def _iter_refs(node: Any):
-    """Yield every numeric ref id reachable in ``node``, in STRUCTURAL order.
-
-    Dict fields are iterated in sorted-KEY order (field names, never ids) and lists in
-    list order, so the discovery order an object imposes on its refs is independent of
-    the ids themselves — which is what makes a save's renumber wash out. A ref dict
-    yields its own id first, then descends its sibling fields for any nested refs.
-    """
+    """Yield numeric ref ids in structural order (sorted keys, list order) so a renumber washes out."""
     if isinstance(node, dict):
         rid = _ref_id(node)
         if rid is not None:
@@ -183,12 +98,6 @@ def _iter_refs(node: Any):
 
 
 def _transform(node: Any, resolve) -> Any:
-    """Serialize an object's content, rewriting each numeric ref via ``resolve``.
-
-    ``resolve(rid)`` returns the type-tagged token dict for a ref (positional /
-    asset / boundary). A ref dict's sibling fields are preserved (transformed), so a
-    ``{"identifier": N, ...}`` with extra fields keeps them alongside its token.
-    """
     if isinstance(node, dict):
         rid = _ref_id(node)
         if rid is not None:
@@ -206,11 +115,7 @@ def _transform(node: Any, resolve) -> Any:
 
 
 def _mask_transform(node: Any) -> Any:
-    """Serialize an object's content with every numeric ref replaced by a CONSTANT.
-
-    The coarse global-key form: a renumber-immune id-mask (``{"@id": "*"}``) is enough
-    to gate the theme/master surface, and over-inclusion there only costs cache misses.
-    """
+    """Replace every numeric ref with ``{"@id": "*"}`` so a global-key renumber cannot move the hash."""
     if isinstance(node, dict):
         rid = _ref_id(node)
         if rid is not None:
@@ -226,9 +131,6 @@ def _mask_transform(node: Any) -> Any:
     return node
 
 
-# --------------------------------------------------------------------------
-# Per-slide normalized closure + key.
-# --------------------------------------------------------------------------
 def _closure(
     slide_id: str,
     objects: dict[str, dict],
@@ -237,21 +139,7 @@ def _closure(
     pres_files: set[str],
     own_file: str | None,
 ) -> tuple[list[str] | None, dict[str, int] | None, str | None]:
-    """BFS the slide's reachable graph; return ``(order, index_of, reason)``.
-
-    ``order`` is the visited ids in discovery order and ``index_of`` their positions;
-    on an uncacheable condition both are ``None`` and ``reason`` is set:
-
-        * ``cross-slide-ref`` — a followed ref lands in ANOTHER presentation slide's
-          file (the reachability guard; measured ~0 on the gold decks).
-        * ``dangling-ref``    — a numeric ref resolves to neither an object nor a Data
-          id (all safe: a miss, never a stale serve).
-
-    The ``TSS.StylesheetArchive`` boundary is skipped (not traversed, not indexed); a
-    ref to it is later resolved to a stable boundary token. Cycle-safe via a visited
-    set — a shared global style reached from many runs is a DAG and dedups on first
-    reach (NEVER an error).
-    """
+    """BFS reachable graph. Uncacheable: ``cross-slide-ref``, ``dangling-ref``. Boundary skipped, not indexed."""
     order: list[str] = []
     index_of: dict[str, int] = {}
     visited: set[str] = {slide_id}
@@ -287,12 +175,7 @@ def _slide_key(
     data_map: dict[str, tuple[int, int]],
     pres_files: set[str],
 ) -> tuple[str | None, str | None]:
-    """``(key, reason)`` for one presentation slide; ``key`` is ``None`` if uncacheable.
-
-    ``key = sha256( canon(normalized_closure) ⊕ "|pos=<i>|skip=<0/1>" )``. The
-    position + skip flag close the duplicate-slide / slide-number-field hazard and a
-    reorder / show-hide, which the closure alone would not see.
-    """
+    """``(key, reason)``. Mix pos+skip so a reorder / show-hide / duplicate-slide moves the key."""
     if slide_id not in objects:
         return None, "undecodable-slide"
     own_file = id_to_file.get(slide_id)
@@ -317,9 +200,6 @@ def _slide_key(
     return _sha(f"{body}|pos={pos}|skip={int(skipped)}"), None
 
 
-# --------------------------------------------------------------------------
-# Global key.
-# --------------------------------------------------------------------------
 def _is_global_excluded(fname: str) -> bool:
     base = fname.rsplit("/", 1)[-1]
     if base in _GLOBAL_EXCLUDE_EXACT:
@@ -328,7 +208,6 @@ def _is_global_excluded(fname: str) -> bool:
 
 
 def _strip_file_id(fname: str) -> str:
-    """Basename with its ``-<id>`` suffix masked, so a renumbered master file matches."""
     return _FILE_ID_SUFFIX.sub("-@", fname.rsplit("/", 1)[-1])
 
 
@@ -339,13 +218,7 @@ def _global_key(
     font_env: str,
     os_build: str,
 ) -> str:
-    """``sha256( canon([ normalized_globals, font_env, os_build ]) )``.
-
-    ``normalized_globals`` is every non-slide, non-excluded ``Index/*.iwa`` file's
-    id-masked content, each tagged with its id-stripped basename, ORDERED by canonical
-    content (an ordered concatenation, not an xor) so the order survives a renumber.
-    The ``TSS.StylesheetArchive`` boundary is skipped here too.
-    """
+    """Id-masked non-slide Index files + font env + OS. Ordered by content so a filename renumber is inert."""
     entries: list[list[Any]] = []
     for fname, ids in file_ids.items():
         if fname in pres_files or _is_global_excluded(fname):
@@ -361,15 +234,7 @@ def _global_key(
     return _sha(_canon([entries, font_env, os_build]))
 
 
-# --------------------------------------------------------------------------
-# Font env + OS build.
-# --------------------------------------------------------------------------
 def _font_names(objects: dict[str, dict]) -> set[str]:
-    """Every distinct PostScript ``fontName`` referenced anywhere in the deck.
-
-    Scans all objects (slides AND masters) for string ``fontName`` values — the union
-    of names the closures and masters reference, which is what the font env must pin.
-    """
     names: set[str] = set()
 
     def scan(node: Any) -> None:
@@ -389,15 +254,7 @@ def _font_names(objects: dict[str, dict]) -> set[str]:
 
 
 def _compute_font_env(objects: dict[str, dict]) -> str:
-    """A stable string over each referenced font's installed file (URL + mtime + size).
-
-    Rendering depends on the installed fonts, which the deck does not carry, so a
-    font install/update/removal must move the global key. Uses ``_ns_font`` to resolve
-    the NSFont and ``CTFontDescriptorCopyAttribute(kCTFontURLAttribute)`` for the file;
-    a missing font becomes ``MISSING:<name>`` (so a later install changes the key). The
-    whole resolution is wrapped so a headless host (no pyobjc / CoreText bridge) falls
-    back to :data:`_FONT_ENV_SENTINEL` rather than raising — tests inject ``font_env``.
-    """
+    """Installed font URL+mtime+size per referenced name. Missing → ``MISSING:<name>``. Headless → sentinel."""
     names = _font_names(objects)
     try:
         from CoreText import (  # noqa: PLC0415 (optional pyobjc bridge, lazy)
@@ -434,20 +291,11 @@ def _compute_font_env(objects: dict[str, dict]) -> str:
 
 
 def _os_build() -> str:
-    """A stable OS-build string (fold it in so an OS/text-engine change moves the key)."""
     return platform.mac_ver()[0] or platform.platform()
 
 
-# --------------------------------------------------------------------------
-# Central-directory data map (media captured by CRC+size, never read).
-# --------------------------------------------------------------------------
 def _build_data_map(key_path: str | Path) -> dict[str, tuple[int, int]]:
-    """``{dataId: (CRC, size)}`` from the zip central directory (no media bytes read).
-
-    Mirrors ``offline_inspect._build_data_index``'s ``Data/<base>-<id>.<ext>`` shape,
-    keyed by the same ``<id>`` an image/movie object's ``data``/``movieData`` ref
-    resolves to, but keeps ``(CRC, size)`` so the token embeds the media bytes.
-    """
+    """``{dataId: (CRC, size)}`` from the zip central directory (media bytes never read)."""
     out: dict[str, tuple[int, int]] = {}
     with zipfile.ZipFile(key_path) as zf:
         for info in zf.infolist():
@@ -457,9 +305,6 @@ def _build_data_map(key_path: str | Path) -> dict[str, tuple[int, int]]:
     return out
 
 
-# --------------------------------------------------------------------------
-# Assembly.
-# --------------------------------------------------------------------------
 def _fingerprint(
     objects: dict[str, dict],
     id_to_file: dict[str, str],
@@ -469,12 +314,6 @@ def _fingerprint(
     font_env: str,
     os_build: str,
 ) -> dict[str, Any]:
-    """Pure core: per-slide + global keys over an already-decoded deck (no zip / fonts).
-
-    Split out from :func:`fingerprint_deck` so the whole keying scheme is unit-testable
-    from hand-built ``objects``/``id_to_file``/``file_ids`` dicts with an injected
-    ``data_map``/``font_env``/``os_build`` — no real deck, fonts or Keynote needed.
-    """
     from obed_edom.iwa_runs import slide_order  # noqa: PLC0415 (pure; keep the pattern)
 
     order = slide_order(objects)
@@ -498,23 +337,7 @@ def _fingerprint(
 def fingerprint_deck(
     key_path: str | Path, *, deck: Any = None, font_env: str | bytes | None = None
 ) -> dict[str, Any]:
-    """Save-churn-immune content keys for a finalized ``.key`` deck.
-
-    Returns ``{"global": <hex>, "slides": [<hex>|None, ...], "uncacheable": {i: reason}}``
-    where ``slides[i]`` is the per-slide key for the presentation slide at position
-    ``i`` in ``slide_order`` (``None`` when that slide is uncacheable, with the reason
-    in ``uncacheable[i]``).
-
-    ``deck`` is an already-decoded ``_load_deck`` 3-tuple ``(objects, id_to_file,
-    file_ids)``; pass it to share ONE IWA decode with the checker's other offline
-    reads. When ``None`` the deck is decoded once here (the ``keynote_parser`` import
-    is lazy, so this module imports without the optional ``iwa`` extra; a decode
-    failure surfaces as ``ImportError`` for the caller to catch).
-
-    ``font_env`` is an injectable override (``str``/``bytes``) so a test can pin the
-    font surface; when ``None`` it is computed from the deck's referenced fonts,
-    falling back to a stable sentinel when the font APIs are unavailable.
-    """
+    """``{global, slides, uncacheable}``. ``deck`` shares one IWA decode; ``font_env`` is injectable."""
     if deck is None:
         from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415 (optional extra)
 

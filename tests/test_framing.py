@@ -4,6 +4,13 @@ The point of remembering a crop is not having to pick it twice. These tests pin
 the three behaviours that make that true: a decision follows its page by content
 rather than by position, a page whose content changed loses its answer, and a
 deferred page is re-offered exactly when the template gains new framings.
+
+States are explicit, not packed into pairing leftIndex/rightIndexes:
+- auto: unanswered; the planner picks.
+- pinned: the operator chose this template slide's framing.
+- deferred: no framing here is right; the page still plans (fit-to-frame) and
+  is re-offered when the template digest changes, because that is when new
+  framings may have appeared.
 """
 
 from pathlib import Path

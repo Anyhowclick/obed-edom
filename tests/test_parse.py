@@ -1,3 +1,9 @@
+"""Parse and generate-pass tests.
+
+Scripting cannot write superscript: pass 2 Copy Style / Paste Style from the seed verse number.
+Pass 1 leaves the deck open; pass 2 styles then exports. Do not export in pass 1.
+"""
+
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch

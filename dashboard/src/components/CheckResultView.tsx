@@ -4,13 +4,6 @@ import { DiffResultView } from "./DiffResultView";
 import { InspectResultView } from "./InspectResultView";
 import { OutlineResultView } from "./OutlineResultView";
 
-/**
- * Pick the right view for a Sermon Checker run.
- *
- * One tab now covers an outline on its own, one deck, and a pair, so the shape
- * of the result decides rather than the feature it was filed under. History
- * shares this so a saved run looks the same as it did when it was made.
- */
 export function CheckResultView({
   job,
   onOpen,

@@ -1,18 +1,8 @@
-"""Find the empty part of a slide and drop loose text boxes into it.
+"""Pixel occupancy of a slide, then pack loose text boxes into empty cells.
 
-The CG resizer's problem with church-name lists is not scale, it is real estate.
-On the wall those lists live on side panels outside the centre 1920x1080, so the
-crop to 16:9 leaves them nowhere to go, and `pack_columns_from_right` stacks
-them inward across the map until they cover the landmass.
-
-Rect-level occupancy cannot help: the map *image* covers the whole CG frame
-while most of it is ocean, so every candidate position looks taken. So the
-emptiness test is done on pixels — background-coloured pixels are free, inked
-ones are not — against a raster of the slide with the lists left out.
-
-Only PIL is used, matching the rest of `src/`. The grid is a few tens of
-thousands of cells, so an integral image in plain Python answers a fit test in
-constant time without pulling in numpy.
+Rect occupancy cannot help: the map image covers the whole CG frame while most
+of it is ocean. Background-coloured pixels are free; inked ones are not.
+Integral image over an 8px grid, no numpy.
 """
 
 from __future__ import annotations
@@ -21,22 +11,16 @@ from dataclasses import dataclass
 
 from PIL import Image
 
-# 8px cells at 1920x1080 give a 240x135 grid: fine enough to thread a text
-# column between coastlines, coarse enough to stay cheap.
+# 8px cells at 1920×1080 → 240×135: fine enough for coastlines, cheap enough.
 DEFAULT_CELL = 8
-# Distance in RGB (0-255) at which a pixel stops counting as background. Slide
-# backgrounds here are flat brand navy, so this only has to survive PNG noise
-# and the faint vignette Keynote renders at the edges.
+# RGB distance at which a pixel stops counting as background (PNG noise / vignette).
 DEFAULT_TOLERANCE = 38.0
-# A cell is occupied when this fraction of its pixels are non-background. Kept
-# low so antialiased coastlines and pin edges still read as content.
+# Occupied when this fraction of the cell is non-background (keep low for antialiased edges).
 DEFAULT_INK_FRACTION = 0.12
 
 
 @dataclass(frozen=True)
 class Box:
-    """A rectangle in slide coordinates."""
-
     x: float
     y: float
     w: float
@@ -48,13 +32,7 @@ class Box:
 
 @dataclass(frozen=True)
 class Placement:
-    """Where a box ended up, and how much artwork it had to sit on to get there.
-
-    `overlap` is the fraction of the box's cells that were already taken. Zero
-    means it found clean background. Anything above zero is a slide the operator
-    should look at: the content is all present and readable-ish, but the list
-    wants breaking up by hand.
-    """
+    """Placed box. ``overlap`` > 0 means it sat on artwork (operator should look)."""
 
     box: Box
     overlap: float
@@ -65,12 +43,7 @@ class Placement:
 
 
 def background_colour(im: Image.Image, *, sample: int = 160) -> tuple[int, int, int]:
-    """The slide's dominant flat colour.
-
-    Quantising first stops JPEG-ish noise splitting one navy into hundreds of
-    near-identical colours, which would let a gradient in the artwork outvote
-    the real background.
-    """
+    """Dominant flat colour. Quantise first so JPEG noise cannot split one navy into hundreds of votes."""
     small = im.convert("RGB")
     if max(small.size) > sample:
         small.thumbnail((sample, sample))
@@ -85,7 +58,7 @@ def background_colour(im: Image.Image, *, sample: int = 160) -> tuple[int, int, 
 
 
 class FreeSpace:
-    """Which cells of a slide are empty, with O(1) "does a box fit here" tests."""
+    """Occupancy grid with O(1) region sums."""
 
     def __init__(self, cols: int, rows: int, occupied: list[bool], cell: int) -> None:
         self.cols = cols
@@ -95,8 +68,7 @@ class FreeSpace:
         self._rebuild()
 
     def _rebuild(self) -> None:
-        # Integral image over the occupancy grid, with one row/column of zero
-        # padding so a region sum never needs a bounds check.
+        # Integral occupancy with a zero pad so a region sum never needs a bounds check.
         cols, rows = self.cols, self.rows
         total = [0] * ((cols + 1) * (rows + 1))
         for r in range(rows):
@@ -112,7 +84,7 @@ class FreeSpace:
         self._sums = total
 
     def occupied_cells(self, c0: int, r0: int, c1: int, r1: int) -> int:
-        """Count occupied cells in the half-open cell range [c0,c1) x [r0,r1)."""
+        """Occupied cells in half-open [c0,c1) × [r0,r1)."""
         c0 = max(0, min(self.cols, c0))
         c1 = max(0, min(self.cols, c1))
         r0 = max(0, min(self.rows, r0))
@@ -137,7 +109,6 @@ class FreeSpace:
         return self.occupied_cells(c0, r0, c1, r1) == 0
 
     def mark(self, box: Box) -> None:
-        """Claim a box's cells so later boxes cannot land on top of it."""
         c0 = max(0, int(box.x // self.cell))
         r0 = max(0, int(box.y // self.cell))
         c1 = min(self.cols, int((box.x + box.w + self.cell - 1) // self.cell))
@@ -167,23 +138,9 @@ def predict_cg_raster(
     dest_h: float,
     bg: tuple[int, int, int] | None = None,
 ) -> tuple[Image.Image, tuple[int, int, int]]:
-    """Render what the CG will look like, by putting the wall through the affine.
-
-    Cropping the wall preview to the CG frame only works when the map is not
-    being scaled. Once the template shrinks the map, the CG frame maps back to a
-    region taller than the 1080px wall, the crop runs off the canvas, and the
-    padding PIL adds is black — which then wins the background vote and makes the
-    real background read as content. Scaling and offsetting the whole wall
-    instead is correct for any scale, and the uncovered part of the frame is
-    genuinely empty, so filling it with the background colour is accurate.
-
-    Returns the predicted frame and the background colour used, since callers
-    need the same colour to erase relocatable text.
-    """
+    """Wall through the affine onto the CG frame. Cropping a scaled map runs off-canvas and pads black."""
     if bg is None:
-        # Sample only the part of the wall that lands inside the frame, and only
-        # where that is actually on-canvas. The side panels are busy with the
-        # lists being moved and would skew the estimate.
+        # Sample only the on-canvas part of the wall that lands in the frame (side panels would skew).
         x0 = max(0.0, (0.0 - tx) / scale) if scale else 0.0
         y0 = max(0.0, (0.0 - ty) / scale) if scale else 0.0
         x1 = min(wall_w, (dest_w - tx) / scale) if scale else wall_w
@@ -211,18 +168,12 @@ def occupancy_from_image(
     tolerance: float = DEFAULT_TOLERANCE,
     ink_fraction: float = DEFAULT_INK_FRACTION,
 ) -> FreeSpace:
-    """Grid a rendered slide into background (free) and inked (occupied) cells.
-
-    `im` may be any resolution; it is mapped onto the slide's coordinate space so
-    placements come back in slide units.
-    """
     rgb = im.convert("RGB")
     cols = max(1, int(slide_w // cell))
     rows = max(1, int(slide_h // cell))
     if bg is None:
         bg = background_colour(rgb)
-    # One pixel per cell would alias thin coastlines away, so sample a small
-    # block per cell and let ink_fraction decide.
+    # One pixel per cell aliases thin coastlines away; sample a 2×2 block.
     probe = rgb.resize((cols * 2, rows * 2), Image.Resampling.BILINEAR)
     pixels = probe.load()
     br, bgr, bb = bg
@@ -250,17 +201,7 @@ def background_fraction(
     tolerance: float = DEFAULT_TOLERANCE,
     samples: int = 24,
 ) -> float:
-    """How much of what is under `box` is bare background.
-
-    Rectangles lie about this. Map art arrives as oversized mostly-transparent
-    PDFs — on one deck two layers of 3686x2752 covered the whole centre wall —
-    so every text box overlaps one and nothing looks free to move. Pixels tell
-    the truth about what is actually visible underneath.
-
-    The box's own text is inside the sample, so this never reaches 1.0. That is
-    fine: glyphs cover a small fraction of a text box, while landmass covers
-    nearly all of it, so the two cases are far apart.
-    """
+    """Fraction of ``box`` that is bare background. Oversized PDF map art covers the frame in rects, not pixels."""
     w, h = im.size
     if box.w <= 0 or box.h <= 0 or w <= 0 or h <= 0:
         return 0.0
@@ -294,17 +235,7 @@ def place_boxes(
     gap: float = 10.0,
     margin: float = 16.0,
 ) -> list[Placement]:
-    """Drop each box into empty space, in order, preferring tidy columns.
-
-    Boxes are placed in the order given, because these are alphabetical name
-    columns and reordering them would scramble the reading order.
-
-    Every box gets placed. When the artwork leaves no clean gap — a full-frame
-    map with 12 columns of names to house is the normal case, not the exception —
-    the box goes where it covers the least, and the returned `overlap` says so.
-    Dropping content instead would leave a church off the slide, which is worse
-    than a crowded slide the operator breaks up by hand.
-    """
+    """Place each box in order (reading order). Always place: overlap is better than dropping a name."""
     out: list[Placement] = []
     slide_w = space.cols * space.cell
     slide_h = space.rows * space.cell
@@ -313,7 +244,6 @@ def place_boxes(
         if box.w <= 0 or box.h <= 0:
             out.append(Placement(box, 0.0))
             continue
-        # Continuing the current column keeps a list reading as one list.
         chosen: Box | None = None
         if last is not None:
             below = last.moved_to(last.x, last.y + last.h + gap)
@@ -357,16 +287,7 @@ def _best_position(
     *,
     prefer_y: float | None = None,
 ) -> Box:
-    """Start a new column as far right and as high as the artwork allows.
-
-    Right-first matches the wall layout, where these lists sit in the right-hand
-    panels, so the CG keeps the operator's sense of where a name should be.
-    `prefer_y` lines a new column up with the previous one, because without it
-    columns drift down following a sloping coastline and read as a staircase.
-
-    A clean position always wins. Failing that this returns the position
-    covering the least artwork, so the caller can place it and flag it.
-    """
+    """New column: right-first, then high. ``prefer_y`` stops columns from stepping down a coastline."""
     step = space.cell
     best: Box | None = None
     best_cost: tuple[int, float] | None = None
@@ -391,14 +312,10 @@ def _best_position(
             )
             if taken == 0:
                 return candidate
-            # Prefer less coverage, then higher up, so crowded columns still
-            # start at the top of the frame rather than scattering.
             cost = (taken, candidate_y)
             if best_cost is None or cost < best_cost:
                 best, best_cost = candidate, cost
         x -= step
     if best is not None:
         return best
-    # Narrower than the margins allow: clamp inside the frame and let the flag
-    # tell the operator.
     return box.moved_to(margin, margin)

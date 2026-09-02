@@ -109,11 +109,7 @@ class DiffSlotsBody(BaseModel):
 
 
 class FramingsBody(BaseModel):
-    """Framing decisions, one per page the operator answered.
-
-    Each entry is `{wallIndex, state, templateSlide}`. Confirming a whole group of
-    pages that share a framing is just several entries in one request.
-    """
+    """`{wallIndex, state, templateSlide}` per answered page. A group confirm is several entries."""
 
     decisions: list[dict[str, Any]] | None = None
 
@@ -268,7 +264,6 @@ def create_app() -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/evidence/{filename}")
     def job_evidence(job_id: str, filename: str):
-        """Cropped pictures of the object a geometry finding is about."""
         job = RUNNER.get(job_id)
         folder = (job.result or {}).get("evidenceDir") if job else None
         if not folder:
@@ -327,7 +322,6 @@ def create_app() -> FastAPI:
         return {"jobs": jobs}
 
     def _outline_arg(raw: str) -> Path | None:
-        """Validate an optional cued outline up front, so the job does not fail late."""
         if not (raw or "").strip():
             return None
         outline = Path(raw.strip()).expanduser()
@@ -560,9 +554,7 @@ def create_app() -> FastAPI:
         slides: str = Form(""),
         export: str = Form("true"),
         include_lists: str = Form("false"),
-        # Aliased: a form field literally named `validate` becomes a Pydantic
-        # model field that shadows BaseModel.validate, which warns on import.
-        # The wire name stays `validate`.
+        # Form field `validate` would shadow BaseModel.validate; alias keeps the wire name.
         run_validation: str = Form("true", alias="validate"),
     ) -> dict:
         key = Path(path).expanduser()
@@ -578,8 +570,6 @@ def create_app() -> FastAPI:
         do_lists = include_lists.lower() in {"1", "true", "yes", "on"}
         do_validate = run_validation.lower() in {"1", "true", "yes", "on"}
         try:
-            # No selection means the whole deck. It used to mean slide 2 only,
-            # from when the map lived there by convention.
             sel = resolve_slides(
                 spec=slides or None,
                 range_from=range_from,
@@ -598,7 +588,6 @@ def create_app() -> FastAPI:
 
     @app.get("/api/resize/{job_id}/thumb/{which}/{filename}")
     def resize_thumb(job_id: str, which: str, filename: str):
-        """A downscaled slide: `wall` for the source page, `template` for a framing."""
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
@@ -620,7 +609,6 @@ def create_app() -> FastAPI:
 
     @app.post("/api/resize/{job_id}/framings")
     def save_resize_framings(job_id: str, payload: FramingsBody) -> dict:
-        """Remember which crop each page should use, without remapping."""
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
@@ -636,14 +624,6 @@ def create_app() -> FastAPI:
             decisions,
             job_id=job_id,
         )
-        # A submitted decisions list is the complete set of non-default answers —
-        # the dashboard sends every pinned/deferred/whitelisted page at once and
-        # omits the ones back on the default. So a page absent from it has been
-        # reset, and its stale decision must be cleared, not left. Apply reads the
-        # overrides and the side-content whitelist from these in-memory pages, so a
-        # left-over decision would keep un-pinning or un-whitelisting from ever
-        # taking effect (the record file is already rewritten without it). When no
-        # decisions were submitted (the fallback), pages are left as they were.
         authoritative = payload.decisions is not None
         by_index = {d.wall_index: d.as_dict() for d in decisions}
         for page in result.get("pages") or []:
@@ -657,7 +637,6 @@ def create_app() -> FastAPI:
 
     @app.post("/api/resize/{job_id}/apply")
     def apply_resize(job_id: str, payload: FramingsBody = Body(default=FramingsBody())) -> dict:
-        """Phase two: remap using the confirmed framings."""
         job = RUNNER.get(job_id)
         if not job or not job.result:
             raise HTTPException(404, "Unknown job")
@@ -812,7 +791,6 @@ def _log_inspect(job: Job, name: str, payload: dict[str, Any]) -> None:
 
 
 def _deck_of(label: str, payload: dict[str, Any]) -> str:
-    """Which deck a side is, so cues are counted against the right family."""
     if re.search(r"\b(LW|GW|LED|FW)\b", label or "", re.I):
         return "lw"
     if re.search(r"\bDSK\b", label or "", re.I):
@@ -914,8 +892,6 @@ def _run_diff(
                 job.log("Earlier pairing no longer matches this content; starting fresh.")
 
     if slots is None and playlist is not None:
-        # The cues are the show-call playlist, so start the operator there
-        # rather than at a guess. They can still drag rows afterwards.
         lw_payload = left_payload if left_deck == "lw" else right_payload
         dsk_payload = right_payload if right_deck == "dsk" else left_payload
         seeded = slots_from_cues(
@@ -1116,7 +1092,6 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
 
 
 def _attach_outline_rows(playlist, pairs: list[dict]) -> list:
-    """Give every pair the cue row that calls it, so the UI can show the script."""
     rows = rows_for_slots(playlist, slots_from_pairs(pairs))
     for pair, row in zip(pairs, rows):
         pair["outlineRow"] = (
@@ -1130,12 +1105,6 @@ def _attach_outline_rows(playlist, pairs: list[dict]) -> list:
 def _apply_outline(
     job: Job, result: dict[str, Any], compared: dict[str, Any], pairs: list[dict]
 ) -> list[Flag]:
-    """Run both outline tracks and attach what belongs to a pair.
-
-    Row-scoped findings go straight onto `pair["flags"]`, so the dashboard needs
-    no extra matching. Whatever is about the outline as a whole comes back to
-    sit in its own panel.
-    """
     raw = result.get("outlinePath")
     if not raw or not Path(raw).is_file():
         return []
@@ -1311,12 +1280,6 @@ def _check_single_deck_outline(
     *,
     lw_final: bool = True,
 ) -> list[Flag]:
-    """One deck plus its script: count cues, then compare wording.
-
-    With one deck the hierarchy collapses to two levels. A DSK is always below
-    the script; a finalised LW is above it, so a difference there means the
-    script is out of date rather than the wall being wrong.
-    """
     if outline is None:
         return []
     try:
@@ -1347,18 +1310,12 @@ def _check_single_deck_outline(
             lw_final=lw_final,
         )
         for flag in found:
-            # An "outline is out of date" verdict is about the script, so it
-            # belongs in the outline panel rather than beside a slide.
             flags.append(flag if flag.deck == "outline" else replace(flag, deck=deck))
     return out
 
 
 def _decisions_from_body(payload: FramingsBody, result: dict[str, Any]) -> list[Decision]:
-    """Body decisions, falling back to whatever the pages already carry.
-
-    An unparseable entry is dropped rather than guessed at: a decision the
-    operator did not make is worse than no decision.
-    """
+    """Unparseable entries are dropped rather than guessed."""
     if payload.decisions is not None:
         rows = payload.decisions
     else:
@@ -1372,10 +1329,6 @@ def _decisions_from_body(payload: FramingsBody, result: dict[str, Any]) -> list[
 
 
 def _overrides_from_result(result: dict[str, Any]) -> dict[int, int]:
-    """Wall slide number to template slide, from pinned pages only.
-
-    Auto and deferred both mean "let the planner choose", so neither pins.
-    """
     overrides: dict[int, int] = {}
     for page in result.get("pages") or []:
         decision = normalize_decision(page.get("decision") or {})
@@ -1386,10 +1339,6 @@ def _overrides_from_result(result: dict[str, Any]) -> dict[int, int]:
 
 
 def _side_content_slides_from_result(result: dict[str, Any]) -> set[int]:
-    """Wall slide numbers whose side-panel content is kept, from whitelisted pages.
-
-    Independent of framing state: a page kept on auto can still be whitelisted.
-    """
     slides: set[int] = set()
     for page in result.get("pages") or []:
         decision = normalize_decision(page.get("decision") or {})
@@ -1399,13 +1348,6 @@ def _side_content_slides_from_result(result: dict[str, Any]) -> set[int]:
 
 
 def _assert_range_within_deck(name: str, total: int, slide_range: Any) -> None:
-    """Raise if the requested slide range runs past the deck's last slide.
-
-    A range typed for a bigger deck — slide 124 fed to a 9-slide extract, say —
-    would otherwise inspect nothing, propose nothing, and leave the operator on a
-    blank framing screen with no idea why. `slideCount` is the whole deck's length
-    even on a ranged read, so it is a reliable ceiling to check against.
-    """
     if not slide_range or not total:
         return
     beyond = sorted(n for n in slide_range if n > total)
@@ -1427,17 +1369,6 @@ def _run_resize_propose(
     include_lists: bool = False,
     validate: bool = True,
 ) -> dict[str, Any]:
-    """Phase one: ask which crop each map page should use.
-
-    Stops before copying anything. Planning is pure Python over the inspect
-    payloads, so the only Keynote time here is the inspect a resize needed anyway
-    — and confirming costs none at all.
-    """
-    # A range is written in the numbers Keynote shows, which count only the
-    # slides that will play. Translating needs the skip flags for the whole deck,
-    # and a ranged read returns only the slides asked for — so this leans on a
-    # full read having happened before, and says plainly when it has not rather
-    # than quietly taking the numbers to mean something else.
     typed = slide_range
     numbering = ""
     if slide_range:
@@ -1449,9 +1380,6 @@ def _run_resize_propose(
                 "Propose once without a range to have Keynote's numbering used."
             )
         else:
-            # The deck is already known in full, so catch an out-of-range range now,
-            # before spending a Keynote pass that would read nothing. Navigator numbers
-            # never exceed the document count, so the typed range is a valid ceiling.
             _assert_range_within_deck(path.name, int(known.get("slideCount") or 0), slide_range)
             slide_range = to_document_range(known, slide_range)
             numbering = navigator_numbering(known)
@@ -1466,16 +1394,8 @@ def _run_resize_propose(
     if numbering:
         job.log(numbering)
     wall = inspect_keynote(path, slide_range=slide_range)
-    # Authoritative check for a deck that was never read in full (no cache to catch
-    # it above): slideCount is the whole deck's length even on this ranged read.
     _assert_range_within_deck(path.name, int(wall.get("slideCount") or 0), slide_range)
     template_data = inspect_keynote(template)
-    # Reuse is settled before proposing so the preview can plan with the same
-    # keep/whitelist the real run would use. A page whitelisted on an earlier run
-    # (carried over by content digest) should preview its side content placed, not
-    # shown as ~200 objects about to be dropped. The digests reuse needs are cheap
-    # here — one is over the in-memory wall payload, the other over the small CG
-    # template — and propose re-derives them for its own return unchanged.
     settings = load_settings()
     reuse = FramingReuse()
     if settings["reusePairings"]:
@@ -1509,9 +1429,6 @@ def _run_resize_propose(
         saved = decisions.get(page["index"])
         page["decision"] = saved or {
             "wallIndex": page["index"],
-            # A page with nothing worth picking defaults to "I will add a template
-            # slide", because offering a dropdown of options that all degrade the
-            # same way invites a click that changes nothing.
             "state": DEFERRED if page["noUsableFraming"] else AUTO,
             "templateSlide": None,
         }
@@ -1524,10 +1441,6 @@ def _run_resize_propose(
         "validate": validate,
         "export": export,
         **proposal,
-        # After the proposal, not before: with a range its payload holds only the
-        # slides asked for, so the note it derives from that is blind to the rest
-        # of the deck. Document positions from here on — apply, the framing rows
-        # and the logs all speak that language — with what was typed beside it.
         "slideRange": sorted(slide_range) if slide_range else None,
         "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
         "numberingNote": numbering or proposal.get("numberingNote") or "",
@@ -1607,9 +1520,6 @@ def _run_resize(
         "validate": validate,
         "templateScore": score,
         "flags": serialize_flags(flags),
-        # The planner's own reporting. These were computed and then dropped before
-        # the dashboard saw them, so overruled framings, content pushed out of
-        # frame and text that had to overlap artwork were visible only in the log.
         "framingReport": info.get("framingReport") or [],
         "fittedSlides": info.get("fittedSlides") or [],
         "offFrame": info.get("offFrame") or [],
