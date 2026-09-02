@@ -645,7 +645,11 @@ def _run_superscript_fix(
 
 
 def _stat_leaf_font_writes(container: str) -> list[str]:
-    """Set each matched stat leaf of `container` to the template size; skip mixed runs."""
+    """Font pass for each text leaf of `container`: stat numbers → template size; all
+    other uniform text → its own size × `s` (the group's affine scale). Keynote scales a
+    group's child GEOMETRY on resize but NOT font size, so without this the text keeps its
+    wall-size font in a shrunk box and clips. Mixed-run leaves are skipped. `s` is in scope
+    from ``obedFontSizeCached``."""
     return [
         f"  repeat with _i from 1 to count of iWork items of {container}",
         "    try",
@@ -654,15 +658,17 @@ def _stat_leaf_font_writes(container: str) -> list[str]:
         "        try",
         "          set _str to (object text of _leaf as string)",
         "          set _tgt to my statSizeFor(_str)",
-        "          if _tgt > 0 then",
-        "            set _c1 to size of character 1 of object text of _leaf",
-        "            set _cN to size of character -1 of object text of _leaf",
-        "            if _c1 = _cN then",
+        "          set _c1 to size of character 1 of object text of _leaf",
+        "          set _cN to size of character -1 of object text of _leaf",
+        "          if _c1 = _cN then",
+        "            if _tgt > 0 then",
         "              set size of characters 1 thru -1 of object text of _leaf to _tgt",
-        "              set sized to sized + 1",
         "            else",
-        "              set sizeSkips to sizeSkips + 1",
+        "              set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)",
         "            end if",
+        "            set sized to sized + 1",
+        "          else",
+        "            set sizeSkips to sizeSkips + 1",
         "          end if",
         "        end try",
         "      end if",
@@ -836,7 +842,7 @@ def _stat_job_handlers() -> list[str]:
         "    end repeat",
         "  end tell",
         "end obedApplyDeletes",
-        "on obedFontSizeCached(slideNo, sigs, targetSig)",
+        "on obedFontSizeCached(slideNo, sigs, targetSig, s)",
         "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report",
         "  " + _keynote_tell(),
         "    try",
@@ -1005,14 +1011,16 @@ def _build_stat_finalize_script(
         lines += [f"  my obedApplyDeletes({slide}, _dels)"]
     if font_skips:
         lines += [f"  set skipJobs to skipJobs + {font_skips}"]
-    font_by_slide: dict[int, list[str]] = {}
+    font_by_slide: dict[int, list[tuple[str, float]]] = {}
     for job in font_jobs:
-        font_by_slide.setdefault(int(job["slide"]), []).append(str(job["childSig"]))
+        font_by_slide.setdefault(int(job["slide"]), []).append(
+            (str(job["childSig"]), float(job.get("s") or 1.0))
+        )
     for slide in sorted(font_by_slide):
         lines += [f"  set _sigs to my obedSlideSigs({slide})"]
-        for childsig in font_by_slide[slide]:
+        for childsig, s in font_by_slide[slide]:
             sig_lit = _sig_list_literal(childsig)
-            lines += [f"  my obedFontSizeCached({slide}, _sigs, {sig_lit})"]
+            lines += [f"  my obedFontSizeCached({slide}, _sigs, {sig_lit}, {float(s)})"]
     lines += ["  save theDoc"]
     # Z-order: select by signature, then Arrange > Bring to Front. Re-resolve live — Bring to Front shifts group indices.
     lines += ['  set frontRaised to 0', '  set frontErr to ""']

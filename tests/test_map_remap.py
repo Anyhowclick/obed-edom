@@ -649,10 +649,10 @@ def test_title_cluster_does_not_swallow_stats_groups():
     globe = next(t for t in out if t.kind == "image" and t.item_index == 3)
     assert 0 < globe.x < 200
     stats = next(t for t in out if t.kind == "group")
-    # Map affine for position, wall size so grouped children (logo, rules, type)
-    # still fit. Affine-scaled w/h clips them.
-    assert abs(stats.w - 537) < 1
-    assert abs(stats.h - 271) < 1
+    # Group frame is affine-scaled (position AND size); the geometry pass scales the
+    # grouped children with it, so wall-size w/h is no longer forced.
+    assert abs(stats.w - 537 * 0.8547) < 1
+    assert abs(stats.h - 271 * 0.8547) < 1
     assert stats.y > title.y + title.h + 20
     assert stats.x >= 0
     plate = next(t for t in out if t.kind == "shape")
@@ -726,7 +726,7 @@ def test_zero_thickness_line_is_visible_and_planned():
     assert sent["h"] == 0.0
 
 
-def test_date_group_keeps_wall_width():
+def test_date_group_is_affine_scaled():
     recipe = _missions_map_recipe()
     slide = {
         "number": 4,
@@ -746,8 +746,9 @@ def test_date_group_keeps_wall_width():
     }
     out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
     date = next(t for t in out if t.kind == "group")
-    assert abs(date.w - 575) < 1
-    assert abs(date.h - 76) < 1
+    # Affine-scaled frame (s=0.8547); the geometry pass scales grouped children with it.
+    assert abs(date.w - 575 * 0.8547) < 1
+    assert abs(date.h - 76 * 0.8547) < 1
 
 
 def test_same_size_overlays_keep_deck_order_because_z_is_unreadable():

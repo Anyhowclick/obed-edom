@@ -2266,24 +2266,23 @@ def plan_slide_transforms(
             mapped = aff.apply_rect(item_rect(item))
         else:
             continue
-        # Map affine parks left-column groups at x≈-900. Move them; do not set group w/h — Keynote does not scale children.
         if str(item.get("kind") or "") == "group" and role == "other":
-            src_box = item_rect(item)
-            parked_left = mapped.x < 16
-            mapped = Rect(
-                16.0 if parked_left else mapped.x,
-                mapped.y,
-                src_box.w,
-                src_box.h,
-            )
-            # JXA cannot scale group children; emit a stat-finalize job. Address by childSig, not a drift-prone groupIndex.
+            # The map affine can throw a left-column infographic off the CG's left edge
+            # (x≈-900); clamp it back on-canvas. Keep the affine-scaled w/h — the geometry
+            # pass scales grouped children (AS and JXA both do on Keynote 15.3.1), so the
+            # old source-w/h override is obsolete and only made the box oversized.
+            if mapped.x < 16:
+                mapped = Rect(16.0, mapped.y, mapped.w, mapped.h)
             if child_resize_report is not None:
                 _gct = slide.get("groupChildText") or {}
+                _src_w = item_rect(item).w
                 child_resize_report.append(
                     {
                         "slide": number,
                         "groupIndex": kind_index + 1,
                         "childSig": _gct.get(kind_index),
+                        # Group frame scales by this; fonts don't, so the pass scales them.
+                        "s": (mapped.w / _src_w) if _src_w else 1.0,
                     }
                 )
         start = end = None

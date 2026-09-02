@@ -130,8 +130,11 @@ def test_finalize_script_embeds_template_sizes_and_content_addresses():
     # ...the slide's group signatures are read ONCE (scan-once) and each job's signature
     # is passed as a list literal to a one-line call resolved against that cache.
     assert "set _sigs to my obedSlideSigs(4)" in script
-    assert 'my obedFontSizeCached(4, _sigs, {"269"})' in script
-    assert 'my obedFontSizeCached(4, _sigs, {"183", "Schools"})' in script
+    # Each font call carries the group's affine scale `s` (default 1.0 when absent) so the
+    # pass scales non-number text leaves by it (the group frame resize doesn't scale fonts).
+    assert 'my obedFontSizeCached(4, _sigs, {"269"}, 1.0)' in script
+    assert 'my obedFontSizeCached(4, _sigs, {"183", "Schools"}, 1.0)' in script
+    assert "set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)" in script
     assert 'my obedZRaise(4, {"269"})' in script
     # No index-addressed group selection survives (the deliverable invariant).
     assert not re.search(r"set g to group \d+ of slide", script)
@@ -139,6 +142,14 @@ def test_finalize_script_embeds_template_sizes_and_content_addresses():
     assert script.count("Bring to Front") >= 1
     # The badge is searched for and raised too.
     assert "Global Missions" in script
+
+
+def test_finalize_font_call_carries_group_scale():
+    """A job's affine scale `s` reaches the AppleScript font call verbatim, so the pass
+    scales that group's non-number text leaves by it (fonts don't scale with the frame)."""
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "CHC Arao", "s": 0.8547}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert 'my obedFontSizeCached(4, _sigs, {"CHC Arao"}, 0.8547)' in script
 
 
 def test_finalize_phase2_is_content_addressed_not_index_descending():
