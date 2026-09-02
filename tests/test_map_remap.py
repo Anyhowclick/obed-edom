@@ -1,3 +1,25 @@
+"""CG resizer planner (obed_edom.map_remap).
+
+Keynote traps this suite locks (kept out of the production file):
+- Setting size yanks the object to (0,0); apply size before position.
+- Keynote does not take line endpoints; a line's width is its length and height
+  is 0 whichever way it runs. Send size as length×0, not the bounding box.
+- Keynote 15.3.1 exposes no arrange/z-order; moving an object does not restack.
+  Apply order is stacking only on generate, which creates objects.
+- Reuse pastes with select-all: everything the donor copy already carries must
+  leave the original first, not merely the objects the planner looked at.
+- A badge plate colour mismatch is an in-map label, not the badge; snapping onto
+  it drags the cyan badge into the map.
+- Church-name lists are ≥6 short boxes; map labels come 1–5 at a time. An
+  unticked include-lists must drop the whole list even where it sits over the map.
+- Centre-panel panoramas (~2 CG frames wide) frame 1:1; thumbnails on them ride
+  the panel affine and must not vote on the crop.
+- Judge a framing on the artwork it is about, not whole-slide extent (side-panel
+  lists punish a true-size map). Rank on agreement count, not raw pair total.
+- Cover the centre panel when no template framing pairs, not the whole wall.
+- Never drop text; least-overlapping placement + report the overlap.
+- Off-slide leftovers must never teach an affine.
+"""
 from obed_edom.map_remap import (
     Affine,
     Rect,
@@ -3085,3 +3107,369 @@ def test_gold_full_report_card_deck_if_warm():
     # Whatever donor selection this deck makes, gating must never trip.
     for j in jobs:
         assert j["persist"] >= REUSE_MIN_PERSIST
+
+
+def test_gold_map_deck_stripbuilds_empty():
+    """A5: stripBuildRefs is left wall-index addressed on the drifted copy
+    (deferred (f) build work) and guarded to fail loud only if it is ever
+    non-empty. Assert it stays empty on the Map gold deck so the guard never
+    fires today; also assert every remove ref carries a plausible output rect."""
+    import math
+
+    import pytest
+
+    from obed_edom.map_remap import plan_slide_reuses
+
+    payload = _reuse_gold_cache_payload("Map_Extracted_Wall_1st.key")
+    if payload is None:
+        pytest.skip("Map wall deck cache is cold; refuse to open Keynote")
+    # Empty transforms (as the sibling donor-selection gold test): stripBuilds
+    # emptiness depends only on the wall buildCounts, and remove refs still carry
+    # finite wall-fallback output rects with no spec present.
+    jobs = plan_slide_reuses(payload, [])
+    for j in jobs:
+        assert j["stripBuilds"] == []
+        # Every remove ref carries a finite output rect (Part B1 / Part C tiles).
+        for r in j["remove"]:
+            for f in ("x", "y", "w", "h"):
+                assert f in r and math.isfinite(float(r[f]))
+
+
+# --- Part B1: per-object OUTPUT-rect map threaded onto `remove` refs -----------
+# These prove the three load-bearing rules of the donor-copy geometry map: a base
+# slide object's rect is its transform spec; a no-spec object's rect is its wall
+# geometry; a persisting object inherits its donor's rect through >=2 donors; and
+# every emitted remove ref carries a finite x/y/w/h for the JS geometry matcher.
+
+
+def _reuse_wall_base(*extra_slide1_items, extra_slide2_items=()):
+    """A synthetic wall: 1 map + 40 pins (>= REUSE_MIN_PERSIST) shared on two
+    slides, plus caller-supplied extras. Slide 1 is the base; slide 2 reuses it."""
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    return {
+        "slides": [
+            {"number": 1, "items": [dict(map_img), *[dict(p) for p in pins], *extra_slide1_items]},
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], *extra_slide2_items]},
+        ]
+    }
+
+
+def test_reuse_remove_ref_carries_base_slide_spec_rect():
+    """B1(a)+(d): a base-slide object removed on a later reuse target carries its
+    OUTPUT rect = the base slide's transform spec (CG space, NOT the wall geom),
+    and every remove ref carries a finite x/y/w/h."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    # `extra` lives on the base slide only, at wall (5000,5000,99,99); its base
+    # transform spec repositions it to a CG rect far away.
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=5000, w=99, h=99)
+    wall = _reuse_wall_base(dict(extra))
+    spec = ItemTransform(
+        slide_number=1, item_index=41, kind="shape", x=123, y=456, w=78, h=90, kind_index=40, role="other"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [spec])}[2]
+    removed = [r for r in job["remove"] if r.get("kind") == "shape"]
+    assert len(removed) == 1
+    r = removed[0]
+    assert (r["x"], r["y"], r["w"], r["h"]) == (123, 456, 78, 90)  # spec rect, not wall
+    # (d) every remove ref carries finite geometry.
+    for rr in job["remove"]:
+        assert all(isinstance(rr.get(f), (int, float)) for f in ("x", "y", "w", "h"))
+
+
+def test_reuse_remove_ref_no_spec_falls_back_to_wall_rect():
+    """B1(b): a removed donor object with NO transform spec is left at its WALL
+    geometry by applyReuse (applySpec is skipped when spec.x is null), so its
+    remove ref carries the wall x/y/w/h."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=5000, w=99, h=99)
+    wall = _reuse_wall_base(dict(extra))
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]  # no transforms at all
+    removed = [r for r in job["remove"] if r.get("kind") == "shape"]
+    assert len(removed) == 1
+    r = removed[0]
+    assert (r["x"], r["y"], r["w"], r["h"]) == (5000, 5000, 99, 99)  # wall fallback
+
+
+def test_reuse_remove_ref_inherits_persisted_rect_through_two_donors():
+    """B1(c): an object placed by the BASE spec, persisted (with no spec of its
+    own) through slide 2 and slide 3, then removed on slide 4, carries the base
+    spec rect — inherited across >= 2 donors, never recomputed from a later wall.
+
+    Slides grow monotonically so the donor chain is forced to 2<-1, 3<-2, 4<-3
+    (each slide shares most with its immediate predecessor); on slides 2 & 3
+    `extra` has NO spec, so a wall-geom rect there would prove inheritance broke."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=5000, w=99, h=99)
+    a1 = _item(kind="shape", kindIndex=41, x=6000, y=100, w=20, h=20)
+    a2 = _item(kind="shape", kindIndex=42, x=6000, y=200, w=20, h=20)
+    a3 = _item(kind="shape", kindIndex=43, x=6000, y=300, w=20, h=20)
+    base = [dict(map_img), *[dict(p) for p in pins]]
+    wall = {
+        "slides": [
+            {"number": 1, "items": [*[dict(b) for b in base], dict(extra), dict(a1)]},
+            {"number": 2, "items": [*[dict(b) for b in base], dict(extra), dict(a1), dict(a2)]},
+            {"number": 3, "items": [*[dict(b) for b in base], dict(extra), dict(a1), dict(a2), dict(a3)]},
+            {"number": 4, "items": [*[dict(b) for b in base], dict(a1), dict(a2), dict(a3)]},  # extra removed
+        ]
+    }
+    spec = ItemTransform(
+        slide_number=1, item_index=41, kind="shape", x=123, y=456, w=78, h=90, kind_index=40, role="other"
+    )
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [spec])}
+    assert {s: j["from"] for s, j in jobs.items()} == {2: 1, 3: 2, 4: 3}
+    removed = [r for r in jobs[4]["remove"] if r.get("kind") == "shape"]
+    assert len(removed) == 1
+    r = removed[0]
+    # Inherited base spec rect (would be (5000,5000,99,99) if the 2-hop inherit failed).
+    assert (r["x"], r["y"], r["w"], r["h"]) == (123, 456, 78, 90)
+
+
+# --- R1/R2: group removes route to `groupRemove` (content-addressed, no geometry) ---
+
+
+def _reuse_wall_with_group(donor_groups, target_groups, donor_gct, target_gct):
+    """A synthetic wall: 1 map + 40 shared pins (>= REUSE_MIN_PERSIST) so slide 2
+    reuses slide 1, plus caller-supplied donor/target groups and their groupChildText
+    (``{kindIndex: childSig}``) as the resizer flow attaches it."""
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    base = [dict(map_img), *[dict(p) for p in pins]]
+    return {
+        "slides": [
+            {"number": 1, "items": [*[dict(b) for b in base], *donor_groups], "groupChildText": donor_gct},
+            {"number": 2, "items": [*[dict(b) for b in base], *target_groups], "groupChildText": target_gct},
+        ]
+    }
+
+
+def test_reuse_group_remove_routes_out_of_remove_with_sig_and_keep():
+    """A donor group absent from the target is routed OUT of `remove` into
+    `groupRemove`, carrying the DONOR slide's childSig and `expectedKeep` from the
+    TARGET's own groupChildText — and it carries NO geometry (R1)."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    ga = _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50)  # removed
+    gb = _item(kind="group", kindIndex=1, x=200, y=200, w=50, h=50)  # persists
+    gb_t = _item(kind="group", kindIndex=0, x=200, y=200, w=50, h=50)
+    wall = _reuse_wall_with_group(
+        donor_groups=[dict(ga), dict(gb)],
+        target_groups=[dict(gb_t)],
+        donor_gct={0: "27\nSchools", 1: "110\nWorkers"},
+        target_gct={0: "110\nWorkers"},
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    # No GROUP ever survives in `remove` (so JXA deleteRefs never index-deletes it).
+    assert all(r.get("kind") != "group" for r in job["remove"])
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    gr = grs[0]
+    assert gr["kind"] == "group" and gr["kindIndex"] == 0
+    assert gr["childSig"] == "27\nSchools"  # DONOR slide's signature for kindIndex 0
+    assert gr["expectedKeep"] == 0  # target retains zero groups of that signature
+    # R1: a group remove carries no output rect (a re-derived frame is undecidable).
+    assert not any(k in gr for k in ("x", "y", "w", "h"))
+
+
+def test_reuse_group_remove_expected_keep_counts_target_signatures():
+    """The stranded-twin case: donor has two groups of the SAME signature, only one
+    persists (target keeps one), so `expectedKeep == 1` — the count-scoped dedup keeps
+    exactly that many and deletes the one donor-copy leftover."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    ga = _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50)  # removed twin
+    gb = _item(kind="group", kindIndex=1, x=200, y=200, w=50, h=50)  # persists
+    gb_t = _item(kind="group", kindIndex=0, x=200, y=200, w=50, h=50)
+    wall = _reuse_wall_with_group(
+        donor_groups=[dict(ga), dict(gb)],
+        target_groups=[dict(gb_t)],
+        donor_gct={0: "27\nSchools", 1: "27\nSchools"},
+        target_gct={0: "27\nSchools"},
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    assert grs[0]["childSig"] == "27\nSchools"
+    assert grs[0]["expectedKeep"] == 1  # target keeps one group of that signature
+
+
+def test_reuse_group_remove_without_groupchildtext_has_no_sig():
+    """When groupChildText is absent (no `iwa` extra), a group remove still routes to
+    `groupRemove` (never `remove`) but carries no childSig — the dedup then reports a
+    shortfall rather than deleting the wrong object."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    ga = _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50)
+    wall = _reuse_wall_with_group(
+        donor_groups=[dict(ga)], target_groups=[], donor_gct=None, target_gct=None
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    grs = job.get("groupRemove")
+    assert grs and len(grs) == 1
+    assert "childSig" not in grs[0]
+    assert all(r.get("kind") != "group" for r in job["remove"])
+
+
+def test_reuse_no_groupremove_key_when_no_group_removes():
+    """A reuse job with only tile removes carries no `groupRemove` key at all."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=5000, w=99, h=99)
+    wall = _reuse_wall_with_group(
+        donor_groups=[dict(extra)], target_groups=[], donor_gct={}, target_gct={}
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    assert "groupRemove" not in job
+    # The shape tile still carries its (wall-fallback) output rect for the geom path.
+    tile = [r for r in job["remove"] if r.get("kind") == "shape"][0]
+    assert (tile["x"], tile["y"], tile["w"], tile["h"]) == (5000, 5000, 99, 99)
+
+
+# --- R2 amendments (v2): donor OUTPUT-state model, cross-chain stray accumulation ---
+
+
+def _reuse_chain(per_slide):
+    """N-slide wall forcing the reuse chain n<-(n-1): 1 map + 40 shared pins, plus an
+    accumulating anchor per slide (slide n carries anchors 0..n-2) so each slide shares
+    strictly more with its immediate predecessor than any earlier slide. `per_slide` is
+    a list of (groups, groupChildText) — the caller-supplied groups for slides 1..N."""
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    base = [dict(map_img), *[dict(p) for p in pins]]
+    slides = []
+    for idx, (groups, gct) in enumerate(per_slide):
+        anchors = [_item(kind="shape", kindIndex=100 + j, x=9000 + j * 7, y=900, w=5, h=5) for j in range(idx)]
+        slides.append(
+            {"number": idx + 1, "items": [*[dict(b) for b in base], *anchors, *groups], "groupChildText": gct}
+        )
+    return {"slides": slides}
+
+
+def _grp(ki, x, sig):
+    return _item(kind="group", kindIndex=ki, x=x, y=100, w=50, h=50), sig
+
+
+def test_reuse_group_moved_then_absent_schedules_both_stray_copies():
+    """A stat group at pos A on slide 1 MOVES to pos B on slide 2 (remove+add), then is
+    absent on slide 3. Because the whole JXA reuse chain runs before the single dedup
+    pass, slide 3 inherits BOTH pre-dedup copies (the slide-1 donor copy + the slide-2
+    paste), neither addressed by the wall-vs-wall partition. Slide 2 removes one (keep 1);
+    slide 3 must schedule TWO removes for that sig — one real (the partitioned donor group)
+    plus one synthetic for the inherited stray the partition never saw."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    wall = _reuse_chain([
+        ([_grp(50, 4600, "27\nSchools")[0]], {50: "27\nSchools"}),
+        ([_grp(50, 4739, "27\nSchools")[0]], {50: "27\nSchools"}),
+        ([], {}),
+    ])
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert {s: j["from"] for s, j in jobs.items()} == {2: 1, 3: 2}
+
+    g2 = jobs[2]["groupRemove"]
+    assert len(g2) == 1
+    assert g2[0]["childSig"] == "27\nSchools" and g2[0]["expectedKeep"] == 1
+    assert g2[0]["kindIndex"] == 50  # the real (partitioned) donor copy
+
+    g3 = jobs[3]["groupRemove"]
+    assert len(g3) == 2
+    assert all(r["childSig"] == "27\nSchools" and r["expectedKeep"] == 0 for r in g3)
+    assert sorted(r["kindIndex"] for r in g3) == [-1, 50]  # one real + one synthetic stray
+
+
+def test_reuse_inherited_strays_are_all_synthetic_down_the_chain():
+    """A group present on slides 1+2 (moved) but absent on 3 AND 4: by slide 4 the
+    partition sees no copy at all, so every scheduled remove is a synthetic stray."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    wall = _reuse_chain([
+        ([_grp(50, 4600, "110\nWorkers")[0]], {50: "110\nWorkers"}),
+        ([_grp(50, 4739, "110\nWorkers")[0]], {50: "110\nWorkers"}),
+        ([], {}),
+        ([], {}),
+    ])
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert {s: j["from"] for s, j in jobs.items()} == {2: 1, 3: 2, 4: 3}
+    g4 = jobs[4]["groupRemove"]
+    assert len(g4) == 2
+    assert all(r["kindIndex"] == -1 and r["childSig"] == "110\nWorkers" and r["expectedKeep"] == 0 for r in g4)
+
+
+def test_reuse_hidden_persisted_group_becomes_dedup_surplus():
+    """A group that PERSISTS onto a reuse target but is marked role='hide' is not a keeper
+    (deleteHides never runs on a reuse slide, so it survives live) — keep excludes it and
+    it is scheduled for dedup removal as a synthetic surplus."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    g = _grp(50, 4600, "side\nlist")[0]
+    wall = _reuse_chain([
+        ([dict(g)], {50: "side\nlist"}),
+        ([dict(g)], {50: "side\nlist"}),  # same geometry => persists
+    ])
+    hide = ItemTransform(slide_number=2, item_index=50, kind="group", kind_index=50, role="hide", x=1, y=1, w=1, h=1)
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide])}[2]
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    assert grs[0]["kindIndex"] == -1 and grs[0]["childSig"] == "side\nlist" and grs[0]["expectedKeep"] == 0
+
+
+def test_reuse_nonreuse_donor_hide_seeds_no_phantom_surplus():
+    """A group hidden on a NON-reuse donor (slide 1) is deleted there by deleteHides, so it
+    never enters the donor's output; when it is absent on the target its partition remove is
+    capped to zero — no phantom surplus, no synthetic."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    wall = _reuse_chain([
+        ([_grp(50, 4600, "hidden\ngroup")[0]], {50: "hidden\ngroup"}),
+        ([], {}),
+    ])
+    hide = ItemTransform(slide_number=1, item_index=50, kind="group", kind_index=50, role="hide", x=1, y=1, w=1, h=1)
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide])}[2]
+    assert "groupRemove" not in job  # capped away, no fake surplus
+
+
+def test_reuse_group_without_gct_entry_stays_sig_less_amid_signed_peers():
+    """Rule D: a removed donor group with no groupChildText entry is EXCLUDED from the
+    output/keep counts and emits a sig-less passthrough ref — never a synthetic carrying a
+    fabricated signature — even alongside a peer group that does have a signature."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    signed = _grp(50, 4600, "27\nSchools")[0]
+    unsigned = _grp(51, 4739, None)[0]  # no gct entry for kindIndex 51
+    wall = _reuse_chain([
+        ([dict(signed), dict(unsigned)], {50: "27\nSchools"}),
+        ([], {}),
+    ])
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    grs = job["groupRemove"]
+    sigless = [r for r in grs if "childSig" not in r]
+    signed_refs = [r for r in grs if r.get("childSig") == "27\nSchools"]
+    assert len(sigless) == 1 and sigless[0]["kindIndex"] == 51
+    assert len(signed_refs) == 1 and signed_refs[0]["kindIndex"] == 50
+    assert not any(r.get("kindIndex") == -1 for r in grs)  # no fabricated-sig synthetic
+
+
+def test_reuse_stray_outliving_keeper_downgrades_to_sig_less():
+    """Wrong-survivor guard (amendment C): two same-sig twins on slide 1 (kindIndex 50/51);
+    only the ki-50 copy persists to slide 2, the ki-51 copy is partition-removed. In the live
+    output the persisted keeper sits BELOW the inherited stray, but the dedup keeps the
+    highest index — so count-scoping would delete the keeper. The planner detects the stray
+    as the predicted survivor and downgrades that signature to a sig-less (fail-loud) ref."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    keeper = _grp(50, 4600, "twin")[0]
+    twin = _grp(51, 4739, "twin")[0]
+    wall = _reuse_chain([
+        ([dict(keeper), dict(twin)], {50: "twin", 51: "twin"}),
+        ([dict(keeper)], {50: "twin"}),  # only ki-50 twin persists
+    ])
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    assert "childSig" not in grs[0] and "expectedKeep" not in grs[0]
+    assert grs[0]["kindIndex"] == 51  # the partitioned twin, emitted sig-less

@@ -5,6 +5,17 @@ The matcher and style resolver are exercised WITHOUT keynote-parser: only
 test here builds a synthetic IWA object graph or calls the pure helpers directly.
 A single local-only integration test runs against a real deck when both the deck
 and the parser are available.
+
+JXA inspect reports plain objectText() but no per-run style, so item["runs"] is
+[] without this module. attach_runs raises ImportError (caught; runs stay [])
+when the optional iwa extra is missing.
+
+Normalize by stripping the object-replacement char and collapsing whitespace —
+JXA and IWA disagree on breaks/nbsp. Colour is IWA 0-1 floats → 0-255 for
+highlight detection. Inheritance: first value up super.parent wins. Identical
+twins assign IWA order → payload order. Grouped copy with JXA childCount 0 goes
+to slide.groupedText only, never items/geometry. groupChildText signatures must
+use the same join as keynote._norm_sig_handler or reuse dedup misses.
 """
 
 import copy
@@ -16,7 +27,9 @@ import obed_edom.iwa_runs as iwa
 from obed_edom.iwa_runs import (
     _match_runs_to_items,
     _normalize_text,
+    _slide_group_child_text,
     _slide_grouped_text,
+    attach_group_child_text,
     attach_runs,
     resolve_para_style,
     resolve_style,
@@ -298,7 +311,9 @@ def _grouped_deck():
 
     objects = {
         "110": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "210"}},
-        "210": {"_pbtype": "KN.SlideArchive"},
+        # drawablesZOrder lets iwa_kindindex.derive_kind_index assign the top-level
+        # group its (kind, kindIndex); the groupChildText helper reads it from here.
+        "210": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "500"}]},
         "500": {
             "_pbtype": "TSD.GroupArchive",
             "super": {"parent": {"identifier": "210"}},  # top-level: parent is the slide
@@ -378,16 +393,43 @@ def test_grouped_attach_leaves_resizer_input_and_digests_untouched(monkeypatch):
     digests_before = deck_slide_digests(copy.deepcopy(payload))
 
     attach_runs("ignored.key", payload)
+    # The resizer-only groupChildText attach must ALSO be side-effect-free.
+    attach_group_child_text("ignored.key", payload)
 
     # groupedText got attached...
     grouped_texts = [g["text"] for g in payload["slides"][0]["groupedText"]]
     assert sorted(grouped_texts) == ["CHC Churches", "Countries"]
+    # ...and groupChildText got attached: the top-level group's DFS leaf signature.
+    assert payload["slides"][0]["groupChildText"] == {0: "Countries\nCHC Churches"}
     # ...but items (incl. every group's children/childCount/geometry) are UNCHANGED.
     assert payload["slides"][0]["items"] == items_before
     for item in payload["slides"][0]["items"]:
         assert item["children"] == [] and item["childCount"] == 0
-    # ...and the reuse fingerprint is byte-identical (groupedText not in the digest).
+    # ...and the reuse fingerprint is byte-identical (neither groupedText nor
+    # groupChildText is in the digest).
     assert deck_slide_digests(payload) == digests_before
+
+
+def test_group_child_text_dfs_signature_and_kindindex_alignment():
+    # The signature is the DFS-order concatenation of full-depth normalized leaf text
+    # (Countries at depth 1, then CHC Churches inside the nested group), keyed by the
+    # SAME kindIndex derive_kind_index assigns the top-level group (0).
+    objects, _id_to_file, _file_ids = _grouped_deck()
+    gct = _slide_group_child_text(objects["210"], objects, {})
+    assert gct == {0: "Countries\nCHC Churches"}
+
+    from obed_edom.iwa_kindindex import derive_kind_index
+
+    groups = [r for r in derive_kind_index(objects["210"], objects) if r["kind"] == "group"]
+    assert [r["kindIndex"] for r in groups] == [0]  # helper key == derive's kindIndex
+
+
+def test_group_child_text_absent_when_no_groups(monkeypatch):
+    # A slide with no top-level groups gets no groupChildText field at all.
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _grouped_deck())
+    payload = {"slides": [{"index": 5, "items": []}]}  # index with no matching slide
+    attach_group_child_text("ignored.key", payload)
+    assert "groupChildText" not in payload["slides"][0]
 
 
 # --------------------------------------------------------------------------

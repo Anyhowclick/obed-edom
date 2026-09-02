@@ -29,8 +29,7 @@ from obed_edom.map_remap import (
 
 REMAP_JS = Path(__file__).resolve().parent / "remap_keynote.js"
 
-# AppleScript element names for the kinds the plan carries. The AppleScript index
-# is the JXA 0-based collection index plus one (same sdef collection, same order).
+# AppleScript index is JXA kindIndex + 1 (same sdef collection, same order).
 _AS_KIND_NAMES = {
     "text": "text item",
     "image": "image",
@@ -42,31 +41,12 @@ _AS_KIND_NAMES = {
 
 
 def as_geometry_enabled() -> bool:
-    """Whether the batched-AppleScript geometry path is used — default ON.
-
-    AS-geometry is the validated default: no JXA (0,0) yank, ~30% faster on the
-    constellation slide (it drops setPos's readback-verify and the second
-    position pass), placement/z-order/groups confirmed correct. Set
-    ``OBED_AS_GEOMETRY=0`` (or ``false``/``no``/``off``) to force the legacy JXA
-    geometry path — kept for A/B debugging and as the per-slide fallback for
-    slides carrying an object of a kind AppleScript can't address.
-    """
+    """Batched-AppleScript geometry path (default ON). `OBED_AS_GEOMETRY=0` forces legacy JXA."""
     return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def suppress_geometry_slides() -> set[int]:
-    """1-based slide numbers whose pass-1 write must place attrs but NO geometry.
-
-    Reads ``OBED_SUPPRESS_GEOMETRY`` (default empty) as a comma/space-separated list
-    of slide numbers. A listed NON-reuse slide gets ``applyTransforms(…, "attrs")``
-    only — its width/height/position are left exactly as pass 1 found them, taking
-    neither the batched-AppleScript geometry branch nor the JXA full-geometry branch
-    (``deleteHides`` still runs). This is the pass-1-only baseline the offline
-    surgical patcher (:mod:`obed_edom.iwa_write`) writes onto: without it an
-    empty-``asGeom`` slide silently falls through to the JXA full path and gets its
-    geometry written anyway. Non-numeric tokens are ignored, so a typo degrades to
-    "suppress nothing" rather than raising mid-remap.
-    """
+    """1-based slides whose pass-1 write is attrs-only. Without `OBED_SUPPRESS_GEOMETRY`, empty-asGeom falls through to JXA full path."""
     raw = os.environ.get("OBED_SUPPRESS_GEOMETRY", "")
     slides: set[int] = set()
     for token in raw.replace(",", " ").split():
@@ -77,26 +57,8 @@ def suppress_geometry_slides() -> set[int]:
     return slides
 
 
-# --------------------------------------------------------------------------
-# Offline source-wall read (OBED_OFFLINE_READ) — reconstruct the ~12-min JXA
-# `inspect_keynote(source)` from the deck's IWA graph, with the legacy read as
-# an AUTOMATIC total fallback. See obed_edom.offline_inspect + the reviewed plan.
-# --------------------------------------------------------------------------
 def offline_read_mode(explicit: str | None = None) -> str:
-    """Resolve the offline-read mode: ``on`` (default) or ``off``.
-
-    ``explicit`` (the ``remap()`` param) wins; otherwise ``OBED_OFFLINE_READ``;
-    otherwise the default. Unknown values fall to the default. DEFAULT is ``on``
-    (Session 15): the gold-deck plan gate is green on both decks with the real bulk
-    read, and one real end-to-end ``on`` remap wrote a deck placement-identical to a
-    legacy-read run. ``OBED_OFFLINE_READ=off`` forces the legacy ~12-min JXA inspect.
-
-    (The old ``verify`` mode — build both reads and diff at runtime — was removed:
-    its check was stricter than the validated write-affecting gate, so a re-derived
-    autoshrink ``fontSize`` that never lands on write made it always fall back on
-    real decks. The granular per-slide fallback inside the ``on`` path is the safety
-    net; force ``off`` for a full legacy read.)
-    """
+    """`on` (default two-tier IWA+bulk) or `off` (legacy JXA inspect). `explicit` wins over `OBED_OFFLINE_READ`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_READ", "")).strip().lower()
     return raw if raw in {"on", "off"} else "on"
 
@@ -138,15 +100,7 @@ def _specs_equivalent(off: list[dict], jxa: list[dict]) -> bool:
 def _merge_legacy_slides(
     payload: dict[str, Any], source: Path, slide_numbers: list[int]
 ) -> None:
-    """Replace the given slides' items in ``payload`` with a scoped legacy read, in place.
-
-    The granular-fallback merge: only ``slide_numbers`` (document numbers) are
-    re-read, in a SINGLE ``inspect_keynote`` scoped to them, and each returned
-    slide's item-bearing fields overwrite the offline+bulk slide of the same
-    number. Addressing (index/number) and every other slide are left untouched, so
-    the payload stays a drop-in for the planner. A legacy read that comes back
-    without a wanted slide leaves that slide's offline data in place (best effort).
-    """
+    """Replace the given slides' items in `payload` with one scoped legacy inspect."""
     if not slide_numbers:
         return
     legacy = inspect_keynote(source, slide_range=frozenset(int(n) for n in slide_numbers))
@@ -159,8 +113,6 @@ def _merge_legacy_slides(
         repl = by_number.get(number)
         if repl is None:
             continue
-        # Overwrite the content the legacy read authoritatively supplies; keep the
-        # offline index/number so downstream addressing is unchanged.
         for key in ("items", "groupedText", "master", "skipped"):
             if key in repl:
                 slide[key] = repl[key]
@@ -173,21 +125,9 @@ def acquire_wall_payload(
     mode: str,
     say: Callable[[str], None],
 ) -> dict[str, Any]:
-    """The source-wall inspect payload, honouring ``OBED_OFFLINE_READ`` ``mode``.
+    """Source-wall inspect honouring offline-read mode.
 
-    * ``off`` — the legacy ``inspect_keynote(source)`` (the ~12-min JXA read).
-    * ``on`` (default) — the TWO-TIER read is the source of truth: the offline IWA
-      payload (tier 1, exact for shapes/lines/plain frames) with a slim bulk Keynote
-      read (tier 2) overwriting the geometry of the three offline-soft classes
-      (groups, masked/rotated images, autosize text). Fallback is GRANULAR — the
-      unit is the object CLASS or SLIDE, never the whole deck: only slides whose
-      soft items the bulk read did not confirm, or that carry a content guard flag
-      (font/fileName the bulk read cannot touch), are re-read with one scoped
-      legacy ``inspect_keynote`` and merged back. The whole deck drops to legacy
-      only when tier 1 itself raises (missing ``iwa`` extra, decode error) or the
-      bulk tier is entirely unavailable AND something still needs confirming.
-
-    A ``say(...)`` line always records which path actually supplied the payload.
+    `on`: IWA + bulk geometry, with per-slide legacy fallback — never drop the whole deck unless tier 1 fails.
     """
     if mode == "off":
         return inspect_keynote(source, slide_range=slide_range)
@@ -209,9 +149,6 @@ def acquire_wall_payload(
     sidecar = offline.get("_offline") or {}
     fallback_slides = sidecar.get("fallback_slides") or []
 
-    # Tier 2 (bulk geometry) unavailable AND something still needs confirming:
-    # the offline geometry alone cannot be trusted for the soft classes, so drop
-    # the whole deck to legacy — the pre-two-tier safe behaviour.
     if not sidecar.get("bulk_ok") and fallback_slides:
         from collections import Counter  # noqa: PLC0415
 
@@ -221,8 +158,6 @@ def acquire_wall_payload(
             f"using Keynote inspect for the whole deck.")
         return inspect_keynote(source, slide_range=slide_range)
 
-    # Granular per-slide fallback: re-read only the flagged slides (one scoped
-    # legacy pass) and splice their items back over the offline payload.
     if fallback_slides:
         from collections import Counter  # noqa: PLC0415
 
@@ -232,7 +167,6 @@ def acquire_wall_payload(
             f"inspect {reasons}: {fallback_slides}.")
         _merge_legacy_slides(offline, source, fallback_slides)
 
-    # mode == "on": the two-tier read is the source of truth.
     confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
     say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
         f"skipped the full Keynote source inspect.")
@@ -240,33 +174,19 @@ def acquire_wall_payload(
 
 
 def write_timing_enabled() -> bool:
-    """Diagnostic: when ON, the JXA write pass records per-slide/per-phase elapsed
-    and the individual objects slower than a threshold, and remap prints a summary
-    — so one run shows exactly which slide, phase, and objects eat the geometry-write
-    time. Default OFF (zero cost). Set ``OBED_WRITE_TIMING=1`` to enable.
-    """
+    """When ON (`OBED_WRITE_TIMING=1`), record per-slide/per-phase JXA write timing."""
     return os.environ.get("OBED_WRITE_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def geom_props_enabled() -> bool:
-    """Whether the AS-geometry block folds each object's SIZE writes into one
-    ``set properties {width, height}`` command (position stays a separate LAST write
-    so the height re-anchor is still corrected; a line's endpoints fold into one
-    atomic set) instead of writing every property separately — default ON.
+    """Fold size into one `set properties {width, height}`; position stays a separate last write.
 
-    Fewer AppleScript commands is the only lever on a heavy slide: each command
-    carries a fixed ~100ms per-object cost there, and there is no cross-object bulk
-    write. Measured ~1.25× on the real report deck (slide 8 124s→101s, slide 3
-    67s→54s), and validated placement-identical against the pipeline's own
-    run-to-run noise floor (Keynote's canvas-shrink already jitters the map ~8px per
-    run). Set ``OBED_GEOM_PROPS=0`` (or ``false``/``no``/``off``) to force the legacy
-    per-property writes for A/B.
+    Height re-anchors ~18px about centre; folding position into the same record drifts the object.
     """
     return os.environ.get("OBED_GEOM_PROPS", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _say_write_timing(timing: dict[str, Any], say: Callable[[str], None]) -> None:
-    """Print the write-path timing: phases by total elapsed, then the slowest objects."""
     buckets: dict[str, Any] = timing.get("buckets") or {}
     rows = sorted(buckets.items(), key=lambda kv: -(kv[1].get("ms") or 0))
     say("── write timing: phases by total elapsed (ms) ──")
@@ -288,7 +208,6 @@ def _say_write_timing(timing: dict[str, Any], say: Callable[[str], None]) -> Non
 
 
 def _as_num(value: Any) -> str:
-    """AppleScript numeric literal: an integer when whole, else a 2dp decimal."""
     number = float(value)
     if number == int(number):
         return str(int(number))
@@ -296,28 +215,9 @@ def _as_num(value: Any) -> str:
 
 
 def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> str:
-    """One `tell slide N` block setting geometry for each object on that slide.
+    """One `tell slide N` block setting geometry.
 
-    Written in Python (not JXA) so a pytest can lock the exact string, and safe to
-    address by slide number because non-reuse slide numbering is stable through
-    the JXA loop (a reuse duplicate is deleted before the next slide, restoring
-    the count). Objects are addressed ``<kind> (kindIndex + 1)`` — the 1-based
-    AppleScript twin of the JXA 0-based collection index.
-
-    Width/height are written before position because an AppleScript height write
-    re-anchors ~18px about the object centre, which the final position write
-    corrects; unlike JXA, AppleScript does not yank an object to (0,0) on a size
-    write, so no position-only restore pass follows. A line's geometry is its
-    endpoints (``start point``/``end point``), which AppleScript can set even
-    though JXA cannot. A group gets full geometry (width, height, position) like
-    any other object: there is no separate child-resize pass on this branch, so
-    the JXA full pass this replaces was the only writer of a group's size — and a
-    role=="other" group is deliberately framed at wall size to keep wall-sized
-    children (a logo, a date) from clipping (see map_remap.py). Setting a group's
-    width in AppleScript neither yanks it nor scales its children, so it matches
-    that JXA frame write. Every object's writes sit inside their own ``try`` so an
-    unsupported property never abandons the rest of the slide, and a locked object
-    is unlocked before the writes and relocked after.
+    Width/height before position (height re-anchors ~18px). Lines use endpoints; AppleScript does not yank to (0,0).
     """
     body: list[str] = []
     for spec in specs:
@@ -349,17 +249,8 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
         x = spec.get("x")
         y = spec.get("y")
         if geom_props_enabled():
-            # Fewer AppleScript commands per object (each carries a fixed per-object cost
-            # on a heavy slide) — but position MUST stay a separate, LAST write. Setting
-            # height re-anchors ~18px about the object centre, and only a trailing
-            # position write corrects it; folding position into an atomic `properties`
-            # record loses that ordering and drifts the object (verified on a real deck).
-            # So: size keys combined into one `set properties`, then position on its own.
-            # A line has no re-anchor, so its endpoints stay a single atomic set.
-            # (Trade-off vs the legacy per-property form: a throw on the combined size
-            # record loses BOTH width and height rather than one — acceptable because both
-            # are universally settable on every _AS_KIND_NAMES kind, and the whole write is
-            # still wrapped in its own try so it never abandons the rest of the slide.)
+            # Position MUST stay a separate last write: height re-anchors ~18px about centre.
+            # Lines have no re-anchor; fold endpoints into one atomic set.
             if kind == "line" and start and end:
                 lines += [
                     "    try",
@@ -423,7 +314,7 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
         body += lines
     if not body:
         return ""
-    # A large deck's geometry can run well past osascript's 120s default.
+    # Geometry can run past osascript's 120s default.
     return "\n".join(
         ["with timeout of 3600 seconds", f"tell slide {int(slide_no)}"]
         + body
@@ -432,7 +323,6 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
 
 
 def _spec_bears_geometry(spec: dict[str, Any]) -> bool:
-    """Whether this transform carries geometry the JXA full pass would place."""
     if spec.get("w") is not None or spec.get("h") is not None:
         return True
     if spec.get("x") is not None and spec.get("y") is not None:
@@ -443,16 +333,7 @@ def _spec_bears_geometry(spec: dict[str, Any]) -> bool:
 
 
 def _slide_geometry_addressable(specs: list[dict[str, Any]]) -> bool:
-    """Whether every geometry-bearing object on the slide has an AppleScript address.
-
-    The AppleScript block can only address the kinds in ``_AS_KIND_NAMES``. JXA's
-    ``getItem`` also resolves a ``table``/``chart``/unknown kind through its
-    iWorkItems fallback and the full pass positions it, but the AppleScript block
-    has no such fallback — so a slide carrying any geometry-bearing unaddressable
-    object is kept OFF the AppleScript path entirely and left to the JXA full pass.
-    Correctness (that object still gets moved) beats removing the flick on that one
-    edge-case slide.
-    """
+    """False if any geometry-bearing object is outside `_AS_KIND_NAMES` — keep that slide on JXA."""
     for spec in specs:
         if spec.get("role") == "hide":
             continue
@@ -467,19 +348,7 @@ def _build_as_geometry(
     transform_dicts: list[dict[str, Any]],
     suppress: set[int] | frozenset[int] = frozenset(),
 ) -> dict[str, str]:
-    """Per-slide AppleScript geometry bodies, keyed by slide number as a string.
-
-    Built from the same transform dicts sent to JXA so the addressing matches
-    object for object. A slide is included ONLY when every geometry-bearing object
-    on it is AppleScript-addressable (see ``_slide_geometry_addressable``); an
-    excluded slide has no key here, and the JXA loop then runs its full geometry
-    path. The reuse path ignores this map regardless.
-
-    A slide in ``suppress`` (see :func:`suppress_geometry_slides`) is omitted here
-    too, so it carries no geometry body at all; ``applyNonReuseSlide`` then writes
-    its attrs only and skips geometry entirely rather than falling through to the
-    JXA full path.
-    """
+    """Per-slide AppleScript geometry bodies. Suppressed slides omitted so they stay attrs-only (no JXA fallback)."""
     by_slide: dict[int, list[dict[str, Any]]] = {}
     order: list[int] = []
     for spec in transform_dicts:
@@ -551,18 +420,7 @@ def resolve_source_previews(
     folder: Path | str | None = None,
     wanted: list[int] | None = None,
 ) -> tuple[dict[int, Any], str]:
-    """Rendered wall slides, keyed by slide number, for measuring empty space.
-
-    Placing loose text needs to know where the CG is actually empty, which needs
-    a picture of the slide. Rather than render one, this reuses an export that
-    already exists: an explicit folder if given, otherwise the preview cache that
-    any earlier inspect of this deck filled in. Both are free. When neither is
-    available the caller falls back to blind packing.
-
-    Returns the images plus a short label naming the source, because a stale
-    preview folder produces a plausible-looking but wrong mask and the log is
-    where that gets noticed.
-    """
+    """Rendered wall slides keyed by number, for measuring empty space for loose text."""
     from PIL import Image  # noqa: PLC0415
 
     from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
@@ -623,26 +481,7 @@ def remap_keynote(
     plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
-
-    `framing_overrides` maps a wall slide number to the template slide the operator
-    confirmed, for the pages where the automatic choice was wrong.
-
-    `side_content_slides` is the per-slide side-panel whitelist (wall slide numbers):
-    side content is dropped everywhere else and kept on these pages.
-
-    `export_dir`, when given, folds the PNG preview export into the stat-finalize
-    session (it runs against the already-open deck before it closes), so the dest is
-    not reopened a third time just to render previews. The result reports `exported`;
-    a run with no stat-group jobs never opens that session, so the caller still exports
-    those previews itself. Left unset (e.g. the validate=True read-back path), no
-    export is folded and behaviour is unchanged.
-
-    `plan_out`, when given, is filled (just before the JXA hand-off) with the planned
-    `transforms`/`reuses`/`suppressGeometry`/`asGeom` this run applied, so an offline
-    caller (the A/B write gate) can address the same specs without re-deriving them. It
-    is a pure read-out; nothing about the remap changes.
-    """
+    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
     def say(message: str) -> None:
         if log:
             log(message)
@@ -685,13 +524,19 @@ def remap_keynote(
         say(f"Inspecting CG template {template_path.name}…")
         template_data = inspect_keynote(template_path)
 
+    try:
+        from obed_edom.iwa_runs import attach_group_child_text  # noqa: PLC0415
+
+        attach_group_child_text(source, wall)
+    except Exception as exc:  # noqa: BLE001 — no group signatures on any failure
+        say(
+            f"Group child-text signatures unavailable ({type(exc).__name__}: {exc}); "
+            "reuse group dedup will report a shortfall instead of deduping."
+        )
+
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
-    # A rendered wall image lets loose text land on measured empty space rather than
-    # blind right-to-left packing. Needed wherever side content is kept — globally or
-    # on a whitelisted slide — so a whitelisted page packs its columns as well as the
-    # old global flag did.
     if include_lists or side_content_slides:
         previews, preview_note = resolve_source_previews(
             source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
@@ -775,6 +620,17 @@ def remap_keynote(
         )
     reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
     reuse_slides = {int(r["slide"]) for r in reuses}
+    # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
+    group_removes: list[dict[str, Any]] = []
+    for r in reuses:
+        for gr in r.get("groupRemove") or []:
+            group_removes.append(
+                {
+                    "slide": int(r["slide"]),
+                    "childSig": gr.get("childSig"),
+                    "expectedKeep": gr.get("expectedKeep"),
+                }
+            )
     stat_adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, reuse_slides)
     if stat_adjustments:
         say(
@@ -859,9 +715,6 @@ def remap_keynote(
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
             "transforms": transform_dicts,
             "reuses": reuses,
-            # Non-reuse slides listed here write attrs but NO geometry (the offline
-            # patcher's pass-1-only baseline). Read in applyNonReuseSlide alongside
-            # asGeom; empty by default so behaviour is unchanged.
             "suppressGeometry": sorted(suppressed),
         }
         if suppressed:
@@ -870,9 +723,6 @@ def remap_keynote(
                 f"slide(s) {sorted(suppressed)}."
             )
         if as_geometry_enabled():
-            # Non-reuse slides get their w/h/position written by a batched
-            # AppleScript block (no JXA (0,0) flick); reuse slides stay on JXA.
-            # A suppressed slide is omitted from the map so it stays attrs-only.
             plan["asGeometry"] = True
             plan["asGeom"] = _build_as_geometry(transform_dicts, suppress=suppressed)
             say(
@@ -887,11 +737,6 @@ def remap_keynote(
             plan["timing"] = {"slowMs": 120}
             say("OBED_WRITE_TIMING on: recording per-slide/per-phase write timing.")
         if plan_out is not None:
-            # Expose the planned geometry to an offline caller (the A/B write gate,
-            # scripts/write_gate_ab.py) without re-deriving it: the exact per-slide
-            # transform dicts this run applied, plus the reuse jobs and the suppress/
-            # asGeom maps. Populated just before the JXA hand-off so it mirrors what
-            # Keynote actually received. Read-only for the caller.
             plan_out["transforms"] = transform_dicts
             plan_out["reuses"] = reuses
             plan_out["suppressGeometry"] = plan.get("suppressGeometry")
@@ -916,6 +761,22 @@ def remap_keynote(
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
     say(f"Applied {applied}, missed {missed}.")
+    for entry in jxa.get("removeShortfalls") or []:
+        slide_no = entry.get("slide")
+        short = {
+            kind: rec
+            for kind, rec in (entry.get("byKind") or {}).items()
+            if int((rec or {}).get("shortfall") or 0) > 0
+        }
+        if short:
+            detail = ", ".join(
+                f"{rec['removed']} of {rec['expected']} {kind}"
+                for kind, rec in sorted(short.items())
+            )
+            say(
+                f"WARNING reuse slide {slide_no}: only removed {detail} on the donor "
+                "copy — a stranded donor object survived (doubling) until it is deduped."
+            )
     if jxa.get("cloned"):
         say(f"Duplicated {jxa.get('cloned')} remapped slide(s) instead of re-placing the map and dots.")
     layouts = jxa.get("layouts") or {}
@@ -936,36 +797,47 @@ def remap_keynote(
         say(f"Canvas after remap: {actual_w}×{actual_h}.")
     if jxa.get("skippedSlides"):
         say(f"Skipped {jxa.get('skippedSlides')} other slide(s) so the preview is this slide only.")
-    # The wall crop keeps the 1080 frame height, so a wall-authored stat number is
-    # already correctly sized relative to the frame — the JXA placement is fine. Two
-    # things JXA can't do: give each number the exact point size the template teaches
-    # (a group is opaque to JXA), and lift the stat text + Global Missions badge in
-    # front of the map they were authored behind. An AppleScript pass does both. No-op
-    # when the plan emitted no stat-group jobs.
+    # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     child_resize_result: dict[str, Any] | None = None
-    if child_resize:
-        stat_sizes = read_template_stat_sizes(template_path)
+    if child_resize or group_removes:
+        stat_sizes = read_template_stat_sizes(template_path) if child_resize else {}
         say(
             f"Finalizing {len(child_resize)} stat group(s): template sizes "
             f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'}) "
-            "+ bring to front."
+            "+ bring to front"
+            + (
+                f"; deduping {len(group_removes)} stranded donor-copy group(s)"
+                if group_removes
+                else ""
+            )
+            + "."
             + (" Exporting previews in the same session." if export_path else "")
         )
         child_resize_result = _run_stat_finalize(
-            dest, child_resize, stat_sizes, export_dir=export_path
+            dest, child_resize, stat_sizes, export_dir=export_path, group_removes=group_removes
         )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
         sized = child_resize_result.get("sized") or 0
         front = child_resize_result.get("front") or 0
+        dedup_deleted = child_resize_result.get("dedupDeleted") or 0
+        dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
                 f"the template, {front} object(s) brought to front"
+                + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
                 + "."
             )
+            if dedup_shortfall:
+                say(
+                    f"WARNING stat-finalize: {dedup_shortfall} donor-copy group(s) could "
+                    "NOT be safely deduped (live count did not equal expectedKeep + "
+                    "deleteCount, or the signature did not match) — kept, not guessed; "
+                    "doubling may persist."
+                )
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
@@ -982,13 +854,10 @@ def remap_keynote(
         "width": jxa.get("width"),
         "height": jxa.get("height"),
         "collections": jxa.get("collections"),
+        "removeShortfalls": jxa.get("removeShortfalls") or [],
         "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),
-        # Against the template this is a self-consistency check, not a quality
-        # score: the recipe was learned from that same template, so a non-zero
-        # figure means the planner did not apply the affine it derived. Use
-        # scripts/score_resize.py against a finished CG deck to judge output.
         "templateScore": score_against_gold(transforms, template_data, wall=wall),
         "placements": placements,
         "placementSource": preview_note,
@@ -997,8 +866,6 @@ def remap_keynote(
         "offFrame": offframe,
         "framingReport": framing_rows,
         "childResize": child_resize_result,
-        # True only when the stat-finalize session actually rendered the previews;
-        # the caller falls back to a standalone export otherwise.
         "exported": bool(child_resize_result and child_resize_result.get("exported")),
         "previewFiles": list(
             (child_resize_result or {}).get("previewFiles") or []
@@ -1036,19 +903,10 @@ def remap_and_inspect(
         wall_payload=wall_payload,
         template_payload=template_payload,
         plan_out=plan_out,
-        # Fold the export into the stat-finalize session on the no-read-back path
-        # only. The validate=True path reads the deck back with inspect_keynote,
-        # which does its own export, so it must stay unchanged (export_dir unset).
         export_dir=export_dir if not validate else None,
         log=log,
     )
-    # Reading the deck back dumps every object, which is what the validation
-    # flags are built from. A run whose wall content has already been checked
-    # only wants the pictures, and those come from a Keynote pass that does not
-    # walk the objects at all.
     if not validate:
-        # The stat-finalize session already exported when it ran; only fall back to a
-        # standalone export when it didn't (no stat-group jobs, or its export failed).
         if export_dir and not info.get("exported"):
             if log:
                 log("Exporting previews (validation off, so the deck is not read back)…")
@@ -1061,15 +919,6 @@ def remap_and_inspect(
         return info
     if log:
         log("Inspecting remapped deck…")
-    # use_cache=False on the readback. `dest` is a freshly-written output deck with a
-    # unique digest every run, so a digest-keyed cache entry never hits again — caching
-    # it only hashes the just-written (multi-GB) deck for nothing and pollutes
-    # .cache/inspect + .cache/previews with a never-reused full preview set. It also
-    # fixes the served-previews bug: with want_cache on, inspect_keynote redirects the
-    # export into preview_cache_dir(digest) (inspect.py:138-140), but remap_and_inspect
-    # and _run_resize build previewFiles/previewDir from the ORIGINAL export_dir, which
-    # is then empty ⇒ the dashboard shows nothing. use_cache=False keeps the export in
-    # export_dir where the web layer serves it from.
     payload = inspect_keynote(
         dest, export_dir=export_dir, slide_range=slide_range, use_cache=False
     )

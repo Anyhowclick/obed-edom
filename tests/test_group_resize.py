@@ -4,6 +4,12 @@ The pass itself is AppleScript (template-taught number sizes + bring-to-front) a
 validated against Keynote separately. These lock the pure-Python parts: the planner
 emitting one job per stat group, and the generated AppleScript embedding the template
 sizes and the z-order/badge steps.
+
+Bring-to-Front self-shifts group indices — do not cache indices for z-order.
+Handlers that name Keynote objects MUST wrap the body in `tell application id`
+(not just `using terms from`) or `count of iWork items` fails -1700.
+DFS-leaf-signature separator MUST equal iwa_runs._SIG_JOIN ("\\n").
+Delete highest-index first.
 """
 
 import re
@@ -105,78 +111,201 @@ def test_no_report_when_not_requested():
 # --- Generated AppleScript -------------------------------------------------------
 
 
-def test_finalize_script_embeds_template_sizes_and_bring_to_front():
-    jobs = [{"slide": 4, "groupIndex": 1}, {"slide": 4, "groupIndex": 6}]
+def test_finalize_script_embeds_template_sizes_and_content_addresses():
+    # Jobs now carry a childSig; the pass is index-FREE (selects by DFS leaf signature).
+    jobs = [
+        {"slide": 4, "groupIndex": 1, "childSig": "269"},
+        {"slide": 4, "groupIndex": 6, "childSig": "183\nSchools"},
+    ]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"183": 150.0, "269": 200.0})
     # Template sizes are looked up per number.
     assert 'if _t is "183" then return 150.0' in script
     assert 'if _t is "269" then return 200.0' in script
-    # Each stat group is addressed by its index and brought to front.
-    assert "group 1 of slide 4" in script
-    assert "group 6 of slide 4" in script
+    # The per-job logic is factored into HANDLERS (content-addressed by the DFS leaf
+    # signature) so N jobs compile to N one-line calls, not N inline scan loops (the
+    # inline form overflowed the compiler, -2707). The signature match is still by DFS
+    # leaf list (z-order scans live; font/dedup resolve against the per-slide cache)...
+    assert "obedSigLeaves(group _gi of slide slideNo of theDoc) is sig" in script
+    assert "(sig of _r) is targetSig" in script
+    # ...the slide's group signatures are read ONCE (scan-once) and each job's signature
+    # is passed as a list literal to a one-line call resolved against that cache.
+    assert "set _sigs to my obedSlideSigs(4)" in script
+    assert 'my obedFontSizeCached(4, _sigs, {"269"})' in script
+    assert 'my obedFontSizeCached(4, _sigs, {"183", "Schools"})' in script
+    assert 'my obedZRaise(4, {"269"})' in script
+    # No index-addressed group selection survives (the deliverable invariant).
+    assert not re.search(r"set g to group \d+ of slide", script)
+    assert not re.search(r"set selection of theDoc to \{group \d+ of slide", script)
     assert script.count("Bring to Front") >= 1
     # The badge is searched for and raised too.
     assert "Global Missions" in script
 
 
-def test_finalize_phase2_raises_groups_descending_per_slide():
-    """Phase 2 z-order must raise groups in descending order per slide. Bring to Front
-    moves the raised group to the end of the groups collection, shifting later indices
-    down. Ascending-order raises would mis-address later groups; descending order keeps
-    each group N addressing its intended group (raising a higher index never disturbs
-    lower ones)."""
-    # Input jobs in ascending order across two slides.
+def test_finalize_phase2_is_content_addressed_not_index_descending():
+    """Phase 2 z-order is now index-free: each stat group is selected by its DFS leaf
+    signature (like the badge block), so the old descending-index self-shift fix is
+    gone. Assert one content-addressed selection per job and NO index-addressed one."""
     jobs = [
-        {"slide": 4, "groupIndex": 1},
-        {"slide": 4, "groupIndex": 3},
-        {"slide": 4, "groupIndex": 6},
-        {"slide": 5, "groupIndex": 2},
-        {"slide": 5, "groupIndex": 4},
+        {"slide": 4, "groupIndex": 1, "childSig": "111"},
+        {"slide": 4, "groupIndex": 3, "childSig": "222"},
+        {"slide": 5, "groupIndex": 2, "childSig": "333"},
     ]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
+    # Phase-2 is a per-job one-line obedZRaise call; the handler selects a signature-
+    # matched group reference (slideNo-parameterised, not a baked-in index).
+    assert "set selection of theDoc to {group _gi of slide slideNo of theDoc}" in script
+    assert "my obedZRaise(4, {\"111\"})" in script
+    assert "my obedZRaise(5, {\"333\"})" in script
+    # Every job's signature is passed as a list literal to both phase calls.
+    for sig in ("111", "222", "333"):
+        assert f'{{"{sig}"}}' in script
+    # No index-addressed group selection or phase-1 index handle survives.
+    assert not re.search(r"set selection of theDoc to \{group \d+ of slide", script)
+    assert not re.search(r"set g to group \d+ of slide", script)
 
-    # Extract all phase-2 z-order "set selection" lines. Phase 2 uses
-    # "set selection of theDoc to {group N of slide S of theDoc}", unique to phase 2.
-    # Phase 1 uses "set g to group N" instead.
-    phase2_pattern = r"set selection of theDoc to \{group (\d+) of slide (\d+) of theDoc\}"
-    phase2_matches = re.findall(phase2_pattern, script)
-    assert len(phase2_matches) == 5, f"Expected 5 phase-2 selections, got {len(phase2_matches)}"
 
-    # Group matches by slide and assert descending group indices per slide.
-    by_slide = {}
-    for group_str, slide_str in phase2_matches:
-        group_idx = int(group_str)
-        slide_num = int(slide_str)
-        if slide_num not in by_slide:
-            by_slide[slide_num] = []
-        by_slide[slide_num].append(group_idx)
+def test_finalize_job_without_childsig_is_skipped_not_indexed():
+    # A job with no childSig (iwa extra unavailable at plan time) must NOT fall back to
+    # a drift-prone index; it is skipped-and-reported.
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": None}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
+    assert "set skipJobs to skipJobs + 1" in script
+    assert not re.search(r"set g to group \d+ of slide", script)
+    assert not re.search(r"obedSigLeaves\(group _gi of slide 4", script)
 
-    # Slide 4 should have groups in order [6, 3, 1] (descending).
-    assert by_slide[4] == [6, 3, 1], f"Slide 4 groups should be [6, 3, 1], got {by_slide[4]}"
-    # Slide 5 should have groups in order [4, 2] (descending).
-    assert by_slide[5] == [4, 2], f"Slide 5 groups should be [4, 2], got {by_slide[5]}"
 
-    # Verify phase-1 sizing lines still exist for all groups (order not asserted).
-    # Phase 1 uses "set g to group N of slide S" pattern.
-    phase1_pattern = r"set g to group (\d+) of slide (\d+) of theDoc"
-    phase1_matches = re.findall(phase1_pattern, script)
-    assert len(phase1_matches) == 5, f"Expected 5 phase-1 sizing groups, got {len(phase1_matches)}"
+def test_finalize_dedup_block_is_count_scoped_and_fail_loud():
+    # Two stranded donor copies of the same signature on slide 6, target keeps 1.
+    group_removes = [
+        {"slide": 6, "childSig": "110\nFull-Time Workers", "expectedKeep": 1},
+        {"slide": 6, "childSig": "110\nFull-Time Workers", "expectedKeep": 1},
+    ]
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {"269": 200.0}, None, group_removes=group_removes
+    )
+    # The slide's group signatures are read ONCE (scan-once); dedup is a one-line
+    # obedDedupPick call resolved against that cache, carrying the content signature (list
+    # literal) and the count-scoped keep/delete args: keep(1)+delete(2). The collected
+    # indices are then deleted in one obedApplyDeletes call.
+    assert "set _sigs to my obedSlideSigs(6)" in script
+    assert 'my obedDedupPick(6, _sigs, {"110", "Full-Time Workers"}, 1, 2)' in script
+    assert "my obedApplyDeletes(6, _dels)" in script
+    # The handler content-addresses by `sig` (against the cache) and guards live ==
+    # keepN+delN before collecting the lowest delN indices to delete.
+    assert "(sig of _r) is targetSig" in script
+    assert "if (count of _idxs) = (keepN + delN) then" in script
+    # Collect the lowest `delete` indices; obedApplyDeletes deletes them highest-first so
+    # the lower cached indices stay valid across the slide's dedup jobs.
+    assert "repeat with _j from 1 to delN" in script
+    assert "delete group _mx of slide slideNo of theDoc" in script
+    assert "set dedupDeleted to dedupDeleted + 1" in script
+    # Fail-loud branch (adds delN to the shortfall) and the two counters surface in the
+    # return string.
+    assert "set dedupShortfall to dedupShortfall + delN" in script
+    assert "dedupDeleted=" in script and "dedupShortfall=" in script
 
-    # Verify the expected groups appear in phase-1 sizing.
-    phase1_groups_by_slide = {}
-    for group_str, slide_str in phase1_matches:
-        group_idx = int(group_str)
-        slide_num = int(slide_str)
-        if slide_num not in phase1_groups_by_slide:
-            phase1_groups_by_slide[slide_num] = set()
-        phase1_groups_by_slide[slide_num].add(group_idx)
 
-    assert phase1_groups_by_slide[4] == {1, 3, 6}
-    assert phase1_groups_by_slide[5] == {2, 4}
+def test_finalize_dedup_sigless_remove_seeds_shortfall():
+    # A group remove with no childSig cannot be content-addressed => straight to the
+    # shortfall (reported, never guessed), and the session still runs (no child_resize).
+    group_removes = [{"slide": 6, "childSig": None, "expectedKeep": 0}]
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {}, None, group_removes=group_removes
+    )
+    assert script != ""  # session runs on group_removes alone (decoupled from jobs)
+    assert "set dedupShortfall to 1" in script
+
+
+def test_finalize_normalizer_parity_with_normalize_text():
+    """§5: the live AppleScript leaf normalizer (simulated in Python) must agree with
+    iwa_runs._normalize_text on representative leaves, or the offline plan signature
+    and the live signature silently disagree (the count-scoped dedup then fails loud)."""
+    from obed_edom.iwa_runs import _normalize_text
+    from obed_edom.keynote import _as_norm_sig_simulate
+
+    samples = [
+        "1,522",
+        "269",
+        "  Full-Time   Workers ",
+        "27\nSchools",
+        "CHC Arao",  # NBSP
+        "line1\nline2\nline3",
+        "text￼with object",  # object-replacement char
+        "￼  leading obj ",
+        "tab\tseparated",
+        "u2028 break",  # U+2028 line separator
+    ]
+    for s in samples:
+        assert _as_norm_sig_simulate(s) == _normalize_text(s), repr(s)
 
 
 def test_finalize_script_empty_when_no_jobs():
     assert _build_stat_finalize_script(Path("/tmp/x.key"), [], {"269": 200.0}) == ""
+
+
+def test_stat_finalize_script_compiles_at_scale():
+    """The per-job logic is factored into handlers precisely because the old inline form
+    overflowed the AppleScript compiler at real deck scale (`storage error: Internal
+    table overflow, -2707`) and stat-finalize never ran. This is the guard that would
+    have caught that offline: build a LARGE script (~200 font jobs across several slides
+    + ~100 group_removes, with varied signatures incl. an embedded newline, an object-
+    replacement char, and a comma-number) and `osacompile` it -- it must compile clean
+    (returncode 0, no -2707/-2741). Skips gracefully where `osacompile` is unavailable."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    import pytest
+
+    if shutil.which("osacompile") is None:
+        pytest.skip("osacompile unavailable (non-macOS)")
+
+    size_map = {"269": 200.0, "183": 150.0, "110": 120.0, "1,522": 90.0}
+    slides = [4, 5, 6, 7, 8, 9]
+    jobs = []
+    for i in range(200):
+        if i % 5 == 0:
+            sig = f"{i}\nFull-Time Workers"  # embedded newline (the _SIG_JOIN)
+        elif i % 5 == 1:
+            sig = "1,522\nGivers"  # comma-number
+        elif i % 5 == 2:
+            sig = "text￼with obj"  # U+FFFC object-replacement char
+        else:
+            sig = f"{i}"
+        jobs.append({"slide": slides[i % len(slides)], "groupIndex": i, "childSig": sig})
+    group_removes = []
+    for i in range(100):
+        if i % 7 == 0:
+            sig = None  # sig-less -> seeded straight into the shortfall
+        elif i % 3 == 0:
+            sig = "110\nFull-Time Workers"
+        elif i % 3 == 1:
+            sig = "1,522"
+        else:
+            sig = f"donor {i}\nline2￼"
+        group_removes.append(
+            {"slide": slides[i % len(slides)], "childSig": sig, "expectedKeep": 1}
+        )
+
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), jobs, size_map, Path("/tmp/prev"), group_removes=group_removes
+    )
+    # Sanity: the factored form stays far below the inline blow-up (~467 KB -> -2707).
+    assert len(script.encode("utf-8")) < 100_000
+
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osacompile", "-o", "/dev/null", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
 
 
 # --- Folded preview export -------------------------------------------------------
