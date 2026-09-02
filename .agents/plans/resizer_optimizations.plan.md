@@ -120,22 +120,25 @@ read this plan coordinates with — now SHIPPED; see the status note below).
 >   → **Upgrade the SKILL masked-image write note from TENTATIVE to PROVEN** (currently SKILL:968).
 >
 > **UP NEXT (in order):**
-> 1. **Bridge A′'s hide indices, then get the clean id-stable verdict.** The id-stable run ABORTED fail-safe:
->    **slide 9 has 2 role=hide specs**, so A′'s AS body (wall kindIndex, via `_build_slide_geometry_script`)
->    would mis-address on the post-`deleteHides` B-pre. Fix: build A′'s body with `iwa_write.bridge_kind_index`
->    (or suppress deleteHides while building A′). **B_pre.key + `specs_slide9.json` are banked in
->    `output/write-gate/`**, so re-run is CHEAP: `write_gate_ab.py --reuse-bpre …/B_pre.key --reuse-specs
->    …/specs_slide9.json` (no 1.2 GB remap). Watch-items (from verify): use the FRESH run for the group
->    verdict (fresh vs reuse `reported` keying can diverge); read the **ID-MATCH RATE** line — <95 % means the
->    A′ save renumbered ids (artifact, not a patch bug), not a write failure.
-> 2. **Group-child scaling gap (the real find; DECIDE extend-vs-fallback).** The offline patch handles
->    TOP-LEVEL geometry only; it does NOT scale geometry INSIDE groups. Matching-free proof: group union w
->    median A=78.5 vs **B==B-pre=24.8** — production enlarges constellation group children ~3×, the patch
->    leaves them untouched. This DISPROVES the plan's old "groups are pure translation / w-h inert" assumption
->    for SCALED groups. The constellation is the ~70 %-of-run write hotspot, so falling it back to AS forfeits
->    the biggest win — but scaling group children is a harder byte class (per-child structural geometry). The
->    byte-reveal (A′ vs B-pre) is the input to characterise the child transform (uniform scale?). User steer
->    2026-09-01: fix the harness first (id-stable), measure the child transform clean, THEN decide.
+> 1. **Bridge A′'s hide indices, get the clean id-stable verdict — DONE (`233f388`, 2026-09-02).** Replaced
+>    the fail-safe abort with `bridge_specs_kindindex` (mirrors the patcher's `_resolve_positional`); for
+>    slide 9 the bridge is a **no-op** (both hides are the TOP two image indices 120/121, so no survivor
+>    shifts — the abort was purely conservative). Cheap reuse re-run gave a **trustworthy** verdict:
+>    **ID-MATCH 100.0 %** (496 pairs), locality OK (only `Slide-20526591.iwa` changed), patch armed clean
+>    (applied 365, `value_clean`, `soft_fallbacks=0`, `refused=False`). **shape PASS @0.41 px, line PASS
+>    @0.50 px.** Banked `B_pre.key`/`specs_slide9.json` unchanged; re-run: `write_gate_ab.py --reuse-bpre
+>    output/write-gate/B_pre.key --reuse-specs output/write-gate/specs_slide9.json --slide 9 --out <scratch>`
+>    (must point `--out` off the bank dir — SameFileError otherwise; env `PYTHONPATH=src`).
+> 2. **Group-child scaling gap — CHARACTERISED clean; DECISION PENDING (extend-vs-fallback).** The sole
+>    failing dimension. `child`/`group`/`image` all FAIL for ONE root cause: the offline patch writes
+>    TOP-LEVEL geometry only and leaves geometry INSIDE groups untouched (`group` compares the child-UNION
+>    box, so its FAIL is derivative of the unscaled children, not an independent group-frame write miss).
+>    **The child transform is a clean UNIFORM per-group scale: sx==sy for all 67 groups**, clustering at
+>    **~1.93× and ~4.0×** (two framings). Worst deltas 146–269 px (unscaled children in a 4×-enlarged group).
+>    The constellation (Map slide 9) is the ~70 %-of-run write hotspot, so fallback-to-AS forfeits the biggest
+>    win; extend = write per-child geometry (position+size, +naturalSize for shape/masked-image children)
+>    scaled by the group's uniform factor — a harder byte class but the transform is now proven simple.
+>    Full run log: `scratchpad/write-gate-run/…/gate_run.log` (this session).
 > 3. Then `w-offline-write-optin` integration (opt-in flow), then `w-zorder-patch`.
 >
 > **PRE-EXISTING PRODUCTION BUGS — flagged by the user 2026-09-01 from `output/write-gate/A_png` (the full
