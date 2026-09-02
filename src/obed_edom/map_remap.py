@@ -1263,8 +1263,9 @@ def learn_recipe(
     if len(wall_slides) == 1:
         w_slide = wall_slides[0]
     else:
-        w_slide = _first_slide_with(wall_slides, is_map_item) or _first_slide_with(
-            wall_slides, is_pin_item
+        live_slides = [s for s in wall_slides if not s.get("skipped")]
+        w_slide = _first_slide_with(live_slides, is_map_item) or _first_slide_with(
+            live_slides, is_pin_item
         )
     g_slide = None
     if template_slide is not None:

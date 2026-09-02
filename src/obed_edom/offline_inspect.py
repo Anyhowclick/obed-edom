@@ -423,28 +423,38 @@ def two_tier_wall_payload(
     sidecar = payload.setdefault("_offline", {})
     guard = sidecar.get("guard") or []
     soft = sidecar.get("soft_geometry") or []
+    skipped_numbers = {
+        int(s.get("number") or (int(s.get("index") or 0) + 1))
+        for s in payload.get("slides") or []
+        if s.get("skipped")
+    }
 
     content_flags = [f for f in guard if f.get("reason") in CONTENT_GUARD_REASONS]
 
     if bulk_geometry_fn is None:
         fallback = content_flags + [{**s, "reason": "bulk-missing"} for s in soft]
         _finalize_two_tier(payload, sidecar, bulk_ok=False, spliced=0, fallback=fallback,
-                           slide_range=slide_range)
+                           slide_range=slide_range, bulk_slides=0, skipped_numbers=skipped_numbers)
         return payload
 
-    from obed_edom.map_remap import wants_slide  # noqa: PLC0415
-
-    wanted = None
+    live = [
+        int(s.get("number") or (int(s.get("index") or 0) + 1))
+        for s in payload.get("slides") or []
+        if not s.get("skipped")
+    ]
+    wanted = live
     if slide_range is not None:
         from obed_edom.map_remap import slides_for_plan  # noqa: PLC0415
 
-        wanted = slides_for_plan(slide_range)
+        wanted = sorted(set(live) & set(slides_for_plan(slide_range) or []))
     try:
-        bulk = bulk_geometry_fn(key_path, slides=wanted)
+        # bulk_geometry reads the WHOLE deck for an empty list; nothing wants a skipped
+        # slide. Subset relies on bulk_geometry_fn honouring `slides`.
+        bulk = bulk_geometry_fn(key_path, slides=wanted) if wanted else {}
     except Exception:  # noqa: BLE001 — any bulk failure => tier 2 unavailable
         fallback = content_flags + [{**s, "reason": "bulk-missing"} for s in soft]
         _finalize_two_tier(payload, sidecar, bulk_ok=False, spliced=0, fallback=fallback,
-                           slide_range=slide_range)
+                           slide_range=slide_range, bulk_slides=0, skipped_numbers=skipped_numbers)
         return payload
 
     spliced, count_mismatch = _splice_bulk_geometry(payload, bulk or {})
@@ -459,10 +469,9 @@ def two_tier_wall_payload(
         for number, kind in sorted(count_mismatch)
     ]
     fallback = content_flags + unconfirmed + count_flags
-    if slide_range is not None:
-        fallback = [f for f in fallback if wants_slide(int(f["slide"]), slide_range)]
     _finalize_two_tier(payload, sidecar, bulk_ok=True, spliced=len(spliced),
-                       fallback=fallback, slide_range=slide_range)
+                       fallback=fallback, slide_range=slide_range,
+                       bulk_slides=len(wanted), skipped_numbers=skipped_numbers)
     return payload
 
 
@@ -474,13 +483,21 @@ def _finalize_two_tier(
     spliced: int,
     fallback: list[dict[str, Any]],
     slide_range: Any,
+    bulk_slides: int,
+    skipped_numbers: set[int],
 ) -> None:
     if slide_range is not None:
         from obed_edom.map_remap import wants_slide  # noqa: PLC0415
 
         fallback = [f for f in fallback if wants_slide(int(f["slide"]), slide_range)]
+    fallback = [
+        f for f in fallback
+        if int(f["slide"]) not in skipped_numbers or f.get("reason") == "filename-dirty"
+    ]
     sidecar["bulk_ok"] = bulk_ok
     sidecar["spliced"] = spliced
+    sidecar["bulk_slides"] = bulk_slides
+    sidecar["skipped"] = len(skipped_numbers)
     sidecar["fallback"] = fallback
     sidecar["fallback_slides"] = sorted({int(f["slide"]) for f in fallback})
     # tripped = whole deck cannot be served two-tier (bulk unavailable and fallback nonempty).

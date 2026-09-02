@@ -674,13 +674,14 @@ def _reuse_wa_diffs(off_jobs: list[dict], jxa_jobs: list[dict], present: dict[in
     return diffs
 
 
-def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None):
+def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None, honour_slides: bool = False):
     """A ``bulk_geometry_fn`` returning the JXA payload's group/image/movie/text x/y/w/h.
 
     ``{slideIndex: {kind: [[x, y, w, h], … by kindIndex]}}`` — exactly what a real
     bulk read would hand back. ``omit`` is a set of ``(slideIndex, kind)`` to leave
     OUT, so a test can simulate the bulk read missing a slide or a kind and check
-    the granular fallback.
+    the granular fallback. ``honour_slides`` restricts the response to the caller's
+    (1-based) ``slides`` list, like the real bulk read would.
     """
     omit = omit or set()
     base: dict[int, dict[str, list]] = {}
@@ -700,7 +701,10 @@ def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None):
         base[s["index"]] = rows
 
     def fn(key_path, slides=None):
-        return base
+        if not honour_slides or not slides:
+            return base
+        keep = {int(n) - 1 for n in slides}  # `slides` is 1-based; `base` keys are 0-based
+        return {i: rows for i, rows in base.items() if i in keep}
     return fn
 
 
@@ -820,6 +824,145 @@ def test_count_mismatch_forces_fallback_even_with_zero_soft_items(monkeypatch):
     )
     # And the mismatched kind was left UNspliced (offline geometry stands).
     assert side["spliced"] == 0
+
+
+def _fake_offline_deck(*, skipped=(), soft=(), guard=()):
+    """Tier-1 double: 3 numbered slides, one image each; ``skipped`` is 1-based numbers."""
+    skip = set(skipped)
+
+    def fake(key_path, slide_range=None, *, deck=None):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 3,
+            "slides": [{"index": i, "number": i + 1, "skipped": (i + 1) in skip,
+                        "items": [{"kind": "image", "kindIndex": 0,
+                                   "x": 0, "y": 0, "w": 0, "h": 0, "index": 0}]}
+                       for i in range(3)],
+            "_offline": {"guard": list(guard), "soft_geometry": list(soft)},
+        }
+    return fake
+
+
+def test_two_tier_bulk_reads_only_non_skipped_slides(monkeypatch):
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}))
+
+    seen: dict = {}
+
+    def fn(key_path, slides=None):
+        seen["slides"] = slides
+        return {}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert seen["slides"] == [1, 3]
+    assert side["bulk_slides"] == 2
+    assert side["skipped"] == 1
+    assert side["fallback_slides"] == []
+
+
+def test_skipped_slide_soft_items_are_not_fallback(monkeypatch):
+    from obed_edom import offline_inspect
+
+    soft = [
+        {"slide": 2, "kind": "group", "kindIndex": 0},
+        {"slide": 3, "kind": "group", "kindIndex": 0},
+    ]
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}, soft=soft)
+    )
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=lambda key_path, slides=None: {})
+    side = off["_offline"]
+    assert side["fallback_slides"] == [3]
+    assert all(f["slide"] == 3 for f in side["fallback"])
+
+
+def test_skipped_slide_font_flags_are_not_fallback_but_filename_dirty_is(monkeypatch):
+    """``filename-dirty`` stays even on a skipped slide because ``deck_slide_digests``
+    hashes fileName (``baseline.py:170-172``) and the legacy item re-read is what
+    fills the real fileName."""
+    from obed_edom import offline_inspect
+
+    guard = [
+        {"slide": 2, "kind": "text", "kindIndex": 0, "reason": "font-size-unresolved"},
+        {"slide": 2, "kind": "image", "kindIndex": 0, "reason": "filename-dirty"},
+        {"slide": 3, "kind": "text", "kindIndex": 0, "reason": "font-size-unresolved"},
+    ]
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}, guard=guard)
+    )
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=lambda key_path, slides=None: {})
+    side = off["_offline"]
+    assert {(f["slide"], f["reason"]) for f in side["fallback"]} == {
+        (2, "filename-dirty"), (3, "font-size-unresolved"),
+    }
+    assert side["fallback_slides"] == [2, 3]
+
+
+def test_all_skipped_skips_bulk_call(monkeypatch):
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={1, 2, 3})
+    )
+
+    def fn(key_path, slides=None):
+        raise AssertionError("bulk_geometry_fn must not be called when every slide is skipped")
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert side["bulk_ok"] is True
+    assert side["spliced"] == 0
+    assert side["bulk_slides"] == 0
+    assert side["fallback_slides"] == []
+
+
+def test_slide_range_intersects_non_skipped(monkeypatch):
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}))
+
+    seen: dict = {}
+
+    def fn(key_path, slides=None):
+        seen["slides"] = slides
+        return {}
+
+    two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn, slide_range=(2, 3))
+    assert seen["slides"] == [3]
+
+
+def test_subset_bulk_requests_every_slide_when_none_skipped_and_digests_hold():
+    """The Map deck has 0 skipped slides, so ``wanted`` (1-based) must cover every
+    slide the JXA payload has (0-based bulk keys aside) — the discriminating
+    assertion is the recorded ``slides`` kwarg. The digest equalities are a sanity
+    check, not the point: the slide-identity digest never depends on geometry, so a
+    subset or partial (some kinds omitted) bulk read holds it by construction."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(MAP_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    from obed_edom.baseline import deck_slide_digests
+
+    full = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+
+    seen: dict = {}
+    honour_fn = _bulk_double_from_jxa(jxa, honour_slides=True)
+
+    def spy(key_path, slides=None):
+        seen["slides"] = slides
+        return honour_fn(key_path, slides=slides)
+
+    subset = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=spy)
+    assert seen["slides"] == [s["number"] for s in full["slides"]]
+
+    omit = {(i, k) for i in (1, 2) for k in BULK_KINDS}
+    partial = two_tier_wall_payload(
+        MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa, omit=omit, honour_slides=True)
+    )
+    assert deck_slide_digests(partial) == deck_slide_digests(full) == deck_slide_digests(subset)
 
 
 def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():

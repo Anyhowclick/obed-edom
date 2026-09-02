@@ -168,7 +168,9 @@ def acquire_wall_payload(
         _merge_legacy_slides(offline, source, fallback_slides)
 
     confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
-    say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
+    omitted = int(sidecar.get("skipped") or 0)
+    skipped_note = "" if not omitted else f"; {omitted} Keynote-skipped slide(s) left to the offline tier"
+    say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
     return offline
 

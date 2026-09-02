@@ -885,6 +885,60 @@ def test_learn_recipe_uses_template_slide_with_matching_map_layers():
     assert abs(pin.x - (3563 - 3041)) < 1
 
 
+def test_learn_recipe_skips_a_keynote_skipped_first_map_slide():
+    """Slide 1 carries a map layer but is Keynote-skipped; slide 2 is the live map
+    slide. The deck recipe must fit slide 2's layout, not slide 1's offline-only one
+    (matching plan_payload_transforms' own skipped-slide contract)."""
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "skipped": True,
+                "items": [_item(kind="image", fileName="map BG-1.png", x=0, y=0, w=200, h=200)],
+            },
+            {
+                "number": 2,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=4073, y=748, w=306, h=295),
+                    _item(kind="shape", x=3563, y=255, w=11, h=11),
+                ],
+            },
+        ],
+    }
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=-126, y=-14, w=787, h=1154),
+                ],
+            },
+            {
+                "number": 2,
+                "items": [],
+            },
+            {
+                "number": 3,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="image", fileName="pasted-image.pdf", x=1032, y=778, w=306, h=295),
+                ],
+            },
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["source"] == "template-layout"
+    assert recipe["templateSlide"] == 3
+    assert abs(recipe["mapDst"]["x"] - 11) < 1
+    assert abs(recipe["mapDst"]["w"] - 1248) < 1
+    assert abs(recipe["mapDst"]["h"] - 771) < 1
+
+
 def test_list_sample_uses_one_line_church_name_font():
     from obed_edom.map_remap import template_list_sample
 
