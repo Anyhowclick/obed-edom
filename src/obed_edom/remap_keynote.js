@@ -448,8 +448,13 @@ function stripBuildRefs(Keynote, slide, refs, flags) {
   return n;
 }
 
+function tempScriptPath(dir, uniq) {
+  const base = dir.charAt(dir.length - 1) === "/" ? dir : dir + "/";
+  return base + "obed-edom-keynote-" + uniq + ".applescript";
+}
+
 function runAppleScript(doc, body) {
-  // Named document, not front. Script file is /tmp; never open a .key under /private/tmp.
+  // Named document, not front. Script file is per-user temp dir, unique per call, removed on success, kept on failure.
   let target = "front document";
   try {
     target =
@@ -463,16 +468,19 @@ function runAppleScript(doc, body) {
     "\n" +
     body +
     "\nend tell\nend tell\n";
+  const dir = ObjC.unwrap($.NSTemporaryDirectory());
+  const uniq = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  const path = tempScriptPath(dir, uniq);
   const ns = $.NSString.stringWithString(script);
-  ns.writeToFileAtomicallyEncodingError(
-    "/tmp/obed-edom-keynote.applescript",
-    true,
-    $.NSUTF8StringEncoding,
-    null
-  );
+  ns.writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
   const app = Application.currentApplication();
   app.includeStandardAdditions = true;
-  app.doShellScript("/usr/bin/osascript /tmp/obed-edom-keynote.applescript");
+  try {
+    app.doShellScript("/usr/bin/osascript '" + path + "'");
+  } catch (e) {
+    throw new Error(String(e) + " (script kept: " + path + ")");
+  }
+  $.NSFileManager.defaultManager.removeItemAtPathError(path, null);
 }
 
 function removeShortfallOf(refs, tally) {
@@ -1116,5 +1124,6 @@ if (typeof module !== "undefined" && module.exports) {
     getItemByGeom: getItemByGeom,
     deleteRefs: deleteRefs,
     removeShortfallOf: removeShortfallOf,
+    tempScriptPath: tempScriptPath,
   };
 }
