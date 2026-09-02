@@ -30,6 +30,7 @@ from scripts.write_gate_ab import (  # noqa: E402
     id_match_rate,
     load_specs_sidecar,
     match_units,
+    bridge_specs_kindindex,
     positional_crosscheck,
     slide_has_resized_image,
     slide_units,
@@ -444,6 +445,40 @@ def test_build_reported_offline_composes_soft_frames():
 def test_specs_hide_count():
     assert specs_hide_count([{"role": "hide"}, {"role": "other"}, {"role": "hide"}]) == 2
     assert specs_hide_count([{"role": "other"}]) == 0
+
+
+def test_bridge_specs_kindindex_shifts_survivors_above_a_deleted_hide():
+    # A hide at image[0] shifts every higher same-kind survivor down by one; other kinds
+    # and survivors below the hide are untouched. Mirrors the patcher's _resolve_positional.
+    specs = [
+        {"kind": "image", "kindIndex": 0, "role": "hide"},
+        {"kind": "image", "kindIndex": 1, "role": "map"},
+        {"kind": "image", "kindIndex": 2, "role": "map"},
+        {"kind": "line", "kindIndex": 0, "role": "line"},
+    ]
+    bridged = bridge_specs_kindindex(specs)
+    by = {(b["kind"], b["role"]): b["kindIndex"] for b in bridged}
+    assert by[("image", "hide")] == 0  # hide spec left as-is (skipped by the AS body)
+    assert by[("image", "map")] in (0, 1)  # the two survivors bridged 1->0, 2->1
+    assert sorted(b["kindIndex"] for b in bridged if b["role"] == "map") == [0, 1]
+    assert by[("line", "line")] == 0  # unrelated kind untouched
+
+
+def test_bridge_specs_kindindex_noop_when_hides_sit_above_all_survivors():
+    # Slide-9 shape: the deleted hides are the TOP two image indices, so no survivor shifts.
+    specs = [
+        {"kind": "image", "kindIndex": i, "role": "map"} for i in range(3)
+    ] + [
+        {"kind": "image", "kindIndex": 3, "role": "hide"},
+        {"kind": "image", "kindIndex": 4, "role": "hide"},
+    ]
+    bridged = bridge_specs_kindindex(specs)
+    assert [b["kindIndex"] for b in bridged] == [s["kindIndex"] for s in specs]
+
+
+def test_bridge_specs_kindindex_noop_without_hides():
+    specs = [{"kind": "image", "kindIndex": 5, "role": "map"}]
+    assert bridge_specs_kindindex(specs) is specs  # returned unchanged, no copy
 
 
 def test_build_aprime_applescript_wraps_body():

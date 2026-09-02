@@ -163,13 +163,40 @@ def load_specs_sidecar(path: Path | str) -> dict:
 
 
 def specs_hide_count(specs: list[dict]) -> int:
-    """Number of ``role="hide"`` specs on the slide — the A' hide-addressing guard.
+    """Number of ``role="hide"`` specs on the slide — drives the A' index bridge.
 
     ``_build_slide_geometry_script`` addresses objects by WALL kindIndex, but B-pre has
-    already run ``deleteHides``; a non-zero count here means those indices are shifted
-    and the production body would hit the wrong objects on the A' copy.
+    already run ``deleteHides``; a non-zero count means the surviving same-kind indices
+    above a deleted hide are shifted down, so the A' body must be bridged (below) to hit
+    the same saved objects the patcher (B) addresses.
     """
     return sum(1 for s in specs if s.get("role") == "hide")
+
+
+def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
+    """Rewrite non-hide specs' WALL kindIndex → saved (post-``deleteHides``) kindIndex.
+
+    A' applies ``_build_slide_geometry_script`` to the saved B-pre, which addresses by
+    kindIndex; the patcher (B) already bridges the same way in ``_resolve_positional``, so
+    bridging here keeps A' and B pointing at the SAME saved object. No-op when the slide
+    has no hides, or (as on slide 9) when every deleted hide sits above all survivors.
+    """
+    from obed_edom.iwa_write import bridge_kind_index
+
+    hide_specs = [s for s in specs if s.get("role") == "hide"]
+    if not hide_specs:
+        return specs
+    bridged: list[dict] = []
+    for s in specs:
+        if s.get("role") == "hide" or s.get("kindIndex") is None:
+            bridged.append(s)
+            continue
+        b = dict(s)
+        b["kindIndex"] = bridge_kind_index(
+            str(s.get("kind") or ""), int(s["kindIndex"]), hide_specs
+        )
+        bridged.append(b)
+    return bridged
 
 
 # ==========================================================================
@@ -870,14 +897,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     _log(f"Preconditions OK: slide {N} resizes a masked image ({len(specs_N)} transform(s)).")
 
-    # Hide-addressing guard: the production geometry body (A') addresses by WALL
-    # kindIndex, but B-pre already ran deleteHides. A hide-bearing slide would mis-hit.
+    # Hide-addressing bridge: the production geometry body (A') addresses by WALL
+    # kindIndex, but B-pre already ran deleteHides. Bridge the surviving indices so A'
+    # and the patcher (B) hit the same saved objects (bridge is a no-op when the deleted
+    # hides sit above every survivor, as on slide 9's top-two image hides).
     n_hides = specs_hide_count(specs_N)
     if n_hides:
-        _log(f"ABORT: slide {N} has {n_hides} role=hide spec(s); A' addresses by wall "
-             "kindIndex on a post-deleteHides deck. Bridge the indices (iwa_write."
-             "bridge_kind_index) or pick a hide-free slide (9 is expected hide-free).")
-        return 2
+        _log(f"BRIDGE: slide {N} has {n_hides} role=hide spec(s); A' kindIndex bridged to "
+             "the post-deleteHides B-pre (iwa_write.bridge_kind_index), matching the patcher.")
 
     bpre_objects, _bp_idf, _bp_fi = _load_deck(bpre_deck)
     if reuse:
@@ -895,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"REUSE: banked A' {args.reuse_aprime}.")
     else:
         shutil.copyfile(bpre_deck, aprime_deck)  # A' shares B-pre's drawable ids
-        body = _build_slide_geometry_script(specs_N, N)
+        body = _build_slide_geometry_script(bridge_specs_kindindex(specs_N), N)
         if not body:
             _log(f"ABORT: no AppleScript geometry body built for slide {N}.")
             return 2
