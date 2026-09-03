@@ -25,6 +25,7 @@ from obed_edom.map_remap import (
     Rect,
     affine_of,
     cover_rect,
+    classify_item,
     effective_wall_map_src,
     is_map_item,
     is_pin_item,
@@ -553,6 +554,73 @@ def test_classifies_pasted_map_art():
     assert is_pin_item(_item(kind="movie", fileName="PIN DROP WAVE-71712.mov", w=500, h=500))
     assert not is_pin_item(_item(kind="image", fileName="34. CHC Kotagiri-76091.JPG", w=800, h=600))
     assert not is_map_item(_item(kind="image", fileName="LED blank-1.png", w=7680, h=1080))
+
+
+def test_caption_bearing_group_is_not_a_pin():
+    """A group is_pin_item catches by size/proximity alone (no name/movie match) is only
+    a real pin when its groupChildText signature is too short to be a caption. Text-
+    bearing groups (UPG/CHC/city-name captions) must reach the font pass, not stay pins
+    stuck at wall-size font in a shrunk box."""
+    group = _item(kind="group", w=100, h=100)
+    assert is_pin_item(group)  # is_pin_item itself is untouched by any of this
+
+    assert classify_item(group, None, None, "UPG") == "other"
+    assert classify_item(group, None, None, "Fairview") == "other"
+
+
+def test_short_label_group_stays_a_pin():
+    group = _item(kind="group", w=100, h=100)
+    assert classify_item(group, None, None, "12") == "pin"
+    assert classify_item(group, None, None, "A") == "pin"
+    assert classify_item(group, None, None, None) == "pin"  # no signature: unchanged default
+    assert classify_item(group, None, None, "") == "pin"
+
+
+def test_pin_name_match_stays_a_pin_even_with_caption_text():
+    """The filename/movie short-circuits in is_pin_item are never overruled by text —
+    only the size/proximity branch can lose a group to a caption."""
+    named = _item(kind="shape", fileName="PIN DROP WAVE-1.png", w=50, h=50)
+    assert is_pin_item(named)
+    assert classify_item(named, None, None, "a real caption, not a number") == "pin"
+
+    movie = _item(kind="movie", fileName="anything.mov", w=100, h=100)
+    assert is_pin_item(movie)
+    assert classify_item(movie, None, None, "a real caption, not a number") == "pin"
+
+
+def test_caption_bearing_pin_sized_group_reaches_the_font_pass():
+    """Diagnosis B/D: child_resize_report (the stat font pass) only collects role=other
+    groups, so a caption-bearing group classified as a pin never got its font scaled and
+    clipped. groupChildText threads through plan_slide_transforms the same way
+    child_resize_report reads it, so this group must classify as other end-to-end."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {
+                "s": 0.8547,
+                "tx": -2597.5,
+                "ty": 28.3,
+                "src": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+                "dst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+            }
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+            _item(kindIndex=0, kind="group", x=3300, y=200, w=100, h=100),  # pin-sized, near the map
+        ],
+        "groupChildText": {0: "Fairview"},
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.role == "other"
+    assert len(report) == 1  # role=pin groups never reach child_resize_report; this one does now
 
 
 def _identity_recipe():

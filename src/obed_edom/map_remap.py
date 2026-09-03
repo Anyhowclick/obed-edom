@@ -1791,14 +1791,30 @@ def _title_badge(
 
 
 def classify_item(
-    item: dict, map_src: Rect | None = None, title: dict | None = None
+    item: dict,
+    map_src: Rect | None = None,
+    title: dict | None = None,
+    group_child_text: str | None = None,
 ) -> str:
-    """Pass the resolved title so a church-named heading is not packed as a list."""
+    """Pass the resolved title so a church-named heading is not packed as a list.
+
+    ``group_child_text`` is this group's DFS leaf-text signature (``slide['groupChildText']``,
+    keyed by kindIndex — see ``child_resize_report``). A caption-bearing group (normalized
+    text >= 3 chars, e.g. "UPG"/"CHC"/a city name) is never a pin and must reach the font
+    pass; a numeral/letter dot-pin label stays too short and stays a pin. Only the
+    size/proximity branch of ``is_pin_item`` can lose text-bearing groups this way — the
+    filename/movie short-circuits there are never overruled by text.
+    """
     if (item.get("kind") or "") == "line":
         return "line"
     if is_map_item(item, map_src):
         return "map"
     if is_pin_item(item, map_src):
+        name = file_name(item)
+        kind = item.get("kind") or ""
+        if not (PIN_NAME_RE.search(name) or kind == "movie"):
+            if len((group_child_text or "").strip()) >= 3:
+                return "other"
         return "pin"
     if title is not None:
         if item is title:
@@ -2032,6 +2048,7 @@ def plan_slide_transforms(
     out: list[ItemTransform] = []
     left_groups: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
+    group_child_text: dict[int, str] = slide.get("groupChildText") or {}
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
     for fallback_i, item in enumerate(slide.get("items") or []):
@@ -2084,7 +2101,7 @@ def plan_slide_transforms(
                 _badge_hits[id(item)] = {"kind": str(item.get("kind") or "shape"), "index": kind_index + 1}
         if cluster is None:
             cluster = map_src
-        role = classify_item(item, cluster, title_item)
+        role = classify_item(item, cluster, title_item, group_child_text.get(kind_index))
         if role == "other" and aff is not None and is_layout_image(item):
             role = "map"
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
