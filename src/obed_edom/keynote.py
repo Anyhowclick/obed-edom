@@ -787,11 +787,15 @@ _STAT_ACCUMULATORS = (
     "frontRaised",
     "frontErr",
     "report",
+    "raiseTargets",
+    "claimed",
+    "sigFallbacks",
+    "unresolved",
 )
 
 
 def _stat_job_handlers() -> list[str]:
-    """Content-address by DFS signature. Delete highest-index first. Z-order rescans live (Bring to Front shifts indices)."""
+    """Index verified by content; descending raise relies on Bring-to-Front append semantics."""
     lines = [
         "on obedSlideSigs(slideNo)",
         "  global theDoc",
@@ -842,19 +846,45 @@ def _stat_job_handlers() -> list[str]:
         "    end repeat",
         "  end tell",
         "end obedApplyDeletes",
-        "on obedFontSizeCached(slideNo, sigs, targetSig, s)",
-        "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report",
+        "on obedResolveGroup(slideNo, sigs, gi, targetSig, allowFallback)",
+        "  global claimed, sigFallbacks, unresolved, skipJobs, report",
+        "  set _hits to {}",
+        "  repeat with _e in sigs",
+        "    set _r to contents of _e",
+        "    if (sig of _r) is targetSig then",
+        "      set _idx to (idx of _r)",
+        "      if _idx is not in claimed then set end of _hits to _idx",
+        "    end if",
+        "  end repeat",
+        "  if gi > 0 then",
+        "    repeat with _h in _hits",
+        "      if (contents of _h) is gi then",
+        "        set end of claimed to gi",
+        "        return gi",
+        "      end if",
+        "    end repeat",
+        "  end if",
+        "  if (allowFallback is not 0) and ((count of _hits) = 1) then",
+        "    set sigFallbacks to sigFallbacks + 1",
+        '    set report to report & " sigFallback(s=" & slideNo & ",gi=" & gi & ")"',
+        "    set _w to item 1 of _hits",
+        "    set end of claimed to _w",
+        "    return _w",
+        "  else",
+        "    set unresolved to unresolved + 1",
+        "    set skipJobs to skipJobs + 1",
+        '    set report to report & " unresolved(s=" & slideNo & ",gi=" & gi & ",n=" & (count of _hits) & ")"',
+        "    return 0",
+        "  end if",
+        "end obedResolveGroup",
+        "on obedStatJob(slideNo, sigs, gi, targetSig, s, allowFallback)",
+        "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report, raiseTargets",
+        "  set _gi to my obedResolveGroup(slideNo, sigs, gi, targetSig, allowFallback)",
+        "  if _gi is 0 then return",
+        "  set end of raiseTargets to {sl:slideNo, idx:_gi}",
         "  " + _keynote_tell(),
         "    try",
-        "      set g to missing value",
-        "      repeat with _e in sigs",
-        "        set _r to contents of _e",
-        "        if (sig of _r) is targetSig then",
-        "          set g to group (idx of _r) of slide slideNo of theDoc",
-        "          exit repeat",
-        "        end if",
-        "      end repeat",
-        '      if g is missing value then error "no sig match"',
+        "      set g to group _gi of slide slideNo of theDoc",
     ]
     lines += ["  " + ln for ln in _stat_leaf_font_writes("g")]
     lines += [
@@ -870,23 +900,30 @@ def _stat_job_handlers() -> list[str]:
         '      set report to report & " skip(font,s=" & slideNo & ",err=" & errNum & ":" & errMsg & ")"',
         "    end try",
         "  end tell",
-        "end obedFontSizeCached",
-        "on obedZRaise(slideNo, sig)",
-        "  global theDoc",
-        "  set _found to false",
-        "  " + _keynote_tell(),
-        "    try",
-        "      repeat with _gi from 1 to count of groups of slide slideNo of theDoc",
-        "        if my obedSigLeaves(group _gi of slide slideNo of theDoc) is sig then",
-        "          set selection of theDoc to {group _gi of slide slideNo of theDoc}",
-        "          set _found to true",
-        "          exit repeat",
-        "        end if",
-        "      end repeat",
-        "    end try",
-        "  end tell",
-        "  if _found then my obedFront()",
-        "end obedZRaise",
+        "end obedStatJob",
+        "on obedRaiseSlide(slideNo)",
+        "  global theDoc, raiseTargets",
+        "  set _rem to {}",
+        "  repeat with _e in raiseTargets",
+        "    set _r to contents of _e",
+        "    if (sl of _r) is slideNo then set end of _rem to (idx of _r)",
+        "  end repeat",
+        "  repeat while (count of _rem) > 0",
+        "    set _mx to item 1 of _rem",
+        "    repeat with _k from 2 to count of _rem",
+        "      if (item _k of _rem) > _mx then set _mx to item _k of _rem",
+        "    end repeat",
+        "    " + _keynote_tell(),
+        "      set selection of theDoc to {group _mx of slide slideNo of theDoc}",
+        "    end tell",
+        "    my obedFront()",
+        "    set _new to {}",
+        "    repeat with _k from 1 to count of _rem",
+        "      if (item _k of _rem) is not _mx then set end of _new to item _k of _rem",
+        "    end repeat",
+        "    set _rem to _new",
+        "  end repeat",
+        "end obedRaiseSlide",
         "on obedBadgeRaise(slideNo)",
         "  global theDoc",
         "  set _found to false",
@@ -993,6 +1030,9 @@ def _build_stat_finalize_script(
         "  set sizeSkips to 0",
         "  set dedupDeleted to 0",
         f"  set dedupShortfall to {no_sig_removes}",
+        "  set raiseTargets to {}",
+        "  set sigFallbacks to 0",
+        "  set unresolved to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1011,23 +1051,33 @@ def _build_stat_finalize_script(
         lines += [f"  my obedApplyDeletes({slide}, _dels)"]
     if font_skips:
         lines += [f"  set skipJobs to skipJobs + {font_skips}"]
-    font_by_slide: dict[int, list[tuple[str, float]]] = {}
+    sig_counts: dict[tuple[int, str], int] = {}
     for job in font_jobs:
-        font_by_slide.setdefault(int(job["slide"]), []).append(
-            (str(job["childSig"]), float(job.get("s") or 1.0))
-        )
-    for slide in sorted(font_by_slide):
-        lines += [f"  set _sigs to my obedSlideSigs({slide})"]
-        for childsig, s in font_by_slide[slide]:
-            sig_lit = _sig_list_literal(childsig)
-            lines += [f"  my obedFontSizeCached({slide}, _sigs, {sig_lit}, {float(s)})"]
-    lines += ["  save theDoc"]
-    # Z-order: select by signature, then Arrange > Bring to Front. Re-resolve live — Bring to Front shifts group indices.
-    lines += ['  set frontRaised to 0', '  set frontErr to ""']
+        key = (int(job["slide"]), str(job["childSig"]))
+        sig_counts[key] = sig_counts.get(key, 0) + 1
+    font_by_slide: dict[int, list[tuple[int, str, float, int]]] = {}
     for job in font_jobs:
         slide = int(job["slide"])
-        sig_lit = _sig_list_literal(str(job["childSig"]))
-        lines += [f"  my obedZRaise({slide}, {sig_lit})"]
+        childsig = str(job["childSig"])
+        gi = int(job.get("groupIndex") or 0)
+        s = float(job.get("s") or 1.0)
+        allow_fallback = 0 if sig_counts[(slide, childsig)] > 1 else 1
+        font_by_slide.setdefault(slide, []).append((gi, childsig, s, allow_fallback))
+    for slide in sorted(font_by_slide):
+        lines += [
+            f"  set _sigs to my obedSlideSigs({slide})",
+            "  set claimed to {}",
+        ]
+        for gi, childsig, s, allow_fallback in font_by_slide[slide]:
+            sig_lit = _sig_list_literal(childsig)
+            lines += [
+                f"  my obedStatJob({slide}, _sigs, {gi}, {sig_lit}, {float(s)}, {allow_fallback})"
+            ]
+    lines += ["  save theDoc"]
+    # Z-order: raise recorded targets per slide, highest index first (Bring to Front appends).
+    lines += ['  set frontRaised to 0', '  set frontErr to ""']
+    for slide in sorted(font_by_slide):
+        lines += [f"  my obedRaiseSlide({slide})"]
     for slide in slides:
         lines += [f"  my obedBadgeRaise({slide})"]
     lines += [
@@ -1052,7 +1102,8 @@ def _build_stat_finalize_script(
         '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
         '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " dedupDeleted=" '
         '& dedupDeleted & " dedupShortfall=" & dedupShortfall & " frontErr=" '
-        '& frontErr & " exported=" & exported & " detail=" & report',
+        '& frontErr & " exported=" & exported & " sigFallback=" & sigFallbacks '
+        '& " unresolved=" & unresolved & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1117,6 +1168,8 @@ def _run_stat_finalize(
         "front": _num("front"),
         "dedupDeleted": _num("dedupDeleted"),
         "dedupShortfall": _num("dedupShortfall"),
+        "sigFallback": _num("sigFallback"),
+        "unresolved": _num("unresolved"),
         "exported": exported,
         "previewFiles": preview_files,
         "raw": raw,

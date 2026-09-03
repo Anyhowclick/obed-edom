@@ -14,7 +14,7 @@ from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
-    adjust_child_resize_for_deleted_hides,
+    adjust_child_resize_indexes,
     navigator_numbering,
     CG_HEIGHT,
     CG_WIDTH,
@@ -649,11 +649,11 @@ def remap_keynote(
                     "expectedKeep": gr.get("expectedKeep"),
                 }
             )
-    stat_adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, reuse_slides)
+    stat_adjustments = adjust_child_resize_indexes(child_resize, transforms, reuse_slides)
     if stat_adjustments:
         say(
-            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides on "
-            "non-reuse slide(s): "
+            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides or "
+            "voided on reuse slide(s): "
             + ", ".join(f"slide {a['slide']} {a['from']}→{a['to']}" for a in stat_adjustments[:8])
             + "."
         )
@@ -859,12 +859,15 @@ def remap_keynote(
         front = child_resize_result.get("front") or 0
         dedup_deleted = child_resize_result.get("dedupDeleted") or 0
         dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
+        sig_fallback = child_resize_result.get("sigFallback") or 0
+        unresolved = child_resize_result.get("unresolved") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
                 f"the template, {front} object(s) brought to front"
                 + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
+                + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
                 + "."
             )
             if dedup_shortfall:
@@ -873,6 +876,12 @@ def remap_keynote(
                     "NOT be safely deduped (live count did not equal expectedKeep + "
                     "deleteCount, or the signature did not match) — kept, not guessed; "
                     "doubling may persist."
+                )
+            if unresolved:
+                say(
+                    f"WARNING stat-finalize: {unresolved} stat group(s) could NOT be "
+                    "unambiguously resolved — kept, not guessed — those stat groups keep "
+                    "their wall font size and stay buried."
                 )
         else:
             say(

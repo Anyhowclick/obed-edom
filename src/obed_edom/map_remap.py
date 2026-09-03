@@ -2592,12 +2592,12 @@ def _spec_key(spec: ItemTransform) -> tuple[str, int]:
     return (str(spec.kind), int(spec.kind_index if spec.kind_index is not None else spec.item_index))
 
 
-def adjust_child_resize_for_deleted_hides(
+def adjust_child_resize_indexes(
     child_resize: list[dict[str, Any]],
     transforms: list[ItemTransform],
     reuse_slides: set[int],
 ) -> list[dict[str, int]]:
-    """Shift stat-group indexes for group hides deleteHides already removed on non-reuse slides."""
+    """One place owns which index is trustworthy: shift for deleted group hides; void reuse slides to 0."""
     group_hides: dict[int, list[int]] = {}
     for t in transforms:
         if t.role != "hide" or str(t.kind) != "group":
@@ -2608,6 +2608,14 @@ def adjust_child_resize_for_deleted_hides(
     for job in child_resize:
         slide = int(job["slide"])
         if slide in reuse_slides:
+            adjustments.append(
+                {
+                    "slide": slide,
+                    "from": int(job["groupIndex"]),
+                    "to": 0,
+                }
+            )
+            job["groupIndex"] = 0
             continue
         job_ki = int(job["groupIndex"]) - 1
         shift = sum(1 for ki in group_hides.get(slide, []) if ki < job_ki)

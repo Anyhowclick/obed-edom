@@ -5,8 +5,8 @@ validated against Keynote separately. These lock the pure-Python parts: the plan
 emitting one job per stat group, and the generated AppleScript embedding the template
 sizes and the z-order/badge steps.
 
-Bring-to-Front self-shifts group indices — do not cache indices for z-order.
-Handlers that name Keynote objects MUST wrap the body in `tell application id`
+Index is verified by content; descending raise relies on Bring-to-Front append
+semantics. Handlers that name Keynote objects MUST wrap the body in `tell application id`
 (not just `using terms from`) or `count of iWork items` fails -1700.
 DFS-leaf-signature separator MUST equal iwa_runs._SIG_JOIN ("\\n").
 Delete highest-index first.
@@ -18,7 +18,7 @@ from pathlib import Path
 from obed_edom.keynote import _build_stat_finalize_script, _run_stat_finalize
 from obed_edom.map_remap import (
     ItemTransform,
-    adjust_child_resize_for_deleted_hides,
+    adjust_child_resize_indexes,
     plan_slide_transforms,
 )
 
@@ -112,7 +112,7 @@ def test_no_report_when_not_requested():
 
 
 def test_finalize_script_embeds_template_sizes_and_content_addresses():
-    # Jobs now carry a childSig; the pass is index-FREE (selects by DFS leaf signature).
+    # Jobs carry childSig + groupIndex; the handler verifies the index against the census.
     jobs = [
         {"slide": 4, "groupIndex": 1, "childSig": "269"},
         {"slide": 4, "groupIndex": 6, "childSig": "183\nSchools"},
@@ -121,22 +121,19 @@ def test_finalize_script_embeds_template_sizes_and_content_addresses():
     # Template sizes are looked up per number.
     assert 'if _t is "183" then return 150.0' in script
     assert 'if _t is "269" then return 200.0' in script
-    # The per-job logic is factored into HANDLERS (content-addressed by the DFS leaf
-    # signature) so N jobs compile to N one-line calls, not N inline scan loops (the
-    # inline form overflowed the compiler, -2707). The signature match is still by DFS
-    # leaf list (z-order scans live; font/dedup resolve against the per-slide cache)...
-    assert "obedSigLeaves(group _gi of slide slideNo of theDoc) is sig" in script
+    # The per-job logic is factored into HANDLERS so N jobs compile to N one-line calls,
+    # not N inline scan loops (the inline form overflowed the compiler, -2707). Font
+    # jobs resolve against the per-slide cache; raise uses recorded targets.
     assert "(sig of _r) is targetSig" in script
     # ...the slide's group signatures are read ONCE (scan-once) and each job's signature
     # is passed as a list literal to a one-line call resolved against that cache.
     assert "set _sigs to my obedSlideSigs(4)" in script
     # Each font call carries the group's affine scale `s` (default 1.0 when absent) so the
     # pass scales non-number text leaves by it (the group frame resize doesn't scale fonts).
-    assert 'my obedFontSizeCached(4, _sigs, {"269"}, 1.0)' in script
-    assert 'my obedFontSizeCached(4, _sigs, {"183", "Schools"}, 1.0)' in script
+    assert 'my obedStatJob(4, _sigs, 1, {"269"}, 1.0, 1)' in script
+    assert 'my obedStatJob(4, _sigs, 6, {"183", "Schools"}, 1.0, 1)' in script
     assert "set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)" in script
-    assert 'my obedZRaise(4, {"269"})' in script
-    # No index-addressed group selection survives (the deliverable invariant).
+    # No baked-in group <digits> of slide object specifiers.
     assert not re.search(r"set g to group \d+ of slide", script)
     assert not re.search(r"set selection of theDoc to \{group \d+ of slide", script)
     assert script.count("Bring to Front") >= 1
@@ -149,30 +146,23 @@ def test_finalize_font_call_carries_group_scale():
     scales that group's non-number text leaves by it (fonts don't scale with the frame)."""
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "CHC Arao", "s": 0.8547}]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
-    assert 'my obedFontSizeCached(4, _sigs, {"CHC Arao"}, 0.8547)' in script
+    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.8547, 1)' in script
 
 
-def test_finalize_phase2_is_content_addressed_not_index_descending():
-    """Phase 2 z-order is now index-free: each stat group is selected by its DFS leaf
-    signature (like the badge block), so the old descending-index self-shift fix is
-    gone. Assert one content-addressed selection per job and NO index-addressed one."""
+def test_finalize_phase2_raises_resolved_targets_descending():
+    """Phase 2 raises recorded targets per slide, highest index first (Bring to Front appends)."""
     jobs = [
         {"slide": 4, "groupIndex": 1, "childSig": "111"},
         {"slide": 4, "groupIndex": 3, "childSig": "222"},
         {"slide": 5, "groupIndex": 2, "childSig": "333"},
     ]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
-    # Phase-2 is a per-job one-line obedZRaise call; the handler selects a signature-
-    # matched group reference (slideNo-parameterised, not a baked-in index).
-    assert "set selection of theDoc to {group _gi of slide slideNo of theDoc}" in script
-    assert "my obedZRaise(4, {\"111\"})" in script
-    assert "my obedZRaise(5, {\"333\"})" in script
-    # Every job's signature is passed as a list literal to both phase calls.
-    for sig in ("111", "222", "333"):
-        assert f'{{"{sig}"}}' in script
-    # No index-addressed group selection or phase-1 index handle survives.
-    assert not re.search(r"set selection of theDoc to \{group \d+ of slide", script)
-    assert not re.search(r"set g to group \d+ of slide", script)
+    assert "my obedRaiseSlide(4)" in script
+    assert "my obedRaiseSlide(5)" in script
+    assert "> _mx" in script
+    assert "set selection of theDoc to {group _mx of slide slideNo of theDoc}" in script
+    assert "obedZRaise" not in script
+    assert "obedSigLeaves(group _gi of slide slideNo of theDoc) is sig" not in script
 
 
 def test_finalize_job_without_childsig_is_skipped_not_indexed():
@@ -386,7 +376,7 @@ def test_adjust_shifts_job_down_by_lower_group_hides():
     # group 5 (kind_index 4), so it drops by 2 to group 3.
     transforms = [_hide(5, 0), _hide(5, 3)]
     child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
     assert child_resize[0]["groupIndex"] == 3
     assert adjustments == [{"slide": 5, "from": 5, "to": 3}]
 
@@ -394,9 +384,9 @@ def test_adjust_shifts_job_down_by_lower_group_hides():
 def test_adjust_excludes_reuse_slides():
     transforms = [_hide(5, 0), _hide(5, 3)]
     child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, {5})
-    assert child_resize[0]["groupIndex"] == 5  # untouched
-    assert adjustments == []
+    adjustments = adjust_child_resize_indexes(child_resize, transforms, {5})
+    assert child_resize[0]["groupIndex"] == 0
+    assert adjustments == [{"slide": 5, "from": 5, "to": 0}]
 
 
 def test_adjust_only_counts_hides_lower_than_job():
@@ -404,7 +394,7 @@ def test_adjust_only_counts_hides_lower_than_job():
     # shift it.
     transforms = [_hide(5, 5)]
     child_resize = [{"slide": 5, "groupIndex": 2}]
-    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
     assert child_resize[0]["groupIndex"] == 2
     assert adjustments == []
 
@@ -413,6 +403,68 @@ def test_adjust_only_counts_group_hides():
     # A lower role="hide" of kind "image" must not shift a group job.
     transforms = [_hide(5, 0, kind="image")]
     child_resize = [{"slide": 5, "groupIndex": 5}]
-    adjustments = adjust_child_resize_for_deleted_hides(child_resize, transforms, set())
+    adjustments = adjust_child_resize_indexes(child_resize, transforms, set())
     assert child_resize[0]["groupIndex"] == 5
     assert adjustments == []
+
+
+def test_finalize_guard_hit_passes_group_index():
+    jobs = [{"slide": 9, "groupIndex": 7, "childSig": "UPG"}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert "my obedStatJob(9, _sigs, 7," in script
+    handler = script[script.index("on obedResolveGroup") : script.index("end obedResolveGroup")]
+    is_gi = handler.find("is gi")
+    one_hit = handler.find("(count of _hits) = 1")
+    else_at = handler.find("else")
+    assert is_gi != -1 and one_hit != -1 and else_at != -1
+    assert is_gi < one_hit < else_at
+
+
+def test_finalize_accounting_globals_claimed_per_font_slide():
+    jobs = [
+        {"slide": 4, "groupIndex": 1, "childSig": "A"},
+        {"slide": 4, "groupIndex": 2, "childSig": "B"},
+        {"slide": 6, "groupIndex": 1, "childSig": "C"},
+    ]
+    group_removes = [
+        {"slide": 6, "childSig": "donor", "expectedKeep": 1},
+        {"slide": 6, "childSig": "donor", "expectedKeep": 1},
+    ]
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), jobs, {}, None, group_removes=group_removes
+    )
+    global_line = script.split("\n", 1)[0]
+    for name in ("sigFallbacks", "unresolved", "claimed", "raiseTargets"):
+        assert name in global_line
+    assert "set raiseTargets to {}" in script
+    assert "set sigFallbacks to 0" in script
+    assert "set unresolved to 0" in script
+    init = script[script.index("set theDoc to document 1") : script.index("set _sigs to")]
+    assert "set claimed to {}" not in init
+    font_phase_slides = {4, 6}
+    assert script.count("set claimed to {}") == len(font_phase_slides)
+    assert "sigFallback=" in script
+    assert "unresolved=" in script
+
+
+def test_finalize_allow_fallback_gated_by_duplicate_childsig():
+    jobs = [
+        {"slide": 9, "groupIndex": 10, "childSig": "UPG", "s": 0.483},
+        {"slide": 9, "groupIndex": 11, "childSig": "UPG", "s": 0.483},
+        {"slide": 9, "groupIndex": 12, "childSig": "CHC", "s": 0.483},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert 'my obedStatJob(9, _sigs, 10, {"UPG"}, 0.483, 0)' in script
+    assert 'my obedStatJob(9, _sigs, 11, {"UPG"}, 0.483, 0)' in script
+    assert 'my obedStatJob(9, _sigs, 12, {"CHC"}, 0.483, 1)' in script
+
+
+def test_finalize_reuse_voids_group_index_in_call():
+    transforms = [_hide(2, 0)]
+    child_resize = [{"slide": 2, "groupIndex": 4, "childSig": "unique-sig"}]
+    adjustments = adjust_child_resize_indexes(child_resize, transforms, {2})
+    assert child_resize[0]["groupIndex"] == 0
+    assert adjustments == [{"slide": 2, "from": 4, "to": 0}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), child_resize, {})
+    assert "my obedStatJob(2, _sigs, 0," in script
+    assert ", 0," in script
