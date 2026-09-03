@@ -3,8 +3,8 @@ name: CG resizer — optimizations (read + write tracks), bug backlog, features
 overview: "ONE plan for the CG resizer (merged 2026-09-03 from cg_resizer.plan.md + resizer_optimizations.plan.md; the umbrella tranche map lives here now). Read `.agents/skills/obed-edom/SKILL.md` first — every durable Keynote/IWA finding lives there; this plan points into it. PRIORITY = the optimization tracks. ORDER: (1) current output-bug fixes (batch 1 in flight, batch 2 next) → (2) clear TRANCHE 1 (W1 offline-write stabilise + default-flip bar; R1 nested-bulk probe) → (3) TRANCHE 2 = the immediate optimization TODO: R2 readback two-tier → propose two-tier, W2 z-order patch (stroke restore lands with batch 1) → (4) R0 leftovers + feature backlog + constellation cluster affine. Shipped work is a compact table at the end; insights are one section. Discipline: measure first, probe before trusting (AppleScript first; COUNT affected objects), 2/1/2 workflow (planners sonnet+opus, fresh sonnet implements, reviewers sonnet+opus; implementers never review their own work), never concurrent Keynote, commits forward-dated ~10:00 UTC, no PRs."
 todos:
   - id: output-bugs-batch1
-    content: "IN FLIGHT 2026-09-03 (plan: session a0211898 scratchpad probe/plan_bugs_final.md, signed off by both planners). F stat-finalize nits (shipped 90aaa4e); E slide-8 backdrop rides the title-slot ty=28 → pin backdrop y=0; A 'Global Missions' badge = 3 top-level drawables (plate/globe/text) under the map — obedBadgeRaise raised only the last text match and never ran on no-stat slides → badge_raise_report + obedRaiseItem plate→globe→text on every remapped slide, three gates relaxed; C card-photo stroke 3.0→0.25 after the canvas shrink → restore SOURCE width via ONE Index/DocumentStylesheet.iwa patch, unconditional (this IS w-border-stroke-width's production rule), guarded out<src and out≤src·canvas_scale·1.1, pairing by (colour,pattern), no gutter change; B1/D1 caption-bearing groups (≥3-char leaf text, checked in classify_item only, after the PIN_NAME_RE/movie short-circuits) are `other` not `pin` so the pass-2 font pass reaches the 5 column-1 cards and the 27 constellation circles. The '+' marks are Keynote's editor-only clipped-text badge (exports show none; wrap-off captions spill horizontally) — nothing to delete. VERIFY: unit tests, score_resize before/after (baseline banked), ONE live Map remap + export, probe/verify_batch1.py + verify_slide9.py."
-    status: in_progress
+    content: "DONE 2026-09-03 — code-complete AND live-verified (2/1/2: sonnet+opus planners, fresh sonnet implementer, sonnet+opus reviewers, two live Map remaps). Commits: 90aaa4e F nits; 171fc65 E backdrop y=0; e689c23 A badge_raise_report + obedRaiseItem plate→globe→text on every remapped slide (three gates relaxed); 56a735c C card stroke restore-to-source (ONE Index/DocumentStylesheet.iwa patch, unconditional, guarded out<src and out≤src·canvas_scale·1.1, pairing by (colour,pattern)); caee7a0 B1/D1 caption-bearing groups (≥3-char leaf text, checked in classify_item only) are `other` not `pin`; 95c722b review nits; f9261b7 + 8e5d3b2 A2 geometry-guarded badge raise (the first live run showed the image-index raise hitting the MAP on reuse slide 6 — index drifted by one — so plate/globe rows carry the planned CG frame, `<kind> idx` is accepted only within 3px, else one bulk read per property scans for the unique match, else skip+report; title stays on the content search). LIVE RESULT (output/batch1-verify.key, previews output/previews/batch1-verify/): verify_batch1.py PASS — badge above the map on slides 1–7, backdrop y=0, stroke 18316959 = 3.0 after pass 2's save, 0 caption overflow; verify_slide9.py PASS — 66/66 text groups at 0.483×, frontmost, unions within 1.3% of plan (live runs at f9261b7; 8e5d3b2 is error-path accounting only, osacompile-checked); score_resize identical before/after (cached payloads carry no child text, so it does not exercise B1 — the gold side of the scorer still classifies without child text, a known asymmetry). The '+' marks were Keynote's editor-only clip badge (exports show none). Residual nits from review (not blocking): scorer gold-side classification asymmetry; `result['cardStroke']` has three shapes; PIN origin guard is looser with 32 fewer pins."
+    status: completed
   - id: card-template-size-reflow
     content: "BATCH 2 (owner ACCEPTED 2026-09-03). Owner's rule: the template dictates SIZE incl. text pt; colour/font/runs/builds from source. Photo cards take the template card rect (120.4×100 vs today's 111.9×93) and captions the template swatch (10pt) with whole-point step-down while the measured string (PIL, Amplitude Bold) exceeds box_w − 2·inset (gold reproduces 71/71 captions; floor 8pt; report every step-down); seed sizes into stat-finalize's exact-text size_map. Consequence: re-pitch the slide-4 grid to gold's 126.9/104.9 and reflow 8×6 → 6×8 (today columns 7–8 sit OFF-CANVAS at x=2064/2187). Land AFTER batch 1 is verified live; re-check the stroke/gutter inequality (≥7pt clear) after the re-pitch."
     status: pending
@@ -94,11 +94,12 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
   position where appropriate) for matched objects, **including text point sizes**; colour,
   font family/style, run formatting and each slide's builds/animations are always copied from
   the SOURCE (memory `template-size-source-style`, SKILL "Text styling").
-- **Just shipped:** stat-finalize index-guarded addressing (`23de0d2`) — the Map slide-9
-  collision (53/67 groups share sig "UPG") shrank two pins' text to ~1.3pt and left the 40
-  targets unscaled; jobs now resolve by `groupIndex` verified against the cached signature
-  census, unique-sig fallback, else skip-and-report; raises from recorded targets, descending.
-- **In flight:** output-bugs batch 1 (todo). Then batch 2, then tranche 1 → **tranche 2**.
+- **Just shipped (2026-09-03):** stat-finalize index-guarded addressing (`23de0d2`, the slide-9
+  signature collision) and output-bugs batch 1 (`171fc65` … `f9261b7`: backdrop y=0, badge
+  plate→globe→text raised on every slide with a geometry-guarded index, card stroke restored to
+  source, caption-bearing groups are never pins) — both live-verified on the Map deck.
+- **Next:** batch 2 (card template size + caption step-down + grid reflow), then tranche 1 →
+  **tranche 2** (the immediate optimization TODO).
 
 ## Order of work
 
@@ -116,10 +117,10 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
 | Tranche | Item | Keynote | Status / depends on |
 |---|---|---|---|
 | W0.1–W0.4 | tmp-path fix, skipped-slide bulk skip, z-order probe, stroke probe | probes only | DONE (2ac04db, 695199d, 99771bf, c4dc5e5) |
-| Fixes | output-bugs batch 1 → batch 2 | one live remap each | IN FLIGHT / next |
+| Fixes | output-bugs batch 1 → batch 2 | one live remap each | batch 1 DONE + live-verified; batch 2 next |
 | **W1** | `w-offline-write-stabilise` | gate on both gold decks | shipped default OFF; re-bank oracle, healthy-A gate, flip bar |
 | **R1** | `r-nested-bulk-probe` | yes | after W1's gate window |
-| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | R0 done; own caveats (a)–(f) |
+| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | own caveats (a)–(f); R0 is independent (cheap, anytime) |
 | **W2** | `w-zorder-patch` (stroke prod folded into batch 1 C) | yes | W1 stable |
 | R0 | `r-cache-quick-wins` | no (A/B on warmed decks) | anytime, Keynote-free |
 | B | reuse yank / framing fallback, cluster affine, builds | yes | independent |
@@ -241,6 +242,10 @@ whose number disagrees with the run either side of it. Ships at `warning`.
   opaque groups (source-deck ungroup); a verse's wall-authored hard line breaks (stripping by
   script destroys superscripts and small-caps LORD); sparkle-overlay placement; a caption in
   the "as it will look" preview.
+- UNCONFIRMED production reports from the 2026-09-01 full Map run (`output/write-gate/A_png`),
+  never localised: (b) the yellow "269 churches" text deleted on several slides yet present +
+  mis-positioned in the slide-7 PNG; (d) right-side photo z-order wrong on slides 4 & 5 (may be
+  subsumed by the badge/z-order work — re-check on the next live run before opening an item).
 - Never dedupe images (stacked map layers are coincident on purpose). The first ranged propose
   on a never-read deck cannot translate the range into Keynote's numbering and says so.
   Composite preview text is scaled wall pixels (close, not right). The JXA export has never
