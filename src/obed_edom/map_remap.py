@@ -703,6 +703,12 @@ def _attach_text_style(
     styles = template_character_styles(template_slides)
     if styles:
         recipe["characterStyles"] = styles
+    cards = template_card_samples(template_slides)
+    if cards:
+        recipe["cardSamples"] = [
+            {"rect": c["rect"].as_dict(), "aspect": c["aspect"], "caption": c["caption"]}
+            for c in cards
+        ]
     return recipe
 
 
@@ -1728,6 +1734,95 @@ def badge_slot_keys(members: Iterable[dict]) -> dict[int, str]:
     return keys
 
 
+# 132/109 wall vs 120/100 template differ by 0.9%; 2% leaves ~2x headroom.
+CARD_ASPECT_TOL = 0.02
+
+
+def template_card_samples(template_slides: list[dict]) -> list[dict[str, Any]]:
+    """Template groups usable as a photo-card sample: {rect, aspect, caption:{font,size,color,text}}.
+
+    caption = this group's own single text leaf (``slide['groupCaption']``, kindIndex-keyed,
+    attach_group_captions — IWA-precise, unlike JXA's flat per-slide groupedText, so an
+    unrelated same-slide group with its own single leaf, e.g. a stat-number swatch, never
+    borrows the card's caption). Purely-numeric captions are excluded (stat swatches, not
+    cards), and so is a bare one-word caption ("UPG"/"CHC" alone) — every measured card
+    caption is a classification tag *plus* a name ("CHC Villamonte"); a bare tag is a
+    constellation-dot/badge swatch that would otherwise falsely aspect-match a wall group
+    on an unrelated slide (measured: wall slide 9's "UPG" dots at aspect 0.78 vs a template
+    swatch at 0.7816 — same single-leaf gate, wrong sample). Several template groups can be
+    the same card sample repeated (see _card_sample_for); this function does not resolve or
+    dedup them.
+    """
+    out: list[dict[str, Any]] = []
+    for slide in template_slides:
+        caps: dict[Any, dict] = slide.get("groupCaption") or {}
+        if not caps:
+            continue
+        for item in slide.get("items") or []:
+            if (item.get("kind") or "") != "group":
+                continue
+            kind_index = _item_kind_index(item, _item_index(item, 0))
+            cap = caps.get(kind_index)
+            if cap is None:
+                continue
+            text = str(cap.get("text") or "").strip()
+            if not text or text.isdigit() or len(text.split()) < 2:
+                continue
+            rect = item_rect(item)
+            if rect.w <= 0 or rect.h <= 0:
+                continue
+            caption = {
+                "font": cap.get("font"),
+                "size": _f(cap.get("size")) or None,
+                "color": None,
+                "text": text,
+            }
+            out.append({"rect": rect, "aspect": rect.w / rect.h, "caption": caption})
+    return out
+
+
+def _card_sample_for(src: Rect, sig: str | None, samples: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The template card sample this wall group's rect/signature matches: one caption leaf
+    (sig has no "\\n") and a matching aspect. Several samples of the same size all pass (the
+    template can carry more than one copy of the card); refuse only if two DIFFERENT sizes do.
+
+    A bare one-word sig ("UPG"/"CHC" alone — a constellation-dot label, not a card caption)
+    never matches: every measured card caption is a tag plus a name."""
+    if not sig or "\n" in sig or src.h <= 0 or len(sig.split()) < 2:
+        return None
+    aspect = src.w / src.h
+    hits = [
+        s for s in samples
+        if s["aspect"] > 0 and abs(aspect - s["aspect"]) / s["aspect"] <= CARD_ASPECT_TOL
+    ]
+    if not hits:
+        return None
+    sizes = {(round(s["rect"].w, 1), round(s["rect"].h, 1)) for s in hits}
+    if len(sizes) > 1:
+        return None
+    return hits[0]
+
+
+def _card_pitch(samples: list[dict[str, Any]], w: float, h: float) -> dict[str, float | None]:
+    """Median x/y gutter between same-sized template card copies (w,h within 0.5pt); None when
+    fewer than two are adjacent on that axis (recipe['cardSample'] then falls back to the wall)."""
+    members = [s for s in samples if abs(s["rect"].w - w) <= 0.5 and abs(s["rect"].h - h) <= 0.5]
+    xs: list[float] = []
+    ys: list[float] = []
+    for i, a in enumerate(members):
+        for b in members[i + 1 :]:
+            dx = abs(a["rect"].x - b["rect"].x)
+            dy = abs(a["rect"].y - b["rect"].y)
+            if dy < h / 2.0 and w < dx < 2.0 * w:
+                xs.append(dx - w)
+            if dx < w / 2.0 and h < dy < 2.0 * h:
+                ys.append(dy - h)
+    return {
+        "gutterX": _median(xs) if xs else None,
+        "gutterY": _median(ys) if ys else None,
+    }
+
+
 def template_badge_slots(
     slides: list[dict], slide_size: tuple[float, float] | None = None
 ) -> dict[str, dict[str, float]]:
@@ -1878,6 +1973,51 @@ def _style_text_box(
     return src, (wall_font or None), font_name, colour
 
 
+CAPTION_SIZE_FLOOR = 8.0
+
+
+def caption_point_size(
+    text: str,
+    box_w: float,
+    inset: float,
+    swatch_pt: float,
+    font: str | None,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    tracking: float = 0.0,
+) -> tuple[float, str | None]:
+    """Template swatch, stepped down whole points while the measured line exceeds
+    box_w - 2*inset. Returns (pt, refusal_reason). Never below CAPTION_SIZE_FLOOR.
+
+    Measures with iwa_text_shape._layout_width (AppKit/TextKit, PostScript-name font
+    resolution) — the same path Keynote lays text out with, and no font-file globbing.
+    """
+    from obed_edom.iwa_text_shape import ShapeStyle, _layout_width, font_missing  # noqa: PLC0415
+
+    style = ShapeStyle(
+        font_name=font,
+        size=swatch_pt,
+        line_multiple=1.0,
+        alignment=None,
+        tracking=tracking,
+        bold=bold,
+        italic=italic,
+        first_line_indent=0.0,
+        left_indent=0.0,
+        right_indent=0.0,
+        line_spacing_mode=None,
+    )
+    if font_missing(style):
+        return swatch_pt, "font-missing"
+    limit = box_w - 2.0 * inset
+    pt = swatch_pt
+    while pt > CAPTION_SIZE_FLOOR and _layout_width(text, style) > limit:
+        pt -= 1.0
+        style.size = pt
+    return pt, None
+
+
 def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any]) -> None:
     lists = [t for t in transforms if t.role == "list"]
     if not lists:
@@ -1977,6 +2117,138 @@ def _hide_item_transform(
     )
 
 
+GRID_MARGIN = 16.0  # matches the group x<16 clamp above
+GRID_MIN_CLEAR = 7.0  # batch-1 border inequality: gutter - stroke >= 7 (fallback pitch only)
+# Measured wall card-border stroke (restore_card_stroke_widths); used only if the caller
+# could not read it offline from the deck.
+DEFAULT_CARD_STROKE = 3.0
+
+
+def _reflow_card_grid(
+    cards: list[ItemTransform],
+    recipe: dict[str, Any],
+    obstacles: list[Rect],
+    stroke: float,
+    captions: dict[tuple[str, int], str] | None = None,
+) -> dict[str, Any] | None:
+    """Re-pitch and reflow a photo-card grid to fit the CG frame. Mutates each card's x/y
+    in place, row-major by its wall (row, col) bin (its ``src`` rect, at 30pt bins). Pitch
+    comes from the template's own card-sample gutters when the template carries adjacent
+    samples (recipe['cardSample']); otherwise from the wall's own grid pitch, scaled and
+    floored at ``stroke + GRID_MIN_CLEAR`` so the batch-1 border inequality still holds.
+    ``captions`` (keyed (kind, kind_index)) names the operator-facing overlap report;
+    never set ``ItemTransform.match_text`` for this — the JXA apply path
+    (remap_keynote.js) uses it to ADDRESS the object by text, not just to label it.
+    Returns a report row, or None for fewer than 2 cards."""
+    with_src = [c for c in cards if c.src is not None]
+    if len(with_src) < 2:
+        return None
+    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
+    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
+    card_w, card_h = with_src[0].w, with_src[0].h
+
+    def _bin(v: float) -> float:
+        return round(v / 30.0) * 30.0
+
+    col_keys = sorted({_bin(c.src.x) for c in with_src})
+    row_keys = sorted({_bin(c.src.y) for c in with_src})
+    col_of = {k: i for i, k in enumerate(col_keys)}
+    row_of = {k: i for i, k in enumerate(row_keys)}
+    ordered = sorted(with_src, key=lambda c: (row_of[_bin(c.src.y)], col_of[_bin(c.src.x)]))
+    n = len(ordered)
+
+    src_w = _median([c.src.w for c in with_src])
+    src_h = _median([c.src.h for c in with_src])
+    scale = (card_w / src_w) if src_w else 1.0
+
+    sample = recipe.get("cardSample") or {}
+    gutter_x = sample.get("gutterX")
+    gutter_y = sample.get("gutterY")
+    floor_clear = stroke + GRID_MIN_CLEAR
+    if gutter_x is None:
+        # True column pitch: the MEAN real src.x inside each 30pt bin (not the snap key
+        # itself, which quantizes to a multiple of 30 and can overstate the gutter).
+        col_x: dict[float, list[float]] = {}
+        for c in with_src:
+            col_x.setdefault(_bin(c.src.x), []).append(c.src.x)
+        col_means = sorted(sum(v) / len(v) for v in col_x.values())
+        if len(col_means) > 1:
+            col_pitch = _median([b - a for a, b in zip(col_means, col_means[1:])])
+            gutter_x = max((col_pitch - src_w) * scale, floor_clear)
+        else:
+            gutter_x = floor_clear
+    if gutter_y is None:
+        row_y: dict[float, list[float]] = {}
+        for c in with_src:
+            row_y.setdefault(_bin(c.src.y), []).append(c.src.y)
+        row_means = sorted(sum(v) / len(v) for v in row_y.values())
+        if len(row_means) > 1:
+            row_pitch = _median([b - a for a, b in zip(row_means, row_means[1:])])
+            gutter_y = max((row_pitch - src_h) * scale, floor_clear)
+        else:
+            gutter_y = floor_clear
+
+    pitch_x = card_w + gutter_x
+    pitch_y = card_h + gutter_y
+    map_dst = _rect_from_dict(recipe.get("mapDst"))
+    left = (map_dst.x + map_dst.w + GRID_MARGIN) if map_dst is not None else 0.0
+    right = dest_w - GRID_MARGIN
+    avail_w = max(0.0, right - left)
+    cols = max(1, int((avail_w + gutter_x) // pitch_x)) if pitch_x > 0 else 1
+    cols = min(cols, n)
+    rows = math.ceil(n / cols)
+    grid_w = cols * card_w + (cols - 1) * gutter_x
+    grid_h = rows * card_h + (rows - 1) * gutter_y
+    x0 = right - grid_w
+
+    badge_plate = _rect_from_dict(recipe.get("badgePlateDst"))
+    badge_bottom = (badge_plate.y + badge_plate.h + GRID_MARGIN) if badge_plate is not None else 0.0
+    naive_min_y = min(c.y for c in with_src)
+    band = [o for o in obstacles if o.x < x0 + grid_w and o.x + o.w > x0]
+    candidates = [badge_bottom, naive_min_y]
+    for o in band:
+        bottom = o.y + o.h + GRID_MARGIN
+        if bottom + grid_h <= dest_h - GRID_MARGIN:
+            candidates.append(bottom)
+    y0 = max(candidates)
+    if y0 + grid_h > dest_h - GRID_MARGIN and rows > 1:
+        max_grid_h = max(0.0, dest_h - GRID_MARGIN - y0)
+        gutter_y = max(floor_clear, (max_grid_h - rows * card_h) / (rows - 1))
+        grid_h = rows * card_h + (rows - 1) * gutter_y
+        pitch_y = card_h + gutter_y
+
+    overlaps: list[str] = []
+    for i, c in enumerate(ordered):
+        r, col = divmod(i, cols)
+        c.x = x0 + col * pitch_x
+        c.y = y0 + r * pitch_y
+        rect = Rect(c.x, c.y, card_w, card_h)
+        if any(_rects_overlap(rect, o) for o in obstacles):
+            name = (captions or {}).get((c.kind, c.kind_index)) or str(c.kind_index)
+            overlaps.append(name)
+    off_canvas = sum(
+        1
+        for c in ordered
+        if c.x < 0 or c.y < 0 or c.x + card_w > dest_w or c.y + card_h > dest_h
+    )
+    return {
+        "slide": with_src[0].slide_number,
+        "n": n,
+        "cols": cols,
+        "rows": rows,
+        "pitchX": round(pitch_x, 2),
+        "pitchY": round(pitch_y, 2),
+        "gutterX": round(gutter_x, 2),
+        "gutterY": round(gutter_y, 2),
+        "clearX": round(gutter_x - stroke, 2),
+        "clearY": round(gutter_y - stroke, 2),
+        "x0": round(x0, 2),
+        "y0": round(y0, 2),
+        "offCanvas": off_canvas,
+        "overlaps": overlaps,
+    }
+
+
 def plan_slide_transforms(
     slide: dict,
     recipe: dict[str, Any],
@@ -1987,6 +2259,8 @@ def plan_slide_transforms(
     free_text_keys: set[tuple[str, int]] | None = None,
     child_resize_report: list[dict[str, Any]] | None = None,
     badge_raise_report: list[dict[str, Any]] | None = None,
+    card_stroke: float = DEFAULT_CARD_STROKE,
+    card_grid_report: list[dict[str, Any]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
@@ -2049,6 +2323,17 @@ def plan_slide_transforms(
     left_groups: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     group_child_text: dict[int, str] = slide.get("groupChildText") or {}
+    group_caption: dict[int, dict[str, Any]] = slide.get("groupCaption") or {}
+    card_samples = [
+        {"rect": _rect_from_dict(s["rect"]), "aspect": s["aspect"], "caption": s["caption"]}
+        for s in (recipe.get("cardSamples") or [])
+    ]
+    # (kind, kind_index) — kind_index is only unique within its own kind (JXA kindIndex),
+    # so a bare kind_index would also catch an unrelated image/text sharing the same number.
+    card_keys: set[tuple[str, int]] = set()
+    # Overlap-report labels only; never fed to ItemTransform.match_text — the JXA apply
+    # path (remap_keynote.js) uses that field to ADDRESS the object by text.
+    card_captions: dict[tuple[str, int], str] = {}
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
     for fallback_i, item in enumerate(slide.get("items") or []):
@@ -2302,6 +2587,52 @@ def plan_slide_transforms(
                 {"x": mapped.x, "y": mapped.y, "w": mapped.w, "h": mapped.h}
             )
         if str(item.get("kind") or "") == "group" and role == "other":
+            _gct = slide.get("groupChildText") or {}
+            _sig = _gct.get(kind_index)
+            _src_rect = item_rect(item)
+            caption_pt = 0.0
+            caption_refusal: str | None = None
+            card = _card_sample_for(_src_rect, _sig, card_samples) if card_samples else None
+            if card is not None:
+                sample_w, sample_h = card["rect"].w, card["rect"].h
+                # Template card rect supplies size only; the grid pass (below) decides position.
+                mapped = Rect(mapped.x, mapped.y, sample_w, sample_h)
+                card_keys.add(("group", kind_index))
+                card_captions[("group", kind_index)] = _sig or ""
+                cached_sample = recipe.get("cardSample")
+                if (
+                    cached_sample is None
+                    or abs(cached_sample["w"] - sample_w) > 0.5
+                    or abs(cached_sample["h"] - sample_h) > 0.5
+                ):
+                    recipe["cardSample"] = {
+                        "w": sample_w,
+                        "h": sample_h,
+                        "caption": card["caption"],
+                        **_card_pitch(card_samples, sample_w, sample_h),
+                    }
+                swatch_pt = _f((card["caption"] or {}).get("size")) or 10.0
+                cap = group_caption.get(kind_index) if child_resize_report is not None else None
+                if cap and _f(cap.get("groupW")):
+                    box_w = _f(cap.get("boxW")) * sample_w / _f(cap["groupW"])
+                    caption_pt, caption_refusal = caption_point_size(
+                        _sig or "",
+                        box_w,
+                        _f(cap.get("inset")),
+                        swatch_pt,
+                        cap.get("font"),
+                        bold=bool(cap.get("bold")),
+                        italic=bool(cap.get("italic")),
+                        tracking=_f(cap.get("tracking")),
+                    )
+                elif child_resize_report is not None:
+                    # No (or incomplete) groupCaption record for a card we DID detect and
+                    # resize — the two match sources (groupChildText vs attach_group_captions)
+                    # can disagree. Never fall silently through to leafPt=0 (`_c1 * s`,
+                    # ~9.09pt, today's bug): write the template swatch and refuse loudly so
+                    # remap_keynote's existing WARNING path reports it.
+                    caption_pt = swatch_pt
+                    caption_refusal = "caption-unread"
             # The map affine can throw a left-column infographic off the CG's left edge
             # (x≈-900); clamp it back on-canvas. Keep the affine-scaled w/h — the geometry
             # pass scales grouped children (AS and JXA both do on Keynote 15.3.1), so the
@@ -2309,17 +2640,17 @@ def plan_slide_transforms(
             if mapped.x < 16:
                 mapped = Rect(16.0, mapped.y, mapped.w, mapped.h)
             if child_resize_report is not None:
-                _gct = slide.get("groupChildText") or {}
-                _src_w = item_rect(item).w
-                child_resize_report.append(
-                    {
-                        "slide": number,
-                        "groupIndex": kind_index + 1,
-                        "childSig": _gct.get(kind_index),
-                        # Group frame scales by this; fonts don't, so the pass scales them.
-                        "s": (mapped.w / _src_w) if _src_w else 1.0,
-                    }
-                )
+                row: dict[str, Any] = {
+                    "slide": number,
+                    "groupIndex": kind_index + 1,
+                    "childSig": _sig,
+                    # Group frame scales by this; fonts don't, so the pass scales them.
+                    "s": (mapped.w / _src_rect.w) if _src_rect.w else 1.0,
+                    "captionPt": caption_pt,
+                }
+                if caption_refusal:
+                    row["captionRefusal"] = caption_refusal
+                child_resize_report.append(row)
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
             if item.get("start"):
@@ -2381,6 +2712,16 @@ def plan_slide_transforms(
     if pack_lists:
         _pack_list_transforms(out, recipe)
     _pack_left_groups(left_groups, recipe)
+    if card_keys:
+        grid_cards = [t for t in out if (t.kind, t.kind_index) in card_keys]
+        grid_obstacles = [
+            Rect(t.x, t.y, t.w, t.h)
+            for t in out
+            if t.role in {"other", "list", "title"} and (t.kind, t.kind_index) not in card_keys
+        ]
+        grid_row = _reflow_card_grid(grid_cards, recipe, grid_obstacles, card_stroke, card_captions)
+        if grid_row is not None and card_grid_report is not None:
+            card_grid_report.append(grid_row)
     if body_tf is not None:
         _fit_body_to_frame(
             body_tf,
@@ -3360,6 +3701,8 @@ def plan_payload_transforms(
     child_resize_report: list[dict[str, Any]] | None = None,
     badge_raise_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
+    card_stroke: float = DEFAULT_CARD_STROKE,
+    card_grid_report: list[dict[str, Any]] | None = None,
 ) -> list[ItemTransform]:
     """Plan every slide's moves. `side_content_slides` keeps side panels; skipped slides stay at wall geometry."""
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
@@ -3435,7 +3778,7 @@ def plan_payload_transforms(
                     _f(slide_recipe.get("destHeight"), CG_HEIGHT),
                 )
                 if fitted:
-                    for carry in ("characterStyles", "listFontSize", "listSample"):
+                    for carry in ("characterStyles", "listFontSize", "listSample", "cardSamples"):
                         if slide_recipe.get(carry) is not None:
                             fitted[carry] = slide_recipe[carry]
                     slide_recipe = fitted
@@ -3463,6 +3806,8 @@ def plan_payload_transforms(
             free_text_keys=analysis["free"] if analysis else None,
             child_resize_report=child_resize_report,
             badge_raise_report=badge_raise_report,
+            card_stroke=card_stroke,
+            card_grid_report=card_grid_report,
         )
         if slide_lists and analysis is not None:
             rows = _place_free_text(planned, slide, slide_recipe, analysis)

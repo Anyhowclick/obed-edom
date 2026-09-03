@@ -249,8 +249,8 @@ def test_finalize_script_embeds_template_sizes_and_content_addresses():
     assert "set _sigs to my obedSlideSigs(4)" in script
     # Each font call carries the group's affine scale `s` (default 1.0 when absent) so the
     # pass scales non-number text leaves by it (the group frame resize doesn't scale fonts).
-    assert 'my obedStatJob(4, _sigs, 1, {"269"}, 1.0, 1)' in script
-    assert 'my obedStatJob(4, _sigs, 6, {"183", "Schools"}, 1.0, 1)' in script
+    assert 'my obedStatJob(4, _sigs, 1, {"269"}, 1.0, 1, 0.0)' in script
+    assert 'my obedStatJob(4, _sigs, 6, {"183", "Schools"}, 1.0, 1, 0.0)' in script
     assert "set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)" in script
     # No baked-in group <digits> of slide object specifiers.
     assert not re.search(r"set g to group \d+ of slide", script)
@@ -265,7 +265,7 @@ def test_finalize_font_call_carries_group_scale():
     scales that group's non-number text leaves by it (fonts don't scale with the frame)."""
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "CHC Arao", "s": 0.8547}]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
-    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.8547, 1)' in script
+    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.8547, 1, 0.0)' in script
 
 
 def test_finalize_phase2_raises_resolved_targets_descending():
@@ -783,9 +783,9 @@ def test_finalize_allow_fallback_gated_by_duplicate_childsig():
         {"slide": 9, "groupIndex": 12, "childSig": "CHC", "s": 0.483},
     ]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
-    assert 'my obedStatJob(9, _sigs, 10, {"UPG"}, 0.483, 0)' in script
-    assert 'my obedStatJob(9, _sigs, 11, {"UPG"}, 0.483, 0)' in script
-    assert 'my obedStatJob(9, _sigs, 12, {"CHC"}, 0.483, 1)' in script
+    assert 'my obedStatJob(9, _sigs, 10, {"UPG"}, 0.483, 0, 0.0)' in script
+    assert 'my obedStatJob(9, _sigs, 11, {"UPG"}, 0.483, 0, 0.0)' in script
+    assert 'my obedStatJob(9, _sigs, 12, {"CHC"}, 0.483, 1, 0.0)' in script
 
 
 def test_finalize_reuse_voids_group_index_in_call():
@@ -797,3 +797,56 @@ def test_finalize_reuse_voids_group_index_in_call():
     script = _build_stat_finalize_script(Path("/tmp/x.key"), child_resize, {})
     assert "my obedStatJob(2, _sigs, 0," in script
     assert ", 0," in script
+
+
+# --------------------------------------------------------------------------
+# Batch 2 — caption point size is job-scoped (child_resize row), never in the
+# global statSizeFor size_map. Regression guard for the 38/44 roster collision.
+# --------------------------------------------------------------------------
+def test_finalize_font_call_carries_caption_point_size():
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "CHC Arao", "s": 0.9091, "captionPt": 9.0}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.9091, 1, 9.0)' in script
+
+
+def test_caption_size_is_job_scoped_not_in_the_size_map():
+    # A card job (captionPt 9.0) and a roster job sharing the SAME leaf string
+    # (captionPt 0.0, today's scale-by-s behaviour) must not collide: the caption
+    # size never enters statSizeFor's digits-only map, only this job's own call.
+    jobs = [
+        {"slide": 4, "groupIndex": 1, "childSig": "CHC Arao", "s": 0.9091, "captionPt": 9.0},
+        {"slide": 4, "groupIndex": 49, "childSig": "CHC Arao", "s": 0.483, "captionPt": 0.0},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert 'if _t is "CHC Arao"' not in script
+    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.9091, 0, 9.0)' in script
+    assert 'my obedStatJob(4, _sigs, 49, {"CHC Arao"}, 0.483, 0, 0.0)' in script
+
+
+def test_stat_size_map_still_digits_only():
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269", "s": 1.0}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
+    assert 'if _t is "269" then return 200.0' in script
+    assert "return 0" in script
+
+
+def test_leaf_font_writes_prefer_stat_size_then_caption_then_scale():
+    from obed_edom.keynote import _stat_leaf_font_writes
+
+    lines = "\n".join(_stat_leaf_font_writes("g"))
+    tgt = lines.index("if _tgt > 0 then")
+    leaf = lines.index("else if leafPt > 0 then")
+    scale = lines.index("set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)")
+    assert tgt < leaf < scale
+
+
+def test_caption_point_size_zero_reproduces_todays_script():
+    # A stat-only job set (captionPt always 0.0) falls through to `_c1 * s`, byte-for-byte
+    # what a job dict without "captionPt" produces.
+    with_zero = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 6, "groupIndex": 7, "childSig": "183\nSchools", "s": 1.0, "captionPt": 0.0}], {}
+    )
+    without_key = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 6, "groupIndex": 7, "childSig": "183\nSchools", "s": 1.0}], {}
+    )
+    assert with_zero == without_key

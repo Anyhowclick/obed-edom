@@ -20,28 +20,40 @@ Keynote traps this suite locks (kept out of the production file):
 - Never drop text; least-overlapping placement + report the overlap.
 - Off-slide leftovers must never teach an affine.
 """
+import pytest
+
 from obed_edom.map_remap import (
     Affine,
+    CAPTION_SIZE_FLOOR,
+    GRID_MIN_CLEAR,
+    ItemTransform,
     Rect,
     affine_of,
+    caption_point_size,
     cover_rect,
     classify_item,
     effective_wall_map_src,
     is_map_item,
     is_pin_item,
     item_center,
+    item_rect,
     learn_recipe,
     map_dst_for_cg,
     map_point,
     merge_affine_groups,
+    offframe_rows,
     on_canvas_fraction,
+    _card_pitch,
+    _card_sample_for,
     _recipe_reusing_affine,
+    _reflow_card_grid,
     pair_by_size,
     plan_payload_transforms,
     plan_slide_transforms,
     recipe_from_cover,
     score_against_gold,
     summarize_plan,
+    template_card_samples,
 )
 
 
@@ -3669,3 +3681,543 @@ def test_reuse_stray_outliving_keeper_downgrades_to_sig_less():
     assert len(grs) == 1
     assert "childSig" not in grs[0] and "expectedKeep" not in grs[0]
     assert grs[0]["kindIndex"] == 51  # the partitioned twin, emitted sig-less
+
+
+# --------------------------------------------------------------------------
+# Batch 2 — card template size + caption step-down + grid reflow.
+# --------------------------------------------------------------------------
+_HAS_APPKIT = True
+try:  # caption_point_size measures with AppKit/TextKit (iwa_text_shape._layout_width)
+    import AppKit  # noqa: F401
+except Exception:  # noqa: BLE001
+    _HAS_APPKIT = False
+
+needs_appkit = pytest.mark.skipif(not _HAS_APPKIT, reason="pyobjc AppKit not installed")
+
+
+def _gcap(text, *, font="Amplitude-Bold", size=10.0, group_w=131.8, box_w=124.4,
+          box_h=19.5, inset=4.0, tracking=0.0, bold=True, italic=False):
+    return {
+        "text": text, "groupW": group_w, "boxW": box_w, "boxH": box_h, "inset": inset,
+        "font": font, "size": size, "tracking": tracking, "bold": bold, "italic": italic,
+    }
+
+
+def _card_template_slide(number, samples):
+    """samples: [(kindIndex, x, y, w, h, caption_kwargs)]."""
+    items = []
+    caps = {}
+    for ki, x, y, w, h, cap_kwargs in samples:
+        items.append(_item(kindIndex=ki, kind="group", x=x, y=y, w=w, h=h))
+        caps[ki] = _gcap(**cap_kwargs)
+    return {"number": number, "items": items, "groupCaption": caps}
+
+
+def test_template_card_sample_is_the_unique_aspect_match():
+    # Two template groups on the same slide: only the 120x100 one is within 2% of a
+    # 132x109.5 wall card (aspect ~1.205); the other (aspect ~0.74) never competes.
+    slide = _card_template_slide(1, [
+        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
+        (1, 1347.0, 24.0, 160.0, 217.0, {"text": "CHC Country Cluster"}),
+    ])
+    samples = template_card_samples([slide])
+    assert len(samples) == 2
+    src = Rect(0, 0, 131.8, 109.5)
+    match = _card_sample_for(src, "CHC Arao", samples)
+    assert match is not None
+    assert (round(match["rect"].w, 1), round(match["rect"].h, 1)) == (120.0, 100.0)
+
+
+def test_template_card_sample_refuses_when_two_groups_match():
+    # A second, differently-sized group also lands within 2% of the same wall aspect
+    # (~1.21) — genuine ambiguity, refuse rather than guess.
+    slide = _card_template_slide(1, [
+        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
+        (1, 553.0, 667.0, 414.0, 342.3, {"text": "269 Total Churches"}),
+    ])
+    samples = template_card_samples([slide])
+    src = Rect(0, 0, 131.8, 109.5)
+    assert _card_sample_for(src, "CHC Arao", samples) is None
+
+
+def test_template_card_samples_excludes_bare_tag_captions():
+    # A bare one-word caption ("UPG" alone) is a constellation-dot/badge swatch, not
+    # a card — every measured card caption is "tag + name". Regression guard for the
+    # wall-slide-9 false positive (aspect 0.78 vs an unrelated 0.7816 template swatch).
+    slide = _card_template_slide(1, [
+        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
+        (1, 1637.0, 74.0, 68.0, 87.0, {"text": "UPG", "size": 60.0}),
+    ])
+    samples = template_card_samples([slide])
+    assert len(samples) == 1
+    assert samples[0]["caption"]["text"] == "CHC Villamonte"
+    src = Rect(0, 0, 68.5, 87.7)  # a constellation dot near the excluded sample's aspect
+    assert _card_sample_for(src, "UPG", samples) is None
+
+
+def test_template_card_samples_excludes_numeric_captions():
+    slide = _card_template_slide(1, [
+        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
+        (1, 553.0, 667.0, 118.0, 98.0, {"text": "269", "size": 200.0}),
+    ])
+    samples = template_card_samples([slide])
+    assert len(samples) == 1
+    assert samples[0]["caption"]["text"] == "CHC Villamonte"
+
+
+def test_card_group_takes_the_template_card_rect_not_the_affine():
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {"s": 0.9091, "tx": 100.0, "ty": 50.0,
+             "src": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+             "dst": {"x": 100.0, "y": 50.0, "w": 1.0, "h": 1.0}},
+        ],
+        "cardSamples": [
+            {"rect": {"x": 1251.0, "y": 191.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5),
+        ],
+        "groupChildText": {0: "CHC Arao"},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    card = next(t for t in out if t.kind == "group")
+    assert card.role == "other"
+    assert (round(card.w, 1), round(card.h, 1)) == (120.0, 100.0)  # template rect, not the affine
+    assert card.src is not None and (round(card.src.w, 1), round(card.src.h, 1)) == (131.8, 109.5)
+
+
+def test_two_leaf_group_is_not_a_card():
+    # "269 / Total Churches" — aspect matches (1.21) but its groupChildText has TWO
+    # parts (joined by \n); the single-caption gate keeps it on the affine.
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=108.9),
+        ],
+        "groupChildText": {0: "269\nTotal Churches"},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    grp = next(t for t in out if t.kind == "group")
+    assert (round(grp.w, 1), round(grp.h, 1)) == (131.8, 108.9)  # unchanged, not resized to the card
+
+
+def test_roster_group_is_not_a_card():
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    roster_sig = "\n".join(f"CHC Name{i}" for i in range(113))
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kindIndex=0, kind="group", x=3300.0, y=100.0, w=1389.0, h=1053.0),
+        ],
+        "groupChildText": {0: roster_sig},
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    grp = next(t for t in out if t.kind == "group")
+    assert (grp.w, grp.h) == (1389.0, 1053.0)  # unchanged
+    assert report[0]["captionPt"] == 0.0
+
+
+@needs_appkit
+def test_caption_step_down_matches_measured_box():
+    # 10pt kept when the line fits; a narrower box forces a step-down, floored at 8.
+    pt, reason = caption_point_size("CHC Villamonte", 113.29, 4.0, 10.0, "Amplitude-Bold")
+    assert pt == 10.0 and reason is None
+    pt2, reason2 = caption_point_size("CHC Fairview Novaliches", 113.29, 4.0, 10.0, "Amplitude-Bold")
+    assert pt2 < 10.0 and pt2 >= CAPTION_SIZE_FLOOR and reason2 is None
+
+
+@needs_appkit
+def test_caption_step_down_never_below_floor():
+    pt, reason = caption_point_size(
+        "A Very Long Church Name That Cannot Possibly Fit In This Tiny Box At Any Size",
+        20.0, 4.0, 10.0, "Amplitude-Bold",
+    )
+    assert pt == CAPTION_SIZE_FLOOR and reason is None
+
+
+def test_caption_font_missing_keeps_swatch_and_reports():
+    pt, reason = caption_point_size("CHC Arao", 113.29, 4.0, 10.0, "Nonexistent-Font-XYZ")
+    assert pt == 10.0
+    assert reason == "font-missing"
+
+
+@needs_appkit
+def test_caption_size_present_on_child_resize_report_row():
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
+        "groupChildText": {0: "CHC Arao"},
+        "groupCaption": {0: _gcap("CHC Arao")},
+    }
+    report: list[dict] = []
+    plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    assert report[0]["captionPt"] == 10.0
+
+
+def test_card_without_groupcaption_writes_swatch_and_refuses_loudly():
+    # A card matched via groupChildText (single-leaf sig) but with NO groupCaption record
+    # (the two offline sources can disagree — see iwa_runs._single_text_leaf's U+FFFC fix)
+    # must never fall through to leafPt=0 (silent _c1*s ~9.09pt): it must write the
+    # template swatch and set captionRefusal so remap_keynote's WARNING path fires.
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
+        "groupChildText": {0: "CHC Arao"},
+        # no "groupCaption" key at all on this slide
+    }
+    report: list[dict] = []
+    plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    assert report[0]["captionPt"] == 10.0  # the template swatch, not 0.0 / not _c1*s
+    assert report[0]["captionRefusal"] == "caption-unread"
+
+
+def test_card_with_incomplete_groupcaption_also_refuses_loudly():
+    # groupCaption present but missing groupW (e.g. a partial/corrupt record) — same guard.
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
+        "groupChildText": {0: "CHC Arao"},
+        "groupCaption": {0: {"text": "CHC Arao", "font": "Amplitude-Bold", "size": 10.0}},  # no groupW/boxW
+    }
+    report: list[dict] = []
+    plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    assert report[0]["captionPt"] == 10.0
+    assert report[0]["captionRefusal"] == "caption-unread"
+
+
+# ---- grid reflow (_reflow_card_grid) ---------------------------------------------------
+def _card_tf(slide_no, ki, src_x, src_y, w=120.0, h=100.0, src_w=132.0, src_h=110.0):
+    return ItemTransform(
+        slide_number=slide_no, item_index=ki, kind="group", x=0.0, y=0.0, w=w, h=h,
+        role="other", kind_index=ki, src=Rect(src_x, src_y, src_w, src_h),
+    )
+
+
+def _grid_recipe(map_right=1094.0, *, template_gutter=True):
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapDst": {"x": 0.0, "y": 0.0, "w": map_right, "h": 1080.0},
+    }
+    if template_gutter:
+        # Matches the real deck's decision-1 template pitch (120x100 + 7/7), so cols/
+        # rows are deterministic regardless of the synthetic wall spacing below.
+        recipe["cardSample"] = {"w": 120.0, "h": 100.0, "gutterX": 7.0, "gutterY": 7.0, "caption": {}}
+    return recipe
+
+
+def test_grid_reflow_8x6_to_6x8_keeps_reading_order():
+    cards = []
+    n = 0
+    for row in range(6):
+        for col in range(8):
+            cards.append(_card_tf(4, n, col * 150.0, row * 120.0))
+            n += 1
+    report = _reflow_card_grid(cards, _grid_recipe(), [], 3.0)
+    assert report is not None
+    assert (report["cols"], report["rows"]) == (6, 8)
+    # Reading order: card 0 (wall row0,col0) still lands in grid cell 0 (top-left).
+    ordered = sorted(cards, key=lambda c: (c.y, c.x))
+    assert ordered[0] is cards[0]
+
+
+def test_grid_reflow_7x4_to_6x5_on_a_second_slide():
+    cards = []
+    n = 0
+    for row in range(4):
+        cols = 7 if row < 3 else 6
+        for col in range(cols):
+            cards.append(_card_tf(5, n, col * 150.0, row * 120.0))
+            n += 1
+    report = _reflow_card_grid(cards, _grid_recipe(), [], 3.0)
+    assert report is not None
+    assert report["cols"] == 6
+    assert report["rows"] == 5  # ceil(27/6)
+
+
+def test_grid_origin_descends_below_obstacles_only_while_it_fits():
+    cards = [_card_tf(4, i, (i % 6) * 150.0, (i // 6) * 120.0) for i in range(12)]
+    recipe = _grid_recipe()
+    # An obstacle that leaves room: grid still fits below it.
+    room_obstacle = Rect(1200.0, 40.0, 400.0, 60.0)
+    report_room = _reflow_card_grid([c for c in cards], recipe, [room_obstacle], 3.0)
+    assert report_room["y0"] >= room_obstacle.y + room_obstacle.h
+
+    # An obstacle so tall that sitting below it wouldn't leave room for the grid: ignored.
+    cards2 = [_card_tf(4, i, (i % 6) * 150.0, (i // 6) * 120.0) for i in range(12)]
+    tall_obstacle = Rect(1200.0, 40.0, 400.0, 1000.0)
+    report_tall = _reflow_card_grid(cards2, recipe, [tall_obstacle], 3.0)
+    assert report_tall["y0"] < tall_obstacle.y + tall_obstacle.h
+
+
+def test_grid_gutter_floor_keeps_seven_points_clear():
+    # No template gutter (single/no template card sample): a tight wall pitch (card +
+    # 2pt gutter) floors to stroke + GRID_MIN_CLEAR instead of the raw wall spacing.
+    cards = [_card_tf(4, i, (i % 4) * 122.0, (i // 4) * 102.0) for i in range(8)]
+    report = _reflow_card_grid(cards, _grid_recipe(template_gutter=False), [], 3.0)
+    assert report["gutterX"] >= 3.0 + GRID_MIN_CLEAR - 1e-6
+    assert report["gutterY"] >= 3.0 + GRID_MIN_CLEAR - 1e-6
+
+
+def test_grid_fallback_pitch_uses_real_coordinates_not_bin_snap():
+    # Regression for the review finding: the fallback pitch must come from the mean real
+    # src.x per 30pt bin (then median of adjacent-bin diffs), not the bin KEYS themselves
+    # (which quantize to a multiple of 30 and overstate the gutter). True column pitch
+    # 143.2 at src_w=132/card_w=120 (scale 0.9091) -> gutter 10.18; the bin-key bug would
+    # instead see keys [90, 240, 390] -> pitch 150.0 -> gutter 16.36 (measured on the real
+    # wall slide 4 in review).
+    cards = [
+        _card_tf(4, 0, 100.0, 100.0),
+        _card_tf(4, 1, 243.2, 100.0),
+        _card_tf(4, 2, 386.4, 100.0),
+    ]
+    report = _reflow_card_grid(cards, _grid_recipe(template_gutter=False), [], 3.0)
+    assert report["gutterX"] == pytest.approx(10.18, abs=0.02)
+    assert report["gutterX"] != pytest.approx(16.36, abs=0.5)
+
+
+def test_grid_reflow_leaves_no_card_off_canvas():
+    cards = []
+    n = 0
+    for row in range(8):
+        for col in range(6):
+            cards.append(_card_tf(4, n, col * 150.0, row * 120.0))
+            n += 1
+    report = _reflow_card_grid(cards, _grid_recipe(), [], 3.0)
+    assert report["offCanvas"] == 0
+    for c in cards:
+        assert c.x >= 0 and c.y >= 0 and c.x + c.w <= 1920.0 and c.y + c.h <= 1080.0
+
+
+def test_grid_reflow_uses_template_gutter_when_present():
+    cards = [_card_tf(4, i, (i % 6) * 150.0, (i // 6) * 120.0) for i in range(12)]
+    recipe = _grid_recipe(template_gutter=False)
+    recipe["cardSample"] = {"w": 120.0, "h": 100.0, "gutterX": 6.571, "gutterY": 7.753, "caption": {}}
+    report = _reflow_card_grid(cards, recipe, [], 3.0)
+    assert report["gutterX"] == pytest.approx(6.571, abs=0.01)
+    assert report["gutterY"] == pytest.approx(7.753, abs=0.01)
+
+
+def test_grid_report_carries_clearance():
+    cards = [_card_tf(4, i, (i % 6) * 150.0, (i // 6) * 120.0) for i in range(12)]
+    report = _reflow_card_grid(cards, _grid_recipe(), [], 3.0)  # template gutter 7.0/7.0
+    assert report["clearX"] == pytest.approx(7.0 - 3.0, abs=1e-6)
+    assert report["clearY"] == pytest.approx(7.0 - 3.0, abs=1e-6)
+
+
+def test_grid_overlap_names_use_captions_not_kind_index():
+    cards = [_card_tf(4, i, (i % 6) * 150.0, (i // 6) * 120.0) for i in range(12)]
+    captions = {("group", i): f"CHC Church{i}" for i in range(12)}
+    # Full-height: infeasible to descend below (fails the grid_h fit check), so the grid
+    # stays at y0=0 and genuinely overlaps it -- mirrors test_grid_origin_descends_*'s
+    # "tall_obstacle" case.
+    obstacle = Rect(1149.0, 0.0, 400.0, 1000.0)
+    report = _reflow_card_grid(cards, _grid_recipe(), [obstacle], 3.0, captions)
+    assert report["overlaps"]
+    assert all(name.startswith("CHC Church") for name in report["overlaps"])
+
+
+def test_grid_overlap_names_fall_back_to_kind_index_without_captions():
+    cards = [_card_tf(4, i, (i % 6) * 150.0, (i // 6) * 120.0) for i in range(12)]
+    obstacle = Rect(1149.0, 0.0, 400.0, 1000.0)
+    report = _reflow_card_grid(cards, _grid_recipe(), [obstacle], 3.0)
+    assert report["overlaps"]
+    assert all(name.isdigit() for name in report["overlaps"])
+
+
+def test_non_card_other_groups_are_not_reflowed():
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4500.0, y=100.0, w=491.5, h=65.0),  # date banner
+        ],
+        "groupChildText": {0: "October 2025"},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    banner = next(t for t in out if t.kind == "group")
+    assert (banner.x, banner.y) != (0.0, 0.0)  # kept its own affine position, not grid-placed
+
+
+def test_template_card_pitch_from_adjacent_samples():
+    # Three identical card copies, an L-shape (two on one row, one below the first).
+    slide = _card_template_slide(12, [
+        (0, 1251.098, 190.519, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+        (1, 1378.042, 190.519, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+        (2, 1251.098, 298.272, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+    ])
+    samples = template_card_samples([slide])
+    pitch = _card_pitch(samples, 120.3727, 100.0)
+    assert pitch["gutterX"] == pytest.approx(6.571, abs=0.01)
+    assert pitch["gutterY"] == pytest.approx(7.753, abs=0.01)
+
+    single = _card_template_slide(12, [
+        (0, 1251.098, 190.519, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+    ])
+    single_samples = template_card_samples([single])
+    single_pitch = _card_pitch(single_samples, 120.3727, 100.0)
+    assert single_pitch["gutterX"] is None and single_pitch["gutterY"] is None
+
+
+def test_template_card_samples_refuse_two_sizes():
+    slide = _card_template_slide(12, [
+        (0, 1251.0, 191.0, 120.0, 100.0, {"text": "CHC Villamonte"}),
+        (1, 553.0, 667.0, 122.0, 101.0, {"text": "CHC Other Sample"}),  # a different card size
+    ])
+    samples = template_card_samples([slide])
+    src = Rect(0, 0, 131.8, 109.5)
+    assert _card_sample_for(src, "CHC Arao", samples) is None
+
+
+def test_offframe_report_is_empty_after_reflow():
+    # 44 wall cards spread across an 8x6 grid whose naive per-item affine mapping
+    # (map_rect against a wall-sized mapSrc) would otherwise carry the rightmost
+    # columns off the 1920-wide CG canvas; the grid pass must bring every one back.
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 7680.0, "h": 1080.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1094.0, "h": 1080.0},
+        "cardSamples": [
+            {"rect": {"x": 1251.0, "y": 191.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+        "cardSample": {"w": 120.0, "h": 100.0, "gutterX": 7.0, "gutterY": 7.0, "caption": {}},
+    }
+    items = []
+    gct = {}
+    n = 0
+    for row in range(6):
+        for col in range(8):
+            items.append(_item(kindIndex=n, kind="group", x=3400.0 + col * 500.0, y=100.0 + row * 150.0,
+                                w=131.8, h=109.5))
+            gct[n] = f"CHC Church{n}"
+            n += 1
+    slide = {"number": 4, "items": items, "groupChildText": gct}
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680.0, 1080.0))
+    rows = offframe_rows(out, slide, recipe, 7680.0, 1080.0)
+    assert rows == []
+
+
+def test_fit_to_frame_recipe_carries_card_samples():
+    # A wall slide whose only template framing is degenerate (forces fit-to-frame,
+    # like the existing "1280 wide against a 7680 wall" scenario) must still resize
+    # its photo cards to the template rect — fit_to_frame_recipe's own dict has no
+    # card data, so plan_payload_transforms must carry recipe["cardSamples"] onto it
+    # the same way it already carries characterStyles/listFontSize/listSample.
+    wall = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=0, w=7680, h=1080),
+                    _item(index=1, kind="shape", x=3000, y=200, w=400, h=300, text="hi"),
+                    _item(index=2, kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5),
+                ],
+                "groupChildText": {0: "CHC Arao"},
+            },
+        ],
+    }
+    template = {
+        "slideWidth": 1920, "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 2,
+                "items": [
+                    _item(index=0, kind="image", fileName="map BG-1.png", x=0, y=100, w=1280, h=720),
+                    _item(index=1, kindIndex=0, kind="group", x=1251.0, y=191.0, w=120.0, h=100.0),
+                ],
+                "groupCaption": {0: _gcap("CHC Villamonte")},
+            },
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe.get("cardSamples")  # sanity: the template does carry a card sample
+    fitted: list[int] = []
+    transforms = plan_payload_transforms(wall, recipe, template=template, fitted_slides=fitted)
+    assert fitted == [1]  # sanity: this scenario really does hit fit-to-frame
+    card = next(t for t in transforms if t.kind == "group")
+    assert (card.w, card.h) == (120.0, 100.0)
+
+
+def test_resolve_template_card_sample_for_the_operator_summary():
+    from obed_edom.remap_keynote import _resolve_template_card_sample
+
+    slide = _card_template_slide(12, [
+        (0, 1251.098, 190.519, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+        (1, 1378.042, 190.519, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+        (2, 1251.098, 298.272, 120.3727, 100.0, {"text": "CHC Villamonte"}),
+    ])
+    samples = template_card_samples([slide])
+    raw = [
+        {"rect": s["rect"].as_dict(), "aspect": s["aspect"], "caption": s["caption"]}
+        for s in samples
+    ]
+    resolved = _resolve_template_card_sample(raw)
+    assert resolved is not None
+    assert round(resolved["w"], 1) == 120.4
+    assert resolved["gutterX"] == pytest.approx(6.571, abs=0.01)
+    assert resolved["gutterY"] == pytest.approx(7.753, abs=0.01)
+    assert _resolve_template_card_sample([]) is None
+    assert _resolve_template_card_sample(None) is None

@@ -18,6 +18,8 @@ from obed_edom.map_remap import (
     navigator_numbering,
     CG_HEIGHT,
     CG_WIDTH,
+    DEFAULT_CARD_STROKE,
+    GRID_MIN_CLEAR,
     format_slide_range,
     learn_recipe,
     plan_payload_transforms,
@@ -431,6 +433,30 @@ def recipe_for(wall: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]
     return learn_recipe(wall, template)
 
 
+def _resolve_template_card_sample(card_samples: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """Same resolution `plan_slide_transforms` does per wall match (dominant same-size
+    cluster + `_card_pitch`), computed once here purely for the operator summary line —
+    `recipe["cardSamples"]` is deck-wide and does not depend on which wall group matched."""
+    if not card_samples:
+        return None
+    from collections import defaultdict  # noqa: PLC0415
+
+    from obed_edom.map_remap import _card_pitch, _rect_from_dict  # noqa: PLC0415
+
+    clusters: dict[tuple[float, float], list[dict[str, Any]]] = defaultdict(list)
+    for s in card_samples:
+        clusters[(round(s["rect"]["w"], 1), round(s["rect"]["h"], 1))].append(s)
+    _key, members = max(clusters.items(), key=lambda kv: len(kv[1]))
+    w = sum(m["rect"]["w"] for m in members) / len(members)
+    h = sum(m["rect"]["h"] for m in members) / len(members)
+    raw = [
+        {"rect": _rect_from_dict(s["rect"]), "aspect": s["aspect"], "caption": s["caption"]}
+        for s in card_samples
+    ]
+    pitch = _card_pitch(raw, w, h)
+    return {"w": w, "h": h, "gutterX": pitch["gutterX"], "gutterY": pitch["gutterY"]}
+
+
 def resolve_source_previews(
     source: Path,
     wall: dict[str, Any],
@@ -629,13 +655,48 @@ def remap_keynote(
         template_data = inspect_keynote(template_path)
 
     try:
-        from obed_edom.iwa_runs import attach_group_child_text  # noqa: PLC0415
+        from obed_edom.iwa_runs import attach_group_captions  # noqa: PLC0415
 
-        attach_group_child_text(source, wall)
-    except Exception as exc:  # noqa: BLE001 — no group signatures on any failure
+        attach_group_captions(template_path, template_data)
+    except Exception as exc:  # noqa: BLE001 — card samples stay unavailable, cards keep the affine size
         say(
-            f"Group child-text signatures unavailable ({type(exc).__name__}: {exc}); "
-            "reuse group dedup will report a shortfall instead of deduping."
+            f"Template caption geometry unavailable ({type(exc).__name__}: {exc}); "
+            "photo cards will keep today's affine size instead of the template's."
+        )
+
+    card_stroke = DEFAULT_CARD_STROKE
+    deck = None
+    try:
+        from obed_edom.iwa_runs import _load_deck, attach_group_captions, attach_group_child_text  # noqa: PLC0415
+
+        deck = _load_deck(source)
+        attach_group_child_text(source, wall, deck=deck)
+        attach_group_captions(source, wall, deck=deck)
+    except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
+        say(
+            f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
+            "will report a shortfall instead of deduping, and photo cards will not be "
+            "recognised as cards at all (no groupChildText signature to match on) — they "
+            "keep today's affine-mapped size, same as any other unmatched group."
+        )
+
+    try:
+        from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415
+        from obed_edom.iwa_write import card_styles, select_card_styles  # noqa: PLC0415
+
+        objects, id_to_file, _file_ids = deck if deck is not None else _load_deck(source)
+        selected = [
+            s
+            for s in select_card_styles(card_styles(objects, id_to_file), min_refs=10)
+            if not s.get("inherited")
+        ]
+        widths = sorted(s["width"] for s in selected if s.get("width") is not None)
+        if widths:
+            card_stroke = widths[len(widths) // 2]
+    except Exception as exc:  # noqa: BLE001 — fall back to the measured default
+        say(
+            f"Card-border stroke read unavailable ({type(exc).__name__}: {exc}); "
+            f"the card grid's fallback-pitch floor uses {card_stroke}pt instead."
         )
 
     recipe = recipe_for(wall, template_data)
@@ -652,6 +713,7 @@ def remap_keynote(
     framing_rows: list[dict[str, Any]] = []
     child_resize: list[dict[str, Any]] = []
     badge_raises: list[dict[str, Any]] = []
+    card_grid: list[dict[str, Any]] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -668,6 +730,8 @@ def remap_keynote(
         side_content_slides=side_content_slides,
         child_resize_report=child_resize,
         badge_raise_report=badge_raises,
+        card_stroke=card_stroke,
+        card_grid_report=card_grid,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
@@ -717,6 +781,46 @@ def remap_keynote(
             f"{len(offframe)} object(s) visible on the wall land outside the CG frame "
             f"({detail}). They are still in the deck — drag them back or adjust the template."
         )
+    card_rows = [r for r in child_resize if r.get("captionPt")]
+    if recipe.get("cardSamples"):
+        resolved = _resolve_template_card_sample(recipe.get("cardSamples"))
+        card_slides = sorted({int(r["slide"]) for r in card_rows})
+        if resolved is not None:
+            gx, gy = resolved.get("gutterX"), resolved.get("gutterY")
+            pitch_source = "template" if gx is not None and gy is not None else "wall fallback"
+            gutter_txt = f"{gx:.2f}/{gy:.2f}" if gx is not None and gy is not None else "n/a"
+            say(
+                f"Template card sample: {len(recipe['cardSamples'])} copies at "
+                f"{resolved['w']:.1f}×{resolved['h']:.1f}, gutters {gutter_txt} ({pitch_source}); "
+                f"{len(card_rows)} wall card(s) matched"
+                + (f" on slides {card_slides}" if card_slides else " (none)")
+                + "."
+            )
+        else:
+            say(
+                f"Template card sample: {len(recipe['cardSamples'])} copies found; "
+                f"{len(card_rows)} wall card(s) matched"
+                + (f" on slides {card_slides}" if card_slides else " (none)")
+                + "."
+            )
+    if card_grid:
+        for row in card_grid:
+            overlaps = row.get("overlaps") or []
+            clear_x, clear_y = row.get("clearX"), row.get("clearY")
+            below = (
+                " (below 7pt)"
+                if (clear_x is not None and clear_x < GRID_MIN_CLEAR)
+                or (clear_y is not None and clear_y < GRID_MIN_CLEAR)
+                else ""
+            )
+            say(
+                f"Slide {row['slide']}: {row['n']} card(s) reflowed to {row['cols']}×{row['rows']}, "
+                f"pitch {row['pitchX']}/{row['pitchY']} (gutter {row['gutterX']}/{row['gutterY']}, "
+                f"clear {clear_x}/{clear_y} at {card_stroke}pt stroke{below}), "
+                f"origin ({row['x0']}, {row['y0']}), {row['offCanvas']} off-canvas"
+                + (f", {len(overlaps)} overlapping a stat group" if overlaps else "")
+                + "."
+            )
     if hidden:
         say(
             f"Left {len(hidden)} skipped slide(s) alone: "
@@ -924,6 +1028,30 @@ def remap_keynote(
         say(f"Canvas after remap: {actual_w}×{actual_h}.")
     if jxa.get("skippedSlides"):
         say(f"Skipped {jxa.get('skippedSlides')} other slide(s) so the preview is this slide only.")
+    if card_rows:
+        swatch = max(r["captionPt"] for r in card_rows)
+        downs = sorted(
+            (r for r in card_rows if r["captionPt"] < swatch),
+            key=lambda r: (-r["captionPt"], r.get("childSig") or ""),
+        )
+        detail = ", ".join(f"{r.get('childSig')} {int(r['captionPt'])}" for r in downs[:10])
+        say(
+            f"Card captions: {len(card_rows)} at the template swatch {int(swatch)}pt"
+            + (
+                f"; {len(downs)} stepped down to fit ({detail}"
+                + ("…" if len(downs) > 10 else "")
+                + ")"
+                if downs
+                else ""
+            )
+            + "."
+        )
+        refusals = [r for r in card_rows if r.get("captionRefusal")]
+        if refusals:
+            say(
+                f"WARNING: {len(refusals)} card caption(s) could not be measured "
+                f"({refusals[0].get('captionRefusal')}) — kept at the template swatch size."
+            )
     # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     child_resize_result: dict[str, Any] | None = None

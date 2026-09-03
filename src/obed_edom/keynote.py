@@ -645,11 +645,11 @@ def _run_superscript_fix(
 
 
 def _stat_leaf_font_writes(container: str) -> list[str]:
-    """Font pass for each text leaf of `container`: stat numbers → template size; all
-    other uniform text → its own size × `s` (the group's affine scale). Keynote scales a
-    group's child GEOMETRY on resize but NOT font size, so without this the text keeps its
-    wall-size font in a shrunk box and clips. Mixed-run leaves are skipped. `s` is in scope
-    from ``obedStatJob``."""
+    """Font pass for each text leaf of `container`: stat numbers → template size; this
+    job's card caption → leafPt; all other uniform text → its own size × `s` (the group's
+    affine scale). Keynote scales a group's child GEOMETRY on resize but NOT font size, so
+    without this the text keeps its wall-size font in a shrunk box and clips. Mixed-run
+    leaves are skipped. `s`/`leafPt` are in scope from ``obedStatJob``."""
     return [
         f"  repeat with _i from 1 to count of iWork items of {container}",
         "    try",
@@ -663,6 +663,8 @@ def _stat_leaf_font_writes(container: str) -> list[str]:
         "          if _c1 = _cN then",
         "            if _tgt > 0 then",
         "              set size of characters 1 thru -1 of object text of _leaf to _tgt",
+        "            else if leafPt > 0 then",
+        "              set size of characters 1 thru -1 of object text of _leaf to leafPt",
         "            else",
         "              set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)",
         "            end if",
@@ -879,7 +881,7 @@ def _stat_job_handlers() -> list[str]:
         "    return 0",
         "  end if",
         "end obedResolveGroup",
-        "on obedStatJob(slideNo, sigs, gi, targetSig, s, allowFallback)",
+        "on obedStatJob(slideNo, sigs, gi, targetSig, s, allowFallback, leafPt)",
         "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report, raiseTargets",
         "  set _gi to my obedResolveGroup(slideNo, sigs, gi, targetSig, allowFallback)",
         "  if _gi is 0 then return",
@@ -1166,23 +1168,24 @@ def _build_stat_finalize_script(
     for job in font_jobs:
         key = (int(job["slide"]), str(job["childSig"]))
         sig_counts[key] = sig_counts.get(key, 0) + 1
-    font_by_slide: dict[int, list[tuple[int, str, float, int]]] = {}
+    font_by_slide: dict[int, list[tuple[int, str, float, int, float]]] = {}
     for job in font_jobs:
         slide = int(job["slide"])
         childsig = str(job["childSig"])
         gi = int(job.get("groupIndex") or 0)
         s = float(job.get("s") or 1.0)
         allow_fallback = 0 if sig_counts[(slide, childsig)] > 1 else 1
-        font_by_slide.setdefault(slide, []).append((gi, childsig, s, allow_fallback))
+        pt = float(job.get("captionPt") or 0.0)
+        font_by_slide.setdefault(slide, []).append((gi, childsig, s, allow_fallback, pt))
     for slide in sorted(font_by_slide):
         lines += [
             f"  set _sigs to my obedSlideSigs({slide})",
             "  set claimed to {}",
         ]
-        for gi, childsig, s, allow_fallback in font_by_slide[slide]:
+        for gi, childsig, s, allow_fallback, pt in font_by_slide[slide]:
             sig_lit = _sig_list_literal(childsig)
             lines += [
-                f"  my obedStatJob({slide}, _sigs, {gi}, {sig_lit}, {float(s)}, {allow_fallback})"
+                f"  my obedStatJob({slide}, _sigs, {gi}, {sig_lit}, {float(s)}, {allow_fallback}, {pt})"
             ]
     lines += ["  save theDoc"]
     # Z-order: raise recorded targets per slide, highest index first (Bring to Front appends).
