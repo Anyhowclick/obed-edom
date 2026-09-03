@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from obed_edom import keynote_app
+from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
@@ -61,6 +61,22 @@ def offline_read_mode(explicit: str | None = None) -> str:
     """`on` (default two-tier IWA+bulk) or `off` (legacy JXA inspect). `explicit` wins over `OBED_OFFLINE_READ`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_READ", "")).strip().lower()
     return raw if raw in {"on", "off"} else "on"
+
+
+def offline_write_mode(explicit: str | None = None, *, say: Callable[[str], None] | None = None) -> str:
+    """`off` (default), `on` (surgical offline IWA patch), or `verify` (patch + live
+    verify). Env `OBED_OFFLINE_WRITE`. Forced `off` when `as_geometry_enabled()` is False:
+    the offline write's AppleScript fallback is the same batched-geometry body that flag disables."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_WRITE", "")).strip().lower()
+    mode = raw if raw in {"on", "verify"} else "off"
+    if mode != "off" and not as_geometry_enabled():
+        if say:
+            say(
+                f"OBED_OFFLINE_WRITE={mode!r} needs OBED_AS_GEOMETRY on (its AppleScript "
+                "fallback is the batched-geometry body); forcing offline write off."
+            )
+        return "off"
+    return mode
 
 
 def _spec_addr(spec: dict[str, Any]) -> tuple:
@@ -709,7 +725,22 @@ def remap_keynote(
         copy_keynote(template_path, layout_src)
         say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
         transform_dicts = [t.as_dict() for t in transforms]
-        suppressed = suppress_geometry_slides()
+        wanted = slides_for_plan(slide_range)
+        env_suppressed = suppress_geometry_slides()
+        offline_mode = offline_write_mode(say=say)
+        offline_mode = offline_write.probe_iwa_extra(offline_mode, say)
+        offline_slides: set[int] = set()
+        if offline_mode != "off":
+            offline_slides = offline_write._offline_write_slides(
+                transform_dicts, reuses, reuse_slides, wanted
+            )
+            donors = {int(r["from"]) for r in reuses if r.get("from") is not None}
+            say(
+                f"OBED_OFFLINE_WRITE={offline_mode}: {len(offline_slides)} slide(s) go "
+                f"offline (surgical IWA patch); {len(reuse_slides)} reuse-target + "
+                f"{len(donors)} donor slide(s) stay on the AppleScript path."
+            )
+        suppressed = env_suppressed | offline_slides
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
@@ -719,10 +750,10 @@ def remap_keynote(
             "reuses": reuses,
             "suppressGeometry": sorted(suppressed),
         }
-        if suppressed:
+        if env_suppressed:
             say(
                 "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for non-reuse "
-                f"slide(s) {sorted(suppressed)}."
+                f"slide(s) {sorted(env_suppressed)}."
             )
         if as_geometry_enabled():
             plan["asGeometry"] = True
@@ -731,7 +762,6 @@ def remap_keynote(
                 "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
                 f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."
             )
-        wanted = slides_for_plan(slide_range)
         if wanted:
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
@@ -791,7 +821,11 @@ def remap_keynote(
             f"Applied {sample.get('to') or 'CG layout'} to "
             f"{len(applied_layouts)} slide(s)."
         )
-    if jxa.get("mapReadback"):
+    offline_write_info = offline_write.run_offline_write(
+        dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say
+    )
+    map_slide = next((int(t.slide_number) for t in transforms if t.role == "map"), None)
+    if jxa.get("mapReadback") and map_slide not in offline_slides:
         say(f"Map object after apply: {jxa.get('mapReadback')}")
     actual_w = jxa.get("width")
     actual_h = jxa.get("height")
@@ -873,6 +907,8 @@ def remap_keynote(
             (child_resize_result or {}).get("previewFiles") or []
         ),
     }
+    if offline_write_info is not None:
+        result["offlineWrite"] = offline_write_info
     return result
 
 
@@ -932,6 +968,16 @@ def remap_and_inspect(
         "exportError": payload.get("exportError") or "",
     }
     info["payload"] = payload
+    ow = info.get("offlineWrite")
+    if ow and ow.get("mode") == "verify":
+        planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
+        stat_slides = frozenset(ow.get("statSlides") or [])
+        live_report = offline_write.verify_live_frames(
+            planned, payload, exclude_slides=stat_slides
+        )
+        ow["liveVerifyPass"] = offline_write._say_verify_report(
+            "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log
+        )
     if export_dir:
         info["previewFiles"] = [p.name for p in preview_pngs(Path(export_dir))]
     return info
