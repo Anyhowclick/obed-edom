@@ -20,6 +20,7 @@ from typing import Any
 
 from obed_edom.baseline import deck_digest, inspect_cache_path, preview_cache_dir
 from obed_edom.map_remap import (
+    DEFAULT_CARD_STROKE,
     align_by_geometry,
     learn_recipe,
     plan_payload_transforms,
@@ -88,6 +89,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No cached inspect for {TEMPLATE.name}. Run scripts/inspect_gold.py first,")
         print("or re-inspect it if you have edited the template since.")
         return 1
+    try:
+        from obed_edom.iwa_runs import attach_group_captions
+
+        attach_group_captions(TEMPLATE, template)
+    except Exception as exc:  # noqa: BLE001 — score without card samples rather than crash
+        print(f"    template caption data unavailable ({type(exc).__name__}: {exc})")
 
     slide_range = resolve_slides(spec=args.slides, range_from=None, range_to=None) if args.slides else None
 
@@ -100,11 +107,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    skipped: {missing} is not cached")
             continue
 
+        card_stroke = DEFAULT_CARD_STROKE
+        try:
+            from obed_edom.iwa_runs import _load_deck, attach_group_captions, attach_group_child_text
+            from obed_edom.iwa_write import card_styles, select_card_styles
+
+            wall_path = GOLD_DIR / wall_name
+            deck = _load_deck(wall_path)
+            attach_group_child_text(wall_path, wall, deck=deck)
+            attach_group_captions(wall_path, wall, deck=deck)
+            objects, id_to_file, _file_ids = deck
+            selected = [
+                s
+                for s in select_card_styles(card_styles(objects, id_to_file), min_refs=10)
+                if not s.get("inherited")
+            ]
+            widths = sorted(s["width"] for s in selected if s.get("width") is not None)
+            if widths:
+                card_stroke = widths[len(widths) // 2]
+        except Exception as exc:  # noqa: BLE001 — score without card data rather than crash
+            print(f"    card data unavailable ({type(exc).__name__}: {exc})")
+
         recipe = learn_recipe(wall, template)
         wanted = sorted(slide_range) if slide_range else None
         previews = {} if args.no_previews else previews_for(wall, wanted)
         placements: list[dict[str, Any]] = []
         hidden: list[int] = []
+        card_grid: list[dict[str, Any]] = []
         transforms = plan_payload_transforms(
             wall,
             recipe,
@@ -114,11 +143,19 @@ def main(argv: list[str] | None = None) -> int:
             previews=previews or None,
             placement_report=placements,
             skipped_slides=hidden,
+            card_stroke=card_stroke,
+            card_grid_report=card_grid,
         )
         counts = summarize_plan(transforms)
         print(f"    recipe {recipe.get('source')}, planned {counts['total']} objects {dict(counts)}")
         if hidden:
             print(f"    left {len(hidden)} skipped slide(s) alone: {hidden[:8]}")
+        for row in card_grid:
+            print(
+                f"    card slide {row['slide']}: n={row['n']} {row['cols']}x{row['rows']} "
+                f"pitch={row['pitchX']}/{row['pitchY']} origin=({row['x0']},{row['y0']}) "
+                f"offCanvas={row['offCanvas']} overlapping={len(row.get('overlaps') or [])}"
+            )
         if placements:
             crowded = [p for p in placements if p.get("overlap")]
             print(
