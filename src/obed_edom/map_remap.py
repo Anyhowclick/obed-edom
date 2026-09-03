@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import re
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -2267,6 +2268,14 @@ def plan_slide_transforms(
             mapped = aff.apply_rect(item_rect(item))
         else:
             continue
+        if wall_size and is_backdrop(item, wall_w, wall_h):
+            # A full-canvas backdrop must sit flush at the top; a translate-only affine
+            # (e.g. inherited from the title slot) can otherwise pin it below y=0.
+            mapped = Rect(mapped.x, 0.0, mapped.w, mapped.h)
+            if mapped.h < CG_HEIGHT:
+                warnings.warn(
+                    f"backdrop on slide {number} pinned to y=0 with h={mapped.h} < CG_HEIGHT"
+                )
         if str(item.get("kind") or "") == "group" and role == "other":
             # The map affine can throw a left-column infographic off the CG's left edge
             # (x≈-900); clamp it back on-canvas. Keep the affine-scaled w/h — the geometry

@@ -679,6 +679,48 @@ def _missions_map_recipe() -> dict:
     }
 
 
+def _backdrop_recipe():
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {
+                "s": 1.0,
+                "tx": 0.0,
+                "ty": 28.2,
+                "src": {"x": 0.0, "y": 0.0, "w": 7680.0, "h": 1080.0},
+                "dst": {"x": 0.0, "y": 28.2, "w": 7680.0, "h": 1080.0},
+            }
+        ],
+        "titleDst": {"x": 135.0, "y": 67.0, "w": 271.0, "h": 64.0},
+    }
+
+
+def test_full_canvas_backdrop_pins_to_y_zero_under_translate_affine():
+    """Slide 8's title-slot affine is a pure +28.2 translate; the BLANK backdrop
+    must land flush at y=0, not carry the title's ty. x/w/h are untouched."""
+    backdrop = _item(index=0, kindIndex=0, kind="image", fileName="BLANK.png", x=0, y=0, w=7680, h=1080)
+    slide = {"number": 8, "items": [backdrop]}
+    out = plan_slide_transforms(slide, _backdrop_recipe(), wall_size=(7680, 1080))
+    t = next(tf for tf in out if tf.kind == "image")
+    assert t.y == 0.0
+    assert t.x == 0.0
+    assert t.w == 7680.0
+    assert t.h == 1080.0
+
+
+def test_non_backdrop_image_keeps_its_translate_under_same_affine():
+    """A non-full-canvas image under the same translate affine is real content and
+    must keep its ty; only true backdrops get pinned to y=0."""
+    photo = _item(index=0, kindIndex=0, kind="image", fileName="photo.png", x=2200, y=100, w=400, h=300)
+    slide = {"number": 8, "items": [photo]}
+    out = plan_slide_transforms(slide, _backdrop_recipe(), wall_size=(7680, 1080))
+    t = next(tf for tf in out if tf.kind == "image")
+    assert t.y == 100.0 + 28.2
+
+
 def test_zero_thickness_line_is_visible_and_planned():
     """Inspect reports a 90° meridian as h=0 / w=length. Skipping those left
     the 7680→1920 leftover (~164px) on the map."""
