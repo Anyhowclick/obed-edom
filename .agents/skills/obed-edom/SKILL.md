@@ -233,8 +233,14 @@ least-overlapping position and report the overlap for operator cleanup.
 
 ### Text styling during resize
 
-Unpaired wall text keeps its **source styling**. A matched template swatch may
-provide size, but must not overwrite source colour or mixed-run styling.
+**The template dictates size; the source dictates style.** `Base_CG_Assets.key`
+exists to give matched objects their intended size (and position, where
+appropriate) — that is the whole point of the affine recipes — and this includes
+**text point sizes**: a caption matched to a template swatch takes the template's
+size (9pt if that is what the template shows; never treat it as "hand-tuned").
+Only size and position may change. Colour, font family/style, run formatting, and
+each slide's builds/animations are always copied from the source, never from the
+template.
 
 For mixed-run text, do not set the font on the whole box: Keynote flattens the
 box to one face and destroys run-level emphasis. See
@@ -388,3 +394,5 @@ After generate:
 * `allow-commits-no-prs` — commits are allowed at verified checkpoints; never
   open a PR unless explicitly asked.
 * `lw-text-keeps-source-font-colour` — source styling invariant for wall→CG text.
+* `template-size-source-style` — template gives size (incl. text pt), source gives
+  colour/font/runs/builds.
