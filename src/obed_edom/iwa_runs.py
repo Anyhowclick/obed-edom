@@ -385,3 +385,105 @@ def attach_group_child_text(
         gct = gct_by_index.get(slide.get("index"))
         if gct:
             slide["groupChildText"] = gct
+
+
+def _single_text_leaf(group_id: str, objects: dict[str, dict]) -> dict | None:
+    """This group's one non-empty text leaf (direct or nested); None if zero or more than one."""
+    found: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(gid: str) -> bool:
+        if gid in seen:
+            return True
+        seen.add(gid)
+        group = objects.get(gid)
+        if not group:
+            return True
+        for ref in group.get("children") or []:
+            child_id = ref.get("identifier")
+            if child_id is None:
+                continue
+            child_id = str(child_id)
+            child = objects.get(child_id)
+            if not child:
+                continue
+            ptype = child.get("_pbtype")
+            if ptype == "TSD.GroupArchive":
+                if not walk(child_id):
+                    return False
+                continue
+            if ptype != "TSWP.ShapeInfoArchive":
+                continue
+            stor_id = (child.get("ownedStorage") or {}).get("identifier")
+            if stor_id is None:
+                continue
+            storage = objects.get(str(stor_id))
+            if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
+                continue
+            # _normalize_text (not a bare .strip()) so an object-replacement-only leaf
+            # (e.g. an inline image placeholder) counts as empty here exactly like it
+            # does in _group_child_signature — otherwise the two sources can disagree
+            # on "single leaf" and a real card silently loses its groupCaption record.
+            if not _normalize_text("".join(storage.get("text") or [])):
+                continue
+            found.append(child)
+            if len(found) > 1:
+                return False
+        return True
+
+    if not walk(group_id) or len(found) != 1:
+        return None
+    return found[0]
+
+
+def attach_group_captions(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
+    """Attach slide['groupCaption'] = {kindIndex: {text, groupW, boxW, boxH, inset, font,
+    size, tracking, bold, italic}} for top-level groups with exactly one non-empty text
+    leaf. Read-only, mirrors attach_group_child_text's shape."""
+    from obed_edom.iwa_geometry import _geom_dict, _xywha  # noqa: PLC0415
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
+    from obed_edom.iwa_text_shape import shape_padding, shape_style  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
+    cache: dict = {}
+    caps_by_index: dict[int, dict[int, dict]] = {}
+    for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
+        slide_archive = objects.get(slide_id)
+        if slide_archive is None:
+            continue
+        caps: dict[int, dict] = {}
+        for rec in derive_kind_index(slide_archive, objects):
+            if rec.get("kind") != "group":
+                continue
+            group_obj = objects.get(str(rec["id"]))
+            if not group_obj:
+                continue
+            leaf = _single_text_leaf(str(rec["id"]), objects)
+            if leaf is None:
+                continue
+            style = shape_style(leaf, objects, cache)
+            if style is None or not style.font_name or not style.size:
+                continue
+            stor_id = (leaf.get("ownedStorage") or {}).get("identifier")
+            storage = objects.get(str(stor_id)) if stor_id is not None else None
+            text = "".join((storage or {}).get("text") or [])
+            _gx, _gy, group_w, _gh, _ga = _xywha(_geom_dict(group_obj))
+            _lx, _ly, box_w, box_h, _la = _xywha(_geom_dict(leaf))
+            caps[int(rec["kindIndex"])] = {
+                "text": text,
+                "groupW": group_w,
+                "boxW": box_w,
+                "boxH": box_h,
+                "inset": shape_padding(leaf, objects, cache),
+                "font": style.font_name,
+                "size": style.size,
+                "tracking": style.tracking,
+                "bold": style.bold,
+                "italic": style.italic,
+            }
+        if caps:
+            caps_by_index[idx] = caps
+    for slide in payload.get("slides") or []:
+        caps = caps_by_index.get(slide.get("index"))
+        if caps:
+            slide["groupCaption"] = caps

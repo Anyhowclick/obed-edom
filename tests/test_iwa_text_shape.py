@@ -22,10 +22,12 @@ from __future__ import annotations
 import pytest
 
 from obed_edom.iwa_text_shape import (
+    TEXT_INSET,
     ShapeStyle,
     compose_text_geometry,
     geometry_flags,
     height_fixed,
+    shape_padding,
     shape_style,
     width_fixed,
 )
@@ -313,3 +315,55 @@ def test_shape_style_from_box():
     assert st.size == 96.0
     assert st.line_multiple == 0.7
     assert st.alignment == "TATvalue2"
+
+
+# --------------------------------------------------------------------------
+# shape_padding — style -> parent-style chain (real archive shape: leaf.super.style,
+# and the style's own parent lives at varying super-depth by archive type).
+# --------------------------------------------------------------------------
+def _leaf_with_style(style_id: str) -> dict:
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "super": {"style": {"identifier": style_id}}}
+
+
+def test_shape_padding_walks_the_style_parent_chain():
+    # "own" carries an explicit override — wins immediately, no parent walk needed.
+    objects = {
+        "own": {
+            "_pbtype": "TSWP.ShapeStyleArchive",
+            "shapeProperties": {"padding": {"left": 4.0, "top": 4.0, "right": 4.0, "bottom": 4.0}},
+            "super": {"super": {"parent": {"identifier": "parent"}}, "shapeProperties": {}},
+        },
+        "parent": {
+            "_pbtype": "TSWP.ShapeStyleArchive",
+            "shapeProperties": {"padding": {"left": 99.0}},
+        },
+        # "inheriting" has no padding of its own anywhere in its own super-chain; only
+        # its parent (a different id, "root") carries one. Matches the measured wall
+        # shape: style -> super.super.parent -> root style with padding 4.0.
+        "inheriting": {
+            "_pbtype": "TSWP.ShapeStyleArchive",
+            "shapeProperties": {"verticalAlignment": "kFrameAlignTop"},
+            "super": {"super": {"parent": {"identifier": "root"}}, "shapeProperties": {}},
+        },
+        "root": {
+            "_pbtype": "TSWP.ShapeStyleArchive",
+            "shapeProperties": {"padding": {"left": 4.0, "top": 4.0, "right": 4.0, "bottom": 4.0}},
+        },
+    }
+    cache: dict = {}
+    assert shape_padding(_leaf_with_style("own"), objects, cache) == 4.0
+    assert shape_padding(_leaf_with_style("inheriting"), objects, cache) == 4.0
+
+
+def test_shape_padding_defaults_to_zero_when_never_set():
+    objects = {"bare": {"_pbtype": "TSWP.ShapeStyleArchive", "shapeProperties": {}}}
+    assert shape_padding(_leaf_with_style("bare"), objects, {}) == 0.0
+    # No style ref at all.
+    assert shape_padding({"_pbtype": "TSWP.ShapeInfoArchive", "super": {}}, objects, {}) == 0.0
+
+
+def test_text_inset_constant_unchanged():
+    # The LW verse-box wrap constant is calibrated and unrelated to card captions
+    # (whose inset is measured per-caption via shape_padding); guard against a
+    # careless shared-constant refactor.
+    assert TEXT_INSET == 12.0

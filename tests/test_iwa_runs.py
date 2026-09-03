@@ -29,6 +29,7 @@ from obed_edom.iwa_runs import (
     _normalize_text,
     _slide_group_child_text,
     _slide_grouped_text,
+    attach_group_captions,
     attach_group_child_text,
     attach_runs,
     resolve_para_style,
@@ -552,3 +553,122 @@ def test_real_deck_map_grouped_stat_labels_reach_scoring_text():
     for label in ("CHC Churches", "Countries", "Total Church Buildings"):
         assert label in scoring, f"expected {label!r} in grouped scoring text"
         assert label not in default, f"{label!r} must stay out of the default fingerprint text"
+
+
+# --------------------------------------------------------------------------
+# attach_group_captions — one-caption-leaf groups only, real archive shape
+# (leaf geometry at super.super.geometry, leaf style ref at leaf.super.style).
+# --------------------------------------------------------------------------
+def _card_deck():
+    """Slide 310 owns two top-level groups: 700 (a card: one image + one caption
+    leaf, styled 10pt Amplitude-Bold, 4.0pt padding) and 710 (a roster: two text
+    leaves — must NOT get a groupCaption entry)."""
+
+    def leaf_geom(x, y, w, h):
+        return {"position": {"x": x, "y": y}, "size": {"width": w, "height": h}, "flags": 3, "angle": 0.0}
+
+    objects = {
+        "120": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "310"}},
+        "310": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "700"}, {"identifier": "710"}]},
+        "700": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"parent": {"identifier": "310"}},
+            "geometry": {"position": {"x": 1251.1, "y": 190.5}, "size": {"width": 131.8, "height": 109.5}},
+            "children": [{"identifier": "701"}, {"identifier": "702"}],
+        },
+        "701": {"_pbtype": "TSD.ImageArchive"},  # non-text sibling; ignored
+        "702": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "ownedStorage": {"identifier": "702-st"},
+            "super": {"style": {"identifier": "702-style"}, "super": {"geometry": leaf_geom(3.7, 1.3, 124.4, 19.5)}},
+        },
+        "702-st": {
+            "_pbtype": "TSWP.StorageArchive", "text": ["CHC Villamonte"],
+            "tableCharStyle": {"entries": [{"characterIndex": 0, "object": {"identifier": "702-c"}}]},
+        },
+        "702-c": {"_pbtype": "TSWP.CharacterStyleArchive",
+                  "charProperties": {"fontName": "Amplitude-Bold", "fontSize": 10.0}},
+        "702-style": {"_pbtype": "TSWP.ShapeStyleArchive",
+                      "shapeProperties": {"padding": {"left": 4.0, "top": 4.0, "right": 4.0, "bottom": 4.0}}},
+        "710": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"parent": {"identifier": "310"}},
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 400.0}},
+            "children": [{"identifier": "711"}, {"identifier": "712"}],
+        },
+        "711": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "ownedStorage": {"identifier": "711-st"},
+            "super": {"super": {"geometry": leaf_geom(0.0, 0.0, 200.0, 30.0)}},
+        },
+        "711-st": {"_pbtype": "TSWP.StorageArchive", "text": ["CHC Aaliana"]},
+        "712": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "ownedStorage": {"identifier": "712-st"},
+            "super": {"super": {"geometry": leaf_geom(0.0, 40.0, 200.0, 30.0)}},
+        },
+        "712-st": {"_pbtype": "TSWP.StorageArchive", "text": ["CHC Bindoy"]},
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "120"}]}},
+    }
+    return objects, {}, {}
+
+
+def test_attach_group_captions_only_single_text_leaf_groups():
+    objects, id_to_file, file_ids = _card_deck()
+    payload = {"slides": [{"index": 0, "number": 1, "items": []}]}
+    attach_group_captions("ignored.key", payload, deck=(objects, id_to_file, file_ids))
+    caps = payload["slides"][0]["groupCaption"]
+    assert list(caps.keys()) == [0]  # only the card group (kindIndex 0); the roster is excluded
+    cap = caps[0]
+    assert cap["text"] == "CHC Villamonte"
+    assert cap["font"] == "Amplitude-Bold"
+    assert cap["size"] == 10.0
+    assert cap["inset"] == 4.0
+    assert cap["groupW"] == pytest.approx(131.8)
+    assert cap["boxW"] == pytest.approx(124.4)
+    assert cap["boxH"] == pytest.approx(19.5)
+
+
+def test_single_text_leaf_ignores_object_replacement_only_siblings():
+    # Review finding: _card_sample_for (via groupChildText/_normalize_text) strips U+FFFC
+    # (object-replacement char, an inline image placeholder), but _single_text_leaf used a
+    # bare .strip() and counted a placeholder-only leaf as a SECOND text leaf — so a real
+    # card (one caption leaf + one placeholder leaf) got a single-leaf groupChildText
+    # signature (looks like a card) but NO groupCaption record (looks like a roster),
+    # silently losing its caption sizing. Both sources must agree.
+    objects = {
+        "800": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"parent": {"identifier": "310"}},
+            "geometry": {"position": {"x": 1251.1, "y": 190.5}, "size": {"width": 131.8, "height": 109.5}},
+            "children": [{"identifier": "801"}, {"identifier": "802"}],
+        },
+        "801": {
+            # A placeholder-only leaf: text is JUST the object-replacement char.
+            "_pbtype": "TSWP.ShapeInfoArchive", "ownedStorage": {"identifier": "801-st"},
+            "super": {"super": {"geometry": {"position": {"x": 0.0, "y": 0.0},
+                                             "size": {"width": 10.0, "height": 10.0},
+                                             "flags": 3, "angle": 0.0}}},
+        },
+        "801-st": {"_pbtype": "TSWP.StorageArchive", "text": ["￼"]},
+        "802": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "ownedStorage": {"identifier": "802-st"},
+            "super": {"style": {"identifier": "802-style"},
+                      "super": {"geometry": {"position": {"x": 3.7, "y": 1.3},
+                                             "size": {"width": 124.4, "height": 19.5},
+                                             "flags": 3, "angle": 0.0}}},
+        },
+        "802-st": {
+            "_pbtype": "TSWP.StorageArchive", "text": ["CHC Villamonte"],
+            "tableCharStyle": {"entries": [{"characterIndex": 0, "object": {"identifier": "802-c"}}]},
+        },
+        "802-c": {"_pbtype": "TSWP.CharacterStyleArchive",
+                  "charProperties": {"fontName": "Amplitude-Bold", "fontSize": 10.0}},
+        "802-style": {"_pbtype": "TSWP.ShapeStyleArchive",
+                      "shapeProperties": {"padding": {"left": 4.0}}},
+    }
+    from obed_edom.iwa_runs import _single_text_leaf, _group_child_signature
+
+    leaf = _single_text_leaf("800", objects)
+    assert leaf is not None and leaf is objects["802"]
+    sig = _group_child_signature("800", objects, {})
+    assert sig == "CHC Villamonte"  # one part: the placeholder normalizes to empty and drops out

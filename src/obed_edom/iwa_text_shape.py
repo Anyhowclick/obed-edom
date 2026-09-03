@@ -63,6 +63,54 @@ class ShapeStyle:
     line_spacing_mode: Any  # lineSpacing.mode; None == relative multiple
 
 
+def _resolve_shape_padding(
+    style_id: str, objects: dict[str, dict], seen: set[str], hops: int = 0
+) -> float | None:
+    """First ``shapeProperties.padding.left`` found walking this style's own super-nesting,
+    else its parent style (``...super.parent``, depth varies by archive type)."""
+    if style_id in seen or hops > 8:
+        return None
+    seen.add(style_id)
+    obj = objects.get(style_id)
+    if not obj:
+        return None
+    cur: Any = obj
+    parent_id: str | None = None
+    for _ in range(6):
+        if not isinstance(cur, dict):
+            break
+        props = cur.get("shapeProperties")
+        if isinstance(props, dict):
+            padding = props.get("padding")
+            if isinstance(padding, dict) and padding.get("left") is not None:
+                return float(padding["left"])
+        parent = cur.get("parent")
+        if isinstance(parent, dict) and parent_id is None and parent.get("identifier") is not None:
+            parent_id = str(parent["identifier"])
+        cur = cur.get("super")
+    if parent_id:
+        return _resolve_shape_padding(parent_id, objects, seen, hops + 1)
+    return None
+
+
+def shape_padding(obj: dict, objects: dict[str, dict], cache: dict) -> float:
+    """Effective left-inset for a ``TSWP.ShapeInfoArchive``'s style (``obj.super.style``),
+    walking the style → parent-style chain. 0.0 when never set. Does not touch TEXT_INSET,
+    the separate LW verse-box wrap constant."""
+    style_ref = (obj.get("super") or {}).get("style")
+    style_id = style_ref.get("identifier") if isinstance(style_ref, dict) else None
+    if style_id is None:
+        return 0.0
+    style_id = str(style_id)
+    key = f"padding:{style_id}"
+    if key in cache:
+        return cache[key]
+    value = _resolve_shape_padding(style_id, objects, set())
+    result = float(value) if value is not None else 0.0
+    cache[key] = result
+    return result
+
+
 def shape_style(obj: dict, objects: dict[str, dict], cache: dict) -> ShapeStyle | None:
     """Char then paragraph. Bold/italic are OR of both (pick would hide the paragraph flag)."""
     storage = _storage_of(obj, objects)
