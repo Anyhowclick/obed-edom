@@ -1,4 +1,4 @@
-"""Surgical in-place geometry write for one slide of a finalized .key.
+"""Surgical in-place geometry write across one or more slides of a finalized .key.
 
 shape: write geometry.size AND naturalSize. line: length in both
 geometry.size.width and naturalSize.width. group: pure translation when spec
@@ -6,16 +6,18 @@ lacks w/h; when both are given, a uniform scale (spec size / child-union size)
 also writes the group's own w/h and recursively rescales every descendant's
 local geometry (masked children rescale their mask too). A descendant that
 can't be safely scaled (rotated mask, cross-member mask) misses the whole
-group rather than partially scaling it. In-place rewrite (O_TRUNC) preserves
-com.apple.macl. Positional addressing refuses the slide on reconcile_counts
-mismatch.
+group rather than partially scaling it. ``patch_deck_geometry`` resolves every
+slide's edits (pure, no I/O), then does exactly ONE zip rewrite touching only
+the edited members. In-place rewrite (O_TRUNC) preserves com.apple.macl and
+never ``os.replace``s. Positional addressing refuses a slide on
+reconcile_counts mismatch; refusal is always per slide.
 """
 from __future__ import annotations
 
 import copy
-import io
 import math
 import os
+import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +35,19 @@ from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.offline_inspect import _line_direction
 
 
+class OfflineWriteRefused(Exception):
+    """Raised by ``_rewrite_members`` before any write: low disk space, or an ``edits``
+    key naming a member the deck doesn't have. The deck is untouched."""
+
+
+class OfflineWriteCorrupted(Exception):
+    """Raised by ``_rewrite_members`` when the deck's O_TRUNC copy-back itself failed.
+
+    The deck IS truncated/invalid at this point — never map this to a refused
+    ``PatchResult``; it must propagate uncaught so the caller knows to recover.
+    """
+
+
 @dataclass
 class PatchResult:
     """refused → AppleScript fallback. value_clean: obj_diffs ≤ edited archives and header_diffs == 0."""
@@ -47,6 +62,7 @@ class PatchResult:
     header_diffs: int = 0
     edited_ids: list[str] = field(default_factory=list)
     soft_fallbacks: int = 0  # group/text/masked used composed frame because reported was missing
+    missed_specs: list[dict] = field(default_factory=list)  # specs the patcher could not place
 
 
 def _find_geom(objdict: dict) -> list[str] | None:
@@ -106,6 +122,27 @@ def bridge_kind_index(kind: str, wall_kind_index: int, hide_specs: list[dict]) -
         if str(h.get("kind")) == kind and int(h.get("kindIndex", 0)) < wall_kind_index
     )
     return wall_kind_index - lower
+
+
+def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
+    """Rewrite non-hide specs' WALL kindIndex to saved (post-``deleteHides``) kindIndex.
+
+    Same bridge ``_resolve_positional`` applies during a patch; useful to anyone (e.g. an
+    A' AppleScript reference) addressing the saved deck by wall kindIndex directly. No-op
+    when the slide has no hides, or when every deleted hide sits above all survivors.
+    """
+    hide_specs = [s for s in specs if s.get("role") == "hide"]
+    if not hide_specs:
+        return specs
+    bridged: list[dict] = []
+    for s in specs:
+        if s.get("role") == "hide" or s.get("kindIndex") is None:
+            bridged.append(s)
+            continue
+        b = dict(s)
+        b["kindIndex"] = bridge_kind_index(str(s.get("kind") or ""), int(s["kindIndex"]), hide_specs)
+        bridged.append(b)
+    return bridged
 
 
 def expected_base_counts(source_counts: dict[str, int], specs: list[dict]) -> dict[str, int]:
@@ -314,30 +351,35 @@ def _resolve_identity(spec: dict, comp_by_id: dict) -> dict | None:
     return comp_by_id.get(str(sid)) if sid is not None else None
 
 
-def patch_slide_geometry(
-    saved_deck: Path | str,
+def _slide_edits(
     slide_number: int,
     specs: list[dict],
+    objects: dict[str, dict],
+    id_to_file: dict[str, str],
+    order: list[tuple[str, bool]],
     *,
     reported: dict | None = None,
     address: str = "positional",
     source_counts: dict[str, int] | None = None,
     require_reconcile: bool = False,
-) -> PatchResult:
-    """Write slide_number geometry in place. Positional + source_counts: refuse on reconcile_counts mismatch."""
-    if require_reconcile and source_counts is None:
-        return PatchResult(refused=True, reason="reconcile required but source_counts missing")
-    saved_deck = Path(saved_deck)
-    reported = reported or {}
-    objects, id_to_file, _file_ids = _load_deck(saved_deck)
+) -> tuple[str | None, dict[str, dict], int, list[dict], str | None]:
+    """Pure, no-I/O resolution of one slide's edits against an already-loaded deck.
 
-    order = slide_order(objects)
+    Returns (target_member, edits, soft_fallbacks, missed_specs, refuse_reason).
+    ``refuse_reason`` set => edits is always {}. Positional + source_counts: refuse on
+    reconcile_counts mismatch. (``len(edits)`` is the applied-object count; the caller's
+    ``_patch_member`` recomputes it for real after the actual archive mutation.)
+    """
+    if require_reconcile and source_counts is None:
+        return (None, {}, 0, [], "reconcile required but source_counts missing")
+    reported = reported or {}
+
     if not (1 <= slide_number <= len(order)):
-        return PatchResult(refused=True, reason=f"slide {slide_number} out of range (deck has {len(order)})")
+        return (None, {}, 0, [], f"slide {slide_number} out of range (deck has {len(order)})")
     slide_id = order[slide_number - 1][0]
     slide = objects.get(slide_id)
     if not slide:
-        return PatchResult(refused=True, reason=f"slide archive {slide_id} not decoded")
+        return (None, {}, 0, [], f"slide archive {slide_id} not decoded")
 
     records = derive_kind_index(slide, objects)
     comp = compose_geometry(slide, objects)
@@ -347,23 +389,20 @@ def patch_slide_geometry(
     members = {id_to_file.get(r["id"]) for r in comp if r["id"] in id_to_file}
     members.discard(None)
     if len(members) != 1:
-        return PatchResult(refused=True, reason=f"slide drawables span {sorted(members)} (need exactly one member)")
+        return (None, {}, 0, [], f"slide drawables span {sorted(members)} (need exactly one member)")
     target_member = next(iter(members))
 
     if address == "positional" and source_counts is not None:
         base = expected_base_counts(source_counts, specs)
         mismatched = reconcile_counts(derived_kind_counts(records), base)
         if mismatched:
-            return PatchResult(
-                refused=True,
-                reason=f"reconcile mismatch on kinds {mismatched}; refusing offline write",
-                target_member=target_member,
-            )
+            return (target_member, {}, 0, [],
+                    f"reconcile mismatch on kinds {mismatched}; refusing offline write")
 
     hide_specs = [s for s in specs if s.get("role") == "hide"]
 
     edits: dict[str, dict] = {}
-    missed = 0
+    missed_specs: list[dict] = []
     soft_fallbacks = 0
     for spec in specs:
         if spec.get("role") == "hide" or not _spec_bears_geometry(spec):
@@ -373,7 +412,7 @@ def patch_slide_geometry(
         else:
             rec = _resolve_positional(spec, comp_by_key, hide_specs)
         if rec is None:
-            missed += 1
+            missed_specs.append(spec)
             continue
         kind = rec["kind"]
         obj = objects.get(rec["id"]) or {}
@@ -397,7 +436,7 @@ def patch_slide_geometry(
             if scaled:
                 child_ops, ok = _group_child_scale_ops(obj, objects, sx, sy, id_to_file, target_member)
                 if not ok:
-                    missed += 1
+                    missed_specs.append(spec)
                     continue
                 ops = ops + child_ops
         elif kind == "text":
@@ -407,16 +446,20 @@ def patch_slide_geometry(
                 ops, mask_id = _masked_image_fields(rec, obj, objects, spec, rep)
                 # Unresolved, cross-member, or rotated mask: miss rather than mis-write.
                 if not ops or mask_id is None or id_to_file.get(mask_id) != target_member:
-                    missed += 1
+                    missed_specs.append(spec)
                     continue
             else:  # unmasked image/movie: plain frame, same as a shape
                 ops = _shape_fields(rec, spec)
         else:
-            missed += 1
+            missed_specs.append(spec)
             continue
 
-        # Soft class used composed frame (no bulk reported): count for the 0-fallback gate.
-        if (kind in ("group", "text") or masked) and not have_reported and ops:
+        # Soft class used composed/reported frame: count for the 0-fallback gate. Masked
+        # images only fall back to `reported` for x/y (never w/h — those read the mask).
+        used_reported = kind in ("group", "text") or (
+            masked and (spec.get("x") is None or spec.get("y") is None)
+        )
+        if used_reported and not have_reported and ops:
             soft_fallbacks += 1
 
         for obj_id, fields in ops:
@@ -424,13 +467,15 @@ def patch_slide_geometry(
                 continue
             edits.setdefault(obj_id, {}).update(fields)
 
-    if not edits:
-        return PatchResult(applied=0, missed=missed, target_member=target_member,
-                           value_clean=True, soft_fallbacks=soft_fallbacks)
+    return (target_member, edits, soft_fallbacks, missed_specs, None)
 
-    with zipfile.ZipFile(saved_deck) as zf:
-        buf = zf.read(target_member)
-    decoded = IWAFile.from_buffer(buf, target_member).to_dict()
+
+def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> tuple[bytes, int, int, int]:
+    """Decode -> apply -> re-encode -> reparse -> diff ONE member, off an already-open
+    ``ZipFile`` (the caller hoists one handle across every member). (new_bytes, applied,
+    obj_diffs, header_diffs)."""
+    buf = zf.read(member)
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
     patched = copy.deepcopy(decoded)
     applied = 0
     for ch in patched["chunks"]:
@@ -444,7 +489,7 @@ def patch_slide_geometry(
                 break
 
     new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
-    reparsed = IWAFile.from_buffer(new_member, target_member).to_dict()
+    reparsed = IWAFile.from_buffer(new_member, member).to_dict()
     obj_diffs = 0
     header_diffs = 0
     for c0, c1 in zip(decoded["chunks"], reparsed["chunks"]):
@@ -453,31 +498,170 @@ def patch_slide_geometry(
                 obj_diffs += 1
             if a0["header"] != a1["header"]:
                 header_diffs += 1
-    # No-op edits can yield obj_diffs < len(edits); collateral (obj_diffs > len(edits)) is the fail.
-    value_clean = obj_diffs <= len(edits) and header_diffs == 0
+    return new_member, applied, obj_diffs, header_diffs
 
-    # In-place O_TRUNC preserves inode + com.apple.macl; a new file is refused by Keynote.
-    out = io.BytesIO()
-    with zipfile.ZipFile(saved_deck) as zin, zipfile.ZipFile(out, "w") as zout:
-        for zi in zin.infolist():
-            data = new_member if zi.filename == target_member else zin.read(zi.filename)
-            zout.writestr(zi, data, compress_type=zi.compress_type)
-    payload = out.getvalue()
-    fd = os.open(str(saved_deck), os.O_WRONLY | os.O_TRUNC)
+
+def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
+    """Stream every zip member into a same-volume temp file (peak RAM = largest member,
+    not the whole deck), then copy the bytes back INTO THE ORIGINAL INODE via ``open(deck,
+    "wb")`` (O_TRUNC on the SAME inode; never ``os.replace``, which would lose the inode
+    and ``com.apple.macl``). Unedited members stream through ``ZipFile.open`` (keeps
+    date_time/extra/compress_type); CPython resets a zero ``external_attr`` to
+    ``0o600 << 16`` on that path regardless — pre-existing, harmless.
+
+    Escape hatch (measured, not built): Index/*.iwa are the last ~857 KB of the 1.16 GB
+    Map output (first .iwa header at 99.93%), so an append+central-directory rewrite
+    would be sub-second but leaves orphaned bytes Keynote has never been probed on.
+    """
+    deck = Path(deck)
+    tmp_path = deck.parent / f".{deck.name}.obedwrite.tmp"
+    # temp zip + full copy-back reallocation (worst case: deck is an APFS clone source).
+    required = deck.stat().st_size * 2.1
+    if shutil.disk_usage(deck.parent).free < required:
+        raise OfflineWriteRefused(f"free space below deck size * 2.1 ({required:.0f} bytes) on {deck.parent}")
+
+    with zipfile.ZipFile(deck) as zin:
+        missing = set(edits) - set(zin.namelist())
+        if missing:
+            raise OfflineWriteRefused(f"edits name members not in {deck.name}: {sorted(missing)}")
+        try:
+            with zipfile.ZipFile(tmp_path, "w") as zout:
+                for zi in zin.infolist():
+                    data = edits.get(zi.filename)
+                    if data is not None:
+                        zout.writestr(zi, data, compress_type=zi.compress_type)
+                    else:
+                        with zin.open(zi) as src, zout.open(zi, "w") as dst:
+                            shutil.copyfileobj(src, dst, 8 << 20)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise  # nothing useful in the temp; deck untouched
+
     try:
-        written = 0
-        while written < len(payload):
-            written += os.write(fd, payload[written:])
-    finally:
-        os.close(fd)
+        with open(str(deck), "wb") as out_fp, open(tmp_path, "rb") as tmp_fp:
+            shutil.copyfileobj(tmp_fp, out_fp, 8 << 20)
+            out_fp.flush()
+            os.fsync(out_fp.fileno())
+    except Exception as exc:
+        raise OfflineWriteCorrupted(f"{deck} truncated; recover from {tmp_path}") from exc
+    tmp_path.unlink()
 
-    return PatchResult(
-        applied=applied,
-        missed=missed,
-        target_member=target_member,
-        value_clean=value_clean,
-        obj_diffs=obj_diffs,
-        header_diffs=header_diffs,
-        edited_ids=sorted(edits),
-        soft_fallbacks=soft_fallbacks,
+
+def patch_deck_geometry(
+    saved_deck: Path | str,
+    specs_by_slide: dict[int, list[dict]],
+    *,
+    reported_by_slide: dict[int, dict[tuple[str, int], list[float]]] | None = None,
+    source_counts_by_slide: dict[int, dict[str, int]] | None = None,
+    address: str = "positional",
+    require_reconcile: bool = True,
+    extra_member_edits: dict[str, bytes] | None = None,
+) -> dict[int, PatchResult]:
+    """Patch every slide in ``specs_by_slide`` with exactly ONE zip rewrite.
+
+    Refusal is per slide (that slide's member left byte-identical). Two slides
+    resolving to the same target member refuse the LATER slide number.
+    ``extra_member_edits`` (member -> raw new bytes, e.g. W2 stylesheet/z-order) merge in
+    AFTER slide edits; a member in both raises ``ValueError`` before anything is written.
+    Returns one ``PatchResult`` per key of ``specs_by_slide``, plus key 0 for
+    ``extra_member_edits`` when given.
+    """
+    if 0 in specs_by_slide:
+        raise ValueError("slide numbers are 1-based")
+    saved_deck = Path(saved_deck)
+    reported_by_slide = reported_by_slide or {}
+    source_counts_by_slide = source_counts_by_slide or {}
+    objects, id_to_file, _file_ids = _load_deck(saved_deck)
+    order = slide_order(objects)
+
+    slide_state: dict[int, tuple] = {}
+    member_owner: dict[str, int] = {}
+    for n in sorted(specs_by_slide):
+        target_member, edits, soft, missed_specs, refuse_reason = _slide_edits(
+            n, specs_by_slide[n], objects, id_to_file, order,
+            reported=reported_by_slide.get(n),
+            address=address,
+            source_counts=source_counts_by_slide.get(n),
+            require_reconcile=require_reconcile,
+        )
+        if not refuse_reason and target_member is not None and edits:
+            owner = member_owner.get(target_member)
+            if owner is not None:
+                refuse_reason, edits = f"member shared with slide {owner}", {}
+            else:
+                member_owner[target_member] = n
+        slide_state[n] = (target_member, edits, soft, missed_specs, refuse_reason)
+
+    if extra_member_edits:
+        collision = set(extra_member_edits) & set(member_owner)
+        if collision:
+            raise ValueError(f"extra_member_edits collides with slide-edited members {sorted(collision)}")
+
+    member_edits: dict[str, bytes] = {}
+    member_diag: dict[str, tuple[int, int, int]] = {}  # applied, obj_diffs, header_diffs
+    if member_owner:
+        with zipfile.ZipFile(saved_deck) as zf:  # one handle shared across every member patch
+            for member, n in member_owner.items():
+                _tm, edits, _soft, _missed, _reason = slide_state[n]
+                new_bytes, applied, obj_diffs, header_diffs = _patch_member(zf, member, edits)
+                member_edits[member] = new_bytes
+                member_diag[member] = (applied, obj_diffs, header_diffs)
+
+    results: dict[int, PatchResult] = {}
+    for n, (target_member, edits, soft, missed_specs, refuse_reason) in slide_state.items():
+        if refuse_reason:
+            results[n] = PatchResult(refused=True, reason=refuse_reason, target_member=target_member,
+                                     missed=len(missed_specs), missed_specs=missed_specs)
+        elif not edits:
+            results[n] = PatchResult(applied=0, missed=len(missed_specs), missed_specs=missed_specs,
+                                     target_member=target_member, value_clean=True, soft_fallbacks=soft)
+        else:
+            m_applied, obj_diffs, header_diffs = member_diag[target_member]
+            # No-op edits can yield obj_diffs < len(edits); collateral (> len(edits)) is the fail.
+            value_clean = obj_diffs <= len(edits) and header_diffs == 0
+            results[n] = PatchResult(
+                applied=m_applied, missed=len(missed_specs), missed_specs=missed_specs,
+                target_member=target_member, value_clean=value_clean,
+                obj_diffs=obj_diffs, header_diffs=header_diffs,
+                edited_ids=sorted(edits), soft_fallbacks=soft,
+            )
+
+    if extra_member_edits:
+        member_edits.update(extra_member_edits)
+        results[0] = PatchResult(applied=len(extra_member_edits), value_clean=True,
+                                 edited_ids=sorted(extra_member_edits))
+
+    if member_edits:
+        try:
+            _rewrite_members(saved_deck, member_edits)
+        except OfflineWriteCorrupted:
+            raise  # deck IS truncated: must reach the caller, never a refused result
+        except Exception as exc:  # noqa: BLE001 — every result refuses, deck left untouched
+            for n, prev in results.items():
+                results[n] = PatchResult(refused=True, reason=f"rewrite failed: {exc}",
+                                         target_member=prev.target_member,
+                                         missed=len(prev.missed_specs), missed_specs=prev.missed_specs)
+            return results
+
+    return results
+
+
+def patch_slide_geometry(
+    saved_deck: Path | str,
+    slide_number: int,
+    specs: list[dict],
+    *,
+    reported: dict | None = None,
+    address: str = "positional",
+    source_counts: dict[str, int] | None = None,
+    require_reconcile: bool = False,
+) -> PatchResult:
+    """Write slide_number geometry in place. Delegates to patch_deck_geometry for one slide."""
+    results = patch_deck_geometry(
+        saved_deck, {slide_number: specs},
+        reported_by_slide={slide_number: reported} if reported is not None else None,
+        source_counts_by_slide={slide_number: source_counts} if source_counts is not None else None,
+        address=address,
+        require_reconcile=require_reconcile,
     )
+    return results[slide_number]

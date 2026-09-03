@@ -143,6 +143,28 @@ def derived_kind_counts(records: list[dict]) -> dict[str, int]:
     return counts
 
 
+def deck_kind_counts(deck: str | Path) -> dict[int, dict[str, int]]:
+    """``{1-based slide number: derived_kind_counts}`` for every slide, one ``_load_deck``.
+
+    ``derive_deck_kind_index`` keys 0-based; this is the reconcile-base call site's
+    convention (``patch_deck_geometry``'s ``specs_by_slide``), so it re-derives rather
+    than reindex the 0-based dict.
+    """
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional extra)
+
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    return {
+        idx + 1: derived_kind_counts(derive_kind_index(objects[slide_id], objects))
+        for idx, (slide_id, _skipped) in enumerate(slide_order(objects))
+        if slide_id in objects
+    }
+
+
+def kind_counts_from_records(records_by_slide: dict[int, list[dict]]) -> dict[int, dict[str, int]]:
+    """Per-slide ``derived_kind_counts`` from already-derived records (no I/O)."""
+    return {n: derived_kind_counts(recs) for n, recs in records_by_slide.items()}
+
+
 def reconcile_counts(
     derived: dict[str, int],
     keynote: dict[str, int],

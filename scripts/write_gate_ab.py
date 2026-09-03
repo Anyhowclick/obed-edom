@@ -58,9 +58,10 @@ from obed_edom.iwa_geometry import (
     _xywha,
     compose_geometry,
 )
-from obed_edom.iwa_kindindex import derive_kind_index, derived_kind_counts
+from obed_edom.iwa_kindindex import deck_kind_counts
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.iwa_write import PatchResult, patch_slide_geometry
+from obed_edom.iwa_write import bridge_specs_kindindex  # noqa: F401 — re-exported for callers of this module
 from obed_edom.offline_inspect import _line_endpoints
 
 DEFAULT_SLIDE = 9
@@ -119,17 +120,11 @@ def reuse_slide_numbers(reuses: list[dict]) -> set[int]:
 
 
 def source_kind_counts(source_deck: Path | str, slide_number: int) -> dict[str, int]:
-    """Per-kind ``derive_kind_index`` counts of the SOURCE-wall slide (reconcile base).
-
-    Fed to :func:`patch_slide_geometry` as ``source_counts`` so its reconcile REFUSE gate
-    can confirm the saved deck's live per-kind counts equal source-minus-hides.
-    """
-    objects, _idf, _fi = _load_deck(source_deck)
-    order = slide_order(objects)
-    if not (1 <= slide_number <= len(order)):
-        raise ValueError(f"slide {slide_number} out of range (source has {len(order)} slides)")
-    slide_id = order[slide_number - 1][0]
-    return derived_kind_counts(derive_kind_index(objects[slide_id], objects))
+    """Per-kind counts of the SOURCE-wall slide (reconcile base); delegates to iwa_kindindex."""
+    counts = deck_kind_counts(source_deck)
+    if slide_number not in counts:
+        raise ValueError(f"slide {slide_number} out of range (source has {len(counts)} slides)")
+    return counts[slide_number]
 
 
 # ==========================================================================
@@ -171,32 +166,6 @@ def specs_hide_count(specs: list[dict]) -> int:
     the same saved objects the patcher (B) addresses.
     """
     return sum(1 for s in specs if s.get("role") == "hide")
-
-
-def bridge_specs_kindindex(specs: list[dict]) -> list[dict]:
-    """Rewrite non-hide specs' WALL kindIndex → saved (post-``deleteHides``) kindIndex.
-
-    A' applies ``_build_slide_geometry_script`` to the saved B-pre, which addresses by
-    kindIndex; the patcher (B) already bridges the same way in ``_resolve_positional``, so
-    bridging here keeps A' and B pointing at the SAME saved object. No-op when the slide
-    has no hides, or (as on slide 9) when every deleted hide sits above all survivors.
-    """
-    from obed_edom.iwa_write import bridge_kind_index
-
-    hide_specs = [s for s in specs if s.get("role") == "hide"]
-    if not hide_specs:
-        return specs
-    bridged: list[dict] = []
-    for s in specs:
-        if s.get("role") == "hide" or s.get("kindIndex") is None:
-            bridged.append(s)
-            continue
-        b = dict(s)
-        b["kindIndex"] = bridge_kind_index(
-            str(s.get("kind") or ""), int(s["kindIndex"]), hide_specs
-        )
-        bridged.append(b)
-    return bridged
 
 
 # ==========================================================================

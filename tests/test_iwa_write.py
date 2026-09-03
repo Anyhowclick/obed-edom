@@ -28,6 +28,7 @@ from __future__ import annotations
 import copy
 import io
 import re
+import shutil
 import zipfile
 
 import pytest
@@ -38,18 +39,25 @@ from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom import iwa_write  # noqa: E402
 from obed_edom.iwa_geometry import _geom_dict, _xywha, compose_geometry  # noqa: E402
-from obed_edom.iwa_runs import _load_deck  # noqa: E402
+from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
+    OfflineWriteCorrupted,
+    OfflineWriteRefused,
     PatchResult,
     _apply_geom_fields,
     _group_child_scale_ops,
     _group_fields,
     _masked_image_fields,
+    _patch_member,
+    _rewrite_members,
     _shape_fields,
+    _slide_edits,
     _text_fields,
     bridge_kind_index,
+    bridge_specs_kindindex,
     expected_base_counts,
     line_inverse,
+    patch_deck_geometry,
     patch_slide_geometry,
 )
 from obed_edom.offline_inspect import _line_endpoints  # noqa: E402
@@ -194,6 +202,41 @@ def _composed(path):
     return {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects["100"], objects)}
 
 
+def _build_two_slide_deck(path):
+    """Two content slides, each in its OWN exclusive Index/Slide-*.iwa member: slide 1
+    (archive 101, shape 300) and slide 2 (archive 102, shape 400)."""
+    shape1 = _arch(300, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(10, 20, 100, 50)})
+    slide1 = _arch(101, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 300}]})
+    shape2 = _arch(400, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(30, 40, 80, 60)})
+    slide2 = _arch(102, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 400}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}, {"identifier": 11}]}})
+    node1 = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 101}, "isSkipped": False})
+    node2 = _arch(11, "KN.SlideNodeArchive", {"slide": {"identifier": 102}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node1, node2]))
+        z.writestr("Index/Slide-101.iwa", _member([slide1, shape1]))
+        z.writestr("Index/Slide-102.iwa", _member([slide2, shape2]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _build_shared_member_deck(path):
+    """Two slide NODES pointing at the SAME slide archive (101) -> same target member,
+    for the member-collision refusal test."""
+    shape1 = _arch(300, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(10, 20, 100, 50)})
+    slide1 = _arch(101, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 300}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}, {"identifier": 11}]}})
+    node1 = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 101}, "isSkipped": False})
+    node2 = _arch(11, "KN.SlideNodeArchive", {"slide": {"identifier": 101}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node1, node2]))
+        z.writestr("Index/Slide-101.iwa", _member([slide1, shape1]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
 # --------------------------------------------------------------------------
 # Pure math: line inverse, deleteHides bridge, reconcile base.
 # --------------------------------------------------------------------------
@@ -220,6 +263,40 @@ def test_bridge_kind_index_subtracts_lower_same_kind_hides():
     assert bridge_kind_index("shape", 1, hides) == 0
     # image untouched by shape hides (only its own index-1 hide would count).
     assert bridge_kind_index("image", 2, hides) == 1
+
+
+def test_bridge_specs_kindindex_shifts_survivors_above_a_deleted_hide():
+    # A hide at image[0] shifts every higher same-kind survivor down by one; other kinds
+    # and survivors below the hide are untouched. Mirrors the patcher's _resolve_positional.
+    specs = [
+        {"kind": "image", "kindIndex": 0, "role": "hide"},
+        {"kind": "image", "kindIndex": 1, "role": "map"},
+        {"kind": "image", "kindIndex": 2, "role": "map"},
+        {"kind": "line", "kindIndex": 0, "role": "line"},
+    ]
+    bridged = bridge_specs_kindindex(specs)
+    by = {(b["kind"], b["role"]): b["kindIndex"] for b in bridged}
+    assert by[("image", "hide")] == 0  # hide spec left as-is (skipped by the AS body)
+    assert by[("image", "map")] in (0, 1)  # the two survivors bridged 1->0, 2->1
+    assert sorted(b["kindIndex"] for b in bridged if b["role"] == "map") == [0, 1]
+    assert by[("line", "line")] == 0  # unrelated kind untouched
+
+
+def test_bridge_specs_kindindex_noop_when_hides_sit_above_all_survivors():
+    # Slide-9 shape: the deleted hides are the TOP two image indices, so no survivor shifts.
+    specs = [
+        {"kind": "image", "kindIndex": i, "role": "map"} for i in range(3)
+    ] + [
+        {"kind": "image", "kindIndex": 3, "role": "hide"},
+        {"kind": "image", "kindIndex": 4, "role": "hide"},
+    ]
+    bridged = bridge_specs_kindindex(specs)
+    assert [b["kindIndex"] for b in bridged] == [s["kindIndex"] for s in specs]
+
+
+def test_bridge_specs_kindindex_noop_without_hides():
+    specs = [{"kind": "image", "kindIndex": 5, "role": "map"}]
+    assert bridge_specs_kindindex(specs) is specs  # returned unchanged, no copy
 
 
 def test_expected_base_counts_subtracts_hide_specs_per_kind():
@@ -479,6 +556,7 @@ def test_rotated_masked_image_missed_not_written(tmp_path, img_angle, mask_angle
     specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
     res = patch_slide_geometry(deck, 1, specs)
     assert res.missed == 1 and res.applied == 0
+    assert res.missed_specs == specs
     assert deck.read_bytes() == original  # rotated masked image left untouched
 
 
@@ -664,4 +742,265 @@ def test_group_with_rotated_masked_child_misses_whole_group(tmp_path):
     specs = [{"kind": "group", "kindIndex": 0, "x": 500.0, "y": 500.0, "w": 160.0, "h": 80.0, "role": "other"}]
     res = patch_slide_geometry(deck, 1, specs)
     assert res.missed == 1 and res.applied == 0
+    assert res.missed_specs == specs
     assert deck.read_bytes() == original  # unscalable child: whole group left untouched
+
+
+# --------------------------------------------------------------------------
+# Deck-level: patch_deck_geometry — one rewrite, per-slide refusal isolation,
+# extra_member_edits, member-collision refusal, missed_specs.
+# --------------------------------------------------------------------------
+def test_patch_deck_geometry_one_rewrite_touches_only_edited_members(tmp_path):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    ino_before = deck.stat().st_ino
+    with zipfile.ZipFile(deck) as z:
+        doc_before = z.read("Index/Document.iwa")
+        s1_before = z.read("Index/Slide-101.iwa")
+        s2_before = z.read("Index/Slide-102.iwa")
+
+    specs = {
+        1: [{"kind": "shape", "kindIndex": 0, "x": 111.0, "y": 222.0, "role": "other"}],
+        2: [{"kind": "shape", "kindIndex": 0, "x": 333.0, "y": 444.0, "role": "other"}],
+    }
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert results[1].applied == 1 and not results[1].refused
+    assert results[2].applied == 1 and not results[2].refused
+
+    assert deck.stat().st_ino == ino_before  # in-place O_TRUNC, same inode
+    with zipfile.ZipFile(deck) as z:
+        assert z.read("Index/Document.iwa") == doc_before  # untouched member byte-identical
+        assert z.read("Index/Slide-101.iwa") != s1_before
+        assert z.read("Index/Slide-102.iwa") != s2_before
+
+    objects, _idf, _fi = _load_deck(deck)
+    after1 = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects["101"], objects)}
+    after2 = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects["102"], objects)}
+    assert [after1[("shape", 0)][k] for k in "xy"] == pytest.approx([111.0, 222.0])
+    assert [after2[("shape", 0)][k] for k in "xy"] == pytest.approx([333.0, 444.0])
+
+
+def test_patch_deck_geometry_refusal_isolates_one_slide(tmp_path):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    with zipfile.ZipFile(deck) as z:
+        s1_before = z.read("Index/Slide-101.iwa")
+
+    specs = {
+        1: [{"kind": "shape", "kindIndex": 0, "x": 111.0, "y": 222.0, "role": "other"}],
+        2: [{"kind": "shape", "kindIndex": 0, "x": 333.0, "y": 444.0, "role": "other"}],
+    }
+    source_counts = {1: {"shape": 5}, 2: {"shape": 1}}  # slide 1 mismatched, slide 2 matches
+    results = patch_deck_geometry(deck, specs, source_counts_by_slide=source_counts, require_reconcile=True)
+    assert results[1].refused and "reconcile" in (results[1].reason or "")
+    assert not results[2].refused and results[2].applied == 1
+
+    with zipfile.ZipFile(deck) as z:
+        assert z.read("Index/Slide-101.iwa") == s1_before  # refused slide's member untouched
+
+
+def test_patch_deck_geometry_accepts_extra_member_edits(tmp_path):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    new_doc_bytes = b"FAKE-STYLESHEET-BYTES"
+    specs = {1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}]}
+    results = patch_deck_geometry(deck, specs, require_reconcile=False,
+                                  extra_member_edits={"Index/Document.iwa": new_doc_bytes})
+    assert not results[1].refused
+    assert results[0].applied == 1 and results[0].edited_ids == ["Index/Document.iwa"]
+    with zipfile.ZipFile(deck) as z:
+        assert z.read("Index/Document.iwa") == new_doc_bytes
+
+
+def test_patch_deck_geometry_rejects_extra_edit_colliding_with_a_slide_member(tmp_path):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    original = deck.read_bytes()
+    specs = {1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}]}
+    with pytest.raises(ValueError):
+        patch_deck_geometry(deck, specs, require_reconcile=False,
+                            extra_member_edits={"Index/Slide-101.iwa": b"whatever"})
+    assert deck.read_bytes() == original  # raised before any write
+
+
+def test_patch_deck_geometry_refuses_slides_sharing_a_member(tmp_path):
+    deck = _build_shared_member_deck(tmp_path / "shared.key")
+    specs = {
+        1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}],
+        2: [{"kind": "shape", "kindIndex": 0, "x": 9.0, "y": 9.0, "role": "other"}],
+    }
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert not results[1].refused and results[1].applied == 1
+    assert results[2].refused and "member shared with slide 1" in (results[2].reason or "")
+    objects, _idf, _fi = _load_deck(deck)
+    after = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects["101"], objects)}
+    assert [after[("shape", 0)][k] for k in "xy"] == pytest.approx([1.0, 2.0])  # earlier slide wins
+
+
+def test_patch_deck_geometry_reports_missed_specs(deck):
+    specs = {1: [
+        {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "role": "other"},
+        {"kind": "shape", "kindIndex": 5, "x": 1.0, "y": 1.0, "role": "other"},  # unknown kindIndex
+    ]}
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    res = results[1]
+    assert not res.refused
+    assert res.applied == 1 and res.missed == 1
+    assert len(res.missed_specs) == 1 and res.missed_specs[0]["kindIndex"] == 5
+
+
+def test_patch_slide_geometry_wrapper_matches_deck_path(tmp_path):
+    d1 = _build_deck(tmp_path / "a.key")
+    d2 = _build_deck(tmp_path / "b.key")
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0, "role": "other"}]
+    res1 = patch_slide_geometry(d1, 1, specs)
+    res2 = patch_deck_geometry(d2, {1: specs}, require_reconcile=False)[1]
+    assert (res1.applied, res1.missed, res1.value_clean, res1.obj_diffs, res1.header_diffs) == \
+           (res2.applied, res2.missed, res2.value_clean, res2.obj_diffs, res2.header_diffs)
+    assert res1.edited_ids == res2.edited_ids and res1.target_member == res2.target_member
+    assert d1.read_bytes() == d2.read_bytes()
+
+
+# --------------------------------------------------------------------------
+# _slide_edits is pure (no I/O); _rewrite_members is the sole write seam.
+# --------------------------------------------------------------------------
+def test_slide_edits_writes_nothing(deck):
+    original = deck.read_bytes()
+    objects, id_to_file, _fi = _load_deck(deck)
+    order = slide_order(objects)
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0, "role": "other"}]
+    target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None and len(edits) == 1 and not missed_specs
+    assert target_member == "Index/Slide-100.iwa"
+    assert deck.read_bytes() == original  # pure: no I/O happened
+
+
+def test_rewrite_refuses_when_disk_space_short(tmp_path, monkeypatch):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    original = deck.read_bytes()
+    specs = {
+        1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}],
+        2: [{"kind": "shape", "kindIndex": 0, "x": 3.0, "y": 4.0, "role": "other"}],
+    }
+    fake_usage = shutil.disk_usage(tmp_path)._replace(free=0)
+    monkeypatch.setattr(iwa_write.shutil, "disk_usage", lambda _path: fake_usage)
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert results and all(r.refused and (r.reason or "").startswith("rewrite failed:") for r in results.values())
+    assert deck.read_bytes() == original
+    assert not list(deck.parent.glob(f".{deck.name}.obedwrite.tmp"))
+
+
+def test_rewrite_refuses_when_free_space_below_2x_deck(tmp_path, monkeypatch):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    original = deck.read_bytes()
+    specs = {
+        1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}],
+        2: [{"kind": "shape", "kindIndex": 0, "x": 3.0, "y": 4.0, "role": "other"}],
+    }
+    free = int(deck.stat().st_size * 1.5)  # below the 2.1x requirement
+    fake_usage = shutil.disk_usage(tmp_path)._replace(free=free)
+    monkeypatch.setattr(iwa_write.shutil, "disk_usage", lambda _path: fake_usage)
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert results and all(r.refused and (r.reason or "").startswith("rewrite failed:") for r in results.values())
+    assert deck.read_bytes() == original
+    assert not list(deck.parent.glob(f".{deck.name}.obedwrite.tmp"))
+
+
+def test_rewrite_proceeds_when_free_space_above_2x_deck(tmp_path, monkeypatch):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    specs = {1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}]}
+    free = int(deck.stat().st_size * 2.5)  # above the 2.1x requirement
+    fake_usage = shutil.disk_usage(tmp_path)._replace(free=free)
+    monkeypatch.setattr(iwa_write.shutil, "disk_usage", lambda _path: fake_usage)
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert not results[1].refused and results[1].applied == 1
+    objects, _idf, _fi = _load_deck(deck)
+    after = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects["101"], objects)}
+    assert [after[("shape", 0)][k] for k in "xy"] == pytest.approx([1.0, 2.0])
+
+
+def test_rewrite_leaves_no_temp_file_on_success(deck):
+    specs = {1: [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "role": "other"}]}
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert not results[1].refused
+    assert not list(deck.parent.glob(f".{deck.name}.obedwrite.tmp"))
+
+
+def test_copy_back_failure_raises_offline_write_corrupted_not_refused(tmp_path, monkeypatch):
+    # A failure AFTER the truncating open must never surface as a refused PatchResult —
+    # the deck is genuinely truncated at that point, so it has to reach the caller.
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    specs = {1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}]}
+    real_copyfileobj = shutil.copyfileobj
+
+    def flaky(src, dst, length=16384):
+        if getattr(dst, "name", None) == str(deck):  # the copy-back write, not a build-phase stream
+            raise RuntimeError("disk yanked mid copy-back")
+        return real_copyfileobj(src, dst, length)
+
+    monkeypatch.setattr(iwa_write.shutil, "copyfileobj", flaky)
+    with pytest.raises(OfflineWriteCorrupted):
+        patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert list(deck.parent.glob(f".{deck.name}.obedwrite.tmp"))  # kept for manual recovery
+
+
+def test_rewrite_build_phase_failure_leaves_deck_untouched(tmp_path, monkeypatch):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    original = deck.read_bytes()
+    specs = {
+        1: [{"kind": "shape", "kindIndex": 0, "x": 1.0, "y": 2.0, "role": "other"}],
+        2: [{"kind": "shape", "kindIndex": 0, "x": 3.0, "y": 4.0, "role": "other"}],
+    }
+
+    def boom(self, *a, **k):
+        raise RuntimeError("disk full mid zip build")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", boom)  # only the edited-member path uses it
+    results = patch_deck_geometry(deck, specs, require_reconcile=False)
+    assert results and all(r.refused and (r.reason or "").startswith("rewrite failed:") for r in results.values())
+    assert deck.read_bytes() == original
+    assert not list(deck.parent.glob(f".{deck.name}.obedwrite.tmp"))
+
+
+def test_rewrite_members_streams_unedited_without_full_buffering_read(tmp_path, monkeypatch):
+    # Pins that unedited members go through ZipFile.open (streaming), never the
+    # whole-member-buffering ZipFile.read — the thing that made the old per-slide
+    # io.BytesIO rewrite unusable at deck scale.
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    with zipfile.ZipFile(deck) as z, z.open("Index/Slide-101.iwa") as f:
+        target_before = f.read()
+    new_bytes = target_before + b"\x00"
+
+    def boom(self, *a, **k):
+        raise AssertionError("must not buffer via ZipFile.read")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", boom)
+    _rewrite_members(deck, {"Index/Slide-101.iwa": new_bytes})
+
+    with zipfile.ZipFile(deck) as z:
+        with z.open("Index/Slide-101.iwa") as f:
+            assert f.read() == new_bytes
+        with z.open("Index/Document.iwa") as f:
+            assert f.read()  # unedited member still readable and intact
+
+
+def test_rewrite_members_refuses_unknown_extra_member(tmp_path):
+    deck = _build_two_slide_deck(tmp_path / "two.key")
+    original = deck.read_bytes()
+    with pytest.raises(OfflineWriteRefused):
+        _rewrite_members(deck, {"Index/DoesNotExist.iwa": b"x"})
+    assert deck.read_bytes() == original
+    assert not list(deck.parent.glob(f".{deck.name}.obedwrite.tmp"))
+
+
+def test_patch_deck_geometry_rejects_slide_zero(deck):
+    with pytest.raises(ValueError):
+        patch_deck_geometry(deck, {0: []})
+
+
+# --------------------------------------------------------------------------
+# Narrowed soft_fallbacks: a full masked-image spec (x AND y given) never
+# consults `reported`, so a missing reported entry must not count.
+# --------------------------------------------------------------------------
+def test_soft_fallbacks_not_counted_for_masked_image_with_full_spec(deck):
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.applied and not res.refused
+    assert res.soft_fallbacks == 0
