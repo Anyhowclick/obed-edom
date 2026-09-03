@@ -939,7 +939,7 @@ def _stat_job_handlers() -> list[str]:
         "  return false",
         "end obedFrameMatches",
         "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh)",
-        "  global theDoc, badgeFallbacks, badgeUnresolved",
+        "  global theDoc, badgeFallbacks, badgeUnresolved, report",
         "  set _tol to 3",
         "  set _found to false",
         "  " + _keynote_tell(),
@@ -975,33 +975,42 @@ def _stat_job_handlers() -> list[str]:
         "          else",
         "            set _hitIdx to 0",
         "            set _hitCount to 0",
-        '            if theKind is "shape" then',
-        "              set _positions to position of every shape",
-        "              set _widths to width of every shape",
-        "              set _heights to height of every shape",
-        "            else",
-        "              set _positions to position of every image",
-        "              set _widths to width of every image",
-        "              set _heights to height of every image",
-        "            end if",
-        "            repeat with _k from 1 to count of _positions",
-        "              set _pk to item _k of _positions",
-        "              if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
-        "item _k of _heights, fx, fy, fw, fh, _tol) then",
-        "                set _hitCount to _hitCount + 1",
-        "                set _hitIdx to _k",
-        "              end if",
-        "            end repeat",
-        "            if _hitCount is 1 then",
+        "            set _scanOk to true",
+        "            try",
         '              if theKind is "shape" then',
-        "                set selection of theDoc to {shape _hitIdx}",
+        "                set _positions to position of every shape",
+        "                set _widths to width of every shape",
+        "                set _heights to height of every shape",
         "              else",
-        "                set selection of theDoc to {image _hitIdx}",
+        "                set _positions to position of every image",
+        "                set _widths to width of every image",
+        "                set _heights to height of every image",
         "              end if",
-        "              set _found to true",
-        "              set badgeFallbacks to badgeFallbacks + 1",
-        "            else",
+        "              repeat with _k from 1 to count of _positions",
+        "                set _pk to item _k of _positions",
+        "                if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
+        "item _k of _heights, fx, fy, fw, fh, _tol) then",
+        "                  set _hitCount to _hitCount + 1",
+        "                  set _hitIdx to _k",
+        "                end if",
+        "              end repeat",
+        "            on error",
+        "              set _scanOk to false",
         "              set badgeUnresolved to badgeUnresolved + 1",
+        '              set report to report & " badgeScanErr(s=" & slideNo & ",k=" & theKind & ")"',
+        "            end try",
+        "            if _scanOk then",
+        "              if _hitCount is 1 then",
+        '                if theKind is "shape" then',
+        "                  set selection of theDoc to {shape _hitIdx}",
+        "                else",
+        "                  set selection of theDoc to {image _hitIdx}",
+        "                end if",
+        "                set _found to true",
+        "                set badgeFallbacks to badgeFallbacks + 1",
+        "              else",
+        "                set badgeUnresolved to badgeUnresolved + 1",
+        "              end if",
         "            end if",
         "          end if",
         "        end if",
@@ -1101,8 +1110,12 @@ def _build_stat_finalize_script(
         d = dedup.setdefault(key, {"count": 0, "expectedKeep": int(gr.get("expectedKeep") or 0)})
         d["count"] += 1
     badge_by_slide: dict[int, list[dict]] = {}
+    badge_missing_frame = 0
     for br in badge_raises:
         badge_by_slide.setdefault(int(br["slide"]), []).append(br)
+        if not br.get("isTitle") and str(br.get("kind") or "shape") in ("shape", "image"):
+            if "w" not in br or "h" not in br:
+                badge_missing_frame += 1
     lines: list[str] = ["global " + ", ".join(_STAT_ACCUMULATORS)]
     lines += _stat_size_handler(size_map)
     lines += _sig_handlers()
@@ -1130,7 +1143,7 @@ def _build_stat_finalize_script(
         "  set sigFallbacks to 0",
         "  set unresolved to 0",
         "  set badgeFallbacks to 0",
-        "  set badgeUnresolved to 0",
+        f"  set badgeUnresolved to {badge_missing_frame}",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1180,16 +1193,19 @@ def _build_stat_finalize_script(
         for entry in badge_by_slide[slide]:
             if entry.get("isTitle"):
                 lines += [f"  my obedBadgeRaise({slide})"]
-            else:
-                kind_lit = _as_escape(str(entry.get("kind") or "shape"))
-                idx = int(entry.get("index") or 0)
-                fx = float(entry.get("x") or 0.0)
-                fy = float(entry.get("y") or 0.0)
-                fw = float(entry.get("w") or 0.0)
-                fh = float(entry.get("h") or 0.0)
-                lines += [
-                    f'  my obedRaiseItem({slide}, "{kind_lit}", {idx}, {fx}, {fy}, {fw}, {fh})'
-                ]
+                continue
+            kind_str = str(entry.get("kind") or "shape")
+            if kind_str in ("shape", "image") and ("w" not in entry or "h" not in entry):
+                continue  # no planned frame (skipped before the merge): counted at init
+            kind_lit = _as_escape(kind_str)
+            idx = int(entry.get("index") or 0)
+            fx = float(entry.get("x") or 0.0)
+            fy = float(entry.get("y") or 0.0)
+            fw = float(entry.get("w") or 0.0)
+            fh = float(entry.get("h") or 0.0)
+            lines += [
+                f'  my obedRaiseItem({slide}, "{kind_lit}", {idx}, {fx}, {fy}, {fw}, {fh})'
+            ]
     lines += [
         "  try",
         "    save theDoc",

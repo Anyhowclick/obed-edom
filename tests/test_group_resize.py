@@ -15,7 +15,7 @@ Delete highest-index first.
 import re
 from pathlib import Path
 
-from obed_edom.keynote import _build_stat_finalize_script, _run_stat_finalize
+from obed_edom.keynote import _STAT_ACCUMULATORS, _build_stat_finalize_script, _run_stat_finalize
 from obed_edom.map_remap import (
     ItemTransform,
     adjust_child_resize_indexes,
@@ -395,17 +395,74 @@ def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order
     assert 'my obedRaiseItem(4, "text"' not in script
 
 
+def test_finalize_badge_row_missing_frame_is_skipped_and_counted_unresolved():
+    """A shape/image badge row that never reached the frame merge in
+    plan_slide_transforms (it `continue`d out before mapped was known) must not emit an
+    obedRaiseItem call that would scan for a 0x0 object -- skip it and pre-count it as
+    badgeUnresolved at init, the same way font_skips/dedupShortfall are seeded."""
+    badge_raises = [
+        {"slide": 4, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        {"slide": 4, "kind": "image", "index": 2, "isTitle": False},  # no frame
+        {"slide": 4, "kind": "text", "index": 1, "isTitle": True},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {}, badge_raises=badge_raises)
+    assert 'my obedRaiseItem(4, "shape", 1, 17.0, 37.0, 411.0, 123.0)' in script
+    assert 'my obedRaiseItem(4, "image", 2' not in script
+    assert "set badgeUnresolved to 1" in script
+
+
+def test_stat_accumulators_include_badge_counters():
+    assert "badgeFallbacks" in _STAT_ACCUMULATORS
+    assert "badgeUnresolved" in _STAT_ACCUMULATORS
+
+
+def test_finalize_return_string_carries_badge_counters():
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
+    assert '" badgeFallback=" & badgeFallbacks' in script
+    assert '" badgeUnresolved=" & badgeUnresolved' in script
+
+
+def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_path):
+    """End-to-end through _run_stat_finalize's own raw-string parsing, with
+    subprocess.run stubbed so no Keynote/osascript actually runs."""
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+
+    raw = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=2 "
+        "badgeUnresolved=3 detail="
+    )
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=raw, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["badgeFallback"] == 2
+    assert result["badgeUnresolved"] == 3
+
+
 def test_obed_raise_item_unknown_kind_is_a_noop():
     """obedRaiseItem must not default an unrecognized kind to a text-item selection --
     only shape/image/group/text are valid; anything else is a no-op (no select, no raise).
-    The top-level kind dispatch (8-space indent) has no bare else: an unrecognized kind
-    matches none of group/text/(shape or image), so _found stays false."""
+    The top-level kind dispatch has no bare else of its own (nested elses inside the
+    shape/image branch don't count): an unrecognized kind matches none of
+    group/text/(shape or image), so _found stays false."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {},
         badge_raises=[{"slide": 1, "kind": "shape", "index": 1, "isTitle": False}],
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
-    assert re.search(r"^ {8}else\s*$", handler, re.M) is None
+    dispatch_at = handler.index('if theKind is "group" then')
+    assert _find_own_else(handler, dispatch_at) is None
     assert 'else if theKind is "text" then' in handler
     assert 'else if (theKind is "shape") or (theKind is "image") then' in handler
 
@@ -427,6 +484,31 @@ def test_obed_raise_item_has_guard_scan_skip_branches_in_order():
     assert guard_at < scan_at < skip_at
 
 
+def _find_own_else(text: str, if_at: int) -> int | None:
+    """Position of the bare 'else' pairing with the 'if ... then' opened at if_at (None
+    if it has no else before its matching 'end if'), by depth-counting nested
+    'if ... then' opens ('else if' does not nest) against 'end if' closes --
+    indentation-independent, unlike a raw '^\\s*else$' scan."""
+    i = text.index("then", if_at) + len("then")
+    depth = 1
+    while i < len(text):
+        if text.startswith("end if", i):
+            depth -= 1
+            if depth == 0:
+                return None
+            i += len("end if")
+        elif text.startswith("else if", i):
+            i += len("else if")
+        elif depth == 1 and text.startswith("else", i):
+            return i
+        elif text.startswith("if ", i):
+            depth += 1
+            i += len("if ")
+        else:
+            i += 1
+    raise AssertionError("unbalanced if/end if")
+
+
 def test_obed_raise_item_ambiguous_scan_hit_is_unresolved_not_raised():
     """Two same-frame images means the scan finds zero or more than one match; that
     branch must count badgeUnresolved and never select/raise anything."""
@@ -438,11 +520,8 @@ def test_obed_raise_item_ambiguous_scan_hit_is_unresolved_not_raised():
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
     hit_at = handler.index("if _hitCount is 1 then")
-    # The nested kind-dispatch else (14-space indent) sits inside the true branch;
-    # the else PAIRED with "if _hitCount is 1 then" is at its own 12-space indent.
-    match = re.search(r"^ {12}else\s*$", handler[hit_at:], re.M)
-    assert match is not None
-    else_at = hit_at + match.start()
+    else_at = _find_own_else(handler, hit_at)
+    assert else_at is not None
     end_if_at = handler.index("end if", else_at)
     unresolved_branch = handler[else_at:end_if_at]
     assert "set badgeUnresolved to badgeUnresolved + 1" in unresolved_branch

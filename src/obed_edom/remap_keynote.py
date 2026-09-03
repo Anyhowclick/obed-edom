@@ -958,6 +958,7 @@ def remap_keynote(
         dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
         sig_fallback = child_resize_result.get("sigFallback") or 0
         unresolved = child_resize_result.get("unresolved") or 0
+        badge_fallback = child_resize_result.get("badgeFallback") or 0
         badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
         if child_resize_result.get("ok"):
             say(
@@ -966,6 +967,7 @@ def remap_keynote(
                 + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
+                + (f", {badge_fallback} badge-fallback(s)" if badge_fallback else "")
                 + "."
             )
             if dedup_shortfall:
