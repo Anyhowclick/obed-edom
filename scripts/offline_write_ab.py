@@ -48,8 +48,12 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import sys
 from pathlib import Path
 from typing import Any
+
+# `python scripts/x.py` puts scripts/ (not the repo root) on sys.path[0].
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 TOL_HARD = 0.5
 TOL_SOFT = 1.0
