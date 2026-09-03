@@ -1072,7 +1072,7 @@ def test_rewrite_preserves_nbsp_member_names_on_real_deck(tmp_path):
     import json
     import subprocess
 
-    from scripts.write_gate_ab import bridge_specs_kindindex, load_specs_sidecar
+    from scripts.write_gate_ab import load_specs_sidecar
 
     copy = tmp_path / "bpre_copy.key"
     subprocess.run(["cp", "-c", str(B_PRE_DECK), str(copy)], check=True)
@@ -1085,7 +1085,7 @@ def test_rewrite_preserves_nbsp_member_names_on_real_deck(tmp_path):
         before = _parse_central_directory(copy.read_bytes())
 
         sidecar = load_specs_sidecar(SPECS_SIDECAR)
-        specs9 = bridge_specs_kindindex(sidecar["specs"])
+        specs9 = sidecar["specs"]  # patch_deck_geometry bridges internally
         res = patch_deck_geometry(
             copy, {9: specs9}, reported_by_slide=None,
             source_counts_by_slide={9: sidecar["source_counts"]}, require_reconcile=True,
