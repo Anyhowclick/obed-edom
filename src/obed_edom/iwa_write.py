@@ -394,10 +394,11 @@ def _slide_edits(
 
     if address == "positional" and source_counts is not None:
         base = expected_base_counts(source_counts, specs)
-        mismatched = reconcile_counts(derived_kind_counts(records), base)
+        derived_counts = derived_kind_counts(records)
+        mismatched = reconcile_counts(derived_counts, base)
         if mismatched:
             return (target_member, {}, 0, [],
-                    f"reconcile mismatch on kinds {mismatched}; refusing offline write")
+                    f"reconcile mismatch on kinds {mismatched} (derived {derived_counts} vs expected {base})")
 
     hide_specs = [s for s in specs if s.get("role") == "hide"]
 
@@ -501,6 +502,45 @@ def _patch_member(zf: zipfile.ZipFile, member: str, edits: dict[str, dict]) -> t
     return new_member, applied, obj_diffs, header_diffs
 
 
+class _RawNameZipInfo(zipfile.ZipInfo):
+    """ZipInfo whose central-directory/local-header filename bytes are frozen to
+    ``_raw_name`` instead of re-encoded from ``self.filename``. ``ZipFile._open_to_write``
+    resets ``flag_bits`` to 0 before calling ``_encodeFilenameFlags``, so this must not
+    try to read back an "original" flag from ``self.flag_bits`` at encode time — it just
+    keeps the standard machinery from ALSO setting bit 11 for a name we're freezing.
+    """
+
+    __slots__ = ("_raw_name",)
+
+    def _encodeFilenameFlags(self):
+        raw = getattr(self, "_raw_name", None)
+        return (raw, self.flag_bits) if raw is not None else super()._encodeFilenameFlags()
+
+
+_ZIPINFO_COPY_ATTRS = (
+    "compress_type", "comment", "extra", "create_system", "create_version",
+    "extract_version", "reserved", "flag_bits", "volume", "internal_attr",
+    "external_attr", "CRC", "compress_size", "file_size",
+)
+
+
+def _preserve_raw_name(zi: zipfile.ZipInfo) -> zipfile.ZipInfo:
+    """Copy of ``zi`` for writing. Keynote writes some ``Data/*`` member names as raw
+    UTF-8 bytes with the UTF-8 flag (bit 11) CLEAR; Python decodes those as CP437
+    (mojibake), and a naive rewrite re-encodes that mojibake as UTF-8 + sets bit 11 —
+    different bytes, so Keynote drops the member as damaged. When the ORIGINAL flag
+    bit 11 was clear and the decoded name is non-ASCII (the mis-decode signature),
+    freeze the exact original bytes; ASCII names and genuinely UTF-8-flagged names
+    round-trip correctly through the standard path already.
+    """
+    info = _RawNameZipInfo(zi.filename, zi.date_time)
+    for attr in _ZIPINFO_COPY_ATTRS:
+        setattr(info, attr, getattr(zi, attr))
+    if zi.flag_bits & 0x800 == 0 and not zi.filename.isascii():
+        info._raw_name = zi.filename.encode("cp437")
+    return info
+
+
 def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
     """Stream every zip member into a same-volume temp file (peak RAM = largest member,
     not the whole deck), then copy the bytes back INTO THE ORIGINAL INODE via ``open(deck,
@@ -527,11 +567,12 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
         try:
             with zipfile.ZipFile(tmp_path, "w") as zout:
                 for zi in zin.infolist():
+                    out_info = _preserve_raw_name(zi)
                     data = edits.get(zi.filename)
                     if data is not None:
-                        zout.writestr(zi, data, compress_type=zi.compress_type)
+                        zout.writestr(out_info, data, compress_type=zi.compress_type)
                     else:
-                        with zin.open(zi) as src, zout.open(zi, "w") as dst:
+                        with zin.open(zi) as src, zout.open(out_info, "w") as dst:
                             shutil.copyfileobj(src, dst, 8 << 20)
         except Exception:
             tmp_path.unlink(missing_ok=True)

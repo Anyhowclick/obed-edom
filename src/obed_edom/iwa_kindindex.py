@@ -50,7 +50,13 @@ def _bezier(obj: dict) -> dict:
 
 
 def _is_line(obj: dict) -> bool:
-    """Open two-point bezier or a zero natural dimension. Multi-point freeforms are shapes."""
+    """Open two-point bezier or a zero natural dimension. Multi-point freeforms are shapes.
+
+    A text box is never a line: an autosize text box's stored ``naturalSize`` height can
+    legitimately be 0 at the pass-1 save, before Keynote lays it out — isTextBox wins.
+    """
+    if obj.get("isTextBox"):
+        return False
     bez = _bezier(obj)
     if not bez:
         return False

@@ -152,6 +152,17 @@ def test_is_line_rejects_closed_rectangle():
     assert _is_line(obj) is False
 
 
+def test_zero_natural_dimension_text_box_is_text_not_line():
+    # An autosize text box's stored naturalSize height can legitimately be 0 at the
+    # pass-1 save, before Keynote lays it out (bug: the zero-dimension line heuristic
+    # was firing on it). isTextBox must win over that heuristic.
+    objects = {}
+    tid = _shape(objects, "t", is_textbox=True, text="Autosize", h=0.0)
+    assert _is_line(objects[tid]) is False
+    recs = derive_kind_index(_slide(tid), objects)
+    assert [r["kind"] for r in recs] == ["text"]
+
+
 def test_no_phantom_table_chart_kinds():
     # collectItems never collects tables/charts, so derive must not emit them either.
     objects = {}

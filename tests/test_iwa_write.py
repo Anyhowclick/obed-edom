@@ -29,7 +29,9 @@ import copy
 import io
 import re
 import shutil
+import struct
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -993,6 +995,107 @@ def test_rewrite_members_refuses_unknown_extra_member(tmp_path):
 def test_patch_deck_geometry_rejects_slide_zero(deck):
     with pytest.raises(ValueError):
         patch_deck_geometry(deck, {0: []})
+
+
+# --------------------------------------------------------------------------
+# BUG 1: a Keynote Data/* member name written as raw UTF-8 bytes with the
+# UTF-8 flag (bit 11) CLEAR must round-trip byte-for-byte, not get re-encoded
+# from Python's CP437 mis-decode of it.
+# --------------------------------------------------------------------------
+def _parse_central_directory(raw: bytes) -> list[tuple[bytes, int]]:
+    """[(raw name bytes, flag_bits)] straight off the zip central directory —
+    deliberately NOT ``ZipFile.namelist()``, which would hide the bug by
+    re-decoding through the same CP437/UTF-8 path under test."""
+    idx = raw.rfind(b"PK")
+    eocd = struct.unpack(zipfile.structEndArchive, raw[idx:idx + zipfile.sizeEndCentDir])
+    cd_size, cd_offset = eocd[5], eocd[6]
+    cd = raw[cd_offset:cd_offset + cd_size]
+    out: list[tuple[bytes, int]] = []
+    p = 0
+    while p < len(cd):
+        fields = struct.unpack(zipfile.structCentralDir, cd[p:p + zipfile.sizeCentralDir])
+        flag_bits = fields[5]
+        nlen, elen, clen = fields[12], fields[13], fields[14]
+        name = cd[p + zipfile.sizeCentralDir:p + zipfile.sizeCentralDir + nlen]
+        out.append((name, flag_bits))
+        p += zipfile.sizeCentralDir + nlen + elen + clen
+    return out
+
+
+def _build_raw_name_deck(path):
+    """Three members: an ASCII one we'll edit, a Keynote-style raw-UTF-8/bit-11-clear
+    NBSP name (mis-decodes to CP437 mojibake), and a genuinely UTF-8-flagged non-ASCII
+    name. Built via a same-length ASCII placeholder + byte substitution so no entry's
+    offsets shift — the standard zipfile writer cannot itself emit bit-11-clear
+    non-ASCII names, which is exactly the shape Keynote produces and we must preserve.
+    """
+    raw_name = b"Data/14. CHLI\xc2\xa0SD-80670.jpg"  # real UTF-8 NBSP, bit 11 clear (Keynote-style)
+    placeholder = b"Data/14. CHLIXXSD-80670.jpg"      # same byte length as raw_name
+    assert len(placeholder) == len(raw_name)
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Index/Slide-100.iwa", b"ASCII-EDITED-MEMBER-CONTENT")
+        z.writestr(placeholder.decode("ascii"), b"FAKEJPEGBYTES")
+        z.writestr("unicode-é.jpg", b"unicode content")  # genuinely UTF-8-flagged (bit 11 set)
+    raw = path.read_bytes()
+    assert raw.count(placeholder) == 2  # local header + central directory
+    path.write_bytes(raw.replace(placeholder, raw_name))
+    return path, raw_name
+
+
+def test_rewrite_preserves_raw_member_name_bytes(tmp_path):
+    deck, raw_name = _build_raw_name_deck(tmp_path / "rawname.key")
+    with zipfile.ZipFile(deck) as z:
+        # Confirm the setup actually reproduces Keynote's mis-decode signature.
+        decoded = {zi.filename: zi.flag_bits for zi in z.infolist()}
+    assert decoded[raw_name.decode("cp437")] == 0
+    assert decoded["unicode-é.jpg"] & 0x800
+
+    before = _parse_central_directory(deck.read_bytes())
+
+    _rewrite_members(deck, {"Index/Slide-100.iwa": b"NEW-EDITED-CONTENT"})
+
+    after = _parse_central_directory(deck.read_bytes())
+    assert before == after  # every name's bytes AND flag bit 11 identical, including the edited one's neighbours
+    with zipfile.ZipFile(deck) as z:
+        assert z.read("Index/Slide-100.iwa") == b"NEW-EDITED-CONTENT"
+
+
+B_PRE_DECK = Path("output/write-gate/B_pre.key")
+SPECS_SIDECAR = Path("output/write-gate/specs_slide9.json")
+
+
+@pytest.mark.skipif(not (B_PRE_DECK.exists() and SPECS_SIDECAR.exists()), reason="local write-gate bank only")
+def test_rewrite_preserves_nbsp_member_names_on_real_deck(tmp_path):
+    # Sanity run on the real banked deck (4 known NBSP Data/* members): patch slide 9
+    # like the write-gate smoke does, then confirm those 4 members' raw CD bytes
+    # (name + flag bit 11) are untouched by the rewrite of an unrelated Slide-*.iwa member.
+    import json
+    import subprocess
+
+    from scripts.write_gate_ab import bridge_specs_kindindex, load_specs_sidecar
+
+    copy = tmp_path / "bpre_copy.key"
+    subprocess.run(["cp", "-c", str(B_PRE_DECK), str(copy)], check=True)
+    try:
+        with zipfile.ZipFile(copy) as z:
+            nbsp_names = [zi.filename for zi in z.infolist()
+                         if not zi.filename.isascii() and zi.flag_bits & 0x800 == 0]
+        assert len(nbsp_names) == 4
+
+        before = _parse_central_directory(copy.read_bytes())
+
+        sidecar = load_specs_sidecar(SPECS_SIDECAR)
+        specs9 = bridge_specs_kindindex(sidecar["specs"])
+        res = patch_deck_geometry(
+            copy, {9: specs9}, reported_by_slide=None,
+            source_counts_by_slide={9: sidecar["source_counts"]}, require_reconcile=True,
+        )[9]
+        assert not res.refused
+
+        after = _parse_central_directory(copy.read_bytes())
+        assert before == after  # NBSP members' name bytes + flags untouched by the slide-9 edit
+    finally:
+        copy.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------
