@@ -16,15 +16,11 @@ import pytest
 pytest.importorskip("keynote_parser")
 
 from obed_edom.iwa_runs import _load_deck  # noqa: E402
+from obed_edom.iwa_write import card_styles, patch_stroke_widths, select_card_styles  # noqa: E402
+from obed_edom.remap_keynote import restore_card_stroke_widths  # noqa: E402
 from test_iwa_write import _arch, _geom, _member  # noqa: E402
 
-from scripts.probe_stroke_patch import (  # noqa: E402
-    border_run,
-    card_styles,
-    patch_stroke_widths,
-    select_card_styles,
-    stroke_probe_applescript,
-)
+from scripts.probe_stroke_patch import border_run, stroke_probe_applescript  # noqa: E402
 from scripts.write_gate_ab import changed_members  # noqa: E402
 
 _WHITE_SOLID_STROKE = {
@@ -245,3 +241,115 @@ def test_stroke_probe_applescript_blocks_balanced_and_save_gated(tmp_path):
                 == lines.count("end using terms from"))
         assert ("save theDoc" in lines) == save
         assert ("close theDoc saving yes" in lines) == save
+
+
+# --- restore_card_stroke_widths (remap_keynote pairing + guard) ------------------
+
+
+def _build_style_deck(path, style_specs, *, slide_w=1920.0, slide_h=1080.0):
+    """One MediaStyleArchive + N referencing images per spec:
+    ``{"id", "width", "refs", "colour": (r,g,b,a), "pattern"}``. Own (non-inherited)
+    stroke, so every style here is directly selectable/pairable."""
+    stylesheet = []
+    slide_archives = []
+    zorder = []
+    for spec in style_specs:
+        sid = spec["id"]
+        r, g, b, a = spec.get("colour", (1.0, 1.0, 1.0, 1.0))
+        stylesheet.append(_arch(sid, "TSD.MediaStyleArchive", {
+            "super": {"styleIdentifier": f"style-{sid}"},
+            "mediaProperties": {"stroke": {
+                "width": spec["width"],
+                "color": {"model": "rgb", "r": r, "g": g, "b": b, "a": a, "rgbspace": "srgb"},
+                "pattern": {"type": spec.get("pattern", "TSDSolidPattern")},
+            }},
+        }))
+        for i in range(spec.get("refs", 10)):
+            img_id = sid * 100 + i + 1
+            slide_archives.append(
+                _arch(img_id, "TSD.ImageArchive", {"style": {"identifier": sid}, "super": _geom(i * 10, 0, 50, 50)})
+            )
+            zorder.append(img_id)
+    slide_id = 99999
+    slide = _arch(slide_id, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": i} for i in zorder]})
+    show = _arch(2, "KN.ShowArchive", {
+        "slideTree": {"slides": [{"identifier": 10}]},
+        "size": {"width": slide_w, "height": slide_h},
+    })
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": slide_id}, "isSkipped": False})
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/DocumentStylesheet.iwa", _member(stylesheet))
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr(f"Index/Slide-{slide_id}.iwa", _member(slide_archives + [slide]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_restore_card_stroke_widths_patches_the_paired_style(tmp_path):
+    from scripts.write_gate_ab import changed_members
+
+    out_deck = _build_style_deck(tmp_path / "out.key", [{"id": 900, "width": 0.25, "refs": 12}])
+    original = tmp_path / "out_original.key"
+    original.write_bytes(out_deck.read_bytes())
+    src_deck = _build_style_deck(tmp_path / "src.key", [{"id": 700, "width": 3.0, "refs": 40}])
+
+    say_lines: list[str] = []
+    result = restore_card_stroke_widths(out_deck, src_deck, {"slideWidth": 7680.0}, say_lines.append)
+
+    assert not result.get("refused")
+    assert result["applied"] == 1
+    assert changed_members(original, out_deck) == {"Index/DocumentStylesheet.iwa"}
+
+    objects, id_to_file, _fi = _load_deck(out_deck)
+    styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
+    assert styles["900"]["width"] == pytest.approx(3.0)
+    assert any("900" in line for line in say_lines)
+
+
+def test_restore_card_stroke_widths_refuses_ambiguous_pairing(tmp_path):
+    out_deck = _build_style_deck(tmp_path / "out.key", [
+        {"id": 900, "width": 0.25, "refs": 12},
+        {"id": 901, "width": 0.3, "refs": 15},  # same colour+pattern as 900: ambiguous
+    ])
+    src_deck = _build_style_deck(tmp_path / "src.key", [{"id": 700, "width": 3.0, "refs": 40}])
+
+    say_lines: list[str] = []
+    result = restore_card_stroke_widths(out_deck, src_deck, {"slideWidth": 7680.0}, say_lines.append)
+
+    assert result.get("skipped")
+    assert any("candidate" in line for line in say_lines)
+    objects, id_to_file, _fi = _load_deck(out_deck)
+    styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
+    assert styles["900"]["width"] == pytest.approx(0.25)  # deck untouched
+    assert styles["901"]["width"] == pytest.approx(0.3)
+
+
+def test_restore_card_stroke_widths_refuses_absent_source_pairing(tmp_path):
+    out_deck = _build_style_deck(tmp_path / "out.key", [{"id": 900, "width": 0.25, "refs": 12}])
+    src_deck = _build_style_deck(tmp_path / "src.key", [
+        {"id": 700, "width": 1.0, "refs": 40, "colour": (0.0, 0.0, 0.0, 1.0)},  # black, no white match
+    ])
+
+    say_lines: list[str] = []
+    result = restore_card_stroke_widths(out_deck, src_deck, {"slideWidth": 7680.0}, say_lines.append)
+
+    assert result.get("skipped")
+    objects, id_to_file, _fi = _load_deck(out_deck)
+    styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
+    assert styles["900"]["width"] == pytest.approx(0.25)  # deck untouched
+
+
+def test_restore_card_stroke_widths_guard_rejects_out_greater_than_src(tmp_path):
+    out_deck = _build_style_deck(tmp_path / "out.key", [{"id": 900, "width": 5.0, "refs": 12}])
+    src_deck = _build_style_deck(tmp_path / "src.key", [{"id": 700, "width": 3.0, "refs": 40}])
+
+    say_lines: list[str] = []
+    result = restore_card_stroke_widths(out_deck, src_deck, {"slideWidth": 7680.0}, say_lines.append)
+
+    assert result.get("skipped")
+    assert any("guard failed" in line for line in say_lines)
+    objects, id_to_file, _fi = _load_deck(out_deck)
+    styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
+    assert styles["900"]["width"] == pytest.approx(5.0)  # deck untouched

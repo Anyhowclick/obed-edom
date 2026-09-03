@@ -14,233 +14,25 @@ whether a save RESETS a patched width, and whether the border widens on-screen.
 from __future__ import annotations
 
 import argparse
-import copy
-import io
-import os
 import shutil
 import subprocess
 import tempfile
 import time
-import zipfile
 from pathlib import Path
-
-from keynote_parser.codec import IWAFile
 
 from obed_edom import keynote_app
 from obed_edom.iwa_geometry import _geom_dict, _leaf_bbox, _xywha
 from obed_edom.iwa_runs import _load_deck, slide_order
+from obed_edom.iwa_write import card_styles, patch_stroke_widths, select_card_styles
 
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "output" / "stroke-probe"
 DEFAULT_MIN_REFS = 10
 DEFAULT_WIDTH = 3.0
-STYLESHEET_MEMBER = "Index/DocumentStylesheet.iwa"
 
 
 # ==========================================================================
 # Pure.
 # ==========================================================================
-def _resolve_stroke(style_id: str, objects: dict[str, dict]) -> tuple[dict | None, bool]:
-    """First non-``None`` ``mediaProperties.stroke`` up the ``super.parent`` chain.
-
-    (stroke, inherited) — ``inherited`` is True once the walk had to leave the
-    starting style. Capped + seen-set, same shape as ``iwa_geometry._geom_dict``.
-    """
-    cur: str | None = str(style_id)
-    seen: set[str] = set()
-    inherited = False
-    for _ in range(6):
-        if cur is None or cur in seen:
-            break
-        seen.add(cur)
-        obj = objects.get(cur)
-        if not obj:
-            break
-        stroke = (obj.get("mediaProperties") or {}).get("stroke")
-        if stroke is not None:
-            return stroke, inherited
-        parent = ((obj.get("super") or {}).get("parent") or {}).get("identifier")
-        if parent is None:
-            break
-        cur = str(parent)
-        inherited = True
-    return None, inherited
-
-
-def _collect_images(obj_id: str, objects: dict[str, dict], seen: set[str], out: list[str]) -> None:
-    """DFS ``TSD.GroupArchive.children``, appending image/movie leaf ids. Mirrors
-    ``iwa_runs._collect_group_text``'s seen-set group DFS."""
-    if obj_id in seen:
-        return
-    seen.add(obj_id)
-    obj = objects.get(obj_id)
-    if not obj:
-        return
-    ptype = obj.get("_pbtype")
-    if ptype == "TSD.GroupArchive":
-        for ref in obj.get("children") or []:
-            cid = ref.get("identifier")
-            if cid is not None:
-                _collect_images(str(cid), objects, seen, out)
-    elif ptype in ("TSD.ImageArchive", "TSD.MovieArchive"):
-        out.append(obj_id)
-
-
-def card_styles(objects: dict[str, dict], id_to_file: dict[str, str]) -> list[dict]:
-    """One dict per ``MediaStyleArchive`` referenced by an image/movie, sorted by refs desc.
-
-    ``slide_of`` walks every slide's ``drawablesZOrder`` recursively through groups
-    (a card's image is nested; ``compose_geometry`` never reaches it). Each dict:
-    ``{id, member, width, color:(r,g,b,a), pattern, refs, slides, inherited}``.
-    """
-    slide_of: dict[str, int] = {}
-    for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
-        slide = objects.get(slide_id)
-        if not slide:
-            continue
-        images: list[str] = []
-        seen: set[str] = set()
-        for ref in slide.get("drawablesZOrder") or []:
-            rid = ref.get("identifier")
-            if rid is not None:
-                _collect_images(str(rid), objects, seen, images)
-        number = idx + 1
-        for img_id in images:
-            slide_of.setdefault(img_id, number)
-
-    refs: dict[str, int] = {}
-    slides_by_style: dict[str, set[int]] = {}
-    for obj_id, obj in objects.items():
-        if obj.get("_pbtype") not in ("TSD.ImageArchive", "TSD.MovieArchive"):
-            continue
-        style_id = (obj.get("style") or {}).get("identifier")
-        if style_id is None:
-            continue
-        style_id = str(style_id)
-        refs[style_id] = refs.get(style_id, 0) + 1
-        number = slide_of.get(obj_id)
-        if number is not None:
-            slides_by_style.setdefault(style_id, set()).add(number)
-
-    styles: list[dict] = []
-    for style_id, count in refs.items():
-        stroke, inherited = _resolve_stroke(style_id, objects)
-        if stroke is None:
-            continue
-        color = stroke.get("color") or {}
-        pattern = (stroke.get("pattern") or {}).get("type")
-        styles.append({
-            "id": style_id,
-            "member": id_to_file.get(style_id),
-            "width": stroke.get("width"),
-            "color": (color.get("r"), color.get("g"), color.get("b"), color.get("a")),
-            "pattern": pattern,
-            "refs": count,
-            "slides": sorted(slides_by_style.get(style_id, set())),
-            "inherited": inherited,
-        })
-    styles.sort(key=lambda s: -s["refs"])
-    return styles
-
-
-def select_card_styles(styles: list[dict], min_refs: int) -> list[dict]:
-    """White + opaque (r,g,b,a each >= 0.95) AND solid AND refs >= ``min_refs``. Never by id."""
-    out = []
-    for s in styles:
-        r, g, b, a = s["color"]
-        if r is None or g is None or b is None or a is None:
-            continue
-        if r >= 0.95 and g >= 0.95 and b >= 0.95 and a >= 0.95 \
-                and s["pattern"] == "TSDSolidPattern" and s["refs"] >= min_refs:
-            out.append(s)
-    return out
-
-
-def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
-    """Patch ``mediaProperties.stroke.width`` for each id in ``widths``, single-member
-    rewrite of ``Index/DocumentStylesheet.iwa`` (a ~30-line copy of
-    ``iwa_write.py:431-472``'s decode -> deepcopy -> re-encode -> reparse -> diff ->
-    O_TRUNC mechanics; no ``iwa_write`` refactor for a probe).
-
-    Refuses (deck untouched) if an id is absent, has no OWN stroke (inherited-only),
-    lives in a different member, or fewer ids matched an archive than requested (the
-    silent-no-op guard — every validation happens before any write).
-    """
-    deck = Path(deck)
-    target_member = STYLESHEET_MEMBER
-    widths = {str(k): float(v) for k, v in widths.items()}
-    objects, id_to_file, _file_ids = _load_deck(deck)
-
-    for sid in widths:
-        obj = objects.get(sid)
-        if obj is None:
-            return {"refused": True, "reason": f"style {sid} not found in deck"}
-        if (obj.get("mediaProperties") or {}).get("stroke") is None:
-            return {"refused": True, "reason": f"style {sid} has no own stroke (inherited-only)"}
-        if id_to_file.get(sid) != target_member:
-            return {"refused": True,
-                    "reason": f"style {sid} lives in {id_to_file.get(sid)!r}, not {target_member!r}"}
-
-    with zipfile.ZipFile(deck) as zf:
-        if target_member not in zf.namelist():
-            return {"refused": True, "reason": f"member {target_member} missing from deck"}
-        buf = zf.read(target_member)
-
-    decoded = IWAFile.from_buffer(buf, target_member).to_dict()
-    patched = copy.deepcopy(decoded)
-    applied = 0
-    for ch in patched["chunks"]:
-        for arch in ch["archives"]:
-            aid = str(arch["header"]["identifier"])
-            if aid not in widths:
-                continue
-            for o in arch.get("objects") or []:
-                o["mediaProperties"]["stroke"]["width"] = float(widths[aid])
-                applied += 1
-                break
-
-    if applied != len(widths):
-        return {"refused": True,
-                "reason": f"only {applied}/{len(widths)} styles matched an archive in {target_member}"}
-
-    new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
-    reparsed = IWAFile.from_buffer(new_member, target_member).to_dict()
-    obj_diffs = 0
-    header_diffs = 0
-    for c0, c1 in zip(decoded["chunks"], reparsed["chunks"]):
-        for a0, a1 in zip(c0["archives"], c1["archives"]):
-            if (a0.get("objects") or []) != (a1.get("objects") or []):
-                obj_diffs += 1
-            if a0["header"] != a1["header"]:
-                header_diffs += 1
-    value_clean = obj_diffs <= len(widths) and header_diffs == 0
-
-    # In-place O_TRUNC preserves inode + com.apple.macl; a new file is refused by Keynote.
-    out = io.BytesIO()
-    with zipfile.ZipFile(deck) as zin, zipfile.ZipFile(out, "w") as zout:
-        for zi in zin.infolist():
-            data = new_member if zi.filename == target_member else zin.read(zi.filename)
-            zout.writestr(zi, data, compress_type=zi.compress_type)
-    payload = out.getvalue()
-    fd = os.open(str(deck), os.O_WRONLY | os.O_TRUNC)
-    try:
-        written = 0
-        while written < len(payload):
-            written += os.write(fd, payload[written:])
-    finally:
-        os.close(fd)
-
-    return {
-        "refused": False,
-        "reason": None,
-        "target_member": target_member,
-        "applied": applied,
-        "obj_diffs": obj_diffs,
-        "header_diffs": header_diffs,
-        "value_clean": value_clean,
-        "edited_ids": sorted(widths, key=str),
-    }
-
-
 def card_frames(objects: dict[str, dict], slide_number: int, style_ids: set[str]
                 ) -> list[tuple[str, tuple[float, float, float, float]]]:
     """(image_id, (x0,y0,x1,y1)) for every image/movie on slide N whose style is in
