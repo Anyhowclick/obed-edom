@@ -649,7 +649,7 @@ def _stat_leaf_font_writes(container: str) -> list[str]:
     other uniform text → its own size × `s` (the group's affine scale). Keynote scales a
     group's child GEOMETRY on resize but NOT font size, so without this the text keeps its
     wall-size font in a shrunk box and clips. Mixed-run leaves are skipped. `s` is in scope
-    from ``obedFontSizeCached``."""
+    from ``obedStatJob``."""
     return [
         f"  repeat with _i from 1 to count of iWork items of {container}",
         "    try",
@@ -888,8 +888,8 @@ def _stat_job_handlers() -> list[str]:
     ]
     lines += ["  " + ln for ln in _stat_leaf_font_writes("g")]
     lines += [
-        "      repeat with _gi from 1 to count of groups of g",
-        "        set _sub to group _gi of g",
+        "      repeat with _sgi from 1 to count of groups of g",
+        "        set _sub to group _sgi of g",
     ]
     lines += ["    " + ln for ln in _stat_leaf_font_writes("_sub")]
     lines += [

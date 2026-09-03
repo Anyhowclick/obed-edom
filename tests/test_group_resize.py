@@ -420,6 +420,25 @@ def test_finalize_guard_hit_passes_group_index():
     assert is_gi < one_hit < else_at
 
 
+def test_finalize_resolve_group_both_winning_branches_claim():
+    jobs = [{"slide": 9, "groupIndex": 10, "childSig": "UPG", "s": 0.483}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    handler = script[script.index("on obedResolveGroup") : script.index("end obedResolveGroup")]
+    exact_branch = handler[handler.index("if gi > 0") : handler.index("if (allowFallback")]
+    fallback_branch = handler[handler.index("if (allowFallback") :]
+    assert "set end of claimed to gi" in exact_branch
+    assert "set end of claimed to _w" in fallback_branch
+
+
+def test_finalize_stat_job_appends_raise_target_before_try():
+    jobs = [{"slide": 9, "groupIndex": 10, "childSig": "UPG", "s": 0.483}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    handler = script[script.index("on obedStatJob") : script.index("end obedStatJob")]
+    raise_at = handler.index("set end of raiseTargets to")
+    try_at = handler.index("    try")
+    assert raise_at < try_at
+
+
 def test_finalize_accounting_globals_claimed_per_font_slide():
     jobs = [
         {"slide": 4, "groupIndex": 1, "childSig": "A"},
