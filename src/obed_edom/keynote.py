@@ -924,6 +924,27 @@ def _stat_job_handlers() -> list[str]:
         "    set _rem to _new",
         "  end repeat",
         "end obedRaiseSlide",
+        "on obedRaiseItem(slideNo, theKind, idx)",
+        "  global theDoc",
+        "  set _found to false",
+        "  " + _keynote_tell(),
+        "    try",
+        "      tell slide slideNo of theDoc",
+        '        if theKind is "shape" then',
+        "          set selection of theDoc to {shape idx}",
+        '        else if theKind is "image" then',
+        "          set selection of theDoc to {image idx}",
+        '        else if theKind is "group" then',
+        "          set selection of theDoc to {group idx}",
+        "        else",
+        "          set selection of theDoc to {text item idx}",
+        "        end if",
+        "        set _found to true",
+        "      end tell",
+        "    end try",
+        "  end tell",
+        "  if _found then my obedFront()",
+        "end obedRaiseItem",
         "on obedBadgeRaise(slideNo)",
         "  global theDoc",
         "  set _found to false",
@@ -939,24 +960,32 @@ def _stat_job_handlers() -> list[str]:
         "                set _found to true",
         "              end if",
         "            end try",
+        "            if _found then exit repeat",
         "          end repeat",
+        "          if _found then exit repeat",
         "        end repeat",
-        "        repeat with _ti from 1 to count of text items",
-        "          try",
-        '            if (object text of text item _ti as string) contains "Global Missions" then',
-        "              set selection of theDoc to {text item _ti}",
-        "              set _found to true",
-        "            end if",
-        "          end try",
-        "        end repeat",
-        "        repeat with _si from 1 to count of shapes",
-        "          try",
-        '            if (object text of shape _si as string) contains "Global Missions" then',
-        "              set selection of theDoc to {shape _si}",
-        "              set _found to true",
-        "            end if",
-        "          end try",
-        "        end repeat",
+        "        if not _found then",
+        "          repeat with _ti from 1 to count of text items",
+        "            try",
+        '              if (object text of text item _ti as string) contains "Global Missions" then',
+        "                set selection of theDoc to {text item _ti}",
+        "                set _found to true",
+        "              end if",
+        "            end try",
+        "            if _found then exit repeat",
+        "          end repeat",
+        "        end if",
+        "        if not _found then",
+        "          repeat with _si from 1 to count of shapes",
+        "            try",
+        '              if (object text of shape _si as string) contains "Global Missions" then',
+        "                set selection of theDoc to {shape _si}",
+        "                set _found to true",
+        "              end if",
+        "            end try",
+        "            if _found then exit repeat",
+        "          end repeat",
+        "        end if",
         "      end tell",
         "    end try",
         "  end tell",
@@ -985,10 +1014,12 @@ def _build_stat_finalize_script(
     size_map: dict,
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
+    badge_raises: list[dict] | None = None,
 ) -> str:
     """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close."""
     group_removes = group_removes or []
-    if not jobs and not group_removes:
+    badge_raises = badge_raises or []
+    if not jobs and not group_removes and not badge_raises:
         return ""
     escaped = _as_escape(str(dest))
     doc_name = _as_escape(Path(dest).name)
@@ -1004,9 +1035,9 @@ def _build_stat_finalize_script(
         key = (int(gr["slide"]), sig)
         d = dedup.setdefault(key, {"count": 0, "expectedKeep": int(gr.get("expectedKeep") or 0)})
         d["count"] += 1
-    slides = sorted(
-        {int(j["slide"]) for j in jobs} | {int(gr["slide"]) for gr in group_removes}
-    )
+    badge_by_slide: dict[int, list[dict]] = {}
+    for br in badge_raises:
+        badge_by_slide.setdefault(int(br["slide"]), []).append(br)
     lines: list[str] = ["global " + ", ".join(_STAT_ACCUMULATORS)]
     lines += _stat_size_handler(size_map)
     lines += _sig_handlers()
@@ -1078,8 +1109,14 @@ def _build_stat_finalize_script(
     lines += ['  set frontRaised to 0', '  set frontErr to ""']
     for slide in sorted(font_by_slide):
         lines += [f"  my obedRaiseSlide({slide})"]
-    for slide in slides:
-        lines += [f"  my obedBadgeRaise({slide})"]
+    for slide in sorted(badge_by_slide):
+        for entry in badge_by_slide[slide]:
+            if entry.get("isTitle"):
+                lines += [f"  my obedBadgeRaise({slide})"]
+            else:
+                kind_lit = _as_escape(str(entry.get("kind") or "shape"))
+                idx = int(entry.get("index") or 0)
+                lines += [f'  my obedRaiseItem({slide}, "{kind_lit}", {idx})']
     lines += [
         "  try",
         "    save theDoc",
@@ -1116,13 +1153,19 @@ def _run_stat_finalize(
     size_map: dict,
     export_dir: Path | None = None,
     group_removes: list[dict] | None = None,
+    badge_raises: list[dict] | None = None,
 ) -> dict:
-    """Run stat-finalize (dedup + sizes + bring-to-front). No-op if both job lists are empty."""
+    """Run stat-finalize (dedup + sizes + bring-to-front). No-op if all three job lists are empty."""
     export_dir = Path(export_dir) if export_dir else None
     if export_dir is not None:
         export_dir.mkdir(parents=True, exist_ok=True)
     script = _build_stat_finalize_script(
-        Path(dest), jobs, size_map or {}, export_dir, group_removes=group_removes
+        Path(dest),
+        jobs,
+        size_map or {},
+        export_dir,
+        group_removes=group_removes,
+        badge_raises=badge_raises,
     )
     if not script:
         return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}

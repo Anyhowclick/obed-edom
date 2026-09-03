@@ -1970,11 +1970,13 @@ def plan_slide_transforms(
     defer_list_packing: bool = False,
     free_text_keys: set[tuple[str, int]] | None = None,
     child_resize_report: list[dict[str, Any]] | None = None,
+    badge_raise_report: list[dict[str, Any]] | None = None,
 ) -> list[ItemTransform]:
     groups = _groups_for_slide(slide, recipe)
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
         slide, recipe, wall_size
     )
+    _badge_hits: dict[int, dict[str, Any]] = {}
     # Corner labels are not missions badges: Keynote cannot script corner radius, so a resize squares the plate. Translate at wall size.
     corner_ids: set[int] = set()
     corner_translate: Affine | None = None
@@ -2078,6 +2080,8 @@ def plan_slide_transforms(
         if title_aff is not None and id(item) in title_ids:
             aff, cluster = title_aff, title_src
             badge_dst = _rect_from_dict(badge_dsts.get(badge_slots.get(id(item), "")))
+            if badge_raise_report is not None:
+                _badge_hits[id(item)] = {"kind": str(item.get("kind") or "shape"), "index": kind_index + 1}
         if cluster is None:
             cluster = map_src
         role = classify_item(item, cluster, title_item)
@@ -2372,6 +2376,17 @@ def plan_slide_transforms(
             -(t.w * t.h) if t.role == "map" else 0.0,
         )
     )
+    if badge_raise_report is not None and _badge_hits:
+        # badge_slots is already largest-first (badge_slot_keys); the title goes last.
+        _title_id = id(title_item) if title_item is not None else None
+        _badge_order = list(badge_slots.keys())
+        if _title_id is not None:
+            _badge_order.append(_title_id)
+        for _bid in _badge_order:
+            if _bid in _badge_hits:
+                badge_raise_report.append(
+                    {"slide": number, "isTitle": _bid == _title_id, **_badge_hits[_bid]}
+                )
     return out
 
 
@@ -3322,6 +3337,7 @@ def plan_payload_transforms(
     framing_report: list[dict[str, Any]] | None = None,
     side_content_slides: set[int] | None = None,
     child_resize_report: list[dict[str, Any]] | None = None,
+    badge_raise_report: list[dict[str, Any]] | None = None,
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
 ) -> list[ItemTransform]:
     """Plan every slide's moves. `side_content_slides` keeps side panels; skipped slides stay at wall geometry."""
@@ -3425,6 +3441,7 @@ def plan_payload_transforms(
             defer_list_packing=slide_lists and analysis is not None,
             free_text_keys=analysis["free"] if analysis else None,
             child_resize_report=child_resize_report,
+            badge_raise_report=badge_raise_report,
         )
         if slide_lists and analysis is not None:
             rows = _place_free_text(planned, slide, slide_recipe, analysis)

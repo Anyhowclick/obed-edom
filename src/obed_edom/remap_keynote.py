@@ -565,6 +565,7 @@ def remap_keynote(
     offframe: list[dict[str, Any]] = []
     framing_rows: list[dict[str, Any]] = []
     child_resize: list[dict[str, Any]] = []
+    badge_raises: list[dict[str, Any]] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -580,6 +581,7 @@ def remap_keynote(
         framing_report=framing_rows,
         side_content_slides=side_content_slides,
         child_resize_report=child_resize,
+        badge_raise_report=badge_raises,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
@@ -836,7 +838,7 @@ def remap_keynote(
     # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     child_resize_result: dict[str, Any] | None = None
-    if child_resize or group_removes:
+    if child_resize or group_removes or badge_raises:
         stat_sizes = read_template_stat_sizes(template_path) if child_resize else {}
         say(
             f"Finalizing {len(child_resize)} stat group(s): template sizes "
@@ -847,11 +849,17 @@ def remap_keynote(
                 if group_removes
                 else ""
             )
+            + (f"; raising {len(badge_raises)} badge object(s)" if badge_raises else "")
             + "."
             + (" Exporting previews in the same session." if export_path else "")
         )
         child_resize_result = _run_stat_finalize(
-            dest, child_resize, stat_sizes, export_dir=export_path, group_removes=group_removes
+            dest,
+            child_resize,
+            stat_sizes,
+            export_dir=export_path,
+            group_removes=group_removes,
+            badge_raises=badge_raises,
         )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0

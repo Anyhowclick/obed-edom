@@ -77,6 +77,70 @@ def _slide_with_groups() -> dict:
     }
 
 
+def _badge_recipe() -> dict:
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {
+                "s": 0.8547,
+                "tx": -2597.5,
+                "ty": 28.3,
+                "src": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+                "dst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+            }
+        ],
+        "badgePlateDst": {"x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        "badgeSlots": {
+            "shape:0": {"x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+            "image:0": {"x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0},
+        },
+    }
+
+
+def _slide_with_badge() -> dict:
+    return {
+        "number": 5,
+        "items": [
+            _item(
+                index=0,
+                kindIndex=0,
+                kind="image",
+                fileName="pasted-image.pdf",
+                x=3052,
+                y=-12,
+                w=1248,
+                h=771,
+            ),
+            _item(
+                index=1,
+                kindIndex=1,
+                kind="image",
+                fileName="pasted-image.pdf",
+                x=1992,
+                y=52,
+                w=124,
+                h=124,
+            ),
+            _item(index=2, kindIndex=0, kind="shape", x=1953, y=28, w=767, h=173),
+            _item(
+                index=3,
+                kindIndex=0,
+                kind="text",
+                text="Global Missions",
+                x=2147,
+                y=52,
+                w=537,
+                h=124,
+                size=100,
+                font="AmplitudeCond-Medium",
+            ),
+        ],
+    }
+
+
 # --- Planner job emission --------------------------------------------------------
 
 
@@ -106,6 +170,39 @@ def test_no_report_when_not_requested():
         wall_size=(7680, 1080),
     )
     assert [t for t in out if t.kind == "group"]  # groups still planned
+
+
+def test_badge_raise_report_orders_plate_globe_then_title_last():
+    """badge_raise_report reuses badge_slot_keys (largest-first: plate 767x173
+    before globe 124x124) and forces the title last, regardless of item order."""
+    report: list[dict] = []
+    plan_slide_transforms(
+        _slide_with_badge(),
+        _badge_recipe(),
+        wall_size=(7680, 1080),
+        badge_raise_report=report,
+    )
+    assert [(j["kind"], j["index"], j["isTitle"]) for j in report] == [
+        ("shape", 1, False),
+        ("image", 2, False),
+        ("text", 1, True),
+    ]
+    for job in report:
+        assert job["slide"] == 5
+
+
+def test_badge_raise_report_runs_on_every_slide_not_just_stat_slides():
+    """The old obedBadgeRaise only ran on stat-job slides. badge_raise_report has
+    no dependency on child_resize_report and is collected even with zero stat groups."""
+    report: list[dict] = []
+    plan_slide_transforms(
+        _slide_with_badge(),
+        _badge_recipe(),
+        wall_size=(7680, 1080),
+        badge_raise_report=report,
+        # No child_resize_report passed: no stat jobs collected at all.
+    )
+    assert len(report) == 3
 
 
 # --- Generated AppleScript -------------------------------------------------------
@@ -244,6 +341,50 @@ def test_finalize_script_empty_when_no_jobs():
     assert _build_stat_finalize_script(Path("/tmp/x.key"), [], {"269": 200.0}) == ""
 
 
+def test_finalize_script_runs_for_badge_alone_with_zero_stat_jobs():
+    """A deck can have a badge and no stat groups at all (slides 1-2 in the diagnosis);
+    the pass must still run instead of the old jobs-and-group_removes-only gate."""
+    badge_raises = [{"slide": 1, "kind": "shape", "index": 1, "isTitle": False}]
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {}, badge_raises=badge_raises
+    )
+    assert script != ""
+    assert 'my obedRaiseItem(1, "shape", 1)' in script
+
+
+def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order():
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+    badge_raises = [
+        {"slide": 4, "kind": "shape", "index": 1, "isTitle": False},
+        {"slide": 4, "kind": "image", "index": 2, "isTitle": False},
+        {"slide": 4, "kind": "text", "index": 1, "isTitle": True},
+    ]
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), jobs, {"269": 200.0}, badge_raises=badge_raises
+    )
+    raise_slide_at = script.index("my obedRaiseSlide(4)")
+    shape_at = script.index('my obedRaiseItem(4, "shape", 1)')
+    image_at = script.index('my obedRaiseItem(4, "image", 2)')
+    badge_at = script.index("my obedBadgeRaise(4)")
+    assert raise_slide_at < shape_at < image_at < badge_at
+    # The title never gets an indexed raise call -- it stays content-search only.
+    assert 'my obedRaiseItem(4, "text"' not in script
+
+
+def test_finalize_obed_badge_raise_exits_on_first_hit():
+    """The old obedBadgeRaise ran all three search loops unconditionally, so only the
+    LAST match in the last loop ever stayed selected. Each loop must now stop the
+    others once a match is found."""
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {})
+    assert script == ""  # sanity: still gated when nothing is asked for
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {}, badge_raises=[{"slide": 1, "kind": "text", "index": 1, "isTitle": True}]
+    )
+    handler = script[script.index("on obedBadgeRaise") : script.index("end obedBadgeRaise")]
+    assert handler.count("if _found then exit repeat") == 4
+    assert "if not _found then" in handler
+
+
 def test_stat_finalize_script_compiles_at_scale():
     """The per-job logic is factored into handlers precisely because the old inline form
     overflowed the AppleScript compiler at real deck scale (`storage error: Internal
@@ -287,9 +428,19 @@ def test_stat_finalize_script_compiles_at_scale():
         group_removes.append(
             {"slide": slides[i % len(slides)], "childSig": sig, "expectedKeep": 1}
         )
+    badge_raises = []
+    for slide in range(1, 8):
+        badge_raises.append({"slide": slide, "kind": "shape", "index": 1, "isTitle": False})
+        badge_raises.append({"slide": slide, "kind": "image", "index": 2, "isTitle": False})
+        badge_raises.append({"slide": slide, "kind": "text", "index": 1, "isTitle": True})
 
     script = _build_stat_finalize_script(
-        Path("/tmp/x.key"), jobs, size_map, Path("/tmp/prev"), group_removes=group_removes
+        Path("/tmp/x.key"),
+        jobs,
+        size_map,
+        Path("/tmp/prev"),
+        group_removes=group_removes,
+        badge_raises=badge_raises,
     )
     # Sanity: the factored form stays far below the inline blow-up (~467 KB -> -2707).
     assert len(script.encode("utf-8")) < 100_000
