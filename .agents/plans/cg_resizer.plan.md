@@ -6,8 +6,8 @@ todos:
     content: "DONE 2026-09-03 — code-complete AND live-verified (2/1/2: sonnet+opus planners, fresh sonnet implementer, sonnet+opus reviewers, two live Map remaps). Commits: 90aaa4e F nits; 171fc65 E backdrop y=0; e689c23 A badge_raise_report + obedRaiseItem plate→globe→text on every remapped slide (three gates relaxed); 56a735c C card stroke restore-to-source (ONE Index/DocumentStylesheet.iwa patch, unconditional, guarded out<src and out≤src·canvas_scale·1.1, pairing by (colour,pattern)); caee7a0 B1/D1 caption-bearing groups (≥3-char leaf text, checked in classify_item only) are `other` not `pin`; 95c722b review nits; f9261b7 + 8e5d3b2 A2 geometry-guarded badge raise (the first live run showed the image-index raise hitting the MAP on reuse slide 6 — index drifted by one — so plate/globe rows carry the planned CG frame, `<kind> idx` is accepted only within 3px, else one bulk read per property scans for the unique match, else skip+report; title stays on the content search). LIVE RESULT (output/batch1-verify.key, previews output/previews/batch1-verify/): verify_batch1.py PASS — badge above the map on slides 1–7, backdrop y=0, stroke 18316959 = 3.0 after pass 2's save, 0 caption overflow; verify_slide9.py PASS — 66/66 text groups at 0.483×, frontmost, unions within 1.3% of plan (live runs at f9261b7; 8e5d3b2 is error-path accounting only, osacompile-checked); score_resize identical before/after (cached payloads carry no child text, so it does not exercise B1 — the gold side of the scorer still classifies without child text, a known asymmetry). The '+' marks were Keynote's editor-only clip badge (exports show none). Residual nits from review (not blocking): scorer gold-side classification asymmetry; `result['cardStroke']` has three shapes; PIN origin guard is looser with 32 fewer pins."
     status: completed
   - id: card-template-size-reflow
-    content: "BATCH 2 (owner ACCEPTED 2026-09-03). Owner's rule: the template dictates SIZE incl. text pt; colour/font/runs/builds from source. Photo cards take the template card rect (120.4×100 vs today's 111.9×93) and captions the template swatch (10pt) with whole-point step-down while the measured string (PIL, Amplitude Bold) exceeds box_w − 2·inset (gold reproduces 71/71 captions; floor 8pt; report every step-down); seed sizes into stat-finalize's exact-text size_map. Consequence: re-pitch the slide-4 grid to gold's 126.9/104.9 and reflow 8×6 → 6×8 (today columns 7–8 sit OFF-CANVAS at x=2064/2187). Land AFTER batch 1 is verified live; re-check the stroke/gutter inequality (≥7pt clear) after the re-pitch."
-    status: pending
+    content: "DONE 2026-09-03 — BATCH 2 code-complete AND live-verified (2/1/2: sonnet+opus planners, fresh sonnet implementer, sonnet+opus reviewers, one live Map remap). Commits: 0ad68b0 iwa attach_group_captions + shape_padding; 0cdcd2b template card size + job-scoped caption step-down + grid re-pitch/reflow; 753acef score_resize attachers + card lane. What shipped vs the accepted item: cards = wall groups with ONE caption leaf (≥2 words, non-numeric) + aspect within 2% of the template card group (slide 12, 120.37×100) take the template rect; caption = template swatch 10pt Amplitude-Bold stepped down whole points while the AppKit-measured line exceeds box − 2·inset (inset = the shape's own padding, 4.0pt — NOT iwa_text_shape.TEXT_INSET), floor 8; the size travels JOB-SCOPED (child_resize captionPt → obedStatJob leafPt) because 38/44 slide-4 captions also occur as roster-list leaves, so the global exact-text size_map was unsafe; the pitch is TEMPLATE-derived from the 3-card L the owner added to slide 12 (gutters 7/7 → pitch 127/107 from payload ints), wall-derived + stroke+7 floor only for a single-card template; grid = 6 columns right-aligned beside the map, origin descending below stat blocks while the grid still fits (slide 4 y0=176, slide 5 y0=392), reading order kept; slide 5 (27 cards, 7→6 cols) included. LIVE (output/batch2-verify.key, previews output/previews/batch2-verify/): 71 cards matched, exactly the 5 predicted 9pt step-downs, 0 off-canvas cards, off-frame 29 → 2 (slides 7/8 pre-existing), 4 + 6 cards overlap stat blocks (reported; owner accepted — gold hand-reshaped those), clearance 4.0/4.0pt (below the batch-1 ≥7pt guideline; template-authoritative, reported), verify_batch1 + verify_slide9 PASS, pass-2 counts identical to batch 1. Gold agreement 70/71 (Bian Lan 9 vs gold 8, accepted). First live attempt crashed on a variable shadowing `source` in a say() line — no offline gate reaches remap_keynote's say path; the live run is that gate."
+    status: completed
   - id: w-offline-write-stabilise
     content: "TRANCHE 1 (W1). SHIPPED ec20f4b/a8b27ac/5577e27 (OBED_OFFLINE_WRITE off|on|verify, default OFF = byte-identical production; deck-level patcher, streaming in-place rewrite, reconcile_counts refuse gate, AS fallback, read-back verify, scripts/offline_write_ab.py). The 'pass-2 0.48× group shrink' was an ORACLE ARTIFACT (banked specs_slide9.json + A_prime predate 8a8ef7a); the offline write is correct and survives pass 2. TO CLEAR: (1) re-bank the write-gate oracle — regenerate specs_slide9.json from the CURRENT planner (write_specs_sidecar) and rebuild A′ (one Keynote open); (2) re-run offline_write_ab.py with a HEALTHY A (Accessibility granted; gate must hard-fail on an unhealthy A: pass-2 done/skipped counts, dedup counts), plan-as-oracle for exact classes, identity matching, group children bucketed separately, groups compared as a SET; (3) default-flip bar = gate GREEN on both gold decks with real patches AND one end-to-end `on` run placement-identical to a scripted run. Design points that stand: deleteHides stays in pass 1 and the patcher bridges kindIndex (never both); reuse slides stay fully in Keynote; the JXA attrs pass stays in pass 1; mapReadback assertion moves to the verify. Payoff: replaces the ~100ms/command AS geometry phase (~100–155s Map, multi-minute Full) with seconds."
     status: pending
@@ -28,6 +28,9 @@ todos:
     status: pending
   - id: r-reuse-photo-placement
     content: "BUG BACKLOG (B). Reuse is KEPT (measured +39% on contiguous map series). (A) REUSE-ADD (0,0) YANK: an add on a reuse target has width/height set first (yanks to (0,0)) and position restored only when spec.x/y are set; a spec-less add rides the paste at its wall coord → off-frame. Bounded reuse-path fix (write order / restore condition / give spec-less adds a placement). (B) FRAMING COVER-FALLBACK OFF-FRAME on dense infographic slides (124/125-class, pairQuality=0) — reuse-INDEPENDENT (identical off-frame counts on/off); a framing item touching all slides, own workstream. Once W1 removes the AS-geometry bottleneck, dropping reuse becomes cheap — revisit then."
+    status: pending
+  - id: stat-group-template-sample
+    content: "BUG BACKLOG (B), follow-up from batch 2 (owner accepted the overlap for now). The re-pitched card grids overlap the affine-sized stat blocks (slide 4: date banner + '44 / Total Church Buildings' 109×265; slide 5: '110 / Full-Time Workers') — 4 + 6 cards, reported per card by caption in the say() line. Gold hand-reshaped those blocks (44 block → 509×88 bar above the grid). Fix = a stat-block sample in the template so those groups take a template size/shape (sibling of the constellation cluster affine: role-named group + template anchor). Until then the operator drags them; the grid origin already descends below stat blocks when the rows still fit (slide 5 y0=392)."
     status: pending
   - id: constellation-cluster-affine
     content: "BUG BACKLOG (B) / recipe work, after batch 2. Per-CLUSTER affine with template anchors (section below). Today one uniform fit-to-width (0.48×) leaves the top half empty; gold scales each CHC cluster ~0.82× as a unit and pushes clusters outward to fill the frame. Cluster discovery offline from line incidence; per-object size from the template circle swatches; placement by pairing clusters to template ANCHOR circles at gold positions (angular order around the building); hub lines rewritten by identity; radial frame-fit fallback when anchor count ≠ cluster count. Template needs one anchor circle per cluster + building/people rows/SOT at gold positions. Score offline against gold before any Keynote run."
@@ -98,8 +101,14 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
   signature collision) and output-bugs batch 1 (`171fc65` … `f9261b7`: backdrop y=0, badge
   plate→globe→text raised on every slide with a geometry-guarded index, card stroke restored to
   source, caption-bearing groups are never pins) — both live-verified on the Map deck.
-- **Next:** batch 2 (card template size + caption step-down + grid reflow), then tranche 1 →
-  **tranche 2** (the immediate optimization TODO).
+- **Batch 2 shipped + live-verified (2026-09-03, `0ad68b0`/`0cdcd2b`/`753acef`):** photo cards
+  take the template card rect, captions the template swatch with a job-scoped whole-point
+  step-down, and each card grid re-pitches to the template's own gutters (3-card L on slide 12)
+  and reflows to 6 columns; off-frame 29 → 2 on the Map deck.
+- **Next:** tranche 1 → **tranche 2** (the immediate optimization TODO). New follow-up in the bug
+  backlog: stat-group template sample (the grid overlaps the date banner / "44" block on slide 4
+  and the "110" block on slide 5 because those groups keep their affine size; gold hand-reshaped
+  them).
 
 ## Order of work
 
@@ -117,7 +126,7 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
 | Tranche | Item | Keynote | Status / depends on |
 |---|---|---|---|
 | W0.1–W0.4 | tmp-path fix, skipped-slide bulk skip, z-order probe, stroke probe | probes only | DONE (2ac04db, 695199d, 99771bf, c4dc5e5) |
-| Fixes | output-bugs batch 1 → batch 2 | one live remap each | batch 1 DONE + live-verified; batch 2 next |
+| Fixes | output-bugs batch 1 → batch 2 | one live remap each | both DONE + live-verified (batch 2: 0ad68b0, 0cdcd2b, 753acef) |
 | **W1** | `w-offline-write-stabilise` | gate on both gold decks | shipped default OFF; re-bank oracle, healthy-A gate, flip bar |
 | **R1** | `r-nested-bulk-probe` | yes | after W1's gate window |
 | **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | own caveats (a)–(f); R0 is independent (cheap, anytime) |
@@ -267,6 +276,8 @@ whose number disagrees with the run either side of it. Ships at `warning`.
 | W1 offline write opt-in | ec20f4b, a8b27ac, 5577e27 | default OFF; stabilise = tranche 1 |
 | reuse group dedup (292802c), role=other group-child scaling + font pass (8a8ef7a) | — | reuse doubles fixed; group text scales |
 | stat-finalize parity audit (7781de8), descending raise (aff1470), index-guarded addressing (23de0d2), nits (90aaa4e) | — | pass-2 addressing correct |
+| output-bugs batch 1 (171fc65 … 8e5d3b2) | — | backdrop y=0, badge raise, stroke restore, caption groups never pins |
+| output-bugs batch 2 (0ad68b0, 0cdcd2b, 753acef) | — | template card size, job-scoped caption step-down, template-pitch grid reflow |
 
 ## Insights worth keeping
 
@@ -285,6 +296,15 @@ whose number disagrees with the run either side of it. Ships at `warning`.
 - Content-signature addressing collides; address by index verified against content and skip
   rather than guess. Keynote's clipped-text "+" is editor chrome; wrap-off text spills
   horizontally instead. Never re-assert a verse box's text.
+- Exact-text lookups leak across groups: 38/44 card captions are also roster-list leaves, so a
+  per-leaf size must travel with its job (captionPt → leafPt), never in a deck-wide text map.
+- A single template object carries size but no spacing; a relationship (pitch) needs two
+  adjacent template objects. Card size came 1:1 from the template; the pitch only became
+  template-derived once the owner pasted two neighbours (the 3-card L).
+- A caption's real inset is the shape's own `padding` (4.0pt here), not a subsystem constant;
+  the inset sweep (3→69, 4→70, 12→64 of 71 gold captions) is what settled it.
+- remap_keynote's say() path has no offline gate: a shadowed local (`source` reused for a
+  label string) crashed the first live run after every reviewer had passed the diff.
 
 **Speed (closed — do not rebuild)**
 - JXA and AppleScript READ at the same speed (~11ms/property); wins come from doing less work.

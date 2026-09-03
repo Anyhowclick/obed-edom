@@ -199,7 +199,11 @@ Include:
 * one `<wall layout name> (16:9)` slide for each framing actually used;
 * map artwork at its final CG size;
 * one real text swatch per character style;
-* the resized title plate.
+* the resized title plate;
+* for photo-card grids, the card group **plus two adjacent copies** (one to the right, one
+  below, at the intended spacing). One card carries size but no spacing; the resizer reads
+  the grid pitch from adjacent template copies and only falls back to the wall's pitch
+  (floored at stroke + 7pt clear) when the template has a single card.
 
 Do not include a contradictory full-canvas 1:1 reference slide.
 
@@ -245,6 +249,12 @@ template.
 For mixed-run text, do not set the font on the whole box: Keynote flattens the
 box to one face and destroys run-level emphasis. See
 `lw-text-keeps-source-font-colour`.
+
+A photo-card caption takes the template swatch size, stepped down whole points while the
+measured line exceeds the caption box minus twice its own `padding` (read from the shape
+style; not `iwa_text_shape.TEXT_INSET`, which is the LW verse-box constant). The size
+travels with the card's pass-2 job (`captionPt` → `leafPt`), never through the deck-wide
+exact-text `size_map`: the same caption strings occur as roster-list leaves elsewhere.
 
 Do not rewrite verse-box text to force reflow. Keynote cannot faithfully rebuild
 all run styling, and rewriting can lose superscripts, small-caps, and authored
