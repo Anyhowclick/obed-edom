@@ -1006,7 +1006,7 @@ def _parse_central_directory(raw: bytes) -> list[tuple[bytes, int]]:
     """[(raw name bytes, flag_bits)] straight off the zip central directory —
     deliberately NOT ``ZipFile.namelist()``, which would hide the bug by
     re-decoding through the same CP437/UTF-8 path under test."""
-    idx = raw.rfind(b"PK")
+    idx = raw.rfind(b"PK\x05\x06")
     eocd = struct.unpack(zipfile.structEndArchive, raw[idx:idx + zipfile.sizeEndCentDir])
     cd_size, cd_offset = eocd[5], eocd[6]
     cd = raw[cd_offset:cd_offset + cd_size]
