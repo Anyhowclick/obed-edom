@@ -958,6 +958,7 @@ def remap_keynote(
         dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
         sig_fallback = child_resize_result.get("sigFallback") or 0
         unresolved = child_resize_result.get("unresolved") or 0
+        badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
@@ -979,6 +980,12 @@ def remap_keynote(
                     f"WARNING stat-finalize: {unresolved} stat group(s) could NOT be "
                     "unambiguously resolved — kept, not guessed — those stat groups keep "
                     "their wall font size and stay buried."
+                )
+            if badge_unresolved:
+                say(
+                    f"WARNING stat-finalize: {badge_unresolved} badge object(s) could NOT be "
+                    "unambiguously resolved — kept, not guessed — those badge objects stay "
+                    "buried under the map."
                 )
         else:
             say(

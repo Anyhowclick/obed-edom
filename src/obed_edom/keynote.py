@@ -791,6 +791,8 @@ _STAT_ACCUMULATORS = (
     "claimed",
     "sigFallbacks",
     "unresolved",
+    "badgeFallbacks",
+    "badgeUnresolved",
 )
 
 
@@ -924,24 +926,84 @@ def _stat_job_handlers() -> list[str]:
         "    set _rem to _new",
         "  end repeat",
         "end obedRaiseSlide",
-        "on obedRaiseItem(slideNo, theKind, idx)",
-        "  global theDoc",
+        "on obedWithinTol(a, b, tol)",
+        "  set _d to a - b",
+        "  if _d < 0 then set _d to -_d",
+        "  return _d <= tol",
+        "end obedWithinTol",
+        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol)",
+        "  if my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol) and "
+        "my obedWithinTol(pw, fw, tol) and my obedWithinTol(ph, fh, tol) then",
+        "    return true",
+        "  end if",
+        "  return false",
+        "end obedFrameMatches",
+        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh)",
+        "  global theDoc, badgeFallbacks, badgeUnresolved",
+        "  set _tol to 3",
         "  set _found to false",
         "  " + _keynote_tell(),
         "    try",
         "      tell slide slideNo of theDoc",
-        '        if theKind is "shape" then',
-        "          set selection of theDoc to {shape idx}",
-        "          set _found to true",
-        '        else if theKind is "image" then',
-        "          set selection of theDoc to {image idx}",
-        "          set _found to true",
-        '        else if theKind is "group" then',
+        '        if theKind is "group" then',
         "          set selection of theDoc to {group idx}",
         "          set _found to true",
         '        else if theKind is "text" then',
         "          set selection of theDoc to {text item idx}",
         "          set _found to true",
+        '        else if (theKind is "shape") or (theKind is "image") then',
+        "          set _match to false",
+        "          try",
+        '            if theKind is "shape" then',
+        "              set _p to position of shape idx",
+        "              set _w to width of shape idx",
+        "              set _h to height of shape idx",
+        "            else",
+        "              set _p to position of image idx",
+        "              set _w to width of image idx",
+        "              set _h to height of image idx",
+        "            end if",
+        "            set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol)",
+        "          end try",
+        "          if _match then",
+        '            if theKind is "shape" then',
+        "              set selection of theDoc to {shape idx}",
+        "            else",
+        "              set selection of theDoc to {image idx}",
+        "            end if",
+        "            set _found to true",
+        "          else",
+        "            set _hitIdx to 0",
+        "            set _hitCount to 0",
+        '            if theKind is "shape" then',
+        "              set _positions to position of every shape",
+        "              set _widths to width of every shape",
+        "              set _heights to height of every shape",
+        "            else",
+        "              set _positions to position of every image",
+        "              set _widths to width of every image",
+        "              set _heights to height of every image",
+        "            end if",
+        "            repeat with _k from 1 to count of _positions",
+        "              set _pk to item _k of _positions",
+        "              if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
+        "item _k of _heights, fx, fy, fw, fh, _tol) then",
+        "                set _hitCount to _hitCount + 1",
+        "                set _hitIdx to _k",
+        "              end if",
+        "            end repeat",
+        "            if _hitCount is 1 then",
+        '              if theKind is "shape" then',
+        "                set selection of theDoc to {shape _hitIdx}",
+        "              else",
+        "                set selection of theDoc to {image _hitIdx}",
+        "              end if",
+        "              set _found to true",
+        "              set badgeFallbacks to badgeFallbacks + 1",
+        "            else",
+        "              set badgeUnresolved to badgeUnresolved + 1",
+        "            end if",
+        "          end if",
         "        end if",
         "      end tell",
         "    end try",
@@ -1067,6 +1129,8 @@ def _build_stat_finalize_script(
         "  set raiseTargets to {}",
         "  set sigFallbacks to 0",
         "  set unresolved to 0",
+        "  set badgeFallbacks to 0",
+        "  set badgeUnresolved to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1119,7 +1183,13 @@ def _build_stat_finalize_script(
             else:
                 kind_lit = _as_escape(str(entry.get("kind") or "shape"))
                 idx = int(entry.get("index") or 0)
-                lines += [f'  my obedRaiseItem({slide}, "{kind_lit}", {idx})']
+                fx = float(entry.get("x") or 0.0)
+                fy = float(entry.get("y") or 0.0)
+                fw = float(entry.get("w") or 0.0)
+                fh = float(entry.get("h") or 0.0)
+                lines += [
+                    f'  my obedRaiseItem({slide}, "{kind_lit}", {idx}, {fx}, {fy}, {fw}, {fh})'
+                ]
     lines += [
         "  try",
         "    save theDoc",
@@ -1143,7 +1213,8 @@ def _build_stat_finalize_script(
         '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " dedupDeleted=" '
         '& dedupDeleted & " dedupShortfall=" & dedupShortfall & " frontErr=" '
         '& frontErr & " exported=" & exported & " sigFallback=" & sigFallbacks '
-        '& " unresolved=" & unresolved & " detail=" & report',
+        '& " unresolved=" & unresolved & " badgeFallback=" & badgeFallbacks '
+        '& " badgeUnresolved=" & badgeUnresolved & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1216,6 +1287,8 @@ def _run_stat_finalize(
         "dedupShortfall": _num("dedupShortfall"),
         "sigFallback": _num("sigFallback"),
         "unresolved": _num("unresolved"),
+        "badgeFallback": _num("badgeFallback"),
+        "badgeUnresolved": _num("badgeUnresolved"),
         "exported": exported,
         "previewFiles": preview_files,
         "raw": raw,

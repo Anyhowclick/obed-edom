@@ -2297,6 +2297,10 @@ def plan_slide_transforms(
                 warnings.warn(
                     f"backdrop on slide {number} pinned to y=0 with h={mapped.h} < CG_HEIGHT"
                 )
+        if id(item) in _badge_hits:
+            _badge_hits[id(item)].update(
+                {"x": mapped.x, "y": mapped.y, "w": mapped.w, "h": mapped.h}
+            )
         if str(item.get("kind") or "") == "group" and role == "other":
             # The map affine can throw a left-column infographic off the CG's left edge
             # (x≈-900); clamp it back on-canvas. Keep the affine-scaled w/h — the geometry

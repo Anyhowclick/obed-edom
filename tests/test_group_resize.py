@@ -205,6 +205,28 @@ def test_badge_raise_report_runs_on_every_slide_not_just_stat_slides():
     assert len(report) == 3
 
 
+def test_badge_raise_report_carries_the_planned_frame_for_shape_and_image_only():
+    """A2: obedRaiseItem geometry-guards a raise against the planned CG frame, so
+    plate/globe rows must carry it. The title stays on content search -- its planned
+    box is autosize (h=0 at plan time) so it never carries a frame."""
+    report: list[dict] = []
+    plan_slide_transforms(
+        _slide_with_badge(),
+        _badge_recipe(),
+        wall_size=(7680, 1080),
+        badge_raise_report=report,
+    )
+    by_kind = {j["kind"]: j for j in report if not j["isTitle"]}
+    assert (by_kind["shape"]["x"], by_kind["shape"]["y"], by_kind["shape"]["w"], by_kind["shape"]["h"]) == (
+        17.0, 37.0, 411.0, 123.0,
+    )
+    assert (by_kind["image"]["x"], by_kind["image"]["y"], by_kind["image"]["w"], by_kind["image"]["h"]) == (
+        31.0, 59.0, 80.0, 80.0,
+    )
+    title_row = next(j for j in report if j["isTitle"])
+    assert "x" not in title_row and "y" not in title_row and "w" not in title_row and "h" not in title_row
+
+
 # --- Generated AppleScript -------------------------------------------------------
 
 
@@ -344,27 +366,29 @@ def test_finalize_script_empty_when_no_jobs():
 def test_finalize_script_runs_for_badge_alone_with_zero_stat_jobs():
     """A deck can have a badge and no stat groups at all (slides 1-2 in the diagnosis);
     the pass must still run instead of the old jobs-and-group_removes-only gate."""
-    badge_raises = [{"slide": 1, "kind": "shape", "index": 1, "isTitle": False}]
+    badge_raises = [
+        {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0}
+    ]
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {}, badge_raises=badge_raises
     )
     assert script != ""
-    assert 'my obedRaiseItem(1, "shape", 1)' in script
+    assert 'my obedRaiseItem(1, "shape", 1, 17.0, 37.0, 411.0, 123.0)' in script
 
 
 def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order():
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     badge_raises = [
-        {"slide": 4, "kind": "shape", "index": 1, "isTitle": False},
-        {"slide": 4, "kind": "image", "index": 2, "isTitle": False},
+        {"slide": 4, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        {"slide": 4, "kind": "image", "index": 2, "isTitle": False, "x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0},
         {"slide": 4, "kind": "text", "index": 1, "isTitle": True},
     ]
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), jobs, {"269": 200.0}, badge_raises=badge_raises
     )
     raise_slide_at = script.index("my obedRaiseSlide(4)")
-    shape_at = script.index('my obedRaiseItem(4, "shape", 1)')
-    image_at = script.index('my obedRaiseItem(4, "image", 2)')
+    shape_at = script.index('my obedRaiseItem(4, "shape", 1, 17.0, 37.0, 411.0, 123.0)')
+    image_at = script.index('my obedRaiseItem(4, "image", 2, 31.0, 59.0, 80.0, 80.0)')
     badge_at = script.index("my obedBadgeRaise(4)")
     assert raise_slide_at < shape_at < image_at < badge_at
     # The title never gets an indexed raise call -- it stays content-search only.
@@ -374,16 +398,56 @@ def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order
 def test_obed_raise_item_unknown_kind_is_a_noop():
     """obedRaiseItem must not default an unrecognized kind to a text-item selection --
     only shape/image/group/text are valid; anything else is a no-op (no select, no raise).
-    Every branch sets _found itself; there is no bare else that falls through to a
-    selection."""
+    The top-level kind dispatch (8-space indent) has no bare else: an unrecognized kind
+    matches none of group/text/(shape or image), so _found stays false."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {},
         badge_raises=[{"slide": 1, "kind": "shape", "index": 1, "isTitle": False}],
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
-    assert re.search(r"^\s*else\s*$", handler, re.M) is None
-    assert handler.count("set _found to true") == 4  # shape, image, group, text -- one each
+    assert re.search(r"^ {8}else\s*$", handler, re.M) is None
     assert 'else if theKind is "text" then' in handler
+    assert 'else if (theKind is "shape") or (theKind is "image") then' in handler
+
+
+def test_obed_raise_item_has_guard_scan_skip_branches_in_order():
+    """A2: shape/image indices drift on reuse slides just like groups did. obedRaiseItem
+    must try the direct index first (guard), fall back to a bulk-read scan of that kind's
+    collection, and only then give up (skip) -- in that order."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "image", "index": 5, "isTitle": False, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    guard_at = handler.index("position of image idx")
+    scan_at = handler.index("position of every image")
+    skip_at = handler.index("set badgeUnresolved to badgeUnresolved + 1")
+    assert guard_at < scan_at < skip_at
+
+
+def test_obed_raise_item_ambiguous_scan_hit_is_unresolved_not_raised():
+    """Two same-frame images means the scan finds zero or more than one match; that
+    branch must count badgeUnresolved and never select/raise anything."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "image", "index": 5, "isTitle": False, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    hit_at = handler.index("if _hitCount is 1 then")
+    # The nested kind-dispatch else (14-space indent) sits inside the true branch;
+    # the else PAIRED with "if _hitCount is 1 then" is at its own 12-space indent.
+    match = re.search(r"^ {12}else\s*$", handler[hit_at:], re.M)
+    assert match is not None
+    else_at = hit_at + match.start()
+    end_if_at = handler.index("end if", else_at)
+    unresolved_branch = handler[else_at:end_if_at]
+    assert "set badgeUnresolved to badgeUnresolved + 1" in unresolved_branch
+    assert "set _found to true" not in unresolved_branch
+    assert "set selection" not in unresolved_branch
 
 
 def test_finalize_obed_badge_raise_exits_on_first_hit():
