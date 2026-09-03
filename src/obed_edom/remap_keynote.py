@@ -560,12 +560,11 @@ def restore_card_stroke_widths(
     if not widths:
         return {"skipped": True, "reason": "no card style pair passed the guard"}
 
+    for c in chosen:
+        say(f"Card-border stroke: {c['id']} {c['old']} → {c['new']} ({c['refs']} refs).")
     result = patch_stroke_widths(dest, widths)
     if result.get("refused"):
         say(f"Card-border stroke patch REFUSED: {result.get('reason')}")
-        return result
-    for c in chosen:
-        say(f"Card-border stroke: {c['id']} {c['old']} → {c['new']} ({c['refs']} refs).")
     return result
 
 

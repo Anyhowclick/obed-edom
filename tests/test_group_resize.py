@@ -371,6 +371,21 @@ def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order
     assert 'my obedRaiseItem(4, "text"' not in script
 
 
+def test_obed_raise_item_unknown_kind_is_a_noop():
+    """obedRaiseItem must not default an unrecognized kind to a text-item selection --
+    only shape/image/group/text are valid; anything else is a no-op (no select, no raise).
+    Every branch sets _found itself; there is no bare else that falls through to a
+    selection."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[{"slide": 1, "kind": "shape", "index": 1, "isTitle": False}],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert re.search(r"^\s*else\s*$", handler, re.M) is None
+    assert handler.count("set _found to true") == 4  # shape, image, group, text -- one each
+    assert 'else if theKind is "text" then' in handler
+
+
 def test_finalize_obed_badge_raise_exits_on_first_hit():
     """The old obedBadgeRaise ran all three search loops unconditionally, so only the
     LAST match in the last loop ever stayed selected. Each loop must now stop the
@@ -586,8 +601,9 @@ def test_finalize_stat_job_appends_raise_target_before_try():
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
     handler = script[script.index("on obedStatJob") : script.index("end obedStatJob")]
     raise_at = handler.index("set end of raiseTargets to")
-    try_at = handler.index("    try")
-    assert raise_at < try_at
+    try_match = re.search(r"^\s*try$", handler, re.M)
+    assert try_match is not None
+    assert raise_at < try_match.start()
 
 
 def test_finalize_accounting_globals_claimed_per_font_slide():

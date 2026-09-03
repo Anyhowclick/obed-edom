@@ -779,6 +779,37 @@ def test_full_canvas_backdrop_pins_to_y_zero_under_translate_affine():
     assert t.h == 1080.0
 
 
+def test_backdrop_pin_warns_when_pinned_height_falls_short_of_cg_height():
+    """The y=0 pin only fixes vertical position; if the affine also scaled the
+    backdrop's height below CG_HEIGHT, the pinned backdrop still doesn't cover the
+    frame -- that must be surfaced, not silently accepted."""
+    import pytest
+
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 3052.0, "y": -12.0, "w": 1248.0, "h": 771.0},
+        "mapDst": {"x": 11.0, "y": 18.0, "w": 1067.0, "h": 659.0},
+        "groups": [
+            {
+                "s": 0.9,
+                "tx": 0.0,
+                "ty": 28.2,
+                "src": {"x": 0.0, "y": 0.0, "w": 7680.0, "h": 1080.0},
+                "dst": {"x": 0.0, "y": 28.2, "w": 6912.0, "h": 972.0},
+            }
+        ],
+        "titleDst": {"x": 135.0, "y": 67.0, "w": 271.0, "h": 64.0},
+    }
+    backdrop = _item(index=0, kindIndex=0, kind="image", fileName="BLANK.png", x=0, y=0, w=7680, h=1080)
+    slide = {"number": 8, "items": [backdrop]}
+    with pytest.warns(UserWarning, match="pinned to y=0"):
+        out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    t = next(tf for tf in out if tf.kind == "image")
+    assert t.y == 0.0
+    assert t.h < 1080.0
+
+
 def test_non_backdrop_image_keeps_its_translate_under_same_affine():
     """A non-full-canvas image under the same translate affine is real content and
     must keep its ty; only true backdrops get pinned to y=0."""

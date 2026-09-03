@@ -341,6 +341,65 @@ def test_restore_card_stroke_widths_refuses_absent_source_pairing(tmp_path):
     assert styles["900"]["width"] == pytest.approx(0.25)  # deck untouched
 
 
+def test_restore_card_stroke_widths_excludes_inherited_only_pairing_candidate(tmp_path):
+    """restore_card_stroke_widths filters inherited before select_card_styles: an
+    inherited-only style sharing a (colour, pattern) key with a real candidate must not
+    make the pairing ambiguous, and must never itself get patched."""
+    parent = _arch(900, "TSD.MediaStyleArchive", {
+        "super": {"styleIdentifier": "image-0-imageStyle"},
+        "mediaProperties": {"stroke": _WHITE_SOLID_STROKE},
+    })
+    child = _arch(902, "TSD.MediaStyleArchive", {
+        "super": {"styleIdentifier": "image-2-imageStyle", "parent": {"identifier": 900}},
+    })
+    stylesheet = [parent, child]
+    slide_archives = []
+    zorder = []
+    for i in range(12):
+        img_id = 1000 + i
+        slide_archives.append(
+            _arch(img_id, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(i * 10, 0, 50, 50)})
+        )
+        zorder.append(img_id)
+    for i in range(11):
+        img_id = 2000 + i
+        slide_archives.append(
+            _arch(img_id, "TSD.ImageArchive", {"style": {"identifier": 902}, "super": _geom(i * 10, 100, 50, 50)})
+        )
+        zorder.append(img_id)
+    slide_id = 88888
+    slide = _arch(slide_id, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": i} for i in zorder]})
+    show = _arch(2, "KN.ShowArchive", {
+        "slideTree": {"slides": [{"identifier": 10}]},
+        "size": {"width": 1920.0, "height": 1080.0},
+    })
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": slide_id}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/DocumentStylesheet.iwa", _member(stylesheet))
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr(f"Index/Slide-{slide_id}.iwa", _member(slide_archives + [slide]))
+    out_deck = tmp_path / "out.key"
+    out_deck.write_bytes(buf.getvalue())
+
+    src_deck = _build_style_deck(tmp_path / "src.key", [{"id": 700, "width": 3.0, "refs": 40}])
+
+    say_lines: list[str] = []
+    result = restore_card_stroke_widths(out_deck, src_deck, {"slideWidth": 7680.0}, say_lines.append)
+
+    assert not result.get("refused")
+    assert result["applied"] == 1
+    assert result["edited_ids"] == ["900"]
+
+    objects, id_to_file, _fi = _load_deck(out_deck)
+    styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
+    assert styles["900"]["width"] == pytest.approx(3.0)
+    # 902 has no own stroke: its own archive is untouched, so it still resolves through
+    # 900's (now-patched) stroke rather than having been independently patched.
+    assert styles["902"]["inherited"] is True
+    assert styles["902"]["width"] == pytest.approx(3.0)
+
+
 def test_restore_card_stroke_widths_guard_rejects_out_greater_than_src(tmp_path):
     out_deck = _build_style_deck(tmp_path / "out.key", [{"id": 900, "width": 5.0, "refs": 12}])
     src_deck = _build_style_deck(tmp_path / "src.key", [{"id": 700, "width": 3.0, "refs": 40}])
