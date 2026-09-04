@@ -195,7 +195,8 @@ def front_err_from_raw(raw: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bool) -> list[str]:
+def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bool,
+                 zero_keys_hard: bool = True) -> list[str]:
     """RED reasons for one run's pass-2 (stat-finalize) result — empty == healthy.
 
     ``result is None`` (no stat/badge jobs planned) is healthy (D4). The no-op script
@@ -205,6 +206,16 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
     before the count checks would otherwise misread ``True`` as ``1``. WARN-only keys
     (``PASS2_WARN_KEYS``) never appear here — a non-zero fallback count is logged
     separately, it does not gate.
+
+    ``zero_keys_hard`` is the ``--pass2-bar`` switch (``strict`` -> ``True``, the
+    default; ``parity`` -> ``False``): under ``parity`` a nonzero ``PASS2_ZERO_KEYS``
+    value is tolerated here (the caller WARNs it separately, gated on A==B by
+    :func:`pass2_parity`), and a ``frontErr`` WITHOUT an Accessibility code
+    (``_ACCESSIBILITY_ERR_CODES`` — a stray GUI raise miss like ``"[-1719]"`` "invalid
+    index", not a permissions problem) is tolerated too. An Accessibility-coded
+    ``frontErr`` stays HARD in BOTH modes -- it means z-order raises are silently
+    no-op'ing, never a benign miss. ``ok``, ``done+skipped==jobs``, and
+    ``front >= 1`` when ``expect_raises`` stay HARD in both modes.
     """
     if result is None:
         return []
@@ -213,15 +224,17 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
     reasons: list[str] = []
     if not result.get("ok", False):
         reasons.append(f"{label}: pass-2 ok=False")
-    for key in PASS2_ZERO_KEYS:
-        val = int(result.get(key) or 0)
-        if val:
-            reasons.append(f"{label}: {key}={val} (expected 0)")
+    if zero_keys_hard:
+        for key in PASS2_ZERO_KEYS:
+            val = int(result.get(key) or 0)
+            if val:
+                reasons.append(f"{label}: {key}={val} (expected 0)")
     front_err = front_err_from_raw(result.get("raw") or "")
     if front_err:
-        tag = (" (Accessibility denied)"
-               if any(code in front_err for code in _ACCESSIBILITY_ERR_CODES) else "")
-        reasons.append(f"{label}: frontErr={front_err!r}{tag}")
+        is_accessibility = any(code in front_err for code in _ACCESSIBILITY_ERR_CODES)
+        if is_accessibility or zero_keys_hard:
+            tag = " (Accessibility denied)" if is_accessibility else ""
+            reasons.append(f"{label}: frontErr={front_err!r}{tag}")
     jobs = int(result.get("jobs") or 0)
     done = int(result.get("done") or 0)
     skipped = int(result.get("skipped") or 0)
@@ -233,12 +246,22 @@ def pass2_health(result: dict[str, Any] | None, *, label: str, expect_raises: bo
     return reasons
 
 
-def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None) -> list[str]:
-    """A/B parity on ``PASS2_PARITY_KEYS`` — ``raw`` is deliberately ignored."""
+def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None, *,
+                 front_hard: bool = True) -> list[str]:
+    """A/B parity on ``PASS2_PARITY_KEYS`` — ``raw`` is deliberately ignored.
+
+    ``front_hard=False`` (``--pass2-bar parity``) excludes ``front`` from this HARD
+    check -- GUI Bring-to-Front raises are flaky and don't move geometry, so the
+    caller WARNs an A/B ``front`` mismatch separately instead of gating on it. Every
+    other key (``jobs``/``done``/``skipped``/``sized``/``sizeSkips``/``dedupDeleted``/
+    ``dedupShortfall``/``sigFallback``/``unresolved``/``badgeFallback``/
+    ``badgeUnresolved``) stays HARD in both modes.
+    """
     a = a or {}
     b = b or {}
     reasons: list[str] = []
-    for key in PASS2_PARITY_KEYS:
+    keys = PASS2_PARITY_KEYS if front_hard else tuple(k for k in PASS2_PARITY_KEYS if k != "front")
+    for key in keys:
         va = int(a.get(key) or 0)
         vb = int(b.get(key) or 0)
         if va != vb:
@@ -942,6 +965,13 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"text px tolerance (autosize x-only), A-vs-B (default {TOL_TEXT})")
     ap.add_argument("--tol-child", type=float, default=TOL_CHILD,
                     help=f"group-child px tolerance, A-vs-B (default {TOL_CHILD})")
+    ap.add_argument(
+        "--pass2-bar", choices=("strict", "parity"), default="strict",
+        help="strict (default): every PASS2_ZERO_KEYS/frontErr/front A-vs-B parity is "
+             "HARD. parity: tolerate a pre-existing pass-2 problem that is IDENTICAL on "
+             "A and B (WARN, never abort/RED) so an unrelated deck defect doesn't block "
+             "the write-equivalence question.",
+    )
     args = ap.parse_args(argv)
 
     for label, deck in (("source", args.source), ("template", args.template)):
@@ -1020,7 +1050,9 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"Run record written -> {_run_record_path(a_deck)}")
         _warn_and_close_stray_documents("A", a_deck)
 
-    reasons_a = pass2_health(child_resize_a, label="A", expect_raises=expect_raises_a)
+    zero_keys_hard = args.pass2_bar == "strict"
+    reasons_a = pass2_health(child_resize_a, label="A", expect_raises=expect_raises_a,
+                             zero_keys_hard=zero_keys_hard)
     for r in reasons_a:
         _log(f"RED: {r}")
     if reasons_a:
@@ -1095,7 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
         f"applied={ow_b.get('applied')}."
     )
 
-    reasons_b = pass2_health(child_resize_b, label="B", expect_raises=expect_raises_b)
+    reasons_b = pass2_health(child_resize_b, label="B", expect_raises=expect_raises_b,
+                             zero_keys_hard=zero_keys_hard)
     for r in reasons_b:
         _log(f"RED: {r}")
 
@@ -1106,13 +1139,33 @@ def main(argv: list[str] | None = None) -> int:
         if warns:
             _log(f"WARN {label}: {', '.join(warns)} (non-zero fallback; investigate, does not gate).")
 
+    if not zero_keys_hard:
+        for label, result in (("A", child_resize_a), ("B", child_resize_b)):
+            if not result:
+                continue
+            zero_warns = [f"{key}={result.get(key)}" for key in PASS2_ZERO_KEYS if int(result.get(key) or 0)]
+            if zero_warns:
+                _log(f"WARN {label}: {', '.join(zero_warns)} "
+                     "(pass2-bar=parity: tolerated because A==B, does not gate).")
+            front_err = front_err_from_raw((result.get("raw") or ""))
+            if front_err and not any(code in front_err for code in _ACCESSIBILITY_ERR_CODES):
+                _log(f"WARN {label}: frontErr={front_err!r} "
+                     "(pass2-bar=parity: no Accessibility code, does not gate).")
+
     drift = plan_parity(plan_a, plan_b, compared_slides)
     for r in drift:
         _log(f"RED: {r}")
 
-    parity = pass2_parity(child_resize_a, child_resize_b)
+    parity = pass2_parity(child_resize_a, child_resize_b, front_hard=zero_keys_hard)
     for r in parity:
         _log(f"RED: {r}")
+
+    if not zero_keys_hard:
+        front_a = int((child_resize_a or {}).get("front") or 0)
+        front_b = int((child_resize_b or {}).get("front") or 0)
+        if front_a != front_b:
+            _log(f"WARN: pass-2 front A={front_a} B={front_b} "
+                 "(pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate).")
 
     summary_reasons = summary_gate_reasons(ow_b, applied_a, applied_b)
     for r in summary_reasons:
@@ -1182,6 +1235,13 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"NOTE: plan-oracle VACUOUS PASS on slide(s) {vacuous_slides} — 0 specs compared "
              "(every planned spec was a non-exact class); those slides' oracle result rests "
              "entirely on the identity compare above, not this oracle.")
+    if zero_keys_hard:
+        _log("pass-2 bar: strict")
+    else:
+        unresolved_n = int((child_resize_a or {}).get("unresolved") or 0)
+        dedup_m = int((child_resize_a or {}).get("dedupShortfall") or 0)
+        _log(f"pass-2 bar: parity (unresolved={unresolved_n}, dedupShortfall={dedup_m} "
+             "tolerated because A==B)")
     _log("OFFLINE-WRITE GATE: GREEN" if gate_ok else "OFFLINE-WRITE GATE: RED (see above)")
     return 0 if gate_ok else 1
 

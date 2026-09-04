@@ -1036,6 +1036,57 @@ def test_pass2_health_done_plus_skipped_must_equal_jobs():
     assert any("!= jobs" in r for r in reasons)
 
 
+# --- pass2_health: --pass2-bar strict (default) vs parity --------------------------
+
+
+def test_pass2_health_strict_flags_zero_keys():
+    # zero_keys_hard defaults True -- unchanged behavior, matches --pass2-bar strict.
+    reasons = pass2_health(
+        _pass2(unresolved=1, dedupShortfall=2, badgeUnresolved=3), label="A",
+        expect_raises=False, zero_keys_hard=True,
+    )
+    assert len(reasons) == 3
+
+
+def test_pass2_health_parity_does_not_flag_zero_keys():
+    reasons = pass2_health(
+        _pass2(unresolved=134, dedupShortfall=6, badgeUnresolved=3), label="A",
+        expect_raises=False, zero_keys_hard=False,
+    )
+    assert reasons == []
+
+
+def test_pass2_health_parity_still_flags_ok_front_done_skipped():
+    assert any("ok=False" in r for r in
+               pass2_health(_pass2(ok=False), label="A", expect_raises=False, zero_keys_hard=False))
+    assert any("front=0" in r for r in
+               pass2_health(_pass2(front=0), label="A", expect_raises=True, zero_keys_hard=False))
+    assert any("!= jobs" in r for r in
+               pass2_health(_pass2(jobs=5, done=2, skipped=2), label="A", expect_raises=False,
+                            zero_keys_hard=False))
+
+
+def test_pass2_health_strict_flags_any_frontErr_even_without_accessibility_code():
+    # -1719 is "invalid index" (a stray GUI raise miss), not an Accessibility code --
+    # strict still gates on it (unchanged from before --pass2-bar existed).
+    raw = "done=1 skipped=0 front=674 dedupDeleted=0 dedupShortfall=0 frontErr= [-1719] exported=true"
+    reasons = pass2_health(_pass2(raw=raw), label="A", expect_raises=False, zero_keys_hard=True)
+    assert any("frontErr" in r for r in reasons)
+    assert not any("Accessibility denied" in r for r in reasons)
+
+
+def test_pass2_health_parity_frontErr_without_accessibility_code_is_not_hard():
+    raw = "done=1 skipped=0 front=674 dedupDeleted=0 dedupShortfall=0 frontErr= [-1719] exported=true"
+    reasons = pass2_health(_pass2(raw=raw), label="A", expect_raises=False, zero_keys_hard=False)
+    assert reasons == []
+
+
+def test_pass2_health_parity_frontErr_with_accessibility_code_stays_hard():
+    raw = "done=1 skipped=0 front=0 dedupDeleted=0 dedupShortfall=0 frontErr= [-1743] exported=true"
+    reasons = pass2_health(_pass2(raw=raw, front=0), label="A", expect_raises=False, zero_keys_hard=False)
+    assert any("Accessibility denied" in r for r in reasons)
+
+
 # --- pass2_parity (D4) --------------------------------------------------------------
 
 
@@ -1059,6 +1110,19 @@ def test_pass2_parity_ignores_raw():
 
 def test_pass2_parity_handles_none():
     assert pass2_parity(None, None) == []
+
+
+def test_pass2_parity_front_hard_by_default():
+    reasons = pass2_parity(_pass2(), _pass2(front=99))
+    assert any("front" in r for r in reasons)
+
+
+def test_pass2_parity_excludes_front_when_not_hard():
+    # front differs but is excluded under --pass2-bar parity (GUI raises are flaky);
+    # a genuinely differing OTHER key must still be caught.
+    reasons = pass2_parity(_pass2(), _pass2(front=99, unresolved=5), front_hard=False)
+    assert not any("front" in r for r in reasons)
+    assert any("unresolved" in r for r in reasons)
 
 
 # --- plan_parity (D5) ----------------------------------------------------------------
