@@ -246,7 +246,7 @@ def tol_for_bucket(bucket: str, sig_type: str | None, tols: Tolerances) -> float
     autosize, x-only) -> ``tols.text``; shape/line -> ``2 * tols.hard``; everything else
     (group union, unmasked image/movie) -> ``2 * tols.soft``.
     """
-    if bucket.startswith("child:"):
+    if bucket.startswith("child:"):  # child sigs are always "frame" (no masked child)
         return tols.child
     if sig_type == "masked":
         return tols.mask
@@ -546,6 +546,8 @@ def _log_identity_report(report: dict[str, Any]) -> None:
         _log(f"      {bucket:14} n={entry['n']:<4} worst={entry['worst']:.2f}px  {tag}")
         for f in entry["fails"][:8]:
             _log(f"        {f['addr']} worst={f['worst']:.2f} {f['reasons']}")
+        if len(entry["fails"]) > 8:
+            _log(f"        (+{len(entry['fails']) - 8} more)")
     if report["carved"]:
         _log(f"      autosize carve-out: {len(report['carved'])} shape(s) excluded")
 
@@ -1087,7 +1089,12 @@ def main(argv: list[str] | None = None) -> int:
         a_units = a_units_by_slide[n]
         b_units = slide_units(b_objects, n)
 
-        identity = compare_units_identity(a_units, b_units, tols)
+        try:
+            identity = compare_units_identity(a_units, b_units, tols)
+        except ValueError as exc:
+            _log(f"RED: slide {n}: {exc}")
+            gate_ok = False
+            continue
         _log_identity_report(identity)
         if not identity["pass"]:
             gate_ok = False
