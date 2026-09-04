@@ -827,6 +827,95 @@ def select_card_styles(styles: list[dict], min_refs: int) -> list[dict]:
     return out
 
 
+# The output deck is a copy of the wall, so an output card style's ref count is the
+# source's plus the remap's stranded donor copies -- measured 83 -> 269 (3.24x) on the
+# Gold run, whose patch runs BEFORE the stat-finalize dedup brings it back to 83. Divide
+# the output count by 8 for the source floor: ~2.5x headroom over that inflation, while
+# still dropping the Full wall's 3-ref 5pt stray (83-ref card style, floor 10-33).
+_SOURCE_REF_DIVISOR = 8
+
+
+def _card_style_pair_key(style: dict[str, Any]) -> tuple:
+    r, g, b, a = style["color"]
+    rnd = tuple(round(v, 3) if v is not None else None for v in (r, g, b, a))
+    return (*rnd, style["pattern"])
+
+
+def match_card_stroke_styles(
+    out_styles: list[dict],
+    src_styles: list[dict],
+    *,
+    canvas_scale: float,
+    min_refs: int = 10,
+) -> dict[str, Any]:
+    """Pair each output card style with its source counterpart. Pure: ``card_styles()``
+    rows in (inherited rows included -- filtered here), no deck IO, no logging.
+
+    The output side is the card classifier verbatim (``select_card_styles``, ``min_refs``).
+    A source candidate shares the pairing key, so its colour and pattern already match by
+    construction -- only the classifier's REFS test has to be re-applied on that side, and
+    it is scaled off the paired output style's own ref count rather than ``min_refs``: the
+    wall legitimately holds fewer card images than the donor-copy-inflated output does, so
+    a flat ``min_refs`` there would refuse small decks that pair correctly today.
+
+    Returns ``{"widths": {output style id: source width}, "chosen": [{"id","old","new",
+    "refs"}], "notes": [str], "out_selected": [style]}``. ``notes`` are refusal lines in
+    emission order for the caller to log verbatim; ``chosen`` is the success log's rows.
+    """
+    out_selected = select_card_styles([s for s in out_styles if not s["inherited"]], min_refs)
+    out_by_key: dict[tuple, list[dict]] = {}
+    for s in out_selected:
+        out_by_key.setdefault(_card_style_pair_key(s), []).append(s)
+    src_by_key: dict[tuple, list[dict]] = {}
+    for s in src_styles:
+        if not s["inherited"]:
+            src_by_key.setdefault(_card_style_pair_key(s), []).append(s)
+
+    widths: dict[str, float] = {}
+    chosen: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for key, out_candidates in out_by_key.items():
+        src_all = src_by_key.get(key) or []
+        floor = max(2, max(o["refs"] for o in out_candidates) // _SOURCE_REF_DIVISOR)
+        src_candidates = select_card_styles(src_all, floor)
+        if len(out_candidates) != 1 or len(src_candidates) != 1:
+            for oc in out_candidates:
+                notes.append(
+                    f"Card-border stroke: skipping style {oc['id']} ({len(out_candidates)} "
+                    f"output / {len(src_candidates)} source candidate(s) for this colour+pattern "
+                    "pairing, need exactly 1 on each side)."
+                )
+            notes.append(
+                "Card-border stroke: candidates were output ["
+                + ", ".join(f"{o['id']} {o['width']}pt/{o['refs']} refs" for o in out_candidates)
+                + "], source ["
+                + (", ".join(f"{s['id']} {s['width']}pt/{s['refs']} refs" for s in src_all) or "none")
+                + f"] at a source floor of {floor} refs."
+            )
+            continue
+        out_style, src_style = out_candidates[0], src_candidates[0]
+        out_w, src_w = out_style["width"], src_style["width"]
+        if out_w is None or src_w is None:
+            continue
+        if not (out_w < src_w and out_w <= src_w * canvas_scale * 1.1):
+            notes.append(
+                f"Card-border stroke: skipping style {out_style['id']} (out={out_w} vs "
+                f"src={src_w}, canvas_scale={canvas_scale:.4f} guard failed)."
+            )
+            continue
+        widths[out_style["id"]] = src_w
+        chosen.append({"id": out_style["id"], "old": out_w, "new": src_w, "refs": out_style["refs"]})
+        if len(src_all) != len(src_candidates):
+            discarded = [s for s in src_all if s["id"] != src_style["id"]]
+            notes.append(
+                f"Card-border stroke: source floor {floor} refs set aside ["
+                + ", ".join(f"{s['id']} {s['width']}pt/{s['refs']} refs" for s in discarded)
+                + f"] for output {out_style['id']}."
+            )
+
+    return {"widths": widths, "chosen": chosen, "notes": notes, "out_selected": out_selected}
+
+
 def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
     """Patch ``mediaProperties.stroke.width`` for each id in ``widths``, single-member
     rewrite of ``Index/DocumentStylesheet.iwa`` via ``_rewrite_members``.
