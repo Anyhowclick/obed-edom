@@ -286,7 +286,7 @@ def _seed_offline_build(monkeypatch, fallback):
             "fallback_slides": sorted({int(f["slide"]) for f in fallback}),
         },
     }
-    monkeypatch.setattr(inspect_mod, "_build_checker_offline", lambda k, fn: payload)
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", lambda k, fn, log=None: payload)
     return payload
 
 
@@ -377,7 +377,7 @@ def test_checker_bulk_unavailable_still_falls_whole_deck(checker_deck, monkeypat
             "fallback_slides": [1],
         },
     }
-    monkeypatch.setattr(inspect_mod, "_build_checker_offline", lambda k, fn: payload)
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", lambda k, fn, log=None: payload)
 
     def no_item_read(*a, **k):  # pragma: no cover
         raise AssertionError("bulk-unavailable must go whole-deck, not item-scoped")

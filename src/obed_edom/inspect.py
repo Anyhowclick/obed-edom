@@ -527,7 +527,9 @@ def inspect_keynote_checker(
     t_read = time.perf_counter()
     try:
         payload = _build_checker_offline(key_path, bulk_geometry, log=log)
-    except Exception:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
+    except Exception as exc:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
+        if log is not None:
+            log(f"WARN: offline checker build failed for {key_path.name} ({exc!r}) -- falling back to legacy JXA.")
         return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
     sidecar = payload.get("_offline") or {}
     fallback = sidecar.get("fallback") or []
