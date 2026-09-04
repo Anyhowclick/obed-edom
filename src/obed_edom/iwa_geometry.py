@@ -1,55 +1,8 @@
-"""Offline composition of Keynote's laid-out (JXA-frame) per-object geometry.
+"""Compose raw IWA frames into JXA-laid-out (x, y, w, h).
 
-:mod:`obed_edom.iwa_kindindex` reconstructs each drawable's *address*
-``(kind, kindIndex)`` offline, but the geometry it carries is the RAW IWA frame,
-which diverges from what Keynote's JXA inspect reports: masked images report the
-unmasked frame, rotated frames report the un-rotated box, group frames are stale,
-lines carry their bounding box rather than their endpoints, and autosize text
-reports a zero-height frame. This module *composes* those raw values into the
-write-accurate ``(x, y, w, h)`` JXA reports, so ``remap`` can read object geometry
-without the ~12-minute per-object Keynote inspect.
-
-Every divergence between raw IWA geometry and JXA is a composition the raw reader
-had not performed. All formulas here were reverse-engineered and differential-tested
-against fresh exact-bytes JXA payloads on ``Map_Extracted_Wall_1st`` (8 slides) and
-``Full_Report_Card_Wall`` (155). What is established, by kind:
-
-    * **image / movie** — unmasked axis-aligned frames match to <0.5px. A rotated
-      frame's JXA box is the axis-aligned bounding box (AABB) of the four rotated
-      corners, position only; SIZE stays the un-rotated ``(w, h)``. A *masked* image
-      reports the MASK rectangle: axis-aligned this collapses to
-      ``(img+mask, mask_size)`` (exact, 1339/1339); rotated it is best-effort and
-      always flagged ``rotated-masked`` (residual to ~36px).
-    * **line** — the endpoints, from the length + rotation closed form; <0.5px.
-    * **shape** — same rotation rule as image (AABB position, un-rotated size);
-      100% <2px both decks. (Raw geometry alone leaves rotated shapes ~2-12px inset,
-      so this composes the rotation even though shapes are never masked.)
-    * **group** — union of the children's transformed bounds; ~89% of distinct
-      groups <2px. The residual cases carry a detectable signal (zero-size connector
-      child, rotated-masked child, or an effect style) and are flagged
-      ``group-residual``; a rotated group itself is flagged ``rotated-group``.
-    * **text** — a fixed box is its frame; an autosize box (zero-height frame)
-      recovers ``x`` exactly (left-aligned) but ``y``/``h``/``w`` from a
-      ``naturalSize`` that is stale on ~20% of boxes, so every autosize box is
-      flagged ``autosize-soft`` while still emitting best-effort values.
-
-``needs_keynote`` marks the records a write path must treat with care; it is ALWAYS
-accompanied by best-effort geometry (never a ``None`` position). The complete reason
-set is ``rotated-masked``, ``masked-unresolved`` (a mask ref that does not resolve, so
-the unmasked frame shipped instead of the mask rect), ``rotated-group`` (incl. a rotated
-NESTED group, which the translation-only union cannot place), ``group-residual``, and
-``autosize-soft``. All are conservative: a record that *might* be wrong is flagged, so a
-write path can fall back to a Keynote read for it. Zero of the mask-unresolved / nested-
-rotated cases occur in the two test decks; they are defensive nets for other decks.
-
-This module is strictly geometry: it reuses :func:`iwa_kindindex.derive_kind_index`
-for the addressing and NEVER changes an object's ``kind``/``kindIndex``/order.
-The rotation math lives here because :class:`map_remap.Affine` is scale+translate
-only. Full rule statement lives in the SKILL under "Reading a .key offline (IWA)".
-
-Public entry points:
-    * :func:`compose_geometry` — pure ``(slide, objects) -> [records]`` for one slide.
-    * :func:`compose_deck_geometry` — whole deck, ``{slide_index: [records]}``.
+Raw vs JXA: masked=mask rect; rotated=AABB position + unrotated size;
+groups=child union; autosize=stale naturalSize (flagged autosize-soft).
+needs_keynote is always paired with best-effort geometry. Addressing is unchanged.
 """
 from __future__ import annotations
 
@@ -59,37 +12,23 @@ from typing import Any, Callable
 
 from obed_edom.iwa_kindindex import derive_kind_index
 
-# geom_source values, one per composition rule.
 GEOM_SOURCES = ("iwa", "mask", "line", "group-union", "autosize")
 
-# needs_keynote reasons (complete set); see module docstring.
+# Complete set; flagged records still ship best-effort geometry.
 NEEDS_KEYNOTE_REASONS = (
     "rotated-masked", "masked-unresolved", "rotated-group", "group-residual", "autosize-soft",
 )
 
-# An angle within this many degrees of 0 (mod 360) is treated as un-rotated: the
-# corner-AABB collapses to the frame and no rotated-* flag is raised.
+# Un-rotated: AABB collapses to the frame (no rotated-* flag).
 _ANGLE_EPS = 0.01
 
-# Masked images tolerate a wider "effectively un-rotated" band than plain frames.
-# Keynote reports a masked image's laid-out box by its axis-aligned frame+mask
-# position (rounded to int); it does NOT re-place it for a sub-degree frame
-# rotation. A cohort of maps carries a 0.0357° residual rotation from an earlier
-# edit — the rotated-corner AABB shifts their top-left ~1px, which (though within
-# the 2px item tolerance) the cover recipe amplifies ~2x into a deck-wide cascade.
-# Treating |angle| below this as un-rotated snaps them back to the frame position
-# JXA reports. A genuine ~1-2° net-zero frame/mask pair stays above the band and
-# keeps its rotated-masked flag (residual, guard-covered).
-_MASK_ANGLE_EPS = 0.1
+# Displacement gate (not an angle threshold): snap-to-90° vs raw-angle top-left.
+# Lever-arm residual can miss by tens of px at 1°. Do not raise; 1.5 sits in the measured gap.
+_MASK_TRUST_PX = 1.5
 
 
-# --------------------------------------------------------------------------
-# Level-agnostic geometry access (mirrors iwa_kindindex._geometry: walk the
-# ``super`` chain to the first dict carrying a ``geometry``, ≤6 hops — robust
-# across shapes at super.super, and images/groups/lines/masks one level up).
-# --------------------------------------------------------------------------
 def _geom_dict(obj: dict) -> dict:
-    """The first ``geometry`` dict up the ``super`` chain, or ``{}``."""
+    """First geometry dict up the super chain (≤6 hops)."""
     cur: Any = obj
     for _ in range(6):
         if not isinstance(cur, dict):
@@ -102,7 +41,6 @@ def _geom_dict(obj: dict) -> dict:
 
 
 def _xywha(geom: dict) -> tuple[float, float, float, float, float]:
-    """``(x, y, w, h, angle_deg)`` from a geometry dict, null-safe."""
     pos = geom.get("position") or {}
     size = geom.get("size") or {}
     return (
@@ -115,21 +53,13 @@ def _xywha(geom: dict) -> tuple[float, float, float, float, float]:
 
 
 def _is_rotated(angle_deg: float) -> bool:
-    """True when ``angle_deg`` is not a multiple of 360 (within :data:`_ANGLE_EPS`)."""
     a = angle_deg % 360.0
     return min(a, 360.0 - a) > _ANGLE_EPS
 
 
-# --------------------------------------------------------------------------
-# The rotation primitive: a point transform mapping a frame's LOCAL coordinate
-# (origin at the un-rotated top-left, ranging over ``[0,w]x[0,h]``) to its
-# absolute placement, rotating about the frame's own centre.
-#
-#     transform(p) = R(theta) . (p - (w/2, h/2)) + (x + w/2, y + h/2)
-# --------------------------------------------------------------------------
 def _frame_transform(x: float, y: float, w: float, h: float, angle_deg: float
                      ) -> Callable[[float, float], tuple[float, float]]:
-    """A ``f(local_x, local_y) -> (abs_x, abs_y)`` for the given frame."""
+    """Local (origin unrotated TL) → absolute, rotating about the frame centre."""
     theta = math.radians(angle_deg)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     cx, cy = x + w / 2.0, y + h / 2.0
@@ -143,7 +73,6 @@ def _frame_transform(x: float, y: float, w: float, h: float, angle_deg: float
 
 def _corners_aabb(transform: Callable[[float, float], tuple[float, float]],
                   w: float, h: float) -> tuple[float, float, float, float]:
-    """AABB ``(x0, y0, x1, y1)`` of a ``w x h`` rect's corners through ``transform``."""
     pts = [transform(0.0, 0.0), transform(w, 0.0), transform(w, h), transform(0.0, h)]
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
@@ -151,12 +80,7 @@ def _corners_aabb(transform: Callable[[float, float], tuple[float, float]],
 
 
 def _frame_rect(geom: dict) -> tuple[float, float, float, float]:
-    """Composed ``(x, y, w, h)`` for a plain (possibly rotated) frame.
-
-    JXA reports a rotated frame as the AABB top-left of the four rotated corners,
-    but keeps the size UN-rotated. Un-rotated frames pass straight through. Used
-    for unmasked images/movies, shapes, and fixed text boxes — all share this rule.
-    """
+    """JXA rotated frame: AABB top-left, unrotated size."""
     x, y, w, h, angle = _xywha(geom)
     if not _is_rotated(angle):
         return (x, y, w, h)
@@ -164,48 +88,42 @@ def _frame_rect(geom: dict) -> tuple[float, float, float, float]:
     return (x0, y0, w, h)
 
 
-# --------------------------------------------------------------------------
-# Masked image (and any masked movie): the visible box is the mask rectangle
-# mapped mask-local -> image-local -> slide, AABB top-left = position, mask's own
-# un-rotated (w, h) = size. Axis-aligned this collapses to (img+mask, mask_size).
-# --------------------------------------------------------------------------
 def _mask_geom(obj: dict, objects: dict[str, dict]) -> dict:
-    """The mask's geometry dict for a masked image/movie, via ``mask.identifier``."""
     ref = (obj.get("mask") or {}).get("identifier")
     if ref is None:
         return {}
     return _geom_dict(objects.get(str(ref)) or {})
 
 
+def _snap90(angle_deg: float) -> float:
+    return round(angle_deg / 90.0) * 90.0
+
+
+def _mask_corner_aabb(fx: float, fy: float, fw: float, fh: float, fa: float,
+                      mx: float, my: float, mw: float, mh: float, ma: float
+                      ) -> tuple[float, float, float, float]:
+    """AABB of mask rect mapped mask-local → image-local → slide."""
+    to_image = _frame_transform(mx, my, mw, mh, ma)
+    to_slide = _frame_transform(fx, fy, fw, fh, fa)
+    return _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
+
+
 def _masked_rect(frame_geom: dict, mask_geom: dict
                  ) -> tuple[tuple[float, float, float, float], bool]:
-    """``((x, y, w, h), rotated)`` for a masked frame.
-
-    ``rotated`` is True when either the frame or the mask carries rotation — the
-    caller flags those ``rotated-masked`` (the corner value is best-effort there;
-    Keynote applies extra layout the closed form cannot reproduce, residual ~36px).
-    """
+    """Mask box at snapped 90°; rotated=True when snap displacement > _MASK_TRUST_PX."""
+    if not mask_geom:
+        return ((0.0, 0.0, 0.0, 0.0), True)
     fx, fy, fw, fh, fa = _xywha(frame_geom)
     mx, my, mw, mh, ma = _xywha(mask_geom)
-    fa_rot = min(fa % 360.0, 360.0 - fa % 360.0) > _MASK_ANGLE_EPS
-    ma_rot = min(ma % 360.0, 360.0 - ma % 360.0) > _MASK_ANGLE_EPS
-    if not fa_rot and not ma_rot:
-        # Effectively un-rotated: JXA reports the axis-aligned frame+mask position
-        # (== the corner AABB at angle 0), not a sub-degree rotated box.
-        return ((fx + mx, fy + my, mw, mh), False)
-    to_image = _frame_transform(mx, my, mw, mh, ma)   # mask-local -> image-local
-    to_slide = _frame_transform(fx, fy, fw, fh, fa)   # image-local -> slide
-    x0, y0, _x1, _y1 = _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
-    return ((x0, y0, mw, mh), True)
+    sx, sy, _sx1, _sy1 = _mask_corner_aabb(fx, fy, fw, fh, _snap90(fa), mx, my, mw, mh, _snap90(ma))
+    rx, ry, _rx1, _ry1 = _mask_corner_aabb(fx, fy, fw, fh, fa, mx, my, mw, mh, ma)
+    # Gate on top-left displacement (max-corner matches under residual rotation).
+    displacement = max(abs(sx - rx), abs(sy - ry))
+    return ((sx, sy, mw, mh), displacement > _MASK_TRUST_PX)
 
 
-# --------------------------------------------------------------------------
-# Line: the visible segment from its length (natural width) and rotation, about
-# the frame centre. Direction/flip-independent because JXA reports the segment's
-# bounding-box top-left, and |cos|/|sin| fold every quadrant onto the same box.
-# --------------------------------------------------------------------------
 def _line_rect(geom: dict) -> tuple[float, float, float, float]:
-    """Composed ``(x, y, length, 0)`` for a line frame."""
+    """(x, y, length, 0) from length + rotation about frame centre; |cos|/|sin| fold quadrants."""
     x, y, w, h, angle = _xywha(geom)
     length = w  # a line's natural frame is horizontal; its height is 0
     theta = math.radians(angle)
@@ -215,41 +133,22 @@ def _line_rect(geom: dict) -> tuple[float, float, float, float]:
             length, 0.0)
 
 
-# --------------------------------------------------------------------------
-# Autosize text: recover x/y(top)/w/h from geometry.position + naturalSize.
-# --------------------------------------------------------------------------
 def _natural_size(obj: dict) -> tuple[float, float]:
-    """``(width, height)`` of a text box's ``bezierPathSource.naturalSize``."""
     pathsource = (obj.get("super") or {}).get("pathsource") or {}
     natural = (pathsource.get("bezierPathSource") or {}).get("naturalSize") or {}
     return (natural.get("width") or 0.0, natural.get("height") or 0.0)
 
 
 def _autosize_rect(obj: dict, geom: dict) -> tuple[float, float, float, float]:
-    """Best-effort ``(x, top, w, h)`` for an autosize (zero-height frame) text box.
-
-    ``geometry.position`` is the box's horizontal-left / vertical-CENTRE anchor, so
-    ``top = position.y - h/2``. ``x`` is exact for a left-aligned box; ``w``/``h``
-    come from ``naturalSize`` which is stale on ~20% of boxes — hence the caller's
-    unconditional ``autosize-soft`` flag.
-    """
+    """Best-effort (x, top, w, h); position is left/vertical-centre so top = y − h/2. naturalSize is stale."""
     x, y, _w, _h, _angle = _xywha(geom)
     nw, nh = _natural_size(obj)
     return (x, y - nh / 2.0, nw, nh)
 
 
-# --------------------------------------------------------------------------
-# Group: union of children's transformed bounds, recursing nested groups under a
-# translation-only parent (verified). A ``seen`` set guards a group reached twice.
-# --------------------------------------------------------------------------
 def _leaf_bbox(obj: dict, ox: float, oy: float, objects: dict[str, dict]
                ) -> tuple[float, float, float, float]:
-    """Absolute AABB ``(x0, y0, x1, y1)`` of a leaf child at parent origin ``(ox, oy)``.
-
-    A masked-image child contributes its mask rectangle; every leaf's own rotation
-    is folded into its AABB about its own centre. (Rotated masked/zero-size children
-    make the union approximate — those groups are flagged ``group-residual``.)
-    """
+    """Absolute AABB of a leaf at parent origin (ox, oy). Masked children use snapped _masked_rect."""
     geom = _geom_dict(obj)
     x, y, w, h, angle = _xywha(geom)
     x += ox
@@ -257,31 +156,19 @@ def _leaf_bbox(obj: dict, ox: float, oy: float, objects: dict[str, dict]
     if obj.get("_pbtype") in ("TSD.ImageArchive", "TSD.MovieArchive"):
         mask_geom = _mask_geom(obj, objects)
         if mask_geom:
-            mx, my, mw, mh, _ma = _xywha(mask_geom)
-            return _corners_aabb(_frame_transform(x + mx, y + my, mw, mh, angle), mw, mh)
+            mx, my, mw, mh, ma = _xywha(mask_geom)
+            return _mask_corner_aabb(x, y, w, h, _snap90(angle), mx, my, mw, mh, _snap90(ma))
     return _corners_aabb(_frame_transform(x, y, w, h, angle), w, h)
 
 
 def _is_real_box(box: tuple[float, float, float, float]) -> bool:
-    """True when an AABB has BOTH positive width and positive height.
-
-    A zero-extent child — a connector/line whose stored frame is ``w==0`` or
-    ``h==0`` and whose local origin can sit hundreds of px off the group's real
-    corner (e.g. ``(0, 220, 0, 0)``) — does not bound the group JXA reports, so it
-    is held out of the union. (Measured: including such children dragged a group's
-    min-corner off by up to ~547px on the gold decks.)
-    """
+    """Positive w and h. Zero-extent connectors must not bound the group union."""
     return (box[2] - box[0]) > 0.0 and (box[3] - box[1]) > 0.0
 
 
 def _group_union(group_id: str, ox: float, oy: float, objects: dict[str, dict],
                  seen: set[str]) -> tuple[float, float, float, float] | None:
-    """Union AABB of a group subtree's REAL children (nested groups add their position).
-
-    Only children with positive width AND height (:func:`_is_real_box`) join the
-    union; zero-extent connectors are excluded. Returns ``None`` when no real child
-    remains, so the caller falls back to the group's own stored-frame geometry.
-    """
+    """Union AABB of real children; nested groups add position. None if none remain."""
     if group_id in seen:
         return None
     seen.add(group_id)
@@ -312,12 +199,6 @@ def _group_union(group_id: str, ox: float, oy: float, objects: dict[str, dict],
 
 
 def _has_effect_style(obj: dict) -> bool:
-    """True when a shadow/reflection effect is present up the ``super`` chain.
-
-    Kept as a defensive residual signal per the plan; NOTE the 7 no-zero-size
-    residual groups in the test decks carry no effect style (they are caught by
-    :func:`_group_residual_reason`'s rotated-masked-child branch instead).
-    """
     cur: Any = obj
     for _ in range(6):
         if not isinstance(cur, dict):
@@ -331,15 +212,7 @@ def _has_effect_style(obj: dict) -> bool:
 
 def _group_residual_reason(group_id: str, objects: dict[str, dict], seen: set[str]
                            ) -> bool:
-    """True when any leaf descendant makes the child-union approximate.
-
-    Signals (each ships the group with a residual JXA cannot match offline):
-      * a zero-size ``ShapeInfoArchive`` (a connector — its drawn box is not its frame);
-      * a rotated masked image/movie (mask corners get extra Keynote layout — this is
-        the same uncertainty as a top-level ``rotated-masked`` image, inherited by the
-        group; it is what actually catches the 7 no-effect-style residual groups);
-      * a detectable shadow/reflection effect style.
-    """
+    """True if a descendant makes the child-union approximate (zero-size connector, off-axis mask, effect, rotated nested group)."""
     if group_id in seen:
         return False
     seen.add(group_id)
@@ -355,37 +228,29 @@ def _group_residual_reason(group_id: str, objects: dict[str, dict], seen: set[st
             continue
         pbtype = child.get("_pbtype")
         if pbtype == "TSD.GroupArchive":
-            # A rotated NESTED group breaks the translation-only union (the parent
-            # rotation is handled at the top by rotated-group; a nested one is not),
-            # so treat it as a residual.
+            # Nested rotation breaks translation-only union (parent rotation is rotated-group).
             if _is_rotated(_xywha(_geom_dict(child))[4]):
                 return True
             if _group_residual_reason(str(child_id), objects, seen):
                 return True
             continue
-        _cx, _cy, cw, ch, cangle = _xywha(_geom_dict(child))
+        _cx, _cy, cw, ch, _cangle = _xywha(_geom_dict(child))
         if pbtype == "TSWP.ShapeInfoArchive" and (cw == 0.0 or ch == 0.0):
             return True
         if pbtype in ("TSD.ImageArchive", "TSD.MovieArchive"):
             mask_geom = _mask_geom(child, objects)
             if mask_geom:
-                _mx, _my, _mw, _mh, mangle = _xywha(mask_geom)
-                if _is_rotated(cangle) or _is_rotated(mangle):
+                # Same displacement gate as top-level masked images (near-90 children compose).
+                _rect, off_axis = _masked_rect(_geom_dict(child), mask_geom)
+                if off_axis:
                     return True
         if _has_effect_style(child):
             return True
     return False
 
 
-# --------------------------------------------------------------------------
-# Per-record composition.
-# --------------------------------------------------------------------------
 def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
-    """Replace ``rec``'s x/y/w/h with composed geometry and add geom_source/needs_keynote.
-
-    Mutates ``rec`` in place (it is a fresh dict from :func:`derive_kind_index`).
-    ``kind``/``kindIndex``/``id``/order are never touched.
-    """
+    """Mutate rec x/y/w/h + geom_source/needs_keynote. Never touches kind/kindIndex/id/order."""
     obj = objects.get(rec["id"]) or {}
     kind = rec["kind"]
     geom = _geom_dict(obj)
@@ -401,11 +266,11 @@ def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
         union = _group_union(rec["id"], gx, gy, objects, set())
         if union:
             x, y, w, h = union[0], union[1], union[2] - union[0], union[3] - union[1]
-        else:  # childless / unresolved: fall back to the raw frame
+        else:
             x, y, w, h = gx, gy, gw, gh
         source = "group-union"
         if _is_rotated(gangle):
-            needs = "rotated-group"  # recursion is verified translation-only
+            needs = "rotated-group"  # union is translation-only
         elif _group_residual_reason(rec["id"], objects, set()):
             needs = "group-residual"
 
@@ -418,9 +283,7 @@ def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
                 needs = "rotated-masked"
         else:
             x, y, w, h = _frame_rect(geom)
-            # A mask ref that does not resolve to a geometry: the object IS masked, so
-            # the unmasked frame is wrong (JXA reports the mask rect). Flag it rather
-            # than ship the frame silently.
+            # Masked but mask geom missing: unmasked frame is wrong.
             if (obj.get("mask") or {}).get("identifier") is not None:
                 needs = "masked-unresolved"
 
@@ -433,7 +296,7 @@ def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
         else:
             x, y, w, h = _frame_rect(geom)
 
-    else:  # shape (and any other frame-shaped drawable): same rotation rule as image
+    else:  # shape: same AABB + unrotated-size rule as image
         x, y, w, h = _frame_rect(geom)
 
     rec["x"], rec["y"], rec["w"], rec["h"] = x, y, w, h
@@ -442,19 +305,7 @@ def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
 
 
 def compose_geometry(slide: dict, objects: dict[str, dict]) -> list[dict]:
-    """:func:`derive_kind_index` records with composed JXA-frame geometry.
-
-    Each record keeps its ``id``/``kind``/``kindIndex``/``text``/``duplicateOf`` from
-    :func:`derive_kind_index`; ``x``/``y``/``w``/``h`` are REPLACED by the composed
-    geometry, and two fields are added:
-
-        * ``geom_source`` — one of :data:`GEOM_SOURCES`.
-        * ``needs_keynote`` — ``None`` or a :data:`NEEDS_KEYNOTE_REASONS` reason. A
-          flagged record still carries best-effort geometry (never a ``None`` value);
-          it marks the object a write path must confirm against Keynote.
-
-    Pure and geometry-only: the addressing (kind, kindIndex, order) is unchanged.
-    """
+    """derive_kind_index records with composed JXA-frame geometry; addressing unchanged."""
     records = derive_kind_index(slide, objects)
     for rec in records:
         _compose_record(rec, objects)
@@ -462,13 +313,7 @@ def compose_geometry(slide: dict, objects: dict[str, dict]) -> list[dict]:
 
 
 def compose_deck_geometry(key_path: str | Path) -> dict[int, list[dict]]:
-    """``{slide_index: [records]}`` of composed geometry for every slide.
-
-    ``slide_index`` matches the JXA payload's ``index`` (skipped slides included), so
-    a caller can line records up with ``payload["slides"][i]["items"]`` directly.
-    Raises ``ImportError`` when the optional ``iwa`` extra is absent (same contract
-    as :mod:`obed_edom.iwa_runs` / :func:`iwa_kindindex.derive_deck_kind_index`).
-    """
+    """{slide_index: [records]} matching JXA payload index (skipped slides included)."""
     from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415 (optional extra)
 
     objects, _id_to_file, _file_ids = _load_deck(key_path)

@@ -20,10 +20,8 @@ from obed_edom.validate import make_flag
 PACKAGE_DIR = Path(__file__).resolve().parent
 MAGIC_MOVE = Transition(effect="magic_move", duration=1.0, match="word")
 
-# What an inline reference leaves behind once "Book Chapter" is removed:
-# "30-32 (MSG)" from "Mark 6:30-32 (MSG) 31 “If God gives…". The colon is
-# already gone by then. A range or a translation is required, because a bare
-# number here is indistinguishable from the verse number itself.
+# Tail after "Book Chapter" is stripped: "30-32 (MSG)" from "Mark 6:30-32 (MSG) 31 …".
+# Range or translation required — a bare number is the verse number itself.
 _REF_RANGE = r"\s*[-–]\s*\d{1,3}"
 _REF_TRANS = r"\s*\([A-Za-z]+\)"
 REF_TAIL_RE = re.compile(
@@ -579,10 +577,6 @@ def _styled_verse_runs(draft: SlideDraft, ref: str) -> list[StyledRun]:
         if full.lower().startswith(ref.lower()):
             runs = _drop_prefix(runs, len(ref))
             runs = _lstrip_runs(runs)
-            # `ref` is only "Book Chapter", so an inline reference leaves its
-            # verse range and translation behind ("30-32 (MSG) 31 …"). Drop that
-            # tail only when a real verse number follows, so a reference whose
-            # range *is* the first verse ("Ezekiel 36:26 I will give…") keeps it.
             tail = REF_TAIL_RE.match("".join(r.text for r in runs))
             if tail and VERSE_LEAD_RE.match(tail.group("rest")):
                 runs = _lstrip_runs(_drop_prefix(runs, tail.end("tail")))
@@ -590,8 +584,7 @@ def _styled_verse_runs(draft: SlideDraft, ref: str) -> list[StyledRun]:
     for run in runs:
         text = re.sub(r"\s+", " ", run.text)
         squeezed.append(StyledRun(text=text, style=run.style))
-    # Squeeze turns a dropped-ref newline into a leading space; strip again so
-    # the first run is the verse number and Keynote can keep the superscript seed.
+    # Squeeze can leave a leading space; strip so the first run is the verse number (superscript seed).
     return _lstrip_runs(_merge_runs(squeezed))
 
 
@@ -867,7 +860,7 @@ def _dsk_verse_specs(
 
 
 def _dsk_post_point_fits(draft: SlideDraft, masters: dict) -> bool:
-    """Skip DSK POST (point + verse) when the point cannot sit in the left column."""
+    """Skip DSK POST when the point cannot sit in the left column."""
     cfg = masters["dsk"]
     n = sum(len(r.text) for r in _point_styled_runs(draft))
     limit = int(cfg.get("point_post_max_chars", 50))
@@ -899,7 +892,7 @@ def _lw_point_spec(
     styled_items: dict[int, list[StyledRun]] = {}
     font_sizes: dict[int, float] = {}
     item_palettes: dict[int, str] = {}
-    # line2/line3 are separate boxes far apart on the GW master — wrap with returns in line1.
+    # GW master: line2/line3 are separate boxes — wrap with returns in line1.
     for key in ("line1", "line2", "line3"):
         idx = mapping.get(key)
         if idx is None:
@@ -936,8 +929,6 @@ def _lw_point_spec(
             font_sizes[int(body_idx)] = _lw_body_font_size(cfg, len(body))
             item_palettes[int(body_idx)] = "lw"
         is_verse = True
-        # The POST is cued by its own [VERSE-AFTER-POINT], so its operator tag
-        # belongs at that cue rather than at a verse-body offset.
         bind = "cue"
         source = list(verse_draft.source_paragraphs)
         for para in draft.source_paragraphs:
@@ -1291,8 +1282,7 @@ def map_slides(outline: OutlineDoc) -> tuple[list[SlideSpec], list[SlideSpec], l
             continue
 
         if tag in {"POINT", "NUM-POINT"}:
-            # One cue, one slide. The point-plus-verse slide comes from the
-            # [VERSE-AFTER-POINT] that follows, and this PRE Magic Moves into it.
+            # One cue, one slide. Point+verse comes from the following [VERSE-AFTER-POINT].
             magic = following is not None
             lw.append(_lw_point_spec(draft, outline, masters, i, post=False, magic_move=magic))
             dsk.append(_dsk_point_spec(draft, outline, masters, i, post=False, magic_move=magic))
@@ -1341,7 +1331,6 @@ def map_slides(outline: OutlineDoc) -> tuple[list[SlideSpec], list[SlideSpec], l
             )
             continue
 
-        # Unknown / legacy tag: treat like a point PRE on both decks.
         lw.append(_lw_point_spec(draft, outline, masters, i, post=False))
         dsk.append(_dsk_point_spec(draft, outline, masters, i, post=False))
 

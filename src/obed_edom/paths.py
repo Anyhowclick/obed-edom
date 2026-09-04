@@ -14,13 +14,7 @@ def find_repo_root() -> Path:
 
 
 def output_root() -> Path:
-    """Where runs write their results.
-
-    Overridable through `OBED_EDOM_OUTPUT_ROOT` so a test run cannot write into
-    the real one. Every caller has to come through here: pointing only the job
-    runner at a temp dir still left the suite dropping cued documents, findings
-    PDFs and generator folders into the operator's output.
-    """
+    """Overridable via `OBED_EDOM_OUTPUT_ROOT`. Every writer must come through here."""
     override = (os.environ.get("OBED_EDOM_OUTPUT_ROOT") or "").strip()
     return Path(override).expanduser() if override else find_repo_root() / "output"
 

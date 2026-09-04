@@ -1,4 +1,4 @@
-# Machine-readable house style. See .cursor/skills/sermon-validation/SKILL.md
+# Machine-readable house style. See .agents/skills/sermon-validation/SKILL.md
 trinity_must_be_caps:
   - God
   - Father
@@ -87,7 +87,7 @@ rules:
   # TODO slide.stat_drift: a figure that changes between adjacent slides and then
   # holds at the new value ("11 Renovated Church Buildings", then 44 on every page
   # after). Reasoning and detection sketch are in
-  # .cursor/plans/cue_palette_and_outline_editor_ef103304.plan.md.
+  # .agents/plans/cue_palette_and_outline_editor_ef103304.plan.md.
   # slide.stat_drift: warning
   outline.text_unavailable: info
 

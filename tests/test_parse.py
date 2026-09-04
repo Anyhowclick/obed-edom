@@ -1,3 +1,9 @@
+"""Parse and generate-pass tests.
+
+Scripting cannot write superscript: pass 2 Copy Style / Paste Style from the seed verse number.
+Pass 1 leaves the deck open; pass 2 styles then exports. Do not export in pass 1.
+"""
+
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -521,7 +527,7 @@ def test_later_verse_numbers_get_the_template_character_style():
     """Pass 2 must stay GUI-driven and must carry the template's character style.
 
     Verified against Keynote 14.5 (see the "Later verse numbers" section of
-    .cursor/skills/obed-edom/SKILL.md). Keynote's AppleScript dictionary has
+    .agents/skills/obed-edom/SKILL.md). Keynote's AppleScript dictionary has
     no style support at all, and superscript is not a character property, so the
     deck's own verse-number style can only be applied through the UI. Do not
     "simplify" this into a pure-AppleScript pass: every scriptable route asserted

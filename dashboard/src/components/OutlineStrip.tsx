@@ -6,11 +6,7 @@ function CueChip({ tag }: { tag: string }) {
 }
 
 /**
- * The script behind one pair row.
- *
- * Cues are coloured the way Word highlights them — turquoise for the wall,
- * yellow for the lower third — so the strip reads like the printed show-call
- * sheet the operator is holding.
+ * Script behind one pair. Cue chips match Word: turquoise wall, yellow DSK.
  */
 export function OutlineStrip({ row, holds }: { row: OutlineRow; holds?: string }) {
   return (

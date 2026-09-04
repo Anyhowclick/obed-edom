@@ -1,30 +1,8 @@
 """Remembered framing decisions for the CG resizer.
 
-Which crop of a map the operator wants is an editorial choice, so it has to be
-asked and then not asked again. This is the Sermon Checker's pattern — propose,
-let the operator correct, remember by content digest, carry across runs — reusing
-its primitives (`pairing_key` for the file key, `index_map` for remapping onto an
-edited deck, `deck_slide_digests` for identity).
-
-The record shape differs from a pairing on purpose. A pairing answers "which
-slides go together"; a framing answers one of three things per page, and only one
-of them names a template slide:
-
-``auto``
-    No operator input. Use whatever the planner picks.
-``pinned``
-    The operator chose this template slide's framing.
-``deferred``
-    "No framing here is right; I will add a template slide and re-run." The page
-    plans automatically meanwhile, which in practice means fit-to-frame — the
-    honest outcome, since a deferred page is one where no crop applies yet.
-
-Squeezing three states into `leftIndex`/`rightIndexes` would make `deferred`
-indistinguishable from an unpaired row, so the states are explicit instead.
-
-A deferred page is re-offered when the *template* changes, because that is
-exactly when new framings may have appeared. That is why the template's deck
-digest is stored alongside the per-slide wall digests.
+States: auto (planner picks), pinned (operator template slide), deferred (no
+crop yet; re-offered when the template digest changes). ``keep_side_content``
+is orthogonal. Auto rows are omitted unless they whitelist side content.
 """
 
 from __future__ import annotations
@@ -48,12 +26,7 @@ STATES = (AUTO, PINNED, DEFERRED)
 
 @dataclass
 class Decision:
-    """One page's answer. `template_slide` is set only when `state` is `pinned`.
-
-    `keep_side_content` is orthogonal to `state`: side-panel content is dropped by
-    default and kept only on the pages the operator whitelists, whatever framing
-    they end up with. So a page can be `auto` and still carry `keep_side_content`.
-    """
+    """One page. ``template_slide`` only when pinned. ``keep_side_content`` is orthogonal to state."""
 
     wall_index: int
     state: str = AUTO
@@ -66,8 +39,6 @@ class Decision:
             "state": self.state,
             "templateSlide": None if self.template_slide is None else int(self.template_slide),
         }
-        # Emitted only when set, so a plain answer stays lean — the same reason an
-        # auto row is dropped from the record entirely.
         if self.keep_side_content:
             out["keepSideContent"] = True
         return out
@@ -84,11 +55,7 @@ class FramingReuse:
     dropped: int = 0
 
     def overrides(self) -> dict[int, int]:
-        """Wall slide *number* to template slide number, for the planner.
-
-        Only pinned decisions become overrides. Auto and deferred both mean
-        "let the planner choose", so neither pins anything.
-        """
+        """Pinned wall-number → template-number. Auto/deferred do not pin."""
         return {
             index + 1: decision.template_slide
             for index, decision in sorted(self.decisions.items())
@@ -96,11 +63,7 @@ class FramingReuse:
         }
 
     def side_content_slides(self) -> set[int]:
-        """Wall slide *numbers* whose side-panel content is kept, for the planner.
-
-        Independent of framing state — whitelisting a page keeps its side content
-        whether its crop is pinned, deferred or automatic.
-        """
+        """Wall numbers whose side-panel content is kept, independent of framing state."""
         return {
             index + 1
             for index, decision in self.decisions.items()
@@ -123,13 +86,9 @@ def normalize_decision(raw: dict[str, Any]) -> Decision | None:
         template_slide = None
     keep_side_content = bool(raw.get("keepSideContent"))
     if state == PINNED and template_slide is None:
-        # A pin with nothing pinned is not a decision; treat it as unanswered
-        # rather than silently pinning slide 0.
-        return None
+        return None  # unanswered, not silently pin slide 0
     if state != PINNED:
         template_slide = None
-    # keep_side_content is kept for every state — a whitelisted page left on auto
-    # is still a decision, unlike template_slide which only pinned pages carry.
     return Decision(
         wall_index=wall_index,
         state=state,
@@ -167,12 +126,7 @@ def save_framings(
     job_id: str = "",
     root: Path | None = None,
 ) -> dict:
-    """Write the framing record, dropping pages left on auto.
-
-    Auto is the absence of a decision, so storing it would grow the file with
-    rows that mean nothing and would make "already answered" untrue. A page kept on
-    auto but whitelisted for side content is a real decision, though, so it stays.
-    """
+    """Write the framing record. Drop auto pages unless they whitelist side content."""
     rows: list[dict[str, Any]] = []
     for entry in decisions:
         decision = entry if isinstance(entry, Decision) else normalize_decision(entry)
@@ -201,12 +155,7 @@ def reuse_framings(
     wall_digests: list[str],
     template_digest: str,
 ) -> FramingReuse:
-    """Carry saved decisions onto the current deck.
-
-    Pages are matched by content digest, so inserting or reordering wall slides
-    keeps their answers. A page whose content changed loses its decision, because
-    the crop was chosen for the old content.
-    """
+    """Carry saved decisions by wall digest. Content change drops the decision."""
     out = FramingReuse()
     if not record:
         return out
@@ -228,9 +177,7 @@ def reuse_framings(
         )
         out.carried += 1
     if out.template_changed:
-        # The one case worth re-asking: a deferred page was waiting for exactly
-        # this. Its answer is kept so nothing is lost if the new template still
-        # has no framing for it.
+        # Deferred pages were waiting for this template change; keep the answer and re-offer.
         out.resurfaced = sorted(
             index for index, d in out.decisions.items() if d.state == DEFERRED
         )
@@ -242,18 +189,7 @@ THUMB_QUALITY = 82
 
 
 def _transform_of(recipe: dict[str, Any]) -> dict[str, float] | None:
-    """The uniform scale and offset that puts wall coordinates into the CG frame.
-
-    `(x, y) -> (s*x + tx, s*y + ty)`, which is what the browser needs to place a
-    wall image inside a 16:9 box: width becomes `wallWidth * s`, offset `tx, ty`.
-
-    Must follow the same precedence as `_groups_from_recipe`, which is what the
-    planner actually places objects with: the first group affine when there is
-    one, and only mapSrc/mapDst when there is not. Deriving it from mapSrc/mapDst
-    unconditionally made the preview lie — on a real page the group affine was
-    s=0.871 while mapSrc/mapDst implied 1.412, so the operator was shown a crop
-    62% larger than the deck would get.
-    """
+    """Uniform scale+offset. Same precedence as the planner: first group affine, else mapSrc/mapDst."""
     groups = recipe.get("groups") or []
     if groups:
         first = groups[0] or {}
@@ -292,13 +228,7 @@ def build_preview_thumbs(
     *,
     log: Callable[[str], None] | None = None,
 ) -> dict[int, str]:
-    """Downscale a deck's cached previews once, so the browser can show artwork.
-
-    Returns slide number to thumbnail file name. Used for both sides: wall slides,
-    whose previews are 7680x1080 and 9 MB each, and the template slides, so a
-    group header can show what "template slide 4" actually looks like instead of
-    asking the operator to hold it in their head.
-    """
+    """Downscale cached previews. Returns slide number → thumbnail file name."""
     from PIL import Image  # noqa: PLC0415
 
     from obed_edom.baseline import deck_digest, preview_cache_dir, wall_thumb_dir  # noqa: PLC0415
@@ -314,10 +244,7 @@ def build_preview_thumbs(
     source = preview_cache_dir(digest)
     dest = wall_thumb_dir(digest)
     slides = payload.get("slides") or []
-    # A template is usually inspected without an export_dir, so it reaches here
-    # with no previews and the operator gets a framing list of bare slide numbers.
-    # Export them now: it is the same Keynote pass the wall already paid for, and
-    # the cache means it happens once per template revision.
+    # Templates are often inspected without export_dir; export now so the list isn't bare numbers.
     if not preview_pngs(source):
         if log:
             log(f"Exporting previews for {deck.name}\u2026")
@@ -363,34 +290,7 @@ def planned_rects(
     include_lists: bool = False,
     side_content_slides: set[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Where every object on this page ends up, for drawing over the crop.
-
-    The crop alone only ever shows one affine, so it cannot show what the run
-    actually does to the badge, the lists, or the 200-odd objects it hides. The
-    planner already works this out in about 10ms a page and it costs no Keynote
-    pass, so the operator may as well see it before committing.
-
-    Compact on purpose: a page can plan 1500 objects and every candidate framing
-    carries its own set.
-
-    The template is deliberately not handed on. `plan_payload_transforms` re-learns
-    a recipe per slide when given one, from whichever framing it would pick
-    automatically — which threw away the recipe passed here and drew every
-    candidate, and every saved recipe, as the automatic choice. The caller has
-    already settled which recipe it wants shown.
-
-    `include_lists` and `side_content_slides` are handed straight to
-    `plan_payload_transforms`, so the preview drops (or keeps) side-panel content
-    exactly as the real run would: an operator who whitelisted this page sees its
-    lists placed, not shown as 199 objects about to be dropped. With neither set
-    the planner drops side content as before, and every dropped object is still
-    marked so the picture shows it leaving rather than staying.
-
-    Each rect carries ``willBeInOutput``: false for anything the run deletes before
-    output (a `role="hide"` marker, or an object pinned to `opacity=0`), true
-    otherwise. Keyed off the transform, not a role string, so the frontend can draw
-    dropped objects distinctly without re-deriving what "hide" means.
-    """
+    """Planned dest rects for this recipe. Do not pass a template (that re-learns the automatic pick)."""
     from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
 
     wall_w, wall_h = wall_size
@@ -414,8 +314,6 @@ def planned_rects(
         }
         if spec.match_text:
             rect["text"] = spec.match_text[:40]
-        # The part of the wall this object occupies, so a preview can cut it out
-        # and draw it where it lands instead of only outlining the destination.
         if spec.src is not None and spec.src.w > 0 and spec.src.h > 0:
             rect["sx"] = round(spec.src.x)
             rect["sy"] = round(spec.src.y)
@@ -436,23 +334,7 @@ def propose_framings(
     side_content_slides: set[int] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """What the operator is asked, without touching the deck.
-
-    Planning is pure Python over cached inspect payloads, so this costs no Keynote
-    pass beyond the inspect that a resize needed anyway. Nothing is copied and
-    nothing is written.
-
-    Candidate fallback is evaluated only for pages whose automatic pick already
-    falls back. Doing it for every candidate on every page means a `learn_recipe`
-    per pair — about 7s on a 158-slide deck against 13 candidates — and it only
-    tells the operator something on the pages they are being asked about.
-
-    `include_lists` (the global CLI keep) and `side_content_slides` (the per-slide
-    whitelist carried over by digest) are passed to the rects so the preview plans
-    what the real run will do to side-panel content, rather than always dropping
-    it. They do not affect framing selection, only which objects the boxes show as
-    kept versus dropped.
-    """
+    """Propose framings over cached inspect payloads. Nothing is copied or written."""
     from obed_edom.baseline import deck_digest, deck_slide_digests  # noqa: PLC0415
     from obed_edom.inspect import inspect_keynote  # noqa: PLC0415
     from obed_edom.map_remap import (  # noqa: PLC0415
@@ -488,8 +370,6 @@ def propose_framings(
     )
     template_slides = template_data.get("slides") or []
 
-    # A dry plan is what knows which pages take a framing decision at all, and
-    # which of them the automatic choice cannot serve.
     report: list[dict[str, Any]] = []
     recipe = learn_recipe(wall_data, template_data)
     plan_payload_transforms(
@@ -516,10 +396,6 @@ def propose_framings(
         candidates = rank_framing_candidates(
             slide, template_slides, wall_size=(wall_w, wall_h), dest_size=dest
         )
-        # Every candidate needs its transform, because the row renders the crop in
-        # the browser and the dropdown has to re-render instantly. Learning the
-        # recipe per candidate also settles whether it would fall back, so both
-        # answers come from the same pass.
         for candidate in candidates:
             trial = learn_recipe(
                 {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]},
@@ -531,9 +407,7 @@ def propose_framings(
                 or is_degenerate_scale(trial, wall_w, wall_h)
             )
             candidate["wouldFallBack"] = falls_back
-            # Preview what the deck will get, not what was asked for. A framing
-            # that falls back is planned with fit-to-frame instead, so showing the
-            # template's crop would promise a result the run cannot produce.
+            # Fallback is planned as fit-to-frame; showing the template crop would lie.
             shown = trial
             if falls_back:
                 fitted = fit_to_frame_recipe(
@@ -546,10 +420,6 @@ def propose_framings(
                 if fitted:
                     shown = fitted
             candidate["transform"] = _transform_of(shown)
-            # The crop shows one affine; these show what the run does to every
-            # object on the page, which is where it actually goes wrong. The same
-            # keep/whitelist the real run would use is threaded through, so a
-            # whitelisted page previews its side content placed rather than dropped.
             candidate["rects"] = planned_rects(
                 slide,
                 shown,
@@ -567,16 +437,11 @@ def propose_framings(
                 "slide": number,
                 "index": number - 1,
                 "thumb": thumbs.get(number),
-                # What the automatic choice does to this page, so a row can render
-                # before the operator touches anything.
                 "autoTransform": (auto_candidate or {}).get("transform"),
                 "autoRects": (auto_candidate or {}).get("rects") or [],
                 "autoTemplateSlide": auto_slide,
                 "autoFellBack": auto_fell_back,
                 "needsAttention": auto_fell_back,
-                # No framing here is worth picking, so the honest default is
-                # "add a template slide and re-run" rather than a dropdown of
-                # options that all degrade to the same fit-to-frame.
                 "noUsableFraming": auto_fell_back and not usable,
                 "candidates": candidates,
             }
@@ -602,12 +467,8 @@ def propose_framings(
         "templatePath": str(template_path),
         "wallDigests": deck_slide_digests(wall_data),
         "templateDigest": deck_digest(template_path),
-        # Kept so serving a thumbnail does not re-hash the deck. Digesting a
-        # 6.8 GB deck took 6.8s per request, which made 150 rows unusable.
         "wallThumbDir": str(wall_thumb_dir(deck_digest(wall_path))),
         "templateThumbDir": str(wall_thumb_dir(deck_digest(template_path))),
-        # Template slide number to thumbnail, so a group can show the framing
-        # itself rather than only naming it.
         "templateThumbs": {str(k): v for k, v in sorted(template_thumbs.items())},
         "destWidth": int(dest[0]),
         "destHeight": int(dest[1]),
@@ -616,10 +477,7 @@ def propose_framings(
         "pages": pages,
         "needAttention": attention,
         "noUsableFraming": stuck,
-        # Ranges are written in document positions and Keynote's navigator numbers
-        # only the slides that will play, so a deck with anything set to Skip
-        # reads differently in the two places. Surfaced here because this is the
-        # last screen before anything is remapped.
+        # Document position ≠ navigator number when any slide is skipped.
         "skippedSlides": skipped_positions(wall_data),
         "numberingNote": navigator_numbering(wall_data),
     }

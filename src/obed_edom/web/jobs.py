@@ -91,7 +91,6 @@ class JobRunner:
         return self._jobs.get(job_id)
 
     def rerun(self, job_id: str, fn: Callable[[Job], dict[str, Any]]) -> Job | None:
-        """Queue another pass on an existing job, keeping the same id."""
         with self._cv:
             job = self._jobs.get(job_id)
             if not job:
@@ -239,9 +238,7 @@ class JobRunner:
         from obed_edom.baseline import cache_root as _cache_root  # noqa: PLC0415
 
         root = self._output_root.resolve()
-        # Never purge the warm cache, wherever it is: rebuilding it costs about an
-        # hour of Keynote time. It normally lives outside output/ now, but honour
-        # the real location in case OBED_EDOM_CACHE_DIR points back inside.
+        # Never purge the warm cache (rebuild is ~1h of Keynote). Honour OBED_EDOM_CACHE_DIR even inside output/.
         cache_root = _cache_root().resolve()
         seen: set[Path] = set()
         for path in candidates:

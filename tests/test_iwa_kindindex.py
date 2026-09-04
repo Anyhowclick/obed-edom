@@ -4,6 +4,20 @@ The classification / ordering / guard logic is pure and exercised WITHOUT keynot
 by building synthetic IWA drawable dicts. A local-only integration test reproduces the
 addressing on a real deck and diffs it against that deck's cached exact-bytes JXA payload
 when the deck, the parser, and the cached payload are all present.
+
+KIND_ORDER is the same six kinds, same order as inspect_keynote.js collectItems
+(text, image, shape, movie, group, line). Tables/charts are omitted because JXA
+never enumerates them.
+
+Membership: isTextBox drives textItems; shapes = not-textbox or custom path;
+a custom-path text box is a dual. A line is an open two-point bezier or a zero
+natural dimension — multi-point freeforms stay shapes.
+
+reconcile_counts is cardinality-only. text/shape/line/movie order is verified;
+image/group order is inferred from the z-order walk and still needs composed
+geometry before a write. Empty title/body placeholders JXA appends last are not
+in drawablesZOrder (TEXT_PLACEHOLDER_SLACK). Full slide 73 is a filled/variation
+box listed in both textItems and shapes — the count guard falls back on it.
 """
 from __future__ import annotations
 
@@ -14,9 +28,11 @@ import pytest
 
 from obed_edom.iwa_kindindex import (
     _is_line,
+    deck_kind_counts,
     derive_deck_kind_index,
     derive_kind_index,
     derived_kind_counts,
+    kind_counts_from_records,
     reconcile_counts,
 )
 
@@ -136,6 +152,17 @@ def test_is_line_rejects_closed_rectangle():
     assert _is_line(obj) is False
 
 
+def test_zero_natural_dimension_text_box_is_text_not_line():
+    # An autosize text box's stored naturalSize height can legitimately be 0 at the
+    # pass-1 save, before Keynote lays it out (bug: the zero-dimension line heuristic
+    # was firing on it). isTextBox must win over that heuristic.
+    objects = {}
+    tid = _shape(objects, "t", is_textbox=True, text="Autosize", h=0.0)
+    assert _is_line(objects[tid]) is False
+    recs = derive_kind_index(_slide(tid), objects)
+    assert [r["kind"] for r in recs] == ["text"]
+
+
 def test_no_phantom_table_chart_kinds():
     # collectItems never collects tables/charts, so derive must not emit them either.
     objects = {}
@@ -213,6 +240,114 @@ def test_derived_kind_counts():
            _simple(objects, "i0", "TSD.ImageArchive")]
     assert derived_kind_counts(derive_kind_index(_slide(*ids), objects)) == {
         "text": 1, "shape": 1, "image": 1}
+
+
+# --------------------------------------------------------------------------
+# deck_kind_counts — real (tiny synthetic) .key, two slides with distinct shape counts.
+# --------------------------------------------------------------------------
+def _build_two_slide_real_deck(path):
+    """Slide 1: one shape. Slide 2: two shapes. Minimal real IWA round-trip via keynote_parser."""
+    import io
+    import re
+    import zipfile
+
+    from keynote_parser.codec import IWAFile, import_version
+
+    id_name_map, _, _ = import_version()
+    inv_id = {c.DESCRIPTOR.full_name: t for t, c in id_name_map.items()}
+    inv_cls = {c.DESCRIPTOR.full_name: c for t, c in id_name_map.items()}
+
+    def scalar_default(field):
+        ct = field.cpp_type
+        if ct in (1, 2, 3, 4):
+            return 0
+        if ct in (5, 6):
+            return 0.0
+        if ct == 7:
+            return False
+        if ct == 8:
+            return field.enum_type.values[0].number
+        if ct == 9:
+            return ""
+        return {}
+
+    def fill_path(d, msg_cls, dotted):
+        parts = dotted.split(".")
+        desc = msg_cls.DESCRIPTOR
+        for i, part in enumerate(parts):
+            field = desc.fields_by_name[part]
+            if i == len(parts) - 1:
+                if field.message_type is not None:
+                    d[part] = d.get(part) or {}
+                else:
+                    d.setdefault(part, scalar_default(field))
+            else:
+                d = d.setdefault(part, {})
+                desc = field.message_type
+
+    def archive_dict(ident, pbtype, obj):
+        o = dict(obj)
+        o["_pbtype"] = pbtype
+        return {"header": {"_pbtype": "TSP.ArchiveInfo", "identifier": ident,
+                           "messageInfos": [{"_pbtype": "TSP.MessageInfo", "type": inv_id[pbtype], "identifier": ident}]},
+                "objects": [o]}
+
+    def complete(pbtype, obj):
+        cls = inv_cls[pbtype]
+        for _ in range(60):
+            try:
+                IWAFile.from_dict({"chunks": [{"archives": [archive_dict(1, pbtype, obj)]}]}).to_buffer()
+                return obj
+            except Exception as exc:  # noqa: BLE001 — the message names the missing fields
+                match = re.search(r"missing required fields: ([^\n']+)", str(exc))
+                if not match:
+                    raise
+                for name in match.group(1).split(","):
+                    fill_path(obj, cls, name.strip())
+        raise RuntimeError("too many required fields to fill")
+
+    def arch(ident, pbtype, obj):
+        return archive_dict(ident, pbtype, complete(pbtype, dict(obj)))
+
+    def member(archives):
+        return IWAFile.from_dict({"chunks": [{"archives": archives}]}).to_buffer()
+
+    def shape(ident, x):
+        bez = {"naturalSize": {"width": 10.0, "height": 10.0}}
+        sup = {"pathsource": {"bezierPathSource": bez},
+               "super": {"geometry": {"position": {"x": x, "y": 0.0}, "size": {"width": 10.0, "height": 10.0}, "angle": 0.0}}}
+        return arch(ident, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": sup})
+
+    slide1 = arch(101, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 200}]})
+    slide2 = arch(102, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 210}, {"identifier": 211}]})
+    show = arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}, {"identifier": 11}]}})
+    node1 = arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 101}, "isSkipped": False})
+    node2 = arch(11, "KN.SlideNodeArchive", {"slide": {"identifier": 102}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", member([show, node1, node2]))
+        z.writestr("Index/Slide-101.iwa", member([slide1, shape(200, 0.0)]))
+        z.writestr("Index/Slide-102.iwa", member([slide2, shape(210, 0.0), shape(211, 20.0)]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_deck_kind_counts_is_one_based(tmp_path):
+    pytest.importorskip("keynote_parser")
+    deck = _build_two_slide_real_deck(tmp_path / "counts.key")
+    counts = deck_kind_counts(deck)
+    assert set(counts) == {1, 2}  # 1-based, not 0-based like derive_deck_kind_index
+    assert counts[1] == {"shape": 1}
+    assert counts[2] == {"shape": 2}
+
+
+def test_deck_kind_counts_matches_derived_per_slide(tmp_path):
+    pytest.importorskip("keynote_parser")
+    deck = _build_two_slide_real_deck(tmp_path / "counts2.key")
+    counts = deck_kind_counts(deck)
+    derived = derive_deck_kind_index(deck)  # 0-based
+    expected = {idx + 1: recs for idx, recs in derived.items()}
+    assert counts == kind_counts_from_records(expected)
 
 
 # --------------------------------------------------------------------------

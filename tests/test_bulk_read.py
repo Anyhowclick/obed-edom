@@ -77,5 +77,19 @@ def test_plan_carries_bulk_read_off(tmp_path, monkeypatch):
     assert captured["plan"]["bulkRead"] is False
 
 
+def test_use_cache_false_exports_into_export_dir_not_the_digest_cache(tmp_path, monkeypatch):
+    # The resizer readback passes use_cache=False so the export lands in export_dir where
+    # the dashboard serves it — NOT redirected into preview_cache_dir(digest) (the cache
+    # miss branch, inspect.py:138-140), which left the served dir empty. Pin that the plan
+    # exportDir the JXA pass writes to is export_dir itself.
+    captured = _capture_plan(monkeypatch)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *a, **k: None)
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    export_dir = tmp_path / "job_previews"
+    inspect_keynote(key, export_dir=export_dir, use_cache=False)
+    assert captured["plan"]["exportDir"] == str(export_dir.resolve())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

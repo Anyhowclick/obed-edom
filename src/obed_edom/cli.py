@@ -154,8 +154,7 @@ def _run_remap(args: argparse.Namespace) -> int:
         print(f"CG template not found: {template}", file=sys.stderr)
         return 1
     try:
-        # No selection means the whole deck. It used to mean slide 2 only, from
-        # when the map lived there by convention.
+        # Empty selection is the whole deck (it used to mean slide 2).
         slide_range = resolve_slides(
             spec=getattr(args, "slides", None),
             range_from=args.range_from,

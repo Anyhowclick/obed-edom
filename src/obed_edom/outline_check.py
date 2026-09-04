@@ -1,18 +1,8 @@
 """Check a cued outline against the decks it calls.
 
-The operator's `_CUED.docx` is a playlist: one `[LW…]` or `[DSK…]` cue is one
-slide advance on that deck. That makes two independent checks possible.
-
-**Correspondence** counts cues against slides. It reads no text at all, so it
-survives decks exported as JPEGs or `.mov`s for ProPresenter, and it is what
-catches a slide nobody cues or a cue with no slide behind it.
-
-**Corroboration** compares wording, and resolves disagreements by rank:
-outline, then LW, then DSK. The outline is the script everyone works from; LW
-is the finalised rendering of it and outranks DSK. So LW is never accused of
-disagreeing with DSK alone, and a DSK slide that contradicts both is wrong.
-
-Nothing here rewrites anything. Findings only.
+Correspondence counts cues vs slides (no text — works on JPEG/.mov exports).
+Corroboration ranks wording: outline, then LW, then DSK (or LW first once
+the wall is signed off). Findings only; nothing is rewritten.
 """
 
 from __future__ import annotations
@@ -32,20 +22,18 @@ from obed_edom.parse_outline import (
 from obed_edom.text_diff import fingerprint, text_score, texts_equivalent
 from obed_edom.validate import make_flag
 
-# Any bracketed token, so one that is neither a cue nor a stage direction can be
-# reported rather than silently ignored.
+# Bracketed tokens that are neither cue nor stage direction.
 BRACKET_RE = re.compile(r"\[[^\]\n]{1,60}\]")
 
-# Below this, the words after a cue are the preacher's commentary rather than
-# the copy on the slide, so there is nothing to corroborate.
+# Below this, words after a cue are preacher commentary, not slide copy.
 SCRIPT_MATCH = 0.45
 
-# How many per-item findings to raise before saying "and N more".
+# Cap per-item findings before "and N more".
 MAX_REPORTED = 8
 
 
 class SemanticOutlineError(ValueError):
-    """Raised when a pre-generate outline is handed to the checker."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -98,13 +86,7 @@ class Playlist:
 
 
 def read_cues(paragraphs: list[Paragraph]) -> list[CueRef]:
-    """Operator cues in reading order.
-
-    Works off `CUE_RE` over the paragraph text, not over runs: Word splits a
-    highlighted cue across per-character runs, and `parse_outline` splits
-    `[LW][DSK-PP]` into two blocks, which loses the fact that they are one
-    advance.
-    """
+    """Operator cues in reading order. Uses `CUE_RE` on paragraph text, not runs."""
     out: list[CueRef] = []
     for para in paragraphs:
         for match in CUE_RE.finditer(para.text):
@@ -125,7 +107,6 @@ def read_cues(paragraphs: list[Paragraph]) -> list[CueRef]:
 
 
 def outline_flavour(paragraphs: list[Paragraph]) -> str:
-    """`cued`, `semantic`, or `none`."""
     semantic = deck = 0
     for para in paragraphs:
         for match in CUE_RE.finditer(para.text):
@@ -158,12 +139,7 @@ def _is_bare_reference(text: str) -> bool:
 
 
 def cue_playlist(paragraphs: list[Paragraph]) -> Playlist:
-    """Group the cue stream into rows, one row per slide advance.
-
-    Cues separated only by whitespace belong to the same advance, so
-    `[LW][DSK-PP]` steps both decks while a lone `[DSK-PP]` steps only the
-    lower third and the wall holds.
-    """
+    """One row per slide advance. Whitespace-only gaps keep `[LW][DSK-PP]` together."""
     cues = read_cues(paragraphs)
     by_index = {para.index: para for para in paragraphs}
     rows: list[CueRow] = []
@@ -191,7 +167,6 @@ def cue_playlist(paragraphs: list[Paragraph]) -> Playlist:
 def _attach_script(
     rows: list[CueRow], paragraphs: list[Paragraph], by_index: dict[int, Paragraph]
 ) -> None:
-    """Give each row the words it calls, up to the next cue."""
     order = [para.index for para in paragraphs]
     for position, row in enumerate(rows):
         last = row.cues[-1]
@@ -209,9 +184,7 @@ def _attach_script(
                     parts.append(by_index[index].text[: stop.start])
                     break
                 parts.append(by_index[index].text)
-        # Generate puts the cue on the verse body and leaves the reference on the
-        # line above; hand-authored outlines put the cue on the reference itself.
-        # Pick the stray line up so both spellings describe the same slide.
+        # Generate cues the verse body; hand-authored outlines cue the reference line.
         lead = _preceding_reference(rows, position, order, by_index)
         text = "\n".join(part for part in ([lead] + parts) if part and part.strip())
         row.script = STAGE_RE.sub("", text).strip()
@@ -236,7 +209,6 @@ def _preceding_reference(
 
 
 def load_playlist(path: Path | str) -> tuple[Playlist, list[Paragraph]]:
-    """Read a cued outline. Raises `SemanticOutlineError` for a pre-generate one."""
     paragraphs = load_paragraphs(Path(path))
     flavour = outline_flavour(paragraphs)
     if flavour != "cued":
@@ -251,12 +223,7 @@ def load_playlist(path: Path | str) -> tuple[Playlist, list[Paragraph]]:
 
 
 def outline_report(path: Path | str) -> dict:
-    """Everything the reader view needs for a cued outline on its own.
-
-    Paragraphs carry their cue spans so the reader can draw the operator chips
-    where Word highlights them, and findings are pinned to a paragraph so they
-    can sit beside the line they are about.
-    """
+    """Paragraphs with cue spans plus findings pinned to a paragraph."""
     from obed_edom.parse_outline import parse_outline  # noqa: PLC0415
     from obed_edom.validate import flag_dict, validate_outline_paragraphs  # noqa: PLC0415
 
@@ -326,7 +293,6 @@ def outline_report(path: Path | str) -> dict:
 
 
 def visible(catalog: list[dict]) -> list[dict]:
-    """Slides an operator actually advances through."""
     return [s for s in catalog if not s.get("skipped")]
 
 
@@ -334,7 +300,7 @@ DECK_LABELS = {"lw": "LW", "dsk": "DSK"}
 
 
 def correspondence(playlist: Playlist, catalogs: dict[str, list[dict]]) -> list[Flag]:
-    """Track 1. Cue counts against slide counts. Reads no slide text."""
+    """Cue counts against slide counts. Reads no slide text."""
     flags: list[Flag] = []
 
     for para, raw in playlist.unknown:
@@ -425,11 +391,7 @@ def slots_from_cues(
     *,
     left_deck: str = "lw",
 ) -> list[tuple[int | None, list[int], float]]:
-    """Turn the playlist into pairing slots for `compare_inspects`.
-
-    A row that steps only the lower third is the wall holding, which is the
-    combined pair the playlist editor already understands.
-    """
+    """Playlist → pairing slots. A DSK-only row folds onto the previous wall hold."""
     lw_left = [s["index"] for s in visible(lw_catalog)]
     dsk_left = [s["index"] for s in visible(dsk_catalog)]
     slots: list[tuple[int | None, list[int], float]] = []
@@ -444,7 +406,6 @@ def slots_from_cues(
             dsk_indexes.append(dsk_left[dsk_at])
             dsk_at += 1
         if lw_index is None and dsk_indexes and slots:
-            # The wall holds: fold this lower third onto the previous row.
             previous = slots[-1]
             slots[-1] = (previous[0], previous[1] + dsk_indexes, previous[2])
             continue
@@ -461,14 +422,12 @@ def slots_from_cues(
 def rows_for_slots(
     playlist: Playlist, slots: list[tuple[int | None, list[int], float]]
 ) -> list[CueRow | None]:
-    """Which cue row produced each slot, so a pair can show its script."""
     out: list[CueRow | None] = []
     cursor = 0
     for _slot in slots:
         row = playlist.rows[cursor] if cursor < len(playlist.rows) else None
         out.append(row)
         cursor += 1
-        # A held wall folded the next row into this slot.
         while cursor < len(playlist.rows) and playlist.rows[cursor].lw is None:
             cursor += 1
     return out
@@ -484,17 +443,7 @@ def corroborate(
     typed: bool = True,
     lw_final: bool = True,
 ) -> list[Flag]:
-    """Track 2. Resolve a wording disagreement by rank.
-
-    Rank depends on whether the wall has been signed off. Once staff have run
-    the deck with the Pastor, LW *is* the service, so a script that disagrees
-    with it is out of date rather than right: **LW, then outline, then DSK**.
-    Before sign-off the script still leads: **outline, then LW, then DSK**.
-
-    Either way DSK is last, and either way this is silent unless the words after
-    the cue really are the copy on the slide — most of an outline is the
-    preacher's commentary, which is on no slide.
-    """
+    """Signed-off wall: LW, then outline, then DSK. Else outline, then LW, then DSK."""
     script = (script or "").strip()
     lw_text = (lw_text or "").strip()
     dsk_text = (dsk_text or "").strip()
@@ -506,8 +455,6 @@ def corroborate(
     if max(text_score(script, t) for t in have) < SCRIPT_MATCH:
         return []
 
-    # Exported media has no readable copy, so anything found here is an OCR
-    # guess. Say so rather than reporting it as a wording error.
     suffix = (
         ""
         if typed
@@ -563,8 +510,6 @@ def corroborate(
         )
     if dsk_ok and not lw_ok:
         if lw_final:
-            # The wall moved on and nothing followed it. This is the finding
-            # worth having: it says why the decks differ, not just that they do.
             return _one(
                 "outline.dsk_stale",
                 "The wall was finalised past both the outline and DSK, so the "
@@ -641,7 +586,6 @@ def _one(
     deck: str,
     source: str = "Outline",
 ) -> list[Flag]:
-    """One finding, quoting the authority first and then what disagrees with it."""
     flag = make_flag(
         rule,
         "outline",
@@ -655,11 +599,7 @@ def _one(
 
 
 def _demote(flag: Flag | None, typed: bool) -> Flag | None:
-    """An OCR guess is a note, not a verdict.
-
-    The configured severity wins over a code default, so a rule that ships as a
-    warning has to be stepped down here rather than at `make_flag`.
-    """
+    """OCR guesses are notes; configured severity otherwise wins over make_flag defaults."""
     if flag is None or typed or flag.severity == "info":
         return flag
     return replace(flag, severity="info")
@@ -676,5 +616,4 @@ def _keep(flags: list[Flag], flag: Flag | None) -> None:
 
 
 def script_matches(script: str, text: str) -> bool:
-    """Exposed for the dashboard strip: does this row's script describe the slide?"""
     return bool(script and text and fingerprint(script) and text_score(script, text) >= SCRIPT_MATCH)

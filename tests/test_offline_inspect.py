@@ -60,6 +60,20 @@ def test_deck_slide_digests_ignore_image_rotation():
     assert deck_slide_digests(base) == deck_slide_digests(rotated)
 
 
+def test_deck_slide_digests_ignore_image_geometry():
+    """Same class as rotation: offline-composed x/y/w/h can drift from JXA between
+    runs, so the slide-IDENTITY digest must not depend on image position or size —
+    otherwise an unedited image churns its digest and floats out of order."""
+    from obed_edom.baseline import deck_slide_digests
+    a = {"slides": [{"index": 0, "number": 1, "skipped": False, "items": [
+        {"kind": "image", "kindIndex": 0, "fileName": "a.jpg",
+         "x": 44, "y": 704, "w": 1832, "h": 350}]}]}
+    b = {"slides": [{"index": 0, "number": 1, "skipped": False, "items": [
+        {"kind": "image", "kindIndex": 0, "fileName": "a.jpg",
+         "x": 45, "y": 700, "w": 1830, "h": 351}]}]}
+    assert deck_slide_digests(a) == deck_slide_digests(b)
+
+
 # --------------------------------------------------------------------------
 # Synthetic IWA archive builders.
 # --------------------------------------------------------------------------
@@ -660,13 +674,14 @@ def _reuse_wa_diffs(off_jobs: list[dict], jxa_jobs: list[dict], present: dict[in
     return diffs
 
 
-def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None):
+def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None, honour_slides: bool = False):
     """A ``bulk_geometry_fn`` returning the JXA payload's group/image/movie/text x/y/w/h.
 
     ``{slideIndex: {kind: [[x, y, w, h], … by kindIndex]}}`` — exactly what a real
     bulk read would hand back. ``omit`` is a set of ``(slideIndex, kind)`` to leave
     OUT, so a test can simulate the bulk read missing a slide or a kind and check
-    the granular fallback.
+    the granular fallback. ``honour_slides`` restricts the response to the caller's
+    (1-based) ``slides`` list, like the real bulk read would.
     """
     omit = omit or set()
     base: dict[int, dict[str, list]] = {}
@@ -686,7 +701,10 @@ def _bulk_double_from_jxa(jxa_payload: dict, *, omit: set | None = None):
         base[s["index"]] = rows
 
     def fn(key_path, slides=None):
-        return base
+        if not honour_slides or not slides:
+            return base
+        keep = {int(n) - 1 for n in slides}  # `slides` is 1-based; `base` keys are 0-based
+        return {i: rows for i, rows in base.items() if i in keep}
     return fn
 
 
@@ -708,8 +726,9 @@ def test_splice_overwrites_only_bulk_kind_geometry_keeps_style():
         ]
     }
     bulk = {0: {"text": [[10, 20, 30, 40]], "image": [[100, 110, 120, 130]]}}
-    spliced = _splice_bulk_geometry(payload, bulk)
+    spliced, mismatch = _splice_bulk_geometry(payload, bulk)
     assert spliced == {(1, "text", 0), (1, "image", 0)}
+    assert mismatch == set()
     items = payload["slides"][0]["items"]
     assert (items[0]["x"], items[0]["y"], items[0]["w"], items[0]["h"]) == (10, 20, 30, 40)
     assert items[0]["font"] == "Amplitude" and items[0]["size"] == 42 and items[0]["text"] == "hi"
@@ -728,6 +747,224 @@ def test_splice_rounds_to_integers_like_jxa():
     assert all(isinstance(it[k], int) for k in ("x", "y", "w", "h"))
 
 
+def test_count_guard_exact_kind_mismatch_is_unspliced_and_flagged():
+    # An image count disagreement (bulk returns one fewer row than the offline read
+    # has image items) desyncs kindIndex: the kind is left UNspliced and returned in
+    # count_mismatch, while a matching kind on the same slide still splices.
+    payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [
+        {"index": 0, "number": 1, "items": [
+            {"kind": "image", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0},
+            {"kind": "image", "kindIndex": 1, "x": 0, "y": 0, "w": 0, "h": 0, "index": 1},
+            {"kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 2},
+        ]},
+    ]}
+    bulk = {0: {"image": [[10, 10, 10, 10]], "group": [[20, 20, 20, 20]]}}
+    spliced, mismatch = _splice_bulk_geometry(payload, bulk)
+    assert mismatch == {(1, "image")}
+    assert spliced == {(1, "group", 0)}  # matching kind still spliced
+    items = payload["slides"][0]["items"]
+    assert (items[0]["x"], items[0]["y"]) == (0, 0)  # image left offline
+    assert (items[2]["x"], items[2]["y"]) == (20, 20)  # group overwritten
+
+
+def test_count_guard_text_slack_requires_placeholder_tail():
+    # The text slack [0,2] must not mask a mid-list drop: when keynote-derived is in
+    # {1,2} the extra TAIL rows must be placeholder-shaped (at ~0,0 / off-canvas),
+    # else the (slide, text) is a real count mismatch (a dropped mid-list box pushed
+    # a real object to the end).
+    def deck():
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": [
+            {"index": 0, "number": 1, "items": [
+                {"kind": "text", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0},
+                {"kind": "text", "kindIndex": 1, "x": 0, "y": 0, "w": 0, "h": 0, "index": 1},
+            ]}]}
+    # Tail row is a real on-canvas box, not a placeholder => flagged, text unspliced.
+    real_tail = {0: {"text": [[10, 20, 30, 40], [50, 60, 70, 80], [500, 400, 200, 50]]}}
+    spliced, mismatch = _splice_bulk_geometry(deck(), real_tail)
+    assert mismatch == {(1, "text")}
+    assert spliced == set()
+    # A genuine placeholder tail (at 0,0) is allowed: text splices, no mismatch.
+    ph_tail = {0: {"text": [[10, 20, 30, 40], [50, 60, 70, 80], [0, 0, 0, 0]]}}
+    spliced2, mismatch2 = _splice_bulk_geometry(deck(), ph_tail)
+    assert mismatch2 == set()
+    assert spliced2 == {(1, "text", 0), (1, "text", 1)}
+
+
+def test_count_mismatch_forces_fallback_even_with_zero_soft_items(monkeypatch):
+    """A per-(slide, kind) bulk-vs-offline count disagreement forces the slide into
+    fallback_slides EVEN when the slide carries no soft item — closes the soft-free
+    mis-splice hole (r-count-guard). Today's soft-only fallback logic would keep the
+    offline item list the mismatch just proved wrong. The tier-1 read is stubbed so
+    the two_tier fallback wiring is exercised on a deliberately soft-free slide."""
+    from obed_edom import offline_inspect
+
+    def fake_offline(key_path, slide_range=None, *, deck=None):
+        # A soft-free slide (empty soft_geometry/guard) with two image items.
+        return {
+            "slideWidth": 1920, "slideHeight": 1080,
+            "slides": [{"index": 0, "number": 1, "items": [
+                {"kind": "image", "kindIndex": 0, "x": 0, "y": 0, "w": 0, "h": 0, "index": 0},
+                {"kind": "image", "kindIndex": 1, "x": 0, "y": 0, "w": 0, "h": 0, "index": 1},
+            ]}],
+            "_offline": {"guard": [], "soft_geometry": []},
+        }
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", fake_offline)
+
+    # Bulk returns ONE image row for a slide the offline read has TWO images on.
+    def fn(key_path, slides=None):
+        return {0: {"image": [[10, 10, 10, 10]]}}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert side["bulk_ok"] is True
+    assert side["fallback_slides"] == [1]
+    assert any(
+        f["slide"] == 1 and f["reason"] == "count-mismatch" and f["kind"] == "image"
+        for f in side["fallback"]
+    )
+    # And the mismatched kind was left UNspliced (offline geometry stands).
+    assert side["spliced"] == 0
+
+
+def _fake_offline_deck(*, skipped=(), soft=(), guard=()):
+    """Tier-1 double: 3 numbered slides, one image each; ``skipped`` is 1-based numbers."""
+    skip = set(skipped)
+
+    def fake(key_path, slide_range=None, *, deck=None):
+        return {
+            "slideWidth": 1920, "slideHeight": 1080, "slideCount": 3,
+            "slides": [{"index": i, "number": i + 1, "skipped": (i + 1) in skip,
+                        "items": [{"kind": "image", "kindIndex": 0,
+                                   "x": 0, "y": 0, "w": 0, "h": 0, "index": 0}]}
+                       for i in range(3)],
+            "_offline": {"guard": list(guard), "soft_geometry": list(soft)},
+        }
+    return fake
+
+
+def test_two_tier_bulk_reads_only_non_skipped_slides(monkeypatch):
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}))
+
+    seen: dict = {}
+
+    def fn(key_path, slides=None):
+        seen["slides"] = slides
+        return {}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert seen["slides"] == [1, 3]
+    assert side["bulk_slides"] == 2
+    assert side["skipped"] == 1
+    assert side["fallback_slides"] == []
+
+
+def test_skipped_slide_soft_items_are_not_fallback(monkeypatch):
+    from obed_edom import offline_inspect
+
+    soft = [
+        {"slide": 2, "kind": "group", "kindIndex": 0},
+        {"slide": 3, "kind": "group", "kindIndex": 0},
+    ]
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}, soft=soft)
+    )
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=lambda key_path, slides=None: {})
+    side = off["_offline"]
+    assert side["fallback_slides"] == [3]
+    assert all(f["slide"] == 3 for f in side["fallback"])
+
+
+def test_skipped_slide_font_flags_are_not_fallback_but_filename_dirty_is(monkeypatch):
+    """``filename-dirty`` stays even on a skipped slide because ``deck_slide_digests``
+    hashes fileName (``baseline.py:170-172``) and the legacy item re-read is what
+    fills the real fileName."""
+    from obed_edom import offline_inspect
+
+    guard = [
+        {"slide": 2, "kind": "text", "kindIndex": 0, "reason": "font-size-unresolved"},
+        {"slide": 2, "kind": "image", "kindIndex": 0, "reason": "filename-dirty"},
+        {"slide": 3, "kind": "text", "kindIndex": 0, "reason": "font-size-unresolved"},
+    ]
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}, guard=guard)
+    )
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=lambda key_path, slides=None: {})
+    side = off["_offline"]
+    assert {(f["slide"], f["reason"]) for f in side["fallback"]} == {
+        (2, "filename-dirty"), (3, "font-size-unresolved"),
+    }
+    assert side["fallback_slides"] == [2, 3]
+
+
+def test_all_skipped_skips_bulk_call(monkeypatch):
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={1, 2, 3})
+    )
+
+    def fn(key_path, slides=None):
+        raise AssertionError("bulk_geometry_fn must not be called when every slide is skipped")
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    side = off["_offline"]
+    assert side["bulk_ok"] is True
+    assert side["spliced"] == 0
+    assert side["bulk_slides"] == 0
+    assert side["fallback_slides"] == []
+
+
+def test_slide_range_intersects_non_skipped(monkeypatch):
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck(skipped={2}))
+
+    seen: dict = {}
+
+    def fn(key_path, slides=None):
+        seen["slides"] = slides
+        return {}
+
+    two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn, slide_range=(2, 3))
+    assert seen["slides"] == [3]
+
+
+def test_subset_bulk_requests_every_slide_when_none_skipped_and_digests_hold():
+    """The Map deck has 0 skipped slides, so ``wanted`` (1-based) must cover every
+    slide the JXA payload has (0-based bulk keys aside) — the discriminating
+    assertion is the recorded ``slides`` kwarg. The digest equalities are a sanity
+    check, not the point: the slide-identity digest never depends on geometry, so a
+    subset or partial (some kinds omitted) bulk read holds it by construction."""
+    pytest.importorskip("keynote_parser")
+    jxa = _cached_payload(MAP_DECK)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    from obed_edom.baseline import deck_slide_digests
+
+    full = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+
+    seen: dict = {}
+    honour_fn = _bulk_double_from_jxa(jxa, honour_slides=True)
+
+    def spy(key_path, slides=None):
+        seen["slides"] = slides
+        return honour_fn(key_path, slides=slides)
+
+    subset = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=spy)
+    assert seen["slides"] == [s["number"] for s in full["slides"]]
+
+    omit = {(i, k) for i in (1, 2) for k in BULK_KINDS}
+    partial = two_tier_wall_payload(
+        MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa, omit=omit, honour_slides=True)
+    )
+    assert deck_slide_digests(partial) == deck_slide_digests(full) == deck_slide_digests(subset)
+
+
 def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():
     # With no bulk fn the payload is the tier-1 offline read, and every soft item
     # (unconfirmed) is a fallback unit — bulk_ok False.
@@ -743,28 +980,26 @@ def test_two_tier_none_fn_is_pure_offline_with_soft_fallback():
     assert all(f["reason"] in (CONTENT_GUARD_REASONS | {"bulk-missing"}) for f in side["fallback"])
 
 
-@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
-def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
-    """The proven simulation: splicing the JXA group/image/movie/text x/y/w/h into
-    the offline payload makes the remap PLAN (transforms + reuses) write-affecting-
-    identical to the JXA plan on the Map deck — the gate goes GREEN behind the bulk
-    fn. Font size (autoshrink, re-derived on write) and colour are the only fields
-    that still differ; both are non-write-affecting (see _ATTR_ONLY_SPEC_FIELDS)."""
+def _assert_two_tier_gate_green(deck: Path):
+    """THE RESIZER GOLD-DECK GATE. Splicing the JXA group/image/movie/text x/y/w/h
+    into the offline payload must make the remap PLAN (transforms + reuses) write-
+    affecting-identical to the JXA plan — the gate goes GREEN behind the bulk fn. Font
+    size (autoshrink, re-derived on write) and colour are the only fields that still
+    differ; both are non-write-affecting (see _ATTR_ONLY_SPEC_FIELDS). Skips when the
+    deck / cached payload / CG template is absent (all local-only, Keynote-free)."""
     pytest.importorskip("keynote_parser")
-    jxa = _cached_payload(MAP_DECK)
+    jxa = _cached_payload(deck)
     if jxa is None:
         pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
-    template = None
-    tmpl_deck = MAP_DECK.parent / "Base_CG_Assets.key"
-    if tmpl_deck.exists():
-        template = offline_wall_payload(tmpl_deck)
-    if template is None:
+    tmpl_deck = deck.parent / "Base_CG_Assets.key"
+    if not tmpl_deck.exists():
         pytest.skip("no CG template deck available for the plan gate")
+    template = offline_wall_payload(tmpl_deck)
 
     from obed_edom.map_remap import plan_payload_transforms, plan_slide_reuses
     from obed_edom.remap_keynote import recipe_for
 
-    off = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
+    off = two_tier_wall_payload(deck, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
     assert off["_offline"]["bulk_ok"] is True
     assert off["_offline"]["fallback_slides"] == [], "full bulk => no slide falls back"
     # Every bulk-kind item is spliced EXCEPT the <=2-per-slide trailing empty
@@ -789,6 +1024,155 @@ def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
     rdiffs = _reuse_wa_diffs(off_r, jxa_r, present)
     assert tdiffs == [], f"transform write-affecting diffs: {tdiffs[:5]}"
     assert rdiffs == [], f"reuse write-affecting diffs: {rdiffs[:5]}"
+
+
+@pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_makes_write_affecting_gate_green_map_deck():
+    # Map deck: 0 rotated-masked images, so it does not exercise the L1 guard; it pins
+    # the shape/line/group/autosize-text plan neutrality of the two-tier read.
+    _assert_two_tier_gate_green(MAP_DECK)
+
+
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_two_tier_splice_makes_write_affecting_gate_green_full_deck():
+    # Full report-card deck carries the rotated-masked images the Map deck lacks (10
+    # pre-L1), so THIS is the gate that proves L1's masked-image change is plan-neutral
+    # for the resizer: whether L1 flags or vouches those images, the bulk splice
+    # overwrites their geometry and the remap plan stays JXA-identical.
+    _assert_two_tier_gate_green(FULL_DECK)
+
+
+@pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])
+def test_l1_cleared_rotated_masked_images_are_write_safe(deck):
+    """L1's load-bearing property: a masked image the guard CLEARS (rotated-masked no
+    longer flagged) is within the 2px write tolerance of the JXA oracle, so a path that
+    trusts it without a bulk read (the tier-1 guard, or a future slim-bulk that drops
+    the image kind) stays write-safe. Only the VOUCHED masks are checked — a still-
+    flagged image falls back and its best-effort value never lands.
+
+    On FULL we also assert that at least one OFF-AXIS mask (frame or mask angle not a
+    90° multiple) is vouched — otherwise a regression to the old flag-every-rotated
+    guard would leave this test green while silently losing all L1 coverage. MAP has no
+    off-axis masks (all vouched masks are axis-aligned), so that leg is FULL-only."""
+    pytest.importorskip("keynote_parser")
+    if not deck.exists():
+        pytest.skip("local gold deck only")
+    jxa = _cached_payload(deck)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    from obed_edom.iwa_geometry import _geom_dict, _mask_geom, _xywha
+    from obed_edom.iwa_runs import _load_deck, slide_order
+
+    def _off_axis(angle: float) -> bool:
+        r = angle % 90.0
+        return min(r, 90.0 - r) > 0.5
+
+    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s.get("items") or []}
+           for s in jxa["slides"]}
+    objects, _a, _b = _load_deck(deck)
+    checked = off_axis_vouched = 0
+    for index, (sid, _skip) in enumerate(slide_order(objects)):
+        if sid not in objects:
+            continue
+        jmap = jby.get(index, {})
+        for rec in compose_geometry(objects[sid], objects):
+            if rec.get("geom_source") != "mask" or rec.get("needs_keynote") is not None:
+                continue  # only vouched (cleared) masked images
+            obj = objects.get(rec["id"]) or {}
+            mg = _mask_geom(obj, objects)
+            if _off_axis(_xywha(_geom_dict(obj))[4]) or (mg and _off_axis(_xywha(mg)[4])):
+                off_axis_vouched += 1  # an image L1 cleared that the old guard flagged
+            j = jmap.get((rec["kind"], rec["kindIndex"]))
+            if not j or j.get("x") is None:
+                continue
+            assert abs(rec["x"] - j["x"]) <= 2 and abs(rec["y"] - j["y"]) <= 2, (
+                deck.name, index + 1, rec["kind"], rec["kindIndex"],
+                (rec["x"], rec["y"]), (j["x"], j["y"]))
+            checked += 1
+    assert checked > 0, "no vouched masked images found to check"
+    if deck == FULL_DECK:
+        assert off_axis_vouched > 0, "L1 vouched no off-axis mask — lost its coverage"
+
+
+@pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])
+def test_l2a_cleared_masked_child_groups_are_write_safe(deck):
+    """L2a's load-bearing property: a GROUP vouched (needs_keynote None) whose subtree
+    contains a masked child is within the 2px write tolerance of the JXA oracle AND
+    derives the SAME pin/map role as the JXA frame — so propagating L1's snap into the
+    group union (_leaf_bbox) is write-safe for any path that trusts the offline group
+    frame (a role flip is the write-affecting failure the px check alone would miss).
+    Also asserts ≥1 such vouched group has an OFF-AXIS masked child, else a regression
+    to the old flag-every-rotated-masked-child rule would leave this green while losing
+    L2a's coverage. (Asserted for BOTH decks — unlike the L1 test's FULL-only guard —
+    because MAP's off-axis masks live only as in-group children, never as top-level
+    masked-image records, so MAP exercises L2a even though it did not exercise L1.)"""
+    pytest.importorskip("keynote_parser")
+    if not deck.exists():
+        pytest.skip("local gold deck only")
+    jxa = _cached_payload(deck)
+    if jxa is None:
+        pytest.skip("no exact-bytes JXA payload cached for the current deck bytes")
+    from obed_edom.iwa_geometry import _geom_dict, _mask_geom, _xywha
+    from obed_edom.iwa_runs import _load_deck, slide_order
+    from obed_edom.map_remap import is_map_item, is_pin_item
+
+    def _off_axis(angle: float) -> bool:
+        r = angle % 90.0
+        return min(r, 90.0 - r) > 0.5
+
+    def _masked_children(gid, objects, seen):
+        """(has_masked_child, has_off_axis_masked_child) over the group subtree."""
+        if gid in seen:
+            return (False, False)
+        seen.add(gid)
+        group = objects.get(gid) or {}
+        has = off = False
+        for ref in group.get("children") or []:
+            cid = ref.get("identifier")
+            child = objects.get(str(cid)) if cid is not None else None
+            if not child:
+                continue
+            if child.get("_pbtype") == "TSD.GroupArchive":
+                h2, o2 = _masked_children(str(cid), objects, seen)
+                has, off = has or h2, off or o2
+            elif child.get("_pbtype") in ("TSD.ImageArchive", "TSD.MovieArchive"):
+                mg = _mask_geom(child, objects)
+                if mg:
+                    has = True
+                    if _off_axis(_xywha(_geom_dict(child))[4]) or _off_axis(_xywha(mg)[4]):
+                        off = True
+        return (has, off)
+
+    jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s.get("items") or []}
+           for s in jxa["slides"]}
+    objects, _a, _b = _load_deck(deck)
+    checked = off_axis_vouched = 0
+    for index, (sid, _skip) in enumerate(slide_order(objects)):
+        if sid not in objects:
+            continue
+        jmap = jby.get(index, {})
+        for rec in compose_geometry(objects[sid], objects):
+            if rec["kind"] != "group" or rec.get("needs_keynote") is not None:
+                continue  # only vouched groups
+            has, off = _masked_children(rec["id"], objects, set())
+            if not has:
+                continue
+            if off:
+                off_axis_vouched += 1  # a group L2a cleared that the old rule flagged
+            j = jmap.get((rec["kind"], rec["kindIndex"]))
+            if not j or j.get("x") is None:
+                continue
+            for f in ("x", "y", "w", "h"):
+                assert abs(rec[f] - j[f]) <= 2, (deck.name, index + 1, f, rec[f], j[f])
+            # Role parity: the offline frame must derive the same pin/map role as JXA —
+            # a size-driven pin<->other flip is write-affecting even inside the 2px band
+            # (the property a future slim-bulk that trusts this frame depends on).
+            off_item = {**j, "x": rec["x"], "y": rec["y"], "w": rec["w"], "h": rec["h"]}
+            assert is_pin_item(off_item) == is_pin_item(j), (deck.name, index + 1, "pin")
+            assert is_map_item(off_item) == is_map_item(j), (deck.name, index + 1, "map")
+            checked += 1
+    assert checked > 0, "no vouched masked-child groups found to check"
+    assert off_axis_vouched > 0, "L2a vouched no off-axis masked-child group"
 
 
 @pytest.mark.skipif(not MAP_DECK.exists(), reason="local gold deck only")

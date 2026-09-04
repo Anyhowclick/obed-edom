@@ -1,10 +1,7 @@
 """Compare pasted graphics as regions, not as whole slides.
 
-Keynote reports a group of screenshots as one empty box, and the wall
-duplicates that box on the right. Hashing the whole center wall against the
-whole DSK frame only ever measures layout. This module clusters the actual
-content, drops the mirror, and then looks inside the crop for a blur patch or
-a highlight box that an 8×8 average hash will not see.
+Groups inspect as empty boxes and the wall duplicates them. Cluster content,
+drop the mirror, then look inside the crop for blur/highlight hashes miss.
 """
 
 from __future__ import annotations

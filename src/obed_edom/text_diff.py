@@ -1,9 +1,4 @@
-"""Token comparison for slide copy, and the classifier behind text findings.
-
-A single "Wording differs" warning tells an operator nothing. These helpers say
-which kind of difference it is, so a stray capital reads differently from a
-rewritten verse and each can carry its own severity.
-"""
+"""Token comparison for slide copy, and the classifier behind text findings."""
 
 from __future__ import annotations
 
@@ -12,7 +7,9 @@ import re
 from dataclasses import dataclass
 
 _SOFT_WS = re.compile(r"[\s\u2028\u2029\xa0]+")
-_EDGE_PUNCT = re.compile(r"^[\s.,;:!?…'\"“”‘’()\[\]{}—–-]+|[\s.,;:!?…'\"“”‘’()\[\]{}—–-]+$")
+_EDGE_PUNCT = re.compile(
+    r"^[\s.,;:!?…'\"“”‘’()\[\]{}—–\-•·‣▪◦∙]+|[\s.,;:!?…'\"“”‘’()\[\]{}—–\-•·‣▪◦∙]+$"
+)
 _STANDALONE_NUMBER = re.compile(r"^\d{1,2}$")
 
 TRANSLATIONS = {
@@ -32,17 +29,11 @@ BIBLE_BOOK_WORDS = {
     "james", "peter", "jude", "revelation", "revelations",
 }
 
-# Typographic variants that mean the same thing to a reader but not to ==.
 _SYMBOL_WORDS = {"&": "and", "+": "and", "w/": "with"}
 
 
 def _enclosed_numerals() -> dict[str, str]:
-    """Circled point numbers read as plain digits.
-
-    A wall sets its point list as ① ② ③. OCR of the same glyphs is unreliable,
-    and the lower third often types 1. 2. 3. instead, so folding them keeps a
-    numbering style out of the wording diff.
-    """
+    """Circled point numbers → plain digits (OCR / DSK often type 1. 2. 3.)."""
     out: dict[str, str] = {}
     for base, count in (
         (0x2460, 20),  # ① .. ⑳
@@ -74,7 +65,6 @@ def fingerprint(text: str) -> str:
 
 
 def comparable_tokens(text: str) -> list[str]:
-    """Whitespace-folded tokens, original case. Ignores wrap/nbsp/line-separator."""
     folded = _SOFT_WS.sub(" ", (text or "").replace("\xa0", " ")).strip()
     out: list[str] = []
     for raw in folded.split() if folded else []:
@@ -84,7 +74,6 @@ def comparable_tokens(text: str) -> list[str]:
 
 
 def canonical_token(token: str) -> str:
-    """Fold case and typographic variants so only real wording differences remain."""
     folded = token.translate(_SYMBOL_CHARS).lower()
     return _SYMBOL_WORDS.get(folded, folded)
 
@@ -98,7 +87,6 @@ def is_rotation(a: list[str], b: list[str]) -> bool:
 
 
 def collapse_repeat(tokens: list[str]) -> list[str]:
-    """LW often duplicates a verse on both sides of the wall."""
     n = len(tokens)
     if n >= 4 and n % 2 == 0 and tokens[: n // 2] == tokens[n // 2 :]:
         return tokens[: n // 2]
@@ -106,7 +94,6 @@ def collapse_repeat(tokens: list[str]) -> list[str]:
 
 
 def texts_equivalent(left: str, right: str) -> bool:
-    """True when copy matches aside from wrap, nbsp, wall-duplication, and ref order."""
     a, b = collapse_repeat(comparable_tokens(left)), collapse_repeat(comparable_tokens(right))
     if a == b or is_rotation(a, b):
         return True
@@ -121,7 +108,6 @@ def texts_equivalent(left: str, right: str) -> bool:
 
 
 def text_score(left: str, right: str) -> float:
-    """Similarity for pairing. Case-folded fingerprints; does not rewrite originals."""
     a = fingerprint(left)
     b = fingerprint(right)
     if not a or not b:
@@ -167,11 +153,7 @@ def _verse_split(
     left_label: str,
     right_label: str,
 ) -> TextFinding | None:
-    """A whole extra verse on one deck is a different split, not a typo.
-
-    The wall fits more text than the lower third, so the two decks group verses
-    differently all the time. Reporting it as rewritten copy buries real errors.
-    """
+    """Whole extra verse on one deck is a split, not a typo."""
     extras: list[tuple[str, str]] = []
     for tag, i1, i2, j1, j2 in ops:
         for tokens, lo, hi, label in ((a, i1, i2, left_label), (b, j1, j2, right_label)):
@@ -219,13 +201,7 @@ LINE_MATCH = 0.55
 
 
 def _residual_lines(a: list[str], b: list[str]) -> tuple[list[str], list[str]] | None:
-    """Pair up the lines the two decks share, and hand back only what is left.
-
-    The wall and the lower third stack the same blocks in different orders, so a
-    straight token diff of the whole slide reports the layout instead of the one
-    line that actually reads differently. Returns None when the slides do not
-    share enough lines for this to be meaningful.
-    """
+    """Pair shared lines; return leftovers. None if too few lines match."""
     if len(a) < 2 or len(b) < 2:
         return None
     available = list(range(len(b)))
@@ -256,11 +232,7 @@ def _residual_lines(a: list[str], b: list[str]) -> tuple[list[str], list[str]] |
 
 
 def _split_reference_label(tokens: list[str]) -> tuple[list[str], list[str]]:
-    """Pull every "1 Samuel 10 (NIV)" out of a token list, wherever it sits.
-
-    Returns (label tokens, remaining tokens). A combined pair carries one label
-    per DSK slide, so all of them have to come out for the bodies to line up.
-    """
+    """Pull every \"1 Samuel 10 (NIV)\" out of a token list."""
     labels: list[str] = []
     rest: list[str] = []
     index = 0
@@ -272,11 +244,10 @@ def _split_reference_label(tokens: list[str]) -> tuple[list[str], list[str]]:
             continue
         end = index + 1
         if end >= len(tokens) or not _strip(tokens[end]).isdigit():
-            rest.append(token)  # A book name with no chapter is prose.
+            rest.append(token)
             index += 1
             continue
         start = index
-        # A numbered book ("1 Samuel") carries its numeral in front.
         if rest and _strip(rest[-1]).isdigit() and len(_strip(rest[-1])) == 1:
             labels.append(rest.pop())
         end += 1
@@ -292,7 +263,6 @@ _ENCLOSED_NUMERALS = _enclosed_numerals()
 
 
 def _numeral_form_only(left: str, right: str) -> bool:
-    """A circled point number against a plain digit is a numbering style."""
     if not any(ch in _ENCLOSED_NUMERALS for ch in left + right):
         return False
     plain = ["".join(_ENCLOSED_NUMERALS.get(ch, ch) for ch in token) for token in (left, right)]
@@ -300,25 +270,21 @@ def _numeral_form_only(left: str, right: str) -> bool:
 
 
 def _substantive_symbol(left: str, right: str) -> bool:
-    """True for swaps a reader notices: & for and, a hyphen for an en dash."""
     if set(left) <= _QUOTE_CHARS and set(right) <= _QUOTE_CHARS:
         return False
     return not _numeral_form_only(left, right)
 
 
 def _is_point_number(token: str) -> bool:
-    """A bare one or two digit number, i.e. a point number rather than a word."""
     bare = _strip(token)
     return bare.isdigit() and len(bare) <= 2
 
 
 def _format_label(tokens: list[str]) -> str:
-    """Render a reference label the way it reads on a slide: John 3 (MSG)."""
     return " ".join(f"({t})" if _is_translation(t) else t for t in _dedupe_labels(tokens))
 
 
 def _dedupe_labels(tokens: list[str]) -> list[str]:
-    """Drop the repeat when a combined pair carries the same label twice."""
     half = len(tokens) // 2
     if half and len(tokens) % 2 == 0 and tokens[:half] == tokens[half:]:
         return tokens[:half]
@@ -358,14 +324,7 @@ def _longest_common_run(a: list[str], b: list[str]) -> tuple[int, int, int] | No
 
 
 def _restacked(a: list[str], b: list[str]) -> bool:
-    """Do both decks hold the same blocks, only stacked in a different order?
-
-    The wall leads with the verse and the lower third with the point title, so
-    whole blocks swap places. Peel off the longest run the two share until
-    nothing is left: when every block was a phrase, this is layout. A sentence
-    rewritten from its own words leaves only stray one and two token runs, and
-    stays a wording difference.
-    """
+    """Same phrase blocks, different order. Short leftover runs stay wording diffs."""
     left, right = list(a), list(b)
     while left and right:
         run = _longest_common_run(left, right)
@@ -386,7 +345,6 @@ def classify_text_diff(
     ignore_left_tokens: set[str] | None = None,
     split_labels: bool = True,
 ) -> TextFinding | None:
-    """Name the difference between two slides' copy, or None when they agree."""
     a = collapse_repeat(comparable_tokens(left))
     b = collapse_repeat(comparable_tokens(right))
     if ignore_left_tokens:
@@ -417,21 +375,14 @@ def classify_text_diff(
     if canon_a == canon_b:
         pairs = [(x, y) for x, y in zip(a, b) if x != y and _substantive_symbol(x, y)]
         if not pairs:
-            # Curly quote direction and similar OCR artefacts. Nobody reads a
-            # difference here, and flagging it drowns out the ones they do.
             return None
         detail = "; ".join(f'{left_label} "{x}" vs {right_label} "{y}"' for x, y in pairs[:4])
         return TextFinding("text.symbol", f"Symbol or punctuation differs: {detail}.")
 
-    # The reference label sits at the top of the wall and the bottom of the
-    # lower third. Comparing raw token order makes that single move look like a
-    # rewrite of the whole slide, so set it aside and diff what is left.
     if split_labels:
         label_a, rest_a = _split_reference_label(a)
         label_b, rest_b = _split_reference_label(b)
         if label_a and label_b and rest_a and rest_b:
-            # The wall sets labels in caps by design, so compare them folded, and
-            # a combined pair repeats the label once per DSK slide.
             if _unique_label(label_a) != _unique_label(label_b):
                 return TextFinding(
                     "text.reference",
@@ -469,8 +420,6 @@ def classify_text_diff(
 
     ops = [op for op in difflib.SequenceMatcher(None, canon_a, canon_b).get_opcodes() if op[0] != "equal"]
     if sorted(canon_a) == sorted(canon_b):
-        # A reference label sits above the body on the wall and below it in the
-        # lower third; that is layout. Any other reshuffle is a real rewrite.
         moved = {
             _strip(t).lower()
             for _tag, i1, i2, j1, j2 in ops
@@ -504,8 +453,6 @@ def classify_text_diff(
     )
     moved = [t for _tag, i1, i2, j1, j2 in ops for t in a[i1:i2] + b[j1:j2]]
     if moved and not reference and all(_is_point_number(t) for t in moved):
-        # The wall shows a point number beside the title and the lower third
-        # sometimes does not. That is the template, not a mistake.
         return None
     parts = []
     for _tag, i1, i2, j1, j2 in ops[:3]:
@@ -533,7 +480,6 @@ def classify_text_diff(
 
 
 def standalone_numbers(text: str) -> set[str]:
-    """Point numbers that sit alone on an LW line and never reach the lower third."""
     return {
         line.strip()
         for line in (text or "").split("\n")

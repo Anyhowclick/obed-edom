@@ -1,9 +1,6 @@
 """On-device OCR of exported slide previews via the macOS Vision framework.
 
-Keynote's scripting API cannot read inside groups and returns nothing for text
-baked into images, so a large share of what the audience actually reads is
-invisible to `inspect_keynote`. OCR of the rendered PNG is the only way to see
-it. Everything here is local; no network and no writes to the .key files.
+Keynote cannot read groups or baked-in image text. Local only; no writes to .key.
 """
 
 from __future__ import annotations
@@ -35,7 +32,7 @@ class OcrLine:
 
 
 def _load_vision():
-    """Import Vision lazily. The frameworks are macOS-only and slow to import."""
+    """macOS-only; slow to import."""
     global _VISION_READY, _VISION_ERROR
     try:
         import Quartz  # noqa: PLC0415
@@ -49,7 +46,6 @@ def _load_vision():
 
 
 def vision_error() -> str | None:
-    """Why OCR is unavailable, or None once a successful read has happened."""
     if _VISION_READY:
         return None
     return _VISION_ERROR
@@ -100,12 +96,7 @@ def ocr_lines(
     *,
     box: tuple[float, float, float, float] | None = None,
 ) -> list[OcrLine]:
-    """Recognised text lines, top to bottom. Empty when Vision cannot run.
-
-    `box` is a pixel rect (x0, y0, x1, y1) with a top-left origin, used to read
-    only the center wall of a wide LW export. Results are cached beside the PNG
-    so re-running checks on the same job costs nothing.
-    """
+    """Top to bottom. Empty when Vision cannot run. `box` is a pixel rect (center wall)."""
     global _VISION_ERROR
     png = Path(png)
     if not png.is_file():
@@ -133,8 +124,6 @@ def ocr_lines(
 
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-    # Slide copy is proper nouns and scripture; autocorrection rewrites exactly
-    # the spellings we are trying to check.
     request.setUsesLanguageCorrection_(False)
     handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
     try:
@@ -157,8 +146,7 @@ def ocr_lines(
         if not text or confidence < MIN_CONFIDENCE:
             continue
         rect = observation.boundingBox()
-        # Vision normalises with a bottom-left origin; flip to top-left so the
-        # numbers line up with Keynote item coordinates.
+        # Vision origin is bottom-left; flip to top-left for Keynote coords.
         x0 = float(rect.origin.x)
         width = float(rect.size.width)
         height = float(rect.size.height)
@@ -173,8 +161,6 @@ def ocr_lines(
                 y1=round(y0 + height, 4),
             )
         )
-    # Band rows before sorting so a caption strip reads left-to-right instead of
-    # being reordered by sub-pixel baseline differences.
     lines.sort(key=lambda line: (round(line.y0 / 0.04), line.x0))
     _write_cache(png, key, lines)
     return lines
@@ -199,9 +185,7 @@ def ocr_text(png: Path | str, *, box: tuple[float, float, float, float] | None =
     return "\n".join(line.text for line in ocr_lines(png, box=box))
 
 
-# Vision reads a small-capped LORD as "Lord", exactly like the typed text, so
-# case alone cannot tell the two apart. The shapes can: in normal case the "d"
-# ascender rises to the same line as the "L", while small caps sit well below it.
+# Small-capped LORD OCRs as "Lord". Ascender drop vs cap-line "d" is the tell.
 SMALL_CAPS_RATIO = 0.05
 _INK_THRESHOLD = 60
 
@@ -220,7 +204,6 @@ def word_shapes(
     *,
     box: tuple[float, float, float, float] | None = None,
 ) -> list[WordShape]:
-    """Measure how each occurrence of `word` is actually set on the slide."""
     png = Path(png)
     if not png.is_file() or len(word) < 3:
         return []
@@ -307,11 +290,7 @@ def word_shapes(
 
 
 def _ascender_drop(grey, rect) -> float | None:
-    """How far below the first letter the rest of the word starts, as a ratio.
-
-    Near zero means normal case, because "d" reaches the cap line. Clearly
-    positive means the remaining letters are small caps.
-    """
+    """Near zero = normal case; clearly positive = remaining letters are small caps."""
     try:
         import numpy as np  # noqa: PLC0415
     except Exception:  # noqa: BLE001
@@ -319,7 +298,6 @@ def _ascender_drop(grey, rect) -> float | None:
     width, height = grey.size
     x0 = int(rect.origin.x * width)
     x1 = int((rect.origin.x + rect.size.width) * width)
-    # Vision's origin is bottom-left; PIL's is top-left.
     y0 = int((1 - rect.origin.y - rect.size.height) * height)
     y1 = int((1 - rect.origin.y) * height)
     if x1 - x0 < 8 or y1 - y0 < 8:
@@ -375,7 +353,6 @@ def _write_shape_cache(png: Path, key: dict, shapes: list[WordShape]) -> None:
 
 
 def clear_cache(folder: Path | str) -> int:
-    """Drop cached OCR sidecars under a folder. Returns how many were removed."""
     removed = 0
     for pattern in ("*.ocr.json", "*.caps.json"):
         for path in Path(folder).rglob(pattern):

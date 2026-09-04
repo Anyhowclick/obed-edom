@@ -10,13 +10,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from obed_edom import keynote_app
+from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
+    adjust_child_resize_indexes,
     navigator_numbering,
     CG_HEIGHT,
     CG_WIDTH,
+    DEFAULT_CARD_STROKE,
+    GRID_MIN_CLEAR,
     format_slide_range,
     learn_recipe,
     plan_payload_transforms,
@@ -28,8 +31,7 @@ from obed_edom.map_remap import (
 
 REMAP_JS = Path(__file__).resolve().parent / "remap_keynote.js"
 
-# AppleScript element names for the kinds the plan carries. The AppleScript index
-# is the JXA 0-based collection index plus one (same sdef collection, same order).
+# AppleScript index is JXA kindIndex + 1 (same sdef collection, same order).
 _AS_KIND_NAMES = {
     "text": "text item",
     "image": "image",
@@ -41,40 +43,42 @@ _AS_KIND_NAMES = {
 
 
 def as_geometry_enabled() -> bool:
-    """Whether the batched-AppleScript geometry path is used — default ON.
-
-    AS-geometry is the validated default: no JXA (0,0) yank, ~30% faster on the
-    constellation slide (it drops setPos's readback-verify and the second
-    position pass), placement/z-order/groups confirmed correct. Set
-    ``OBED_AS_GEOMETRY=0`` (or ``false``/``no``/``off``) to force the legacy JXA
-    geometry path — kept for A/B debugging and as the per-slide fallback for
-    slides carrying an object of a kind AppleScript can't address.
-    """
+    """Batched-AppleScript geometry path (default ON). `OBED_AS_GEOMETRY=0` forces legacy JXA."""
     return os.environ.get("OBED_AS_GEOMETRY", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
-# --------------------------------------------------------------------------
-# Offline source-wall read (OBED_OFFLINE_READ) — reconstruct the ~12-min JXA
-# `inspect_keynote(source)` from the deck's IWA graph, with the legacy read as
-# an AUTOMATIC total fallback. See obed_edom.offline_inspect + the reviewed plan.
-# --------------------------------------------------------------------------
+def suppress_geometry_slides() -> set[int]:
+    """1-based slides whose pass-1 write is attrs-only. Without `OBED_SUPPRESS_GEOMETRY`, empty-asGeom falls through to JXA full path."""
+    raw = os.environ.get("OBED_SUPPRESS_GEOMETRY", "")
+    slides: set[int] = set()
+    for token in raw.replace(",", " ").split():
+        try:
+            slides.add(int(token))
+        except ValueError:
+            continue
+    return slides
+
+
 def offline_read_mode(explicit: str | None = None) -> str:
-    """Resolve the offline-read mode: ``on`` (default) or ``off``.
-
-    ``explicit`` (the ``remap()`` param) wins; otherwise ``OBED_OFFLINE_READ``;
-    otherwise the default. Unknown values fall to the default. DEFAULT is ``on``
-    (Session 15): the gold-deck plan gate is green on both decks with the real bulk
-    read, and one real end-to-end ``on`` remap wrote a deck placement-identical to a
-    legacy-read run. ``OBED_OFFLINE_READ=off`` forces the legacy ~12-min JXA inspect.
-
-    (The old ``verify`` mode — build both reads and diff at runtime — was removed:
-    its check was stricter than the validated write-affecting gate, so a re-derived
-    autoshrink ``fontSize`` that never lands on write made it always fall back on
-    real decks. The granular per-slide fallback inside the ``on`` path is the safety
-    net; force ``off`` for a full legacy read.)
-    """
+    """`on` (default two-tier IWA+bulk) or `off` (legacy JXA inspect). `explicit` wins over `OBED_OFFLINE_READ`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_READ", "")).strip().lower()
     return raw if raw in {"on", "off"} else "on"
+
+
+def offline_write_mode(explicit: str | None = None, *, say: Callable[[str], None] | None = None) -> str:
+    """`off` (default), `on` (surgical offline IWA patch), or `verify` (patch + live
+    verify). Env `OBED_OFFLINE_WRITE`. Forced `off` when `as_geometry_enabled()` is False:
+    the offline write's AppleScript fallback is the same batched-geometry body that flag disables."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_OFFLINE_WRITE", "")).strip().lower()
+    mode = raw if raw in {"on", "verify"} else "off"
+    if mode != "off" and not as_geometry_enabled():
+        if say:
+            say(
+                f"OBED_OFFLINE_WRITE={mode!r} needs OBED_AS_GEOMETRY on (its AppleScript "
+                "fallback is the batched-geometry body); forcing offline write off."
+            )
+        return "off"
+    return mode
 
 
 def _spec_addr(spec: dict[str, Any]) -> tuple:
@@ -114,15 +118,7 @@ def _specs_equivalent(off: list[dict], jxa: list[dict]) -> bool:
 def _merge_legacy_slides(
     payload: dict[str, Any], source: Path, slide_numbers: list[int]
 ) -> None:
-    """Replace the given slides' items in ``payload`` with a scoped legacy read, in place.
-
-    The granular-fallback merge: only ``slide_numbers`` (document numbers) are
-    re-read, in a SINGLE ``inspect_keynote`` scoped to them, and each returned
-    slide's item-bearing fields overwrite the offline+bulk slide of the same
-    number. Addressing (index/number) and every other slide are left untouched, so
-    the payload stays a drop-in for the planner. A legacy read that comes back
-    without a wanted slide leaves that slide's offline data in place (best effort).
-    """
+    """Replace the given slides' items in `payload` with one scoped legacy inspect."""
     if not slide_numbers:
         return
     legacy = inspect_keynote(source, slide_range=frozenset(int(n) for n in slide_numbers))
@@ -135,8 +131,6 @@ def _merge_legacy_slides(
         repl = by_number.get(number)
         if repl is None:
             continue
-        # Overwrite the content the legacy read authoritatively supplies; keep the
-        # offline index/number so downstream addressing is unchanged.
         for key in ("items", "groupedText", "master", "skipped"):
             if key in repl:
                 slide[key] = repl[key]
@@ -149,21 +143,9 @@ def acquire_wall_payload(
     mode: str,
     say: Callable[[str], None],
 ) -> dict[str, Any]:
-    """The source-wall inspect payload, honouring ``OBED_OFFLINE_READ`` ``mode``.
+    """Source-wall inspect honouring offline-read mode.
 
-    * ``off`` — the legacy ``inspect_keynote(source)`` (the ~12-min JXA read).
-    * ``on`` (default) — the TWO-TIER read is the source of truth: the offline IWA
-      payload (tier 1, exact for shapes/lines/plain frames) with a slim bulk Keynote
-      read (tier 2) overwriting the geometry of the three offline-soft classes
-      (groups, masked/rotated images, autosize text). Fallback is GRANULAR — the
-      unit is the object CLASS or SLIDE, never the whole deck: only slides whose
-      soft items the bulk read did not confirm, or that carry a content guard flag
-      (font/fileName the bulk read cannot touch), are re-read with one scoped
-      legacy ``inspect_keynote`` and merged back. The whole deck drops to legacy
-      only when tier 1 itself raises (missing ``iwa`` extra, decode error) or the
-      bulk tier is entirely unavailable AND something still needs confirming.
-
-    A ``say(...)`` line always records which path actually supplied the payload.
+    `on`: IWA + bulk geometry, with per-slide legacy fallback — never drop the whole deck unless tier 1 fails.
     """
     if mode == "off":
         return inspect_keynote(source, slide_range=slide_range)
@@ -185,9 +167,6 @@ def acquire_wall_payload(
     sidecar = offline.get("_offline") or {}
     fallback_slides = sidecar.get("fallback_slides") or []
 
-    # Tier 2 (bulk geometry) unavailable AND something still needs confirming:
-    # the offline geometry alone cannot be trusted for the soft classes, so drop
-    # the whole deck to legacy — the pre-two-tier safe behaviour.
     if not sidecar.get("bulk_ok") and fallback_slides:
         from collections import Counter  # noqa: PLC0415
 
@@ -197,8 +176,6 @@ def acquire_wall_payload(
             f"using Keynote inspect for the whole deck.")
         return inspect_keynote(source, slide_range=slide_range)
 
-    # Granular per-slide fallback: re-read only the flagged slides (one scoped
-    # legacy pass) and splice their items back over the offline payload.
     if fallback_slides:
         from collections import Counter  # noqa: PLC0415
 
@@ -208,41 +185,28 @@ def acquire_wall_payload(
             f"inspect {reasons}: {fallback_slides}.")
         _merge_legacy_slides(offline, source, fallback_slides)
 
-    # mode == "on": the two-tier read is the source of truth.
     confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
-    say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed} — "
+    omitted = int(sidecar.get("skipped") or 0)
+    skipped_note = "" if not omitted else f"; {omitted} Keynote-skipped slide(s) left to the offline tier"
+    say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
     return offline
 
 
 def write_timing_enabled() -> bool:
-    """Diagnostic: when ON, the JXA write pass records per-slide/per-phase elapsed
-    and the individual objects slower than a threshold, and remap prints a summary
-    — so one run shows exactly which slide, phase, and objects eat the geometry-write
-    time. Default OFF (zero cost). Set ``OBED_WRITE_TIMING=1`` to enable.
-    """
+    """When ON (`OBED_WRITE_TIMING=1`), record per-slide/per-phase JXA write timing."""
     return os.environ.get("OBED_WRITE_TIMING", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def geom_props_enabled() -> bool:
-    """Whether the AS-geometry block folds each object's SIZE writes into one
-    ``set properties {width, height}`` command (position stays a separate LAST write
-    so the height re-anchor is still corrected; a line's endpoints fold into one
-    atomic set) instead of writing every property separately — default ON.
+    """Fold size into one `set properties {width, height}`; position stays a separate last write.
 
-    Fewer AppleScript commands is the only lever on a heavy slide: each command
-    carries a fixed ~100ms per-object cost there, and there is no cross-object bulk
-    write. Measured ~1.25× on the real report deck (slide 8 124s→101s, slide 3
-    67s→54s), and validated placement-identical against the pipeline's own
-    run-to-run noise floor (Keynote's canvas-shrink already jitters the map ~8px per
-    run). Set ``OBED_GEOM_PROPS=0`` (or ``false``/``no``/``off``) to force the legacy
-    per-property writes for A/B.
+    Height re-anchors ~18px about centre; folding position into the same record drifts the object.
     """
     return os.environ.get("OBED_GEOM_PROPS", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _say_write_timing(timing: dict[str, Any], say: Callable[[str], None]) -> None:
-    """Print the write-path timing: phases by total elapsed, then the slowest objects."""
     buckets: dict[str, Any] = timing.get("buckets") or {}
     rows = sorted(buckets.items(), key=lambda kv: -(kv[1].get("ms") or 0))
     say("── write timing: phases by total elapsed (ms) ──")
@@ -264,7 +228,6 @@ def _say_write_timing(timing: dict[str, Any], say: Callable[[str], None]) -> Non
 
 
 def _as_num(value: Any) -> str:
-    """AppleScript numeric literal: an integer when whole, else a 2dp decimal."""
     number = float(value)
     if number == int(number):
         return str(int(number))
@@ -272,28 +235,9 @@ def _as_num(value: Any) -> str:
 
 
 def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> str:
-    """One `tell slide N` block setting geometry for each object on that slide.
+    """One `tell slide N` block setting geometry.
 
-    Written in Python (not JXA) so a pytest can lock the exact string, and safe to
-    address by slide number because non-reuse slide numbering is stable through
-    the JXA loop (a reuse duplicate is deleted before the next slide, restoring
-    the count). Objects are addressed ``<kind> (kindIndex + 1)`` — the 1-based
-    AppleScript twin of the JXA 0-based collection index.
-
-    Width/height are written before position because an AppleScript height write
-    re-anchors ~18px about the object centre, which the final position write
-    corrects; unlike JXA, AppleScript does not yank an object to (0,0) on a size
-    write, so no position-only restore pass follows. A line's geometry is its
-    endpoints (``start point``/``end point``), which AppleScript can set even
-    though JXA cannot. A group gets full geometry (width, height, position) like
-    any other object: there is no separate child-resize pass on this branch, so
-    the JXA full pass this replaces was the only writer of a group's size — and a
-    role=="other" group is deliberately framed at wall size to keep wall-sized
-    children (a logo, a date) from clipping (see map_remap.py). Setting a group's
-    width in AppleScript neither yanks it nor scales its children, so it matches
-    that JXA frame write. Every object's writes sit inside their own ``try`` so an
-    unsupported property never abandons the rest of the slide, and a locked object
-    is unlocked before the writes and relocked after.
+    Width/height before position (height re-anchors ~18px). Lines use endpoints; AppleScript does not yank to (0,0).
     """
     body: list[str] = []
     for spec in specs:
@@ -325,17 +269,8 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
         x = spec.get("x")
         y = spec.get("y")
         if geom_props_enabled():
-            # Fewer AppleScript commands per object (each carries a fixed per-object cost
-            # on a heavy slide) — but position MUST stay a separate, LAST write. Setting
-            # height re-anchors ~18px about the object centre, and only a trailing
-            # position write corrects it; folding position into an atomic `properties`
-            # record loses that ordering and drifts the object (verified on a real deck).
-            # So: size keys combined into one `set properties`, then position on its own.
-            # A line has no re-anchor, so its endpoints stay a single atomic set.
-            # (Trade-off vs the legacy per-property form: a throw on the combined size
-            # record loses BOTH width and height rather than one — acceptable because both
-            # are universally settable on every _AS_KIND_NAMES kind, and the whole write is
-            # still wrapped in its own try so it never abandons the rest of the slide.)
+            # Position MUST stay a separate last write: height re-anchors ~18px about centre.
+            # Lines have no re-anchor; fold endpoints into one atomic set.
             if kind == "line" and start and end:
                 lines += [
                     "    try",
@@ -399,7 +334,7 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
         body += lines
     if not body:
         return ""
-    # A large deck's geometry can run well past osascript's 120s default.
+    # Geometry can run past osascript's 120s default.
     return "\n".join(
         ["with timeout of 3600 seconds", f"tell slide {int(slide_no)}"]
         + body
@@ -408,7 +343,6 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
 
 
 def _spec_bears_geometry(spec: dict[str, Any]) -> bool:
-    """Whether this transform carries geometry the JXA full pass would place."""
     if spec.get("w") is not None or spec.get("h") is not None:
         return True
     if spec.get("x") is not None and spec.get("y") is not None:
@@ -419,16 +353,7 @@ def _spec_bears_geometry(spec: dict[str, Any]) -> bool:
 
 
 def _slide_geometry_addressable(specs: list[dict[str, Any]]) -> bool:
-    """Whether every geometry-bearing object on the slide has an AppleScript address.
-
-    The AppleScript block can only address the kinds in ``_AS_KIND_NAMES``. JXA's
-    ``getItem`` also resolves a ``table``/``chart``/unknown kind through its
-    iWorkItems fallback and the full pass positions it, but the AppleScript block
-    has no such fallback — so a slide carrying any geometry-bearing unaddressable
-    object is kept OFF the AppleScript path entirely and left to the JXA full pass.
-    Correctness (that object still gets moved) beats removing the flick on that one
-    edge-case slide.
-    """
+    """False if any geometry-bearing object is outside `_AS_KIND_NAMES` — keep that slide on JXA."""
     for spec in specs:
         if spec.get("role") == "hide":
             continue
@@ -439,15 +364,11 @@ def _slide_geometry_addressable(specs: list[dict[str, Any]]) -> bool:
     return True
 
 
-def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
-    """Per-slide AppleScript geometry bodies, keyed by slide number as a string.
-
-    Built from the same transform dicts sent to JXA so the addressing matches
-    object for object. A slide is included ONLY when every geometry-bearing object
-    on it is AppleScript-addressable (see ``_slide_geometry_addressable``); an
-    excluded slide has no key here, and the JXA loop then runs its full geometry
-    path. The reuse path ignores this map regardless.
-    """
+def _build_as_geometry(
+    transform_dicts: list[dict[str, Any]],
+    suppress: set[int] | frozenset[int] = frozenset(),
+) -> dict[str, str]:
+    """Per-slide AppleScript geometry bodies. Suppressed slides omitted so they stay attrs-only (no JXA fallback)."""
     by_slide: dict[int, list[dict[str, Any]]] = {}
     order: list[int] = []
     for spec in transform_dicts:
@@ -460,6 +381,8 @@ def _build_as_geometry(transform_dicts: list[dict[str, Any]]) -> dict[str, str]:
         by_slide[slide_no].append(spec)
     out: dict[str, str] = {}
     for slide_no in order:
+        if slide_no in suppress:
+            continue
         specs = by_slide[slide_no]
         if not _slide_geometry_addressable(specs):
             continue
@@ -510,6 +433,30 @@ def recipe_for(wall: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]
     return learn_recipe(wall, template)
 
 
+def _resolve_template_card_sample(card_samples: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """Same resolution `plan_slide_transforms` does per wall match (dominant same-size
+    cluster + `_card_pitch`), computed once here purely for the operator summary line —
+    `recipe["cardSamples"]` is deck-wide and does not depend on which wall group matched."""
+    if not card_samples:
+        return None
+    from collections import defaultdict  # noqa: PLC0415
+
+    from obed_edom.map_remap import _card_pitch, _rect_from_dict  # noqa: PLC0415
+
+    clusters: dict[tuple[float, float], list[dict[str, Any]]] = defaultdict(list)
+    for s in card_samples:
+        clusters[(round(s["rect"]["w"], 1), round(s["rect"]["h"], 1))].append(s)
+    _key, members = max(clusters.items(), key=lambda kv: len(kv[1]))
+    w = sum(m["rect"]["w"] for m in members) / len(members)
+    h = sum(m["rect"]["h"] for m in members) / len(members)
+    raw = [
+        {"rect": _rect_from_dict(s["rect"]), "aspect": s["aspect"], "caption": s["caption"]}
+        for s in card_samples
+    ]
+    pitch = _card_pitch(raw, w, h)
+    return {"w": w, "h": h, "gutterX": pitch["gutterX"], "gutterY": pitch["gutterY"]}
+
+
 def resolve_source_previews(
     source: Path,
     wall: dict[str, Any],
@@ -517,18 +464,7 @@ def resolve_source_previews(
     folder: Path | str | None = None,
     wanted: list[int] | None = None,
 ) -> tuple[dict[int, Any], str]:
-    """Rendered wall slides, keyed by slide number, for measuring empty space.
-
-    Placing loose text needs to know where the CG is actually empty, which needs
-    a picture of the slide. Rather than render one, this reuses an export that
-    already exists: an explicit folder if given, otherwise the preview cache that
-    any earlier inspect of this deck filled in. Both are free. When neither is
-    available the caller falls back to blind packing.
-
-    Returns the images plus a short label naming the source, because a stale
-    preview folder produces a plausible-looking but wrong mask and the log is
-    where that gets noticed.
-    """
+    """Rendered wall slides keyed by number, for measuring empty space for loose text."""
     from PIL import Image  # noqa: PLC0415
 
     from obed_edom.baseline import deck_digest, preview_cache_dir  # noqa: PLC0415
@@ -572,6 +508,92 @@ def resolve_source_previews(
     return {}, ""
 
 
+def _card_style_pair_key(style: dict[str, Any]) -> tuple:
+    r, g, b, a = style["color"]
+    rnd = tuple(round(v, 3) if v is not None else None for v in (r, g, b, a))
+    return (*rnd, style["pattern"])
+
+
+def restore_card_stroke_widths(
+    dest: Path, source: Path, wall: dict[str, Any], say: Callable[[str], None]
+) -> dict[str, Any]:
+    """Canvas shrink divides every image-card stroke width along with the geometry;
+    restore each canvas-shrunk card border to its source width, unconditional (not
+    gated by OBED_OFFLINE_WRITE), before the stat-finalize pass. Deck untouched on
+    any refusal/pairing miss for a given style; a resolved style is patched alone."""
+    try:
+        from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415
+        from obed_edom.iwa_write import (  # noqa: PLC0415
+            card_styles,
+            patch_stroke_widths,
+            select_card_styles,
+        )
+    except Exception as exc:  # noqa: BLE001 — optional iwa extra; never break the run
+        say(f"Card-border stroke patch unavailable ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+
+    try:
+        out_objects, out_id_to_file, _out_fi = _load_deck(dest)
+        src_objects, src_id_to_file, _src_fi = _load_deck(source)
+    except Exception as exc:  # noqa: BLE001 — offline read is opt-in; never break the run
+        say(f"Card-border stroke patch could not read the deck(s) ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+
+    out_selected = select_card_styles(
+        [s for s in card_styles(out_objects, out_id_to_file) if not s["inherited"]], min_refs=10
+    )
+    if not out_selected:
+        return {"skipped": True, "reason": "no card styles selected in the output"}
+    src_styles = [s for s in card_styles(src_objects, src_id_to_file) if not s["inherited"]]
+
+    out_by_key: dict[tuple, list[dict]] = {}
+    for s in out_selected:
+        out_by_key.setdefault(_card_style_pair_key(s), []).append(s)
+    src_by_key: dict[tuple, list[dict]] = {}
+    for s in src_styles:
+        src_by_key.setdefault(_card_style_pair_key(s), []).append(s)
+
+    wall_w = float(wall.get("slideWidth") or CG_WIDTH)
+    canvas_scale = (CG_WIDTH / wall_w) if wall_w > 0 else 1.0
+
+    widths: dict[str, float] = {}
+    chosen: list[dict[str, Any]] = []
+    for key, out_candidates in out_by_key.items():
+        src_candidates = src_by_key.get(key) or []
+        if len(out_candidates) != 1 or len(src_candidates) != 1:
+            for oc in out_candidates:
+                say(
+                    f"Card-border stroke: skipping style {oc['id']} ({len(out_candidates)} "
+                    f"output / {len(src_candidates)} source candidate(s) for this colour+pattern "
+                    "pairing, need exactly 1 on each side)."
+                )
+            continue
+        out_style, src_style = out_candidates[0], src_candidates[0]
+        out_w, src_w = out_style["width"], src_style["width"]
+        if out_w is None or src_w is None:
+            continue
+        if not (out_w < src_w and out_w <= src_w * canvas_scale * 1.1):
+            say(
+                f"Card-border stroke: skipping style {out_style['id']} (out={out_w} vs "
+                f"src={src_w}, canvas_scale={canvas_scale:.4f} guard failed)."
+            )
+            continue
+        widths[out_style["id"]] = src_w
+        chosen.append(
+            {"id": out_style["id"], "old": out_w, "new": src_w, "refs": out_style["refs"]}
+        )
+
+    if not widths:
+        return {"skipped": True, "reason": "no card style pair passed the guard"}
+
+    for c in chosen:
+        say(f"Card-border stroke: {c['id']} {c['old']} → {c['new']} ({c['refs']} refs).")
+    result = patch_stroke_widths(dest, widths)
+    if result.get("refused"):
+        say(f"Card-border stroke patch REFUSED: {result.get('reason')}")
+    return result
+
+
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
@@ -586,23 +608,10 @@ def remap_keynote(
     source_previews: Path | str | None = None,
     export_dir: Path | str | None = None,
     offline_read: str | None = None,
+    plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Copy wall `source` to `dest`, remap map+pins in place using the CG template crop.
-
-    `framing_overrides` maps a wall slide number to the template slide the operator
-    confirmed, for the pages where the automatic choice was wrong.
-
-    `side_content_slides` is the per-slide side-panel whitelist (wall slide numbers):
-    side content is dropped everywhere else and kept on these pages.
-
-    `export_dir`, when given, folds the PNG preview export into the stat-finalize
-    session (it runs against the already-open deck before it closes), so the dest is
-    not reopened a third time just to render previews. The result reports `exported`;
-    a run with no stat-group jobs never opens that session, so the caller still exports
-    those previews itself. Left unset (e.g. the validate=True read-back path), no
-    export is folded and behaviour is unchanged.
-    """
+    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
     def say(message: str) -> None:
         if log:
             log(message)
@@ -645,13 +654,54 @@ def remap_keynote(
         say(f"Inspecting CG template {template_path.name}…")
         template_data = inspect_keynote(template_path)
 
+    try:
+        from obed_edom.iwa_runs import attach_group_captions  # noqa: PLC0415
+
+        attach_group_captions(template_path, template_data)
+    except Exception as exc:  # noqa: BLE001 — card samples stay unavailable, cards keep the affine size
+        say(
+            f"Template caption geometry unavailable ({type(exc).__name__}: {exc}); "
+            "photo cards will keep today's affine size instead of the template's."
+        )
+
+    card_stroke = DEFAULT_CARD_STROKE
+    deck = None
+    try:
+        from obed_edom.iwa_runs import _load_deck, attach_group_captions, attach_group_child_text  # noqa: PLC0415
+
+        deck = _load_deck(source)
+        attach_group_child_text(source, wall, deck=deck)
+        attach_group_captions(source, wall, deck=deck)
+    except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
+        say(
+            f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
+            "will report a shortfall instead of deduping, and photo cards will not be "
+            "recognised as cards at all (no groupChildText signature to match on) — they "
+            "keep today's affine-mapped size, same as any other unmatched group."
+        )
+
+    try:
+        from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415
+        from obed_edom.iwa_write import card_styles, select_card_styles  # noqa: PLC0415
+
+        objects, id_to_file, _file_ids = deck if deck is not None else _load_deck(source)
+        selected = [
+            s
+            for s in select_card_styles(card_styles(objects, id_to_file), min_refs=10)
+            if not s.get("inherited")
+        ]
+        widths = sorted(s["width"] for s in selected if s.get("width") is not None)
+        if widths:
+            card_stroke = widths[len(widths) // 2]
+    except Exception as exc:  # noqa: BLE001 — fall back to the measured default
+        say(
+            f"Card-border stroke read unavailable ({type(exc).__name__}: {exc}); "
+            f"the card grid's fallback-pitch floor uses {card_stroke}pt instead."
+        )
+
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
-    # A rendered wall image lets loose text land on measured empty space rather than
-    # blind right-to-left packing. Needed wherever side content is kept — globally or
-    # on a whitelisted slide — so a whitelisted page packs its columns as well as the
-    # old global flag did.
     if include_lists or side_content_slides:
         previews, preview_note = resolve_source_previews(
             source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
@@ -662,6 +712,8 @@ def remap_keynote(
     offframe: list[dict[str, Any]] = []
     framing_rows: list[dict[str, Any]] = []
     child_resize: list[dict[str, Any]] = []
+    badge_raises: list[dict[str, Any]] = []
+    card_grid: list[dict[str, Any]] = []
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -677,6 +729,9 @@ def remap_keynote(
         framing_report=framing_rows,
         side_content_slides=side_content_slides,
         child_resize_report=child_resize,
+        badge_raise_report=badge_raises,
+        card_stroke=card_stroke,
+        card_grid_report=card_grid,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
@@ -726,6 +781,46 @@ def remap_keynote(
             f"{len(offframe)} object(s) visible on the wall land outside the CG frame "
             f"({detail}). They are still in the deck — drag them back or adjust the template."
         )
+    card_rows = [r for r in child_resize if r.get("captionPt")]
+    if recipe.get("cardSamples"):
+        resolved = _resolve_template_card_sample(recipe.get("cardSamples"))
+        card_slides = sorted({int(r["slide"]) for r in card_rows})
+        if resolved is not None:
+            gx, gy = resolved.get("gutterX"), resolved.get("gutterY")
+            pitch_source = "template" if gx is not None and gy is not None else "wall fallback"
+            gutter_txt = f"{gx:.2f}/{gy:.2f}" if gx is not None and gy is not None else "n/a"
+            say(
+                f"Template card sample: {len(recipe['cardSamples'])} copies at "
+                f"{resolved['w']:.1f}×{resolved['h']:.1f}, gutters {gutter_txt} ({pitch_source}); "
+                f"{len(card_rows)} wall card(s) matched"
+                + (f" on slides {card_slides}" if card_slides else " (none)")
+                + "."
+            )
+        else:
+            say(
+                f"Template card sample: {len(recipe['cardSamples'])} copies found; "
+                f"{len(card_rows)} wall card(s) matched"
+                + (f" on slides {card_slides}" if card_slides else " (none)")
+                + "."
+            )
+    if card_grid:
+        for row in card_grid:
+            overlaps = row.get("overlaps") or []
+            clear_x, clear_y = row.get("clearX"), row.get("clearY")
+            below = (
+                " (below 7pt)"
+                if (clear_x is not None and clear_x < GRID_MIN_CLEAR)
+                or (clear_y is not None and clear_y < GRID_MIN_CLEAR)
+                else ""
+            )
+            say(
+                f"Slide {row['slide']}: {row['n']} card(s) reflowed to {row['cols']}×{row['rows']}, "
+                f"pitch {row['pitchX']}/{row['pitchY']} (gutter {row['gutterX']}/{row['gutterY']}, "
+                f"clear {clear_x}/{clear_y} at {card_stroke}pt stroke{below}), "
+                f"origin ({row['x0']}, {row['y0']}), {row['offCanvas']} off-canvas"
+                + (f", {len(overlaps)} overlapping a stat group" if overlaps else "")
+                + "."
+            )
     if hidden:
         say(
             f"Left {len(hidden)} skipped slide(s) alone: "
@@ -734,6 +829,26 @@ def remap_keynote(
             + ". Un-skip in Keynote and re-run to include them."
         )
     reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
+    reuse_slides = {int(r["slide"]) for r in reuses}
+    # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
+    group_removes: list[dict[str, Any]] = []
+    for r in reuses:
+        for gr in r.get("groupRemove") or []:
+            group_removes.append(
+                {
+                    "slide": int(r["slide"]),
+                    "childSig": gr.get("childSig"),
+                    "expectedKeep": gr.get("expectedKeep"),
+                }
+            )
+    stat_adjustments = adjust_child_resize_indexes(child_resize, transforms, reuse_slides)
+    if stat_adjustments:
+        say(
+            f"Adjusted {len(stat_adjustments)} stat-group index(es) for deleted group hides or "
+            "voided on reuse slide(s): "
+            + ", ".join(f"slide {a['slide']} {a['from']}→{a['to']}" for a in stat_adjustments[:8])
+            + "."
+        )
     counts = summarize_plan(transforms)
     say(
         f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
@@ -802,6 +917,22 @@ def remap_keynote(
         copy_keynote(template_path, layout_src)
         say("Setting 16:9 canvas, applying CG layouts, then map/pin positions…")
         transform_dicts = [t.as_dict() for t in transforms]
+        wanted = slides_for_plan(slide_range)
+        env_suppressed = suppress_geometry_slides()
+        offline_mode = offline_write_mode(say=say)
+        offline_mode = offline_write.probe_iwa_extra(offline_mode, say)
+        offline_slides: set[int] = set()
+        if offline_mode != "off":
+            offline_slides = offline_write._offline_write_slides(
+                transform_dicts, reuses, reuse_slides, wanted
+            )
+            donors = {int(r["from"]) for r in reuses if r.get("from") is not None}
+            say(
+                f"OBED_OFFLINE_WRITE={offline_mode}: {len(offline_slides)} slide(s) go "
+                f"offline (surgical IWA patch); {len(reuse_slides)} reuse-target + "
+                f"{len(donors)} donor slide(s) stay on the AppleScript path."
+            )
+        suppressed = env_suppressed | offline_slides
         plan: dict[str, Any] = {
             "dest": str(dest),
             "template": str(layout_src),
@@ -809,23 +940,31 @@ def remap_keynote(
             "height": int(recipe.get("destHeight") or CG_HEIGHT),
             "transforms": transform_dicts,
             "reuses": reuses,
+            "suppressGeometry": sorted(suppressed),
         }
+        if env_suppressed:
+            say(
+                "OBED_SUPPRESS_GEOMETRY on: attrs-only (no geometry) for non-reuse "
+                f"slide(s) {sorted(env_suppressed)}."
+            )
         if as_geometry_enabled():
-            # Non-reuse slides get their w/h/position written by a batched
-            # AppleScript block (no JXA (0,0) flick); reuse slides stay on JXA.
             plan["asGeometry"] = True
-            plan["asGeom"] = _build_as_geometry(transform_dicts)
+            plan["asGeom"] = _build_as_geometry(transform_dicts, suppress=suppressed)
             say(
                 "OBED_AS_GEOMETRY on: non-reuse geometry via batched AppleScript "
                 f"for {len(plan['asGeom'])} slide(s); reuse slides stay on JXA."
             )
-        wanted = slides_for_plan(slide_range)
         if wanted:
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
         if write_timing_enabled():
             plan["timing"] = {"slowMs": 120}
             say("OBED_WRITE_TIMING on: recording per-slide/per-phase write timing.")
+        if plan_out is not None:
+            plan_out["transforms"] = transform_dicts
+            plan_out["reuses"] = reuses
+            plan_out["suppressGeometry"] = plan.get("suppressGeometry")
+            plan_out["asGeom"] = plan.get("asGeom")
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
@@ -846,6 +985,22 @@ def remap_keynote(
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
     say(f"Applied {applied}, missed {missed}.")
+    for entry in jxa.get("removeShortfalls") or []:
+        slide_no = entry.get("slide")
+        short = {
+            kind: rec
+            for kind, rec in (entry.get("byKind") or {}).items()
+            if int((rec or {}).get("shortfall") or 0) > 0
+        }
+        if short:
+            detail = ", ".join(
+                f"{rec['removed']} of {rec['expected']} {kind}"
+                for kind, rec in sorted(short.items())
+            )
+            say(
+                f"WARNING reuse slide {slide_no}: only removed {detail} on the donor "
+                "copy — a stranded donor object survived (doubling) until it is deduped."
+            )
     if jxa.get("cloned"):
         say(f"Duplicated {jxa.get('cloned')} remapped slide(s) instead of re-placing the map and dots.")
     layouts = jxa.get("layouts") or {}
@@ -858,7 +1013,14 @@ def remap_keynote(
             f"Applied {sample.get('to') or 'CG layout'} to "
             f"{len(applied_layouts)} slide(s)."
         )
-    if jxa.get("mapReadback"):
+    offline_write_info = offline_write.run_offline_write(
+        dest, offline_mode, offline_slides, transform_dicts, wall, child_resize, say
+    )
+    # Card border stroke widths shrink with the canvas; restore them before the stat-finalize
+    # pass. Always runs — not gated by OBED_OFFLINE_WRITE.
+    card_stroke_result = restore_card_stroke_widths(dest, source, wall, say)
+    map_slide = next((int(t.slide_number) for t in transforms if t.role == "map"), None)
+    if jxa.get("mapReadback") and map_slide not in offline_slides:
         say(f"Map object after apply: {jxa.get('mapReadback')}")
     actual_w = jxa.get("width")
     actual_h = jxa.get("height")
@@ -866,36 +1028,95 @@ def remap_keynote(
         say(f"Canvas after remap: {actual_w}×{actual_h}.")
     if jxa.get("skippedSlides"):
         say(f"Skipped {jxa.get('skippedSlides')} other slide(s) so the preview is this slide only.")
-    # The wall crop keeps the 1080 frame height, so a wall-authored stat number is
-    # already correctly sized relative to the frame — the JXA placement is fine. Two
-    # things JXA can't do: give each number the exact point size the template teaches
-    # (a group is opaque to JXA), and lift the stat text + Global Missions badge in
-    # front of the map they were authored behind. An AppleScript pass does both. No-op
-    # when the plan emitted no stat-group jobs.
+    if card_rows:
+        swatch = max(r["captionPt"] for r in card_rows)
+        downs = sorted(
+            (r for r in card_rows if r["captionPt"] < swatch),
+            key=lambda r: (-r["captionPt"], r.get("childSig") or ""),
+        )
+        detail = ", ".join(f"{r.get('childSig')} {int(r['captionPt'])}" for r in downs[:10])
+        say(
+            f"Card captions: {len(card_rows)} at the template swatch {int(swatch)}pt"
+            + (
+                f"; {len(downs)} stepped down to fit ({detail}"
+                + ("…" if len(downs) > 10 else "")
+                + ")"
+                if downs
+                else ""
+            )
+            + "."
+        )
+        refusals = [r for r in card_rows if r.get("captionRefusal")]
+        if refusals:
+            say(
+                f"WARNING: {len(refusals)} card caption(s) could not be measured "
+                f"({refusals[0].get('captionRefusal')}) — kept at the template swatch size."
+            )
+    # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     child_resize_result: dict[str, Any] | None = None
-    if child_resize:
-        stat_sizes = read_template_stat_sizes(template_path)
+    if child_resize or group_removes or badge_raises:
+        stat_sizes = read_template_stat_sizes(template_path) if child_resize else {}
         say(
             f"Finalizing {len(child_resize)} stat group(s): template sizes "
             f"({', '.join(f'{k}→{int(v)}pt' for k, v in sorted(stat_sizes.items())) or 'none found'}) "
-            "+ bring to front."
+            "+ bring to front"
+            + (
+                f"; deduping {len(group_removes)} stranded donor-copy group(s)"
+                if group_removes
+                else ""
+            )
+            + (f"; raising {len(badge_raises)} badge object(s)" if badge_raises else "")
+            + "."
             + (" Exporting previews in the same session." if export_path else "")
         )
         child_resize_result = _run_stat_finalize(
-            dest, child_resize, stat_sizes, export_dir=export_path
+            dest,
+            child_resize,
+            stat_sizes,
+            export_dir=export_path,
+            group_removes=group_removes,
+            badge_raises=badge_raises,
         )
         done = child_resize_result.get("done") or 0
         skipped = child_resize_result.get("skipped") or 0
         sized = child_resize_result.get("sized") or 0
         front = child_resize_result.get("front") or 0
+        dedup_deleted = child_resize_result.get("dedupDeleted") or 0
+        dedup_shortfall = child_resize_result.get("dedupShortfall") or 0
+        sig_fallback = child_resize_result.get("sigFallback") or 0
+        unresolved = child_resize_result.get("unresolved") or 0
+        badge_fallback = child_resize_result.get("badgeFallback") or 0
+        badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
                 f"the template, {front} object(s) brought to front"
+                + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
+                + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
+                + (f", {badge_fallback} badge-fallback(s)" if badge_fallback else "")
                 + "."
             )
+            if dedup_shortfall:
+                say(
+                    f"WARNING stat-finalize: {dedup_shortfall} donor-copy group(s) could "
+                    "NOT be safely deduped (live count did not equal expectedKeep + "
+                    "deleteCount, or the signature did not match) — kept, not guessed; "
+                    "doubling may persist."
+                )
+            if unresolved:
+                say(
+                    f"WARNING stat-finalize: {unresolved} stat group(s) could NOT be "
+                    "unambiguously resolved — kept, not guessed — those stat groups keep "
+                    "their wall font size and stay buried."
+                )
+            if badge_unresolved:
+                say(
+                    f"WARNING stat-finalize: {badge_unresolved} badge object(s) could NOT be "
+                    "unambiguously resolved — kept, not guessed — those badge objects stay "
+                    "buried under the map."
+                )
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
@@ -912,13 +1133,10 @@ def remap_keynote(
         "width": jxa.get("width"),
         "height": jxa.get("height"),
         "collections": jxa.get("collections"),
+        "removeShortfalls": jxa.get("removeShortfalls") or [],
         "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),
-        # Against the template this is a self-consistency check, not a quality
-        # score: the recipe was learned from that same template, so a non-zero
-        # figure means the planner did not apply the affine it derived. Use
-        # scripts/score_resize.py against a finished CG deck to judge output.
         "templateScore": score_against_gold(transforms, template_data, wall=wall),
         "placements": placements,
         "placementSource": preview_note,
@@ -927,13 +1145,14 @@ def remap_keynote(
         "offFrame": offframe,
         "framingReport": framing_rows,
         "childResize": child_resize_result,
-        # True only when the stat-finalize session actually rendered the previews;
-        # the caller falls back to a standalone export otherwise.
         "exported": bool(child_resize_result and child_resize_result.get("exported")),
         "previewFiles": list(
             (child_resize_result or {}).get("previewFiles") or []
         ),
     }
+    if offline_write_info is not None:
+        result["offlineWrite"] = offline_write_info
+    result["cardStroke"] = card_stroke_result
     return result
 
 
@@ -951,6 +1170,7 @@ def remap_and_inspect(
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     validate: bool = True,
+    plan_out: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
@@ -964,19 +1184,11 @@ def remap_and_inspect(
         side_content_slides=side_content_slides,
         wall_payload=wall_payload,
         template_payload=template_payload,
-        # Fold the export into the stat-finalize session on the no-read-back path
-        # only. The validate=True path reads the deck back with inspect_keynote,
-        # which does its own export, so it must stay unchanged (export_dir unset).
+        plan_out=plan_out,
         export_dir=export_dir if not validate else None,
         log=log,
     )
-    # Reading the deck back dumps every object, which is what the validation
-    # flags are built from. A run whose wall content has already been checked
-    # only wants the pictures, and those come from a Keynote pass that does not
-    # walk the objects at all.
     if not validate:
-        # The stat-finalize session already exported when it ran; only fall back to a
-        # standalone export when it didn't (no stat-group jobs, or its export failed).
         if export_dir and not info.get("exported"):
             if log:
                 log("Exporting previews (validation off, so the deck is not read back)…")
@@ -989,7 +1201,9 @@ def remap_and_inspect(
         return info
     if log:
         log("Inspecting remapped deck…")
-    payload = inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range)
+    payload = inspect_keynote(
+        dest, export_dir=export_dir, slide_range=slide_range, use_cache=False
+    )
     info["inspect"] = {
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
@@ -998,6 +1212,16 @@ def remap_and_inspect(
         "exportError": payload.get("exportError") or "",
     }
     info["payload"] = payload
+    ow = info.get("offlineWrite")
+    if ow and ow.get("mode") == "verify":
+        planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
+        stat_slides = frozenset(ow.get("statSlides") or [])
+        live_report = offline_write.verify_live_frames(
+            planned, payload, exclude_slides=stat_slides
+        )
+        ow["liveVerifyPass"] = offline_write._say_verify_report(
+            "offline-write live verify", live_report, offline_write.LIVE_VERIFY_TOL, log
+        )
     if export_dir:
         info["previewFiles"] = [p.name for p in preview_pngs(Path(export_dir))]
     return info

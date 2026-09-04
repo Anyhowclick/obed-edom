@@ -83,8 +83,9 @@ def test_validate_true_does_not_thread_export_dir(monkeypatch, tmp_path, export_
     # The read-back path exports through inspect_keynote; stub it out.
     inspect_calls = {}
 
-    def fake_inspect(dest, *, export_dir=None, slide_range=None, **kwargs):
+    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
         inspect_calls["export_dir"] = export_dir
+        inspect_calls["use_cache"] = use_cache
         return {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 1, "exported": True}
 
     monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
@@ -106,3 +107,8 @@ def test_validate_true_does_not_thread_export_dir(monkeypatch, tmp_path, export_
     # …the read-back inspect handles the export instead, and no standalone export runs.
     assert inspect_calls["export_dir"] == export_dir
     assert export_calls == []
+    # …and the read-back must NOT cache: dest is a fresh output deck (unique digest every
+    # run), so use_cache=False keeps the export in export_dir (not redirected into the
+    # digest preview cache, where the dashboard would never find it) and skips the
+    # pointless GB hash + never-reused cache write.
+    assert inspect_calls["use_cache"] is False

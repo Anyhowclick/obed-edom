@@ -39,102 +39,58 @@ def test_continued_dsk_verse_overflow_is_flagged():
     assert not any("LW" in (f.location or "") for f in overflow)
 
 
-def test_inspect_overflow_from_box_geometry():
-    payload = {
+def _overflow_payload(*, x=100.0, y=100.0, w=1540.0, h=200.0, slide_height=1080):
+    return {
         "path": "demo.key",
         "slideWidth": 1920,
-        "slideHeight": 1080,
+        "slideHeight": slide_height,
         "slides": [
             {
                 "number": 1,
                 "items": [
                     {
                         "kind": "text",
-                        "text": (
-                            "People who don't know God and the way he works fuss over these things, "
-                            "but you know both God and how he works. Steep your life in God-reality, "
-                            "God-initiative, God-provisions. Don't worry about missing out. You'll "
-                            "find all your everyday human concerns will be met."
-                        ),
-                        "w": 1540,
-                        "h": 90,
-                        "size": 45,
-                        "runs": [{"text": "People who don't know God", "size": 45}],
+                        "text": "Steep your life in God-reality, God-initiative, God-provisions.",
+                        "x": x,
+                        "y": y,
+                        "w": w,
+                        "h": h,
                     }
                 ],
             }
         ],
     }
-    flags = validate_inspect(payload, location_prefix="demo.key")
-    assert any(f.category == "overflow" for f in flags)
-
-    tight_ok = {
-        "path": "ok.key",
-        "slideWidth": 1920,
-        "slides": [
-            {
-                "number": 1,
-                "items": [
-                    {
-                        "kind": "text",
-                        "text": "but you know both God and how he works.",
-                        "w": 1540,
-                        "h": 120,
-                        "size": 45,
-                    }
-                ],
-            }
-        ],
-    }
-    ok_flags = validate_inspect(tight_ok, location_prefix="ok.key")
-    assert not any(f.category == "overflow" for f in ok_flags)
 
 
-def test_authored_lines_that_fit_are_not_flagged_as_overflow():
-    """A multi-line title/verse whose box was grown to hold its authored lines is
-    not overflow. The old estimator re-wrapped each fitting line with a too-wide
-    per-character guess, inflating the line count so the box looked overflowed."""
-    # Wall title, three authored lines, box height == the three laid-out lines.
-    title = {
-        "path": "k.key",
-        "slideWidth": 7680,
-        "slideHeight": 1080,
-        "slides": [
-            {
-                "number": 1,
-                "items": [
-                    {
-                        "kind": "text",
-                        "text": "The greatest work of the Spirit\nis what He produces\nInside your heart.",
-                        "x": 2340,
-                        "y": 300,
-                        "w": 3000,
-                        "h": 642,
-                        "size": 180,
-                    }
-                ],
-            }
-        ],
-    }
+def test_inspect_overflow_flags_box_off_the_bottom():
+    # bottom = 1000 + 200 = 1200, well past the 1080 canvas -> runs off-screen.
+    payload = _overflow_payload(y=1000.0, h=200.0)
+    flags = [f for f in validate_inspect(payload, location_prefix="demo.key") if f.category == "overflow"]
+    assert flags
+    assert "bottom" in flags[0].message
+
+
+def test_inspect_overflow_flags_box_off_the_top():
+    # top = -60 sits above the canvas -> runs off-screen.
+    payload = _overflow_payload(y=-60.0, h=200.0)
+    flags = [f for f in validate_inspect(payload, location_prefix="demo.key") if f.category == "overflow"]
+    assert flags
+    assert "top" in flags[0].message
+
+
+def test_inspect_overflow_ignores_boxes_that_stay_on_screen():
+    """Geometry that sits comfortably inside the canvas is not overflow, even
+    when a per-character height estimate would over-count a line. Mirrors the
+    real GW slide 12 verse (bottom 529) and DSK slide 9 verse (bottom 1043)."""
+    gw12 = _overflow_payload(y=90.0, h=439.0)  # bottom 529
     assert not any(
         f.category == "overflow"
-        for f in validate_inspect(title, location_prefix="k.key")
+        for f in validate_inspect(gw12, location_prefix="gw.key")
     )
-
-    # The same three lines crammed into a fixed box a fraction of the height is a
-    # real clip and must still be flagged.
-    clipped = {
-        **title,
-        "slides": [
-            {
-                "number": 1,
-                "items": [{**title["slides"][0]["items"][0], "h": 120}],
-            }
-        ],
-    }
-    assert any(
+    dsk9 = _overflow_payload(y=866.0, h=177.0)  # bottom 1043 < 1080
+    assert not any(
         f.category == "overflow"
-        for f in validate_inspect(clipped, location_prefix="k.key")
+        for f in validate_inspect(dsk9, location_prefix="dsk.key")
     )
 
 

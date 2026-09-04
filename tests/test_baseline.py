@@ -1,3 +1,18 @@
+"""Content identity and pairing reuse (obed_edom.baseline).
+
+Jobs are keyed by id; this module remaps saved slots onto current slides by
+content digest so unchanged pairings carry over.
+
+INSPECT_VERSION is the payload-shape cache partition (v4 = offline IWA + bulk
+geometry). The cache is keyed by deck digest, which says nothing about the
+reader, so without the bump a deck inspected by an older build is reused
+forever. Rotation-value consistency is the v4 reason: JXA reports whole-degree
+rotation, the offline read composes frame+mask angle and carries a sub-degree
+residual on masked images — mixing v3 JXA with a fresh offline payload churns
+deck_slide_digests and fires photo-tilt. Keynote's app version is the other half
+of "the reader" (.k<version> tag). Untagged payloads were 14.5 and are no longer
+read.
+"""
 from pathlib import Path
 
 from obed_edom.baseline import (
@@ -190,6 +205,46 @@ def test_insert_unpaired_places_new_index_in_order():
     lefts = [s["leftIndex"] for s in out]
     assert 1 in lefts
     assert lefts.index(1) < lefts.index(2)
+
+
+def test_insert_unpaired_one_sided_row_is_not_a_barrier():
+    # An early LW-only row must not drag a later leftover DSK slide to the top:
+    # the edited DSK3's pair was dropped (LW4 now left-only), and DSK3 must land
+    # next to LW4 for realign to re-pair them, not before the early LW1-only row.
+    slots = [
+        slot_dict(0, [0]),
+        slot_dict(1, []),   # early LW-only row
+        slot_dict(2, [1]),
+        slot_dict(3, [2]),
+        slot_dict(4, []),   # was paired to the edited DSK3, now LW-only
+    ]
+    out = insert_unpaired(slots, n_left=5, n_right=4)
+    dsk3 = next(i for i, s in enumerate(out) if s["rightIndexes"] == [3])
+    lw1 = next(i for i, s in enumerate(out) if s["leftIndex"] == 1 and not s["rightIndexes"])
+    lw4 = next(i for i, s in enumerate(out) if s["leftIndex"] == 4 and not s["rightIndexes"])
+    assert dsk3 > lw1          # not teleported above the early one-sided row
+    assert abs(dsk3 - lw4) == 1  # sits beside its true neighbour
+
+
+def test_reuse_edit_right_slide_keeps_order():
+    # Editing one DSK slide (its digest changes) must not float it to the top.
+    result = reuse_slots(
+        _baseline(
+            ["a", "b", "c", "d", "e"],
+            ["A", "B", "C", "D"],
+            [slot_dict(0, [0]), slot_dict(1, []), slot_dict(2, [1]),
+             slot_dict(3, [2]), slot_dict(4, [3])],
+        ),
+        ["a", "b", "c", "d", "e"],
+        ["A", "B", "C", "D2"],  # DSK index 3 edited
+        threshold=0.4,
+    )
+    assert result is not None
+    order = [s["rightIndexes"] for s in result.slots]
+    dsk3 = order.index([3])
+    # DSK3 stays after the earlier DSK pairs, not at the top.
+    assert dsk3 > order.index([1])
+    assert dsk3 > order.index([2])
 
 
 def test_pairing_store_roundtrip(tmp_path: Path):

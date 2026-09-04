@@ -1,9 +1,7 @@
-ObjC.import("Foundation");
+// Remap write pass. Address by bundle id, never by name.
+// JXA size-before-position yanks to (0,0). Delete highest-index first.
+if (typeof ObjC !== "undefined") ObjC.import("Foundation");
 
-// --- write-path timing (OBED_WRITE_TIMING) -------------------------------
-// Null unless plan.timing is set. When on, records per-slide/per-phase elapsed
-// and the individual objects slower than slowMs, so one run shows exactly which
-// slide, phase, and objects eat the geometry-write time. Zero cost when off.
 var TIMING = null;
 function _now() {
   return +new Date();
@@ -19,9 +17,6 @@ function _trec(bucket, ms, desc) {
   }
 }
 
-// Set from the plan in run(). Keynote is addressed by bundle id because 15.x is
-// "Keynote Creator Studio" under com.apple.Keynote while 14.x is
-// com.apple.iWork.Keynote, and both answer to the name "Keynote".
 let KEYNOTE_BUNDLE_ID = "com.apple.Keynote";
 
 function readJSON(path) {
@@ -117,7 +112,6 @@ function setPos(obj, x, y) {
       if (Math.abs(got[0] - nx) < 2 && Math.abs(got[1] - ny) < 2) return true;
     } catch (e) {}
   }
-  // Some items treat position as the centre. Compensate using current size.
   let w = 0;
   let h = 0;
   try {
@@ -151,18 +145,12 @@ function xyOf(obj) {
   }
 }
 
-// mode selects what applyGeom writes:
-//   "full"  — attributes (opacity/font/size/colour) AND geometry (w/h/position).
-//             The original positionOnly=false behaviour.
-//   "pos"   — position only. The original positionOnly=true behaviour.
-//   "attrs" — attributes only, NO geometry. Used by the OBED_AS_GEOMETRY path so
-//             the yank-free AppleScript geometry block owns w/h/position and this
-//             JXA pass only touches the non-yanking attributes.
+// Never size in a pos-only pass (JXA yank). Line width=length / height=0 — size places the rule.
 function applyGeom(obj, spec, mode) {
   mode = mode || "full";
-  const writeAttrs = mode !== "pos"; // opacity/font/size/colour
-  const writeSize = mode === "full"; // width/height (yanks in JXA — never in "attrs")
-  const writePos = mode !== "attrs"; // position (yanks in JXA — never in "attrs")
+  const writeAttrs = mode !== "pos";
+  const writeSize = mode === "full";
+  const writePos = mode !== "attrs";
   let ok = false;
   let wasLocked = false;
   try {
@@ -179,7 +167,6 @@ function applyGeom(obj, spec, mode) {
       ok = true;
     } catch (eO) {}
   }
-  // Never set size in a position-only pass. Setting width/height yanks the object to (0,0).
   if (writeSize && spec.w != null) {
     try {
       obj.width = spec.w;
@@ -192,13 +179,6 @@ function applyGeom(obj, spec, mode) {
       ok = true;
     } catch (eH) {}
   }
-  // Keynote 15.3.1 does not implement a line's endpoints: they read back null
-  // even on a line created with them, and *writing* them collapses the line to
-  // one unit long. A 383px divider came out at w=1. `width` is the length —
-  // Keynote reports it that way whichever direction the line runs — and setting
-  // it works, so the size pass above is what places a rule. (AppleScript CAN set
-  // a line's start/end points, so the OBED_AS_GEOMETRY block uses those instead.)
-  // See scripts/probe_line.js.
   if (writeAttrs && spec.font) {
     try {
       obj.objectText.font = spec.font;
@@ -246,16 +226,157 @@ function deleteObj(Keynote, obj) {
   }
 }
 
-function deleteRefs(Keynote, slide, refs) {
-  const ordered = (refs || []).slice().sort(function (a, b) {
+function whOf(obj) {
+  let w = 0;
+  let h = 0;
+  try {
+    w = Number(obj.width());
+  } catch (eW) {}
+  try {
+    h = Number(obj.height());
+  } catch (eH) {}
+  return [w, h];
+}
+
+function matchesRect(x, y, w, h, rect, tol) {
+  const t = tol != null ? Number(tol) : 4;
+  return (
+    Math.abs(x - Number(rect.x)) <= t &&
+    Math.abs(y - Number(rect.y)) <= t &&
+    Math.abs(w - Number(rect.w)) <= t &&
+    Math.abs(h - Number(rect.h)) <= t
+  );
+}
+
+// Reuse-donor copies drift; resolve removals by live output rect, not wall kindIndex. tol=4px.
+function itemsByGeom(slide, kind, rect, tol) {
+  const out = [];
+  const col = collectionNamed(slide, kindColName(kind));
+  const n = countOf(col);
+  const t = tol != null ? Number(tol) : 4;
+  for (let i = 0; i < n; i++) {
+    const obj = itemAt(col, i);
+    if (!obj) continue;
+    const p = xyOf(obj);
+    const wh = whOf(obj);
+    if (matchesRect(p[0], p[1], wh[0], wh[1], rect, t)) {
+      out.push({ obj: obj, index: i });
+    }
+  }
+  return out;
+}
+
+function getItemByGeom(slide, kind, rect, tol) {
+  const hits = itemsByGeom(slide, kind, rect, tol);
+  return hits.length ? hits[0].obj : null;
+}
+
+function refHasGeom(ref) {
+  return ref != null && ref.x != null && ref.y != null && ref.w != null && ref.h != null;
+}
+
+function deleteRefs(Keynote, slide, refs, flags, tally) {
+  const all = refs || [];
+  const indexRefs = [];
+  const geomRefs = [];
+  for (let i = 0; i < all.length; i++) {
+    if (refHasGeom(all[i])) geomRefs.push(all[i]);
+    else indexRefs.push(all[i]);
+  }
+  let n = 0;
+  // Index-addressed deletes: highest kindIndex first so lower live indices stay valid.
+  const ordered = indexRefs.slice().sort(function (a, b) {
     const ka = String(a.kind || "");
     const kb = String(b.kind || "");
     if (ka !== kb) return ka < kb ? -1 : 1;
     return Number(b.kindIndex) - Number(a.kindIndex);
   });
-  let n = 0;
   for (let i = 0; i < ordered.length; i++) {
-    if (deleteObj(Keynote, getItem(slide, ordered[i]))) n += 1;
+    if (deleteObj(Keynote, getItem(slide, ordered[i]))) {
+      n += 1;
+      if (tally) {
+        const k = String(ordered[i].kind || "item");
+        tally[k] = (tally[k] || 0) + 1;
+      }
+    }
+  }
+  // Geometry-addressed reuse removals: delete only when live match count equals ref count; else fail loud, never guess.
+  const groups = {};
+  const order = [];
+  for (let i = 0; i < geomRefs.length; i++) {
+    const r = geomRefs[i];
+    const key =
+      String(r.kind || "") +
+      "|" +
+      Math.round(Number(r.x)) +
+      "|" +
+      Math.round(Number(r.y)) +
+      "|" +
+      Math.round(Number(r.w)) +
+      "|" +
+      Math.round(Number(r.h));
+    if (!groups[key]) {
+      groups[key] = [];
+      order.push(key);
+    }
+    groups[key].push(r);
+  }
+  const snapByKind = {};
+  function snapshotFor(kind) {
+    if (snapByKind[kind]) return snapByKind[kind];
+    const snap = [];
+    const col = collectionNamed(slide, kindColName(kind));
+    const cnt = countOf(col);
+    for (let i = 0; i < cnt; i++) {
+      const obj = itemAt(col, i);
+      if (!obj) continue;
+      const p = xyOf(obj);
+      const wh = whOf(obj);
+      snap.push({ obj: obj, index: i, x: p[0], y: p[1], w: wh[0], h: wh[1] });
+    }
+    snapByKind[kind] = snap;
+    return snap;
+  }
+  for (let g = 0; g < order.length; g++) {
+    const key = order[g];
+    const grp = groups[key];
+    const r0 = grp[0];
+    const snap = snapshotFor(r0.kind);
+    const hits = [];
+    for (let s = 0; s < snap.length; s++) {
+      const e = snap[s];
+      if (e.deleted) continue;
+      if (matchesRect(e.x, e.y, e.w, e.h, r0, 4)) {
+        hits.push({ obj: e.obj, index: e.index, entry: e });
+      }
+    }
+    if (hits.length === grp.length) {
+      hits.sort(function (a, b) {
+        return b.index - a.index;
+      });
+      for (let i = 0; i < hits.length; i++) {
+        if (deleteObj(Keynote, hits[i].obj)) {
+          n += 1;
+          hits[i].entry.deleted = true;
+          if (tally) {
+            const k = String(r0.kind || "item");
+            tally[k] = (tally[k] || 0) + 1;
+          }
+        }
+      }
+    } else if (flags && flags.length < 8) {
+      flags.push(
+        "reuse remove geom split: " +
+          grp.length +
+          " ref(s) vs " +
+          hits.length +
+          " live match(es) for " +
+          r0.kind +
+          " @ " +
+          key +
+          " — kept, no delete (fail loud)"
+      );
+    }
   }
   return n;
 }
@@ -280,10 +401,7 @@ function keystroke(cmd) {
 }
 
 function applySpec(obj, spec) {
-  // The reuse path keeps the JXA geometry writes (full pass, then a position-only
-  // restore) regardless of OBED_AS_GEOMETRY: pasted/mutated objects land at the
-  // end of their collection, so their live index no longer equals the wall
-  // kindIndex the AppleScript block would address. See the summary's reuse note.
+  // Reuse keeps JXA geometry: paste appends, so live index ≠ wall kindIndex the AppleScript block would use.
   if (!obj || !spec || spec.x == null) return false;
   const a = applyGeom(obj, spec, "full");
   applyGeom(obj, spec, "pos");
@@ -314,15 +432,29 @@ function stripBuildsOf(Keynote, slide, obj) {
   return n;
 }
 
-function stripBuildRefs(Keynote, slide, refs) {
+function stripBuildRefs(Keynote, slide, refs, flags) {
+  const list = refs || [];
+  if (list.length && flags && flags.length < 8) {
+    flags.push(
+      "stripBuilds non-empty (" +
+        list.length +
+        " ref(s)) on slide reuse: still wall-index addressed on the drifted copy — deferred (f) build work, verify before trusting"
+    );
+  }
   let n = 0;
-  for (let i = 0; i < (refs || []).length; i++) {
-    n += stripBuildsOf(Keynote, slide, getItem(slide, refs[i]));
+  for (let i = 0; i < list.length; i++) {
+    n += stripBuildsOf(Keynote, slide, getItem(slide, list[i]));
   }
   return n;
 }
 
+function tempScriptPath(dir, uniq) {
+  const base = dir.charAt(dir.length - 1) === "/" ? dir : dir + "/";
+  return base + "obed-edom-keynote-" + uniq + ".applescript";
+}
+
 function runAppleScript(doc, body) {
+  // Named document, not front. Script file is per-user temp dir, unique per call, removed on success, kept on failure.
   let target = "front document";
   try {
     target =
@@ -336,16 +468,37 @@ function runAppleScript(doc, body) {
     "\n" +
     body +
     "\nend tell\nend tell\n";
+  const dir = ObjC.unwrap($.NSTemporaryDirectory());
+  const uniq = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  const path = tempScriptPath(dir, uniq);
   const ns = $.NSString.stringWithString(script);
-  ns.writeToFileAtomicallyEncodingError(
-    "/tmp/obed-edom-keynote.applescript",
-    true,
-    $.NSUTF8StringEncoding,
-    null
-  );
+  ns.writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
   const app = Application.currentApplication();
   app.includeStandardAdditions = true;
-  app.doShellScript("/usr/bin/osascript /tmp/obed-edom-keynote.applescript");
+  try {
+    app.doShellScript("/usr/bin/osascript '" + path + "'");
+  } catch (e) {
+    throw new Error(String(e) + " (script kept: " + path + ")");
+  }
+  $.NSFileManager.defaultManager.removeItemAtPathError(path, null);
+}
+
+function removeShortfallOf(refs, tally) {
+  const list = refs || [];
+  const expected = {};
+  for (let i = 0; i < list.length; i++) {
+    const k = String(list[i].kind || "item");
+    expected[k] = (expected[k] || 0) + 1;
+  }
+  const removed = tally || {};
+  const out = {};
+  const keys = Object.keys(expected);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const got = Number(removed[k] || 0);
+    out[k] = { expected: expected[k], removed: got, shortfall: expected[k] - got };
+  }
+  return out;
 }
 
 function applyReuse(doc, Keynote, job, missReasons) {
@@ -367,11 +520,11 @@ function applyReuse(doc, Keynote, job, missReasons) {
   if (countOf(slides) !== nBefore + 1) {
     return { ok: false, duplicated: 0, applied: 0, missed: 1 };
   }
-  // copy sits at `to`; the original wall slide shifted to `to + 1`.
   let copy = slides[to - 1];
   let orig = slides[to];
-  const removed = deleteRefs(Keynote, copy, job.remove || []);
-  stripBuildRefs(Keynote, copy, job.stripBuilds || []);
+  const removedByKind = {};
+  const removed = deleteRefs(Keynote, copy, job.remove || [], missReasons, removedByKind);
+  stripBuildRefs(Keynote, copy, job.stripBuilds || [], missReasons);
   slides = doc.slides();
   copy = slides[to - 1];
   orig = slides[to];
@@ -379,8 +532,6 @@ function applyReuse(doc, Keynote, job, missReasons) {
   let applied = 0;
   let missed = 0;
   if (add.length) {
-    // Rearrange the delta on the original slide (kindIndex from wall inspect),
-    // then paste those already-placed objects onto the remapped donor copy.
     for (let i = 0; i < add.length; i++) {
       const spec = add[i];
       const obj = getItem(orig, spec);
@@ -434,7 +585,14 @@ function applyReuse(doc, Keynote, job, missReasons) {
     const leftover = slides[to];
     if (leftover) deleteObj(Keynote, leftover);
   }
-  return { ok: true, duplicated: 1, removed: removed, applied: applied, missed: missed };
+  return {
+    ok: true,
+    duplicated: 1,
+    removed: removed,
+    removeShortfall: removeShortfallOf(job.remove || [], removedByKind),
+    applied: applied,
+    missed: missed,
+  };
 }
 
 function slidesInPlan(transforms, reuses) {
@@ -559,12 +717,7 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
         collectionsOut[k] = counts[k];
       });
     }
-    // Every hidden object is deleted, not left at opacity 0. An invisible leftover
-    // still catches clicks, so the operator ends up selecting a zero-opacity ghost
-    // instead of the text they want to edit. (A group never honoured opacity anyway,
-    // and the canvas shrink would scale a "hidden" grouped inset back on-frame.)
-    // Deletion is deferred to deleteHides, after both geometry passes, so removing
-    // one never shifts the kindIndex a placed sibling is looked up by here.
+    // Hides are deleted, not opacity 0 (ghosts still catch clicks). Defer to deleteHides after geometry so kindIndex lookups stay valid.
     if (spec.role === "hide") continue;
     const obj = getItem(slide, spec);
     if (!obj) {
@@ -589,10 +742,6 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
         y: Math.round(Number(spec.y) || 0),
       });
     }
-    // In "attrs" mode geometry is written by the AppleScript block, not here, so a
-    // resolved object counts as applied even when it carries no JXA attribute to
-    // set (a map/pin has no opacity/font). Otherwise every geometry-only object
-    // would be miscounted as missed and could trip the "moved 0 objects" abort.
     if (wrote || mode === "attrs") {
       applied += 1;
     } else {
@@ -606,10 +755,7 @@ function applyTransforms(slides, transforms, collectionsOut, missReasons, mode) 
 }
 
 function deleteHides(slides, Keynote, transforms, missReasons) {
-  // Remove every object marked role="hide", after both geometry passes have read the
-  // collection by its original indices. Grouped by (slide, kind) and descending by
-  // kindIndex within each, so each deletion leaves the lower indices of the ones
-  // still to go — in that same per-kind collection — valid.
+  // deleteHides after both geometry passes, grouped by (slide, kind), descending kindIndex so remaining indices stay valid.
   const hides = [];
   for (let t = 0; t < transforms.length; t++) {
     const spec = transforms[t];
@@ -645,9 +791,6 @@ function deleteHides(slides, Keynote, transforms, missReasons) {
     if (_okDel) {
       applied += 1;
     } else {
-      // Last resort if Keynote refuses the delete: pin it invisible so a hide that
-      // cannot be removed does not reappear on the CG. (No help for a group, which
-      // ignores opacity — but those were always delete-or-nothing.)
       if (obj) {
         try {
           obj.opacity = 0;
@@ -786,9 +929,6 @@ function deleteTrailingSlides(dest, Keynote, keepCount) {
 }
 
 function runSlideGeomScript(doc, asGeom, n, missReasons) {
-  // Run the Python-built batched geometry block for slide n against the open doc.
-  // Built in Python (see remap_keynote.py) so a pytest can lock the string, and
-  // safe to address by number because non-reuse slide numbering is stable.
   if (!asGeom) return;
   const body = asGeom[n];
   if (!body) return;
@@ -801,22 +941,27 @@ function runSlideGeomScript(doc, asGeom, n, missReasons) {
   }
 }
 
-function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom) {
+// "attrs" wins over asGeom: without suppress, empty-asGeom falls through to JXA full path.
+function geometryPathForSlide(n, asGeom, suppressGeometry) {
+  if (suppressGeometry && suppressGeometry.indexOf(n) !== -1) return "attrs";
+  if (asGeom && asGeom[n]) return "as";
+  return "jxa";
+}
+
+function applyNonReuseSlide(
+  doc, Keynote, n, transforms, collectionsOut, missReasons, asGeom, suppressGeometry
+) {
   const specs = transformsForSlide(transforms, n);
   let applied = 0;
   let missed = 0;
-  // Decide the path PER SLIDE, not on a global flag: use the AppleScript geometry
-  // path only when Python built a body for this slide (i.e. every geometry-bearing
-  // object on it is AppleScript-addressable). A slide with any unaddressable kind
-  // has no body here and falls through to the JXA full path, so no object ever
-  // silently loses its geometry. Flag OFF ⇒ asGeom is null ⇒ always the JXA path.
-  const asBody = asGeom ? asGeom[n] : null;
-  if (asBody) {
-    // JXA writes only the non-yanking attributes (opacity/font/size/colour); the
-    // batched AppleScript block owns w/h/position and addresses `slide n` — the
-    // SAME live slide JXA just resolved, since the reuse path restores slide
-    // numbering before the next slide runs, so a non-reuse slide's live index
-    // always equals its wall slide number n.
+  const path = geometryPathForSlide(n, asGeom, suppressGeometry);
+  if (path === "attrs") {
+    const _ta = TIMING ? _now() : 0;
+    const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
+    if (TIMING) _trec("phase:attrsSuppressed:slide" + n, _now() - _ta, null);
+    applied += r.applied;
+    missed += r.missed;
+  } else if (path === "as") {
     const _ta = TIMING ? _now() : 0;
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "attrs");
     if (TIMING) _trec("phase:attrs:slide" + n, _now() - _ta, null);
@@ -825,8 +970,7 @@ function applyNonReuseSlide(doc, Keynote, n, transforms, collectionsOut, missRea
     const _tg = TIMING ? _now() : 0;
     runSlideGeomScript(doc, asGeom, n, missReasons);
     if (TIMING) _trec("phase:asGeomScript:slide" + n, _now() - _tg, null);
-    // No position-only restore pass: AppleScript geometry does not yank, so the
-    // first position write sticks.
+    // AppleScript geometry does not yank, so the first position write sticks.
   } else {
     const _tf = TIMING ? _now() : 0;
     const r = applyTransforms(doc.slides(), specs, collectionsOut, missReasons, "full");
@@ -855,18 +999,13 @@ function run(argv) {
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.dest));
   const transforms = plan.transforms || [];
-  // OBED_AS_GEOMETRY path: Python passes a per-slide map of pre-built AppleScript
-  // geometry bodies (only for slides where every geometry-bearing object is
-  // addressable). Absent ⇒ null ⇒ byte-for-byte the JXA geometry behaviour. The
-  // per-slide decision lives in applyNonReuseSlide, keyed on asGeom[n].
   const asGeom = plan.asGeom || null;
+  const suppressGeometry = plan.suppressGeometry || null;
   const width = Number(plan.width) || 1920;
   const height = Number(plan.height) || 1080;
   const collections = {};
   const missReasons = [];
   const layoutReport = { imported: [], applied: [], extraDeleted: 0, names: [] };
-  // Change canvas first. Keynote scale-to-fits into a 1920×270 strip; we then
-  // apply the template crop (map may be larger than the slide, with negative x).
   const sizeProp = setSlideSize(doc, width, height);
   let actualWidth = width;
   let actualHeight = height;
@@ -902,6 +1041,7 @@ function run(argv) {
   let cloned = 0;
   let appliedFirst = 0;
   let missedFirst = 0;
+  const removeShortfalls = [];
   for (let i = 0; i < order.length; i++) {
     const n = order[i];
     if (reuseBy[n]) {
@@ -910,12 +1050,10 @@ function run(argv) {
         cloned += r.duplicated || 0;
         appliedFirst += r.applied || 0;
         missedFirst += r.missed || 0;
+        if (r.removeShortfall) removeShortfalls.push({ slide: n, byKind: r.removeShortfall });
       } else {
-        // Reuse failed: fall back to a fresh non-reuse remap of this slide. Its
-        // live index is n (the failed reuse duplicated nothing), so the same
-        // slide-number guarantee holds and AppleScript geometry is safe here too.
         const rf = applyNonReuseSlide(
-          doc, Keynote, n, transforms, collections, missReasons, asGeom
+          doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
         );
         appliedFirst += rf.applied;
         missedFirst += rf.missed;
@@ -923,7 +1061,7 @@ function run(argv) {
       continue;
     }
     const rn = applyNonReuseSlide(
-      doc, Keynote, n, transforms, collections, missReasons, asGeom
+      doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
     );
     appliedFirst += rn.applied;
     missedFirst += rn.missed;
@@ -942,6 +1080,7 @@ function run(argv) {
       sizeProp: sizeProp,
       collections: collections,
       missReasons: missReasons,
+      removeShortfalls: removeShortfalls,
       layouts: layoutReport,
       saved: false,
     });
@@ -969,10 +1108,22 @@ function run(argv) {
     sizeProp: sizeProp,
     collections: collections,
     missReasons: missReasons,
+    removeShortfalls: removeShortfalls,
     skippedSlides: skippedSlides,
     mapReadback: mapReadback,
     layouts: layoutReport,
     saved: true,
     timing: TIMING,
   });
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    geometryPathForSlide: geometryPathForSlide,
+    itemsByGeom: itemsByGeom,
+    getItemByGeom: getItemByGeom,
+    deleteRefs: deleteRefs,
+    removeShortfallOf: removeShortfallOf,
+    tempScriptPath: tempScriptPath,
+  };
 }

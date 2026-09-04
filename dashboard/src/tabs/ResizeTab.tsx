@@ -61,8 +61,6 @@ export function ResizeTab() {
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
-  // Reading the deck back to build the flags dumps every object on every slide.
-  // Worth it once; not worth it on a run whose wall content was already checked.
   const [validate, setValidate] = useState(false);
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -73,8 +71,6 @@ export function ResizeTab() {
   useEffect(() => {
     const path = result?.path;
     if (path) setLw({ path, name: path.split("/").pop() || path });
-    // Restore the template too, or reopening a run leaves the button disabled and
-    // the operator has to re-pick a file the run already knows about.
     const templatePath = result?.templatePath;
     if (templatePath) {
       setTemplate({ path: templatePath, name: templatePath.split("/").pop() || templatePath });

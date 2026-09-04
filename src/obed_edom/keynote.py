@@ -14,7 +14,7 @@ from obed_edom.paths import output_root, select_deck_template
 
 
 def _keynote_tell() -> str:
-    """``tell`` header addressing Keynote by bundle id rather than by name."""
+    """Tell header: address by bundle id, never by name."""
     return f'tell application id "{keynote_app.bundle_id()}"'
 
 
@@ -23,11 +23,7 @@ def _keynote_terms() -> str:
 
 
 def _keynote_process_tell() -> str:
-    """System Events target for GUI scripting.
-
-    Matched on bundle identifier: both Keynote 14.x and 15.x set their bundle
-    name to "Keynote", so ``process "Keynote"`` is as ambiguous as the app name.
-    """
+    """System Events process matched by bundle id, not name."""
     return (
         'tell application "System Events" to tell '
         f'(first application process whose bundle identifier is "{keynote_app.bundle_id()}")'
@@ -63,7 +59,6 @@ STYLE_PALETTES = {
         "normal": {"color": [65527, 65535, 65524], "font": "AzoSans-Regular", "size": 70},
         "highlight": {"color": [65534, 65532, 2687], "font": "AzoSans-Bold", "size": 70},
     },
-    # Point titles keep the template serif; only colour (and size) is overridden.
     "lw_point": {
         "normal": {"color": [65527, 65535, 65524]},
         "highlight": {"color": [65534, 65532, 2687]},
@@ -82,9 +77,7 @@ def _runs_to_payload(runs) -> list[dict]:
 def _prepare_styled_runs(runs: list[dict]) -> tuple[str, str, list[dict]]:
     """Split leading template-superscript digits from the body-baseline rest.
 
-    Later verse numbers stay ASCII. Unicode superscripts ² and ⁷/⁸ come from
-    different code charts, so mixing them makes 27/28 look like mismatched
-    digit sizes. Later numbers copy superscript from the template seed character.
+    Later verse numbers stay ASCII; pass 2 copies superscript from the seed character.
     """
     cleaned: list[dict] = []
     skipping = True
@@ -188,12 +181,7 @@ def _append_plain_text(lines: list[str], idx: int, value: str, size: float | Non
 
 
 def _text_seed_mode(first_super: str, spec: dict, palette_name: str) -> str:
-    """How to write a text box so SuperScript does not leak onto body copy.
-
-    keep_super: verse number uses the template seed character.
-    body_only: no verse number (continuation / mid-verse split); drop the seed.
-    replace: point titles and unseeded POST boxes — replace the whole object.
-    """
+    """keep_super / body_only / replace — so SuperScript does not leak onto body copy."""
     if first_super:
         return "keep_super"
     if palette_name in {"lw_point", "dsk_point"}:
@@ -214,12 +202,7 @@ def _append_seeded_text(
 ) -> None:
     """Write verse body without turning the whole box into superscript.
 
-    The VERSES master stores a superscript seed as character 1. Replacing the
-    whole object text copies that superscript onto every character. Keep the
-    seed only when the template actually has a larger body-sized character.
-    Point titles and DSK POST verse boxes have no seed — replace the box.
-    Continuation slides have no leading verse number; drop the seed and write
-    onto the body-sized character so Regular copy stays on the baseline.
+    Replacing object text copies the seed's superscript onto every character.
     """
     if mode == "replace" or (mode == "keep_super" and not first_super):
         lines.append("        try")
@@ -328,7 +311,7 @@ def _append_styling_pass(
     palette: dict,
     body_size: float | None,
 ) -> None:
-    """Apply per-run colours/fonts without a blanket Regular-font sweep over verse numbers."""
+    """Per-run colours/fonts; never a blanket Regular-font sweep over verse numbers."""
     normal = palette.get("normal") or STYLE_PALETTES["lw"]["normal"]
     total = sum(len(r.get("text") or "") for r in prepared)
     if total < 1:
@@ -374,24 +357,19 @@ def _append_styling_pass(
     lines.append("        end try")
 
 
-# Keynote's Find bar is the only way to place a text selection from a script, so
-# each later verse number is located by the copy that immediately follows it.
+# Find is the only scripted way to place a text selection; later verse numbers use the following copy as the needle.
 _ANCHOR_MAX_CHARS = 24
 
 
 def _verse_anchor(prepared: list[dict], run_index: int) -> str:
-    """Text right after a verse number, used as the Find needle that selects it."""
+    """Text right after a verse number — Find needle that selects it."""
     tail = "".join((r.get("text") or "") for r in prepared[run_index + 1 :])
     anchor = tail.split("\n", 1)[0][:_ANCHOR_MAX_CHARS]
     return anchor if anchor.strip() else ""
 
 
 def _seed_verse_job(prepared: list[dict]) -> dict | None:
-    """The first verse number, whose character style pass 2 copies from.
-
-    The template applies its verse-number character style ("SuperScript" on LW,
-    "Verse Number" on DSK) to this one only, so it is the donor for the rest.
-    """
+    """First verse number, whose character style pass 2 copies from."""
     for run_index, run in enumerate(prepared):
         text = run.get("text") or ""
         if not text:
@@ -405,7 +383,6 @@ def _seed_verse_job(prepared: list[dict]) -> dict | None:
 
 
 def _later_verse_jobs(prepared: list[dict]) -> list[dict]:
-    """Character positions and digits for verse numbers after the first superscript seed."""
     jobs: list[dict] = []
     cursor = 1
     seen_super = False
@@ -437,9 +414,7 @@ def _collect_superscript_jobs(slides: list[SlideSpec]) -> list[dict]:
         for idx, runs in spec.styled_items.items():
             payload = [{"text": r.text, "style": r.style} for r in runs]
             first_super, _, prepared = _prepare_styled_runs(payload)
-            # Only keep work pass 2 can actually do: pass 1 hands the open deck
-            # over whenever this list is non-empty, so an entry it would skip
-            # would leave the deck open, unexported and never closed.
+            # Skip jobs pass 2 cannot do: a non-empty list makes pass 1 leave the deck open and unexported.
             later = [v for v in _later_verse_jobs(prepared) if v["anchor"]]
             if not first_super or not later:
                 continue
@@ -463,7 +438,7 @@ def _collect_superscript_jobs(slides: list[SlideSpec]) -> list[dict]:
 
 
 def _superscript_anchor_plan(jobs: list[dict]) -> list[dict]:
-    """One Find pass per distinct anchor, repeated once per slide that shows that verse."""
+    """One Find pass per distinct anchor, once per slide that shows that verse."""
     counts: dict[tuple[str, int], int] = {}
     order: list[tuple[str, int]] = []
     for job in jobs:
@@ -483,11 +458,6 @@ def _superscript_anchor_plan(jobs: list[dict]) -> list[dict]:
 
 
 def _append_select_digits(lines: list[str], anchor: str, digit_len: int, indent: str) -> None:
-    """Place a selection on the digits that sit just before ``anchor``.
-
-    Find is the only scripted way to place a text selection: find the anchor,
-    collapse the selection to its left edge, then extend back over the digits.
-    """
     lines += [
         f'{indent}keystroke "f" using {{command down}}',
         f"{indent}delay 0.7",
@@ -508,21 +478,9 @@ def _append_select_digits(lines: list[str], anchor: str, digit_len: int, indent:
 
 
 def _append_superscript_gui_pass(lines: list[str], seed: dict, plan: list[dict]) -> None:
-    """Copy the seed verse number's character style, then paste it onto the rest.
+    """Copy Style from the seed verse number, Paste Style onto the rest.
 
-    Keynote's AppleScript dictionary has no style support at all -- no character
-    styles, and superscript is not a character property. So the deck's own
-    verse-number character style ("SuperScript" on the LW template, "Verse
-    Number" on DSK) can only be applied through the UI, which needs
-    Accessibility. Format > Copy Style on the first verse number and Paste Style
-    onto the later ones carries that named style across, which is why no style
-    name is hardcoded here: whatever the template puts on the first number is
-    what the rest inherit.
-
-    Each anchor is applied once per occurrence, because Find cycles through
-    matches and the same verse box is reused on more than one slide (a magic-move
-    POST slide repeats it). Applying once would style a single instance and leave
-    the others on the baseline.
+    AppleScript cannot set superscript; Accessibility drives Format. Apply once per occurrence.
     """
     seed_anchor = _as_escape(seed["anchor"])
     seed_len = int(seed["len"])
@@ -571,9 +529,7 @@ def _build_superscript_fix_script(
 ) -> str:
     """Pass 2: style later verse numbers in the deck pass 1 left open.
 
-    Pass 1 saves but does not close, so ``open`` here is a bring-to-front on the
-    document that is already loaded rather than a reopen; it only actually loads
-    the file if something else closed it in between.
+    `open` here is bring-to-front of the already-loaded document, then export and close.
     """
     plan = _superscript_anchor_plan(jobs)
     seed = next((job.get("seed") for job in jobs if job.get("seed")), None)
@@ -634,7 +590,7 @@ def _build_superscript_fix_script(
         '  set exported to "false"',
     ]
     if export_dir:
-        # Pass 1 deferred the export so the previews show the styled numbers.
+        # Pass 2 exports; pass 1 must not.
         lines += [
             f'  set exportFolder to POSIX file "{_as_escape(str(export_dir))}"',
             "  try",
@@ -689,20 +645,11 @@ def _run_superscript_fix(
 
 
 def _stat_leaf_font_writes(container: str) -> list[str]:
-    """AppleScript that sets each matched stat text leaf of `container` to the size
-    the template teaches for that number, in place.
-
-    Iterates ``iWork items`` (the *distinct* children — a text-bearing shape is listed
-    in BOTH ``text items`` and ``shapes``, so iterating those separately would touch it
-    twice; SKILL). Skips nested groups (the caller recurses one level). For each text
-    leaf it looks the trimmed content up in ``statSizeFor`` (the template's
-    ``{number: size}`` map, embedded as a handler); a hit sets ``size of characters 1
-    thru -1`` to that size — only on a uniform run, so bold/coloured runs are never
-    flattened. Position and box are left alone: the wall crop preserves the 1080 frame
-    height, so a wall-authored number is already correctly sized *relative to the
-    frame* — the template just refines the exact point size (e.g. 269 300->200).
-    Non-number leaves (labels) match nothing and are left untouched.
-    """
+    """Font pass for each text leaf of `container`: stat numbers → template size; this
+    job's card caption → leafPt; all other uniform text → its own size × `s` (the group's
+    affine scale). Keynote scales a group's child GEOMETRY on resize but NOT font size, so
+    without this the text keeps its wall-size font in a shrunk box and clips. Mixed-run
+    leaves are skipped. `s`/`leafPt` are in scope from ``obedStatJob``."""
     return [
         f"  repeat with _i from 1 to count of iWork items of {container}",
         "    try",
@@ -711,15 +658,19 @@ def _stat_leaf_font_writes(container: str) -> list[str]:
         "        try",
         "          set _str to (object text of _leaf as string)",
         "          set _tgt to my statSizeFor(_str)",
-        "          if _tgt > 0 then",
-        "            set _c1 to size of character 1 of object text of _leaf",
-        "            set _cN to size of character -1 of object text of _leaf",
-        "            if _c1 = _cN then",
+        "          set _c1 to size of character 1 of object text of _leaf",
+        "          set _cN to size of character -1 of object text of _leaf",
+        "          if _c1 = _cN then",
+        "            if _tgt > 0 then",
         "              set size of characters 1 thru -1 of object text of _leaf to _tgt",
-        "              set sized to sized + 1",
+        "            else if leafPt > 0 then",
+        "              set size of characters 1 thru -1 of object text of _leaf to leafPt",
         "            else",
-        "              set sizeSkips to sizeSkips + 1",
+        "              set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)",
         "            end if",
+        "            set sized to sized + 1",
+        "          else",
+        "            set sizeSkips to sizeSkips + 1",
         "          end if",
         "        end try",
         "      end if",
@@ -729,10 +680,8 @@ def _stat_leaf_font_writes(container: str) -> list[str]:
 
 
 def _stat_size_handler(size_map: dict) -> list[str]:
-    """A top-level ``statSizeFor`` handler returning the template size for a number
-    string (trimmed), else 0. Keys are matched exactly after trimming whitespace."""
+    """`statSizeFor` returns the template size for a trimmed number string, else 0."""
     lines = ["on statSizeFor(theStr)"]
-    # Trim leading/trailing whitespace and newlines so ' 269 ' matches '269'.
     lines += [
         '  set _t to theStr',
         '  repeat while _t starts with " " or _t starts with tab or _t starts with return or _t starts with linefeed',
@@ -751,38 +700,428 @@ def _stat_size_handler(size_map: dict) -> list[str]:
     return lines
 
 
+# DFS-leaf-signature separator MUST equal iwa_runs._SIG_JOIN ("\n").
+_SIG_JOIN = "\n"
+
+
+def _as_string_list(parts: list[str]) -> str:
+    return "{" + ", ".join('"' + _as_escape(p) + '"' for p in parts) + "}"
+
+
+def _sig_list_literal(sig: str) -> str:
+    return _as_string_list([p for p in sig.split(_SIG_JOIN) if p])
+
+
+def _as_norm_sig_simulate(text: str | None) -> str:
+    """Python mirror of AppleScript `obedNormSig` for the offline parity test."""
+    t = text or ""
+    t = t.replace("￼", "").replace("\xa0", " ")
+    for ws in ("\t", "\r", "\n", " ", " "):
+        t = t.replace(ws, " ")
+    while "  " in t:
+        t = t.replace("  ", " ")
+    return t.strip(" ")
+
+
+def _sig_handlers() -> list[str]:
+    """Replace / normalize / DFS leaf-list. `obedSigLeaves` must `tell application id`."""
+    return [
+        "on obedReplace(t, findStr, replStr)",
+        "  set od to AppleScript's text item delimiters",
+        "  set AppleScript's text item delimiters to findStr",
+        "  set _parts to text items of t",
+        "  set AppleScript's text item delimiters to replStr",
+        "  set t to _parts as text",
+        "  set AppleScript's text item delimiters to od",
+        "  return t",
+        "end obedReplace",
+        "on obedNormSig(theStr)",
+        "  set t to theStr as string",
+        '  set t to my obedReplace(t, (character id 65532), "")',
+        '  set t to my obedReplace(t, (character id 160), " ")',
+        '  set t to my obedReplace(t, tab, " ")',
+        '  set t to my obedReplace(t, return, " ")',
+        '  set t to my obedReplace(t, linefeed, " ")',
+        '  set t to my obedReplace(t, (character id 8232), " ")',
+        '  set t to my obedReplace(t, (character id 8233), " ")',
+        '  repeat while t contains "  "',
+        '    set t to my obedReplace(t, "  ", " ")',
+        "  end repeat",
+        '  repeat while t starts with " "',
+        "    if (count of t) is 0 then exit repeat",
+        "    set t to text 2 thru -1 of t",
+        "  end repeat",
+        '  repeat while t ends with " "',
+        "    if (count of t) is 0 then exit repeat",
+        "    set t to text 1 thru -2 of t",
+        "  end repeat",
+        "  return t",
+        "end obedNormSig",
+        # Must wrap in `tell application id` (not just `using terms from`) or `count of iWork items` fails -1700.
+        "on obedSigLeaves(g)",
+        "  " + _keynote_tell(),
+        "    set acc to {}",
+        "    repeat with _i from 1 to count of iWork items of g",
+        "      set _it to iWork item _i of g",
+        "      if (class of _it) is group then",
+        "        set acc to acc & my obedSigLeaves(_it)",
+        "      else",
+        "        try",
+        "          set _t to my obedNormSig(object text of _it as string)",
+        '          if _t is not "" then set end of acc to _t',
+        "        end try",
+        "      end if",
+        "    end repeat",
+        "    return acc",
+        "  end tell",
+        "end obedSigLeaves",
+    ]
+
+
+_STAT_ACCUMULATORS = (
+    "theDoc",
+    "doneJobs",
+    "skipJobs",
+    "sized",
+    "sizeSkips",
+    "dedupDeleted",
+    "dedupShortfall",
+    "frontRaised",
+    "frontErr",
+    "report",
+    "raiseTargets",
+    "claimed",
+    "sigFallbacks",
+    "unresolved",
+    "badgeFallbacks",
+    "badgeUnresolved",
+)
+
+
+def _stat_job_handlers() -> list[str]:
+    """Index verified by content; descending raise relies on Bring-to-Front append semantics."""
+    lines = [
+        "on obedSlideSigs(slideNo)",
+        "  global theDoc",
+        "  set _acc to {}",
+        "  " + _keynote_tell(),
+        "    repeat with _gi from 1 to count of groups of slide slideNo of theDoc",
+        "      set end of _acc to {idx:_gi, sig:my obedSigLeaves(group _gi of slide slideNo of theDoc)}",
+        "    end repeat",
+        "  end tell",
+        "  return _acc",
+        "end obedSlideSigs",
+        "on obedDedupPick(slideNo, sigs, targetSig, keepN, delN)",
+        "  global dedupShortfall, report",
+        "  set _idxs to {}",
+        "  repeat with _e in sigs",
+        "    set _r to contents of _e",
+        "    if (sig of _r) is targetSig then set end of _idxs to (idx of _r)",
+        "  end repeat",
+        "  if (count of _idxs) = (keepN + delN) then",
+        "    set _del to {}",
+        "    repeat with _j from 1 to delN",
+        "      set end of _del to (item _j of _idxs)",
+        "    end repeat",
+        "    return _del",
+        "  else",
+        "    set dedupShortfall to dedupShortfall + delN",
+        '    set report to report & " dedupMiss(s=" & slideNo & ",live=" & (count of _idxs) & ",keep=" & keepN & ",del=" & delN & ")"',
+        "    return {}",
+        "  end if",
+        "end obedDedupPick",
+        # Delete collected group indices highest-first so lower cached indices stay valid.
+        "on obedApplyDeletes(slideNo, idxs)",
+        "  global theDoc, dedupDeleted",
+        "  set _rem to idxs",
+        "  " + _keynote_tell(),
+        "    repeat while (count of _rem) > 0",
+        "      set _mx to item 1 of _rem",
+        "      repeat with _k from 2 to count of _rem",
+        "        if (item _k of _rem) > _mx then set _mx to item _k of _rem",
+        "      end repeat",
+        "      delete group _mx of slide slideNo of theDoc",
+        "      set dedupDeleted to dedupDeleted + 1",
+        "      set _new to {}",
+        "      repeat with _k from 1 to count of _rem",
+        "        if (item _k of _rem) is not _mx then set end of _new to item _k of _rem",
+        "      end repeat",
+        "      set _rem to _new",
+        "    end repeat",
+        "  end tell",
+        "end obedApplyDeletes",
+        "on obedResolveGroup(slideNo, sigs, gi, targetSig, allowFallback)",
+        "  global claimed, sigFallbacks, unresolved, skipJobs, report",
+        "  set _hits to {}",
+        "  repeat with _e in sigs",
+        "    set _r to contents of _e",
+        "    if (sig of _r) is targetSig then",
+        "      set _idx to (idx of _r)",
+        "      if _idx is not in claimed then set end of _hits to _idx",
+        "    end if",
+        "  end repeat",
+        "  if gi > 0 then",
+        "    repeat with _h in _hits",
+        "      if (contents of _h) is gi then",
+        "        set end of claimed to gi",
+        "        return gi",
+        "      end if",
+        "    end repeat",
+        "  end if",
+        "  if (allowFallback is not 0) and ((count of _hits) = 1) then",
+        "    set sigFallbacks to sigFallbacks + 1",
+        '    set report to report & " sigFallback(s=" & slideNo & ",gi=" & gi & ")"',
+        "    set _w to item 1 of _hits",
+        "    set end of claimed to _w",
+        "    return _w",
+        "  else",
+        "    set unresolved to unresolved + 1",
+        "    set skipJobs to skipJobs + 1",
+        '    set report to report & " unresolved(s=" & slideNo & ",gi=" & gi & ",n=" & (count of _hits) & ")"',
+        "    return 0",
+        "  end if",
+        "end obedResolveGroup",
+        "on obedStatJob(slideNo, sigs, gi, targetSig, s, allowFallback, leafPt)",
+        "  global theDoc, doneJobs, skipJobs, sized, sizeSkips, report, raiseTargets",
+        "  set _gi to my obedResolveGroup(slideNo, sigs, gi, targetSig, allowFallback)",
+        "  if _gi is 0 then return",
+        "  set end of raiseTargets to {sl:slideNo, idx:_gi}",
+        "  " + _keynote_tell(),
+        "    try",
+        "      set g to group _gi of slide slideNo of theDoc",
+    ]
+    lines += ["  " + ln for ln in _stat_leaf_font_writes("g")]
+    lines += [
+        "      repeat with _sgi from 1 to count of groups of g",
+        "        set _sub to group _sgi of g",
+    ]
+    lines += ["    " + ln for ln in _stat_leaf_font_writes("_sub")]
+    lines += [
+        "      end repeat",
+        "      set doneJobs to doneJobs + 1",
+        "    on error errMsg number errNum",
+        "      set skipJobs to skipJobs + 1",
+        '      set report to report & " skip(font,s=" & slideNo & ",err=" & errNum & ":" & errMsg & ")"',
+        "    end try",
+        "  end tell",
+        "end obedStatJob",
+        "on obedRaiseSlide(slideNo)",
+        "  global theDoc, raiseTargets",
+        "  set _rem to {}",
+        "  repeat with _e in raiseTargets",
+        "    set _r to contents of _e",
+        "    if (sl of _r) is slideNo then set end of _rem to (idx of _r)",
+        "  end repeat",
+        "  repeat while (count of _rem) > 0",
+        "    set _mx to item 1 of _rem",
+        "    repeat with _k from 2 to count of _rem",
+        "      if (item _k of _rem) > _mx then set _mx to item _k of _rem",
+        "    end repeat",
+        "    " + _keynote_tell(),
+        "      set selection of theDoc to {group _mx of slide slideNo of theDoc}",
+        "    end tell",
+        "    my obedFront()",
+        "    set _new to {}",
+        "    repeat with _k from 1 to count of _rem",
+        "      if (item _k of _rem) is not _mx then set end of _new to item _k of _rem",
+        "    end repeat",
+        "    set _rem to _new",
+        "  end repeat",
+        "end obedRaiseSlide",
+        "on obedWithinTol(a, b, tol)",
+        "  set _d to a - b",
+        "  if _d < 0 then set _d to -_d",
+        "  return _d <= tol",
+        "end obedWithinTol",
+        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol)",
+        "  if my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol) and "
+        "my obedWithinTol(pw, fw, tol) and my obedWithinTol(ph, fh, tol) then",
+        "    return true",
+        "  end if",
+        "  return false",
+        "end obedFrameMatches",
+        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh)",
+        "  global theDoc, badgeFallbacks, badgeUnresolved, report",
+        "  set _tol to 3",
+        "  set _found to false",
+        "  " + _keynote_tell(),
+        "    try",
+        "      tell slide slideNo of theDoc",
+        '        if theKind is "group" then',
+        "          set selection of theDoc to {group idx}",
+        "          set _found to true",
+        '        else if theKind is "text" then',
+        "          set selection of theDoc to {text item idx}",
+        "          set _found to true",
+        '        else if (theKind is "shape") or (theKind is "image") then',
+        "          set _match to false",
+        "          try",
+        '            if theKind is "shape" then',
+        "              set _p to position of shape idx",
+        "              set _w to width of shape idx",
+        "              set _h to height of shape idx",
+        "            else",
+        "              set _p to position of image idx",
+        "              set _w to width of image idx",
+        "              set _h to height of image idx",
+        "            end if",
+        "            set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol)",
+        "          end try",
+        "          if _match then",
+        '            if theKind is "shape" then',
+        "              set selection of theDoc to {shape idx}",
+        "            else",
+        "              set selection of theDoc to {image idx}",
+        "            end if",
+        "            set _found to true",
+        "          else",
+        "            set _hitIdx to 0",
+        "            set _hitCount to 0",
+        "            set _scanOk to true",
+        "            try",
+        '              if theKind is "shape" then',
+        "                set _positions to position of every shape",
+        "                set _widths to width of every shape",
+        "                set _heights to height of every shape",
+        "              else",
+        "                set _positions to position of every image",
+        "                set _widths to width of every image",
+        "                set _heights to height of every image",
+        "              end if",
+        "              repeat with _k from 1 to count of _positions",
+        "                set _pk to item _k of _positions",
+        "                if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
+        "item _k of _heights, fx, fy, fw, fh, _tol) then",
+        "                  set _hitCount to _hitCount + 1",
+        "                  set _hitIdx to _k",
+        "                end if",
+        "              end repeat",
+        "            on error",
+        "              set _scanOk to false",
+        "              set badgeUnresolved to badgeUnresolved + 1",
+        '              set report to report & " badgeScanErr(s=" & slideNo & ",k=" & theKind & ")"',
+        "            end try",
+        "            if _scanOk then",
+        "              if _hitCount is 1 then",
+        '                if theKind is "shape" then',
+        "                  set selection of theDoc to {shape _hitIdx}",
+        "                else",
+        "                  set selection of theDoc to {image _hitIdx}",
+        "                end if",
+        "                set _found to true",
+        "                set badgeFallbacks to badgeFallbacks + 1",
+        "              else",
+        "                set badgeUnresolved to badgeUnresolved + 1",
+        "              end if",
+        "            end if",
+        "          end if",
+        "        end if",
+        "      end tell",
+        "    end try",
+        "  end tell",
+        "  if _found then my obedFront()",
+        "end obedRaiseItem",
+        "on obedBadgeRaise(slideNo)",
+        "  global theDoc",
+        "  set _found to false",
+        "  " + _keynote_tell(),
+        "    try",
+        "      tell slide slideNo of theDoc",
+        "        repeat with _gi from 1 to count of groups",
+        "          set _bg to group _gi",
+        "          repeat with _ti from 1 to count of text items of _bg",
+        "            try",
+        '              if (object text of text item _ti of _bg as string) contains "Global Missions" then',
+        "                set selection of theDoc to {_bg}",
+        "                set _found to true",
+        "              end if",
+        "            end try",
+        "            if _found then exit repeat",
+        "          end repeat",
+        "          if _found then exit repeat",
+        "        end repeat",
+        "        if not _found then",
+        "          repeat with _ti from 1 to count of text items",
+        "            try",
+        '              if (object text of text item _ti as string) contains "Global Missions" then',
+        "                set selection of theDoc to {text item _ti}",
+        "                set _found to true",
+        "              end if",
+        "            end try",
+        "            if _found then exit repeat",
+        "          end repeat",
+        "        end if",
+        "        if not _found then",
+        "          repeat with _si from 1 to count of shapes",
+        "            try",
+        '              if (object text of shape _si as string) contains "Global Missions" then',
+        "                set selection of theDoc to {shape _si}",
+        "                set _found to true",
+        "              end if",
+        "            end try",
+        "            if _found then exit repeat",
+        "          end repeat",
+        "        end if",
+        "      end tell",
+        "    end try",
+        "  end tell",
+        "  if _found then my obedFront()",
+        "end obedBadgeRaise",
+        "on obedFront()",
+        "  global frontRaised, frontErr",
+        "  delay 0.35",
+        "  try",
+        "    " + _keynote_process_tell(),
+        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
+        "    end tell",
+        "    set frontRaised to frontRaised + 1",
+        "    delay 0.2",
+        "  on error errMsg number errNum",
+        '    set frontErr to frontErr & " [" & errNum & "]"',
+        "  end try",
+        "end obedFront",
+    ]
+    return lines
+
+
 def _build_stat_finalize_script(
-    dest: Path, jobs: list[dict], size_map: dict, export_dir: Path | None = None
+    dest: Path,
+    jobs: list[dict],
+    size_map: dict,
+    export_dir: Path | None = None,
+    group_removes: list[dict] | None = None,
+    badge_raises: list[dict] | None = None,
 ) -> str:
-    """Post-JXA pass: give each stat number the template's font size, then bring the
-    stat groups and the Global Missions badge to the front (above the map).
-
-    Two things the 1st (JXA) pass cannot do because a group is opaque to JXA and it
-    has no arrange command: (1) set the inner number's point size to what the template
-    teaches (e.g. 269 -> 200pt, 183 -> 150pt), and (2) lift the stat text and badge in
-    front of the map they were authored behind. Both are AppleScript: the font set is
-    plain scripting; the front-raise is Arrange > Bring to Front driven through System
-    Events on a selection set by reference (needs Accessibility, like the superscript
-    pass). If Accessibility is off, the sizes still land and the front-raise is skipped
-    and reported.
-
-    Each job is ``{slide, groupIndex}``; the group is addressed by index (JXA and
-    AppleScript agree on group order). Font sizing is guarded so a non-uniform run is
-    left alone; the whole job is wrapped so an unresolved index is skipped and reported
-    (the JXA placement stays as the fallback).
-
-    When ``export_dir`` is given, the PNG preview export is folded into this same open
-    session: after the stat sizes and z-order are saved, the still-open ``theDoc`` is
-    exported before it is closed, so the dest is not reopened a third time just to
-    render previews. The export is in its own ``try`` so a render failure never loses
-    the already-saved stat/geometry work, and the result reports whether it ran.
-    """
-    if not jobs:
+    """Post-JXA: template stat sizes, then Bring to Front (stat groups + badge). Optional PNG export before close."""
+    group_removes = group_removes or []
+    badge_raises = badge_raises or []
+    if not jobs and not group_removes and not badge_raises:
         return ""
     escaped = _as_escape(str(dest))
     doc_name = _as_escape(Path(dest).name)
-    slides = sorted({int(j["slide"]) for j in jobs})
-    lines: list[str] = list(_stat_size_handler(size_map))
+    font_jobs = [j for j in jobs if j.get("childSig")]
+    font_skips = len(jobs) - len(font_jobs)
+    dedup: dict[tuple[int, str], dict] = {}
+    no_sig_removes = 0
+    for gr in group_removes:
+        sig = gr.get("childSig")
+        if not sig:
+            no_sig_removes += 1
+            continue
+        key = (int(gr["slide"]), sig)
+        d = dedup.setdefault(key, {"count": 0, "expectedKeep": int(gr.get("expectedKeep") or 0)})
+        d["count"] += 1
+    badge_by_slide: dict[int, list[dict]] = {}
+    badge_missing_frame = 0
+    for br in badge_raises:
+        badge_by_slide.setdefault(int(br["slide"]), []).append(br)
+        if not br.get("isTitle") and str(br.get("kind") or "shape") in ("shape", "image"):
+            if "w" not in br or "h" not in br:
+                badge_missing_frame += 1
+    lines: list[str] = ["global " + ", ".join(_STAT_ACCUMULATORS)]
+    lines += _stat_size_handler(size_map)
+    lines += _sig_handlers()
+    lines += _stat_job_handlers()
     lines += [
         _keynote_terms(),
         _keynote_tell(),
@@ -800,103 +1139,82 @@ def _build_stat_finalize_script(
         "  set skipJobs to 0",
         "  set sized to 0",
         "  set sizeSkips to 0",
+        "  set dedupDeleted to 0",
+        f"  set dedupShortfall to {no_sig_removes}",
+        "  set raiseTargets to {}",
+        "  set sigFallbacks to 0",
+        "  set unresolved to 0",
+        "  set badgeFallbacks to 0",
+        f"  set badgeUnresolved to {badge_missing_frame}",
         '  set exported to "false"',
         '  set report to ""',
     ]
-    # Phase 1 — template-taught number sizes (plain scripting).
-    for job in jobs:
+    dedup_by_slide: dict[int, list[tuple[str, int, int]]] = {}
+    for (slide, sig), d in dedup.items():
+        dedup_by_slide.setdefault(slide, []).append(
+            (sig, int(d["expectedKeep"]), int(d["count"]))
+        )
+    for slide in sorted(dedup_by_slide):
+        lines += [f"  set _sigs to my obedSlideSigs({slide})", "  set _dels to {}"]
+        for sig, keep, dele in dedup_by_slide[slide]:
+            sig_lit = _sig_list_literal(sig)
+            lines += [
+                f"  set _dels to _dels & my obedDedupPick({slide}, _sigs, {sig_lit}, {keep}, {dele})"
+            ]
+        lines += [f"  my obedApplyDeletes({slide}, _dels)"]
+    if font_skips:
+        lines += [f"  set skipJobs to skipJobs + {font_skips}"]
+    sig_counts: dict[tuple[int, str], int] = {}
+    for job in font_jobs:
+        key = (int(job["slide"]), str(job["childSig"]))
+        sig_counts[key] = sig_counts.get(key, 0) + 1
+    font_by_slide: dict[int, list[tuple[int, str, float, int, float]]] = {}
+    for job in font_jobs:
         slide = int(job["slide"])
-        group_index = int(job["groupIndex"])
+        childsig = str(job["childSig"])
+        gi = int(job.get("groupIndex") or 0)
+        s = float(job.get("s") or 1.0)
+        allow_fallback = 0 if sig_counts[(slide, childsig)] > 1 else 1
+        pt = float(job.get("captionPt") or 0.0)
+        font_by_slide.setdefault(slide, []).append((gi, childsig, s, allow_fallback, pt))
+    for slide in sorted(font_by_slide):
         lines += [
-            f"  -- slide {slide}, group {group_index}",
-            "  try",
-            f"    set g to group {group_index} of slide {slide} of theDoc",
+            f"  set _sigs to my obedSlideSigs({slide})",
+            "  set claimed to {}",
         ]
-        lines += _stat_leaf_font_writes("g")
-        lines += [
-            "    repeat with _gi from 1 to count of groups of g",
-            "      set _sub to group _gi of g",
-        ]
-        lines += ["  " + ln for ln in _stat_leaf_font_writes("_sub")]
-        lines += [
-            "    end repeat",
-            "    set doneJobs to doneJobs + 1",
-            "  on error errMsg number errNum",
-            "    set skipJobs to skipJobs + 1",
-            f'    set report to report & " skip(s={slide},g={group_index},err=" '
-            '& errNum & ":" & errMsg & ")"',
-            "  end try",
-        ]
+        for gi, childsig, s, allow_fallback, pt in font_by_slide[slide]:
+            sig_lit = _sig_list_literal(childsig)
+            lines += [
+                f"  my obedStatJob({slide}, _sigs, {gi}, {sig_lit}, {float(s)}, {allow_fallback}, {pt})"
+            ]
     lines += ["  save theDoc"]
-    # Phase 2 — z-order: bring stat groups (and the badge) to the front. Selection by
-    # reference then Arrange > Bring to Front through System Events.
+    # Z-order: raise recorded targets per slide, highest index first (Bring to Front appends).
     lines += ['  set frontRaised to 0', '  set frontErr to ""']
-    for job in jobs:
-        slide = int(job["slide"])
-        group_index = int(job["groupIndex"])
-        # Only bring to front when the selection was actually set — otherwise the
-        # click fires on whatever was selected before (another slide's group).
-        lines += [
-            "  set _found to false",
-            "  try",
-            f"    set selection of theDoc to {{group {group_index} of slide {slide} of theDoc}}",
-            "    set _found to true",
-            "  end try",
-            "  if _found then",
-        ]
-        lines += ["  " + ln for ln in _bring_selection_to_front()]
-        lines += ["  end if"]
-    # The Global Missions badge: it may be a group OR a loose text item/shape (the
-    # template authored it loose), so scan all three; raise only if found.
-    for slide in slides:
-        lines += [
-            f"  -- badge on slide {slide}",
-            "  set _found to false",
-            "  try",
-            f"    tell slide {slide} of theDoc",
-            "      repeat with _gi from 1 to count of groups",
-            "        set _bg to group _gi",
-            "        repeat with _ti from 1 to count of text items of _bg",
-            "          try",
-            '            if (object text of text item _ti of _bg as string) contains "Global Missions" then',
-            "              set selection of theDoc to {_bg}",
-            "              set _found to true",
-            "            end if",
-            "          end try",
-            "        end repeat",
-            "      end repeat",
-            "      repeat with _ti from 1 to count of text items",
-            "        try",
-            '          if (object text of text item _ti as string) contains "Global Missions" then',
-            "            set selection of theDoc to {text item _ti}",
-            "            set _found to true",
-            "          end if",
-            "        end try",
-            "      end repeat",
-            "      repeat with _si from 1 to count of shapes",
-            "        try",
-            '          if (object text of shape _si as string) contains "Global Missions" then',
-            "            set selection of theDoc to {shape _si}",
-            "            set _found to true",
-            "          end if",
-            "        end try",
-            "      end repeat",
-            "    end tell",
-            "  end try",
-            "  if _found then",
-        ]
-        lines += ["  " + ln for ln in _bring_selection_to_front()]
-        lines += ["  end if"]
-    # Persist the stat sizes + z-order before the (fallible) export, so a render
-    # failure can only cost re-exportable previews, never the placement work.
+    for slide in sorted(font_by_slide):
+        lines += [f"  my obedRaiseSlide({slide})"]
+    for slide in sorted(badge_by_slide):
+        for entry in badge_by_slide[slide]:
+            if entry.get("isTitle"):
+                lines += [f"  my obedBadgeRaise({slide})"]
+                continue
+            kind_str = str(entry.get("kind") or "shape")
+            if kind_str in ("shape", "image") and ("w" not in entry or "h" not in entry):
+                continue  # no planned frame (skipped before the merge): counted at init
+            kind_lit = _as_escape(kind_str)
+            idx = int(entry.get("index") or 0)
+            fx = float(entry.get("x") or 0.0)
+            fy = float(entry.get("y") or 0.0)
+            fw = float(entry.get("w") or 0.0)
+            fh = float(entry.get("h") or 0.0)
+            lines += [
+                f'  my obedRaiseItem({slide}, "{kind_lit}", {idx}, {fx}, {fy}, {fw}, {fh})'
+            ]
     lines += [
         "  try",
         "    save theDoc",
         "  end try",
     ]
     if export_dir:
-        # Fold the preview export into this already-open session (no third reopen).
-        # Its own try, so an export failure leaves the saved deck untouched.
         lines += [
             f'  set exportFolder to POSIX file "{_as_escape(str(export_dir))}"',
             "  try",
@@ -911,45 +1229,37 @@ def _build_stat_finalize_script(
         "  end try",
         "  end timeout",
         '  return "done=" & doneJobs & " skipped=" & skipJobs & " sized=" & sized '
-        '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " frontErr=" '
-        '& frontErr & " exported=" & exported & " detail=" & report',
+        '& " sizeSkips=" & sizeSkips & " front=" & frontRaised & " dedupDeleted=" '
+        '& dedupDeleted & " dedupShortfall=" & dedupShortfall & " frontErr=" '
+        '& frontErr & " exported=" & exported & " sigFallback=" & sigFallbacks '
+        '& " unresolved=" & unresolved & " badgeFallback=" & badgeFallbacks '
+        '& " badgeUnresolved=" & badgeUnresolved & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
     return "\n".join(lines)
 
 
-def _bring_selection_to_front() -> list[str]:
-    """Click Arrange > Bring to Front on the current selection via System Events.
-    Counts a success in ``frontRaised``; a failure (e.g. Accessibility off) is caught
-    and appended to ``frontErr`` so the sizes still stand."""
-    return [
-        "  delay 0.35",
-        "  try",
-        "    " + _keynote_process_tell(),
-        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
-        "    end tell",
-        "    set frontRaised to frontRaised + 1",
-        "    delay 0.2",
-        "  on error errMsg number errNum",
-        '    set frontErr to frontErr & " [" & errNum & "]"',
-        "  end try",
-    ]
-
-
 def _run_stat_finalize(
-    dest: Path, jobs: list[dict], size_map: dict, export_dir: Path | None = None
+    dest: Path,
+    jobs: list[dict],
+    size_map: dict,
+    export_dir: Path | None = None,
+    group_removes: list[dict] | None = None,
+    badge_raises: list[dict] | None = None,
 ) -> dict:
-    """Run the stat-finalize pass (template sizes + bring-to-front); no-op if empty.
-
-    When ``export_dir`` is given, the same open session also exports the PNG previews
-    before closing, so the dest is not reopened just to render them. The result carries
-    ``exported`` and ``previewFiles`` so the caller can skip a separate export pass.
-    """
+    """Run stat-finalize (dedup + sizes + bring-to-front). No-op if all three job lists are empty."""
     export_dir = Path(export_dir) if export_dir else None
     if export_dir is not None:
         export_dir.mkdir(parents=True, exist_ok=True)
-    script = _build_stat_finalize_script(Path(dest), jobs, size_map or {}, export_dir)
+    script = _build_stat_finalize_script(
+        Path(dest),
+        jobs,
+        size_map or {},
+        export_dir,
+        group_removes=group_removes,
+        badge_raises=badge_raises,
+    )
     if not script:
         return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
     subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
@@ -976,8 +1286,6 @@ def _run_stat_finalize(
     if not ok:
         debug = Path(dest).with_suffix(".stat-finalize.applescript")
         debug.write_text(script, encoding="utf-8")
-    # The folder is the ground truth for a successful render (the same check
-    # export_slide_images uses), not just the AppleScript flag.
     preview_files: list[str] = []
     exported = False
     if export_dir is not None:
@@ -994,6 +1302,12 @@ def _run_stat_finalize(
         "sized": _num("sized"),
         "sizeSkips": _num("sizeSkips"),
         "front": _num("front"),
+        "dedupDeleted": _num("dedupDeleted"),
+        "dedupShortfall": _num("dedupShortfall"),
+        "sigFallback": _num("sigFallback"),
+        "unresolved": _num("unresolved"),
+        "badgeFallback": _num("badgeFallback"),
+        "badgeUnresolved": _num("badgeUnresolved"),
         "exported": exported,
         "previewFiles": preview_files,
         "raw": raw,
@@ -1002,21 +1316,7 @@ def _run_stat_finalize(
 
 
 def read_template_stat_sizes(template: Path, *, use_cache: bool = True) -> dict[str, float]:
-    """AppleScript-read the CG template's numeric text (grouped and loose) into a
-    ``{digits: font size}`` map, so the stat-finalize pass can give a wall number the
-    size the template teaches (e.g. ``269`` -> 200pt, ``183`` -> 150pt).
-
-    JXA's swatch harvest misses numbers that sit inside a group (a group is opaque to
-    JXA), which is exactly where the hero stats live on the template — so this reads
-    them in AppleScript. Only all-digit content is kept (labels and the date are left
-    for the wall size); the largest size wins if a number appears more than once.
-    Read-only: opens, walks, closes without saving.
-
-    The template is invariant across runs of the same template, so the read is cached
-    by the template's content digest (and Keynote version): on a hit the map is
-    returned straight from disk and Keynote is never opened. Pass ``use_cache=False``
-    to force a fresh read (and refresh the cache).
-    """
+    """Template `{digits: pt}` map for grouped/loose numeric text. Cached by digest; JXA cannot see grouped numbers."""
     template = Path(template)
     cache_path: Path | None = None
     if use_cache:
@@ -1033,9 +1333,6 @@ def read_template_stat_sizes(template: Path, *, use_cache: bool = True) -> dict[
             try:
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    # A cache hit costs no Keynote open. The float() cast is inside
-                    # the try so a malformed-but-parseable cache (a non-numeric value)
-                    # degrades to a real read instead of crashing the remap.
                     return {str(k): float(v) for k, v in data.items()}
             except (OSError, json.JSONDecodeError, ValueError, TypeError):
                 pass
@@ -1050,7 +1347,6 @@ def read_template_stat_sizes(template: Path, *, use_cache: bool = True) -> dict[
 
 
 def _read_template_stat_sizes_via_keynote(template: Path) -> dict[str, float]:
-    """Open the template in Keynote and read its numeric font sizes (uncached)."""
     template = Path(template)
     escaped = _as_escape(str(template))
     doc_name = _as_escape(template.name)
@@ -1133,7 +1429,7 @@ def _read_template_stat_sizes_via_keynote(template: Path) -> dict[str, float]:
     return sizes
 
 
-# Accessibility is off: System Events cannot drive Keynote's menus.
+# Accessibility off: System Events cannot drive the app's menus.
 _AX_DENIED_CODES = ("-1743", "-25211")
 
 
@@ -1142,7 +1438,6 @@ def _read_superscript_report(raw: str) -> dict:
     body, _, tail = raw.partition(" gui=")
     gui_error, _, exported = tail.partition(" exported=")
     boxes: list[dict] = []
-    # Leading space is stripped from stdout, so re-pad before splitting on the separator.
     for chunk in f" {body.strip()}".split(" s=")[1:]:
         fields: dict[str, float] = {}
         head = chunk.split()
@@ -1226,10 +1521,7 @@ def _as_escape(text: str) -> str:
 def _build_applescript(plan: dict) -> str:
     output = plan["output"]
     export_dir = plan.get("exportDir") or ""
-    # Python has already overwritten this path with a fresh template copy, so a
-    # document still open from an earlier run is stale: opening the file would
-    # hand back that stale document and the rebuild fails with -10000. Discard it
-    # without saving -- only ever this deck, which we just regenerated.
+    # Close this deck by name first; `open` of a still-open stale copy returns that document, not the file we just wrote.
     doc_name = _as_escape(Path(output).name)
     lines = [
         _keynote_terms(),
@@ -1386,8 +1678,7 @@ def _build_applescript(plan: dict) -> str:
         "  save theDoc",
         '  set exported to "false"',
     ]
-    # Pass 2 restyles this deck, then exports and closes it. Exporting here too
-    # would render every slide twice and show the verse numbers pre-superscript.
+    # Pass 2 exports and closes. Exporting here would show verse numbers pre-superscript.
     hand_off = bool(plan.get("superscriptJobs")) and bool(plan.get("superscriptFix"))
     if export_dir and not hand_off:
         lines += [
@@ -1415,9 +1706,7 @@ def _build_applescript(plan: dict) -> str:
 
 def run_applescript(plan: dict) -> dict:
     script = _build_applescript(plan)
-    # File + LaunchServices, not stdin: uvicorn's worker thread makes
-    # osascript's HIServices/clipboard connection fail, and then Keynote's
-    # dictionary never loads (syntax error on ``properties``).
+    # File + LaunchServices, not stdin: uvicorn workers break osascript's HIServices and Keynote's dictionary never loads.
     subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
@@ -1474,13 +1763,12 @@ def generate_deck(
     dest.parent.mkdir(parents=True, exist_ok=True)
     _copy_template(src, dest)
     plan = _plan_payload(slides, dest, export_dir, overlays)
-    # Pass 1 only leaves the deck open (and defers its export) if pass 2 follows.
+    # Pass 1 leaves the deck open (and defers export) only if pass 2 follows.
     plan["superscriptFix"] = superscript_fix
     result = run_applescript(plan)
     result["key"] = str(dest)
     if superscript_fix:
         super_result = _run_superscript_fix(dest, plan.get("superscriptJobs") or [], export_dir)
-        # Pass 1 handed the export to pass 2, so take the outcome from there.
         if result.get("exportDeferred"):
             result["exported"] = bool(super_result.get("exported"))
     else:

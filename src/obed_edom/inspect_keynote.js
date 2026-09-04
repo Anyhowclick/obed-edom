@@ -1,6 +1,5 @@
-// Guarded so the pure helpers below (bulk length-guard, per-object/bulk record
-// derivation) can be require()d from Node for unit tests. Under osascript ObjC
-// is defined and the import runs exactly as before.
+// Full inspect. Address by bundle id, never by name.
+// Bulk arrays must length-match the collection — a short zip silently shifts kindIndex.
 if (typeof ObjC !== "undefined") ObjC.import("Foundation");
 
 function readJSON(path) {
@@ -67,16 +66,7 @@ function sizeOf(obj) {
   return [w, h];
 }
 
-// Per-run character style is not reachable from Keynote's scripting API, so
-// there is deliberately no runs[] here. `objectText.attributeRuns()` raises
-// "Can't convert types.", and paragraphs()/characters()/words() hand back plain
-// JS strings, which carry no colour, size or font. A string also answers
-// .bold() — that is String.prototype.bold(), an HTML wrapper that is always
-// truthy — so a run-style probe reads as working while reporting nonsense.
-// Whole-item size/font/color below do work. Anything needing per-character
-// style (highlight, small caps) has to come off a rendered preview; see
-// bible.py's small-caps ink-height check for the established pattern.
-// scripts/probe_runs.js reproduces all of the above.
+// No per-run style from Keynote scripting (attributeRuns fails; String.prototype.bold is an HTML wrapper). Whole-item font/size/color only.
 
 function kindOf(obj) {
   let raw = "";
@@ -186,33 +176,8 @@ function describeItem(obj, index, kindHint) {
   return rec;
 }
 
-// --- Bulk read ------------------------------------------------------------
-//
-// The per-object path above issues one Apple Event per object per property
-// (obj.position(), obj.width(), obj.objectText.size(), ...). A *bulk* read
-// fetches one property for a whole collection in a single Apple Event by
-// leaving the collection specifier UNEVALUATED: `slide.shapes.position()`
-// returns an array of positions. That is ~2.4x on flat single-kind collections.
-//
-// Safety (this is what makes bulk "never slower, never wrong"):
-//   1. Per-collection x per-property fallback. Every bulk fetch is TRIED; if it
-//      throws or its array length != the collection's element count, it is
-//      discarded and that property is read per-object via the SAME functions
-//      the legacy path uses (positionOf/sizeOf/fileNameOf and the inline
-//      objectText/line reads). The per-object read is the source of truth.
-//   2. Array-length-drift guard. If Keynote drops a missing value (a file-less
-//      image in images.fileName(), an empty objectText) the array is SHORTER
-//      than the collection and every subsequent zip index shifts, silently
-//      corrupting kindIndex. So bulkArray() asserts length === count for EVERY
-//      array and falls back on any mismatch. A short array is never zipped.
-//
-// Because each derive below applies the IDENTICAL transform the per-object path
-// applies to the SAME underlying value, a passing bulk array is byte-identical
-// to the per-object payload by construction.
+// Bulk: one unevaluated collection specifier per property. Discard if length ≠ count — a short array would shift kindIndex.
 
-// Return `value` only when it is an array-like of exactly `count` elements,
-// else null (=> per-object fallback for this property). count 0 accepts any
-// value since an empty collection is never indexed.
 function bulkArray(value, count) {
   if (value == null) return null;
   let n;
@@ -227,7 +192,6 @@ function bulkArray(value, count) {
   return value;
 }
 
-// One bulk fetch off the UNEVALUATED specifier, length-guarded.
 function tryBulk(slide, name, prop, count) {
   try {
     return bulkArray(slide[name][prop](), count);
@@ -236,7 +200,6 @@ function tryBulk(slide, name, prop, count) {
   }
 }
 
-// Nested bulk fetch, e.g. slide.textItems.objectText.size().
 function tryBulkNested(slide, name, prop, sub, count) {
   try {
     return bulkArray(slide[name][prop][sub](), count);
@@ -245,10 +208,6 @@ function tryBulkNested(slide, name, prop, sub, count) {
   }
 }
 
-// The bulk arrays applicable to `kind`. Only properties describeItem actually
-// reads for that kind are attempted, so a bulk that could only ever throw (a
-// text item has no fileName) is never fired — keeping the cost <= the legacy
-// path on every collection. Each entry is a length-checked array or null.
 function fetchBulkArrays(slide, name, kind, count) {
   const bulk = {};
   bulk.position = tryBulk(slide, name, "position", count);
@@ -272,10 +231,6 @@ function fetchBulkArrays(slide, name, kind, count) {
   return bulk;
 }
 
-// fileName has a secondary source (obj.file()) that bulk can't reach, so a bulk
-// element is trusted only when it yields a valid string — exactly fileNameOf's
-// first branch. Otherwise defer to fileNameOf entirely (which re-probes
-// fileName() then file()), keeping the file-less/missing-value case identical.
 function fileNameFrom(bulk, i, obj) {
   if (bulk.fileName) {
     const v = bulk.fileName[i];
@@ -287,8 +242,6 @@ function fileNameFrom(bulk, i, obj) {
   return fileNameOf(obj);
 }
 
-// Bulk twin of describeItem: identical record shape and key order, but each
-// property comes from its bulk array when present, else the per-object read.
 function describeItemBulk(obj, index, kindHint, bulk, i) {
   const kind = kindHint || kindOf(obj);
   const rec = {
@@ -310,8 +263,6 @@ function describeItemBulk(obj, index, kindHint, bulk, i) {
   const pos = bulk.position ? xyFrom(bulk.position[i]) || [0, 0] : positionOf(obj);
   rec.x = pos[0];
   rec.y = pos[1];
-  // sizeOf reads both dimensions; reuse it (cached) whenever either can't be
-  // bulked so the fallback is byte-identical.
   let szCache = null;
   const sizePair = function () {
     if (!szCache) szCache = sizeOf(obj);
@@ -391,9 +342,6 @@ function describeItemBulk(obj, index, kindHint, bulk, i) {
     }
   }
   if (kind === "group") {
-    // Children stay per-object: the group case is ~1.1x at best and childCount
-    // is often 0 on real decks, so correctness beats a marginal bulk win here.
-    // The group's OWN geometry above is bulked where clean.
     rec.children = [];
     try {
       const kids = obj.iWorkItems();
@@ -408,11 +356,6 @@ function describeItemBulk(obj, index, kindHint, bulk, i) {
   return rec;
 }
 
-// Bulk twin of collectFrom. The evaluated `slide[name]()` array is kept exactly
-// as the legacy path uses it — it supplies the element count, the per-object
-// fallback refs, and the identity.objs refs that attachBuildCounts matches on.
-// Only the property reads switch to bulk; kindIndex/kindCounts/identity order
-// is untouched.
 function collectFromBulk(slide, name, kind, items, kindCounts, identity) {
   try {
     const col = slide[name]();
@@ -422,10 +365,6 @@ function collectFromBulk(slide, name, kind, items, kindCounts, identity) {
     const bulk = fetchBulkArrays(slide, name, kind, n);
     const objs = [];
     for (let i = 0; i < n; i++) {
-      // Per-item guard: a throw in the bulk record must degrade THIS item to the
-      // legacy per-object record, not fall to the outer catch (which would drop
-      // the tail of the collection AND skip identity.push — breaking build-count
-      // matching for the whole kind). describeItem is byte-identical anyway.
       let rec;
       try {
         rec = describeItemBulk(col[i], items.length, kind, bulk, i);
@@ -459,11 +398,7 @@ function collectFrom(slide, name, kind, items, kindCounts, identity) {
   } catch (e) {}
 }
 
-// A text box is a shape, so Keynote lists text-bearing shapes in both
-// `textItems` and `shapes`: on a real wall deck a third of text objects came
-// back twice, and the remapper then planned two moves for one object. Mark the
-// shape copy rather than removing it, because remap_keynote.js resolves objects
-// by (collection, kindIndex) and those indices must keep matching Keynote's.
+// Text-bearing shapes appear in both textItems and shapes; mark the shape copy. kindIndex must keep matching Keynote's collections.
 function markDuplicateShapes(items) {
   const texts = [];
   for (let i = 0; i < items.length; i++) {
@@ -492,10 +427,7 @@ function collectItems(slide, bulkRead) {
   const items = [];
   const kindCounts = {};
   const identity = [];
-  // bulkRead defaults ON; OBED_BULK_READ=0 (plan.bulkRead === false) forces the
-  // legacy per-object path for A/B validation and as an escape hatch. The kind
-  // order below is load-bearing — kindIndex is assigned per kind in exactly this
-  // sequence and map_remap addresses geometry by it.
+  // Kind collect order is load-bearing — kindIndex is assigned in this sequence.
   const collect = bulkRead === false ? collectFrom : collectFromBulk;
   collect(slide, "textItems", "text", items, kindCounts, identity);
   collect(slide, "images", "image", items, kindCounts, identity);
@@ -525,10 +457,7 @@ function collectItems(slide, bulkRead) {
   return items;
 }
 
-// There is deliberately no z-order pass. `slide.iWorkItems()` reports 0 on
-// slides that hold 19 real objects, so stacking cannot be read at all — every
-// zIndex came back null on real decks. The remapper's stacking policy is the
-// role_order sort in map_remap.plan_slide_transforms, not recovered z.
+// No z-order from iWorkItems (reports 0 on real slides). Remap stacking is role_order, not recovered z.
 
 function attachBuildCounts(slide, items, identity, byKindIndex) {
   let builds = null;
@@ -601,7 +530,7 @@ function exportImages(Keynote, doc, exportDir) {
 }
 
 function canvasSize(doc) {
-  // slideWidth() throws "Can't convert types" on current Keynote; width() works.
+  // slideWidth() throws; width() works.
   try {
     const w = Number(doc.width());
     const h = Number(doc.height());
@@ -615,20 +544,107 @@ function canvasSize(doc) {
   return [1920, 1080];
 }
 
+
+const COLLECTION_FOR = {
+  text: "textItems",
+  image: "images",
+  shape: "shapes",
+  movie: "movies",
+  group: "groups",
+  line: "lines",
+};
+
+// Before kindIndex: live collection count must match expected (text allows trailing empty placeholders). Drift → whole slide unreadable.
+function readSlideItems(slide, entries, kindCounts, slack) {
+  const byKind = {};
+  for (let e = 0; e < entries.length; e++) {
+    const k = entries[e].kind;
+    if (!byKind[k]) byKind[k] = [];
+    byKind[k].push(entries[e]);
+  }
+  const records = [];
+  for (const kind in byKind) {
+    if (!byKind.hasOwnProperty(kind)) continue;
+    const name = COLLECTION_FOR[kind];
+    if (!name) return { unreadable: true, items: [] };
+    let col = null;
+    try {
+      col = slide[name]();
+    } catch (eCol) {
+      return { unreadable: true, items: [] };
+    }
+    if (col == null) return { unreadable: true, items: [] };
+    const n = lenOf(col);
+    const expected =
+      kindCounts && kindCounts[kind] != null ? Number(kindCounts[kind]) : null;
+    if (expected != null) {
+      const drift =
+        kind === "text" ? n < expected || n - expected > slack : n !== expected;
+      if (drift) return { unreadable: true, items: [] };
+    }
+    const wanted = byKind[kind];
+    for (let w = 0; w < wanted.length; w++) {
+      const ki = Number(wanted[w].kindIndex);
+      if (isNaN(ki) || ki < 0 || ki >= n) return { unreadable: true, items: [] };
+      const rec = describeItem(col[ki], ki, kind);
+      rec.kindIndex = ki;
+      records.push(rec);
+    }
+  }
+  return { unreadable: false, items: records };
+}
+
+function readPlanItems(doc, plan) {
+  const slides = doc.slides();
+  const counts = plan.counts || {};
+  let slack = Number(plan.textPlaceholderSlack);
+  if (isNaN(slack)) slack = 0;
+  const bySlide = {};
+  for (let a = 0; a < plan.items.length; a++) {
+    const it = plan.items[a];
+    const key = String(Number(it.slide));
+    if (!bySlide[key]) bySlide[key] = [];
+    bySlide[key].push(it);
+  }
+  const out = {};
+  for (const sKey in bySlide) {
+    if (!bySlide.hasOwnProperty(sKey)) continue;
+    const i = Number(sKey) - 1;
+    const key0 = String(i);
+    if (i < 0 || i >= slides.length) {
+      out[key0] = { unreadable: true, items: [] };
+      continue;
+    }
+    out[key0] = readSlideItems(slides[i], bySlide[sKey], counts[sKey] || null, slack);
+  }
+  return out;
+}
+
+function closeDoc(Keynote, doc) {
+  try {
+    Keynote.close(doc, { saving: "no" });
+  } catch (e3) {
+    try {
+      doc.close({ saving: "no" });
+    } catch (e4) {}
+  }
+}
+
 function run(argv) {
   const plan = readJSON(argv[0]);
-  // By bundle id, never by name: Keynote 15 is "Keynote Creator Studio" with a
-  // different id, and both apps answer to the name "Keynote".
   const Keynote = Application(plan.bundleId || "com.apple.Keynote");
   Keynote.includeStandardAdditions = true;
   const doc = Keynote.open(Path(plan.path));
+  if (plan.items) {
+    const itemsBySlide = readPlanItems(doc, plan);
+    closeDoc(Keynote, doc);
+    return JSON.stringify({ path: plan.path, itemsBySlide: itemsBySlide });
+  }
   const slides = doc.slides();
   const size = canvasSize(doc);
   const slideWidth = size[0];
   const slideHeight = size[1];
 
-  // Default ON; Python sets plan.bulkRead from OBED_BULK_READ. `!== false` so an
-  // absent key (direct JXA invocation) also gets the fast path.
   const bulkRead = plan.bulkRead !== false;
 
   const range = plan.range || null;
@@ -703,8 +719,6 @@ function run(argv) {
   });
 }
 
-// Exposed for Node unit tests only. Under osascript `module` is undefined, so
-// this is a no-op there and `run` stays the JXA entry point.
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     num: num,
@@ -717,5 +731,8 @@ if (typeof module !== "undefined" && module.exports) {
     describeItemBulk: describeItemBulk,
     bulkArray: bulkArray,
     fileNameFrom: fileNameFrom,
+    COLLECTION_FOR: COLLECTION_FOR,
+    readSlideItems: readSlideItems,
+    readPlanItems: readPlanItems,
   };
 }

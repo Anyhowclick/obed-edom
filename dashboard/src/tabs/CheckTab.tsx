@@ -36,7 +36,6 @@ const BLURB: Record<Mode, string> = {
     "Seeds the pairing from the cues, then resolves any wording difference against the outline first, then LW, then DSK.",
 };
 
-/** `[LW]` cues describe a wall, so name the sides the way the outline does. */
 function deckLabel(name: string, fallback: string): string {
   if (/dsk/i.test(name)) return "DSK";
   if (/\b(lw|gw|led|fw)\b/i.test(name)) return "LW";
@@ -57,9 +56,6 @@ export function CheckTab() {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  // Staff sign the wall off with the Pastor, and from that point it is the
-  // service. Default to yes, because by the time a deck reaches this tab it
-  // usually has been.
   const [lwFinal, setLwFinal] = useState(true);
 
   const result = (job?.result || undefined) as
@@ -71,7 +67,6 @@ export function CheckTab() {
     const put = (path: string | undefined, set: (f: ChosenFile | null) => void) => {
       if (path) set({ path, name: path.split("/").pop() || path });
     };
-    // An outline-only run keeps its path in `path`, like the single-deck run.
     if (result.kind === "outline") put(result.path, setOutline);
     else put(result.path, setLeft);
     put(result.leftPath, setLeft);
@@ -81,7 +76,6 @@ export function CheckTab() {
 
   const mode = modeOf(outline, left, right);
   const paired = mode === "pair" || mode === "pair+outline";
-  // The question only changes an answer when there is a script to rank against.
   const wall = looksLikeWall(left) ? left : looksLikeWall(right) ? right : null;
   const wallPresent = Boolean(wall);
   const wallName = wall?.name || "the LED wall";

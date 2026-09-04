@@ -5,7 +5,6 @@ import { SHOW_INFO_KEY, useSessionToggle } from "../prefs";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
 
-/** Split a paragraph into its cue tags and the words between them. */
 function segments(para: OutlineParagraph): { text: string; cue?: OutlineCue }[] {
   const cues = [...(para.cues || [])].sort((a, b) => a.start - b.start);
   if (!cues.length) return [{ text: para.text }];
@@ -20,13 +19,6 @@ function segments(para: OutlineParagraph): { text: string; cue?: OutlineCue }[] 
   return out;
 }
 
-/**
- * The cued outline as the operator reads it, with findings alongside.
- *
- * This is the whole result when no Keynote is supplied, so the document itself
- * is the layout: cue chips sit where Word highlights them and each finding sits
- * next to the line it is about, the way the pair rows show slide findings.
- */
 export function OutlineResultView({ job }: { job: Job }) {
   const result = (job.result || undefined) as OutlineResult | undefined;
   const [showInfo, setShowInfo] = useSessionToggle(SHOW_INFO_KEY, false);

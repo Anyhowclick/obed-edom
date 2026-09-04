@@ -3,8 +3,21 @@
 The batched AppleScript geometry block is built in pure Python so it can be
 exercised without Keynote. These tests pin the address form (`<kind> N` where
 ``N`` == kindIndex + 1), the line/group special cases, the locked unlock/relock
-scaffold, the timeout wrapper, and that the flag is off by default (so the plan
-that reaches JXA is unchanged).
+scaffold, and the timeout wrapper.
+
+Default ON: no JXA (0,0) yank, ~30% faster (drops setPos readback-verify and
+the second position pass). OBED_AS_GEOMETRY=0 forces legacy JXA, also the
+per-slide fallback for kinds AppleScript can't address.
+
+Position MUST stay a separate LAST write. Setting height re-anchors ~18px about
+the object centre; folding position into an atomic properties record loses that
+ordering. Lines have no re-anchor, so endpoints stay one atomic set. A throw on
+the combined size record loses both width and height — acceptable because both
+are settable on every _AS_KIND_NAMES kind, and the write has its own try.
+
+OBED_SUPPRESS_GEOMETRY: listed non-reuse slides get attrs only (no AS or JXA
+geometry). Without it an empty-asGeom slide falls through to JXA full path.
+Non-numeric tokens are ignored (typo = suppress nothing).
 """
 
 from __future__ import annotations
@@ -15,6 +28,7 @@ from obed_edom.remap_keynote import (
     _build_slide_geometry_script,
     as_geometry_enabled,
     geom_props_enabled,
+    suppress_geometry_slides,
 )
 
 
@@ -237,6 +251,45 @@ def test_unaddressable_kind_without_geometry_does_not_exclude():
     out = _build_as_geometry(specs)
     assert "5" in out
     assert "set theObj to text item 1" in out["5"]
+
+
+# --- geometry suppression knob (OBED_SUPPRESS_GEOMETRY) --------------------
+
+
+def test_suppress_geometry_empty_by_default(monkeypatch):
+    monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
+    assert suppress_geometry_slides() == set()
+
+
+def test_suppress_geometry_parses_comma_and_space_lists(monkeypatch):
+    monkeypatch.setenv("OBED_SUPPRESS_GEOMETRY", "9")
+    assert suppress_geometry_slides() == {9}
+    monkeypatch.setenv("OBED_SUPPRESS_GEOMETRY", "1, 9 12")
+    assert suppress_geometry_slides() == {1, 9, 12}
+    # A non-numeric token degrades to "suppress nothing extra" rather than raising.
+    monkeypatch.setenv("OBED_SUPPRESS_GEOMETRY", "9, junk, 3")
+    assert suppress_geometry_slides() == {9, 3}
+
+
+def test_build_as_geometry_omits_suppressed_slide():
+    # The plan-facing invariant behind OBED_SUPPRESS_GEOMETRY="9": slide 9 carries
+    # NO asGeom body (so applyNonReuseSlide writes it attrs-only), while a sibling
+    # non-suppressed slide keeps its body. This is the exact `plan["asGeom"]` map
+    # `remap` attaches (remap itself needs Keynote, so the map builder is locked
+    # here, mirroring the other _build_as_geometry tests above).
+    specs = [
+        _spec(slide=9, kind="text", kindIndex=0),
+        _spec(slide=10, kind="image", kindIndex=0),
+    ]
+    out = _build_as_geometry(specs, suppress={9})
+    assert "9" not in out  # suppressed: attrs-only, no geometry body
+    assert "10" in out  # untouched
+
+
+def test_build_as_geometry_no_suppress_keeps_all():
+    specs = [_spec(slide=9, kind="text", kindIndex=0)]
+    assert "9" in _build_as_geometry(specs)  # default suppress set is empty
+    assert "9" in _build_as_geometry(specs, suppress=set())
 
 
 # --- integration with the real transform dict ------------------------------

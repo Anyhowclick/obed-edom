@@ -218,11 +218,7 @@ SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2, "success": 3}
 
 
 def write_outline_findings(path: Path, report: dict) -> Path:
-    """A printable copy of the outline findings, in reading order.
-
-    Operators mark up a paper script, so the findings are listed against the
-    paragraph they belong to rather than grouped by rule.
-    """
+    """Findings listed against the paragraph they belong to, not grouped by rule."""
     path = Path(path).with_suffix(".pdf")
     styles = _styles()
     name = str(report.get("name") or "Outline")
