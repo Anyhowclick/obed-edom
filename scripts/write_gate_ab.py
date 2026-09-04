@@ -65,6 +65,7 @@ from obed_edom.iwa_write import bridge_specs_kindindex  # noqa: F401 — re-expo
 from obed_edom.offline_inspect import _line_endpoints
 
 DEFAULT_SLIDE = 9
+GATE_VERSION = 1  # sidecar staleness marker (D10) — bump when the specs sidecar shape changes.
 TOL_PX = 2.0  # SKILL write budget (iwa_geometry:93) — mask/rotated composites need ±2, not ±1.
 # Soft classes: their laid-out frame is not recoverable from raw IWA, so the patcher takes
 # their delta off the pre-patch BULK read (``reported``), never the offline compose.
@@ -132,13 +133,17 @@ def source_kind_counts(source_deck: Path | str, slide_number: int) -> dict[str, 
 # ==========================================================================
 def write_specs_sidecar(path: Path | str, *, slide_number: int, source: Path | str,
                         template: Path | str, specs: list[dict],
-                        source_counts: dict[str, int]) -> Path:
+                        source_counts: dict[str, int], commit: str,
+                        gate_version: int = GATE_VERSION) -> Path:
     """Persist everything the patcher + A' need for slide N, so a later run can SKIP
     the B-pre remap entirely (``--reuse-bpre`` / ``--reuse-specs``).
 
     Holds the slide number, the source/template paths, the planned transform dicts
-    (``specs``) and the source-wall per-kind counts (the reconcile base). Written next
-    to the banked B-pre deck as ``specs_slide<N>.json``.
+    (``specs``), the source-wall per-kind counts (the reconcile base), and the git
+    ``commit`` (HEAD) + ``gate_version`` the sidecar was banked at (D10) — a later
+    ``--reuse-specs`` refuses a sidecar from a different commit unless
+    ``--allow-stale-specs`` (:func:`specs_sidecar_is_stale`). Written next to the banked
+    B-pre deck as ``specs_slide<N>.json``.
     """
     path = Path(path)
     payload = {
@@ -147,6 +152,8 @@ def write_specs_sidecar(path: Path | str, *, slide_number: int, source: Path | s
         "template": str(template),
         "specs": specs,
         "source_counts": source_counts,
+        "commit": commit,
+        "gate_version": int(gate_version),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return path
@@ -155,6 +162,24 @@ def write_specs_sidecar(path: Path | str, *, slide_number: int, source: Path | s
 def load_specs_sidecar(path: Path | str) -> dict:
     """Round-trips :func:`write_specs_sidecar`. Returns the decoded dict."""
     return json.loads(Path(path).read_text())
+
+
+def specs_sidecar_is_stale(sidecar: dict, head: str) -> str:
+    """Reason the sidecar is unusable for the CURRENT commit — empty string == fresh.
+
+    A stale sidecar (banked before a patcher/plan fix landed) silently produces a
+    plausible-looking GREEN gate against yesterday's logic (D10); refuse it instead of
+    re-banking on every run.
+    """
+    version = sidecar.get("gate_version")
+    if version != GATE_VERSION:
+        return f"sidecar gate_version {version!r} != {GATE_VERSION}"
+    commit = sidecar.get("commit")
+    if not commit or not head:
+        return "commit unknown (empty sidecar commit or HEAD — cannot prove freshness)"
+    if commit != head:
+        return f"sidecar commit {commit!r} != HEAD {head!r}"
+    return ""
 
 
 def specs_hide_count(specs: list[dict]) -> int:
@@ -760,6 +785,13 @@ def _remap_env(*, suppress: str = "", as_geometry: str = "1", geom_props: str = 
     os.environ["OBED_GEOM_PROPS"] = geom_props
 
 
+def _git_head(repo: Path | None = None) -> str:
+    """Current git HEAD commit hash, or ``""`` outside a repo / on any git failure."""
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True, check=False)
+    return (proc.stdout or "").strip() if proc.returncode == 0 else ""
+
+
 def _log_group_child_scale(scale: dict[tuple, dict]) -> None:
     """Compact per-group table of the A'↔B group-CHILD size ratios (the lead's
     diagnostic for whether the patcher can scale group children with a uniform scale)."""
@@ -798,6 +830,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="specs sidecar json from a prior run — SKIP the B-pre remap")
     ap.add_argument("--reuse-aprime", type=Path,
                     help="banked A' .key (built from the SAME B-pre) — SKIP regenerating A'")
+    ap.add_argument("--allow-stale-specs", action="store_true",
+                    help="use --reuse-specs even if its commit/gate_version does not match HEAD (D10)")
     ap.add_argument("--full-a", action="store_true",
                     help="also run the full INDEPENDENT production remap A (positional-only "
                          "cross-check; different ids, so NOT id-stable — never gates)")
@@ -830,6 +864,14 @@ def main(argv: list[str] | None = None) -> int:
             if not Path(p).exists():
                 ap.error(f"--{label} not found: {p}")
         sidecar = load_specs_sidecar(args.reuse_specs)
+        head = _git_head()
+        stale = specs_sidecar_is_stale(sidecar, head)
+        if stale and not args.allow_stale_specs:
+            _log(f"ABORT: {args.reuse_specs} is stale ({stale}); re-bank it (fresh pass, "
+                 "no reuse flags) or pass --allow-stale-specs to use it anyway.")
+            return 2
+        if stale:
+            _log(f"WARN: using a stale specs sidecar ({stale}) — --allow-stale-specs forced.")
         specs_N = slide_specs(sidecar.get("specs") or [], N)
         src_counts = sidecar.get("source_counts") or {}
         shutil.copyfile(args.reuse_bpre, bpre_deck)  # never mutate the bank
@@ -857,7 +899,8 @@ def main(argv: list[str] | None = None) -> int:
         # Bank the sidecar so later runs can --reuse-bpre + --reuse-specs (no Keynote).
         if not errors:
             write_specs_sidecar(specs_path, slide_number=N, source=args.source,
-                                template=args.template, specs=specs_N, source_counts=src_counts)
+                                template=args.template, specs=specs_N, source_counts=src_counts,
+                                commit=_git_head())
             _log(f"Banked specs sidecar → {specs_path}")
 
     if errors:

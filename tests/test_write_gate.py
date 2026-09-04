@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("keynote_parser")
 
 from scripts.write_gate_ab import (  # noqa: E402
+    GATE_VERSION,
     build_aprime_applescript,
     build_reported,
     build_reported_offline,
@@ -34,6 +35,7 @@ from scripts.write_gate_ab import (  # noqa: E402
     slide_has_resized_image,
     slide_units,
     specs_hide_count,
+    specs_sidecar_is_stale,
     text_autosize_shapes,
     write_specs_sidecar,
 )
@@ -422,12 +424,38 @@ def test_specs_sidecar_round_trip(tmp_path):
     counts = {"image": 5, "group": 2}
     path = tmp_path / "specs_slide9.json"
     write_specs_sidecar(path, slide_number=9, source="/w.key", template="/t.key",
-                        specs=specs, source_counts=counts)
+                        specs=specs, source_counts=counts, commit="abc123")
     loaded = load_specs_sidecar(path)
     assert loaded["slide"] == 9
     assert loaded["source"] == "/w.key" and loaded["template"] == "/t.key"
     assert loaded["specs"] == specs
     assert loaded["source_counts"] == counts
+    assert loaded["commit"] == "abc123"
+    assert loaded["gate_version"] == GATE_VERSION
+
+
+def test_specs_sidecar_is_stale_on_commit_drift():
+    sidecar = {"commit": "abc123", "gate_version": GATE_VERSION}
+    assert specs_sidecar_is_stale(sidecar, "def456") != ""
+    assert specs_sidecar_is_stale(sidecar, "abc123") == ""
+
+
+def test_specs_sidecar_is_stale_on_gate_version_drift():
+    sidecar = {"commit": "abc123", "gate_version": GATE_VERSION - 1}
+    assert specs_sidecar_is_stale(sidecar, "abc123") != ""
+
+
+def test_specs_sidecar_is_stale_on_empty_head():
+    # An empty HEAD (git failed / not a repo) can never PROVE freshness -- must be stale.
+    sidecar = {"commit": "abc123", "gate_version": GATE_VERSION}
+    assert specs_sidecar_is_stale(sidecar, "") != ""
+
+
+def test_specs_sidecar_is_stale_on_missing_or_empty_commit():
+    sidecar_missing = {"gate_version": GATE_VERSION}
+    assert specs_sidecar_is_stale(sidecar_missing, "abc123") != ""
+    sidecar_empty = {"commit": "", "gate_version": GATE_VERSION}
+    assert specs_sidecar_is_stale(sidecar_empty, "abc123") != ""
 
 
 def test_build_reported_offline_composes_soft_frames():

@@ -9,6 +9,7 @@ monkeypatched or stood in for here rather than exercised against a real deck.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,7 +30,23 @@ from obed_edom.offline_write import (
     verify_offline_frames,
 )
 from obed_edom.remap_keynote import offline_write_mode
-from scripts.offline_write_ab import compare_units_by_addr, compare_units_multiset
+from scripts.offline_write_ab import (
+    Tolerances,
+    accessibility_ok,
+    compare_units_by_addr,
+    compare_units_identity,
+    compare_units_multiset,
+    front_err_from_raw,
+    load_run_record,
+    pass2_health,
+    pass2_parity,
+    plan_oracle_slide,
+    plan_parity,
+    run_record,
+    tol_for_bucket,
+    unit_bucket,
+    write_run_record,
+)
 
 
 def _spec(**over):
@@ -564,10 +581,20 @@ def test_compare_units_multiset_text_is_informational():
     assert report["per_kind"]["text"]["worst"] == 50.0
 
 
-# --- compare_units_by_addr (BLOCKER item 7 gate follow-up) -----------------------
+def test_compare_units_multiset_child_text_is_also_informational():
+    child_addr = (("top", "group", 0), "child", 0)
+    a = [_unit("text", 0, 0, 10, 10, addr=child_addr)]
+    b = [_unit("text", 50, 0, 10, 10, addr=child_addr)]  # far off in x
+    report = compare_units_multiset(a, b, tol_hard=0.5, tol_soft=1.0)
+    assert report["pass"] is True
+    assert report["per_kind"]["child:text"]["informational"] is True
+    assert report["per_kind"]["child:text"]["worst"] == 50.0
 
 
-def test_compare_units_by_addr_catches_permutation_that_fools_the_multiset():
+# --- compare_units_by_addr — demoted to a permutation DIAGNOSTIC only (D2) -------
+
+
+def test_compare_units_by_addr_flags_permutation_but_never_gates():
     a = [
         _unit("shape", 0, 0, 10, 10, addr=("top", "shape", 0)),
         _unit("shape", 100, 100, 10, 10, addr=("top", "shape", 1)),
@@ -582,8 +609,8 @@ def test_compare_units_by_addr_catches_permutation_that_fools_the_multiset():
     assert multiset["pass"] is True  # fooled: identical population and sorted order
 
     addr_report = compare_units_by_addr(a, b)
-    assert addr_report["pass"] is False  # caught: huge per-address delta
-    assert addr_report["per_kind"]["shape"]["pass"] is False
+    assert addr_report["pass"] is True  # D2: informational everywhere, never gates
+    assert addr_report["per_kind"]["shape"]["pass"] is False  # still visible as a diagnostic
 
 
 def test_compare_units_by_addr_group_is_informational():
@@ -597,13 +624,23 @@ def test_compare_units_by_addr_group_is_informational():
     assert report["per_kind"]["group"]["worst"] == 50.0
 
 
-def test_compare_units_by_addr_gates_shape_line_image_movie():
+def test_compare_units_by_addr_never_gates_shape_line_image_movie():
     for kind in ("shape", "line", "image", "movie"):
         a = [_unit(kind, 0, 0, 10, 10, addr=("top", kind, 0))]
         b = [_unit(kind, 5, 0, 10, 10, addr=("top", kind, 0))]
         report = compare_units_by_addr(a, b, tol_hard=0.5, tol_soft=0.5)
-        assert report["per_kind"][kind]["pass"] is False, kind
-        assert report["pass"] is False, kind
+        assert report["per_kind"][kind]["pass"] is False, kind  # still flagged...
+        assert report["pass"] is True, kind  # ...but D2: never gates the overall result
+
+
+def test_compare_units_by_addr_x_only_rule_uses_unit_bucket():
+    # A "child:text" bucket (via unit_bucket), not the raw "text" kind, must also get
+    # the x-only delta rule -- a large y/w/h drift on a child-text unit must NOT count.
+    child_addr = (("top", "group", 0), "child", 0)
+    a = [_unit("text", 0, 0, 10, 10, addr=child_addr)]
+    b = [_unit("text", 3.0, 500, 999, 999, addr=child_addr)]  # x drift 3.0, everything else huge
+    report = compare_units_by_addr(a, b, tol_hard=0.5, tol_soft=5.0)
+    assert report["per_kind"]["text"]["worst"] == 3.0  # x-only, not the huge y/w/h delta
 
 
 def test_log_multiset_report_flags_text_informational(capsys):
@@ -800,3 +837,619 @@ def test_summary_gate_reasons_missing_verify_keys_do_not_spuriously_fail():
 
     ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True}
     assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
+
+
+# --- accessibility_ok (D5 pre-flight) ---------------------------------------------
+
+
+def test_accessibility_ok_true(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="true\n", stderr=""),
+    )
+    ok, detail = accessibility_ok()
+    assert ok is True
+    assert detail == "true"
+
+
+def test_accessibility_ok_false_on_false_output(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="false\n", stderr=""),
+    )
+    ok, _detail = accessibility_ok()
+    assert ok is False
+
+
+def test_accessibility_ok_false_on_osascript_failure(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="not authorized"),
+    )
+    ok, detail = accessibility_ok()
+    assert ok is False
+    assert "not authorized" in detail
+
+
+# --- front_err_from_raw (D4) -------------------------------------------------------
+
+
+def test_front_err_from_raw_extracts_field():
+    raw = ("done=1 skipped=0 sized=0 sizeSkips=0 front=2 dedupDeleted=0 dedupShortfall=0 "
+           "frontErr= [-1743] exported=true sigFallback=0 unresolved=0 badgeFallback=0 "
+           "badgeUnresolved=0 detail=")
+    assert front_err_from_raw(raw) == "[-1743]"
+
+
+def test_front_err_from_raw_empty_when_clean():
+    raw = "done=1 skipped=0 front=2 dedupDeleted=0 dedupShortfall=0 frontErr= exported=true"
+    assert front_err_from_raw(raw) == ""
+
+
+def test_front_err_from_raw_no_match_returns_empty():
+    assert front_err_from_raw("garbage, no fields here") == ""
+
+
+# --- pass2_health (D4) --------------------------------------------------------------
+
+
+def _pass2(**over):
+    base = dict(ok=True, jobs=2, done=2, skipped=0, sized=2, sizeSkips=0, front=1,
+                dedupDeleted=0, dedupShortfall=0, sigFallback=0, unresolved=0,
+                badgeFallback=0, badgeUnresolved=0, raw="")
+    base.update(over)
+    return base
+
+
+def test_pass2_health_green():
+    assert pass2_health(_pass2(), label="A", expect_raises=True) == []
+
+
+def test_pass2_health_none_result_is_healthy():
+    # `childResize is None` (no stat/badge jobs planned) is healthy (D4).
+    assert pass2_health(None, label="A", expect_raises=True) == []
+
+
+def test_pass2_health_noop_skipped_bool_form_is_healthy():
+    # `_run_stat_finalize`'s no-op return: `skipped` is a BOOL sentinel here, not the
+    # per-job skip COUNT the rest of this function reads as an int -- must short-circuit
+    # before the count checks would otherwise misread `True` as `1`.
+    noop = {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
+    assert pass2_health(noop, label="A", expect_raises=True) == []
+
+
+def test_pass2_health_not_ok():
+    reasons = pass2_health(_pass2(ok=False), label="A", expect_raises=False)
+    assert any("ok=False" in r for r in reasons)
+
+
+def test_pass2_health_zero_keys():
+    reasons = pass2_health(
+        _pass2(unresolved=1, dedupShortfall=2, badgeUnresolved=3), label="A", expect_raises=False
+    )
+    assert len(reasons) == 3
+
+
+def test_pass2_health_front_when_raises():
+    reasons = pass2_health(_pass2(front=0), label="A", expect_raises=True)
+    assert any("front=0" in r for r in reasons)
+    # front is NOT required when the plan carried no stat jobs / badge raises.
+    assert pass2_health(_pass2(front=0), label="A", expect_raises=False) == []
+
+
+def test_pass2_health_frontErr_flags_accessibility_denied():
+    raw = "done=1 skipped=0 front=0 dedupDeleted=0 dedupShortfall=0 frontErr= [-1743] exported=true"
+    reasons = pass2_health(_pass2(raw=raw, front=0), label="A", expect_raises=False)
+    assert any("Accessibility denied" in r for r in reasons)
+
+
+def test_pass2_health_fallback_keys_are_warn_only():
+    # sigFallback/badgeFallback non-zero must NOT gate (D4: WARN only).
+    reasons = pass2_health(_pass2(sigFallback=3, badgeFallback=2), label="A", expect_raises=False)
+    assert reasons == []
+
+
+def test_pass2_health_done_plus_skipped_must_equal_jobs():
+    reasons = pass2_health(_pass2(jobs=5, done=2, skipped=2), label="A", expect_raises=False)
+    assert any("!= jobs" in r for r in reasons)
+
+
+# --- pass2_parity (D4) --------------------------------------------------------------
+
+
+def test_pass2_parity_green():
+    assert pass2_parity(_pass2(), _pass2()) == []
+
+
+def test_pass2_parity_flags_each_key():
+    for key in ("jobs", "done", "skipped", "sized", "sizeSkips", "front", "dedupDeleted",
+                "dedupShortfall", "sigFallback", "unresolved", "badgeFallback", "badgeUnresolved"):
+        b = _pass2(**{key: 99})
+        reasons = pass2_parity(_pass2(), b)
+        assert any(key in r for r in reasons), key
+
+
+def test_pass2_parity_ignores_raw():
+    a = _pass2(raw="AAA some detail")
+    b = _pass2(raw="BBB totally different detail")
+    assert pass2_parity(a, b) == []
+
+
+def test_pass2_parity_handles_none():
+    assert pass2_parity(None, None) == []
+
+
+# --- plan_parity (D5) ----------------------------------------------------------------
+
+
+def _plan(**over):
+    # A's suppressGeometry is always empty and B's always equals the compared-slide set
+    # in these `transforms`/`reuses` tests — suppressGeometry drift is tested separately
+    # below, since (by construction, D1/D5) it can never be an EQUALITY check between A/B.
+    base = {"transforms": [{"slide": 1}], "reuses": [], "suppressGeometry": []}
+    base.update(over)
+    return base
+
+
+def test_plan_parity_green():
+    plan_a = _plan(suppressGeometry=[])
+    plan_b = _plan(suppressGeometry=[5])
+    assert plan_parity(plan_a, plan_b, compared_slides=[5]) == []
+
+
+def test_plan_parity_flags_transform_drift():
+    plan_a = _plan(suppressGeometry=[])
+    plan_b = _plan(transforms=[{"slide": 2}], suppressGeometry=[5])
+    reasons = plan_parity(plan_a, plan_b, compared_slides=[5])
+    assert any("transforms" in r for r in reasons)
+
+
+def test_plan_parity_flags_reuse_drift():
+    plan_a = _plan(suppressGeometry=[])
+    plan_b = _plan(reuses=[{"slide": 1, "from": 2}], suppressGeometry=[5])
+    reasons = plan_parity(plan_a, plan_b, compared_slides=[5])
+    assert any("reuses" in r for r in reasons)
+
+
+def test_plan_parity_flags_a_suppress_geometry_nonempty():
+    # A is the production (AppleScript-only) path — it must never suppress geometry.
+    plan_a = _plan(suppressGeometry=[1])
+    plan_b = _plan(suppressGeometry=[5])
+    reasons = plan_parity(plan_a, plan_b, compared_slides=[5])
+    assert any("suppressGeometry not empty" in r for r in reasons)
+
+
+def test_plan_parity_flags_b_suppress_geometry_mismatch():
+    # B must suppress EXACTLY the compared-slide set, not merely "something".
+    plan_a = _plan(suppressGeometry=[])
+    plan_b = _plan(suppressGeometry=[9])
+    reasons = plan_parity(plan_a, plan_b, compared_slides=[5])
+    assert any("suppressGeometry" in r and "compared slides" in r for r in reasons)
+
+
+def test_plan_parity_suppress_geometry_never_an_equality_check():
+    # A == [] and B == compared_slides is GREEN even though the two lists differ --
+    # the old "identical suppressGeometry" rule could never pass by construction.
+    plan_a = _plan(suppressGeometry=[])
+    plan_b = _plan(suppressGeometry=[2, 5])
+    assert plan_a["suppressGeometry"] != plan_b["suppressGeometry"]
+    assert plan_parity(plan_a, plan_b, compared_slides=[2, 5]) == []
+
+
+# --- unit_bucket / tol_for_bucket (D7/D8) ---------------------------------------------
+
+
+def test_unit_bucket_top_level_keeps_kind():
+    assert unit_bucket({"addr": ("top", "shape", 0), "kind": "shape"}) == "shape"
+
+
+def test_unit_bucket_child_gets_prefix():
+    addr = (("top", "group", 0), "child", 0)
+    assert unit_bucket({"addr": addr, "kind": "image"}) == "child:image"
+
+
+def test_tol_for_bucket_masked_uses_mask_tol():
+    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
+    assert tol_for_bucket("image", "masked", tols) == 2.0
+
+
+def test_tol_for_bucket_autosize_uses_text_tol():
+    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
+    assert tol_for_bucket("text", "autosize", tols) == 3.0
+
+
+def test_tol_for_bucket_hard_kinds():
+    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
+    assert tol_for_bucket("shape", "frame", tols) == 0.5
+    assert tol_for_bucket("line", "line", tols) == 0.5
+
+
+def test_tol_for_bucket_soft_default_including_children():
+    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
+    assert tol_for_bucket("image", "frame", tols) == 1.0
+    assert tol_for_bucket("group", "group", tols) == 1.0
+    assert tol_for_bucket("child:image", "frame", tols) == 1.0
+
+
+# --- compare_units_identity (D1) ------------------------------------------------------
+
+
+def _idunit(id_, kind, x, y, w, h, addr):
+    return {"id": id_, "kind": kind, "addr": addr,
+            "sig": {"type": "frame", "frame": (x, y, w, h), "flips": (False, False)}}
+
+
+def test_compare_units_identity_matches_reordered_kindindex():
+    a = [_idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0))]
+    b = [_idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 1))]  # Bring-to-Front reordered
+    report = compare_units_identity(a, b, Tolerances())
+    assert report["pass"] is True
+    assert report["id_rate"] == 1.0
+
+
+def test_compare_units_identity_id_rate_below_one_fails():
+    # Different ids at the SAME address: match_units falls back to addr, so the id RATE
+    # drops below 1.0 even though the geometry is identical -- D1 gates on the id set.
+    a = [_idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0))]
+    b = [_idunit("s2", "shape", 0, 0, 10, 10, ("top", "shape", 0))]
+    report = compare_units_identity(a, b, Tolerances())
+    assert report["id_rate"] == 0.0
+    assert report["pass"] is False
+
+
+def test_compare_units_identity_flags_unmatched_unit():
+    a = [
+        _idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0)),
+        _idunit("s2", "shape", 20, 20, 10, 10, ("top", "shape", 1)),
+    ]
+    b = [_idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0))]
+    report = compare_units_identity(a, b, Tolerances())
+    assert [u["id"] for u in report["unmatched_a"]] == ["s2"]
+    assert report["pass"] is False
+
+
+def test_compare_units_identity_autosize_is_x_only():
+    a = [{"id": "t1", "kind": "text", "addr": ("top", "text", 0),
+          "sig": {"type": "autosize", "x": 100.0, "flips": (False, False)}}]
+    b = [{"id": "t1", "kind": "text", "addr": ("top", "text", 0),
+          "sig": {"type": "autosize", "x": 101.5, "flips": (False, False)}}]
+    report = compare_units_identity(a, b, Tolerances(text=2.0))
+    assert report["pass"] is True
+    assert report["per_bucket"]["text"]["worst"] == 1.5
+
+
+def test_compare_units_identity_carves_autosize_shapes():
+    a = [{"id": "sh1", "kind": "shape", "addr": ("top", "shape", 0),
+          "sig": {"type": "frame", "frame": (0, 0, 0, 50), "flips": (False, False)}}]
+    b = [{"id": "sh1", "kind": "shape", "addr": ("top", "shape", 0),
+          "sig": {"type": "frame", "frame": (0, 0, 0, 999), "flips": (False, False)}}]
+    report = compare_units_identity(a, b, Tolerances())
+    assert report["carved"] == ["sh1"]
+    assert report["pass"] is True
+    assert report["per_bucket"] == {}
+
+
+def test_compare_units_identity_buckets_group_children_separately():
+    top_addr = ("top", "group", 0)
+    child_addr = (top_addr, "child", 0)
+    a = [
+        _idunit("g1", "group", 0, 0, 100, 100, top_addr),
+        _idunit("c1", "image", 10, 10, 20, 20, child_addr),
+    ]
+    b = [
+        _idunit("g1", "group", 0, 0, 100, 100, top_addr),
+        _idunit("c1", "image", 10, 10, 20, 20, child_addr),
+    ]
+    report = compare_units_identity(a, b, Tolerances())
+    assert set(report["per_bucket"]) == {"group", "child:image"}
+
+
+# --- plan_oracle_slide (D3) -----------------------------------------------------------
+
+
+def test_plan_oracle_slide_matches_by_id():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 10.0, "y": 20.0, "w": 30.0, "h": 40.0}]
+    id_by_addr = {("shape", 0): "obj1"}
+    recs_by_id = {"obj1": {"id": "obj1", "kind": "shape", "kindIndex": 0,
+                           "x": 10.0, "y": 20.0, "w": 30.0, "h": 40.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["pass"] is True
+    assert report["per_kind"]["shape"]["n"] == 1
+    assert report["skipped"] == 0
+    assert report["compared"] == 1
+
+
+def test_plan_oracle_slide_skips_hide_role():
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "role": "hide"}]
+    report = plan_oracle_slide(specs, {}, {}, Tolerances())
+    assert report == {"pass": True, "per_kind": {}, "missing_ids": [], "skipped": 0, "compared": 0}
+
+
+def test_plan_oracle_slide_skips_text_spec():
+    # Autosize text geometry is not offline-recoverable — the identity compare covers it.
+    specs = [{"slide": 1, "kind": "text", "kindIndex": 0, "x": 999.0, "y": 999.0}]
+    id_by_addr = {("text", 0): "t1"}
+    recs_by_id = {"t1": {"id": "t1", "kind": "text", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "autosize"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["per_kind"] == {}
+    assert report["pass"] is True
+    assert report["skipped"] == 1
+    assert report["compared"] == 0  # vacuous — every spec on this slide was skipped
+
+
+def test_plan_oracle_slide_skips_group_spec():
+    # A group's union is a live-layout composite — not offline-recoverable either.
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 999.0, "y": 999.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["per_kind"] == {}
+    assert report["pass"] is True
+    assert report["skipped"] == 1
+    assert report["compared"] == 0
+
+
+def test_plan_oracle_slide_skips_masked_image():
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 999.0, "y": 999.0}]
+    id_by_addr = {("image", 0): "img1"}
+    recs_by_id = {"img1": {"id": "img1", "kind": "image", "kindIndex": 0,
+                           "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "mask"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["per_kind"] == {}
+    assert report["pass"] is True
+    assert report["skipped"] == 1
+    assert report["compared"] == 0
+
+
+def test_plan_oracle_slide_unmasked_image_is_compared():
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("image", 0): "img1"}
+    recs_by_id = {"img1": {"id": "img1", "kind": "image", "kindIndex": 0,
+                           "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["pass"] is True
+    assert report["per_kind"]["image"]["n"] == 1
+    assert report["skipped"] == 0
+
+
+def test_plan_oracle_slide_line_uses_position_only():
+    # Lines compare POSITION only (offline_write._spec_box) — a huge w/h drift must NOT fail.
+    specs = [{"slide": 1, "kind": "line", "kindIndex": 0, "x": 10.0, "y": 20.0, "w": 999.0, "h": 999.0}]
+    id_by_addr = {("line", 0): "l1"}
+    recs_by_id = {"l1": {"id": "l1", "kind": "line", "kindIndex": 0,
+                        "x": 10.0, "y": 20.0, "w": 5.0, "h": 5.0, "geom_source": "line"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["pass"] is True
+    assert report["per_kind"]["line"]["worst"] == 0.0
+
+
+def test_plan_oracle_slide_flags_missing_id():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0}]
+    report = plan_oracle_slide(specs, {}, {}, Tolerances())
+    assert report["pass"] is False
+    assert report["missing_ids"][0]["reason"] == "not in source kind index"
+
+
+def test_plan_oracle_slide_flags_missing_from_output_deck():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0}]
+    id_by_addr = {("shape", 0): "obj1"}
+    report = plan_oracle_slide(specs, id_by_addr, {}, Tolerances())
+    assert report["pass"] is False
+    assert report["missing_ids"][0]["reason"] == "missing from output deck"
+
+
+def test_plan_oracle_slide_flags_spec_with_no_kindindex():
+    # Should never happen (ItemTransform.as_dict always emits kindIndex) — never a
+    # silent drop; a loud RED missing_ids entry instead.
+    specs = [{"slide": 1, "kind": "shape", "x": 0.0, "y": 0.0}]
+    report = plan_oracle_slide(specs, {}, {}, Tolerances())
+    assert report["pass"] is False
+    assert report["missing_ids"][0]["reason"] == "spec carries no kindIndex"
+
+
+def test_plan_oracle_slide_worst_per_kind():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 0.0, "h": 0.0}]
+    id_by_addr = {("shape", 0): "s1"}
+    recs_by_id = {"s1": {"id": "s1", "kind": "shape", "kindIndex": 0,
+                         "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5))
+    assert report["per_kind"]["shape"]["worst"] == 5.0
+    assert report["pass"] is False
+
+
+# --- run_record / write_run_record / load_run_record (D13) ---------------------------
+
+
+def _record(**over):
+    base = dict(
+        commit="abc123", deck_digest="dA", source_digest="dS",
+        plan={"transforms": [{"slide": 1}], "reuses": [], "suppressGeometry": [],
+             "statJobs": [{"slide": 3}]},
+        child_resize={"ok": True, "jobs": 0}, applied=5, missed=0,
+        offline_write={"slides": [1], "specs": {1: []}},
+        spec_id_map={"1": [{"kind": "shape", "kindIndex": 0, "id": "obj1"}]},
+    )
+    base.update(over)
+    return base
+
+
+def test_run_record_drops_specs_from_offline_write():
+    record = run_record(**_record())
+    assert "specs" not in record["offlineWrite"]
+    assert record["offlineWrite"]["slides"] == [1]
+
+
+def test_run_record_trims_plan_to_three_keys():
+    record = run_record(**_record(plan={"transforms": [1], "reuses": [2], "suppressGeometry": [3],
+                                        "asGeom": {"junk": True}, "statJobs": []}))
+    assert set(record["plan"]) == {"transforms", "reuses", "suppressGeometry"}
+
+
+def test_run_record_computes_expect_raises_from_stat_jobs():
+    record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
+                                        "statJobs": [{"slide": 3}]}))
+    assert record["expectRaises"] is True
+
+
+def test_run_record_computes_expect_raises_from_badge_raises():
+    record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
+                                        "badgeRaises": [{"slide": 5}]}))
+    assert record["expectRaises"] is True
+
+
+def test_run_record_expect_raises_false_when_both_job_lists_empty():
+    record = run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": [],
+                                        "statJobs": [], "badgeRaises": []}))
+    assert record["expectRaises"] is False
+
+
+def test_run_record_raises_when_plan_carries_neither_key():
+    # A plan with NEITHER "statJobs" nor "badgeRaises" looks like an already-trimmed
+    # persisted plan (a loaded run record's `plan`), not a fresh `plan_out` -- fail
+    # loudly rather than silently reading it as "no jobs planned".
+    with pytest.raises(ValueError, match="statJobs"):
+        run_record(**_record(plan={"transforms": [], "reuses": [], "suppressGeometry": []}))
+
+
+def test_write_run_record_round_trips(tmp_path):
+    record = run_record(**_record())
+    path = write_run_record(tmp_path / "A.run.json", record)
+    assert json.loads(path.read_text()) == record
+
+
+def test_load_run_record_refuses_gate_version_mismatch(tmp_path, monkeypatch):
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    record = run_record(**_record(deck_digest="digestX"))
+    record["gateVersion"] = 999
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="gateVersion"):
+        load_run_record(path, deck=deck, source=source)
+
+
+def test_load_run_record_refuses_deck_digest_mismatch(tmp_path, monkeypatch):
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    record = run_record(**_record(deck_digest="something-else"))
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="deck digest"):
+        load_run_record(path, deck=deck, source=source)
+
+
+def test_load_run_record_refuses_source_digest_mismatch(tmp_path, monkeypatch):
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    # deck_digest is monkeypatched to a single constant regardless of path -- keep the
+    # deck digest MATCHING so this test proves the SOURCE check specifically fires.
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    record = run_record(**_record(deck_digest="digestX", source_digest="something-else"))
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="source digest"):
+        load_run_record(path, deck=deck, source=source)
+
+
+def test_load_run_record_warns_but_does_not_refuse_commit_mismatch(tmp_path, monkeypatch, capsys):
+    from scripts import offline_write_ab as owab
+
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    monkeypatch.setattr(owab, "_git_head", lambda *a, **k: "current-head")
+    record = run_record(**_record(deck_digest="digestX", source_digest="digestX", commit="stale-commit"))
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    loaded = load_run_record(path, deck=deck, source=source)
+    assert loaded == record  # NOT refused
+    out = capsys.readouterr().out
+    assert "WARN" in out and "commit" in out
+
+
+def test_load_run_record_accepts_matching_record(tmp_path, monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    deck = tmp_path / "d.key"
+    deck.write_bytes(b"x")
+    source = tmp_path / "s.key"
+    monkeypatch.setattr("obed_edom.baseline.deck_digest", lambda p: "digestX")
+    monkeypatch.setattr(owab, "_git_head", lambda *a, **k: "abc123")  # matches _record()'s commit
+    record = run_record(**_record(deck_digest="digestX", source_digest="digestX"))
+    path = tmp_path / "d.run.json"
+    path.write_text(json.dumps(record))
+    loaded = load_run_record(path, deck=deck, source=source)
+    assert loaded == record
+
+
+# --- remap_keynote plan_out carries pass-two expectations (spec item 2) --------------
+
+
+def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
+    monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
+
+    def fake_plan_payload_transforms(wall, recipe, *, child_resize_report=None,
+                                     badge_raise_report=None, **kwargs):
+        if child_resize_report is not None:
+            child_resize_report.append({"slide": 3, "captionPt": 24.0, "groupIndex": 1})
+        if badge_raise_report is not None:
+            badge_raise_report.append({"slide": 5, "isTitle": True})
+        return []
+
+    monkeypatch.setattr(rk, "plan_payload_transforms", fake_plan_payload_transforms)
+    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rk, "recipe_for",
+        lambda wall, template: {
+            "source": "test", "mapSrc": "src", "mapDst": "dst",
+            "destWidth": 1920, "destHeight": 1080, "characterStyles": [],
+        },
+    )
+    monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
+    monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
+    monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    # child_resize/badgeRaises are non-empty below, which would otherwise route through
+    # the REAL pass-2 stat-finalize AppleScript (Keynote-touching) — never allowed here.
+    monkeypatch.setattr(rk, "_run_stat_finalize", lambda *a, **k: {"ok": True, "jobs": 1})
+    monkeypatch.setattr(rk, "read_template_stat_sizes", lambda *a, **k: {})
+    monkeypatch.setattr(rk, "restore_card_stroke_widths", lambda *a, **k: None)
+
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    dest = tmp_path / "out.key"
+    source.touch()
+    template.touch()
+
+    wall_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    plan_out: dict = {}
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        plan_out=plan_out, log=lambda m: None,
+    )
+
+    assert plan_out["statJobs"] == [{"slide": 3, "captionPt": 24.0, "groupIndex": 1}]
+    assert plan_out["badgeRaises"] == [{"slide": 5, "isTitle": True}]
+    assert plan_out["groupRemoves"] == []
+    assert plan_out["statSlides"] == [3]

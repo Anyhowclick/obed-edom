@@ -929,6 +929,12 @@ def remap_keynote(
             plan_out["reuses"] = reuses
             plan_out["suppressGeometry"] = plan.get("suppressGeometry")
             plan_out["asGeom"] = plan.get("asGeom")
+            plan_out["groupRemoves"] = list(group_removes)
+            plan_out["badgeRaises"] = list(badge_raises)
+            # "statJobs" (not "childResize") — the run record's pass-2 RESULT dict already
+            # uses "childResize" for `_run_stat_finalize`'s return; this is the JOB LIST.
+            plan_out["statJobs"] = list(child_resize)
+            plan_out["statSlides"] = sorted({int(cr.get("slide", -1)) for cr in child_resize})
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
