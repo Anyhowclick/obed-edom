@@ -4,7 +4,8 @@
 Runs :func:`obed_edom.remap_keynote.remap_and_inspect` TWICE against the same
 source/template pair:
 
-    A = production run, ``OBED_OFFLINE_WRITE`` unset (today's AppleScript-only path).
+    A = the scripted-AppleScript baseline, ``OBED_OFFLINE_WRITE=off`` set EXPLICITLY
+        (never relies on the ambient default, whatever it currently is).
     B = the SAME plan with ``OBED_OFFLINE_WRITE={verify,on}`` (surgical offline IWA patch,
         AppleScript fallback only for refused slides / individually missed specs).
 
@@ -42,8 +43,13 @@ mismatch a matched pair's render signature reports — TYPE (e.g. ``autosize`` v
 ``write_gate_ab.compare_signature`` reports those independently of the geometry delta.
 
 Health gates run BEFORE any geometry compare: an Accessibility pre-flight (``front``
-z-order raises silently no-op without it), pass-2 (stat-finalize) health on run A --
-aborting before B ever starts -- then A/B pass-2 parity and plan parity. Plan parity
+z-order raises silently no-op without it), a Keynote-open-documents pre-flight
+(:func:`keynote_open_documents` -- ABORTS if anything is already open; a stray document
+left by a swallowed close is what made a real run inherit the previous run's B_flagged
+and blow memory on the two-tier read), pass-2 (stat-finalize) health on run A --
+aborting before B ever starts -- then A/B pass-2 parity and plan parity. Each fresh run
+(A and B) is followed by the SAME open-documents check, WARNing loudly and closing only
+that run's own deck if Keynote left it open (never anyone else's). Plan parity
 checks ``transforms``/``reuses`` for exact equality, but NOT ``suppressGeometry`` — that
 key differs from A to B BY CONSTRUCTION (A, the production path, never suppresses
 geometry; B suppresses exactly the compared-slide set) — instead A's must be empty and
@@ -132,6 +138,55 @@ def accessibility_ok() -> tuple[bool, str]:
     if out.lower() != "true":
         return False, out or "Accessibility not enabled"
     return True, out
+
+
+def keynote_open_documents() -> list[str]:
+    """Every open Keynote document's name — empty when Keynote isn't running, or is
+    running with no documents open. ``if it is running`` short-circuits so this never
+    LAUNCHES Keynote itself; a stray document left open (a swallowed close from a prior
+    run) is exactly what caused the Full-deck gate to inherit the previous run's
+    B_flagged and blow memory on the two-tier read."""
+    from obed_edom import keynote_app  # noqa: PLC0415
+
+    proc = subprocess.run(
+        ["osascript", "-e",
+         f'tell application id "{keynote_app.bundle_id()}" to if it is running then '
+         "get name of documents"],
+        capture_output=True, text=True, check=False,
+    )
+    out = (proc.stdout or "").strip()
+    if not out:
+        return []
+    return [name.strip() for name in out.split(",") if name.strip()]
+
+
+def _close_keynote_document(name: str) -> None:
+    """Close every open document named ``name`` (exact match), discarding changes."""
+    from obed_edom import keynote_app  # noqa: PLC0415
+
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    subprocess.run(
+        ["osascript", "-e",
+         f'tell application id "{keynote_app.bundle_id()}" to close (every document '
+         f'whose name is "{escaped}") saving no'],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def _warn_and_close_stray_documents(label: str, deck: Path) -> None:
+    """After a fresh run, log a loud WARN naming every Keynote document still open, then
+    close ONLY the ones matching THIS run's own deck (``deck.stem``) -- never anything
+    else -- so a swallowed close doesn't strand the next run's Keynote session holding
+    stale documents (the Full-deck-gate memory blowup this guards against)."""
+    open_docs = keynote_open_documents()
+    if not open_docs:
+        return
+    _log(f"WARN: {label}: Keynote still has {len(open_docs)} document(s) open after "
+         f"this run: {open_docs}.")
+    own = [name for name in open_docs if Path(name).stem == deck.stem]
+    for name in own:
+        _close_keynote_document(name)
+        _log(f"Closed stray document {name!r} (matches {label}'s own deck {deck.name}).")
 
 
 def front_err_from_raw(raw: str) -> str:
@@ -912,6 +967,15 @@ def main(argv: list[str] | None = None) -> int:
              "no-op without it).")
         return 4
 
+    open_docs = keynote_open_documents()
+    if open_docs:
+        _log(f"ABORT: Keynote already has {len(open_docs)} document(s) open: {open_docs}. "
+             "A prior run's swallowed close (or an unrelated open deck) can wedge this run "
+             "or force the two-tier read to fall back into the legacy per-object inspect "
+             "(the Full-deck-gate memory blowup this guards against). Close them in Keynote "
+             "and re-run.")
+        return 5
+
     commit = _git_head()
 
     # ================================ run/reuse A =================================
@@ -932,9 +996,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.validate:
             _log("live verify SKIPPED (--no-validate).")
     else:
-        _log(f"A: production remap {args.source.name} (OBED_OFFLINE_WRITE unset) -> {a_deck}")
+        _log(f"A: production remap {args.source.name} (OBED_OFFLINE_WRITE=off) -> {a_deck}")
         _remap_env(suppress="", as_geometry="1", geom_props="1")
-        os.environ.pop("OBED_OFFLINE_WRITE", None)
+        os.environ["OBED_OFFLINE_WRITE"] = "off"  # explicit: never rely on the ambient default
         plan_a: dict[str, Any] = {}
         info_a = remap_and_inspect(
             args.source, a_deck, template=args.template, slide_range=slide_range,
@@ -954,6 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
         expect_raises_a = bool(a_record["expectRaises"])
         write_run_record(_run_record_path(a_deck), a_record)
         _log(f"Run record written -> {_run_record_path(a_deck)}")
+        _warn_and_close_stray_documents("A", a_deck)
 
     reasons_a = pass2_health(child_resize_a, label="A", expect_raises=expect_raises_a)
     for r in reasons_a:
@@ -1015,6 +1080,7 @@ def main(argv: list[str] | None = None) -> int:
         expect_raises_b = bool(b_record["expectRaises"])
         write_run_record(_run_record_path(b_deck), b_record)
         _log(f"Run record written -> {_run_record_path(b_deck)}")
+        _warn_and_close_stray_documents("B", b_deck)
 
     if not (ow_b.get("slides") or []):
         _log("ABORT: run B took no slide offline (OBED_AS_GEOMETRY off, or no slide "

@@ -37,6 +37,7 @@ from scripts.offline_write_ab import (
     compare_units_identity,
     compare_units_multiset,
     front_err_from_raw,
+    keynote_open_documents,
     load_run_record,
     pass2_health,
     pass2_parity,
@@ -857,6 +858,101 @@ def test_accessibility_ok_false_on_osascript_failure(monkeypatch):
     assert "not authorized" in detail
 
 
+# --- keynote_open_documents / stray-document guard (Full-deck-gate memory blowup) --
+
+
+def test_keynote_open_documents_not_running_returns_empty(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="\n", stderr=""),
+    )
+    assert keynote_open_documents() == []
+
+
+def test_keynote_open_documents_parses_comma_list(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout="A_unflagged.key, B_flagged.key\n", stderr=""
+        ),
+    )
+    assert keynote_open_documents() == ["A_unflagged.key", "B_flagged.key"]
+
+
+def test_keynote_open_documents_single_name_no_comma(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="A_unflagged.key\n", stderr=""),
+    )
+    assert keynote_open_documents() == ["A_unflagged.key"]
+
+
+def test_main_aborts_when_keynote_already_has_documents_open(monkeypatch, tmp_path, capsys):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(owab, "accessibility_ok", lambda: (True, "true"))
+    monkeypatch.setattr(owab, "keynote_open_documents", lambda: ["Stray.key"])
+
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    source.touch()
+    template.touch()
+
+    rc = owab.main([
+        "--source", str(source), "--template", str(template),
+        "--out", str(tmp_path / "out"),
+    ])
+    assert rc == 5
+    out = capsys.readouterr().out
+    assert "ABORT" in out and "Stray.key" in out
+
+
+def test_warn_and_close_stray_documents_only_closes_own_deck(monkeypatch, tmp_path):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(
+        owab, "keynote_open_documents", lambda: ["A_unflagged.key", "SomeOtherDeck.key"]
+    )
+    closed = []
+    monkeypatch.setattr(owab, "_close_keynote_document", lambda name: closed.append(name))
+
+    deck = tmp_path / "A_unflagged.key"
+    owab._warn_and_close_stray_documents("A", deck)
+
+    assert closed == ["A_unflagged.key"]  # NOT "SomeOtherDeck.key"
+
+
+def test_warn_and_close_stray_documents_noop_when_nothing_open(monkeypatch, tmp_path):
+    from scripts import offline_write_ab as owab
+
+    monkeypatch.setattr(owab, "keynote_open_documents", lambda: [])
+    closed = []
+    monkeypatch.setattr(owab, "_close_keynote_document", lambda name: closed.append(name))
+
+    owab._warn_and_close_stray_documents("A", tmp_path / "A_unflagged.key")
+    assert closed == []
+
+
+def test_close_keynote_document_command_targets_named_document(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    calls = []
+    monkeypatch.setattr(
+        owab.subprocess, "run",
+        lambda cmd, **k: calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    owab._close_keynote_document("A_unflagged.key")
+    assert len(calls) == 1
+    script = calls[0][2]  # ["osascript", "-e", "<script>"]
+    assert 'close (every document whose name is "A_unflagged.key") saving no' in script
+
+
 # --- front_err_from_raw (D4) -------------------------------------------------------
 
 
@@ -1584,3 +1680,6 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     assert plan_out["badgeRaises"] == [{"slide": 5, "isTitle": True}]
     assert plan_out["groupRemoves"] == []
     assert plan_out["statSlides"] == [3]
+
+
+# ============================================================================

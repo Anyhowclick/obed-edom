@@ -778,11 +778,20 @@ def target_member_for_slide(objects: dict[str, dict], id_to_file: dict[str, str]
 # ==========================================================================
 # Keynote-touching orchestration — the LEAD runs this (guarded), NOT the sub-agent.
 # ==========================================================================
-def _remap_env(*, suppress: str = "", as_geometry: str = "1", geom_props: str = "1") -> None:
-    """Set the env knobs remap reads at call time (module funcs read os.environ live)."""
+def _remap_env(*, suppress: str = "", as_geometry: str = "1", geom_props: str = "1",
+               offline_write: str = "off") -> None:
+    """Set the env knobs remap reads at call time (module funcs read os.environ live).
+
+    ``offline_write`` defaults to ``"off"`` -- this gate's B-pre remap (attrs-only pass
+    1) and the optional full-A cross-check must stay on the SCRIPTED AppleScript path
+    (the whole point of both is to be an independent, un-offline-written reference)
+    REGARDLESS of ``OBED_OFFLINE_WRITE``'s own ambient default, so every call site here
+    sets it EXPLICITLY rather than relying on whatever that default currently is.
+    """
     os.environ["OBED_SUPPRESS_GEOMETRY"] = suppress
     os.environ["OBED_AS_GEOMETRY"] = as_geometry
     os.environ["OBED_GEOM_PROPS"] = geom_props
+    os.environ["OBED_OFFLINE_WRITE"] = offline_write
 
 
 def _git_head(repo: Path | None = None) -> str:
