@@ -29,6 +29,7 @@ import re
 import subprocess
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -376,25 +377,33 @@ def nested_to_bulk_shape(
 ) -> tuple[dict[int, dict[str, list[list[float]]]], list[dict]]:
     """``{kind: {"position"|"width"|"height": [per-slide lists]}}`` -> the
     ``bulk_geometry.js`` contract, ``{0-based slide: {kind: [[x, y, w, h], ...]}}``, plus
-    a shape-error log. Never substitutes and never raises: an outer list shorter than
-    ``slide_count``, a slide whose width/height sublist isn't even a list (a flattened
-    read — the per-slide nesting collapsed), one whose length disagrees with its
-    position sublist, or a position entry that isn't a 2-element ``[x, y]``, is logged
-    (``outer_length`` / ``inner_shape`` / ``inner_length`` / ``inner_shape``) and that
-    (slide, kind) OMITTED from ``shaped`` rather than zero-padded or unpacked blind —
-    padding would let a broken read masquerade as a genuine empty collection."""
+    a shape-error log. Never substitutes and never raises: a ``position``/``width``/
+    ``height`` value that isn't even a list — the whole-deck AppleScript collapse seen
+    live on ``char_counts`` can happen to any nested read — is ``outer_shape``; a proper
+    list shorter than ``slide_count`` is ``outer_length``; a slide whose width/height
+    sublist isn't a list (flattened), or whose length disagrees with its position
+    sublist, or a position entry that isn't a 2-element ``[x, y]``, is ``inner_shape`` /
+    ``inner_length`` / ``inner_shape``. Every case is logged and that (slide, kind)
+    OMITTED from ``shaped`` rather than zero-padded or unpacked blind — padding would
+    let a broken read masquerade as a genuine empty collection."""
     shaped: dict[int, dict[str, list[list[float]]]] = {i: {} for i in range(slide_count)}
     shape_errors: list[dict] = []
     for kind, props in by_kind.items():
-        positions = props.get("position") or []
-        widths = props.get("width") or []
-        heights = props.get("height") or []
-        for prop, values in (("position", positions), ("width", widths), ("height", heights)):
-            if len(values) != slide_count:
+        raw_positions, raw_widths, raw_heights = props.get("position"), props.get("width"), props.get("height")
+        for prop, values in (("position", raw_positions), ("width", raw_widths), ("height", raw_heights)):
+            if not isinstance(values, list):
+                shape_errors.append({
+                    "kind": kind, "prop": prop, "reason": "outer_shape",
+                    "type": type(values).__name__,
+                })
+            elif len(values) != slide_count:
                 shape_errors.append({
                     "kind": kind, "prop": prop, "reason": "outer_length",
                     "len": len(values), "slide_count": slide_count,
                 })
+        positions = raw_positions if isinstance(raw_positions, list) else []
+        widths = raw_widths if isinstance(raw_widths, list) else []
+        heights = raw_heights if isinstance(raw_heights, list) else []
         n = min(len(positions), len(widths), len(heights), slide_count)
         for i in range(n):
             pos_slide, w_slide, h_slide = positions[i], widths[i], heights[i]
@@ -507,8 +516,8 @@ def zero_char_text_item_count(entry: dict | None) -> tuple[int | None, str]:
     if "value" not in entry:
         return None, "char_counts probe neither raised nor carried a value"
     value = entry["value"]
-    if not all(isinstance(slide, list) for slide in value):
-        return None, "char_counts not nested per slide"
+    if not isinstance(value, list) or not all(isinstance(slide, list) for slide in value):
+        return None, f"char_counts not nested per slide (got {type(value).__name__})"
     count = sum(1 for slide in value for c in slide if c == 0)
     if count < 1:
         return 0, "no zero-character text item confirmed"
@@ -546,10 +555,12 @@ def _classify_failure_mode(
     if "value" not in primary:
         return "unknown", {"reason": "primary probe neither raised nor carried a value"}
     value = primary["value"]
+    if not isinstance(value, list):
+        return "unknown", {"reason": f"primary probe value not nested per slide (got {type(value).__name__})"}
     short_slides = []
     for idx, count in bulk_text_counts.items():
         slide_value = value[idx] if idx < len(value) else None
-        if slide_value is None or len(slide_value) < count:
+        if slide_value is None or not isinstance(slide_value, list) or len(slide_value) < count:
             short_slides.append(idx)
     if short_slides:
         return "silent_partial", {"short_slides": short_slides}
@@ -577,6 +588,7 @@ def evaluate_criteria(
         m for m in kind_mismatches if m.get("reason") == "length" and m.get("kind") == "text"
     ]
     omissions = [m for m in kind_mismatches if m.get("reason") == "omitted"]
+    outer_shape_errors = [e for e in shape_errors if e.get("reason") == "outer_shape"]
     outer_length_errors = [e for e in shape_errors if e.get("reason") == "outer_length"]
     inner_length_errors = [e for e in shape_errors if e.get("reason") == "inner_length"]
     inner_shape_errors = [e for e in shape_errors if e.get("reason") == "inner_shape"]
@@ -592,10 +604,13 @@ def evaluate_criteria(
 
     return {
         "1": {
-            "pass": not outer_length_errors and meta_ok and not compare.get("slide_mismatches"),
+            "pass": (
+                not outer_shape_errors and not outer_length_errors
+                and meta_ok and not compare.get("slide_mismatches")
+            ),
             "detail": {
                 "slide_count": slide_count, "meta_slide_count": meta_slide_count,
-                "outer_length_errors": outer_length_errors,
+                "outer_shape_errors": outer_shape_errors, "outer_length_errors": outer_length_errors,
                 "slide_mismatches": compare.get("slide_mismatches", []),
             },
         },
@@ -694,6 +709,14 @@ def _run_jxa(script: str) -> str:
     return (proc.stdout or "").strip()
 
 
+def _write_sidecar(out: Path, name: str, text: str) -> Path:
+    """Raw Keynote output, written IMMEDIATELY on return — before any parsing — so a
+    live run never loses its evidence to a downstream analysis bug."""
+    path = out / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--deck", type=Path, required=True)
@@ -735,6 +758,7 @@ def main(argv: list[str] | None = None) -> int:
             deck, lock_image_slide=args.lock_image_slide,
             lock_text_slide=args.lock_text_slide, empty_text_slide=args.empty_text_slide,
         ))
+        _write_sidecar(args.out, f"prep-raw-{deck.stem}.txt", raw)
         report = parse_prep_report(raw)
         print(f"prep: locked={report['locked']} emptyBoxes={report['emptyBoxes']}")
         if report["locked"] != 2 or report["emptyBoxes"] != 1:
@@ -757,82 +781,103 @@ def main(argv: list[str] | None = None) -> int:
     print(f"bulk_geometry (cold): {bulk_seconds_cold:.1f}s, {len(bulk)} slides")
 
     t_open_close0 = time.perf_counter()
-    _run_osascript(build_open_close_applescript(deck))
+    openclose_raw = _run_osascript(build_open_close_applescript(deck))
     open_close_seconds = time.perf_counter() - t_open_close0
+    openclose_sidecar = _write_sidecar(args.out, f"openclose-raw-{deck.stem}.txt", openclose_raw)
 
     t_nested0 = time.perf_counter()
     raw = _run_osascript(build_all_reads_applescript(deck))
     nested_seconds = time.perf_counter() - t_nested0
-    entries = parse_nested(raw)
+    nested_sidecar = _write_sidecar(args.out, f"nested-raw-{deck.stem}.json", raw)
 
     t_bulk_warm0 = time.perf_counter()
     bulk_geometry(deck)
     bulk_seconds_warm = time.perf_counter() - t_bulk_warm0
     print(f"bulk_geometry (warm): {bulk_seconds_warm:.1f}s")
 
-    by_kind: dict[str, dict[str, list]] = {}
-    read_seconds: dict[str, int] = {}
-    meta_slide_count: int | None = None
-    for entry in entries:
-        if entry["kind"] == "_meta":
-            meta_slide_count = int(entry["value"])
-            continue
-        by_kind.setdefault(entry["kind"], {})[entry["prop"]] = entry["value"]
-        read_seconds[f'{entry["kind"]}_{entry["prop"]}'] = int(entry["seconds"])
-    slide_count = len(bulk)
-    print(f"nested read: {nested_seconds:.1f}s, meta slideCount={meta_slide_count}, bulk slides={slide_count}")
-
-    shaped, shape_errors = nested_to_bulk_shape(by_kind, slide_count)
-    compare = compare_to_bulk(shaped, bulk, text_slack=args.text_slack)
-
     failure_raw = _run_osascript(
         build_failure_probe_applescript(deck, empty_text_slide=args.empty_text_slide)
     )
-    failure_entries = parse_nested(failure_raw)
-    failure = {e["name"]: e for e in failure_entries}
-    zero_char_items, zero_char_reason = resolve_zero_char_premise(
-        failure.get("char_counts"), failure.get("char_counts_scoped")
-    )
-    print(f"zero-char premise: {zero_char_items} ({zero_char_reason})")
-    bulk_text_counts = {idx: len(bulk[idx].get("text", [])) for idx in bulk}
+    failure_sidecar = _write_sidecar(args.out, f"failure-raw-{deck.stem}.json", failure_raw)
 
+    # Raw Keynote output is now safe on disk (openclose/nested/failure sidecars). Every
+    # remaining step is pure-Python analysis of that text — a live run must never lose
+    # the sidecars to a downstream bug there, so this whole section is wrapped: on ANY
+    # exception, findings-{stem}.json still gets written with the error + the sidecar
+    # paths, then the exception is re-raised.
+    raw_sidecars: list[str] = [str(openclose_sidecar), str(nested_sidecar), str(failure_sidecar)]
     timings: dict[str, Any] = {
         "bulk_seconds_cold": bulk_seconds_cold, "bulk_seconds_warm": bulk_seconds_warm,
         "open_close_seconds": open_close_seconds, "nested_seconds": nested_seconds,
-        "per_read": read_seconds,
-    }
-
-    jxa_findings: dict[str, Any] | None = None
-    if args.with_jxa:
-        t_jxa0 = time.perf_counter()
-        jxa_raw = _run_jxa(build_jxa_nested_read(deck))
-        timings["jxa_seconds"] = time.perf_counter() - t_jxa0
-        jxa_sidecar = args.out / f"jxa-raw-{deck.stem}.json"
-        jxa_sidecar.write_text(jxa_raw, encoding="utf-8")
-        jxa_payload = parse_nested(jxa_raw)
-        jxa_by_kind = {
-            kind: {prop: jxa_payload.get(f"{kind}_{prop}") for prop in PROPS}
-            for _name, kind in (("textItems", "text"), ("images", "image"), ("movies", "movie"), ("groups", "group"))
-        }
-        jxa_shaped, jxa_shape_errors = nested_to_bulk_shape(jxa_by_kind, slide_count)
-        jxa_compare = compare_to_bulk(jxa_shaped, bulk, text_slack=args.text_slack)
-        jxa_findings = {"compare": jxa_compare, "shape_errors": jxa_shape_errors, "raw_sidecar": str(jxa_sidecar)}
-
-    criteria = evaluate_criteria(
-        compare, timings, failure, slide_count,
-        shape_errors=shape_errors, meta_slide_count=meta_slide_count,
-        bulk_text_counts=bulk_text_counts,
-        zero_char_items=zero_char_items, zero_char_reason=zero_char_reason,
-    )
-    verdict = recommend(criteria)
-
-    findings = {
-        "criteria": criteria, "timings": timings, "shape_errors": shape_errors,
-        "mismatches": compare.get("kind_mismatches", []), "failure": failure,
-        "zero_char_items": zero_char_items, "zero_char_reason": zero_char_reason,
-        "jxa": jxa_findings, "recommendation": verdict,
+        "per_read": {},
     }
     findings_path = args.out / f"findings-{deck.stem}.json"
+
+    try:
+        entries = parse_nested(raw)
+        by_kind: dict[str, dict[str, list]] = {}
+        meta_slide_count: int | None = None
+        for entry in entries:
+            if entry["kind"] == "_meta":
+                meta_slide_count = int(entry["value"])
+                continue
+            by_kind.setdefault(entry["kind"], {})[entry["prop"]] = entry["value"]
+            timings["per_read"][f'{entry["kind"]}_{entry["prop"]}'] = int(entry["seconds"])
+        slide_count = len(bulk)
+        print(f"nested read: {nested_seconds:.1f}s, meta slideCount={meta_slide_count}, "
+              f"bulk slides={slide_count}")
+
+        shaped, shape_errors = nested_to_bulk_shape(by_kind, slide_count)
+        compare = compare_to_bulk(shaped, bulk, text_slack=args.text_slack)
+
+        failure_entries = parse_nested(failure_raw)
+        failure = {e["name"]: e for e in failure_entries}
+        zero_char_items, zero_char_reason = resolve_zero_char_premise(
+            failure.get("char_counts"), failure.get("char_counts_scoped")
+        )
+        print(f"zero-char premise: {zero_char_items} ({zero_char_reason})")
+        bulk_text_counts = {idx: len(bulk[idx].get("text", [])) for idx in bulk}
+
+        jxa_findings: dict[str, Any] | None = None
+        if args.with_jxa:
+            t_jxa0 = time.perf_counter()
+            jxa_raw = _run_jxa(build_jxa_nested_read(deck))
+            timings["jxa_seconds"] = time.perf_counter() - t_jxa0
+            jxa_sidecar = _write_sidecar(args.out, f"jxa-raw-{deck.stem}.json", jxa_raw)
+            raw_sidecars.append(str(jxa_sidecar))
+            jxa_payload = parse_nested(jxa_raw)
+            jxa_by_kind = {
+                kind: {prop: jxa_payload.get(f"{kind}_{prop}") for prop in PROPS}
+                for _name, kind in (("textItems", "text"), ("images", "image"),
+                                     ("movies", "movie"), ("groups", "group"))
+            }
+            jxa_shaped, jxa_shape_errors = nested_to_bulk_shape(jxa_by_kind, slide_count)
+            jxa_compare = compare_to_bulk(jxa_shaped, bulk, text_slack=args.text_slack)
+            jxa_findings = {
+                "compare": jxa_compare, "shape_errors": jxa_shape_errors, "raw_sidecar": str(jxa_sidecar),
+            }
+
+        criteria = evaluate_criteria(
+            compare, timings, failure, slide_count,
+            shape_errors=shape_errors, meta_slide_count=meta_slide_count,
+            bulk_text_counts=bulk_text_counts,
+            zero_char_items=zero_char_items, zero_char_reason=zero_char_reason,
+        )
+        verdict = recommend(criteria)
+
+        findings = {
+            "criteria": criteria, "timings": timings, "shape_errors": shape_errors,
+            "mismatches": compare.get("kind_mismatches", []), "failure": failure,
+            "zero_char_items": zero_char_items, "zero_char_reason": zero_char_reason,
+            "jxa": jxa_findings, "recommendation": verdict, "raw_sidecars": raw_sidecars,
+        }
+    except Exception:
+        findings = {"error": traceback.format_exc(), "timings": timings, "raw_sidecars": raw_sidecars}
+        findings_path.write_text(json.dumps(findings, indent=2), encoding="utf-8")
+        print(f"ABORT: analysis crashed; raw Keynote output preserved in {raw_sidecars}; "
+              f"findings (with the error) at {findings_path}")
+        raise
+
     findings_path.write_text(json.dumps(findings, indent=2), encoding="utf-8")
 
     for key in sorted(criteria, key=int):
@@ -842,7 +887,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"recommendation: {verdict}")
     print(f"findings: {findings_path}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

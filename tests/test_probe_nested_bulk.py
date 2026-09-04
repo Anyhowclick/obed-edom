@@ -163,6 +163,18 @@ def test_nested_to_bulk_shape_non_numeric_position_never_raises():
     assert "text" not in shaped[0]
 
 
+def test_nested_to_bulk_shape_scalar_outer_value_is_outer_shape_error_not_a_crash():
+    # The same collapse class as the live char_counts crash, but on position/width/
+    # height directly: a bare scalar instead of any list at all. len(int) must never run.
+    by_kind = {"text": {"position": 63, "width": 63, "height": 63}}
+    shaped, errors = nested_to_bulk_shape(by_kind, 2)
+    outer_shape = [e for e in errors if e["reason"] == "outer_shape"]
+    assert len(outer_shape) == 3
+    assert {e["prop"] for e in outer_shape} == {"position", "width", "height"}
+    assert outer_shape[0]["type"] == "int"
+    assert "text" not in shaped[0] and "text" not in shaped[1]
+
+
 # ==========================================================================
 # compare_to_bulk — omission vs confirmed-empty, value/length mismatches
 # ==========================================================================
@@ -243,7 +255,24 @@ def test_zero_char_text_item_count_absent_vs_raised_have_different_reasons():
 def test_zero_char_text_item_count_guards_flat_non_nested_value():
     count, reason = zero_char_text_item_count({"raised": False, "value": [0, 5, 3]})
     assert count is None
-    assert reason == "char_counts not nested per slide"
+    assert reason == "char_counts not nested per slide (got list)"
+
+
+def test_zero_char_text_item_count_guards_scalar_value():
+    # The live-run crash: Keynote 15.3.1 collapsed `count of characters of object text
+    # of every text item of every slide` to ONE integer, not a nested (or even flat)
+    # list. `for slide in value` on a bare int must never raise.
+    count, reason = zero_char_text_item_count({"raised": False, "value": 63})
+    assert count is None
+    assert reason == "char_counts not nested per slide (got int)"
+
+    count, reason = zero_char_text_item_count({"raised": False, "value": None})
+    assert count is None
+    assert "got NoneType" in reason
+
+    count, reason = zero_char_text_item_count({"raised": False, "value": "oops"})
+    assert count is None
+    assert "got str" in reason
 
 
 def test_scoped_zero_char_confirmed():
@@ -259,6 +288,16 @@ def test_resolve_zero_char_premise_prefers_whole_deck_when_it_answers():
     )
     assert count == 1
     assert reason == "confirmed by char_counts"
+
+
+def test_resolve_zero_char_premise_scalar_whole_deck_value_falls_back_to_scoped():
+    # The live-run crash scenario end-to-end: whole-deck char_counts collapsed to a bare
+    # int, must not raise, and the scoped fallback still answers.
+    count, reason = resolve_zero_char_premise(
+        {"raised": False, "value": 63}, {"raised": False, "value": 0}
+    )
+    assert count == 1
+    assert reason == "confirmed by char_counts_scoped"
 
 
 def test_resolve_zero_char_premise_falls_back_to_scoped():
@@ -318,6 +357,13 @@ def test_evaluate_criteria_one_fail():
 def test_evaluate_criteria_criterion1_fails_on_outer_length_shape_error():
     criteria = _evaluate(shape_errors=[
         {"kind": "text", "prop": "position", "reason": "outer_length", "len": 9, "slide_count": 10}
+    ])
+    assert criteria["1"]["pass"] is False
+
+
+def test_evaluate_criteria_criterion1_fails_on_outer_shape_error():
+    criteria = _evaluate(shape_errors=[
+        {"kind": "text", "prop": "position", "reason": "outer_shape", "type": "int"}
     ])
     assert criteria["1"]["pass"] is False
 
@@ -391,6 +437,14 @@ def test_evaluate_criteria_raised_false_short_sublist_is_silent_partial():
     criteria = _evaluate(failure=failure, bulk_text_counts={0: 1, 1: 2})
     assert criteria["6"]["mode"] == "silent_partial"
     assert criteria["6"]["pass"] is False
+
+
+def test_evaluate_criteria_scalar_primary_value_is_unknown_not_a_crash():
+    # Same class of collapse as char_counts, but on the "primary" probe's own value.
+    failure = {"primary": {"raised": False, "value": 63}}
+    criteria = _evaluate(failure=failure, bulk_text_counts={0: 1, 1: 2})
+    assert criteria["6"]["mode"] == "unknown"
+    assert "not nested per slide" in criteria["6"]["detail"]["reason"]
 
 
 def test_recommend_implement_nested_on_whole_event_raise():
@@ -708,3 +762,78 @@ def test_main_findings_filename_carries_the_deck_stem(tmp_path, monkeypatch):
     assert findings_path.is_file()
     data = json.loads(findings_path.read_text())
     assert "criteria" in data
+
+
+def test_main_writes_raw_sidecars_before_parsing(tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("clone_gw/jxa must not run: no --prep, no --with-jxa")
+
+    monkeypatch.setattr(m, "_run_jxa", boom)
+    monkeypatch.setattr(m, "clone_gw", boom)
+
+    out = tmp_path / "out"
+    out.mkdir()
+    deck = out / "GW.key"
+    deck.write_bytes(b"x")
+
+    bulk = {0: {"text": [], "image": [], "movie": [], "group": []}}
+
+    def fake_run_osascript(script):
+        if "slideCount" in script:
+            return "NOT VALID JSON"  # mimics a Keynote-side collapse/garble
+        return "ok"
+
+    monkeypatch.setattr(m, "_run_osascript", fake_run_osascript)
+
+    import obed_edom.inspect as inspect_mod
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", lambda _deck: bulk)
+
+    with pytest.raises(json.JSONDecodeError):
+        m.main(["--deck", str(deck), "--out", str(out), "--live"])
+
+    # The sidecars exist and hold the raw text — even though parsing it afterward blew up.
+    nested_sidecar = out / "nested-raw-GW.json"
+    openclose_sidecar = out / "openclose-raw-GW.txt"
+    failure_sidecar = out / "failure-raw-GW.json"
+    assert nested_sidecar.is_file()
+    assert nested_sidecar.read_text() == "NOT VALID JSON"
+    assert openclose_sidecar.is_file()
+    assert failure_sidecar.is_file()
+
+
+def test_main_analysis_exception_still_writes_findings_with_error(tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("clone_gw/jxa must not run: no --prep, no --with-jxa")
+
+    monkeypatch.setattr(m, "_run_jxa", boom)
+    monkeypatch.setattr(m, "clone_gw", boom)
+
+    out = tmp_path / "out"
+    out.mkdir()
+    deck = out / "GW.key"
+    deck.write_bytes(b"x")
+
+    bulk = {0: {"text": [], "image": [], "movie": [], "group": []}}
+
+    def fake_run_osascript(script):
+        if "slideCount" in script:
+            return "NOT VALID JSON"
+        return "ok"
+
+    monkeypatch.setattr(m, "_run_osascript", fake_run_osascript)
+
+    import obed_edom.inspect as inspect_mod
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", lambda _deck: bulk)
+
+    with pytest.raises(json.JSONDecodeError):
+        m.main(["--deck", str(deck), "--out", str(out), "--live"])
+
+    findings_path = out / "findings-GW.json"
+    assert findings_path.is_file()
+    data = json.loads(findings_path.read_text())
+    assert "error" in data
+    assert "JSONDecodeError" in data["error"]
+    assert data["timings"]["nested_seconds"] >= 0
+    assert data["timings"]["per_read"] == {}  # crashed before any read entry was parsed
+    assert len(data["raw_sidecars"]) == 3
+    assert all(Path(p).is_file() for p in data["raw_sidecars"])
