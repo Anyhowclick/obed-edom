@@ -41,6 +41,12 @@ _AS_KIND_NAMES = {
     "line": "line",
 }
 
+# Emitted by `_build_slide_geometry_script`'s per-spec `on error` and parsed back out of
+# osascript's stderr by `offline_write._run_fallback_scripts`. Pass 1 runs the same body
+# via JXA's `runAppleScript` -> `doShellScript`, which discards stderr on a zero exit, so
+# a pass-1 marker is swallowed today (harmless: no diagnostic, not a regression).
+GEOM_UNWRITABLE_MARKER = "OBED_GEOM_UNWRITABLE"
+
 
 def as_geometry_enabled() -> bool:
     """Batched-AppleScript geometry path (default ON). `OBED_AS_GEOMETRY=0` forces legacy JXA."""
@@ -329,6 +335,9 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
             "    try",
             "      if wasLocked then set locked of theObj to true",
             "    end try",
+            "  on error",
+            f'    log "{GEOM_UNWRITABLE_MARKER} slide={int(slide_no)} kind={kind} '
+            f'kindIndex={int(kind_index)}"',
             "  end try",
         ]
         body += lines

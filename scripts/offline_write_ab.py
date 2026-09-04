@@ -678,22 +678,23 @@ def plan_oracle_slide(
     id-addressed via the SOURCE deck's kind index (D3) -- raise-immune, hide-immune
     (stat-finalize needs no exclusion).
 
-    Covers the SAME exact classes as ``offline_write.verify_offline_frames`` (shape/
-    line at ``tols.hard``, unmasked image/movie -- the resolved record's ``geom_source
-    == "iwa"`` -- at ``tols.soft``) PLUS ``group`` (its union x/y/w/h vs the composed
-    group-union record, also at ``tols.soft`` -- a group's union IS offline-recoverable,
-    unlike its children's live layout). Text (autosize ``y``/``w``/``h`` are not
-    offline-recoverable) is NOT exactly recoverable from raw IWA and would spuriously
-    RED a text-heavy deck, so it is skipped here and left entirely to the A-vs-B
-    identity compare instead. A masked image/movie (``geom_source == "mask"``) is
-    skipped too -- its crop is covered by the identity compare at ``tols.mask``. Every
-    skip increments ``skipped``.
+    Covers the SAME exact classes as ``offline_write.verify_offline_frames`` (shape at
+    ``tols.hard``, unmasked image/movie -- the resolved record's ``geom_source == "iwa"``
+    -- at ``tols.soft``) PLUS ``group`` (its union x/y/w/h vs the composed group-union
+    record, also at ``tols.soft`` -- a group's union IS offline-recoverable, unlike its
+    children's live layout). Text (autosize ``y``/``w``/``h`` are not offline-recoverable)
+    is NOT exactly recoverable from raw IWA and would spuriously RED a text-heavy deck, so
+    it is skipped here and left entirely to the A-vs-B identity compare instead. A masked
+    image/movie (``geom_source == "mask"``) is skipped too -- its crop is covered by the
+    identity compare at ``tols.mask``. Line is skipped as well -- a line spec's x/y is an
+    ordinary bbox, a composed line's is ``_line_rect``'s anchor, not a comparable pair
+    (see ``offline_write._OFFLINE_EXACT_KINDS``). Every skip increments ``skipped``.
 
     ``role == "hide"`` specs are skipped (nothing to compare — the object is deleted).
     Any other non-hide, non-skipped spec whose id fails to resolve, or is missing from
     the deck being checked, is a RED ``missing_ids`` entry. Uses
     ``offline_write._spec_box`` for the (planned, actual) tuples — same comparator
-    ``verify_offline_frames`` uses (lines compare POSITION only, never length/width).
+    ``verify_offline_frames`` uses.
 
     A spec with no ``kindIndex`` at all (should never happen -- ``ItemTransform.as_dict``
     always emits one) is a RED ``missing_ids`` entry too, reason ``"spec carries no
@@ -775,6 +776,9 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
     returned for run B's own verify passes (offline compose vs planned, and Keynote-
     reported vs planned); checked for an explicit ``False`` (not merely absent) so a run
     that never verified — ``mode`` wasn't ``"verify"`` — doesn't spuriously fail here.
+
+    ``missedSpecs`` gates on fallback coverage (sum(fallbackSpecs.values()) >= missedSpecs
+    and fallbackUnwritable == 0), not the raw count.
     """
     reasons: list[str] = []
     refused = ow.get("refused") or []
@@ -784,9 +788,16 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
     if refused:
         reasons.append(f"{len(refused)} slide(s) refused the offline patch: {refused}")
     if missed_specs:
-        reasons.append(
-            f"{missed_specs} spec(s) missed the offline patch (fallback should cover every miss)."
-        )
+        # Coverage floor, not an exact identity: a REFUSED slide falls back whole, so its
+        # non-hide specs inflate `fallbackSpecs` past `missedSpecs`. Refusals gate above.
+        fallback_total = sum(int(v) for v in (ow.get("fallbackSpecs") or {}).values())
+        fallback_unwritable = int(ow.get("fallbackUnwritable") or 0)
+        if fallback_total < missed_specs or fallback_unwritable:
+            reasons.append(
+                f"{missed_specs} spec(s) missed the offline patch and the AppleScript "
+                f"fallback did not fully cover them (fallback_specs={fallback_total}, "
+                f"unwritable={fallback_unwritable})."
+            )
     if soft_fallbacks:
         reasons.append(
             f"{soft_fallbacks} soft (group/text/masked) frame(s) used a stale fallback, "
@@ -989,8 +1000,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-validate", dest="validate", action="store_false",
                     help="skip the live-verify readback (required for the Full deck)")
     ap.add_argument("--tol-hard", type=float, default=TOL_HARD,
-                    help=f"shape/line px tolerance vs the PLAN (oracle, per side); "
-                         f"identity (A-vs-B) gates at 2x this (default {TOL_HARD})")
+                    help=f"shape px tolerance vs the PLAN (oracle, per side; line is "
+                         f"skipped by the oracle); identity/multiset (A-vs-B) gates "
+                         f"shape+line at 2x this (default {TOL_HARD})")
     ap.add_argument("--tol-soft", type=float, default=TOL_SOFT,
                     help=f"group/unmasked-image/movie px tolerance vs the PLAN (oracle, "
                          f"per side); identity (A-vs-B) gates at 2x this (default {TOL_SOFT})")
@@ -1220,6 +1232,13 @@ def main(argv: list[str] | None = None) -> int:
             _log(f"WARN: pass-2 front A={front_a} B={front_b} "
                  "(pass2-bar=parity: GUI Bring-to-Front raises are flaky, does not gate).")
 
+    ow_missed = int(ow_b.get("missedSpecs") or 0)
+    ow_fallback = sum(int(v) for v in (ow_b.get("fallbackSpecs") or {}).values())
+    ow_unwritable = int(ow_b.get("fallbackUnwritable") or 0)
+    if ow_missed and ow_fallback >= ow_missed and not ow_unwritable:
+        _log(f"WARN B: missedSpecs={ow_missed} fully covered by the AppleScript fallback "
+             f"(fallbackSpecs={ow_fallback}, unwritable=0; does not gate).")
+
     summary_reasons = summary_gate_reasons(ow_b, applied_a, applied_b)
     for r in summary_reasons:
         _log(f"RED: {r}")
@@ -1256,7 +1275,7 @@ def main(argv: list[str] | None = None) -> int:
         if any(r["compared"] == 0 and r["skipped"] > 0 for r in (oracle_a, oracle_b)):
             vacuous_slides.append(n)
             _log(f"  slide {n}: WARN plan-oracle VACUOUS PASS — every planned spec on this "
-                 "slide is a non-exact class (text/group/masked); 0 compared, PASS proves nothing.")
+                 "slide is a non-exact class (text/group/masked/line); 0 compared, PASS proves nothing.")
 
         a_units = a_units_by_slide[n]
         b_units = slide_units(b_objects, n)

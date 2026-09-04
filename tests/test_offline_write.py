@@ -21,6 +21,7 @@ from obed_edom.offline_write import (
     _fallback_specs_by_slide,
     _offline_write_slides,
     _reported_from_bulk_rows,
+    _run_fallback_scripts,
     _soft_seed_slides,
     build_fallback_scripts,
     counts_from_payload,
@@ -260,6 +261,46 @@ def test_fallback_script_chunks_over_size_limit(tmp_path):
     assert len(one) == 1
 
 
+# --- _run_fallback_scripts -------------------------------------------------------
+
+
+def test_run_fallback_scripts_parses_unwritable_log_lines(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(ow_mod.keynote_app, "bundle_id", lambda: "com.apple.iWork.Keynote")
+    monkeypatch.setattr(
+        ow_mod.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout="",
+            stderr="noise\nOBED_GEOM_UNWRITABLE slide=96 kind=image kindIndex=8\nmore noise\n",
+        ),
+    )
+    ok, dumps, unwritable = _run_fallback_scripts(Path("/tmp/x.key"), ["SCRIPT"], lambda m: None)
+    assert ok is True
+    assert dumps == []
+    assert unwritable == ["OBED_GEOM_UNWRITABLE slide=96 kind=image kindIndex=8"]
+
+
+def test_run_fallback_scripts_reports_unwritable_alongside_session_failure(monkeypatch, tmp_path):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(ow_mod.keynote_app, "bundle_id", lambda: "com.apple.iWork.Keynote")
+    monkeypatch.setattr(
+        ow_mod.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="OBED_GEOM_UNWRITABLE slide=1 kind=shape kindIndex=0\n",
+        ),
+    )
+    dest = tmp_path / "x.key"
+    ok, dumps, unwritable = _run_fallback_scripts(dest, ["SCRIPT"], lambda m: None)
+    assert ok is False
+    assert len(dumps) == 1
+    assert unwritable == ["OBED_GEOM_UNWRITABLE slide=1 kind=shape kindIndex=0"]
+
+
 # --- fallback spec assembly -----------------------------------------------------
 
 
@@ -299,6 +340,41 @@ def test_fallback_specs_by_slide_drops_clean_patches():
     assert out == {}
 
 
+def test_fallback_carries_slide_hide_specs_for_bridging():
+    hide = _spec(slide=1, kindIndex=0, role="hide")
+    spec = _spec(slide=1, kindIndex=1)
+    specs_by_slide = {1: [hide, spec]}
+    results = {1: _result(missed_specs=[spec])}
+    out = _fallback_specs_by_slide({1}, specs_by_slide, results)
+    assert len(out[1]) == 2
+    assert out[1][0] == spec
+    assert sum(1 for s in out[1] if s.get("role") == "hide") == 1
+
+
+def test_fallback_specs_by_slide_adds_no_hides_when_nothing_missed():
+    specs_by_slide = {1: [_spec(slide=1, kindIndex=0, role="hide")]}
+    results = {1: _result(missed_specs=[])}
+    out = _fallback_specs_by_slide({1}, specs_by_slide, results)
+    assert out == {}
+
+
+def test_slide96_fallback_bridges_missed_image_past_hides_to_correct_address():
+    specs_by_slide = {96: [
+        _spec(slide=96, kind="image", kindIndex=0, role="hide"),
+        _spec(slide=96, kind="image", kindIndex=1, role="hide"),
+        _spec(slide=96, kind="image", kindIndex=2, role="hide"),
+        _spec(slide=96, kind="image", kindIndex=8, role="map",
+              x=929.43, y=888.61, w=239.85, h=163.21),
+    ]}
+    missed = [specs_by_slide[96][3]]
+    results = {96: _result(missed_specs=missed)}
+    bodies = _fallback_bodies(_fallback_specs_by_slide({96}, specs_by_slide, results))
+    assert "set theObj to image 6" in bodies[96]
+    assert "set theObj to image 9" not in bodies[96]
+    for hidden_addr in (1, 2, 3):  # the three hides are never addressed
+        assert f"set theObj to image {hidden_addr}" not in bodies[96]
+
+
 # --- verify_offline_frames ------------------------------------------------------
 
 
@@ -330,6 +406,13 @@ def test_verify_offline_frames_skips_hide_specs():
     planned = {1: [_spec(slide=1, kind="shape", kindIndex=0, role="hide")]}
     composed = {1: [{"id": "s1", "kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 1, "h": 1,
                       "geom_source": "iwa"}]}
+    assert verify_offline_frames(planned, composed) == {}
+
+
+def test_verify_offline_frames_skips_line_kind():
+    planned = {1: [_spec(slide=1, kind="line", kindIndex=0, x=999, y=999)]}
+    composed = {1: [{"id": "l1", "kind": "line", "kindIndex": 0, "x": 0, "y": 0, "w": 1, "h": 1,
+                      "geom_source": "line"}]}
     assert verify_offline_frames(planned, composed) == {}
 
 
@@ -461,12 +544,41 @@ def test_run_offline_write_raises_when_fallback_fails(monkeypatch):
     monkeypatch.setattr(ow_mod, "build_fallback_scripts", lambda dest, bodies: ["SCRIPT"])
     monkeypatch.setattr(
         ow_mod, "_run_fallback_scripts",
-        lambda dest, scripts, say: (False, [Path("/tmp/x.offline-fallback.applescript")]),
+        lambda dest, scripts, say: (False, [Path("/tmp/x.offline-fallback.applescript")], []),
     )
     with pytest.raises(RuntimeError, match="offline-write fallback failed"):
         run_offline_write(
             Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
         )
+
+
+def test_run_offline_write_records_fallback_unwritable(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {1: _result(refused=True, reason="x", applied=0, value_clean=False)},
+    )
+    monkeypatch.setattr(ow_mod, "_fallback_bodies", lambda fb: {1: "BODY"})
+    monkeypatch.setattr(ow_mod, "build_fallback_scripts", lambda dest, bodies: ["SCRIPT"])
+    monkeypatch.setattr(
+        ow_mod, "_run_fallback_scripts",
+        lambda dest, scripts, say: (True, [], ["OBED_GEOM_UNWRITABLE slide=1 kind=image kindIndex=8"]),
+    )
+    info = run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert info["fallbackUnwritable"] == 1
+
+
+def test_run_offline_write_fallback_unwritable_zero_by_default(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    info = run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert info["fallbackUnwritable"] == 0
 
 
 def test_run_offline_write_skips_offline_decode_in_on_mode(monkeypatch):
@@ -497,6 +609,20 @@ def test_run_offline_write_returns_none_when_no_offline_slides():
     assert run_offline_write(Path("/tmp/x.key"), "on", set(), [], {}, [], lambda m: None) is None
 
 
+def test_run_offline_write_fallback_specs_count_excludes_hides(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    hide = _spec(slide=1, kind="image", kindIndex=0, role="hide")
+    missed = _spec(slide=1, kind="image", kindIndex=1, role="map", x=1, y=1, w=1, h=1)
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result(missed_specs=[missed])})
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, [], []))
+    info = run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [hide, missed], {}, [], lambda m: None
+    )
+    assert info["fallbackSpecs"] == {"1": 1}
+    assert info["missedSpecs"] == 1
+
+
 def test_run_offline_write_fallback_specs_keys_are_strings_and_record_round_trips(
     monkeypatch, tmp_path
 ):
@@ -509,7 +635,7 @@ def test_run_offline_write_fallback_specs_keys_are_strings_and_record_round_trip
         ow_mod, "_patch_offline_slides",
         lambda *a, **k: {1: _result(refused=True, reason="x", applied=0, value_clean=False)},
     )
-    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, []))
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, [], []))
     info = run_offline_write(
         Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
     )
@@ -518,6 +644,24 @@ def test_run_offline_write_fallback_specs_keys_are_strings_and_record_round_trip
     record = run_record(**_record(offline_write=info))
     path = write_run_record(tmp_path / "A.run.json", record)  # raises on round-trip mismatch
     assert json.loads(path.read_text())["offlineWrite"]["fallbackSpecs"] == {"1": 1}
+
+
+def test_run_offline_write_refused_slide_fallback_specs_count_excludes_hides(monkeypatch):
+    # A refused slide falls back WHOLE (specs_by_slide[n], hides included); fallbackSpecs
+    # must still count only the specs the fallback script actually writes.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {1: _result(refused=True, reason="x", applied=0, value_clean=False)},
+    )
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, [], []))
+    hide = _spec(slide=1, kindIndex=0, role="hide")
+    spec = _spec(slide=1, kindIndex=1)
+    info = run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [hide, spec], {}, [], lambda m: None
+    )
+    assert info["fallbackSpecs"] == {"1": 1}
 
 
 # --- OfflineWriteCorrupted (BLOCKER item 4) ---------------------------------------
@@ -855,6 +999,40 @@ def test_summary_gate_reasons_missing_verify_keys_do_not_spuriously_fail():
 
     ow = {"refused": [], "missedSpecs": 0, "softFallbacks": 0, "valueClean": True}
     assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
+
+
+def test_summary_gate_reasons_downgrades_fully_covered_missed_specs_to_non_gating():
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True,
+          "fallbackSpecs": {"5": 3}, "fallbackUnwritable": 0}
+    assert summary_gate_reasons(ow, applied_a=5, applied_b=5) == []
+
+
+def test_summary_gate_reasons_reds_missed_specs_not_fully_covered():
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True,
+          "fallbackSpecs": {"5": 1}, "fallbackUnwritable": 0}
+    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
+    assert any("did not fully cover" in r and "fallback_specs=1" in r for r in reasons)
+
+
+def test_summary_gate_reasons_reds_on_fallback_unwritable():
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True,
+          "fallbackSpecs": {"5": 3}, "fallbackUnwritable": 1}
+    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
+    assert any("unwritable=1" in r for r in reasons)
+
+
+def test_summary_gate_reasons_missed_specs_absent_fallback_keys_still_red():
+    from scripts.offline_write_ab import summary_gate_reasons
+
+    ow = {"refused": [], "missedSpecs": 3, "softFallbacks": 0, "valueClean": True}
+    reasons = summary_gate_reasons(ow, applied_a=5, applied_b=5)
+    assert any("missed the offline patch" in r for r in reasons)
 
 
 # --- accessibility_ok (D5 pre-flight) ---------------------------------------------
@@ -1645,15 +1823,18 @@ def test_plan_oracle_slide_unmasked_image_is_compared():
     assert report["skipped"] == 0
 
 
-def test_plan_oracle_slide_line_uses_position_only():
-    # Lines compare POSITION only (offline_write._spec_box) — a huge w/h drift must NOT fail.
+def test_plan_oracle_slide_skips_line_kind():
+    # A line spec's x/y is an ordinary bbox, a composed line's is `_line_rect`'s anchor
+    # (offline_write._spec_box) — not a comparable pair, so line is skipped outright.
     specs = [{"slide": 1, "kind": "line", "kindIndex": 0, "x": 10.0, "y": 20.0, "w": 999.0, "h": 999.0}]
     id_by_addr = {("line", 0): "l1"}
     recs_by_id = {"l1": {"id": "l1", "kind": "line", "kindIndex": 0,
                         "x": 10.0, "y": 20.0, "w": 5.0, "h": 5.0, "geom_source": "line"}}
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["per_kind"] == {}
     assert report["pass"] is True
-    assert report["per_kind"]["line"]["worst"] == 0.0
+    assert report["skipped"] == 1
+    assert report["compared"] == 0
 
 
 def test_plan_oracle_slide_flags_missing_id():

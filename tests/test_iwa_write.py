@@ -40,7 +40,7 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom import iwa_write  # noqa: E402
-from obed_edom.iwa_geometry import _geom_dict, _xywha, compose_geometry  # noqa: E402
+from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _xywha, compose_geometry  # noqa: E402
 from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
     OfflineWriteCorrupted,
@@ -355,10 +355,66 @@ def test_text_fields_fixed_height_still_writes_size_h():
 def test_shape_fields_size_writes_geometry_and_naturalsize():
     rec = {"id": "5", "kind": "shape", "kindIndex": 0}
     spec = {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0}
-    (_id, fields), = _shape_fields(rec, spec)
+    stored = (0.0, 0.0, 300.0, 120.0, 0.0)
+    (_id, fields), = _shape_fields(rec, spec, stored)
     assert fields["size_w"] == 300.0 and fields["natural_w"] == 300.0
     assert fields["size_h"] == 120.0 and fields["natural_h"] == 120.0
     assert fields["pos_x"] == 60.0 and fields["pos_y"] == 70.0
+
+
+def test_shape_fields_rotation_anchor_matches_slide59_image_17832898():
+    rec = {"id": "17832898", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": -8304.0, "y": 0.0, "w": 14244.0, "h": 10636.0}
+    stored = (0.0, 0.0, 14244.0, 10636.0, 332.5)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == pytest.approx(-6653.129720920795, abs=1e-6)
+    assert fields["pos_y"] == pytest.approx(2687.6972343016932, abs=1e-6)
+
+
+def test_shape_fields_rotation_anchor_matches_slide57_shape_17431696():
+    rec = {"id": "17431696", "kind": "shape", "kindIndex": 0}
+    spec = {"kind": "shape", "kindIndex": 0, "x": 363.0, "y": 286.0, "w": 17.0, "h": 17.0}
+    stored = (0.0, 0.0, 17.0, 17.0, 242.44)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == pytest.approx(365.9682343429508, abs=1e-6)
+    assert fields["pos_y"] == pytest.approx(288.9682343429508, abs=1e-6)
+
+
+@pytest.mark.parametrize("angle,w,h,x,y", [
+    (332.5, 14244.0, 10636.0, -8304.0, 0.0),
+    (242.44, 17.0, 17.0, 363.0, 286.0),
+    (90.0, 100.0, 50.0, 10.0, 20.0),
+    (0.0, 100.0, 50.0, 10.0, 20.0),
+])
+def test_shape_fields_rotation_round_trips_through_frame_rect(angle, w, h, x, y):
+    rec = {"id": "1", "kind": "shape", "kindIndex": 0}
+    spec = {"kind": "shape", "kindIndex": 0, "x": x, "y": y, "w": w, "h": h}
+    stored = (0.0, 0.0, w, h, angle)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    geom = {"position": {"x": fields["pos_x"], "y": fields["pos_y"]},
+            "size": {"width": w, "height": h}, "angle": angle}
+    x0, y0, _w0, _h0 = _frame_rect(geom)
+    assert x0 == pytest.approx(x, abs=1e-6)
+    assert y0 == pytest.approx(y, abs=1e-6)
+
+
+def test_shape_fields_sub_eps_angle_gets_no_correction():
+    rec = {"id": "1", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": -8304.0, "y": 0.0}
+    stored = (0.0, 0.0, 14244.0, 10636.0, 0.005)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == -8304.0
+    assert fields["pos_y"] == 0.0
+
+
+def test_shape_fields_uses_stored_size_when_spec_omits_wh():
+    rec = {"id": "1", "kind": "shape", "kindIndex": 0}
+    spec = {"kind": "shape", "kindIndex": 0, "x": 10.0, "y": 20.0}
+    stored = (0.0, 0.0, 100.0, 50.0, 90.0)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == pytest.approx(10.0 - 25.0, abs=1e-6)
+    assert fields["pos_y"] == pytest.approx(20.0 + 25.0, abs=1e-6)
+    assert "size_w" not in fields and "size_h" not in fields
 
 
 def test_apply_geom_fields_mutates_geometry_and_naturalsize():

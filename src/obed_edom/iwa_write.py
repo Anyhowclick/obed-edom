@@ -25,7 +25,7 @@ from typing import Any
 
 from keynote_parser.codec import IWAFile
 
-from obed_edom.iwa_geometry import _geom_dict, _xywha, compose_geometry
+from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _xywha, compose_geometry
 from obed_edom.iwa_kindindex import (
     derive_kind_index,
     derived_kind_counts,
@@ -155,12 +155,34 @@ def expected_base_counts(source_counts: dict[str, int], specs: list[dict]) -> di
     return {k: v - hides.get(k, 0) for k, v in source_counts.items()}
 
 
-def _shape_fields(rec: dict, spec: dict) -> list[tuple[str, dict]]:
+def _rotated_anchor_delta(w: float, h: float, angle: float) -> tuple[float, float]:
+    """Stored unrotated TL minus rotated-AABB TL: the inverse of `iwa_geometry._frame_rect`.
+
+    Gated on the reader's own `_is_rotated`, not on a bare angle test: below `_ANGLE_EPS`
+    the reader returns the stored position verbatim, so any correction there is pure error.
+    """
+    if not _is_rotated(angle):
+        return (0.0, 0.0)
+    theta = math.radians(angle)
+    big_w = abs(w * math.cos(theta)) + abs(h * math.sin(theta))
+    big_h = abs(w * math.sin(theta)) + abs(h * math.cos(theta))
+    return ((big_w - w) / 2.0, (big_h - h) / 2.0)
+
+
+def _shape_fields(rec: dict, spec: dict,
+                  stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
+    """Spec x/y is the ROTATED AABB top-left the reader reports; stored position is the
+    unrotated top-left it rotates from. Correct with the POST-write size (spec w/h where the
+    spec resizes, stored otherwise) and the stored angle -- shape/image writes never set angle.
+    """
     fields: dict[str, float] = {}
+    w = float(spec["w"]) if spec.get("w") is not None else stored[2]
+    h = float(spec["h"]) if spec.get("h") is not None else stored[3]
+    dx, dy = _rotated_anchor_delta(w, h, stored[4])
     if spec.get("x") is not None:
-        fields["pos_x"] = float(spec["x"])
+        fields["pos_x"] = float(spec["x"]) + dx
     if spec.get("y") is not None:
-        fields["pos_y"] = float(spec["y"])
+        fields["pos_y"] = float(spec["y"]) + dy
     if spec.get("w") is not None:  # size to BOTH geometry.size AND naturalSize
         fields["size_w"] = float(spec["w"])
         fields["natural_w"] = float(spec["w"])
@@ -431,7 +453,7 @@ def _slide_edits(
         if kind == "line":
             ops = _line_fields(rec, obj, spec)
         elif kind == "shape":
-            ops = _shape_fields(rec, spec)
+            ops = _shape_fields(rec, spec, stored)
         elif kind == "group":
             spec_w, spec_h = spec.get("w"), spec.get("h")
             rep_w, rep_h = rep[2], rep[3]
@@ -455,7 +477,7 @@ def _slide_edits(
                     missed_specs.append(spec)
                     continue
             else:  # unmasked image/movie: plain frame, same as a shape
-                ops = _shape_fields(rec, spec)
+                ops = _shape_fields(rec, spec, stored)
         else:
             missed_specs.append(spec)
             continue
