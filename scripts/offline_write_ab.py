@@ -13,21 +13,33 @@ straight from the SOURCE (not regenerated per run) — so every object that surv
 runs' pass 1 (reuse-pasted copies and stat-finalize dedup deletions excepted) shares the
 SAME id in A and B. That makes drawable-IDENTITY matching the PRIMARY gate on every
 planned non-reuse, non-donor slide (:func:`compare_units_identity`): the id SETS must be
-equal (``id_rate == 1.0``, no unmatched on either side), then each matched pair's render
-geometry is compared per D8 bucket (top-level kind, or ``"child:" + kind`` for a group's
-recursive children) at the D7 tolerance for its signature type. Reuse-target and donor
-slides are NOT covered — a reuse job pastes a COPY (fresh ids) and stat-finalize dedup
-can delete a stranded donor object, so those slides never reach id parity by construction.
+equal (``id_rate == 1.0``, no unmatched on either side). Matching pairs by ``(id, kind)``
+composite, not id alone — a text-bearing shape emits TWO units sharing one drawable id
+(a ``duplicateOf`` twin: the text unit and the shape unit), so id-only matching can
+cross-pair a text unit to its own twin's shape unit and silently orphan the other side.
+Each matched pair's render geometry is then compared per D8 bucket (top-level kind, or
+``"child:" + kind`` for a group's recursive children).
 
 A SECOND, always-on oracle (:func:`plan_oracle_slide`, D3) resolves each planned transform
 to a drawable id via the SOURCE deck's kind index and checks the id's composed geometry in
 BOTH A and B against the spec's target — independent of Keynote's own z-order/kindIndex
 bookkeeping (immune to Bring-to-Front re-indexing and to a deleted hide shifting the
-surviving indices), so stat-finalize slides need no exclusion. This oracle is restricted
-to the SAME exact classes as ``offline_write.verify_offline_frames``: shape/line and
-unmasked image/movie. Text (autosize geometry) and group (a live-layout union) are NOT
-offline-recoverable from raw IWA, so they are skipped by this oracle and left entirely to
+surviving indices), so stat-finalize slides need no exclusion. This oracle covers
+shape/line, unmasked image/movie, and group (its union). Text (autosize geometry) is NOT
+offline-recoverable from raw IWA, so it is skipped by this oracle and left entirely to
 the identity compare above.
+
+EVERY bucket in the identity compare GATES — there is no informational demotion. The
+oracle already holds A and B each individually to ``tols.hard``/``tols.soft`` against
+the SAME plan, so their MUTUAL distance is budgeted at TWICE that (two independent runs
+each within r of one centre can be up to 2r apart): shape/line at ``2 * tols.hard``,
+group union and unmasked image/movie at ``2 * tols.soft`` (:func:`tol_for_bucket`).
+``child:*`` (a group child's live layout, not oracle-covered at all) gates at
+``tols.child``; masked image/movie at ``tols.mask``; text at ``tols.text``. A structural
+mismatch a matched pair's render signature reports — TYPE (e.g. ``autosize`` vs
+``frame``, Keynote silently freezing a grow-to-fit text box), ``flips``, or masked
+``mask_angle`` — always fails its pair regardless of the tolerance used, since
+``write_gate_ab.compare_signature`` reports those independently of the geometry delta.
 
 Health gates run BEFORE any geometry compare: an Accessibility pre-flight (``front``
 z-order raises silently no-op without it), pass-2 (stat-finalize) health on run A --
@@ -75,9 +87,10 @@ TOL_HARD = 0.5
 TOL_SOFT = 1.0
 TOL_MASK = 2.0
 TOL_TEXT = 2.0
+TOL_CHILD = 2.0
 
 _HARD_KINDS = {"shape", "line"}
-_TEXT_BUCKETS = {"text", "child:text"}
+_TEXT_BUCKETS = {"text"}  # "child:text" is unreachable: `_child_kind` never yields "text"
 
 # D4 pass-2 (stat-finalize) health, from `keynote._run_stat_finalize`'s result dict.
 PASS2_ZERO_KEYS = ("unresolved", "dedupShortfall", "badgeUnresolved")
@@ -96,6 +109,7 @@ class Tolerances(NamedTuple):
     soft: float = TOL_SOFT
     mask: float = TOL_MASK
     text: float = TOL_TEXT
+    child: float = TOL_CHILD
 
 
 def _log(msg: str) -> None:
@@ -216,14 +230,29 @@ def unit_bucket(unit: dict[str, Any]) -> str:
 
 
 def tol_for_bucket(bucket: str, sig_type: str | None, tols: Tolerances) -> float:
-    """Per D7: masked sig -> ``tols.mask``; autosize text -> ``tols.text``; shape/line
-    (top-level only — children never carry that bucket) -> ``tols.hard``; everything
-    else (unmasked image/movie, group union, child frames, fixed text) -> ``tols.soft``."""
+    """A-vs-B GATING tolerance, per UNIT (every bucket gates -- there is no
+    informational demotion; the plan oracle, :func:`plan_oracle_slide`, is the PRIMARY
+    per-side bar, held to ``tols.hard``/``tols.soft`` directly against the plan).
+
+    A and B are two INDEPENDENT Keynote runs, each individually within the oracle's
+    per-side tolerance of the SAME plan -- their MUTUAL distance budget is therefore
+    twice the per-side budget (two points each within r of a centre can be up to 2r
+    apart). Measured on the Map deck (2026-09-04): line 0.95px, group 1.43px,
+    child:image 1.83px -- all comfortably under the doubled bars below, none of which
+    would pass at the single-sided ``tols.hard``/``tols.soft``.
+
+    Priority: any ``child:*`` bucket (a group child's live layout, not oracle-covered
+    at all) -> ``tols.child``; masked sig -> ``tols.mask``; text (fixed-frame or
+    autosize, x-only) -> ``tols.text``; shape/line -> ``2 * tols.hard``; everything else
+    (group union, unmasked image/movie) -> ``2 * tols.soft``.
+    """
+    if bucket.startswith("child:"):
+        return tols.child
     if sig_type == "masked":
         return tols.mask
-    if sig_type == "autosize":
+    if bucket in _TEXT_BUCKETS or sig_type == "autosize":
         return tols.text
-    return tols.hard if bucket in _HARD_KINDS else tols.soft
+    return 2 * tols.hard if bucket in _HARD_KINDS else 2 * tols.soft
 
 
 # ==========================================================================
@@ -395,14 +424,48 @@ def _log_addr_report(report: dict[str, Any]) -> None:
 # ==========================================================================
 # compare_units_identity — the PRIMARY gate (D1).
 # ==========================================================================
+def _composite_id(unit: dict[str, Any]) -> str:
+    """``"<id>|<kind>"`` — a text-bearing shape's ``duplicateOf`` twin shares ONE
+    drawable id across TWO units (its text unit and its shape unit); matching by this
+    composite instead of the raw id stops one twin's unit from cross-pairing with the
+    OTHER twin's unit on the far side."""
+    return f"{unit['id']}|{unit['kind']}"
+
+
+def _duplicate_composite_ids(units: list[dict[str, Any]]) -> list[str]:
+    """Composite ids (:func:`_composite_id`) that occur more than once in ``units`` --
+    empty means every ``(id, kind)`` pair on this side is unique, as expected."""
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for u in units:
+        cid = _composite_id(u)
+        if cid in seen and cid not in dupes:
+            dupes.append(cid)
+        seen.add(cid)
+    return dupes
+
+
 def compare_units_identity(
     a_units: list[dict[str, Any]], b_units: list[dict[str, Any]], tols: Tolerances
 ) -> dict[str, Any]:
-    """PRIMARY A/B gate (D1): match every unit by drawable IDENTITY
-    (``write_gate_ab.match_units``), bucket by :func:`unit_bucket` (D8), gate at
-    :func:`tol_for_bucket` (D7). Text-autosize shapes are carved out of BOTH sides first
-    (``write_gate_ab.text_autosize_shapes`` — ``naturalSize`` re-derives on Keynote OPEN,
-    so A and B legitimately differ there yet render identically).
+    """PRIMARY A/B gate (D1): match every unit by drawable IDENTITY, composite
+    ``(id, kind)`` (:func:`_composite_id` — see the ``duplicateOf`` twin note),
+    ``write_gate_ab.match_units`` doing the actual pairing/addr-fallback against
+    COPIES keyed by the composite (results remapped back to the original units before
+    return, so every id in the report is the real drawable id). A composite id
+    repeated within ONE side is a caller bug (``slide_units`` should never emit two
+    units with the same ``(id, kind)``) -- raises ``ValueError`` naming the duplicate
+    rather than silently losing one of them to the ``{composite: unit}`` remap.
+
+    Bucket by :func:`unit_bucket` (D8), gate EVERY bucket at :func:`tol_for_bucket`
+    (D7, revised: doubled tolerances for the classes the plan oracle also validates
+    per-side — see that function's docstring for the rationale). There is no
+    informational demotion: every unit that fails ``write_gate_ab.compare_signature``
+    (geometry beyond tolerance, OR a structural mismatch -- render-signature TYPE,
+    ``flips``, or masked ``mask_angle`` -- which that comparator reports regardless of
+    the delta) gates the overall result. Text-autosize shapes are carved out of BOTH
+    sides first (``write_gate_ab.text_autosize_shapes`` — ``naturalSize`` re-derives on
+    Keynote OPEN, so A and B legitimately differ there yet render identically).
 
     ``pass`` requires: ``id_rate == 1.0`` (every unit matched by id, none by addr
     fallback), no unmatched unit on either side, and every bucket within tolerance.
@@ -425,8 +488,26 @@ def compare_units_identity(
     a_units = [u for u in a_units if u["id"] not in carve]
     b_units = [u for u in b_units if u["id"] not in carve]
 
-    pairs, unmatched_a, unmatched_b = match_units(a_units, b_units)
-    rate = id_match_rate(pairs)
+    a_keyed = [{**u, "id": _composite_id(u)} for u in a_units]
+    b_keyed = [{**u, "id": _composite_id(u)} for u in b_units]
+    a_orig_by_key = {k["id"]: o for o, k in zip(a_units, a_keyed)}
+    b_orig_by_key = {k["id"]: o for o, k in zip(b_units, b_keyed)}
+    if len(a_orig_by_key) != len(a_units):
+        raise ValueError(
+            f"compare_units_identity: duplicate (id, kind) on the A side: "
+            f"{_duplicate_composite_ids(a_units)}"
+        )
+    if len(b_orig_by_key) != len(b_units):
+        raise ValueError(
+            f"compare_units_identity: duplicate (id, kind) on the B side: "
+            f"{_duplicate_composite_ids(b_units)}"
+        )
+
+    keyed_pairs, unmatched_a_k, unmatched_b_k = match_units(a_keyed, b_keyed)
+    rate = id_match_rate(keyed_pairs)
+    pairs = [(a_orig_by_key[ka["id"]], b_orig_by_key[kb["id"]], how) for ka, kb, how in keyed_pairs]
+    unmatched_a = [a_orig_by_key[k["id"]] for k in unmatched_a_k]
+    unmatched_b = [b_orig_by_key[k["id"]] for k in unmatched_b_k]
 
     per_bucket: dict[str, dict[str, Any]] = {}
     for ua, ub, _how in pairs:
@@ -463,6 +544,8 @@ def _log_identity_report(report: dict[str, Any]) -> None:
     for bucket, entry in sorted(report["per_bucket"].items()):
         tag = "PASS" if entry["pass"] else "FAIL"
         _log(f"      {bucket:14} n={entry['n']:<4} worst={entry['worst']:.2f}px  {tag}")
+        for f in entry["fails"][:8]:
+            _log(f"        {f['addr']} worst={f['worst']:.2f} {f['reasons']}")
     if report["carved"]:
         _log(f"      autosize carve-out: {len(report['carved'])} shape(s) excluded")
 
@@ -480,14 +563,16 @@ def plan_oracle_slide(
     id-addressed via the SOURCE deck's kind index (D3) -- raise-immune, hide-immune
     (stat-finalize needs no exclusion).
 
-    Restricted to the SAME exact classes as ``offline_write.verify_offline_frames``:
-    shape/line, and unmasked image/movie (the resolved record's ``geom_source ==
-    "iwa"``). Text (autosize ``y``/``w``/``h`` are not offline-recoverable) and group
-    (its union is a live-layout composite) are NOT exactly recoverable from raw IWA
-    either, so this oracle would spuriously RED a text/group-heavy deck; both are
-    skipped here and left to the A-vs-B identity compare instead. A masked image/movie
-    (``geom_source == "mask"``) is skipped too -- its crop is covered by the identity
-    compare at ``tols.mask``. Every skip increments ``skipped``.
+    Covers the SAME exact classes as ``offline_write.verify_offline_frames`` (shape/
+    line at ``tols.hard``, unmasked image/movie -- the resolved record's ``geom_source
+    == "iwa"`` -- at ``tols.soft``) PLUS ``group`` (its union x/y/w/h vs the composed
+    group-union record, also at ``tols.soft`` -- a group's union IS offline-recoverable,
+    unlike its children's live layout). Text (autosize ``y``/``w``/``h`` are not
+    offline-recoverable) is NOT exactly recoverable from raw IWA and would spuriously
+    RED a text-heavy deck, so it is skipped here and left entirely to the A-vs-B
+    identity compare instead. A masked image/movie (``geom_source == "mask"``) is
+    skipped too -- its crop is covered by the identity compare at ``tols.mask``. Every
+    skip increments ``skipped``.
 
     ``role == "hide"`` specs are skipped (nothing to compare — the object is deleted).
     Any other non-hide, non-skipped spec whose id fails to resolve, or is missing from
@@ -511,6 +596,7 @@ def plan_oracle_slide(
         _spec_box,
     )
 
+    oracle_kinds = _OFFLINE_EXACT_KINDS | _OFFLINE_MEDIA_KINDS | {"group"}
     per_kind: dict[str, dict[str, Any]] = {}
     missing_ids: list[dict[str, Any]] = []
     skipped = 0
@@ -518,7 +604,7 @@ def plan_oracle_slide(
         if spec.get("role") == "hide":
             continue
         kind = str(spec.get("kind") or "")
-        if kind not in _OFFLINE_EXACT_KINDS and kind not in _OFFLINE_MEDIA_KINDS:
+        if kind not in oracle_kinds:
             skipped += 1
             continue
         kind_index = spec.get("kindIndex")
@@ -788,20 +874,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-validate", dest="validate", action="store_false",
                     help="skip the live-verify readback (required for the Full deck)")
     ap.add_argument("--tol-hard", type=float, default=TOL_HARD,
-                    help=f"shape/line px tolerance (default {TOL_HARD})")
+                    help=f"shape/line px tolerance vs the PLAN (oracle, per side); "
+                         f"identity (A-vs-B) gates at 2x this (default {TOL_HARD})")
     ap.add_argument("--tol-soft", type=float, default=TOL_SOFT,
-                    help=f"image/group/child/fixed-text px tolerance (default {TOL_SOFT})")
+                    help=f"group/unmasked-image/movie px tolerance vs the PLAN (oracle, "
+                         f"per side); identity (A-vs-B) gates at 2x this (default {TOL_SOFT})")
     ap.add_argument("--tol-mask", type=float, default=TOL_MASK,
-                    help=f"masked image/movie crop px tolerance (default {TOL_MASK})")
+                    help=f"masked image/movie crop px tolerance, A-vs-B (default {TOL_MASK})")
     ap.add_argument("--tol-text", type=float, default=TOL_TEXT,
-                    help=f"autosize text px tolerance, x-only (default {TOL_TEXT})")
+                    help=f"text px tolerance (autosize x-only), A-vs-B (default {TOL_TEXT})")
+    ap.add_argument("--tol-child", type=float, default=TOL_CHILD,
+                    help=f"group-child px tolerance, A-vs-B (default {TOL_CHILD})")
     args = ap.parse_args(argv)
 
     for label, deck in (("source", args.source), ("template", args.template)):
         if not deck.exists():
             ap.error(f"{label} deck not found: {deck}")
 
-    tols = Tolerances(args.tol_hard, args.tol_soft, args.tol_mask, args.tol_text)
+    tols = Tolerances(args.tol_hard, args.tol_soft, args.tol_mask, args.tol_text, args.tol_child)
 
     slide_range = None
     if args.slides:

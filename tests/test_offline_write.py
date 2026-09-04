@@ -581,16 +581,6 @@ def test_compare_units_multiset_text_is_informational():
     assert report["per_kind"]["text"]["worst"] == 50.0
 
 
-def test_compare_units_multiset_child_text_is_also_informational():
-    child_addr = (("top", "group", 0), "child", 0)
-    a = [_unit("text", 0, 0, 10, 10, addr=child_addr)]
-    b = [_unit("text", 50, 0, 10, 10, addr=child_addr)]  # far off in x
-    report = compare_units_multiset(a, b, tol_hard=0.5, tol_soft=1.0)
-    assert report["pass"] is True
-    assert report["per_kind"]["child:text"]["informational"] is True
-    assert report["per_kind"]["child:text"]["worst"] == 50.0
-
-
 # --- compare_units_by_addr — demoted to a permutation DIAGNOSTIC only (D2) -------
 
 
@@ -631,16 +621,6 @@ def test_compare_units_by_addr_never_gates_shape_line_image_movie():
         report = compare_units_by_addr(a, b, tol_hard=0.5, tol_soft=0.5)
         assert report["per_kind"][kind]["pass"] is False, kind  # still flagged...
         assert report["pass"] is True, kind  # ...but D2: never gates the overall result
-
-
-def test_compare_units_by_addr_x_only_rule_uses_unit_bucket():
-    # A "child:text" bucket (via unit_bucket), not the raw "text" kind, must also get
-    # the x-only delta rule -- a large y/w/h drift on a child-text unit must NOT count.
-    child_addr = (("top", "group", 0), "child", 0)
-    a = [_unit("text", 0, 0, 10, 10, addr=child_addr)]
-    b = [_unit("text", 3.0, 500, 999, 999, addr=child_addr)]  # x drift 3.0, everything else huge
-    report = compare_units_by_addr(a, b, tol_hard=0.5, tol_soft=5.0)
-    assert report["per_kind"]["text"]["worst"] == 3.0  # x-only, not the huge y/w/h delta
 
 
 def test_log_multiset_report_flags_text_informational(capsys):
@@ -1064,17 +1044,24 @@ def test_tol_for_bucket_autosize_uses_text_tol():
     assert tol_for_bucket("text", "autosize", tols) == 3.0
 
 
-def test_tol_for_bucket_hard_kinds():
+def test_tol_for_bucket_hard_kinds_doubled_for_identity():
+    # Two INDEPENDENT runs each within tols.hard of the plan can be 2x that apart.
     tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
-    assert tol_for_bucket("shape", "frame", tols) == 0.5
-    assert tol_for_bucket("line", "line", tols) == 0.5
+    assert tol_for_bucket("shape", "frame", tols) == 1.0
+    assert tol_for_bucket("line", "line", tols) == 1.0
 
 
-def test_tol_for_bucket_soft_default_including_children():
-    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0)
-    assert tol_for_bucket("image", "frame", tols) == 1.0
-    assert tol_for_bucket("group", "group", tols) == 1.0
-    assert tol_for_bucket("child:image", "frame", tols) == 1.0
+def test_tol_for_bucket_soft_doubled_for_unmasked_top_level():
+    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0, child=4.0)
+    assert tol_for_bucket("image", "frame", tols) == 2.0
+    assert tol_for_bucket("group", "group", tols) == 2.0
+
+
+def test_tol_for_bucket_child_star_uses_child_tol_regardless_of_kind():
+    tols = Tolerances(hard=0.5, soft=1.0, mask=2.0, text=3.0, child=4.0)
+    assert tol_for_bucket("child:image", "frame", tols) == 4.0
+    assert tol_for_bucket("child:group", "group", tols) == 4.0
+    assert tol_for_bucket("child:child", "frame", tols) == 4.0
 
 
 # --- compare_units_identity (D1) ------------------------------------------------------
@@ -1150,6 +1137,139 @@ def test_compare_units_identity_buckets_group_children_separately():
     assert set(report["per_bucket"]) == {"group", "child:image"}
 
 
+def test_compare_units_identity_duplicateof_twin_matches_both_units():
+    # A text-bearing shape emits TWO units sharing ONE drawable id (the text unit and
+    # its `duplicateOf` shape twin). id-only matching can cross-pair the A text unit to
+    # B's shape unit (and vice versa), stranding the other side as unmatched even though
+    # id_rate reads 100%. Composite (id, kind) matching must pair BOTH correctly.
+    shared_id = "20539608"
+    a = [
+        {"id": shared_id, "kind": "text", "addr": ("top", "text", 0),
+         "sig": {"type": "frame", "frame": (0, 0, 100, 20), "flips": (False, False)}},
+        {"id": shared_id, "kind": "shape", "addr": ("top", "shape", 0),
+         "sig": {"type": "frame", "frame": (0, 0, 100, 20), "flips": (False, False)}},
+    ]
+    b = [
+        {"id": shared_id, "kind": "text", "addr": ("top", "text", 0),
+         "sig": {"type": "frame", "frame": (0, 0, 100, 20), "flips": (False, False)}},
+        {"id": shared_id, "kind": "shape", "addr": ("top", "shape", 0),
+         "sig": {"type": "frame", "frame": (0, 0, 100, 20), "flips": (False, False)}},
+    ]
+    report = compare_units_identity(a, b, Tolerances())
+    assert report["id_rate"] == 1.0
+    assert report["unmatched_a"] == [] and report["unmatched_b"] == []
+    assert report["per_bucket"]["text"]["n"] == 1
+    assert report["per_bucket"]["shape"]["n"] == 1
+    assert report["pass"] is True
+
+
+def test_compare_units_identity_masked_image_stays_gating():
+    a = [{"id": "i1", "kind": "image", "addr": ("top", "image", 0),
+          "sig": {"type": "masked", "crop": (0, 0, 10, 10), "mask_angle": 0,
+                  "raw_size": (10, 10), "flips": (False, False)}}]
+    b = [{"id": "i1", "kind": "image", "addr": ("top", "image", 0),
+          "sig": {"type": "masked", "crop": (5.0, 0, 10, 10), "mask_angle": 0,
+                  "raw_size": (10, 10), "flips": (False, False)}}]
+    report = compare_units_identity(a, b, Tolerances(mask=2.0))
+    assert report["per_bucket"]["image"]["pass"] is False  # 5px > tols.mask
+    assert report["pass"] is False
+
+
+def test_compare_units_identity_child_bucket_uses_tol_child():
+    child_addr = (("top", "group", 0), "child", 0)
+    a = [_idunit("c1", "image", 0, 0, 10, 10, child_addr)]
+    b_ok = [_idunit("c1", "image", 1.5, 0, 10, 10, child_addr)]
+    b_bad = [_idunit("c1", "image", 2.5, 0, 10, 10, child_addr)]
+    tols = Tolerances(child=2.0)
+    assert compare_units_identity(a, b_ok, tols)["pass"] is True
+    report_bad = compare_units_identity(a, b_bad, tols)
+    assert report_bad["per_bucket"]["child:image"]["pass"] is False
+    assert report_bad["pass"] is False
+
+
+def test_compare_units_identity_shape_drift_1_5_fails_at_doubled_hard_tol():
+    # 1.5px > 2*tols.hard (default 2*0.5=1.0) — matches D7's revised A-vs-B budget.
+    a = [_idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0))]
+    b = [_idunit("s1", "shape", 1.5, 0, 10, 10, ("top", "shape", 0))]
+    report = compare_units_identity(a, b, Tolerances(hard=0.5))
+    assert report["per_bucket"]["shape"]["worst"] == 1.5
+    assert report["pass"] is False
+
+
+def test_compare_units_identity_group_1_43_passes_at_doubled_soft_tol():
+    # Measured on the Map deck (2026-09-04): group A-vs-B worst 1.43px, within 2*tols.soft.
+    a = [{"id": "g1", "kind": "group", "addr": ("top", "group", 0),
+          "sig": {"type": "group", "union": (0, 0, 100, 100), "flips": (False, False)}}]
+    b = [{"id": "g1", "kind": "group", "addr": ("top", "group", 0),
+          "sig": {"type": "group", "union": (1.43, 0, 100, 100), "flips": (False, False)}}]
+    report = compare_units_identity(a, b, Tolerances(soft=1.0))
+    assert report["per_bucket"]["group"]["worst"] == 1.43
+    assert report["pass"] is True
+
+
+def test_compare_units_identity_line_0_95_passes_at_doubled_hard_tol():
+    # Measured on the Map deck (2026-09-04): line A-vs-B worst 0.95px, within 2*tols.hard.
+    a = [{"id": "l1", "kind": "line", "addr": ("top", "line", 0),
+          "sig": {"type": "line", "endpoints": ((0.0, 0.0), (10.0, 10.0)), "flips": (False, False)}}]
+    b = [{"id": "l1", "kind": "line", "addr": ("top", "line", 0),
+          "sig": {"type": "line", "endpoints": ((0.95, 0.0), (10.0, 10.0)), "flips": (False, False)}}]
+    report = compare_units_identity(a, b, Tolerances(hard=0.5))
+    assert report["per_bucket"]["line"]["worst"] == 0.95
+    assert report["pass"] is True
+
+
+def test_compare_units_identity_mixed_masked_unmasked_bucket_order_independent():
+    # Both share the top-level "image" bucket; each unit's OWN sig type picks its
+    # tolerance (tols.mask vs 2*tols.soft) -- NOT whichever unit happened to insert the
+    # bucket first (the bug the old "informational-decided-by-first-unit" design had).
+    masked_a = {"id": "m1", "kind": "image", "addr": ("top", "image", 0),
+               "sig": {"type": "masked", "crop": (0, 0, 10, 10), "mask_angle": 0,
+                       "raw_size": (10, 10), "flips": (False, False)}}
+    masked_b = {"id": "m1", "kind": "image", "addr": ("top", "image", 0),
+               "sig": {"type": "masked", "crop": (5.0, 0, 10, 10), "mask_angle": 0,
+                       "raw_size": (10, 10), "flips": (False, False)}}  # 5px > tols.mask
+    unmasked_a = {"id": "u1", "kind": "image", "addr": ("top", "image", 1),
+                 "sig": {"type": "frame", "frame": (0, 0, 10, 10), "flips": (False, False)}}
+    unmasked_b = {"id": "u1", "kind": "image", "addr": ("top", "image", 1),
+                 "sig": {"type": "frame", "frame": (0.5, 0, 10, 10), "flips": (False, False)}}  # within 2*soft
+
+    order1 = compare_units_identity([masked_a, unmasked_a], [masked_b, unmasked_b], Tolerances())
+    order2 = compare_units_identity([unmasked_a, masked_a], [unmasked_b, masked_b], Tolerances())
+    assert order1["pass"] is False and order2["pass"] is False
+    assert order1["pass"] == order2["pass"]
+    assert order1["per_bucket"]["image"]["worst"] == order2["per_bucket"]["image"]["worst"] == 5.0
+
+
+def test_compare_units_identity_flips_mismatch_fails_regardless_of_worst():
+    a = [{"id": "s1", "kind": "shape", "addr": ("top", "shape", 0),
+          "sig": {"type": "frame", "frame": (0, 0, 10, 10), "flips": (False, False)}}]
+    b = [{"id": "s1", "kind": "shape", "addr": ("top", "shape", 0),
+          "sig": {"type": "frame", "frame": (0, 0, 10, 10), "flips": (True, False)}}]
+    report = compare_units_identity(a, b, Tolerances())
+    assert report["per_bucket"]["shape"]["worst"] == 0.0  # geometry identical
+    assert report["pass"] is False  # flips differ -> FAIL regardless of the (zero) delta
+
+
+def test_compare_units_identity_type_mismatch_fails():
+    a = [{"id": "t1", "kind": "text", "addr": ("top", "text", 0),
+          "sig": {"type": "autosize", "x": 100.0, "flips": (False, False)}}]
+    b = [{"id": "t1", "kind": "text", "addr": ("top", "text", 0),
+          "sig": {"type": "frame", "frame": (100.0, 0, 50, 43), "flips": (False, False)}}]
+    report = compare_units_identity(a, b, Tolerances())
+    assert report["pass"] is False
+    assert report["per_bucket"]["text"]["fails"][0]["worst"] == float("inf")
+
+
+def test_compare_units_identity_raises_on_duplicate_composite_id():
+    a = [
+        _idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0)),
+        _idunit("s1", "shape", 5, 5, 10, 10, ("top", "shape", 1)),  # same (id, kind) twice
+    ]
+    b = [_idunit("s1", "shape", 0, 0, 10, 10, ("top", "shape", 0))]
+    with pytest.raises(ValueError, match="duplicate"):
+        compare_units_identity(a, b, Tolerances())
+
+
 # --- plan_oracle_slide (D3) -----------------------------------------------------------
 
 
@@ -1184,17 +1304,28 @@ def test_plan_oracle_slide_skips_text_spec():
     assert report["compared"] == 0  # vacuous — every spec on this slide was skipped
 
 
-def test_plan_oracle_slide_skips_group_spec():
-    # A group's union is a live-layout composite — not offline-recoverable either.
-    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 999.0, "y": 999.0}]
+def test_plan_oracle_slide_compares_group_union_at_soft_tol():
+    # A group's union IS offline-recoverable (unlike its children's live layout) --
+    # compared against the composed group-union record at tols.soft.
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
     id_by_addr = {("group", 0): "g1"}
     recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
                         "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
-    assert report["per_kind"] == {}
+    assert report["per_kind"]["group"]["n"] == 1
     assert report["pass"] is True
-    assert report["skipped"] == 1
-    assert report["compared"] == 0
+    assert report["skipped"] == 0
+    assert report["compared"] == 1
+
+
+def test_plan_oracle_slide_group_fails_beyond_soft_tol():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0))
+    assert report["per_kind"]["group"]["worst"] == 5.0
+    assert report["pass"] is False
 
 
 def test_plan_oracle_slide_skips_masked_image():
