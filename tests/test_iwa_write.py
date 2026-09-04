@@ -328,6 +328,30 @@ def test_text_fields_x_absolute_y_delta_on_stored_centre():
     assert "size_w" not in fields and "size_h" not in fields  # no reported w/h delta asked
 
 
+def test_text_fields_autosize_height_never_writes_size_h():
+    # stored h == 0.0 is the AUTOSIZE sentinel (iwa_geometry.py's `th == 0.0`) -- writing
+    # size_h here would freeze the box into a fixed-height frame (a real defect).
+    rec = {"id": "20539608", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 2327.5, 0.0, 0.0)
+    reported = [700.0, 344.0, 1140.0, 0.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 1139.88, "h": 43.0}
+    (obj_id, fields), = _text_fields(rec, spec, reported, stored)
+    assert obj_id == "20539608"
+    assert "pos_x" in fields and "pos_y" in fields
+    assert "size_w" in fields  # width is the wrap width, not the autosize sentinel
+    assert "size_h" not in fields  # NEVER write size_h when stored h is the sentinel
+
+
+def test_text_fields_fixed_height_still_writes_size_h():
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 200.0, 60.0, 0.0)  # non-zero stored h: a real fixed-frame box
+    reported = [700.0, 344.0, 200.0, 60.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0}
+    (_obj_id, fields), = _text_fields(rec, spec, reported, stored)
+    assert fields["size_h"] == pytest.approx(60.0 + (90.0 - 60.0))
+    assert fields["size_w"] == pytest.approx(200.0 + (250.0 - 200.0))
+
+
 def test_shape_fields_size_writes_geometry_and_naturalsize():
     rec = {"id": "5", "kind": "shape", "kindIndex": 0}
     spec = {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0}

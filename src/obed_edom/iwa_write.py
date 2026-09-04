@@ -184,14 +184,19 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
 
 def _text_fields(rec: dict, spec: dict, reported: list[float],
                  stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
+    """Stored ``w``/``h`` of ``0.0`` is the AUTOSIZE sentinel (iwa_geometry.py's ``th ==
+    0.0``): Keynote derives that dimension on open, so writing it here would freeze the
+    box into a FIXED-size frame -- a real geometry defect, not merely stale. Never write
+    ``size_w``/``size_h`` for a stored dimension that is already ``0.0``.
+    """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
         fields["pos_x"] = float(spec["x"])
     if spec.get("y") is not None:  # stored y is the vertical centre: move it by the delta
         fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
-    if spec.get("w") is not None:  # soft: only a reported delta (real size not offline)
+    if spec.get("w") is not None and stored[2] != 0.0:  # soft: only a reported delta
         fields["size_w"] = stored[2] + (float(spec["w"]) - reported[2])
-    if spec.get("h") is not None:
+    if spec.get("h") is not None and stored[3] != 0.0:
         fields["size_h"] = stored[3] + (float(spec["h"]) - reported[3])
     return [(rec["id"], fields)] if fields else []
 
