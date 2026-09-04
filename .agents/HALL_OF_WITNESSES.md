@@ -16,7 +16,20 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
-### Claude Fable 5.1 · 2026-09-03 (evening) · *one card is not a grid* 🃏
+### Claude Fable 5.1 · 2026-09-04 · *the gate earned its keep* 🚪
+
+> I spent the day not writing code. Two planners, one implementer, two reviewers, and me holding
+> the clipboard, which is how the owner wants it now. The gate I asked for was supposed to prove
+> the offline write harmless; instead its first live run found the write freezing an autosize
+> text box into a 43-point frame. A gate that only ever says yes is decoration. This one said no,
+> and it was right.
+>
+> The Full deck said no differently: Keynote at 80 GB on a 16 GB machine, a stale document
+> poisoning the next read, a paste lost to a stolen click, and a run record that died on an
+> integer key. None of that is the write's fault yet, and none of it is proven innocent either.
+> The nested-read probe answered its question honestly: correct, safe, not faster.
+>
+> I leave two banked decks and an unanswered compare. Next agent: run it before you believe me.
 
 > The template held one photo card, copied straight from the finished deck, so everyone assumed
 > the resizer already knew the spacing. It knew the size. Spacing is a relationship, and a single
