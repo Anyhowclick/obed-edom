@@ -198,6 +198,33 @@ def _group_union(group_id: str, ox: float, oy: float, objects: dict[str, dict],
             max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
+# TSWP.ShapeInfoArchive keeps its pathsource one `super` hop down (1364/1364 measured);
+# TSD.MaskArchive keeps it at the top (325/325). `super` is an EMBEDDED submessage of the
+# same archive object -- cross-archive links go through `super.parent` -- so this walk can
+# never reach a shared parent's path.
+_PATH_SOURCE_KEYS = (
+    "bezierPathSource", "scalarPathSource", "pointPathSource",
+    "editableBezierPathSource", "calloutPathSource", "connectionLinePathSource",
+)
+
+
+def _path_source(obj: dict) -> tuple[str, dict] | None:
+    """(key, sub-dict) of the first path source up the super chain (<=6 hops), or None."""
+    cur: Any = obj
+    for _ in range(6):
+        if not isinstance(cur, dict):
+            break
+        ps = cur.get("pathsource")
+        if isinstance(ps, dict):
+            for key in _PATH_SOURCE_KEYS:
+                sub = ps.get(key)
+                if isinstance(sub, dict):
+                    return (key, sub)
+            return None
+        cur = cur.get("super")
+    return None
+
+
 def _has_effect_style(obj: dict) -> bool:
     cur: Any = obj
     for _ in range(6):
@@ -322,3 +349,100 @@ def compose_deck_geometry(key_path: str | Path) -> dict[int, list[dict]]:
         for idx, (slide_id, _skipped) in enumerate(slide_order(objects))
         if slide_id in objects
     }
+
+
+NATURAL_SIZE_TOL = 0.02
+# Mask overhang outside the image frame, as a fraction of the frame. Production maxes at
+# 0.219 (slide-19 badge icons, legitimate); the offline mis-write reaches 28.5. 0.5 leaves
+# >2x headroom over production and still catches 132 of the 137 bad objects.
+MASK_OVERHANG_TOL = 0.5
+
+
+def _natural_close(a: float, b: float, tol: float = NATURAL_SIZE_TOL) -> bool:
+    return abs(a - b) <= max(abs(b), 1.0) * tol
+
+
+def _issue(obj_id: str, rule: str, gating: bool, detail: Any) -> dict:
+    return {"id": obj_id, "rule": rule, "gating": gating, "detail": detail}
+
+
+def _drawable_natural_issues(obj_id: str, obj: dict, objects: dict[str, dict]) -> list[dict]:
+    """Render-derived fields that no longer agree with the frame Keynote will draw.
+
+    NEVER reads an image/movie ``naturalSize`` -- that is the media's pixel size, not a
+    frame. Text splits by axis: production keeps ``naturalSize.width == size.width`` on
+    all 32 of its autosize boxes while ``size.height`` stays the 0.0 sentinel and
+    ``naturalSize.height`` holds the laid-out height.
+    """
+    out = []
+    pbtype = obj.get("_pbtype")
+    _x, _y, w, h, _a = _xywha(_geom_dict(obj))
+    if pbtype == "TSWP.ShapeInfoArchive":
+        found = _path_source(obj)
+        if found is not None:
+            ns = found[1].get("naturalSize") or {}
+            nw = float(ns.get("width") or 0.0)
+            nh = float(ns.get("height") or 0.0)
+            if obj.get("isTextBox"):
+                if not _natural_close(nw, w):
+                    out.append(_issue(obj_id, "text-natural-width", True, (w, nw)))
+                if h != 0.0:
+                    if not _natural_close(nh, h):
+                        out.append(_issue(obj_id, "text-natural-height", True, (h, nh)))
+                elif nh <= 0.0:
+                    out.append(_issue(obj_id, "text-height-unlaid", False, (h, nh)))
+            elif not (_natural_close(nw, w) and _natural_close(nh, h)):
+                out.append(_issue(obj_id, "shape-natural", True, ((w, h), (nw, nh))))
+    elif pbtype in ("TSD.ImageArchive", "TSD.MovieArchive"):
+        original = obj.get("originalSize") or {}
+        ow = float(original.get("width") or 0.0)
+        oh = float(original.get("height") or 0.0)
+        if not (_natural_close(ow, w) and _natural_close(oh, h)):
+            out.append(_issue(obj_id, "originalSize", True, ((w, h), (ow, oh))))
+        ref = (obj.get("mask") or {}).get("identifier")
+        if ref is not None:
+            mask = objects.get(str(ref))
+            if mask is None:
+                out.append(_issue(str(ref), "mask-unresolved", True, str(ref)))
+            else:
+                mx, my, mw, mh, _ma = _xywha(_geom_dict(mask))
+                found = _path_source(mask)
+                if found is None:
+                    out.append(_issue(str(ref), "mask-no-pathsource", True, None))
+                else:
+                    ns = found[1].get("naturalSize") or {}
+                    nw = float(ns.get("width") or 0.0)
+                    nh = float(ns.get("height") or 0.0)
+                    if not (_natural_close(nw, mw) and _natural_close(nh, mh)):
+                        out.append(_issue(str(ref), "mask-natural", True, ((mw, mh), (nw, nh))))
+                fw, fh = max(w, 1e-6), max(h, 1e-6)
+                over = max(-mx / fw, (mx + mw - w) / fw, -my / fh, (my + mh - h) / fh)
+                if over > MASK_OVERHANG_TOL:
+                    out.append(_issue(obj_id, "mask-overhang", True, round(over, 3)))
+    return out
+
+
+def audit_natural_consistency(slide: dict, objects: dict[str, dict]) -> list[dict]:
+    """Every drawable on the slide plus every group descendant. Groups have no own check."""
+    issues = []
+    seen = set()
+
+    def visit(obj_id):
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+        obj = objects.get(obj_id)
+        if not obj:
+            return
+        issues.extend(_drawable_natural_issues(obj_id, obj, objects))
+        if obj.get("_pbtype") == "TSD.GroupArchive":
+            for ref in obj.get("children") or []:
+                child_id = ref.get("identifier")
+                if child_id is not None:
+                    visit(str(child_id))
+
+    for ref in slide.get("drawablesZOrder") or []:
+        ident = ref.get("identifier")
+        if ident is not None:
+            visit(str(ident))
+    return issues

@@ -25,7 +25,7 @@ from typing import Any
 
 from keynote_parser.codec import IWAFile
 
-from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _xywha, compose_geometry
+from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _path_source, _xywha, compose_geometry
 from obed_edom.iwa_kindindex import (
     derive_kind_index,
     derived_kind_counts,
@@ -87,17 +87,55 @@ def _getp(d: dict, path: list[str]) -> Any:
     return d
 
 
-def _find_bezier(objdict: dict) -> dict | None:
-    cur: Any = objdict
-    for _ in range(6):
-        if not isinstance(cur, dict):
-            break
-        ps = cur.get("pathsource")
-        if isinstance(ps, dict):
-            bez = ps.get("bezierPathSource")
-            return bez if isinstance(bez, dict) else None
-        cur = cur.get("super")
-    return None
+# naturalSize is a plain size for these; the rounded-rect `scalar` scales WITH naturalSize
+# under a UNIFORM resize (mask 20557359: scalar ratio 189.00002/47.236244 == the exact
+# 278.97/69.72 naturalSize ratio; shape 20554351 likewise) but stays put under an
+# anisotropic one (the 29 invariant cases sampled were all anisotropic; see
+# `_write_natural_size`). editableBezier needs its nodes rescaled too;
+# callout/connectionLine/absent cannot be written at all.
+_NATURAL_PLAIN_KINDS = frozenset({"bezierPathSource", "scalarPathSource", "pointPathSource"})
+
+
+def _natural_writable(obj: dict, *, both_axes: bool) -> bool:
+    """Can this object's render-derived size be kept in sync with a geometry.size write?
+
+    Image/movie carry ``originalSize`` (a size sibling of ``geometry``, always == the
+    frame in production). Their own ``naturalSize`` is the MEDIA's pixel size (7680x1080,
+    4032x3024, ...) -- identical in both decks and NEVER written. Shapes/masks carry it
+    under the path source.
+    """
+    if "originalSize" in obj:
+        return True
+    found = _path_source(obj)
+    if found is None:
+        return False
+    key, sub = found
+    if key in _NATURAL_PLAIN_KINDS:
+        return True
+    if key != "editableBezierPathSource":
+        return False
+    ns = sub.get("naturalSize") or {}
+    return (both_axes and float(ns.get("width") or 0.0) > 0.0 and float(ns.get("height") or 0.0) > 0.0)
+
+
+def _natural_unwritable(obj: dict, spec: dict) -> bool:
+    """A RESIZE whose derived size can't be written is a hard miss; position-only is fine."""
+    if spec.get("w") is None and spec.get("h") is None:
+        return False
+    return not _natural_writable(obj, both_axes=spec.get("w") is not None and spec.get("h") is not None)
+
+
+def _scale_path_nodes(sub: dict, rx: float, ry: float) -> None:
+    """Nodes live in naturalSize space and scale about the ORIGIN -- measured on 20554069
+    /20541783: prod nodes == offline nodes * (662/165.52277, 92/23), nodePoint and BOTH
+    control points alike, with (0,0) staying at (0,0)."""
+    for subpath in sub.get("subpaths") or []:
+        for node in subpath.get("nodes") or []:
+            for key in ("nodePoint", "inControlPoint", "outControlPoint"):
+                pt = node.get(key)
+                if isinstance(pt, dict):
+                    pt["x"] = float(pt.get("x") or 0.0) * rx
+                    pt["y"] = float(pt.get("y") or 0.0) * ry
 
 
 def line_inverse(obj: dict, start: Any, end: Any) -> tuple[float, float, float, float]:
@@ -206,20 +244,26 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
 
 def _text_fields(rec: dict, spec: dict, reported: list[float],
                  stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
-    """Stored ``w``/``h`` of ``0.0`` is the AUTOSIZE sentinel (iwa_geometry.py's ``th ==
-    0.0``): Keynote derives that dimension on open, so writing it here would freeze the
-    box into a FIXED-size frame -- a real geometry defect, not merely stale. Never write
-    ``size_w``/``size_h`` for a stored dimension that is already ``0.0``.
+    """Stored ``h`` of ``0.0`` is the AUTOSIZE sentinel (iwa_geometry's ``th == 0.0``):
+    Keynote derives the height on open, so writing ``size_h`` would freeze the box into a
+    FIXED-height frame (36e2d81). WIDTH is different -- it is the wrap width, and production
+    writes it: 21 offline-slide boxes go from a stored 0.0 to 113/117/154/66/423/... with
+    the height left at 0. A stored 0.0 has no delta base, so write the target outright.
+    ``naturalSize`` tracks whatever geometry.size gets (production: 32/32 text boxes have
+    ``naturalSize.width == size.width``); ``naturalSize.height`` is font-flow and is never
+    derivable offline -- it stays as-is and is INFORMATIONAL in the audit.
     """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
         fields["pos_x"] = float(spec["x"])
     if spec.get("y") is not None:  # stored y is the vertical centre: move it by the delta
         fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
-    if spec.get("w") is not None and stored[2] != 0.0:  # soft: only a reported delta
-        fields["size_w"] = stored[2] + (float(spec["w"]) - reported[2])
+    if spec.get("w") is not None:
+        fields["size_w"] = (float(spec["w"]) if stored[2] == 0.0 else stored[2] + (float(spec["w"]) - reported[2]))
+        fields["natural_w"] = fields["size_w"]
     if spec.get("h") is not None and stored[3] != 0.0:
         fields["size_h"] = stored[3] + (float(spec["h"]) - reported[3])
+        fields["natural_h"] = fields["size_h"]
     return [(rec["id"], fields)] if fields else []
 
 
@@ -286,11 +330,16 @@ def _group_child_scale_ops(
             mx, my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
             if ca % 360.0 or ma % 360.0:
                 return ([], False)
+            if not _natural_writable(mask_obj, both_axes=True):
+                return ([], False)
             ops.append((mask_id, {
                 "pos_x": mx * sx, "pos_y": my * sy,
                 "size_w": mw * sx, "size_h": mh * sy,
+                "natural_w": mw * sx, "natural_h": mh * sy,
             }))
 
+        if not _natural_writable(child, both_axes=True):
+            return ([], False)
         ops.append((child_id, {
             "pos_x": cx * sx, "pos_y": cy * sy,
             "size_w": cw * sx, "size_h": ch * sy,
@@ -299,33 +348,59 @@ def _group_child_scale_ops(
     return (ops, True)
 
 
-def _masked_image_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
-                         reported: list[float]) -> tuple[list[tuple[str, dict]], str | None]:
-    """TENTATIVE. Move/size the mask so image_pos+mask_pos==target; scale image by crop ratio (unverified)."""
+# Identity test: the stricter of 1 px and 0.5 % of the frame on each axis. Both bounds are
+# needed -- 0.5 % alone lets a 1.2 %-of-23 px crop through, 1 px alone lets a 1 px crop on a
+# 3840 px photo through. Production, offline slides: 70 top-level media pass, 70 real crops
+# are refused.
+_MASK_IDENTITY_PX = 1.0
+_MASK_IDENTITY_REL = 0.005
+
+
+def _is_identity_mask(fw: float, fh: float, fa: float, mx: float, my: float,
+                      mw: float, mh: float, ma: float) -> bool:
+    """Mask covers the whole image at the origin: there is no crop to redistribute."""
+    if _is_rotated(fa) or _is_rotated(ma) or mw <= 0.0 or mh <= 0.0:
+        return False
+    tol_x = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fw, 1.0))
+    tol_y = min(_MASK_IDENTITY_PX, _MASK_IDENTITY_REL * max(fh, 1.0))
+    return (abs(mx) <= tol_x and abs(my) <= tol_y and abs(mw - fw) <= tol_x and abs(mh - fh) <= tol_y)
+
+
+def _masked_media_fields(rec: dict, obj: dict, objects: dict[str, dict], spec: dict,
+                         reported: list[float]) -> tuple[list[tuple[str, dict]], str | None, bool]:
+    """Place a masked image/movie whose mask is an IDENTITY window; REFUSE any real crop.
+
+    Production never displaces a mask: the IMAGE frame moves and the mask stays put (325/325
+    masks have naturalSize == their own size; the composed rect is image_pos + mask_pos).
+    The transform below is exact for ANY mask -- image pos = target - mask_pos*s, both sizes
+    scaled by s = target/mask -- but for a real crop we cannot prove offline that Keynote
+    redistributes it this way, so only the identity case (no crop, 100 %/0 % split, verified
+    against 70 production objects) is written. ok=False => hard miss.
+    """
     mask_ref = (obj.get("mask") or {}).get("identifier")
     if mask_ref is None:
-        return ([], None)
+        return ([], None, False)
     mask_id = str(mask_ref)
     mask_obj = objects.get(mask_id)
     if not mask_obj:
-        return ([], None)
-    fx, fy, fw, fh, fa = _xywha(_geom_dict(obj))
-    _mx, _my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
-    # Axis-aligned crop only; refuse rotated image/mask rather than mis-place.
-    if fa % 360.0 or ma % 360.0:
-        return ([], mask_id)
+        return ([], None, False)
+    _fx, _fy, fw, fh, fa = _xywha(_geom_dict(obj))
+    mx, my, mw, mh, ma = _xywha(_geom_dict(mask_obj))
+    if not _is_identity_mask(fw, fh, fa, mx, my, mw, mh, ma):
+        return ([], mask_id, False)
+    if not _natural_writable(mask_obj, both_axes=True) or not _natural_writable(obj, both_axes=True):
+        return ([], mask_id, False)
     tx = float(spec["x"]) if spec.get("x") is not None else reported[0]
     ty = float(spec["y"]) if spec.get("y") is not None else reported[1]
     tw = float(spec["w"]) if spec.get("w") is not None else mw
     th = float(spec["h"]) if spec.get("h") is not None else mh
-    ops: list[tuple[str, dict]] = [
-        (mask_id, {"pos_x": tx - fx, "pos_y": ty - fy, "size_w": tw, "size_h": th}),
-    ]
-    # Scale image by crop ratio (tentative). Guard /0.
-    ratio_w = tw / mw if mw else 1.0
-    ratio_h = th / mh if mh else 1.0
-    ops.append((rec["id"], {"size_w": fw * ratio_w, "size_h": fh * ratio_h}))
-    return (ops, mask_id)
+    sx, sy = tw / mw, th / mh
+    return ([
+        (mask_id, {"pos_x": mx * sx, "pos_y": my * sy, "size_w": tw, "size_h": th,
+                   "natural_w": tw, "natural_h": th}),
+        (rec["id"], {"pos_x": tx - mx * sx, "pos_y": ty - my * sy, "size_w": fw * sx, "size_h": fh * sy,
+                     "natural_w": fw * sx, "natural_h": fh * sy}),
+    ], mask_id, True)
 
 
 def _apply_geom_fields(archive_obj: dict, fields: dict) -> None:
@@ -348,13 +423,54 @@ def _apply_geom_fields(archive_obj: dict, fields: dict) -> None:
             if "angle" in fields:
                 geom["angle"] = float(fields["angle"])
     if "natural_w" in fields or "natural_h" in fields:
-        bez = _find_bezier(archive_obj)
-        if bez is not None:
-            ns = bez.setdefault("naturalSize", {})
-            if "natural_w" in fields:
-                ns["width"] = float(fields["natural_w"])
-            if "natural_h" in fields:
-                ns["height"] = float(fields["natural_h"])
+        _write_natural_size(archive_obj, fields)
+
+
+def _scale_rect_scalar(sub: dict, fields: dict) -> None:
+    """Rounded-rect `scalar` rides naturalSize under a UNIFORM resize, stays put otherwise
+    (module-top comment on `_NATURAL_PLAIN_KINDS` has the measured evidence)."""
+    old = sub.get("naturalSize") or {}
+    ow = float(old.get("width") or 0.0)
+    oh = float(old.get("height") or 0.0)
+    if ow <= 0.0 or oh <= 0.0 or "natural_w" not in fields or "natural_h" not in fields:
+        return
+    if "scalar" not in sub:
+        return
+    rx = float(fields["natural_w"]) / ow
+    ry = float(fields["natural_h"]) / oh
+    if abs(rx - ry) <= 1e-3 * max(rx, ry):
+        sub["scalar"] = float(sub["scalar"]) * rx
+
+
+def _write_natural_size(archive_obj: dict, fields: dict) -> None:
+    """Image/movie -> ``originalSize``; everything else -> the path source's naturalSize.
+
+    editableBezier additionally rescales its nodes off the PRE-write naturalSize, read from
+    the same on-disk dict ``_patch_member`` is mutating.
+    """
+    if "originalSize" in archive_obj:
+        size = archive_obj.setdefault("originalSize", {})
+    else:
+        found = _path_source(archive_obj)
+        if found is None:
+            return
+        key, sub = found
+        if key == "editableBezierPathSource":
+            old = sub.get("naturalSize") or {}
+            ow = float(old.get("width") or 0.0)
+            oh = float(old.get("height") or 0.0)
+            if ow <= 0.0 or oh <= 0.0 or "natural_w" not in fields or "natural_h" not in fields:
+                return
+            _scale_path_nodes(sub, float(fields["natural_w"]) / ow, float(fields["natural_h"]) / oh)
+        elif key == "scalarPathSource":
+            _scale_rect_scalar(sub, fields)
+        elif key not in _NATURAL_PLAIN_KINDS:
+            return
+        size = sub.setdefault("naturalSize", {})
+    if "natural_w" in fields:
+        size["width"] = float(fields["natural_w"])
+    if "natural_h" in fields:
+        size["height"] = float(fields["natural_h"])
 
 
 def _spec_bears_geometry(spec: dict) -> bool:
@@ -451,8 +567,14 @@ def _slide_edits(
         rep = list(reported.get((kind, saved_ki)) or [rec["x"], rec["y"], rec["w"], rec["h"]])
 
         if kind == "line":
+            if _natural_unwritable(obj, spec):
+                missed_specs.append(spec)
+                continue
             ops = _line_fields(rec, obj, spec)
         elif kind == "shape":
+            if _natural_unwritable(obj, spec):
+                missed_specs.append(spec)
+                continue
             ops = _shape_fields(rec, spec, stored)
         elif kind == "group":
             spec_w, spec_h = spec.get("w"), spec.get("h")
@@ -468,15 +590,24 @@ def _slide_edits(
                     continue
                 ops = ops + child_ops
         elif kind == "text":
+            # text writes natural_w with size_w, natural_h with size_h -- and size_h only
+            # when the stored height is not the autosize sentinel (36e2d81).
+            wants_h = spec.get("h") is not None and stored[3] != 0.0
+            if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
+                missed_specs.append(spec)
+                continue
             ops = _text_fields(rec, spec, rep, stored)
         elif kind in ("image", "movie"):
             if masked:
-                ops, mask_id = _masked_image_fields(rec, obj, objects, spec, rep)
-                # Unresolved, cross-member, or rotated mask: miss rather than mis-write.
-                if not ops or mask_id is None or id_to_file.get(mask_id) != target_member:
+                ops, mask_id, ok = _masked_media_fields(rec, obj, objects, spec, rep)
+                # Cropped, rotated, unresolved or cross-member mask: miss, never mis-write.
+                if not ok or mask_id is None or id_to_file.get(mask_id) != target_member:
                     missed_specs.append(spec)
                     continue
             else:  # unmasked image/movie: plain frame, same as a shape
+                if _natural_unwritable(obj, spec):
+                    missed_specs.append(spec)
+                    continue
                 ops = _shape_fields(rec, spec, stored)
         else:
             missed_specs.append(spec)

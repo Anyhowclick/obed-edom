@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from obed_edom.iwa_geometry import audit_natural_consistency
 from obed_edom.offline_write import (
     _fallback_bodies,
     _fallback_specs_by_slide,
@@ -432,6 +433,121 @@ def test_verify_offline_frames_bridges_before_lookup(monkeypatch):
     assert out["shape"][1] == 1  # found via the bridged kindIndex 5, not the raw 0
 
 
+# --- audit_natural_consistency (naturalSize/originalSize/mask consistency) -------
+
+
+def _na_geom(x, y, w, h, angle=0.0):
+    return {"geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": h}, "angle": angle}}
+
+
+def _na_shape(*, w, h, nw, nh, is_textbox=False):
+    return {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": is_textbox,
+            "super": {"pathsource": {"bezierPathSource": {"naturalSize": {"width": nw, "height": nh}}},
+                      "super": _na_geom(0.0, 0.0, w, h)}}
+
+
+def _na_image(*, w, h, ow, oh, mask_id=None, media_natural=None):
+    obj = {"_pbtype": "TSD.ImageArchive", "super": _na_geom(0.0, 0.0, w, h),
+           "originalSize": {"width": ow, "height": oh}}
+    if mask_id is not None:
+        obj["mask"] = {"identifier": mask_id}
+    if media_natural is not None:
+        obj["naturalSize"] = {"width": media_natural[0], "height": media_natural[1]}
+    return obj
+
+
+def _na_mask(*, x, y, w, h, nw, nh):
+    return {"_pbtype": "TSD.MaskArchive",
+            "pathsource": {"bezierPathSource": {"naturalSize": {"width": nw, "height": nh}}},
+            "super": _na_geom(x, y, w, h)}
+
+
+def _na_slide(*ids):
+    return {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": i} for i in ids]}
+
+
+def test_natural_audit_flags_stale_shape_naturalsize():
+    shape = _na_shape(w=209.0, h=47.0, nw=52.238213, nh=11.679036)
+    issues = audit_natural_consistency(_na_slide("1"), {"1": shape})
+    assert len(issues) == 1
+    assert issues[0]["rule"] == "shape-natural" and issues[0]["gating"] is True
+
+
+def test_natural_audit_flags_stale_mask_naturalsize():
+    mask = _na_mask(x=0.0, y=0.0, w=3840.0, h=1080.0, nw=960.0, nh=270.0)
+    image = _na_image(w=3840.0, h=1080.0, ow=3840.0, oh=1080.0, mask_id="2")
+    issues = audit_natural_consistency(_na_slide("1"), {"1": image, "2": mask})
+    assert any(i["rule"] == "mask-natural" and i["gating"] for i in issues)
+    assert not any(i["rule"] in ("originalSize", "mask-overhang") for i in issues)
+
+
+def test_natural_audit_flags_originalsize_mismatch():
+    image = _na_image(w=3840.0, h=1080.0, ow=1920.0, oh=540.0)
+    issues = audit_natural_consistency(_na_slide("1"), {"1": image})
+    assert len(issues) == 1
+    assert issues[0]["rule"] == "originalSize" and issues[0]["gating"] is True
+
+
+def test_natural_audit_flags_mask_overhang():
+    # 2000/3840 == 0.5208 > the 0.5 tolerance.
+    mask = _na_mask(x=-2000.0, y=0.0, w=3840.0, h=1080.0, nw=3840.0, nh=1080.0)
+    image = _na_image(w=3840.0, h=1080.0, ow=3840.0, oh=1080.0, mask_id="2")
+    issues = audit_natural_consistency(_na_slide("1"), {"1": image, "2": mask})
+    assert any(i["rule"] == "mask-overhang" and i["gating"] for i in issues)
+
+    # Slide-19 production shape: overhang ~6%, well under tolerance -> no issue.
+    mask2 = _na_mask(x=-0.97, y=0.0, w=17.98, h=40.0, nw=17.98, nh=40.0)
+    image2 = _na_image(w=16.04, h=40.0, ow=16.04, oh=40.0, mask_id="4")
+    issues2 = audit_natural_consistency(_na_slide("3"), {"3": image2, "4": mask2})
+    assert not any(i["rule"] == "mask-overhang" for i in issues2)
+
+
+def test_natural_audit_production_mask_offset_is_not_an_issue():
+    # Production's measured max overhang (21.93%) must stay comfortably under tolerance.
+    mask = _na_mask(x=-21.93, y=0.0, w=100.0, h=100.0, nw=100.0, nh=100.0)
+    image = _na_image(w=100.0, h=100.0, ow=100.0, oh=100.0, mask_id="2")
+    issues = audit_natural_consistency(_na_slide("1"), {"1": image, "2": mask})
+    assert not any(i["rule"] == "mask-overhang" for i in issues)
+
+
+def test_natural_audit_text_zero_height_is_informational_not_gating():
+    laid = _na_shape(w=1140.0, h=0.0, nw=1140.0, nh=328.2, is_textbox=True)
+    assert audit_natural_consistency(_na_slide("1"), {"1": laid}) == []
+
+    unlaid = _na_shape(w=1140.0, h=0.0, nw=1140.0, nh=0.0, is_textbox=True)
+    issues = audit_natural_consistency(_na_slide("1"), {"1": unlaid})
+    assert len(issues) == 1
+    assert issues[0]["rule"] == "text-height-unlaid" and issues[0]["gating"] is False
+
+
+def test_natural_audit_text_width_mismatch_is_gating():
+    shape = _na_shape(w=1139.88, h=0.0, nw=581.88, nh=0.0, is_textbox=True)
+    issues = audit_natural_consistency(_na_slide("1"), {"1": shape})
+    assert any(i["rule"] == "text-natural-width" and i["gating"] for i in issues)
+
+
+def test_natural_audit_never_reads_image_naturalsize():
+    image = _na_image(w=100.0, h=100.0, ow=100.0, oh=100.0, media_natural=(7680.0, 1080.0))
+    assert audit_natural_consistency(_na_slide("1"), {"1": image}) == []
+
+
+def test_natural_audit_walks_group_descendants():
+    bad_shape = _na_shape(w=209.0, h=47.0, nw=52.238213, nh=11.679036)
+    group = {"_pbtype": "TSD.GroupArchive", "super": _na_geom(0.0, 0.0, 0.0, 0.0),
+             "children": [{"identifier": "1"}]}
+    issues = audit_natural_consistency(_na_slide("2"), {"1": bad_shape, "2": group})
+    assert any(i["id"] == "1" and i["rule"] == "shape-natural" for i in issues)
+
+
+def test_natural_audit_clean_deck_returns_empty():
+    shape = _na_shape(w=100.0, h=50.0, nw=100.0, nh=50.0)
+    mask = _na_mask(x=0.0, y=0.0, w=80.0, h=40.0, nw=80.0, nh=40.0)
+    image = _na_image(w=80.0, h=40.0, ow=80.0, oh=40.0, mask_id="3")
+    text = _na_shape(w=200.0, h=0.0, nw=200.0, nh=60.0, is_textbox=True)
+    objects = {"1": shape, "2": image, "3": mask, "4": text}
+    assert audit_natural_consistency(_na_slide("1", "2", "4"), objects) == []
+
+
 # --- verify_live_frames (BLOCKER items 3 and 6) ----------------------------------
 
 
@@ -520,6 +636,7 @@ def test_run_offline_write_sets_offline_verify_pass_in_verify_mode(monkeypatch):
 
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
     monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"shape": (0.1, 1, [])})
     info = run_offline_write(
         Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
@@ -599,10 +716,85 @@ def test_run_offline_write_runs_offline_decode_in_verify_mode(monkeypatch):
     monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
     composed_calls = []
     monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: composed_calls.append(1) or {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
     run_offline_write(
         Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
     )
     assert composed_calls == [1]
+
+
+def test_run_offline_write_skips_natural_audit_in_on_mode(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    audit_calls = []
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: audit_calls.append(1) or {})
+    run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert audit_calls == []  # "on" never pays for the diagnostic natural-consistency audit
+
+
+def test_run_offline_write_runs_natural_audit_in_verify_mode(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    audit_calls = []
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: audit_calls.append(1) or {})
+    run_offline_write(
+        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert audit_calls == [1]
+
+
+def test_run_offline_write_natural_consistency_fails_offline_verify_pass(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"shape": (0.1, 1, [])})
+    monkeypatch.setattr(
+        ow_mod, "_natural_audit",
+        lambda *a, **k: {1: [{"id": "9", "rule": "shape-natural", "gating": True, "detail": None}]},
+    )
+    info = run_offline_write(
+        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    # A passing frame report alone is not enough: a gating natural-consistency issue
+    # must also fail offlineVerifyPass.
+    assert info["offlineVerifyPass"] is False
+    assert info["naturalConsistencyIssues"] == 1
+
+
+def test_run_offline_write_natural_consistency_keys_present_in_verify_mode(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {})
+    monkeypatch.setattr(
+        ow_mod, "_natural_audit",
+        lambda *a, **k: {1: [{"id": "9", "rule": "text-height-unlaid", "gating": False, "detail": None}]},
+    )
+    info = run_offline_write(
+        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert info["naturalConsistencyIssues"] == 0
+    assert info["naturalConsistencyInformational"] == 1
+
+
+def test_run_offline_write_natural_consistency_keys_zero_in_on_mode(monkeypatch):
+    # "on" mode never runs the audit (see test_run_offline_write_skips_natural_audit_in_on_mode):
+    # the keys stay present (same unconditional-dict shape as softFallbacks) but read 0.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    info = run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert info["naturalConsistencyIssues"] == 0
+    assert info["naturalConsistencyInformational"] == 0
 
 
 def test_run_offline_write_returns_none_when_no_offline_slides():

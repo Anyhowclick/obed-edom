@@ -29,10 +29,11 @@ from obed_edom.keynote import _as_escape, _keynote_tell, _keynote_terms
 # anchor — see `_spec_box`. Comparing them is a guaranteed-failing number on ANY deck.
 _OFFLINE_EXACT_KINDS = frozenset({"shape"})
 _OFFLINE_MEDIA_KINDS = frozenset({"image", "movie"})
-# Masked image/movie omitted: `iwa_write._slide_edits` only falls back to the `reported`
-# bulk seed for a masked image's x/y (never w/h — those read the mask geometry), and only
-# when the spec's x/y is None; `ItemTransform.as_dict()` always emits x/y, so a masked
-# image spec never actually needs a live seed in practice.
+# Masked image/movie omitted: `iwa_write._slide_edits` writes a masked image/movie from an
+# identity mask (`_masked_media_fields`) or hard-misses a real crop -- either way it only
+# falls back to the `reported` bulk seed for x/y (never w/h — those read the mask geometry),
+# and only when the spec's x/y is None; `ItemTransform.as_dict()` always emits x/y, so a
+# masked image spec never actually needs a live seed in practice.
 _OFFLINE_SOFT_SEED_KINDS = frozenset({"group", "text"})
 
 # Live-verify tolerance per kind (px), consumed by `_say_verify_report`'s per-kind lookup;
@@ -375,6 +376,26 @@ def _composed_frames(dest: Path, slides: set[int]) -> dict[int, list[dict[str, A
     return out
 
 
+def _natural_audit(dest: Path, slides: set[int]) -> dict[int, list[dict[str, Any]]]:
+    """Per-slide render-derived-field consistency, post-patch. One extra decode (measured
+    1.9 s on the 2.5 GB Gold deck); verify mode only, same diagnostic stance as
+    ``_composed_frames``."""
+    from obed_edom.iwa_geometry import audit_natural_consistency  # noqa: PLC0415
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = _load_deck(dest)
+    order = slide_order(objects)
+    out = {}
+    for n in slides:
+        if not (1 <= n <= len(order)):
+            continue
+        slide = objects.get(order[n - 1][0])
+        if slide is None:
+            continue
+        out[n] = audit_natural_consistency(slide, objects)
+    return out
+
+
 def _spec_box(
     spec: dict[str, Any], rec: dict[str, Any]
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
@@ -596,12 +617,25 @@ def run_offline_write(
                 "geometry, nothing else will write them."
             )
     offline_verify_pass: bool | None = None
+    natural_gating = 0
+    natural_informational = 0
     if mode == "verify":
         composed = _composed_frames(dest, offline_slides)
         offline_report = verify_offline_frames(specs_by_slide, composed)
+        issues = _natural_audit(dest, offline_slides)
+        gating = {n: [i for i in v if i.get("gating", True)] for n, v in issues.items()}
+        gating = {n: v for n, v in gating.items() if v}
+        natural_gating = sum(len(v) for v in gating.values())
+        natural_informational = sum(1 for v in issues.values() for i in v if not i.get("gating", True))
+        if natural_gating:
+            worst = next(iter(gating.values()))[:3]
+            say(f"Offline-write verify: naturalSize/originalSize/mask consistency FAILED: "
+                f"{natural_gating} violation(s) on slide(s) {sorted(gating)} — {worst}")
+        else:
+            say("Offline-write verify: naturalSize/originalSize/mask consistency PASS.")
         offline_verify_pass = _say_verify_report(
             "offline-write verify", offline_report, OFFLINE_VERIFY_TOL, say
-        )
+        ) and not natural_gating
     result: dict[str, Any] = {
         "mode": mode,
         "slides": sorted(offline_slides),
@@ -613,6 +647,8 @@ def run_offline_write(
             len(getattr(r, "missed_specs", None) or []) for r in patch_results.values()
         ),
         "softFallbacks": sum(getattr(r, "soft_fallbacks", 0) for r in patch_results.values()),
+        "naturalConsistencyIssues": natural_gating,
+        "naturalConsistencyInformational": natural_informational,
         "valueClean": all(
             getattr(r, "value_clean", False)
             for r in patch_results.values()
