@@ -581,7 +581,7 @@ def run_offline_write(
         "mode": mode,
         "slides": sorted(offline_slides),
         "refused": sorted(n for n, r in patch_results.items() if getattr(r, "refused", False)),
-        "fallbackSpecs": {n: len(v) for n, v in fallback_by_slide.items()},
+        "fallbackSpecs": {str(n): len(v) for n, v in fallback_by_slide.items()},
         "applied": sum(getattr(r, "applied", 0) for r in patch_results.values()),
         "missedSpecs": sum(
             len(getattr(r, "missed_specs", None) or []) for r in patch_results.values()

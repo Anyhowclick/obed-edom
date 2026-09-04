@@ -497,6 +497,29 @@ def test_run_offline_write_returns_none_when_no_offline_slides():
     assert run_offline_write(Path("/tmp/x.key"), "on", set(), [], {}, [], lambda m: None) is None
 
 
+def test_run_offline_write_fallback_specs_keys_are_strings_and_record_round_trips(
+    monkeypatch, tmp_path
+):
+    # Regression: fallback_by_slide is int-keyed internally (needed by _fallback_bodies'
+    # AppleScript addressing); a record built from it must round-trip through JSON, which
+    # requires str keys in fallbackSpecs (see write_run_record's round-trip self-check).
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {1: _result(refused=True, reason="x", applied=0, value_clean=False)},
+    )
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, []))
+    info = run_offline_write(
+        Path("/tmp/x.key"), "on", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
+    )
+    assert info["fallbackSpecs"] == {"1": 1}
+
+    record = run_record(**_record(offline_write=info))
+    path = write_run_record(tmp_path / "A.run.json", record)  # raises on round-trip mismatch
+    assert json.loads(path.read_text())["offlineWrite"]["fallbackSpecs"] == {"1": 1}
+
+
 # --- OfflineWriteCorrupted (BLOCKER item 4) ---------------------------------------
 
 
