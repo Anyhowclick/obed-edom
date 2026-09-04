@@ -194,10 +194,44 @@ def inspect_keynote(
     return payload
 
 
+LAST_BULK_ERRORS: list[dict[str, Any]] = []
+LAST_BULK_NOTES: list[dict[str, Any]] = []
+
+
+def _log_bulk_errors(errors: list[dict[str, Any]], error_count: int, log: Any) -> None:
+    if not errors or log is None:
+        return
+    total = error_count if error_count else len(errors)
+    log(f"Bulk geometry: {len(errors)} of {total} per-collection/item error(s) (first 5 shown):")
+    for e in errors[:5]:
+        log(f"  slide={e.get('slide')} kind={e.get('kind')} where={e.get('where')}: {e.get('error')}")
+
+
+def _log_bulk_notes(notes: list[dict[str, Any]], note_count: int, log: Any) -> None:
+    if not notes or log is None:
+        return
+    total = note_count if note_count else len(notes)
+    log(f"Bulk geometry: {total} note(s) (informational, e.g. a bulk-array length drift).")
+
+
 def bulk_geometry(
     key_path: Path | str,
     slides: list[int] | None = None,
+    *,
+    log: Any = None,
 ) -> dict[int, dict[str, list[list[float]]]]:
+    """{slide (0-based): {kind: [[x, y, w, h], ...]}}. bulk_geometry.js's own per-
+    collection/bulk-property/item FAILURES (otherwise invisible -- that kind just gets
+    omitted) land in `LAST_BULK_ERRORS` (replaced every call); informational drift NOTES
+    (e.g. a bulk array whose length didn't match, harmlessly covered by the per-item
+    fallback) land separately in `LAST_BULK_NOTES`. Both are stamped with this call's own
+    `path` (a caller snapshotting them must never accidentally pick up a DIFFERENT
+    key_path's leftovers). Logged here (first 5 errors + total; notes just a count) via
+    `log` -- default `None` (library code never prints on its own; pass `log=print` or an
+    operator `say` explicitly)."""
+    global LAST_BULK_ERRORS, LAST_BULK_NOTES
+    LAST_BULK_ERRORS = []
+    LAST_BULK_NOTES = []
     key_path = Path(key_path).expanduser().resolve()
     if not key_path.exists():
         raise FileNotFoundError(f"Keynote not found: {key_path}")
@@ -232,6 +266,15 @@ def bulk_geometry(
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Bulk geometry read returned invalid JSON: {exc}") from exc
+    if parsed.get("error"):
+        # bulk_geometry.js's own Keynote.open/doc.slides() guard: an open/slides
+        # failure must be LOUD, never a silent empty-geometry "bulk-missing" fallback.
+        raise RuntimeError(f"Bulk geometry read failed: {parsed['error']}")
+    path_str = str(key_path)
+    LAST_BULK_ERRORS = [{**e, "path": path_str} for e in (parsed.get("errors") or [])]
+    LAST_BULK_NOTES = [{**n, "path": path_str} for n in (parsed.get("notes") or [])]
+    _log_bulk_errors(LAST_BULK_ERRORS, int(parsed.get("errorCount") or 0), log)
+    _log_bulk_notes(LAST_BULK_NOTES, int(parsed.get("noteCount") or 0), log)
     geometry = parsed.get("geometry") or {}
     out: dict[int, dict[str, list[list[float]]]] = {}
     for slide_key, kinds in geometry.items():
@@ -398,13 +441,13 @@ def _merge_legacy_items(
     return sorted(unreadable_numbers)
 
 
-def _build_checker_offline(key_path: Path, bulk_geometry_fn: Any) -> dict[str, Any]:
+def _build_checker_offline(key_path: Path, bulk_geometry_fn: Any, *, log: Any = None) -> dict[str, Any]:
     """Two-tier IWA + attach_runs; one decode. Raises ImportError without ``iwa``."""
     from obed_edom.iwa_runs import _load_deck, attach_runs  # noqa: PLC0415
     from obed_edom.offline_inspect import two_tier_wall_payload  # noqa: PLC0415
 
     deck = _load_deck(key_path)
-    payload = two_tier_wall_payload(key_path, bulk_geometry_fn=bulk_geometry_fn, deck=deck)
+    payload = two_tier_wall_payload(key_path, bulk_geometry_fn=bulk_geometry_fn, deck=deck, log=log)
     try:
         attach_runs(key_path, payload, deck=deck)
     except Exception:  # noqa: BLE001 — run-matching error leaves runs=[] / no groupedText
@@ -419,8 +462,11 @@ def inspect_keynote_checker(
     *,
     export_dir: Path | str | None = None,
     use_cache: bool | None = None,
+    log: Any = None,
 ) -> dict[str, Any]:
-    """Shares digest cache; serve only ``reader==offline`` hits."""
+    """Shares digest cache; serve only ``reader==offline`` hits. ``log`` defaults to
+    ``None`` (library code never prints on its own) -- pass ``log=print`` or an operator
+    ``say`` explicitly to see the cache-hit ``bulkErrors`` WARN."""
     key_path = Path(key_path).expanduser().resolve()
     if not key_path.exists():
         raise FileNotFoundError(f"Keynote not found: {key_path}")
@@ -446,6 +492,11 @@ def inspect_keynote_checker(
             cached = json.loads(json_path.read_text(encoding="utf-8"))
             # Shared digest cache: a JXA hit has no runs[]; serving it would skip attach_runs.
             if cached.get("reader") == "offline":
+                bulk_errors = cached.get("bulkErrors") or []
+                if bulk_errors and log is not None:
+                    log(f"WARN: cached offline read for {key_path.name} carries "
+                        f"{len(bulk_errors)} bulk-geometry error(s) from when it was built "
+                        "(see bulkErrors) -- the cache may be serving a silent-partial read.")
                 slides = cached.get("slides") or []
                 slide_count = int(cached.get("slideCount") or len(slides))
                 # Export skips skipped slides; expected PNGs = slideCount − skipped, else a skip-deck never hits.
@@ -475,7 +526,7 @@ def inspect_keynote_checker(
 
     t_read = time.perf_counter()
     try:
-        payload = _build_checker_offline(key_path, bulk_geometry)
+        payload = _build_checker_offline(key_path, bulk_geometry, log=log)
     except Exception:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
         return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
     sidecar = payload.get("_offline") or {}

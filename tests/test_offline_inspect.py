@@ -901,6 +901,93 @@ def test_skipped_slide_font_flags_are_not_fallback_but_filename_dirty_is(monkeyp
     assert side["fallback_slides"] == [2, 3]
 
 
+def _own_path(key_path):
+    return str(Path(key_path).expanduser().resolve())
+
+
+def test_two_tier_sidecar_carries_bulk_errors(monkeypatch):
+    """bulk_geometry.js's own per-collection/item failures (invisible otherwise -- a
+    "bulk-missing" fallback carries no reason why) ride on `inspect.LAST_BULK_ERRORS`,
+    set by whatever `bulk_geometry_fn` the LAST call made; _finalize_two_tier copies
+    them into the sidecar as `bulk_errors` even on an overall bulk_ok=True read (a
+    silent partial). Each entry must carry the CALLER's own `path` to survive the
+    snapshot's path filter (D-item 4)."""
+    from obed_edom import inspect as inspect_mod
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck())
+
+    def fn(key_path, slides=None):
+        sample = [{"slide": 1, "kind": "movie", "where": "collection", "error": "boom",
+                  "path": _own_path(key_path)}]
+        monkeypatch.setattr(inspect_mod, "LAST_BULK_ERRORS", sample, raising=False)
+        return {}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    assert off["_offline"]["bulk_errors"] == [
+        {"slide": 1, "kind": "movie", "where": "collection", "error": "boom",
+         "path": _own_path("ignored.key")}
+    ]
+    assert off["bulkErrors"] == off["_offline"]["bulk_errors"]  # promoted, non-underscore
+    assert off["_offline"]["bulk_ok"] is True  # a silent partial, not a hard failure
+
+
+def test_two_tier_sidecar_bulk_errors_empty_when_none_reported(monkeypatch):
+    from obed_edom import inspect as inspect_mod
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck())
+    monkeypatch.setattr(inspect_mod, "LAST_BULK_ERRORS", [], raising=False)
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=lambda key_path, slides=None: {})
+    assert off["_offline"]["bulk_errors"] == []
+    assert off["bulkErrors"] == []
+
+
+def test_two_tier_sidecar_drops_bulk_errors_from_a_different_path(monkeypatch):
+    """A stale `LAST_BULK_ERRORS` left by some OTHER caller's `bulk_geometry()` call
+    (a different deck path) must never leak into THIS payload's sidecar."""
+    from obed_edom import inspect as inspect_mod
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck())
+
+    stale = [{"slide": 9, "kind": "image", "where": "collection", "error": "stale",
+             "path": "/some/other/deck.key"}]
+
+    def fn(key_path, slides=None):
+        monkeypatch.setattr(inspect_mod, "LAST_BULK_ERRORS", stale, raising=False)
+        return {}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    assert off["_offline"]["bulk_errors"] == []
+    assert off["bulkErrors"] == []
+
+
+def test_two_tier_sidecar_carries_bulk_notes_but_never_promotes_them(monkeypatch):
+    """Notes (informational drift, e.g. bulk:<prop>:length) ride on `LAST_BULK_NOTES`
+    and land in the sidecar as `bulk_notes` -- but unlike `bulk_errors` they are NOT
+    promoted to a non-underscore top-level key, so they do NOT survive a cache write."""
+    from obed_edom import inspect as inspect_mod
+    from obed_edom import offline_inspect
+
+    monkeypatch.setattr(offline_inspect, "offline_wall_payload", _fake_offline_deck())
+
+    def fn(key_path, slides=None):
+        sample = [{"slide": 2, "kind": "image", "where": "bulk:position:length",
+                  "error": "length !== 3", "path": _own_path(key_path)}]
+        monkeypatch.setattr(inspect_mod, "LAST_BULK_NOTES", sample, raising=False)
+        monkeypatch.setattr(inspect_mod, "LAST_BULK_ERRORS", [], raising=False)
+        return {}
+
+    off = two_tier_wall_payload("ignored.key", bulk_geometry_fn=fn)
+    assert off["_offline"]["bulk_notes"] == [
+        {"slide": 2, "kind": "image", "where": "bulk:position:length", "error": "length !== 3",
+         "path": _own_path("ignored.key")}
+    ]
+    assert "bulkNotes" not in off  # never promoted, unlike bulkErrors
+
+
 def test_all_skipped_skips_bulk_call(monkeypatch):
     from obed_edom import offline_inspect
 

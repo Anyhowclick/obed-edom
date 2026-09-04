@@ -286,7 +286,7 @@ def _patch_offline_slides(
         try:
             from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
 
-            bulk = bulk_geometry(dest, slides=sorted(soft_slides))
+            bulk = bulk_geometry(dest, slides=sorted(soft_slides), log=say)
             reported_by_slide = _reported_from_bulk_rows(bulk)
         except Exception as exc:  # noqa: BLE001 — never patch soft classes blind
             say(

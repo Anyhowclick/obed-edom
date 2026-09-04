@@ -643,11 +643,18 @@ def test_log_multiset_report_flags_text_informational(capsys):
 
 def test_flag_off_builds_the_same_plan_as_today_pure(monkeypatch):
     """Pure-function lock (kept alongside the full remap_keynote() lock below): the exact
-    computation the plan-building hook performs when the flag is off."""
+    computation the plan-building hook performs when the flag is off.
+
+    SAFETY: OBED_OFFLINE_WRITE is set EXPLICITLY (not delenv'd) -- this repo's ambient
+    default is a piece-2-pending flip away from "off" (D14, uncommitted), and relying on
+    delenv here would make this test's `remap_keynote()` sibling below silently take the
+    REAL offline-write path (and its fallback launches REAL Keynote) whenever it runs
+    against a flipped tree. Explicit off is correct under either default.
+    """
     from obed_edom.map_remap import ItemTransform
     from obed_edom.remap_keynote import _build_as_geometry, suppress_geometry_slides
 
-    monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
 
     transforms = [
@@ -678,12 +685,19 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
     would give — i.e. the off path is byte-for-byte the pre-W1 plan. A spy on
     `offline_write._offline_write_slides` proves the off path never even computes
     `offline_slides`.
+
+    SAFETY: OBED_OFFLINE_WRITE is set EXPLICITLY (not delenv'd) -- see the `_pure`
+    sibling above. Under this repo's currently-flipped ambient default, delenv here
+    made this REAL `remap_keynote()` call take the live offline-write path, whose
+    AppleScript fallback launches REAL Keynote against a fake (touch()-only) dest --
+    confirmed live during verification (killed twice). Explicit off is correct under
+    either default and removes the hazard entirely.
     """
     import obed_edom.offline_write as ow_mod
     import obed_edom.remap_keynote as rk
     from obed_edom.map_remap import ItemTransform
 
-    monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
     monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
     monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
 
@@ -951,6 +965,103 @@ def test_close_keynote_document_command_targets_named_document(monkeypatch):
     assert len(calls) == 1
     script = calls[0][2]  # ["osascript", "-e", "<script>"]
     assert 'close (every document whose name is "A_unflagged.key") saving no' in script
+
+
+def _is_count_script(cmd):
+    return cmd[0] == "osascript" and "bundle identifier" in cmd[2] and "count" in cmd[2]
+
+
+def _is_quit_script(cmd):
+    return cmd[0] == "osascript" and "quit saving no" in cmd[2]
+
+
+def test_quit_keynote_and_wait_sends_quit_saving_no_and_polls_by_bundle_id(monkeypatch):
+    # Never by process name -- this machine's Keynote installs under a different .app
+    # name ("Keynote Creator Studio.app"), so a bare "Keynote" process-name match would
+    # be wrong; resolve via bundle id (System Events process count) instead.
+    from scripts import offline_write_ab as owab
+
+    calls = []
+
+    def fake_run(cmd, **k):
+        calls.append(cmd)
+        if _is_count_script(cmd):
+            return SimpleNamespace(returncode=0, stdout="0\n", stderr="")  # gone immediately
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(owab.subprocess, "run", fake_run)
+    monkeypatch.setattr(owab.time, "sleep", lambda s: None)
+
+    ok, _elapsed = owab.quit_keynote_and_wait()
+    assert ok is True
+    quit_calls = [c for c in calls if _is_quit_script(c)]
+    assert len(quit_calls) == 1
+    assert "pgrep" not in " ".join(str(c) for c in calls)
+    assert not any(c[0] == "pgrep" for c in calls)
+    count_calls = [c for c in calls if _is_count_script(c)]
+    assert count_calls and "bundle identifier" in count_calls[0][2]
+
+
+def test_quit_keynote_and_wait_polls_until_count_reports_zero(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    poll_calls = {"n": 0}
+
+    def fake_run(cmd, **k):
+        if _is_count_script(cmd):
+            poll_calls["n"] += 1
+            # 2 processes on the first two polls, 0 on the third.
+            out = "2\n" if poll_calls["n"] < 3 else "0\n"
+            return SimpleNamespace(returncode=0, stdout=out, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    slept = []
+    monkeypatch.setattr(owab.subprocess, "run", fake_run)
+    monkeypatch.setattr(owab.time, "sleep", lambda s: slept.append(s))
+
+    ok, _elapsed = owab.quit_keynote_and_wait(timeout=90.0)
+    assert ok is True
+    assert poll_calls["n"] == 3
+    assert len(slept) == 2  # slept between poll 1->2 and 2->3, not after the final zero
+
+
+def test_quit_keynote_and_wait_warns_not_raises_when_still_running_at_timeout(monkeypatch):
+    from scripts import offline_write_ab as owab
+
+    def fake_run(cmd, **k):
+        if _is_count_script(cmd):
+            return SimpleNamespace(returncode=0, stdout="1\n", stderr="")  # always "running"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    # Fake a clock so the 90s timeout elapses without a real sleep.
+    fake_now = [0.0]
+    monkeypatch.setattr(owab.subprocess, "run", fake_run)
+    monkeypatch.setattr(owab.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+    monkeypatch.setattr(owab.time, "monotonic", lambda: fake_now[0])
+
+    ok, elapsed = owab.quit_keynote_and_wait(timeout=5.0)
+    assert ok is False
+    assert elapsed >= 5.0
+
+
+def test_quit_keynote_and_wait_nonzero_returncode_never_counts_as_gone(monkeypatch):
+    # A nonzero osascript rc (or empty/garbled stdout) is NOT proof Keynote quit --
+    # even if stdout happened to be empty or "0"-looking, a failed call must keep polling.
+    from scripts import offline_write_ab as owab
+
+    def fake_run(cmd, **k):
+        if _is_count_script(cmd):
+            return SimpleNamespace(returncode=1, stdout="", stderr="System Events got an error")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    fake_now = [0.0]
+    monkeypatch.setattr(owab.subprocess, "run", fake_run)
+    monkeypatch.setattr(owab.time, "sleep", lambda s: fake_now.__setitem__(0, fake_now[0] + s))
+    monkeypatch.setattr(owab.time, "monotonic", lambda: fake_now[0])
+
+    ok, elapsed = owab.quit_keynote_and_wait(timeout=5.0)
+    assert ok is False
+    assert elapsed >= 5.0
 
 
 # --- front_err_from_raw (D4) -------------------------------------------------------

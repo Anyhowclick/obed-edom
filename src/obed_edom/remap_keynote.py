@@ -157,7 +157,7 @@ def acquire_wall_payload(
         )
 
         offline = two_tier_wall_payload(
-            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range
+            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range, log=say
         )
     except Exception as exc:  # noqa: BLE001 — any tier-1 failure drops to legacy
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "

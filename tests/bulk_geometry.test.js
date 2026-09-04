@@ -106,4 +106,126 @@ test("xyFrom accepts a {x,y} accessor object too", function () {
   assert.deepStrictEqual(m.xyFrom(p), [9, 8]);
 });
 
+// --- error collection: every silently-swallowed failure is now reported ------------
+//
+// Every per-collection/bulk-property/item exception used to just vanish (the kind was
+// omitted, "bulk-missing" carried no reason). These lock that each failure mode now
+// lands in the module-level `errors` array with the (slide, kind, where) the caller
+// needs to explain a "bulk unavailable" run after the fact.
+
+test("unreadable collection reports a collection-level error", function () {
+  m.resetErrors();
+  const slide = { movies: function () { throw new Error("cannot evaluate"); } };
+  assert.strictEqual(m.collectionGeom(slide, "movies"), null);
+  const errors = m.getErrors();
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].kind, "movie");
+  assert.strictEqual(errors[0].where, "collection");
+  assert.ok(errors[0].error.indexOf("cannot evaluate") !== -1);
+});
+
+test("a bulk property that throws reports bulk:<prop> and still falls back per-item", function () {
+  m.resetErrors();
+  const els = [elem(5, 6, 7, 8)];
+  const col = collection(els, { position: "throw", width: [100], height: [50] });
+  const rows = m.collectionGeom({ images: col }, "images");
+  assert.deepStrictEqual(rows, [[5, 6, 100, 50]]);
+  const errors = m.getErrors();
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].kind, "image");
+  assert.strictEqual(errors[0].where, "bulk:position");
+});
+
+test("a per-item fallback that itself throws reports item:<i>, row still emitted", function () {
+  m.resetErrors();
+  const badElem = {
+    position: function () { throw new Error("item position boom"); },
+    width: function () { return 7; },
+    height: function () { return 8; },
+  };
+  // Bulk position DRIFTS (length 2 for a 1-element collection) -- discarded with no
+  // exception (bulkArray returns null), so the per-item fallback runs and its own
+  // throw is the ONLY error; width/height stay bulk (valid, length 1) so no bulk:
+  // error fires for them either. The drift itself is a NOTE, not an error.
+  const col = collection([badElem], { position: [[1, 1], [2, 2]], width: [100], height: [50] });
+  const rows = m.collectionGeom({ groups: col }, "groups");
+  assert.deepStrictEqual(rows, [[0, 0, 100, 50]]); // position fell back to [0, 0]
+  const errors = m.getErrors();
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].kind, "group");
+  assert.strictEqual(errors[0].where, "item:0");
+  assert.ok(errors[0].error.indexOf("item position boom") !== -1);
+  const notes = m.getNotes();
+  assert.strictEqual(notes.length, 1);
+  assert.strictEqual(notes[0].kind, "group");
+  assert.strictEqual(notes[0].where, "bulk:position:length");
+});
+
+test("a drifted bulk array with no other failure reports ONLY a note, no error", function () {
+  m.resetErrors();
+  const els = [elem(1, 2, 0, 0), elem(3, 4, 0, 0)];
+  const col = collection(els, {
+    position: [[10, 20]], // length 1 for a 2-element collection => discarded
+    width: [100, 300],
+    height: [50, 70],
+  });
+  m.collectionGeom({ images: col }, "images");
+  assert.deepStrictEqual(m.getErrors(), []);
+  const notes = m.getNotes();
+  assert.strictEqual(notes.length, 1);
+  assert.strictEqual(notes[0].kind, "image");
+  assert.strictEqual(notes[0].where, "bulk:position:length");
+});
+
+test("notes array is capped at 50, noteCount stays uncapped, independent of errors", function () {
+  m.resetErrors();
+  const els = [elem(1, 2, 0, 0)];
+  const col = collection(els, { position: [[10, 20], [30, 40]], width: [1], height: [1] });
+  for (let i = 0; i < 60; i++) {
+    m.collectionGeom({ images: col }, "images");
+  }
+  assert.strictEqual(m.getNotes().length, 50);
+  assert.strictEqual(m.getNoteCount(), 60);
+  assert.strictEqual(m.getErrors().length, 0);
+  assert.strictEqual(m.getErrorCount(), 0);
+});
+
+test("slideGeom tags every error with its own slide index", function () {
+  m.resetErrors();
+  const empty = collection([], {});
+  const slide = {
+    textItems: empty,
+    images: empty,
+    groups: empty,
+    movies: function () { throw new Error("nope"); },
+  };
+  m.slideGeom(slide, 41);
+  const errors = m.getErrors();
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].slide, 41);
+  assert.strictEqual(errors[0].kind, "movie");
+});
+
+test("errors array is capped at 50, errorCount stays uncapped", function () {
+  m.resetErrors();
+  const slide = { movies: function () { throw new Error("nope"); } };
+  for (let i = 0; i < 60; i++) {
+    m.collectionGeom(slide, "movies");
+  }
+  assert.strictEqual(m.getErrors().length, 50);
+  assert.strictEqual(m.getErrorCount(), 60);
+});
+
+test("an unreadable count (NaN/negative) reports a count error", function () {
+  m.resetErrors();
+  const badCol = function () { return { length: -1 }; };
+  const rows = m.collectionGeom({ groups: badCol }, "groups");
+  assert.strictEqual(rows, null);
+  const errors = m.getErrors();
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].kind, "group");
+  assert.strictEqual(errors[0].where, "count");
+  assert.ok(errors[0].error.indexOf("-1") !== -1);
+});
+
 console.log("\n" + passed + " passing");

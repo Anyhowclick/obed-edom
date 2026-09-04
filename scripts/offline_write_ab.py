@@ -189,6 +189,41 @@ def _warn_and_close_stray_documents(label: str, deck: Path) -> None:
         _log(f"Closed stray document {name!r} (matches {label}'s own deck {deck.name}).")
 
 
+def quit_keynote_and_wait(timeout: float = 90.0) -> tuple[bool, float]:
+    """``quit saving no``, then poll BY BUNDLE ID (never by process name -- this
+    machine's Keynote installs as "Keynote Creator Studio.app", and matching a bare
+    "Keynote" process name would also be wrong on a stock install with a differently-
+    named helper) via System Events' process count, until it reaches 0 (or ``timeout``
+    seconds elapse). Returns ``(ok, elapsed)`` -- ``ok`` False means still running at
+    timeout; the caller WARNs that. Never raises: a quit/osascript failure just means
+    Keynote wasn't running, which is the goal state anyway.
+
+    Only a LITERAL ``"0"`` stdout on a SUCCESSFUL (``returncode == 0``) poll counts as
+    gone; a nonzero returncode or empty/garbled stdout (a flaky System Events call, NOT
+    proof Keynote quit) keeps polling rather than declaring victory on ambiguous output.
+    """
+    from obed_edom import keynote_app  # noqa: PLC0415
+
+    bundle = keynote_app.bundle_id()
+    subprocess.run(
+        ["osascript", "-e", f'tell application id "{bundle}" to quit saving no'],
+        capture_output=True, text=True, check=False,
+    )
+    count_script = (
+        'tell application "System Events" to count '
+        f'(every process whose bundle identifier is "{bundle}")'
+    )
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        proc = subprocess.run(["osascript", "-e", count_script],
+                              capture_output=True, text=True, check=False)
+        count = (proc.stdout or "").strip()
+        if proc.returncode == 0 and count == "0":
+            return True, time.monotonic() - start
+        time.sleep(1.0)
+    return False, time.monotonic() - start
+
+
 def front_err_from_raw(raw: str) -> str:
     """The ``frontErr=`` field out of ``_run_stat_finalize``'s raw AppleScript return."""
     match = _FRONT_ERR_RE.search(raw or "")
@@ -972,6 +1007,12 @@ def main(argv: list[str] | None = None) -> int:
              "A and B (WARN, never abort/RED) so an unrelated deck defect doesn't block "
              "the write-equivalence question.",
     )
+    ap.add_argument(
+        "--no-quit-between-runs", dest="quit_between_runs", action="store_false", default=True,
+        help="skip quitting Keynote after each fresh run (default: quit + wait so the "
+             "next run starts on a fresh process -- Keynote can go unresponsive shortly "
+             "after closing a large deck)",
+    )
     args = ap.parse_args(argv)
 
     for label, deck in (("source", args.source), ("template", args.template)):
@@ -1049,6 +1090,12 @@ def main(argv: list[str] | None = None) -> int:
         write_run_record(_run_record_path(a_deck), a_record)
         _log(f"Run record written -> {_run_record_path(a_deck)}")
         _warn_and_close_stray_documents("A", a_deck)
+        if args.quit_between_runs:
+            quit_ok, elapsed = quit_keynote_and_wait()
+            if quit_ok:
+                _log(f"Keynote quit between runs ({elapsed:.0f} s)")
+            else:
+                _log(f"WARN: Keynote still running after {elapsed:.0f} s")
 
     zero_keys_hard = args.pass2_bar == "strict"
     reasons_a = pass2_health(child_resize_a, label="A", expect_raises=expect_raises_a,
@@ -1113,6 +1160,12 @@ def main(argv: list[str] | None = None) -> int:
         write_run_record(_run_record_path(b_deck), b_record)
         _log(f"Run record written -> {_run_record_path(b_deck)}")
         _warn_and_close_stray_documents("B", b_deck)
+        if args.quit_between_runs:
+            quit_ok, elapsed = quit_keynote_and_wait()
+            if quit_ok:
+                _log(f"Keynote quit between runs ({elapsed:.0f} s)")
+            else:
+                _log(f"WARN: Keynote still running after {elapsed:.0f} s")
 
     if not (ow_b.get("slides") or []):
         _log("ABORT: run B took no slide offline (OBED_AS_GEOMETRY off, or no slide "
