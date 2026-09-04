@@ -10,8 +10,8 @@ Keynote traps this suite locks (kept out of the production file):
   leave the original first, not merely the objects the planner looked at.
 - A badge plate colour mismatch is an in-map label, not the badge; snapping onto
   it drags the cyan badge into the map.
-- Church-name lists are ≥6 short boxes; map labels come 1–5 at a time. An
-  unticked include-lists must drop the whole list even where it sits over the map.
+- A church-name list is a stacked column of ≥3 same-left-edge boxes; a map label
+  stands alone. An unticked include-lists drops the column, never the labels.
 - Centre-panel panoramas (~2 CG frames wide) frame 1:1; thumbnails on them ride
   the panel affine and must not vote on the crop.
 - Judge a framing on the artwork it is about, not whole-slide extent (side-panel
@@ -41,6 +41,8 @@ from obed_edom.map_remap import (
     map_dst_for_cg,
     map_point,
     merge_affine_groups,
+    name_column_ids,
+    name_columns,
     offframe_rows,
     on_canvas_fraction,
     _card_pitch,
@@ -1966,6 +1968,122 @@ def test_church_summary_list_over_map_is_hidden_when_flag_off():
     )
     kept = [t for t in off2 if t.kind == "text" and t.role != "hide"]
     assert kept  # few labels over artwork are not dropped
+
+
+def test_name_columns_reads_a_stacked_church_column():
+    items = [
+        _item(kind="text", text=f"CHC Row{i}", x=3000 if i % 2 == 0 else 3001, y=6 + i * 52, w=200, h=58)
+        for i in range(4)
+    ]
+    columns = name_columns(items)
+    assert len(columns) == 1
+    assert len(columns[0]) == 4
+    assert name_column_ids(items) == {id(it) for it in items}
+
+
+def test_name_columns_ignores_a_lone_map_label():
+    items = [
+        _item(kind="text", text="CHC Sitiawan", x=2908, y=338, w=243, h=52),
+        _item(kind="text", text="CHC Zui Si", x=3854, y=657, w=162, h=46),
+    ]
+    assert name_columns(items) == []
+    assert name_column_ids(items) == set()
+
+
+def test_name_columns_splits_columns_by_left_edge():
+    col_a = [
+        _item(kind="text", text=f"CHC A{i}", x=259 if i % 2 == 0 else 260, y=6 + i * 52, w=200, h=58)
+        for i in range(4)
+    ]
+    col_b = [_item(kind="text", text=f"CHC B{i}", x=753, y=6 + i * 52, w=200, h=58) for i in range(3)]
+    lone = [_item(kind="text", text="CHC Lone", x=2908, y=338, w=243, h=52)]
+    items = col_a + col_b + lone
+
+    columns = name_columns(items)
+    assert sorted(len(column) for column in columns) == [3, 4]
+    assert name_column_ids(items) == {id(it) for it in col_a} | {id(it) for it in col_b}
+
+
+def test_name_column_ids_takes_a_multiline_name_box():
+    box = _item(kind="text", text="CHC A\nCHC B\nCHC C\nCHC D", x=100, y=100, w=200, h=200)
+    items = [box]
+    assert name_columns(items) == []
+    assert name_column_ids(items) == {id(box)}
+
+
+def test_lone_map_label_over_the_map_survives_the_list_drop():
+    items = [
+        _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080),
+        _item(kind="text", text="CHC Sitiawan", x=2908, y=338, w=243, h=52, size=40),
+    ]
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    for free_text_keys in (None, set()):
+        out = plan_slide_transforms(
+            wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=free_text_keys
+        )
+        texts = [t for t in out if t.kind == "text"]
+        assert len(texts) == 1
+        t = texts[0]
+        assert t.role == "other"
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= t.y and t.y + t.h <= 1080
+
+
+def test_a_church_name_column_over_the_map_is_still_dropped():
+    items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
+    items += [
+        _item(kind="text", text=f"CHC Row{i}", x=3000, y=6 + i * 52, w=200, h=58, size=40) for i in range(3)
+    ]
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    out = plan_slide_transforms(
+        wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=None
+    )
+    texts = [t for t in out if t.kind == "text"]
+    assert texts
+    assert all(t.role == "hide" for t in texts)
+
+
+def test_slide_9_style_map_labels_ride_the_map_affine():
+    labels = [
+        ("CHC Qiu Cha", 3670, 407, 192),
+        ("CHC Rao Bo", 3787, 473, 180),
+        ("CHC Jiang Shou", 3814, 217, 238),
+        ("CHC Xian Chou", 3827, 620, 226),
+        ("CHC Zui Si", 3867, 816, 155),
+        ("CHC Da Mi", 3887, 349, 163),
+        ("CHC Fu Chang", 3939, 143, 217),
+        ("CHC Chun Gu", 3987, 514, 207),
+        ("CHC Jiang Yin", 4051, 300, 212),
+        ("CHC Bian Lan", 4308, 672, 207),
+        ("CHC Di He", 4322, 440, 155),
+        ("CHC Kuan Ping", 4344, 535, 231),
+        ("CHC Feng Yun", 4353, 603, 212),
+        ("CHC Nu Zhou", 4446, 313, 198),
+        ("CHC Pu You", 4555, 235, 180),
+    ]
+    items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
+    for i, (text, x, y, w) in enumerate(labels):
+        items.append(_item(kind="text", text=text, x=x, y=y, w=w, h=46, size=35, kindIndex=i))
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    assert abs(recipe["mapDst"]["x"] - (-2880)) < 1
+    assert abs(recipe["mapDst"]["w"] / recipe["mapSrc"]["w"] - 1) < 1e-6
+
+    out = plan_slide_transforms(
+        wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=None
+    )
+    by = {t.kind_index: t for t in out if t.kind == "text"}
+    assert len(by) == 15
+    assert not any(t.role == "hide" for t in by.values())
+    for i, (_, wall_x, wall_y, _) in enumerate(labels):
+        t = by[i]
+        assert abs(t.x - (wall_x - 2880)) < 1
+        assert abs(t.y - wall_y) < 1
 
 
 def test_off_screen_objects_are_hidden_not_left_alone():

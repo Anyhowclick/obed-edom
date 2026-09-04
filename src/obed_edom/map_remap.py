@@ -39,8 +39,12 @@ TITLE_NEAR_PAD = 120.0
 BADGE_PLATE_PAD = 24.0
 # Separates a paragraph from a phrase/label.
 BODY_TEXT_MIN_CHARS = 60
-# ≥6 church-name boxes is a list, not map labels (those come 1–5 at a time).
+# ≥6 name-column boxes is a list even where a preview reads the text as free.
 LIST_SUMMARY_MIN = 6
+# A name column is a stack of same-left-edge rows; a map label stands alone.
+NAME_COLUMN_MIN_ROWS = 3
+NAME_COLUMN_X_TOL = 6.0
+NAME_COLUMN_PITCH = 2.0
 # Rejects full-height side columns; real plates are ~0.1 of canvas height.
 PLATE_MAX_H_FRACTION = 0.5
 # Map crop is often s≈1; unmatched wall text still needs to shrink for 16:9.
@@ -298,6 +302,38 @@ def is_list_item(item: dict) -> bool:
     if CHURCH_LIST_RE.search(text):
         return True
     return text.count("\n") >= 3
+
+
+def name_columns(items: Iterable[dict]) -> list[list[dict]]:
+    """Church-name boxes that form a real roster column: one left edge, stacked down the page."""
+    rows = [it for it in items if is_list_item(it) and (it.get("text") or "").count("\n") < 3]
+    lanes: list[list[dict]] = []
+    for it in sorted(rows, key=lambda i: _f(i.get("x"))):
+        if lanes and abs(_f(it.get("x")) - _f(lanes[-1][0].get("x"))) <= NAME_COLUMN_X_TOL:
+            lanes[-1].append(it)
+            continue
+        lanes.append([it])
+    out: list[list[dict]] = []
+    for lane in lanes:
+        run: list[dict] = []
+        for it in sorted(lane, key=lambda i: _f(i.get("y"))):
+            if run and _f(it.get("y")) - _f(run[-1].get("y")) > NAME_COLUMN_PITCH * (_f(run[-1].get("h")) or 1.0):
+                if len(run) >= NAME_COLUMN_MIN_ROWS:
+                    out.append(run)
+                run = []
+            run.append(it)
+        if len(run) >= NAME_COLUMN_MIN_ROWS:
+            out.append(run)
+    return out
+
+
+def name_column_ids(items: Iterable[dict]) -> set[int]:
+    """id()s of list-classified boxes that are roster rows, not lone map labels."""
+    items = list(items)
+    ids = {id(it) for it in items if is_list_item(it) and (it.get("text") or "").count("\n") >= 3}
+    for column in name_columns(items):
+        ids.update(id(it) for it in column)
+    return ids
 
 
 # Title phrases live in masters.yaml `cg.title_phrases`; a miss treats the badge as ordinary content.
@@ -2335,6 +2371,7 @@ def plan_slide_transforms(
     # path (remap_keynote.js) uses that field to ADDRESS the object by text.
     card_captions: dict[tuple[str, int], str] = {}
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
+    name_col_ids = name_column_ids(slide.get("items") or [])
     coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
@@ -2391,6 +2428,9 @@ def plan_slide_transforms(
             role = "map"
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
             continue
+        # A lone church label lives on the map; only a real name column is list content.
+        if role == "list" and not include_lists and id(item) not in name_col_ids:
+            role = "other"
         # Unticked lists drop name columns, never map labels; ≥ LIST_SUMMARY_MIN names is a list even over the map.
         loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
         is_summary_list = list_count >= LIST_SUMMARY_MIN
