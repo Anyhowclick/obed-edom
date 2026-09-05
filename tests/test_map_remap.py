@@ -1163,6 +1163,45 @@ def test_church_lists_use_sample_font_and_pack_in_gutter():
     assert all(t.x + 1 >= map_right for t in lists)
 
 
+def test_kept_centre_roster_is_packed_inside_the_frame():
+    """D4: a D5-kept roster is packed into 1920x1080 instead of left at its wall
+    extent. Autosize boxes must be checked in VISUAL space (y - h/2) -- the
+    planner's y for an autosize text frame is the box's vertical CENTRE, not its
+    top."""
+    items = [_item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)]
+    for i, x in enumerate((2000, 3000, 4000, 5000)):  # centre band, far outside the 1920-wide frame
+        items.append(
+            _item(
+                kind="text",
+                text=f"CHC {i}A\nCHC {i}B\nCHC {i}C\nCHC {i}D",
+                x=x, y=459, w=200, h=400, size=42, autosize=True,
+            )
+        )
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["listFontSize"] == 20
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), pack_lists=True)
+    lists = [t for t in out if t.role == "list"]
+    assert len(lists) == 4
+    for t in lists:
+        top = t.y - t.h / 2 if t.autosize else t.y
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= top and top + t.h <= 1080
+
+
 def test_pack_columns_steps_left_when_taller_than_frame():
     from obed_edom.map_remap import pack_columns_from_right
 
@@ -1933,12 +1972,12 @@ def test_coincident_dup_is_hidden_not_dropped_from_plan():
     assert len(groups) == 2 and all(t.role == "hide" and t.opacity == 0.0 for t in groups)
 
 
-def test_coincident_twin_carrying_a_build_is_not_hidden():
+def test_coincident_twin_is_hidden_even_when_it_carries_a_build():
     """Gold slide 13's two stat-group twins (e.g. `{"183", group[2]}` at the exact
-    same rect) both carry authored builds (bc-zoom-big / KLNSparkle) -- a twin that
-    carries a build is emphasis, not a magic-move leftover, and must stay planned.
-    Without a matching `slide["builds"]` entry the old behaviour (hide the second
-    twin) is unchanged."""
+    same rect) both carry authored builds (bc-zoom-big / KLNSparkle), but un-hiding
+    the twin gives pass 2 two identical-signature stat groups it cannot resolve
+    (12 unresolved groups, 8 dedup shortfalls) -- so the twin stays hidden and its
+    build is reported as a loud shortfall instead (the trade this round makes)."""
     def slide_with(builds):
         return {
             "number": 1,
@@ -1965,7 +2004,7 @@ def test_coincident_twin_carrying_a_build_is_not_hidden():
     out2 = plan_slide_transforms(slide2, recipe2, wall_size=(7680, 1080))
     groups2 = {t.kind_index: t for t in out2 if t.kind == "group"}
     assert groups2[0].role != "hide"
-    assert groups2[1].role != "hide"
+    assert groups2[1].role == "hide"  # still hidden: the build cannot be re-pointed onto it
 
 
 def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
@@ -2301,6 +2340,82 @@ def test_slide_9_style_map_labels_ride_the_map_affine():
         t = by[i]
         assert abs(t.x - (wall_x - 2880)) < 1
         assert abs(t.y - wall_y) < 1
+
+
+def _roster_slide(number, n_names=8, extra=None, kind_index_offset=0):
+    items = [
+        _item(
+            kind="text", text=f"CHC Place{i}", x=3000, y=6 + i * 52, w=215, h=58, size=42,
+            kindIndex=kind_index_offset + i,
+        )
+        for i in range(n_names)
+    ]
+    if extra is not None:
+        items.append(extra)
+    return {"number": number, "items": items}
+
+
+def test_roster_run_keeps_the_first_two_slides_and_drops_the_third():
+    """Owner rule: a church roster is kept on the slide it first appears on, plus
+    an immediately-following slide that only re-lays-out the same roster; every
+    later slide of the run hides its roster, even though its names still overlap
+    (Gold 11 keep, 12 keep, 13 drop)."""
+    from obed_edom.map_remap import roster_slides
+
+    slide1 = _roster_slide(1)
+    slide2 = _roster_slide(2)  # same names, same non-roster content: a pure re-layout
+    slide3 = _roster_slide(3, extra=_item(kind="group", kindIndex=99, x=100, y=100, w=50, h=50))
+
+    keep, drop = roster_slides([slide1, slide2, slide3])
+    assert keep == {1, 2}
+    assert drop == {3}
+
+
+def test_roster_run_of_one_slide_keeps_its_roster():
+    """A roster run bordered by slides that never reach ROSTER_MIN_NAMES is a run
+    of one: it is kept outright (Full wall slide 57)."""
+    from obed_edom.map_remap import roster_slides
+
+    before = {"number": 1, "items": [_item(kind="text", text="CHC Solo", x=3000, y=6, w=215, h=58, size=42)]}
+    roster = _roster_slide(2)
+    after = {"number": 3, "items": [_item(kind="text", text="CHC Solo2", x=3000, y=6, w=215, h=58, size=42)]}
+
+    keep, drop = roster_slides([before, roster, after])
+    assert keep == {2}
+    assert drop == set()
+
+
+def test_roster_second_slide_with_new_content_drops_the_roster():
+    """The second slide of a run only keeps its roster when its non-roster
+    content matches the first's exactly; new content (an extra group here) drops
+    it instead of leaving it undecided."""
+    from obed_edom.map_remap import roster_slides
+
+    slide1 = _roster_slide(1)
+    slide2 = _roster_slide(2, extra=_item(kind="group", kindIndex=99, x=100, y=100, w=50, h=50))
+
+    keep, drop = roster_slides([slide1, slide2])
+    assert keep == {1}
+    assert drop == {2}
+
+
+def test_dropped_roster_hides_centre_band_items_too():
+    """drop_roster overrides the positional keep rule: a centre-band roster item
+    that `is_side_panel_item` would never touch is still hidden."""
+    slide = _roster_slide(1)
+    slide["items"].insert(
+        0, _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080, kindIndex=50)
+    )
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    kept = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    names = [t for t in kept if t.kind == "text"]
+    assert names and all(t.role != "hide" for t in names)  # centre band: kept without drop_roster
+
+    dropped = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), drop_roster=True)
+    names2 = [t for t in dropped if t.kind == "text"]
+    assert names2 and all(t.role == "hide" for t in names2)
 
 
 def test_off_screen_objects_are_hidden_not_left_alone():
@@ -3458,6 +3573,25 @@ def test_pack_left_groups_moves_wall_size_groups_without_overlap():
     ys = [g.y for g in by_src_y]
     assert ys == sorted(ys)
     assert by_src_y[0].x == 16
+
+
+def test_packing_compensates_the_autosize_anchor():
+    """One autosize and one ordinary text box, each too tall to share a column,
+    are packed to the same visual top -- their plan `y` values must differ by
+    h/2, since an autosize box's `y` is its vertical CENTRE, not its top."""
+    from obed_edom.map_remap import _pack_list_transforms
+
+    auto = ItemTransform(
+        slide_number=1, item_index=0, kind="text", x=0, y=0, w=200, h=700,
+        role="list", autosize=True,
+    )
+    plain = ItemTransform(
+        slide_number=1, item_index=1, kind="text", x=0, y=0, w=200, h=700,
+        role="list", autosize=False,
+    )
+    _pack_list_transforms([auto, plain], {"destWidth": 1920.0, "destHeight": 1080.0})
+    assert plain.y == pytest.approx(16.0)
+    assert auto.y == pytest.approx(16.0 + auto.h / 2)
 
 
 # --- Part A: per-slide occurrence-ordinal partition key (co-located dedup) ---

@@ -117,6 +117,9 @@ class ItemTransform:
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
     src: Rect | None = None
+    # Zero-height autosize text: planner y is the box's vertical CENTRE, not its top
+    # (Keynote renders it at y - h/2). Packing must convert to/from visual space.
+    autosize: bool = False
     # Groups holding an autosize text box: pass 1 must write these CHILDREN (absolute,
     # slide coords) and never the group. A Keynote group resize is an aspect-locked
     # uniform scale about the group's LIVE frame — after setSlideSize that frame is the
@@ -2099,11 +2102,20 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     order = sorted(range(len(lists)), key=lambda i: (-lists[i].x, lists[i].y))
-    boxes = [Rect(lists[i].x, lists[i].y, lists[i].w, lists[i].h) for i in order]
+    # Pack in VISUAL space: an autosize box's y is its vertical centre, not its top.
+    boxes = [
+        Rect(
+            lists[i].x,
+            (lists[i].y - lists[i].h / 2) if lists[i].autosize else lists[i].y,
+            lists[i].w,
+            lists[i].h,
+        )
+        for i in order
+    ]
     placed = pack_columns_from_right(boxes, dest_w, dest_h, map_dst)
     for idx, rect in zip(order, placed, strict=True):
         lists[idx].x = rect.x
-        lists[idx].y = rect.y
+        lists[idx].y = (rect.y + rect.h / 2) if lists[idx].autosize else rect.y
         lists[idx].w = rect.w
         lists[idx].h = rect.h
 
@@ -2327,6 +2339,8 @@ def plan_slide_transforms(
     recipe: dict[str, Any],
     *,
     keep_side_panels: bool = False,
+    pack_lists: bool = False,
+    drop_roster: bool = False,
     wall_size: tuple[float, float] | None = None,
     defer_list_packing: bool = False,
     child_resize_report: list[dict[str, Any]] | None = None,
@@ -2385,7 +2399,7 @@ def plan_slide_transforms(
     styles = list(recipe.get("characterStyles") or [])
     # Blind packing would drag map labels off their plates. With a preview, only free (background) text is packed — never drop labels.
     pack_lists = bool(
-        keep_side_panels
+        pack_lists
         and not defer_list_packing
         and recipe.get("listFontSize")
         and slide_has_column_lists(slide)
@@ -2410,15 +2424,15 @@ def plan_slide_transforms(
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     name_col_ids = name_column_ids(slide.get("items") or [])
     coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
-    build_keys = {(b["kind"], b["kindIndex"]) for b in (slide.get("builds") or [])}
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
         parked_left = False
-        # Hide coincident magic-move copies, unless the twin carries its own build.
-        if id(item) in coincident_dups and (str(item.get("kind") or ""), kind_index) not in build_keys:
+        autosize = bool(item.get("autosize"))
+        # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts back on-frame.
+        if id(item) in coincident_dups:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         # Hide off-slide leftovers; the 16:9 canvas scales every still-owned object back on-frame.
@@ -2426,6 +2440,10 @@ def plan_slide_transforms(
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         if is_chrome_bg(item):
+            out.append(_hide_item_transform(item, number, item_index, kind_index))
+            continue
+        # Roster kept only on the church-list slide(s); a later slide hides every roster item regardless of position.
+        if drop_roster and id(item) in name_col_ids:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         if not keep_side_panels and is_side_panel_item(item, wall_w, wall_h):
@@ -2544,6 +2562,7 @@ def plan_slide_transforms(
                     color=None,
                     role="list",
                     kind_index=kind_index,
+                    autosize=autosize,
                 )
             )
             continue
@@ -2585,6 +2604,7 @@ def plan_slide_transforms(
                     color=None,
                     role="list",
                     kind_index=kind_index,
+                    autosize=autosize,
                 )
             )
             continue
@@ -2617,6 +2637,7 @@ def plan_slide_transforms(
                     color=None,
                     role="other" if role == "other" else "list",
                     kind_index=kind_index,
+                    autosize=autosize,
                 )
             )
             if item is body_for_body:
@@ -3752,10 +3773,14 @@ def _place_free_text(
     if not targets:
         return []
     targets.sort(key=lambda t: (-t.x, t.y))
-    placed = place_boxes(space, [Box(t.x, t.y, t.w, t.h) for t in targets])
+    # Place in VISUAL space: an autosize box's y is its vertical centre, not its top.
+    placed = place_boxes(
+        space, [Box(t.x, (t.y - t.h / 2) if t.autosize else t.y, t.w, t.h) for t in targets]
+    )
     report: list[dict[str, Any]] = []
     for spec, spot in zip(targets, placed, strict=True):
-        spec.x, spec.y = spot.box.x, spot.box.y
+        spec.x = spot.box.x
+        spec.y = (spot.box.y + spec.h / 2) if spec.autosize else spot.box.y
         report.append(
             {
                 "slide": spec.slide_number,
@@ -3864,6 +3889,57 @@ def _recipe_reusing_affine(
     return out
 
 
+ROSTER_MIN_NAMES = 8
+ROSTER_RUN_OVERLAP = 0.6
+
+
+def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
+    """(keep, drop) slide numbers. Names come from name_column_ids items, split per line.
+
+    A roster (>= ROSTER_MIN_NAMES names) starts a run with the slide it first
+    appears on; the next slide joins the run while its names overlap the
+    previous slide's by ROSTER_RUN_OVERLAP and the two are consecutive. Per
+    run: keep the first slide; keep the second only when its non-roster
+    content matches the first's; drop every slide after that.
+    """
+
+    def names_and_signature(slide: dict) -> tuple[set[str], list[tuple[Any, ...]]]:
+        roster_ids = name_column_ids(slide.get("items") or [])
+        names: set[str] = set()
+        signature: list[tuple[Any, ...]] = []
+        for it in slide.get("items") or []:
+            if id(it) in roster_ids:
+                names.update(line.strip() for line in (it.get("text") or "").split("\n") if line.strip())
+            elif not is_placeholder_text(it):
+                signature.append(item_content_key(it))
+        return names, sorted(signature)
+
+    runs: list[list[tuple[int, set[str], list[tuple[Any, ...]]]]] = []
+    for slide in sorted(slides, key=_slide_number_of):
+        number = _slide_number_of(slide)
+        names, signature = names_and_signature(slide)
+        if len(names) < ROSTER_MIN_NAMES:
+            continue
+        last_run = runs[-1] if runs else None
+        joins = False
+        if last_run is not None and number == last_run[-1][0] + 1:
+            prev_names = last_run[-1][1]
+            joins = len(prev_names & names) / min(len(prev_names), len(names)) >= ROSTER_RUN_OVERLAP
+        if joins:
+            last_run.append((number, names, signature))
+        else:
+            runs.append([(number, names, signature)])
+
+    keep: set[int] = set()
+    drop: set[int] = set()
+    for run in runs:
+        keep.add(run[0][0])
+        if len(run) > 1:
+            (keep if run[1][2] == run[0][2] else drop).add(run[1][0])
+        drop.update(number for number, _, _ in run[2:])
+    return keep, drop
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
@@ -3884,6 +3960,7 @@ def plan_payload_transforms(
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
     card_stroke: float = DEFAULT_CARD_STROKE,
     card_grid_report: list[dict[str, Any]] | None = None,
+    roster_report: dict[str, set[int]] | None = None,
 ) -> list[ItemTransform]:
     """Plan every slide's moves. `side_content_slides` keeps side panels; skipped slides stay at wall geometry."""
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
@@ -3892,6 +3969,10 @@ def plan_payload_transforms(
     prev_number: int | None = None
     prev_pin: int | None = None
     prev_affine: Affine | None = None
+    roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
+    if roster_report is not None:
+        roster_report["keep"] = roster_keep
+        roster_report["drop"] = roster_drop
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not wants_slide(number, slide_range):
@@ -3978,10 +4059,19 @@ def plan_payload_transforms(
         slide_lists = keep_side_panels or (
             side_content_slides is not None and number in side_content_slides
         )
+        drop_roster = number in roster_drop
+        roster_ids = name_column_ids(slide.get("items") or [])
+        slide_keeps_centre_roster = number in roster_keep and any(
+            not is_side_panel_item(it, wall_w, wall_h)
+            for it in (slide.get("items") or [])
+            if id(it) in roster_ids
+        )
         planned = plan_slide_transforms(
             slide,
             slide_recipe,
             keep_side_panels=slide_lists,
+            pack_lists=slide_lists or slide_keeps_centre_roster,
+            drop_roster=drop_roster,
             wall_size=(wall_w, wall_h),
             defer_list_packing=slide_lists and analysis is not None,
             child_resize_report=child_resize_report,

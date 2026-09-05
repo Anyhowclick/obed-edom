@@ -502,7 +502,9 @@ def test_map_labels_are_not_dragged_off_the_map():
     recipe = dict(_identity_recipe())
     recipe["listFontSize"] = 20.0
 
-    packed = plan_slide_transforms(slide, recipe, keep_side_panels=True, defer_list_packing=False)
+    packed = plan_slide_transforms(
+        slide, recipe, keep_side_panels=True, pack_lists=True, defer_list_packing=False
+    )
     deferred = plan_slide_transforms(slide, recipe, keep_side_panels=True, defer_list_packing=True)
 
     # Blind packing walks them to the right edge; deferring leaves them put.

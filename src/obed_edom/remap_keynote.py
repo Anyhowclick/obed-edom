@@ -842,12 +842,9 @@ def remap_keynote(
         )
 
     recipe = recipe_for(wall, template_data)
-    previews: dict[int, Any] = {}
-    preview_note = ""
-    if keep_side_panels or side_content_slides:
-        previews, preview_note = resolve_source_previews(
-            source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
-        )
+    previews, preview_note = resolve_source_previews(
+        source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
+    )
     placements: list[dict[str, Any]] = []
     hidden: list[int] = []
     fitted: list[int] = []
@@ -856,6 +853,7 @@ def remap_keynote(
     child_resize: list[dict[str, Any]] = []
     badge_raises: list[dict[str, Any]] = []
     card_grid: list[dict[str, Any]] = []
+    roster: dict[str, set[int]] = {}
     transforms = plan_payload_transforms(
         wall,
         recipe,
@@ -874,6 +872,7 @@ def remap_keynote(
         badge_raise_report=badge_raises,
         card_stroke=card_stroke,
         card_grid_report=card_grid,
+        roster_report=roster,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
@@ -1003,6 +1002,13 @@ def remap_keynote(
         f"{counts.get('list', 0)} list, {counts.get('hide', 0)} hidden"
         f"{'' if (keep_side_panels or side_content_slides) else ' (side-panel content dropped; keep it with --keep-side-panels N or the framing review)'}."
     )
+    if roster.get("drop"):
+        kept = format_slide_range(roster.get("keep") or set()).replace("–", "-")
+        dropped = format_slide_range(roster["drop"]).replace("–", "-")
+        say(
+            f"Roster kept on slide(s) {kept}, dropped on {dropped} "
+            "(a wall leftover behind newer content)."
+        )
     if keep_side_panels and recipe.get("listFontSize"):
         if placements:
             crowded = [row for row in placements if row.get("overlap")]

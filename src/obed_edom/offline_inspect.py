@@ -212,6 +212,8 @@ def _item_from_record(
     }
     if rec.get("duplicateOf") is not None:
         item["duplicateOf"] = rec["duplicateOf"]
+    if rec.get("geom_source") == "autosize":
+        item["autosize"] = True
 
     reason: str | None = None
     needs = rec.get("needs_keynote")
