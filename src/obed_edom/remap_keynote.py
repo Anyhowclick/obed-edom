@@ -1067,6 +1067,8 @@ def remap_keynote(
         unresolved = child_resize_result.get("unresolved") or 0
         badge_fallback = child_resize_result.get("badgeFallback") or 0
         badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
+        badge_moved = child_resize_result.get("badgeMoved") or 0
+        badge_front_dead = child_resize_result.get("badgeFrontDead") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
@@ -1075,6 +1077,7 @@ def remap_keynote(
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
                 + (f", {badge_fallback} badge-fallback(s)" if badge_fallback else "")
+                + (f", {badge_moved} badge object(s) moved" if badge_moved else "")
                 + "."
             )
             if dedup_shortfall:
@@ -1095,6 +1098,13 @@ def remap_keynote(
                     f"WARNING stat-finalize: {badge_unresolved} badge object(s) could NOT be "
                     "unambiguously resolved — kept, not guessed — those badge objects stay "
                     "buried under the map."
+                )
+            if badge_front_dead:
+                say(
+                    "WARNING stat-finalize: the GUI Bring-to-Front had NO effect on the first "
+                    "badge raise (selection/Accessibility) — every badge raise was skipped, "
+                    "badges keep their source stacking. Grant Accessibility to the launching "
+                    "process and re-run if a badge is buried."
                 )
         else:
             say(

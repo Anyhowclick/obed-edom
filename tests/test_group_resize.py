@@ -97,6 +97,9 @@ def _badge_recipe() -> dict:
             "shape:0": {"x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
             "image:0": {"x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0},
         },
+        # The title's frame comes from the template's own title box (role="title"
+        # branch), not from badgeSlots -- see plan_slide_transforms' title handling.
+        "titleDst": {"x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0},
     }
 
 
@@ -205,10 +208,10 @@ def test_badge_raise_report_runs_on_every_slide_not_just_stat_slides():
     assert len(report) == 3
 
 
-def test_badge_raise_report_carries_the_planned_frame_for_shape_and_image_only():
-    """A2: obedRaiseItem geometry-guards a raise against the planned CG frame, so
-    plate/globe rows must carry it. The title stays on content search -- its planned
-    box is autosize (h=0 at plan time) so it never carries a frame."""
+def test_badge_raise_report_carries_the_planned_frame_for_every_row():
+    """A2: obedRaiseItem/obedBadgeFind geometry-guards every raise against the planned
+    CG frame, so every row -- plate, globe, and the title -- must carry one. The frame
+    comes from the emitted transform, not the mid-loop `mapped` value."""
     report: list[dict] = []
     plan_slide_transforms(
         _slide_with_badge(),
@@ -224,7 +227,76 @@ def test_badge_raise_report_carries_the_planned_frame_for_shape_and_image_only()
         31.0, 59.0, 80.0, 80.0,
     )
     title_row = next(j for j in report if j["isTitle"])
-    assert "x" not in title_row and "y" not in title_row and "w" not in title_row and "h" not in title_row
+    assert (title_row["x"], title_row["y"], title_row["w"], title_row["h"]) == (107.0, 79.5, 296.0, 40.0)
+
+
+def test_badge_raise_report_drops_a_hidden_member():
+    """A badge member that lands off-canvas (is_visible false, a stray side-panel copy)
+    is hidden in pass 1 before it ever gets a badge_dst -- it cannot be buried, so it
+    must not appear in the report; the surviving members still carry their frame.
+
+    (The plate must clear PIN_KIND_MAX=180pt on at least one axis or title_plate treats
+    it as pin-sized; the sole text landing INSIDE the plate's own rect becomes the
+    title -- slide_title_item's plate-based fallback -- so this exercises that path too.)
+    """
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+        "badgePlateDst": {"x": 17.0, "y": 37.0, "w": 300.0, "h": 80.0},
+        "badgeSlots": {"shape:0": {"x": 17.0, "y": 37.0, "w": 300.0, "h": 80.0}},
+        "titleDst": {"x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0},
+    }
+    slide = {
+        "number": 3,
+        "items": [
+            _item(index=0, kindIndex=0, kind="shape", x=1600, y=100, w=300, h=80),
+            _item(index=1, kindIndex=0, kind="text", text="Malaysia", x=1650, y=120, w=100, h=40),
+            # Off-canvas (x=1905 >= wall_w=1905) but still within the plate's 24pt pad: a
+            # geometric "member" that pass 1 deletes before it reaches badge_dst.
+            _item(index=2, kindIndex=1, kind="text", text="stray", x=1905, y=110, w=6, h=10),
+        ],
+    }
+    report: list[dict] = []
+    plan_slide_transforms(slide, recipe, wall_size=(1905.0, 1080.0), badge_raise_report=report)
+    assert [j["kind"] for j in report] == ["shape", "text"]
+    for j in report:
+        assert {"x", "y", "w", "h"} <= j.keys()
+
+
+def test_badge_raise_report_frame_comes_from_the_emitted_transform():
+    """A badge line's `mapped` is overwritten by lineSlots AFTER the mid-loop badge_dst
+    merge (2625-2628): the report row must carry that final value, not the stale one."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+        "badgePlateDst": {"x": 17.0, "y": 37.0, "w": 300.0, "h": 80.0},
+        "badgeSlots": {
+            "shape:0": {"x": 17.0, "y": 37.0, "w": 300.0, "h": 80.0},
+            "line:0": {"x": 90.0, "y": 60.0, "w": 20.0, "h": 0.0},
+        },
+        "titleDst": {"x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0},
+        "lineSlots": [{"x": 90.0, "y": 60.0, "w": 98.0, "h": 0.0}],
+    }
+    slide = {
+        "number": 3,
+        "items": [
+            # x in the LW centre panel [1920..5760] -- the 7680x1080 wall_size below hides
+            # anything on the side panels, which the earlier x~1600 numbers landed on.
+            _item(index=0, kindIndex=0, kind="shape", x=3600, y=100, w=300, h=80),
+            # Sole text inside the plate's own rect: becomes the title (unrelated to the
+            # line under test, just required for title_plate to elect this shape).
+            _item(index=1, kindIndex=0, kind="text", text="Malaysia", x=3650, y=120, w=100, h=40),
+            _item(index=2, kindIndex=0, kind="line", x=3660, y=130, w=20, h=0),
+        ],
+    }
+    report: list[dict] = []
+    plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), badge_raise_report=report)
+    line_row = next(j for j in report if j["kind"] == "line")
+    assert line_row["w"] == 98.0  # from lineSlots, not the 20.0 badge_dst merge value
 
 
 # --- Generated AppleScript -------------------------------------------------------
@@ -256,8 +328,6 @@ def test_finalize_script_embeds_template_sizes_and_content_addresses():
     assert not re.search(r"set g to group \d+ of slide", script)
     assert not re.search(r"set selection of theDoc to \{group \d+ of slide", script)
     assert script.count("Bring to Front") >= 1
-    # The badge is searched for and raised too.
-    assert "Global Missions" in script
 
 
 def test_finalize_font_call_carries_group_scale():
@@ -373,42 +443,39 @@ def test_finalize_script_runs_for_badge_alone_with_zero_stat_jobs():
         Path("/tmp/x.key"), [], {}, badge_raises=badge_raises
     )
     assert script != ""
-    assert 'my obedRaiseItem(1, "shape", 1, 17.0, 37.0, 411.0, 123.0)' in script
+    assert 'my obedBadgeSlide(1, {{k:"shape", i:1, x:17.0, y:37.0, w:411.0, h:123.0, mh:true}})' in script
 
 
-def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order():
+def test_finalize_badge_raises_emit_after_raise_slide_in_plate_globe_title_order_in_one_call():
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     badge_raises = [
         {"slide": 4, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
         {"slide": 4, "kind": "image", "index": 2, "isTitle": False, "x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0},
-        {"slide": 4, "kind": "text", "index": 1, "isTitle": True},
+        {"slide": 4, "kind": "text", "index": 1, "isTitle": True, "x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0},
     ]
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), jobs, {"269": 200.0}, badge_raises=badge_raises
     )
     raise_slide_at = script.index("my obedRaiseSlide(4)")
-    shape_at = script.index('my obedRaiseItem(4, "shape", 1, 17.0, 37.0, 411.0, 123.0)')
-    image_at = script.index('my obedRaiseItem(4, "image", 2, 31.0, 59.0, 80.0, 80.0)')
-    badge_at = script.index("my obedBadgeRaise(4)")
-    assert raise_slide_at < shape_at < image_at < badge_at
-    # The title never gets an indexed raise call -- it stays content-search only.
-    assert 'my obedRaiseItem(4, "text"' not in script
+    badge_slide_at = script.index("my obedBadgeSlide(4,")
+    assert raise_slide_at < badge_slide_at
+    call_line = script[badge_slide_at : script.index("\n", badge_slide_at)]
+    assert call_line.index('k:"shape"') < call_line.index('k:"image"') < call_line.index('k:"text"')
+    assert "obedBadgeRaise" not in script
 
 
 def test_finalize_badge_row_missing_frame_is_skipped_and_counted_unresolved():
-    """A shape/image badge row that never reached the frame merge in
-    plan_slide_transforms (it `continue`d out before mapped was known) must not emit an
-    obedRaiseItem call that would scan for a 0x0 object -- skip it and pre-count it as
-    badgeUnresolved at init, the same way font_skips/dedupShortfall are seeded."""
+    """A frameless row of any kind now suppresses that slide's WHOLE obedBadgeSlide
+    call (all-or-nothing extends to emission, not just runtime): every member on the
+    slide is pre-counted as unresolved, not just the frameless one."""
     badge_raises = [
         {"slide": 4, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
         {"slide": 4, "kind": "image", "index": 2, "isTitle": False},  # no frame
-        {"slide": 4, "kind": "text", "index": 1, "isTitle": True},
+        {"slide": 4, "kind": "text", "index": 1, "isTitle": True, "x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0},
     ]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {}, badge_raises=badge_raises)
-    assert 'my obedRaiseItem(4, "shape", 1, 17.0, 37.0, 411.0, 123.0)' in script
-    assert 'my obedRaiseItem(4, "image", 2' not in script
-    assert "set badgeUnresolved to 1" in script
+    assert "my obedBadgeSlide(4," not in script
+    assert "set badgeUnresolved to 3" in script
 
 
 def test_stat_accumulators_include_badge_counters():
@@ -416,11 +483,18 @@ def test_stat_accumulators_include_badge_counters():
     assert "badgeUnresolved" in _STAT_ACCUMULATORS
 
 
+def test_stat_accumulators_include_badge_moved_counters():
+    assert "badgeMoved" in _STAT_ACCUMULATORS
+    assert "badgeFrontDead" in _STAT_ACCUMULATORS
+
+
 def test_finalize_return_string_carries_badge_counters():
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
     assert '" badgeFallback=" & badgeFallbacks' in script
     assert '" badgeUnresolved=" & badgeUnresolved' in script
+    assert '" badgeMoved=" & badgeMoved' in script
+    assert '" badgeFrontDead=" & badgeFrontDead' in script
 
 
 def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_path):
@@ -433,7 +507,7 @@ def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_p
     raw = (
         "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
         "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=2 "
-        "badgeUnresolved=3 detail="
+        "badgeUnresolved=3 badgeMoved=4 badgeFrontDead=0 detail="
     )
 
     def fake_run(args, *a, **kw):
@@ -448,40 +522,48 @@ def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_p
     result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
     assert result["badgeFallback"] == 2
     assert result["badgeUnresolved"] == 3
+    assert result["badgeMoved"] == 4
+    assert result["badgeFrontDead"] == 0
 
 
-def test_obed_raise_item_unknown_kind_is_a_noop():
-    """obedRaiseItem must not default an unrecognized kind to a text-item selection --
-    only shape/image/group/text are valid; anything else is a no-op (no select, no raise).
-    The top-level kind dispatch has no bare else of its own (nested elses inside the
-    shape/image branch don't count): an unrecognized kind matches none of
-    group/text/(shape or image), so _found stays false."""
+def test_obed_badge_find_unknown_kind_resolves_to_zero():
+    """obedBadgeFind must not default an unrecognized kind to a text-item selection --
+    only shape/image/text/line/group/movie are valid; anything else leaves `_p`/
+    `_positions` undefined so the frame-match errors are swallowed and `_hit` stays 0
+    (unresolved, never guessed). The top-level kind dispatch has no bare else of its own."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {},
-        badge_raises=[{"slide": 1, "kind": "shape", "index": 1, "isTitle": False}],
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}
+        ],
     )
-    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
-    dispatch_at = handler.index('if theKind is "group" then')
+    handler = script[script.index("on obedBadgeFind") : script.index("end obedBadgeFind")]
+    dispatch_at = handler.index('if theKind is "shape" then')
     assert _find_own_else(handler, dispatch_at) is None
     assert 'else if theKind is "text" then' in handler
-    assert 'else if (theKind is "shape") or (theKind is "image") then' in handler
+    assert 'else if theKind is "line" then' in handler
+    assert 'else if theKind is "group" then' in handler
+    assert 'else if theKind is "movie" then' in handler
 
 
 def test_obed_raise_item_has_guard_scan_skip_branches_in_order():
-    """A2: shape/image indices drift on reuse slides just like groups did. obedRaiseItem
+    """A2: shape/image indices drift on reuse slides just like groups did. obedBadgeFind
     must try the direct index first (guard), fall back to a bulk-read scan of that kind's
-    collection, and only then give up (skip) -- in that order."""
+    collection, and only then obedRaiseItem gives up (skip) -- in that order."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {},
         badge_raises=[
             {"slide": 1, "kind": "image", "index": 5, "isTitle": False, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}
         ],
     )
-    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
-    guard_at = handler.index("position of image idx")
-    scan_at = handler.index("position of every image")
-    skip_at = handler.index("set badgeUnresolved to badgeUnresolved + 1")
-    assert guard_at < scan_at < skip_at
+    find_handler = script[script.index("on obedBadgeFind") : script.index("end obedBadgeFind")]
+    guard_at = find_handler.index("position of image idx")
+    scan_at = find_handler.index("position of every image")
+    assert guard_at < scan_at
+    raise_handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    find_call_at = raise_handler.index("my obedBadgeFind(")
+    skip_at = raise_handler.index("set badgeUnresolved to badgeUnresolved + 1")
+    assert find_call_at < skip_at
 
 
 def _find_own_else(text: str, if_at: int) -> int | None:
@@ -510,37 +592,117 @@ def _find_own_else(text: str, if_at: int) -> int | None:
 
 
 def test_obed_raise_item_ambiguous_scan_hit_is_unresolved_not_raised():
-    """Two same-frame images means the scan finds zero or more than one match; that
-    branch must count badgeUnresolved and never select/raise anything."""
+    """Two same-frame images means the scan finds zero or more than one match;
+    obedBadgeFind must return 0 (never select) so obedRaiseItem's caller-side check
+    counts it as unresolved."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {},
         badge_raises=[
             {"slide": 1, "kind": "image", "index": 5, "isTitle": False, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0}
         ],
     )
-    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    handler = script[script.index("on obedBadgeFind") : script.index("end obedBadgeFind")]
+    assert "set selection" not in handler
     hit_at = handler.index("if _hitCount is 1 then")
-    else_at = _find_own_else(handler, hit_at)
-    assert else_at is not None
-    end_if_at = handler.index("end if", else_at)
-    unresolved_branch = handler[else_at:end_if_at]
-    assert "set badgeUnresolved to badgeUnresolved + 1" in unresolved_branch
-    assert "set _found to true" not in unresolved_branch
-    assert "set selection" not in unresolved_branch
+    end_if_at = handler.index("end if", hit_at)
+    unique_branch = handler[hit_at:end_if_at]
+    assert "set _hit to _hitIdx" in unique_branch
+    # No else: ambiguous (or zero) hits leave _hit at its initial 0, never guessed.
+    assert "else" not in unique_branch
 
 
-def test_finalize_obed_badge_raise_exits_on_first_hit():
-    """The old obedBadgeRaise ran all three search loops unconditionally, so only the
-    LAST match in the last loop ever stayed selected. Each loop must now stop the
-    others once a match is found."""
-    script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {})
-    assert script == ""  # sanity: still gated when nothing is asked for
+def test_obed_badge_find_covers_line_and_text_kinds():
+    """The old obedRaiseItem only frame-guarded shape/image; a line member was a
+    permanent silent no-op and a text member was a blind index select. Both are now
+    resolved by obedBadgeFind like every other kind."""
     script = _build_stat_finalize_script(
-        Path("/tmp/x.key"), [], {}, badge_raises=[{"slide": 1, "kind": "text", "index": 1, "isTitle": True}]
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "line", "index": 1, "isTitle": False, "x": 1.0, "y": 2.0, "w": 3.0, "h": 4.0},
+        ],
     )
-    handler = script[script.index("on obedBadgeRaise") : script.index("end obedBadgeRaise")]
-    assert handler.count("if _found then exit repeat") == 4
-    assert "if not _found then" in handler
+    handler = script[script.index("on obedBadgeFind") : script.index("end obedBadgeFind")]
+    assert "position of every line" in handler
+    assert "position of every text item" in handler
+
+
+def test_badge_text_and_line_rows_do_not_match_on_height():
+    """An autosize text box's live height is Keynote-derived and a rotated line's
+    reported height is its bounding box, not its length -- neither is a frame the
+    planner can guard. mh (matchH) must be false for text/line, true for shape/image."""
+    badge_raises = [
+        {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        {"slide": 1, "kind": "image", "index": 2, "isTitle": False, "x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0},
+        {"slide": 1, "kind": "text", "index": 1, "isTitle": True, "x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0},
+        {"slide": 1, "kind": "line", "index": 1, "isTitle": False, "x": 184.0, "y": 97.0, "w": 98.0, "h": 0.0},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {}, badge_raises=badge_raises)
+    call_at = script.index("my obedBadgeSlide(1,")
+    call_line = script[call_at : script.index("\n", call_at)]
+    assert 'k:"shape", i:1, x:17.0, y:37.0, w:411.0, h:123.0, mh:true' in call_line
+    assert 'k:"image", i:2, x:31.0, y:59.0, w:80.0, h:80.0, mh:true' in call_line
+    assert 'k:"text", i:1, x:107.0, y:79.5, w:296.0, h:40.0, mh:false' in call_line
+    assert 'k:"line", i:1, x:184.0, y:97.0, w:98.0, h:0.0, mh:false' in call_line
+    matches_handler = script[script.index("on obedFrameMatches") : script.index("end obedFrameMatches")]
+    assert "if matchH and not" in matches_handler
+
+
+def test_obed_badge_slide_resolves_all_members_before_raising_any():
+    """All-or-nothing: every member must resolve before anything is raised."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedBadgeSlide") : script.index("end obedBadgeSlide")]
+    first_repeat_at = handler.index("repeat with _e in members")
+    second_repeat_at = handler.index("repeat with _e in members", first_repeat_at + 1)
+    resolve_block = handler[first_repeat_at:second_repeat_at]
+    raise_block = handler[second_repeat_at:]
+    assert "set badgeUnresolved" in resolve_block
+    assert "return" in resolve_block
+    assert "obedRaiseItem" not in resolve_block
+    assert "obedRaiseItem" in raise_block
+
+
+def test_obed_badge_slide_raises_plate_first():
+    """A 7-row fixture in badge_slot_keys order (plate largest-area-first, mirroring the
+    Gold missions badge): the emitted member list literal must start with the plate."""
+    badge_raises = [
+        {"slide": 3, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        {"slide": 3, "kind": "text", "index": 1, "isTitle": False, "x": 262.0, "y": 63.5, "w": 154.0, "h": 40.0},
+        {"slide": 3, "kind": "text", "index": 2, "isTitle": True, "x": 107.0, "y": 79.5, "w": 66.0, "h": 40.0},
+        {"slide": 3, "kind": "text", "index": 3, "isTitle": False, "x": 107.0, "y": 57.0, "w": 113.0, "h": 40.0},
+        {"slide": 3, "kind": "text", "index": 4, "isTitle": False, "x": 263.0, "y": 98.5, "w": 117.0, "h": 40.0},
+        {"slide": 3, "kind": "image", "index": 1, "isTitle": False, "x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0},
+        {"slide": 3, "kind": "line", "index": 1, "isTitle": False, "x": 184.0, "y": 97.0, "w": 98.0, "h": 0.0},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), [], {}, badge_raises=badge_raises)
+    call_at = script.index("my obedBadgeSlide(3,")
+    call_line = script[call_at : script.index("\n", call_at)]
+    first_member_at = call_line.index('k:"')
+    assert call_line[first_member_at:].startswith('k:"shape"')
+
+
+def test_badge_front_dead_short_circuits_further_raises():
+    """obedBadgeSlide starts with `if badgeFrontDead is 1 then return`, and obedRaiseItem
+    sets badgeFrontDead when the raised object does not end up last of its kind (the GUI
+    Bring-to-Front proved inert) -- so no later member or slide attempts a raise."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    slide_lines = [l.strip() for l in
+                   script[script.index("on obedBadgeSlide") : script.index("end obedBadgeSlide")].splitlines()
+                   if l.strip()]
+    assert slide_lines[0].startswith("on obedBadgeSlide")
+    assert slide_lines[1].startswith("global")
+    assert slide_lines[2] == "if badgeFrontDead is 1 then return"
+    raise_handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert "set badgeFrontDead to 1" in raise_handler
 
 
 def test_stat_finalize_script_compiles_at_scale():
@@ -588,9 +750,18 @@ def test_stat_finalize_script_compiles_at_scale():
         )
     badge_raises = []
     for slide in range(1, 8):
-        badge_raises.append({"slide": slide, "kind": "shape", "index": 1, "isTitle": False})
-        badge_raises.append({"slide": slide, "kind": "image", "index": 2, "isTitle": False})
-        badge_raises.append({"slide": slide, "kind": "text", "index": 1, "isTitle": True})
+        badge_raises.append({
+            "slide": slide, "kind": "shape", "index": 1, "isTitle": False,
+            "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0,
+        })
+        badge_raises.append({
+            "slide": slide, "kind": "image", "index": 2, "isTitle": False,
+            "x": 31.0, "y": 59.0, "w": 80.0, "h": 80.0,
+        })
+        badge_raises.append({
+            "slide": slide, "kind": "text", "index": 1, "isTitle": True,
+            "x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0,
+        })
 
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"),

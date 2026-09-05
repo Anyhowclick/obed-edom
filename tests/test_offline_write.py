@@ -359,6 +359,19 @@ def test_fallback_specs_by_slide_adds_no_hides_when_nothing_missed():
     assert out == {}
 
 
+def test_fallback_specs_include_autosize_text_misses():
+    """Fix 2: an autosize-height text spec is a hard miss at the offline writer, so it
+    must route through the same missed_specs -> fallback path as any other miss, and
+    the fallback body writes its geometry via `set properties`."""
+    spec = _spec(slide=1, kind="text", kindIndex=0, w=113.4, x=107.15)
+    specs_by_slide = {1: [spec]}
+    results = {1: _result(missed_specs=[spec])}
+    out = _fallback_specs_by_slide({1}, specs_by_slide, results)
+    assert out[1] == [spec]
+    bodies = _fallback_bodies(out)
+    assert "set properties of theObj to {width:" in bodies[1]
+
+
 def test_slide96_fallback_bridges_missed_image_past_hides_to_correct_address():
     specs_by_slide = {96: [
         _spec(slide=96, kind="image", kindIndex=0, role="hide"),

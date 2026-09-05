@@ -244,22 +244,17 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
 
 def _text_fields(rec: dict, spec: dict, reported: list[float],
                  stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
-    """Stored ``h`` of ``0.0`` is the AUTOSIZE sentinel (iwa_geometry's ``th == 0.0``):
-    Keynote derives the height on open, so writing ``size_h`` would freeze the box into a
-    FIXED-height frame (36e2d81). WIDTH is different -- it is the wrap width, and production
-    writes it: 21 offline-slide boxes go from a stored 0.0 to 113/117/154/66/423/... with
-    the height left at 0. A stored 0.0 has no delta base, so write the target outright.
-    ``naturalSize`` tracks whatever geometry.size gets (production: 32/32 text boxes have
-    ``naturalSize.width == size.width``); ``naturalSize.height`` is font-flow and is never
-    derivable offline -- it stays as-is and is INFORMATIONAL in the audit.
+    """A stored height of ``0.0`` never reaches this function (the caller hard-misses it to
+    the AppleScript fallback -- ``naturalSize`` is Keynote's render cache and only a live
+    write refreshes it). ``naturalSize`` tracks ``geometry.size`` on both axes.
     """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
         fields["pos_x"] = float(spec["x"])
     if spec.get("y") is not None:  # stored y is the vertical centre: move it by the delta
         fields["pos_y"] = stored[1] + (float(spec["y"]) - reported[1])
-    if spec.get("w") is not None:
-        fields["size_w"] = (float(spec["w"]) if stored[2] == 0.0 else stored[2] + (float(spec["w"]) - reported[2]))
+    if spec.get("w") is not None and stored[2] != 0.0:  # autosize width has no writable frame
+        fields["size_w"] = stored[2] + (float(spec["w"]) - reported[2])
         fields["natural_w"] = fields["size_w"]
     if spec.get("h") is not None and stored[3] != 0.0:
         fields["size_h"] = stored[3] + (float(spec["h"]) - reported[3])
@@ -337,6 +332,9 @@ def _group_child_scale_ops(
                 "size_w": mw * sx, "size_h": mh * sy,
                 "natural_w": mw * sx, "natural_h": mh * sy,
             }))
+
+        if pbtype == "TSWP.ShapeInfoArchive" and child.get("isTextBox") and ch == 0.0:
+            return ([], False)  # autosize text child: Keynote must lay it out; whole group misses
 
         if not _natural_writable(child, both_axes=True):
             return ([], False)
@@ -590,8 +588,15 @@ def _slide_edits(
                     continue
                 ops = ops + child_ops
         elif kind == "text":
-            # text writes natural_w with size_w, natural_h with size_h -- and size_h only
-            # when the stored height is not the autosize sentinel (36e2d81).
+            # An autosize text box (stored height == the 0.0 sentinel) carries its render
+            # frame in naturalSize, which Keynote refreshes ONLY when the live app writes
+            # that box -- the height is font-flow and is not derivable offline (measured:
+            # MISSIONS 83 -> 34, a ratio neither the affine's 0.485 nor the width's 0.38).
+            # Left at 0 Keynote re-shrink-wraps the box on open, discarding our width and
+            # re-anchoring it. Hard miss -> AppleScript fallback, which writes it correctly.
+            if stored[3] == 0.0:
+                missed_specs.append(spec)
+                continue
             wants_h = spec.get("h") is not None and stored[3] != 0.0
             if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
                 missed_specs.append(spec)

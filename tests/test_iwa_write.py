@@ -189,7 +189,7 @@ def _mask_super(x, y, w, h, *, nw=None, nh=None, angle=0.0):
 def _build_deck(path, *, shapes=(200,), extra_drawables=("line", "text", "image", "group")):
     """Write a one-slide .key with a configurable drawable set to ``path``.
 
-    Default set: one shape (id 200), a line (210), an autosize text box (220 +
+    Default set: one shape (id 200), a line (210), a fixed-height text box (220 +
     storage 221), a masked image (230 + mask 231), and a group (250 + child 251).
     ``shapes`` lets a test add extra bare shapes (ids given) for the bridge test.
     """
@@ -203,7 +203,9 @@ def _build_deck(path, *, shapes=(200,), extra_drawables=("line", "text", "image"
         zorder.append(210)
     if "text" in extra_drawables:
         slide_member.append(_arch(221, "TSWP.StorageArchive", {"text": ["Hello"]}))
-        slide_member.append(_arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 0, 0, nw=200, nh=60)}))
+        # Fixed (non-sentinel) stored height: a stored h==0.0 is now a hard miss to the
+        # AppleScript fallback (Fix 2), and this deck exercises the offline text writer.
+        slide_member.append(_arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 0, 60, nw=200, nh=60)}))
         zorder.append(220)
     if "image" in extra_drawables:
         # IDENTITY mask (mask == image frame, no crop): mask at (0,0,120,60) is the whole
@@ -404,16 +406,16 @@ def test_text_fields_fixed_height_still_writes_size_h():
     assert fields["size_w"] == pytest.approx(200.0 + (250.0 - 200.0))
 
 
-def test_text_fields_zero_width_writes_absolute_size_w_and_natural_w():
-    # A stored width of 0.0 has no delta base -- write the target outright, not stored+delta
-    # (that would give a NEGATIVE size, per the 297+113-452 = -42... here 0+113-452=-339).
+def test_text_fields_zero_width_never_writes_size_w():
+    # A stored width of 0.0 is the autosize sentinel too -- it has no delta base AND no
+    # writable frame (naturalSize.width would go stale exactly like height), so it must
+    # never be written, not even the target outright.
     rec = {"id": "1", "kind": "text", "kindIndex": 0}
     stored = (297.0, 292.0, 0.0, 0.0, 0.0)
     reported = [1188.0, 1168.0, 452.0, 136.0]
     spec = {"kind": "text", "kindIndex": 0, "w": 113.0}
-    (_obj_id, fields), = _text_fields(rec, spec, reported, stored)
-    assert fields["size_w"] == 113.0 and fields["natural_w"] == 113.0
-    assert "size_h" not in fields and "natural_h" not in fields
+    result = _text_fields(rec, spec, reported, stored)
+    assert result == []
 
 
 def test_text_fields_nonzero_width_keeps_delta_and_writes_natural_w():
@@ -1270,6 +1272,68 @@ def test_text_editable_bezier_fixed_height_only_hard_misses():
     assert refuse_reason is None
     assert missed_specs == specs
     assert edits == {}
+
+
+def test_autosize_height_text_hard_misses_to_the_fallback():
+    # Stored height == 0.0 (the autosize sentinel): naturalSize.height is Keynote's
+    # render cache and only a live write refreshes it, so this is a hard miss
+    # regardless of what the spec asks for (here: x + w only, no h at all).
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "x": 107.15, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_fixed_height_text_is_still_patched_offline():
+    # Same family, but a real (non-sentinel) stored height: still patched offline.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 113.4, 34.0, nw=113.4, nh=34.0)},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "h": 34.0, "x": 107.15, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == []
+    fields = next(iter(edits.values()))
+    assert {"size_w", "natural_w", "size_h", "natural_h"} <= fields.keys()
+
+
+def test_group_with_autosize_text_child_refuses_whole_group():
+    # A group whose child is an autosize-height text box: Keynote must lay it out
+    # live, so the whole group hard-misses, same policy as an unwritable pathsource.
+    objects = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(10, 20, 100, 0.0)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    assert ops == [] and not ok
+
+
+def test_group_with_fixed_height_text_child_still_scales():
+    # Regression guard for the slide-19 card groups: a child text box with a real
+    # stored height (not the autosize sentinel) keeps scaling offline.
+    objects = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(10, 20, 100, 40.0)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    assert ok
+    assert dict(ops)["1"]["size_h"] == 80.0
 
 
 def test_rewrite_refuses_when_disk_space_short(tmp_path, monkeypatch):

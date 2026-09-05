@@ -2779,16 +2779,29 @@ def plan_slide_transforms(
         )
     )
     if badge_raise_report is not None and _badge_hits:
-        # badge_slots is already largest-first (badge_slot_keys); the title goes last.
+        # Take the frame from the emitted transform, not the mid-loop `mapped` value: a
+        # role="hide" member was deleted in pass 1 and is not on the slide to bury.
+        _by_key = {
+            (t.kind, int(t.kind_index if t.kind_index is not None else t.item_index) + 1): t
+            for t in out
+            if t.role != "hide"
+        }
         _title_id = id(title_item) if title_item is not None else None
-        _badge_order = list(badge_slots.keys())
+        _badge_order = list(badge_slots.keys())  # largest-area-first: plate is first
         if _title_id is not None:
             _badge_order.append(_title_id)
         for _bid in _badge_order:
-            if _bid in _badge_hits:
-                badge_raise_report.append(
-                    {"slide": number, "isTitle": _bid == _title_id, **_badge_hits[_bid]}
-                )
+            _hit = _badge_hits.get(_bid)
+            if _hit is None:
+                continue
+            _t = _by_key.get((_hit["kind"], _hit["index"]))
+            if _t is None:
+                continue  # hidden / dropped member: nothing to raise
+            badge_raise_report.append({
+                "slide": number, "isTitle": _bid == _title_id,
+                "kind": _hit["kind"], "index": _hit["index"],
+                "x": _t.x, "y": _t.y, "w": _t.w, "h": _t.h,
+            })
     return out
 
 

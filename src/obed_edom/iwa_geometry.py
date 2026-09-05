@@ -373,6 +373,12 @@ def _drawable_natural_issues(obj_id: str, obj: dict, objects: dict[str, dict]) -
     frame. Text splits by axis: production keeps ``naturalSize.width == size.width`` on
     all 32 of its autosize boxes while ``size.height`` stays the 0.0 sentinel and
     ``naturalSize.height`` holds the laid-out height.
+
+    A ``0.0`` ``naturalSize.height`` means the box's layout cache is invalid: Keynote
+    re-derives the whole box from the text on open, discarding a written width and
+    re-anchoring the frame. The offline writer therefore refuses those boxes outright
+    (``iwa_write`` text branch) and the AppleScript fallback writes them -- so on a
+    correct build this rule should count 0 on every offline slide.
     """
     out = []
     pbtype = obj.get("_pbtype")
