@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -2409,14 +2410,17 @@ def plan_slide_transforms(
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     name_col_ids = name_column_ids(slide.get("items") or [])
     coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
+    build_keys = {(b["kind"], b["kindIndex"]) for b in (slide.get("builds") or [])}
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
         parked_left = False
-        # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts back on-frame.
-        if id(item) in coincident_dups:
+        # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts
+        # back on-frame. A twin that carries a build is authored emphasis, not a
+        # magic-move leftover.
+        if id(item) in coincident_dups and (str(item.get("kind") or ""), kind_index) not in build_keys:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         # Hide off-slide leftovers; the 16:9 canvas scales every still-owned object back on-frame.
@@ -3176,6 +3180,24 @@ def plan_slide_reuses(
         )
         group_out[num] = [(gct[ki], ("group", ki)) for ki in kis if ki in gct and ki not in hidden]
 
+    def _build_multiset_by_key(slide_builds: list[dict] | None) -> dict[tuple[str, int], Counter]:
+        out: dict[tuple[str, int], Counter] = {}
+        for b in slide_builds or []:
+            key = (str(b.get("kind") or ""), int(b.get("kindIndex") or 0))
+            out.setdefault(key, Counter())[(b.get("effect"), b.get("animationType"))] += 1
+        return out
+
+    def _donor_missing_a_build(target_it: dict, donor_it: dict, donor_builds_by_key: dict) -> bool:
+        need = target_builds_by_key.get(
+            (str(target_it.get("kind") or ""), int(target_it.get("kindIndex") or 0))
+        )
+        if not need:
+            return False
+        have = donor_builds_by_key.get(
+            (str(donor_it.get("kind") or ""), int(donor_it.get("kindIndex") or 0))
+        ) or Counter()
+        return any(have[k] < c for k, c in need.items())
+
     for slide in slides:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not done:
@@ -3184,6 +3206,10 @@ def plan_slide_reuses(
             continue
         curr_items = _live_items(slide)
         curr_keys = _keyed(curr_items)
+        # A reuse target can only ever LOSE builds offline (the patch never invents
+        # one); a donor that cannot supply a build the target's own source needs is
+        # rejected here so the slide falls through to a fresh remap instead.
+        target_builds_by_key = _build_multiset_by_key(slide.get("builds"))
         best: tuple[int, int, int, dict, list, list, list] | None = None
         for prev_n, prev in done:
             prev_items = _live_items(prev)
@@ -3213,6 +3239,11 @@ def plan_slide_reuses(
                 else:
                     add.append(it)
             remove = [it for it in remove if prev_key_of[id(it)] not in mutate_prev_keys]
+            donor_builds_by_key = _build_multiset_by_key(prev.get("builds"))
+            if any(_donor_missing_a_build(curr_it, prev_it, donor_builds_by_key) for curr_it, prev_it in persist_pairs) or any(
+                _donor_missing_a_build(it, donor_it, donor_builds_by_key) for donor_it, it in mutate
+            ):
+                continue
             cost = len(remove) + len(add)
             rank = (len(persist), -cost)
             if best is None or rank > (best[0], -best[1]):
@@ -3232,6 +3263,7 @@ def plan_slide_reuses(
 
         # Reconcile persist pairs where donor/target disagree on side-panel visibility.
         donor_specs = {_spec_key(t): t for t in (by_slide.get(from_n) or [])}
+        donor_gct = {int(k): v for k, v in (_prev.get("groupChildText") or {}).items()}
 
         def _hidden(smap: dict[tuple[str, int], ItemTransform], item: dict) -> bool:
             spec = smap.get((str(item.get("kind") or ""), int(item.get("kindIndex") or 0)))
@@ -3243,8 +3275,11 @@ def plan_slide_reuses(
             donor_hidden = _hidden(donor_specs, prev_it)
             target_hidden = _hidden(spec_map, curr_it)
             if target_hidden and not donor_hidden:
-                # A hidden group is already surplus in the dedup accounting below.
-                if is_group:
+                # A hidden group with a groupChildText signature is already surplus in
+                # the sig-keyed dedup accounting below; a sig-less one is invisible to
+                # that accounting, so fall through to the sig-less passthrough instead
+                # of leaking the donor's live copy onto the target.
+                if is_group and donor_gct.get(int(prev_it.get("kindIndex") or 0)) is not None:
                     continue
                 remove.append(prev_it)
                 reconciled.append((curr_it, prev_it))
@@ -3310,13 +3345,7 @@ def plan_slide_reuses(
             for it in (slide.get("items") or [])
             if (str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) not in add_keys
         ]
-        strip_builds = [
-            _ref(prev)
-            for curr, prev in persist_pairs
-            if int(curr.get("buildCount") or 0) == 0 and int(prev.get("buildCount") or 0) > 0
-        ]
         # Delete drifted copies by output rect; groups re-derive their frame after duplicate — those go to groupRemove.
-        donor_gct = {int(k): v for k, v in (_prev.get("groupChildText") or {}).items()}
         target_gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
         remove_refs: list[dict[str, Any]] = []
         removed_groups: list[dict] = []
@@ -3414,7 +3443,6 @@ def plan_slide_reuses(
             "persist": persist_n,
             "remove": remove_refs,
             "strip": [_ref(it) for it in strip_items],
-            "stripBuilds": strip_builds,
             "add": add_specs,
             "mutate": mutate_specs,
         }

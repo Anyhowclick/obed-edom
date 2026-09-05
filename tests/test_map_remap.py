@@ -1933,6 +1933,41 @@ def test_coincident_dup_is_hidden_not_dropped_from_plan():
     assert len(groups) == 2 and all(t.role == "hide" and t.opacity == 0.0 for t in groups)
 
 
+def test_coincident_twin_carrying_a_build_is_not_hidden():
+    """Gold slide 13's two stat-group twins (e.g. `{"183", group[2]}` at the exact
+    same rect) both carry authored builds (bc-zoom-big / KLNSparkle) -- a twin that
+    carries a build is emphasis, not a magic-move leftover, and must stay planned.
+    Without a matching `slide["builds"]` entry the old behaviour (hide the second
+    twin) is unchanged."""
+    def slide_with(builds):
+        return {
+            "number": 1,
+            "items": [
+                _item(kind="image", fileName="Building.png", x=1920, y=-126, w=3840, h=1250),
+                _item(kind="group", kindIndex=0, x=1993, y=365, w=111, h=78, childCount=2),
+                _item(kind="group", kindIndex=1, x=1993, y=365, w=111, h=78, childCount=2),  # coincident twin
+            ],
+            "builds": builds,
+        }
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    slide = slide_with([])
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    groups = {t.kind_index: t for t in out if t.kind == "group"}
+    assert groups[0].role != "hide"
+    assert groups[1].role == "hide"
+
+    slide2 = slide_with([{"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 1}])
+    wall2 = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide2]}
+    recipe2 = learn_recipe(wall2, template)
+    out2 = plan_slide_transforms(slide2, recipe2, wall_size=(7680, 1080))
+    groups2 = {t.kind_index: t for t in out2 if t.kind == "group"}
+    assert groups2[0].role != "hide"
+    assert groups2[1].role != "hide"
+
+
 def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
     """On the LW wall, content wholly on a side panel is dropped unless side
     content is being kept; centre and boundary-straddling content stay."""
@@ -2532,28 +2567,6 @@ def test_title_badge_follows_globe_not_map():
     assert badge.x < 500
     title = next(t for t in transforms if t.role == "title")
     assert abs(title.x - 135) < 1
-
-
-def test_reuse_strips_builds_missing_on_dest():
-    from obed_edom.map_remap import plan_slide_reuses
-
-    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
-    pins = [
-        _item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11, buildCount=1 if i == 0 else 0)
-        for i in range(40)
-    ]
-    dest_pins = [
-        _item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11, buildCount=0) for i in range(40)
-    ]
-    wall = {
-        "slides": [
-            {"number": 2, "items": [map_img, *pins]},
-            {"number": 5, "items": [dict(map_img), *dest_pins]},
-        ]
-    }
-    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
-    assert jobs[5]["from"] == 2
-    assert any(r["kind"] == "shape" for r in jobs[5]["stripBuilds"])
 
 
 def test_reuse_strips_mutated_text_before_pasting_the_delta():
@@ -3499,39 +3512,51 @@ def test_reuse_duplicated_map_images_stay_ordinal_paired_and_persist():
 
 
 def test_reuse_persisting_collided_pair_aligns_by_ordinal_across_slides():
-    """A PERSISTING collided pair (the Map deck never exercises this) proves the
-    donor pair aligns to the current pair BY ORDINAL, not cross-matched/collapsed:
-    the donor's ordinal-0 member carries a build the target lost, the ordinal-1
-    member does not. `stripBuilds` must name exactly the ordinal-0 donor. Pre-fix
-    the dict kept only the last (ordinal-1, build-free) copy, so the lost build was
-    invisible and `stripBuilds` was empty."""
+    """Three co-located (colliding) donor twins prove `_keyed` aligns pairs BY
+    ORDINAL (encounter order in each slide's own item list), not by a plain dict
+    keyed only on content (which would collapse every twin to the last one seen).
+    Two twins persist paired ordinal-for-ordinal (different childSig each, so a
+    collapse would be observable); the third, donor-only, has no counterpart and
+    must be named precisely by ITS OWN kindIndex+childSig in `groupRemove` — the
+    remaining consumer of `persist_pairs`' per-ordinal alignment is `persist_map`,
+    which feeds the `keep`/`check` signature counts groupRemove reads."""
     from obed_edom.map_remap import plan_slide_reuses
 
     map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
     pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
-    # Donor: co-located pair, ordinal-0 (ki 0) animates, ordinal-1 (ki 1) is static.
-    donor_pair = [
-        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, buildCount=1),
-        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, buildCount=0),
+    donor_twins = [
+        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50),
+        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50),
+        _item(kind="group", kindIndex=2, x=100, y=100, w=50, h=50),  # no target counterpart
     ]
-    # Target: same co-located pair, both static (the ordinal-0 build was dropped).
-    curr_pair = [
-        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, buildCount=0),
-        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, buildCount=0),
+    curr_twins = [
+        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50),
+        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50),
     ]
     wall = {
         "slides": [
-            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], *donor_pair]},
-            {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], *curr_pair]},
+            {
+                "number": 2,
+                "items": [dict(map_img), *[dict(p) for p in pins], *donor_twins],
+                "groupChildText": {0: "27\nSchools", 1: "110\nWorkers", 2: "83\nAffiliate"},
+            },
+            {
+                "number": 3,
+                "items": [dict(map_img), *[dict(p) for p in pins], *curr_twins],
+                "groupChildText": {0: "27\nSchools", 1: "110\nWorkers"},
+            },
         ]
     }
     job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
     assert job["from"] == 2
-    # 40 pins + 1 map + both twins persist.
+    # 40 pins + 1 map + both twins persist, aligned ordinal-for-ordinal.
     assert job["persist"] == 43
-    build_refs = [r for r in job["stripBuilds"] if r.get("kind") == "group"]
-    # Exactly the ordinal-0 donor (ki 0) — proves per-ordinal pairing, not collapse.
-    assert build_refs == [{"kind": "group", "kindIndex": 0, "itemIndex": 0}]
+    assert not any(r.get("kind") == "group" for r in job["remove"])
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    assert grs[0]["kind"] == "group" and grs[0]["kindIndex"] == 2
+    assert grs[0]["childSig"] == "83\nAffiliate"
+    assert grs[0]["expectedKeep"] == 0
 
 
 def test_reuse_collision_free_wall_all_ordinals_zero():
@@ -3554,6 +3579,34 @@ def test_reuse_collision_free_wall_all_ordinals_zero():
     assert job["from"] == 2
     # 40 pins + 1 map; the differing text is not in persist. No duplication.
     assert job["persist"] == 41
+
+
+def test_reuse_refuses_a_donor_that_lacks_a_build_the_target_needs():
+    """A reuse target can only LOSE builds offline (the patch never invents one):
+    when the target's own source needs a build on a persisting item the donor
+    physically lacks, the donor candidate is rejected -- the slide falls through
+    to a fresh remap (which keeps its builds by construction) instead of an
+    unfixable reuse."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    text = _item(kind="text", kindIndex=40, text="Total Churches", x=2671, y=389, w=200, h=60, size=42)
+    donor_slide = {
+        "number": 2,
+        "items": [dict(map_img), *[dict(p) for p in pins], dict(text)],
+        "builds": [],  # the donor's own text carries no build
+    }
+    target_slide = {
+        "number": 3,
+        "items": [dict(map_img), *[dict(p) for p in pins], dict(text)],
+        "builds": [
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "text", "kindIndex": 40}
+        ],
+    }
+    wall = {"slides": [donor_slide, target_slide]}
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert 3 not in jobs  # no reuse: the only candidate donor is rejected
 
 
 def _reuse_gold_cache_payload(name):
@@ -3615,32 +3668,6 @@ def test_gold_full_report_card_deck_if_warm():
     # Whatever donor selection this deck makes, gating must never trip.
     for j in jobs:
         assert j["persist"] >= REUSE_MIN_PERSIST
-
-
-def test_gold_map_deck_stripbuilds_empty():
-    """A5: stripBuildRefs is left wall-index addressed on the drifted copy
-    (deferred (f) build work) and guarded to fail loud only if it is ever
-    non-empty. Assert it stays empty on the Map gold deck so the guard never
-    fires today; also assert every remove ref carries a plausible output rect."""
-    import math
-
-    import pytest
-
-    from obed_edom.map_remap import plan_slide_reuses
-
-    payload = _reuse_gold_cache_payload("Map_Extracted_Wall_1st.key")
-    if payload is None:
-        pytest.skip("Map wall deck cache is cold; refuse to open Keynote")
-    # Empty transforms (as the sibling donor-selection gold test): stripBuilds
-    # emptiness depends only on the wall buildCounts, and remove refs still carry
-    # finite wall-fallback output rects with no spec present.
-    jobs = plan_slide_reuses(payload, [])
-    for j in jobs:
-        assert j["stripBuilds"] == []
-        # Every remove ref carries a finite output rect (Part B1 / Part C tiles).
-        for r in j["remove"]:
-            for f in ("x", "y", "w", "h"):
-                assert f in r and math.isfinite(float(r[f]))
 
 
 # --- Part B1: per-object OUTPUT-rect map threaded onto `remove` refs -----------
@@ -3821,6 +3848,28 @@ def test_reuse_group_remove_without_groupchildtext_has_no_sig():
     assert grs and len(grs) == 1
     assert "childSig" not in grs[0]
     assert all(r.get("kind") != "group" for r in job["remove"])
+
+
+def test_reuse_sigless_target_hidden_persisted_group_falls_through_to_removal():
+    """R1: the target-hidden/donor-visible reconcile `continue` (treating a hidden
+    group as already-covered by the sig-keyed dedup accounting below) is only sound
+    when the donor group carries a groupChildText signature -- that accounting is
+    blind to a sig-less group. Without one it must fall through to the existing
+    sig-less passthrough instead of silently leaking the donor's live copy onto
+    the target."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    g = _grp(50, 4600, "side\nlist")[0]
+    wall = _reuse_chain([
+        ([dict(g)], {}),  # no groupChildText entry for kindIndex 50
+        ([dict(g)], {}),  # same geometry => persists, still no signature
+    ])
+    hide = ItemTransform(slide_number=2, item_index=50, kind="group", kind_index=50, role="hide", x=1, y=1, w=1, h=1)
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide])}[2]
+    assert not any(r.get("kind") == "group" for r in job["remove"])
+    grs = job.get("groupRemove")
+    assert grs and len(grs) == 1
+    assert "childSig" not in grs[0]
 
 
 def test_reuse_no_groupremove_key_when_no_group_removes():

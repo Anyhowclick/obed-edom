@@ -1,8 +1,8 @@
 """Offline JXA-shaped wall inspect from the IWA graph (write-path input).
 
 Plan-equivalence, not "true" values: omit childCount/children (JXA reports 0/[]
-on groups), emit buildCount 0, omit runs. JXA color is colour-managed and not
-equal to IWA sRGB. Raises ImportError without the ``iwa`` extra.
+on groups), omit runs. JXA color is colour-managed and not equal to IWA sRGB.
+Raises ImportError without the ``iwa`` extra.
 """
 from __future__ import annotations
 
@@ -209,7 +209,6 @@ def _item_from_record(
         # Whole-degree [0,360); fractional rotation churns the reuse fingerprint.
         "rotation": _round_pt(angle) % 360,
         "locked": _locked(obj),
-        "buildCount": 0,
     }
     if rec.get("duplicateOf") is not None:
         item["duplicateOf"] = rec["duplicateOf"]

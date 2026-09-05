@@ -441,46 +441,6 @@ function applySpec(obj, spec) {
   return a;
 }
 
-function stripBuildsOf(Keynote, slide, obj) {
-  if (!obj) return 0;
-  let n = 0;
-  for (let guard = 0; guard < 40; guard++) {
-    const builds = collectionNamed(slide, "builds");
-    let found = null;
-    for (let i = countOf(builds) - 1; i >= 0; i--) {
-      const b = itemAt(builds, i);
-      if (!b) continue;
-      try {
-        const target = b.object();
-        if (target === obj) {
-          found = b;
-          break;
-        }
-      } catch (e) {}
-    }
-    if (!found) break;
-    if (deleteObj(Keynote, found)) n += 1;
-    else break;
-  }
-  return n;
-}
-
-function stripBuildRefs(Keynote, slide, refs, flags) {
-  const list = refs || [];
-  if (list.length && flags && flags.length < 8) {
-    flags.push(
-      "stripBuilds non-empty (" +
-        list.length +
-        " ref(s)) on slide reuse: still wall-index addressed on the drifted copy — deferred (f) build work, verify before trusting"
-    );
-  }
-  let n = 0;
-  for (let i = 0; i < list.length; i++) {
-    n += stripBuildsOf(Keynote, slide, getItem(slide, list[i]));
-  }
-  return n;
-}
-
 function tempScriptPath(dir, uniq) {
   const base = dir.charAt(dir.length - 1) === "/" ? dir : dir + "/";
   return base + "obed-edom-keynote-" + uniq + ".applescript";
@@ -557,7 +517,6 @@ function applyReuse(doc, Keynote, job, missReasons) {
   let orig = slides[to];
   const removedByKind = {};
   const removed = deleteRefs(Keynote, copy, job.remove || [], missReasons, removedByKind);
-  stripBuildRefs(Keynote, copy, job.stripBuilds || [], missReasons);
   slides = doc.slides();
   copy = slides[to - 1];
   orig = slides[to];

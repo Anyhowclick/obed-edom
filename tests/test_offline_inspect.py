@@ -3,8 +3,8 @@
 The field synthesis is pure and exercised WITHOUT keynote-parser by building
 synthetic IWA archive dicts (mirroring test_iwa_geometry): item-level
 font/size/colour with paragraph-style inheritance, line endpoints, locked,
-fileName clean-vs-dirty, the childCount/buildCount rules, and the structural
-guard. A local-only integration test builds the real Map deck offline and checks
+fileName clean-vs-dirty, the childCount rule, and the structural guard.
+A local-only integration test builds the real Map deck offline and checks
 field parity against its cached exact-bytes JXA payload.
 
 NOTE ON THE PLAN GATE: full remap-plan equivalence (offline vs JXA transforms +
@@ -368,7 +368,7 @@ def test_movie_filename_uses_moviedata_identifier():
 
 
 # --------------------------------------------------------------------------
-# childCount/children omitted; buildCount 0.
+# childCount/children omitted.
 # --------------------------------------------------------------------------
 def test_group_item_omits_childcount_and_children():
     objects: dict = {"g": {"_pbtype": "TSD.GroupArchive", "super": _geom(0, 0, 10, 10),
@@ -376,14 +376,6 @@ def test_group_item_omits_childcount_and_children():
     item, _reason = _item_from_record(_record("g", "group", 0), objects, {}, {})
     assert "childCount" not in item
     assert "children" not in item
-
-
-def test_buildcount_is_zero():
-    objects: dict = {}
-    stor = _storage(objects, "s", text="x")
-    box = _textbox(objects, "b", storage=stor)
-    item, _reason = _item_from_record(_record(box, "text", 0, text="x"), objects, {}, {})
-    assert item["buildCount"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -489,12 +481,10 @@ def test_integration_offline_field_parity_map_deck():
 
     jby = {s["index"]: {(it["kind"], it["kindIndex"]): it for it in s.get("items") or []}
            for s in payload["slides"]}
-    filename_checked = build_zero = childcount_absent = geom_checked = 0
+    filename_checked = childcount_absent = geom_checked = 0
     for slide in off["slides"]:
         jmap = jby.get(slide["index"], {})
         for it in slide["items"]:
-            assert it["buildCount"] == 0
-            build_zero += 1
             if it["kind"] == "group":
                 assert "childCount" not in it and "children" not in it
                 childcount_absent += 1
@@ -506,7 +496,7 @@ def test_integration_offline_field_parity_map_deck():
                 assert it["fileName"] == (j.get("fileName") or ""), (
                     slide["number"], it["kind"], it["kindIndex"])
                 filename_checked += 1
-    assert filename_checked > 100 and build_zero > 100 and childcount_absent > 0
+    assert filename_checked > 100 and childcount_absent > 0
 
     # Wall geometry parity where the geometry model is EXACT: unmasked, unrotated
     # images (geom_source "iwa", not flagged) within 2px of JXA. (Autosize text and
@@ -660,8 +650,8 @@ def _reuse_wa_diffs(off_jobs: list[dict], jxa_jobs: list[dict], present: dict[in
         sj = {_addr(r) for r in jj.get("strip") or []} & present.get(slide, set())
         if so != sj:
             diffs.append((slide, "strip", so ^ sj))
-        # `remove`/`stripBuilds` address the DONOR slide's items — compared directly.
-        for name in ("remove", "stripBuilds"):
+        # `remove` addresses the DONOR slide's items — compared directly.
+        for name in ("remove",):
             ao = {_addr(r) for r in jo.get(name) or []}
             aj = {_addr(r) for r in jj.get(name) or []}
             if ao != aj:
@@ -1314,7 +1304,7 @@ def test_two_tier_splice_does_not_touch_addressing_or_style():
     base = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=None)
     spliced = two_tier_wall_payload(MAP_DECK, bulk_geometry_fn=_bulk_double_from_jxa(jxa))
     keep = ("index", "kind", "kindIndex", "font", "size", "color", "fileName",
-            "locked", "text", "buildCount", "duplicateOf")
+            "locked", "text", "duplicateOf")
     for bs, ss in zip(base["slides"], spliced["slides"]):
         assert len(bs["items"]) == len(ss["items"])
         for bi, si in zip(bs["items"], ss["items"]):
