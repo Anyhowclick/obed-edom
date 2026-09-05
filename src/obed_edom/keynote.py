@@ -1173,7 +1173,10 @@ def _build_stat_finalize_script(
         slide = int(job["slide"])
         childsig = str(job["childSig"])
         gi = int(job.get("groupIndex") or 0)
-        s = float(job.get("s") or 1.0)
+        # `or 1.0` would coerce an explicit 0.0 scale to 1.0 and make the AppleScript's
+        # `else if s > 0` guard unreachable; a missing key still defaults to no scaling.
+        s_raw = job.get("s")
+        s = float(s_raw) if s_raw is not None else 1.0
         allow_fallback = 0 if sig_counts[(slide, childsig)] > 1 else 1
         pt = float(job.get("captionPt") or 0.0)
         font_by_slide.setdefault(slide, []).append((gi, childsig, s, allow_fallback, pt))

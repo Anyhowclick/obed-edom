@@ -849,6 +849,21 @@ def test_leaf_font_write_needs_a_positive_scale():
     assert "set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)" in lines
 
 
+def test_finalize_honours_an_explicit_zero_scale_instead_of_coercing_to_one():
+    # Review finding 6: `float(job.get("s") or 1.0)` would silently turn a real 0.0
+    # scale into 1.0, making the AppleScript's `else if s > 0` guard unreachable. An
+    # explicit 0.0 must reach the script as 0.0 (a missing key still defaults to 1.0).
+    zero = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "CHC Arao", "s": 0.0}], {}
+    )
+    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.0, 1, 0.0)' in zero
+
+    missing = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "CHC Arao"}], {}
+    )
+    assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 1.0, 1, 0.0)' in missing
+
+
 def test_caption_point_size_zero_reproduces_todays_script():
     # A stat-only job set (captionPt always 0.0) falls through to `_c1 * s`, byte-for-byte
     # what a job dict without "captionPt" produces.

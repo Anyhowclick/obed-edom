@@ -4454,3 +4454,36 @@ def test_card_group_never_takes_the_child_write_path():
     d = card.as_dict()
     assert "children" not in d
     assert (round(card.w, 1), round(card.h, 1)) == (120.0, 100.0)
+
+
+def test_badge_slot_group_never_takes_the_child_write_path():
+    # The other half of the same guard line (map_remap.py: "not in card_keys and
+    # badge_dst is None") — a group sharing the title's badge box takes the
+    # template's badge slot rect, not an affine-mapped size, so it must stay off
+    # the child-write path even when groupChildren has an entry for it.
+    # >PIN_KIND_MAX (180) so is_pin_item does not swallow the group as a map pin
+    # before badge_members ever sees it.
+    title = _item(kind="text", text="Global Missions", x=2000.0, y=50.0, w=500.0, h=100.0)
+    badge_group = _item(kindIndex=0, kind="group", x=2150.0, y=0.0, w=200.0, h=200.0)
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        # plan_slide_transforms bails out with [] when there is neither a "groups"
+        # affine list nor a map — an off-map slide, but the guard needs SOME reason
+        # to run; a degenerate no-op map is enough and never classifies anything.
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "titleDst": {"x": 800.0, "y": 40.0, "w": 300.0, "h": 60.0},
+        "badgeSlots": {"group:0": {"x": 700.0, "y": 20.0, "w": 90.0, "h": 90.0}},
+    }
+    slide = {
+        "number": 6,
+        "items": [title, badge_group],
+        "groupChildText": {0: "Ps George"},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert "children" not in d
+    assert (round(group_tf.w, 1), round(group_tf.h, 1)) == (90.0, 90.0)

@@ -148,13 +148,21 @@ function xyOf(obj) {
 // Mirror of _child_ops_lines. Never resizes the group: a Keynote group resize is an
 // aspect-locked uniform scale about the group's live frame, which after setSlideSize is
 // the union of a word-wrapped autosize child — and the resize freezes that child wrapped.
+// All-or-nothing: every child must resolve before any write happens, otherwise the
+// group's live frame (the union of whatever landed) becomes a phantom straddling both
+// the old and new positions with no repair path.
 function applyGroupChildren(obj, spec, mode) {
   const kids = spec.children || [];
+  const resolved = [];
+  for (let i = 0; i < kids.length; i++) {
+    const child = getItem(obj, kids[i]);
+    if (!child) return false;
+    resolved.push(child);
+  }
   let wrote = false;
   for (let i = 0; i < kids.length; i++) {
     const c = kids[i];
-    const child = getItem(obj, c);
-    if (!child) continue;
+    const child = resolved[i];
     if (mode === "full" && c.w != null) {
       try { child.width = c.w; wrote = true; } catch (eW) {}
       if (!c.autosize && c.h != null) {

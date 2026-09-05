@@ -140,4 +140,33 @@ test("applyGeom(full) on a group with no children still resizes the group (old p
   assert.strictEqual(group._state.h, 100);
 });
 
+// All-or-nothing (review finding 1): if any child fails to resolve, NOTHING gets
+// written — not even the children that did resolve — because the group is never
+// resized and its live frame is the union of whatever landed. A partial write
+// would produce a phantom group straddling both the old and new positions with
+// no repair path.
+test("applyGeom(full) writes nothing when one child fails to resolve", function () {
+  const plate = stub(4164, 39, 278, 88);
+  // Only one shape exists; spec addresses shape index 1 (out of range) too.
+  const group = groupOf([plate], []);
+  const spec = {
+    kind: "group",
+    w: 273,
+    h: 86,
+    x: 1700,
+    y: 40,
+    children: [
+      { kind: "shape", kindIndex: 0, x: 1700, y: 40, w: 273, h: 86 },
+      { kind: "text", kindIndex: 0, x: 1704.8, y: 47.66, cy: 82.02, w: 263.4, h: 68.7, autosize: true },
+    ],
+  };
+  const ok = m.applyGeom(group, spec, "full");
+  assert.strictEqual(ok, false);
+  // The plate resolves fine on its own, but must be left untouched because its
+  // sibling (the text item) does not resolve.
+  assert.strictEqual(plate._state.w, 278);
+  assert.strictEqual(plate._state.h, 88);
+  assert.deepStrictEqual([plate._state.x, plate._state.y], [4164, 39]);
+});
+
 console.log("\n" + passed + " passed");

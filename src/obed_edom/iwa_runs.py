@@ -523,7 +523,7 @@ def _group_child_records(group_obj: dict, objects: dict[str, dict]) -> list[dict
             assigned[kind] = counters.get(kind, 0)
             counters[kind] = assigned[kind] + 1
         geom = _geom_dict(child)
-        cx, cy, _cw, ch, ca = _xywha(geom)
+        cx, cy, cw, ch, ca = _xywha(geom)
         if ca % 360.0:
             return None
         if (child.get("mask") or {}).get("identifier") is not None:
@@ -533,12 +533,23 @@ def _group_child_records(group_obj: dict, objects: dict[str, dict]) -> list[dict
             _rect, off_axis = _masked_rect(geom, mask_geom)
             if off_axis:
                 return None
-        autosize = child.get("_pbtype") == "TSWP.ShapeInfoArchive" and ch == 0.0
+        # ch == 0.0 alone also matches a zero-height LINE child (legitimately h == 0,
+        # a hairline divider): "text" in assigned is what actually marks an autosize
+        # text box, so it must gate the predicate, not just the later lookup — else a
+        # group with an ordinary line member is refused outright instead of falling
+        # through to the plain leaf-bbox branch below.
+        autosize = (
+            child.get("_pbtype") == "TSWP.ShapeInfoArchive" and ch == 0.0 and "text" in assigned
+        )
         if autosize:
-            if "text" not in assigned:
-                return None
             nw, nh = _natural_size(child)
-            if nw <= 0:
+            if nw <= 0 or nh <= 0:
+                return None
+            # The frame width (cw) is read from the same pristine source-deck archive;
+            # naturalSize is documented stale elsewhere (_autosize_rect) and disagreeing
+            # with the live frame width means one of them does not describe this text
+            # any more — refuse rather than write a box the wrong width.
+            if cw > 0 and abs(cw - nw) > 0.01 * nw:
                 return None
             autosize_seen = True
             out.append({

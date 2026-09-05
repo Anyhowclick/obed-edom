@@ -244,16 +244,25 @@ def _child_ops_lines(children: list[dict[str, Any]]) -> list[str]:
     union. An autosize child gets a WIDTH only — a height write is ignored AND re-anchors
     the box — then a position centred on its mapped vertical centre using the height
     Keynote has just derived from the new width.
+
+    All-or-nothing: the whole block is guarded by a live collection-count check before
+    anything is written. Without it, a mis-addressed or already-stale child would be
+    skipped silently while its siblings still get absolute writes — since the group is
+    never resized, the group's live frame is the union of whatever landed, so a half
+    write produces a phantom group straddling both the old and new positions with no
+    repair path (a resize would only re-freeze whatever is left).
     """
-    lines: list[str] = []
+    ops: list[str] = []
+    required: dict[str, int] = {}
     for child in children:
         name = _AS_KIND_NAMES.get(str(child.get("kind") or ""))
         index = child.get("kindIndex")
         if not name or index is None:
             continue
-        lines += ["    try", f"      set _c to {name} {int(index) + 1} of theObj"]
+        required[f"{name}s"] = max(required.get(f"{name}s", 0), int(index) + 1)
+        ops += ["    try", f"      set _c to {name} {int(index) + 1} of theObj"]
         if child.get("autosize"):
-            lines += [
+            ops += [
                 f"      set width of _c to {_as_num(child['w'])}",
                 "      set _ch to height of _c",
                 "      if _ch > 0 then",
@@ -264,13 +273,18 @@ def _child_ops_lines(children: list[dict[str, Any]]) -> list[str]:
                 "      end if",
             ]
         else:
-            lines += [
+            ops += [
                 f"      set properties of _c to {{width:{_as_num(child['w'])}, "
                 f"height:{_as_num(child['h'])}}}",
                 f"      set position of _c to {{{_as_num(child['x'])}, {_as_num(child['y'])}}}",
             ]
-        lines += ["    end try"]
-    return lines
+        ops += ["    end try"]
+    if not ops:
+        return []
+    guard = " and ".join(
+        f"(count of {plural} of theObj) >= {n}" for plural, n in sorted(required.items())
+    )
+    return [f"    if {guard} then"] + ops + ["    end if"]
 
 
 def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> str:
@@ -683,7 +697,16 @@ def remap_keynote(
         deck = _load_deck(source)
         attach_group_child_text(source, wall, deck=deck)
         attach_group_captions(source, wall, deck=deck)
-        attach_group_children(source, wall, deck=deck)
+        # child_src's offsets are computed against the group's STORED archive frame
+        # (gx, gy in _group_child_records); ItemTransform derives targets against
+        # self.src, which under OBED_OFFLINE_READ=on is the offline-composed group
+        # rect (same stored-frame space, or the child union — both fine) but under
+        # =off is Keynote's LIVE group frame. Stored != live union for a group whose
+        # children have already wrapped, so the two would be subtracted across
+        # different origins and displace every child. Attach only when the wall
+        # payload actually came from the offline reader.
+        if offline_read_mode(offline_read) == "on":
+            attach_group_children(source, wall, deck=deck)
     except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
         say(
             f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
