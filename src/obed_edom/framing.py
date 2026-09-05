@@ -287,7 +287,7 @@ def planned_rects(
     recipe: dict[str, Any],
     *,
     wall_size: tuple[float, float],
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Planned dest rects for this recipe. Do not pass a template (that re-learns the automatic pick)."""
@@ -299,7 +299,7 @@ def planned_rects(
     for spec in plan_payload_transforms(
         payload,
         recipe,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         side_content_slides=side_content_slides,
     ):
         dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
@@ -330,7 +330,7 @@ def propose_framings(
     slide_range: Any = None,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -424,7 +424,7 @@ def propose_framings(
                 slide,
                 shown,
                 wall_size=(wall_w, wall_h),
-                include_lists=include_lists,
+                keep_side_panels=keep_side_panels,
                 side_content_slides=side_content_slides,
             )
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]

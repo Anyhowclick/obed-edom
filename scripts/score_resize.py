@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
             wall,
             recipe,
             slide_range=slide_range,
-            include_lists=True,
+            keep_side_panels=True,
             template=template,
             previews=previews or None,
             placement_report=placements,

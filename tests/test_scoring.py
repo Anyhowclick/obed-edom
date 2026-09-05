@@ -418,7 +418,7 @@ def test_content_pushed_out_of_frame_is_reported():
         "mapDst": dict(dst),
         "groups": [{"s": 1.0, "tx": -3000.0, "ty": 0.0, "src": frame, "dst": dst}],
     }
-    out = plan_slide_transforms(slide, recipe, include_lists=True, wall_size=(7680.0, 1080.0))
+    out = plan_slide_transforms(slide, recipe, keep_side_panels=True, wall_size=(7680.0, 1080.0))
     rows = offframe_rows(out, slide, recipe, 7680.0, 1080.0)
     reported = {(r["kind"], r["kindIndex"]) for r in rows}
     assert ("image", 1) in reported, "badge pushed off the left edge went unreported"
@@ -465,13 +465,13 @@ def test_many_labels_do_not_all_snap_to_one_template_position():
     recipe["listPaired"] = True
     recipe["listDst"] = {"x": 638.0, "y": 537.0, "w": 192.0, "h": 46.0}
 
-    out = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=True)
+    out = plan_slide_transforms(slide, recipe, keep_side_panels=True, defer_list_packing=True)
     spots = {(round(t.x), round(t.y)) for t in out if t.role == "list"}
     assert len(spots) == 5, "labels collapsed onto one another"
 
     # A lone column still honours the template's destination.
     single = {"number": 1, "items": [_map(3000, 100, 1200, 700, kindIndex=0), labels[0]]}
-    out = plan_slide_transforms(single, recipe, include_lists=True, defer_list_packing=True)
+    out = plan_slide_transforms(single, recipe, keep_side_panels=True, defer_list_packing=True)
     only = next(t for t in out if t.role == "list")
     assert (round(only.x), round(only.y)) == (638, 537)
 
@@ -502,8 +502,8 @@ def test_map_labels_are_not_dragged_off_the_map():
     recipe = dict(_identity_recipe())
     recipe["listFontSize"] = 20.0
 
-    packed = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=False)
-    deferred = plan_slide_transforms(slide, recipe, include_lists=True, defer_list_packing=True)
+    packed = plan_slide_transforms(slide, recipe, keep_side_panels=True, defer_list_packing=False)
+    deferred = plan_slide_transforms(slide, recipe, keep_side_panels=True, defer_list_packing=True)
 
     # Blind packing walks them to the right edge; deferring leaves them put.
     packed_xs = sorted(t.x for t in packed if t.role == "list")

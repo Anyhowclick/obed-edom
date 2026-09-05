@@ -5,7 +5,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from obed_edom.map_remap import resolve_slides
+from obed_edom.map_remap import parse_slide_spec, resolve_slides
 from obed_edom.paths import find_repo_root, output_root
 from obed_edom.pipeline import generate
 
@@ -86,9 +86,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     remap.add_argument(
-        "--include-lists",
-        action="store_true",
-        help="Include resizing church-name lists on side panels (Special Offering Series).",
+        "--keep-side-panels",
+        nargs="?",
+        const="all",
+        default=None,
+        metavar="SLIDES",
+        help=(
+            "Keep content outside the centre wall band (church-name side panels, "
+            "badges). Bare flag = every slide; '4,7' or '4-9' = those slides only."
+        ),
     )
     remap.add_argument(
         "--source-previews",
@@ -163,6 +169,12 @@ def _run_remap(args: argparse.Namespace) -> int:
             range_from=args.range_from,
             range_to=args.range_to,
         )
+        keep_all = args.keep_side_panels == "all"
+        side = (
+            None
+            if (keep_all or not args.keep_side_panels)
+            else set(parse_slide_spec(args.keep_side_panels))
+        )
     except ValueError as err:
         print(str(err), file=sys.stderr)
         return 1
@@ -180,7 +192,8 @@ def _run_remap(args: argparse.Namespace) -> int:
             dest,
             template=template,
             slide_range=slide_range,
-            include_lists=args.include_lists,
+            keep_side_panels=keep_all,
+            side_content_slides=side,
             source_previews=source_previews,
             log=log,
         )
@@ -191,7 +204,8 @@ def _run_remap(args: argparse.Namespace) -> int:
             dest,
             template=template,
             slide_range=slide_range,
-            include_lists=args.include_lists,
+            keep_side_panels=keep_all,
+            side_content_slides=side,
             export_dir=export_dir,
             source_previews=source_previews,
             validate=args.validate,

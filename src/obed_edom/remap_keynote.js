@@ -277,14 +277,15 @@ function whOf(obj) {
   return [w, h];
 }
 
-function matchesRect(x, y, w, h, rect, tol) {
+// Text/line boxes autosize their height (and sometimes width, when the plan wrote
+// none); only x/y (and w, when the rect carries one) are ever load-bearing there.
+function matchesRect(kind, x, y, w, h, rect, tol) {
   const t = tol != null ? Number(tol) : 4;
-  return (
-    Math.abs(x - Number(rect.x)) <= t &&
-    Math.abs(y - Number(rect.y)) <= t &&
-    Math.abs(w - Number(rect.w)) <= t &&
-    Math.abs(h - Number(rect.h)) <= t
-  );
+  if (Math.abs(x - Number(rect.x)) > t || Math.abs(y - Number(rect.y)) > t) return false;
+  if (kind === "text" || kind === "line") {
+    return rect.w == null || Math.abs(w - Number(rect.w)) <= t;
+  }
+  return Math.abs(w - Number(rect.w)) <= t && Math.abs(h - Number(rect.h)) <= t;
 }
 
 // Reuse-donor copies drift; resolve removals by live output rect, not wall kindIndex. tol=4px.
@@ -298,7 +299,7 @@ function itemsByGeom(slide, kind, rect, tol) {
     if (!obj) continue;
     const p = xyOf(obj);
     const wh = whOf(obj);
-    if (matchesRect(p[0], p[1], wh[0], wh[1], rect, t)) {
+    if (matchesRect(kind, p[0], p[1], wh[0], wh[1], rect, t)) {
       out.push({ obj: obj, index: i });
     }
   }
@@ -385,7 +386,7 @@ function deleteRefs(Keynote, slide, refs, flags, tally) {
     for (let s = 0; s < snap.length; s++) {
       const e = snap[s];
       if (e.deleted) continue;
-      if (matchesRect(e.x, e.y, e.w, e.h, r0, 4)) {
+      if (matchesRect(r0.kind, e.x, e.y, e.w, e.h, r0, 4)) {
         hits.push({ obj: e.obj, index: e.index, entry: e });
       }
     }

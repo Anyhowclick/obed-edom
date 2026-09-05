@@ -1213,7 +1213,7 @@ def _run_resize_propose(
     template: Path,
     slide_range: frozenset[int] | None,
     export: bool,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     validate: bool = True,
 ) -> dict[str, Any]:
     typed = slide_range
@@ -1267,7 +1267,7 @@ def _run_resize_propose(
         slide_range=slide_range,
         wall_payload=wall,
         template_payload=template_data,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         side_content_slides=reuse.side_content_slides(),
         log=job.log,
     )
@@ -1284,7 +1284,7 @@ def _run_resize_propose(
         "phase": "framing",
         "path": str(path),
         "templatePath": str(template),
-        "includeLists": include_lists,
+        "includeLists": keep_side_panels,
         "validate": validate,
         "export": export,
         **proposal,
@@ -1302,7 +1302,7 @@ def _run_resize(
     template: Path,
     slide_range: frozenset[int] | None,
     export: bool,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     framing_overrides: dict[int, int] | None = None,
     side_content_slides: set[int] | None = None,
     validate: bool = True,
@@ -1314,14 +1314,14 @@ def _run_resize(
     scope = f"slide {label}" if label else "every slide"
     job.log(f"Remapping {path.name} → 1920×1080 ({scope})…")
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
-    if not include_lists and not side_content_slides:
+    if not keep_side_panels and not side_content_slides:
         job.log("Side-panel content dropped (whitelist a slide in the framing review to keep it).")
     info = remap_and_inspect(
         path,
         dest,
         template=template,
         slide_range=slide_range,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         export_dir=export_dir,
         framing_overrides=framing_overrides,
         side_content_slides=side_content_slides,
@@ -1363,7 +1363,7 @@ def _run_resize(
         "counts": counts,
         "applied": applied,
         "missed": missed,
-        "includeLists": include_lists,
+        "includeLists": keep_side_panels,
         "validate": validate,
         "templateScore": score,
         "flags": serialize_flags(flags),

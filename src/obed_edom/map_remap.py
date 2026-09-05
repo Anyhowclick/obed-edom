@@ -39,8 +39,6 @@ TITLE_NEAR_PAD = 120.0
 BADGE_PLATE_PAD = 24.0
 # Separates a paragraph from a phrase/label.
 BODY_TEXT_MIN_CHARS = 60
-# ≥6 name-column boxes is a list even where a preview reads the text as free.
-LIST_SUMMARY_MIN = 6
 # A name column is a stack of same-left-edge rows; a map label stands alone.
 NAME_COLUMN_MIN_ROWS = 3
 NAME_COLUMN_X_TOL = 6.0
@@ -2327,7 +2325,7 @@ def plan_slide_transforms(
     slide: dict,
     recipe: dict[str, Any],
     *,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     wall_size: tuple[float, float] | None = None,
     defer_list_packing: bool = False,
     free_text_keys: set[tuple[str, int]] | None = None,
@@ -2387,7 +2385,7 @@ def plan_slide_transforms(
     styles = list(recipe.get("characterStyles") or [])
     # Blind packing would drag map labels off their plates. With a preview, only free (background) text is packed — never drop labels.
     pack_lists = bool(
-        include_lists
+        keep_side_panels
         and not defer_list_packing
         and recipe.get("listFontSize")
         and slide_has_column_lists(slide)
@@ -2429,7 +2427,7 @@ def plan_slide_transforms(
         if is_chrome_bg(item):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
-        if not include_lists and is_side_panel_item(item, wall_w, wall_h):
+        if not keep_side_panels and is_side_panel_item(item, wall_w, wall_h):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         if corner_translate is not None and id(item) in corner_ids:
@@ -2468,28 +2466,8 @@ def plan_slide_transforms(
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
             continue
         # A lone church label lives on the map; only a real name column is list content.
-        if role == "list" and not include_lists and id(item) not in name_col_ids:
+        if role == "list" and not keep_side_panels and id(item) not in name_col_ids:
             role = "other"
-        # Unticked lists drop name columns, never map labels; ≥ LIST_SUMMARY_MIN names is a list even over the map.
-        loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
-        is_summary_list = list_count >= LIST_SUMMARY_MIN
-        if role == "list" and not include_lists and (loose or is_summary_list):
-            out.append(
-                ItemTransform(
-                    slide_number=number,
-                    item_index=item_index,
-                    kind=str(item.get("kind") or "text"),
-                    x=_f(item.get("x")),
-                    y=_f(item.get("y")),
-                    w=_f(item.get("w")),
-                    h=_f(item.get("h")),
-                    locked=bool(item.get("locked")),
-                    role="hide",
-                    kind_index=kind_index,
-                    opacity=0.0,
-                )
-            )
-            continue
         if role == "title":
             dst = _rect_from_dict(recipe.get("titleDst"))
             if dst is None:
@@ -2543,7 +2521,7 @@ def plan_slide_transforms(
             if item is body_for_body:
                 body_tf = out[-1]
             continue
-        if role == "list" and include_lists and recipe.get("listPaired") and list_count == 1:
+        if role == "list" and keep_side_panels and recipe.get("listPaired") and list_count == 1:
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
             size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
@@ -3247,6 +3225,41 @@ def plan_slide_reuses(
             for k, it in curr_keys.items()
         }
 
+        # persist assumes donor and target agree on visibility; a per-slide side-panel
+        # whitelist can disagree. Reconcile before add/remove/persist are read further so
+        # a target-only side item is added fresh and a donor-only one is actively removed.
+        donor_specs = {_spec_key(t): t for t in (by_slide.get(from_n) or [])}
+
+        def _hidden(smap: dict[tuple[str, int], ItemTransform], item: dict) -> bool:
+            spec = smap.get((str(item.get("kind") or ""), int(item.get("kindIndex") or 0)))
+            return spec is not None and spec.role == "hide"
+
+        reconciled: list[tuple[dict, dict]] = []
+        for curr_it, prev_it in persist_pairs:
+            # Groups already have their own signature-keyed hide/dedup accounting
+            # below (kindIndex drifts on a reuse copy); leave their persist pairs
+            # alone so that machinery — not a geometry ref — resolves the hide.
+            if str(curr_it.get("kind") or "") == "group":
+                continue
+            donor_hidden = _hidden(donor_specs, prev_it)
+            target_hidden = _hidden(spec_map, curr_it)
+            if target_hidden and not donor_hidden:
+                remove.append(prev_it)
+                reconciled.append((curr_it, prev_it))
+            elif donor_hidden and not target_hidden:
+                add.append(curr_it)
+                donor_out[number][prev_key_of[id(prev_it)]] = _out_rect(curr_it, spec_map)
+                reconciled.append((curr_it, prev_it))
+        if reconciled:
+            reconciled_ids = {id(prev_it) for _curr_it, prev_it in reconciled}
+            persist_pairs = [pair for pair in persist_pairs if id(pair[1]) not in reconciled_ids]
+            persist = [c for c, _p in persist_pairs]
+            persist_n = len(persist)
+
+        # A donor item already deleted (role=hide there) never exists on the duplicated
+        # copy; a remove ref for it is a phantom deleteRefs can never satisfy.
+        remove = [it for it in remove if not _hidden(donor_specs, it)]
+
         def _xf(item: dict, match: str | None = None) -> dict[str, Any] | None:
             spec = spec_map.get((str(item.get("kind") or ""), int(item.get("kindIndex") or 0)))
             if spec is None:
@@ -3815,7 +3828,7 @@ def plan_payload_transforms(
     recipe: dict[str, Any],
     *,
     slide_range: SlideRange = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     template: dict[str, Any] | None = None,
     previews: dict[int, Any] | None = None,
     placement_report: list[dict[str, Any]] | None = None,
@@ -3921,13 +3934,13 @@ def plan_payload_transforms(
             if preview is not None
             else None
         )
-        slide_lists = include_lists or (
+        slide_lists = keep_side_panels or (
             side_content_slides is not None and number in side_content_slides
         )
         planned = plan_slide_transforms(
             slide,
             slide_recipe,
-            include_lists=slide_lists,
+            keep_side_panels=slide_lists,
             wall_size=(wall_w, wall_h),
             defer_list_packing=slide_lists and analysis is not None,
             free_text_keys=analysis["free"] if analysis else None,

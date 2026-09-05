@@ -632,7 +632,7 @@ def remap_keynote(
     *,
     template: Path | str,
     slide_range: tuple[int, int] | frozenset[int] | None = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     framing_overrides: dict[int, int] | None = None,
@@ -748,7 +748,7 @@ def remap_keynote(
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
-    if include_lists or side_content_slides:
+    if keep_side_panels or side_content_slides:
         previews, preview_note = resolve_source_previews(
             source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
         )
@@ -764,7 +764,7 @@ def remap_keynote(
         wall,
         recipe,
         slide_range=slide_range,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         template=template_data,
         previews=previews or None,
         placement_report=placements,
@@ -898,11 +898,11 @@ def remap_keynote(
     counts = summarize_plan(transforms)
     say(
         f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
-        f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list, "
-        f"{counts.get('hide', 0)} hidden names"
-        f"{'' if (include_lists or side_content_slides) else ' (side content dropped; whitelist a slide in the framing review to keep it)'}."
+        f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, "
+        f"{counts.get('list', 0)} list, {counts.get('hide', 0)} hidden"
+        f"{'' if (keep_side_panels or side_content_slides) else ' (side-panel content dropped; keep it with --keep-side-panels N or the framing review)'}."
     )
-    if include_lists and recipe.get("listFontSize"):
+    if keep_side_panels and recipe.get("listFontSize"):
         if placements:
             crowded = [row for row in placements if row.get("overlap")]
             detail = f"{len(placements)} moved into empty space"
@@ -1237,7 +1237,7 @@ def remap_and_inspect(
     *,
     template: Path | str,
     slide_range: tuple[int, int] | frozenset[int] | None = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     export_dir: Path | str | None = None,
     source_previews: Path | str | None = None,
     framing_overrides: dict[int, int] | None = None,
@@ -1253,7 +1253,7 @@ def remap_and_inspect(
         dest,
         template=template,
         slide_range=slide_range,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         source_previews=source_previews,
         framing_overrides=framing_overrides,
         side_content_slides=side_content_slides,

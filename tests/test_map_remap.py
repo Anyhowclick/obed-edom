@@ -11,7 +11,8 @@ Keynote traps this suite locks (kept out of the production file):
 - A badge plate colour mismatch is an in-map label, not the badge; snapping onto
   it drags the cyan badge into the map.
 - A church-name list is a stacked column of ≥3 same-left-edge boxes; a map label
-  stands alone. An unticked include-lists drops the column, never the labels.
+  stands alone. Keeping side panels is positional: a column wholly on a side
+  panel is dropped unless whitelisted; a centre-band column is always kept.
 - Centre-panel panoramas (~2 CG frames wide) frame 1:1; thumbnails on them ride
   the panel affine and must not vote on the crop.
 - Judge a framing on the artwork it is about, not whole-slide extent (side-panel
@@ -367,7 +368,7 @@ def test_gold_recipe_pairs_pins_and_list():
     assert score["pinPairs"] == 1
     assert score["pinRmse"] < 5
 
-    with_lists = plan_payload_transforms(wall, recipe, include_lists=True)
+    with_lists = plan_payload_transforms(wall, recipe, keep_side_panels=True)
     assert summarize_plan(with_lists)["list"] == 1
     name = next(t for t in with_lists if t.role == "list")
     assert name.font_size == 28
@@ -660,7 +661,7 @@ def test_base_map_is_applied_before_the_overlays_that_sit_on_it():
     slide = {"number": 1, "items": [pin, title, australia, asia]}
     roles = [
         (t.role, t.w * t.h)
-        for t in plan_slide_transforms(slide, _identity_recipe(), include_lists=True)
+        for t in plan_slide_transforms(slide, _identity_recipe(), keep_side_panels=True)
     ]
     assert [r for r, _ in roles] == ["map", "map", "pin", "title"]
     # Largest map first: Australia must land on top of the Asia plate.
@@ -913,7 +914,7 @@ def test_same_size_overlays_keep_deck_order_because_z_is_unreadable():
     india = _item(index=0, kindIndex=0, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
     white = _item(index=1, kindIndex=1, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
     slide = {"number": 1, "items": [india, white]}
-    out = plan_slide_transforms(slide, _identity_recipe(), include_lists=True)
+    out = plan_slide_transforms(slide, _identity_recipe(), keep_side_panels=True)
     assert [t.kind_index for t in out] == [0, 1]
 
 
@@ -1145,7 +1146,7 @@ def test_church_lists_use_sample_font_and_pack_in_gutter():
     assert recipe["listFontSize"] == 20
     assert recipe["titleFontSize"] == 50
     assert abs(recipe["titleDst"]["x"] - 135) < 1
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True)
     lists = [t for t in transforms if t.role == "list"]
     assert len(lists) == 2
     assert all(t.font_size == 20 for t in lists)
@@ -1380,7 +1381,7 @@ def test_unpaired_text_resizes_when_swatch_face_differs():
     recipe = learn_recipe(wall, template)
     styles = recipe.get("characterStyles") or []
     assert any(s["size"] == 50 and "AmplitudeCond" in s["font"] for s in styles)
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     taiwan = next(t for t in transforms if t.role == "other" and abs((t.font_size or 0) - 50) < 0.1)
     assert taiwan.font == "AmplitudeCond-Medium"
     # Photo crop translate is ~-2848; Taiwan stays with the photo, not packed as a list.
@@ -1456,7 +1457,7 @@ def test_unpaired_text_keeps_source_colour_takes_only_template_size():
     recipe = learn_recipe(wall, template)
     styles = recipe.get("characterStyles") or []
     assert any(abs(s["size"] - 50) < 0.1 and "helvetica" in (s["font"] or "").lower() for s in styles)
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     verse = next(t for t in transforms if t.role == "other" and t.kind == "text")
     # Size comes from the swatch...
     assert verse.font_size is not None and abs(verse.font_size - 50) < 0.1
@@ -1525,7 +1526,7 @@ def test_title_keeps_source_font_and_colour_takes_template_position_and_size():
     assert recipe["titleFont"] == "Helvetica"
     assert recipe.get("titleColor") is not None
     assert recipe["titleFontSize"] == 50
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True)
     title = next(t for t in transforms if t.role == "title")
     # ...position and size come from the template...
     assert abs(title.x - 135) < 1
@@ -1579,7 +1580,7 @@ def test_centre_panel_panorama_frames_one_to_one_over_overlaid_thumbnails():
     recipe = learn_recipe(wall, template)
     # 1:1, not the thumbnail scale it would take if the grid drove the framing.
     assert abs(frame_affine(recipe).s - 1.0) < 0.05
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     placed = [t for t in transforms if t.kind == "image" and t.role != "hide"]
     # Every overlay is still placed — held out of the crop choice, not dropped.
     assert len(placed) >= 10
@@ -1683,7 +1684,7 @@ def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     }
     recipe = learn_recipe(wall, template)
     assert recipe.get("bodyTextDst") == {"x": 698.0, "y": 119.0, "w": 1140.0, "h": 675.0}
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     body = next(t for t in transforms if t.kind == "text" and t.role == "other")
     assert (round(body.x), round(body.y), round(body.w), round(body.h)) == (698, 119, 1140, 675)
     assert abs((body.font_size or 0) - 46.67) < 0.1
@@ -1748,7 +1749,7 @@ def test_full_bleed_cover_is_not_vetoed_by_reflowed_body_and_cropped_side_conten
     # page is not vetoed.
     assert on_canvas_fraction(wall["slides"][0], recipe, 7680, 1080) >= 0.5
     fitted: list[int] = []
-    plan_payload_transforms(wall, recipe, include_lists=True, template=template, fitted_slides=fitted)
+    plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template, fitted_slides=fitted)
     assert fitted == []  # covered, not scaled to fit
 
 
@@ -1823,7 +1824,7 @@ def test_sparkle_overlay_takes_body_size_not_its_own_clamp():
     overlays = sparkle_overlays(s, body)
     assert len(overlays) == 1  # only the overlapping substring, not the far one
     recipe = learn_recipe(wall, template)
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     others = [t for t in transforms if t.role == "other" and t.kind == "text"]
     body_tf = max(others, key=lambda t: t.w * t.h)
     overlay_tf = next(t for t in others if t is not body_tf and 300 < t.w < 600)
@@ -1896,13 +1897,13 @@ def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
     dropped = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080))
     assert not any(t.kind == "text" and t.role != "hide" for t in dropped)  # side text dropped
-    kept = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    kept = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), keep_side_panels=True)
     assert any(t.kind == "text" and t.role != "hide" for t in kept)  # kept when side content is kept
 
 
 def test_side_content_whitelist_keeps_only_the_named_slide():
     """plan_payload_transforms drops side content by default and keeps it on the
-    slides named in side_content_slides — the per-slide form of include_lists."""
+    slides named in side_content_slides — the per-slide form of keep_side_panels."""
     def slide(n):
         return {
             "number": n,
@@ -1932,15 +1933,116 @@ def test_side_content_whitelist_keeps_only_the_named_slide():
     assert side_text_visible(picked, 2)
 
 
-def test_church_summary_list_over_map_is_hidden_when_flag_off():
-    """A church-name list is dropped when 'include lists' is off even where it
-    sits over the map. The background test marks names over land as non-free, and
-    they used to be left remapped in place; a slide of many names is a list, not a
-    set of map labels. A slide with only a couple of labels keeps the old
-    protection."""
+def test_side_panel_column_is_dropped_but_the_centre_column_is_kept():
+    """Gold slide-11 shape: three name columns on each 1920 side panel, three in
+    the centre band. Side columns are dropped; centre columns are always kept —
+    "keep side panels" is positional, never a list-wide toggle."""
+    def column(x, ki_start):
+        return [
+            _item(
+                kind="text", text=f"CHC R{ki_start + i}", x=x + (i % 2), y=6 + i * 52,
+                w=200, h=58, size=40, kindIndex=ki_start + i,
+            )
+            for i in range(3)
+        ]
+
+    items = [_item(kind="image", fileName="worldmap.png", x=1920, y=0, w=3840, h=1080, kindIndex=0)]
+    for i, x in enumerate((260, 755, 1242)):
+        items += column(x, i * 3)
+    for i, x in enumerate((1943, 2476, 3055)):
+        items += column(x, 9 + i * 3)
+
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080))
+    texts = {t.kind_index: t for t in out if t.kind == "text"}
+    assert len(texts) == 18
+    for ki in range(9):
+        assert texts[ki].role == "hide"
+    for ki in range(9, 18):
+        assert texts[ki].role != "hide"
+
+
+def _reuse_side_panel_wall():
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+
+    def slide(n):
+        return {
+            "number": n,
+            "items": [
+                dict(map_img),
+                *[dict(p) for p in pins],
+                _item(kind="text", kindIndex=0, text="CHC Left Panel", x=200, y=100, w=300, h=60),
+            ],
+        }
+
+    return {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide(1), slide(2)]}
+
+
+def test_reuse_adds_target_side_content_when_only_the_target_is_whitelisted():
+    """Reuse must read the TARGET's own whitelist decision, not inherit the
+    donor's: a side-panel item hidden on the donor and kept on the target must be
+    freshly added, never silently missing (persist can't see the disagreement)."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    wall = _reuse_side_panel_wall()
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides={2})
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    assert any(a.get("kind") == "text" and a.get("kindIndex") == 0 for a in job["add"])
+    assert not any(s.get("kind") == "text" and s.get("kindIndex") == 0 for s in job["strip"])
+
+
+def test_reuse_removes_donor_side_content_when_only_the_donor_is_whitelisted():
+    """The reverse disagreement: kept on the donor, dropped on the target — the
+    leaked side content must be actively removed from the pasted duplicate, by
+    the donor's OWN output rect (what is actually live on the copy)."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    wall = _reuse_side_panel_wall()
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides={1})
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    removed = [r for r in job["remove"] if r.get("kind") == "text" and r.get("kindIndex") == 0]
+    assert len(removed) == 1
+    assert removed[0]["w"] > 0 and removed[0]["h"] > 0
+
+
+def test_reuse_emits_no_remove_ref_for_a_donor_hidden_object():
+    """A donor-only side-panel object already deleted by pass 1 (role=hide) must
+    not get a `remove` ref: deleteRefs can never find it on the duplicated copy,
+    so the ref was always a phantom, not a genuine geometry miss."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    donor_only = _item(kind="text", kindIndex=0, text="CHC Donor Only Name", x=200, y=100, w=300, h=60)
+
+    wall = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [dict(map_img), *[dict(p) for p in pins], donor_only]},
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins]]},
+        ],
+    }
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides=set())
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    assert job["remove"] == []
+
+
+def test_church_summary_list_over_the_map_is_kept_when_side_panels_are_dropped():
+    """A church-name list in the centre wall band is always kept, even over the
+    map and even as a large list — "keep side panels" is positional, not a list
+    toggle. Only true side-panel content (a separate test) is dropped."""
     def church_slide(n_names):
         # Names over the centre map (x within 1920..5760) so this exercises the
-        # summary-list rule, not the side-panel drop that has its own test.
+        # centre-band rule, not the side-panel drop that has its own test.
         items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
         for i in range(n_names):
             items.append(_item(kind="text", text=f"CHC Place{i}", x=3000, y=6 + i * 52, w=215, h=58, size=42))
@@ -1955,16 +2057,19 @@ def test_church_summary_list_over_map_is_hidden_when_flag_off():
     recipe = learn_recipe(many, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
     # free_text_keys empty simulates a real run where every name sits over artwork.
     off = plan_slide_transforms(
-        many["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=set()
+        many["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=set()
     )
     placed_names = [t for t in off if t.kind == "text" and t.role != "hide"]
-    assert not placed_names  # the whole list is hidden, not remapped over the map
+    assert len(placed_names) == 20  # the whole centre-band list is kept, not hidden
+    for t in placed_names:
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= t.y and t.y + t.h <= 1080
 
-    # A couple of labels over artwork keep their protection (not a summary list).
+    # A couple of labels over artwork keep their protection (unchanged).
     few = church_slide(2)
     recipe2 = learn_recipe(few, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
     off2 = plan_slide_transforms(
-        few["slides"][0], recipe2, include_lists=False, wall_size=(7680, 1080), free_text_keys=set()
+        few["slides"][0], recipe2, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=set()
     )
     kept = [t for t in off2 if t.kind == "text" and t.role != "hide"]
     assert kept  # few labels over artwork are not dropped
@@ -2021,7 +2126,7 @@ def test_lone_map_label_over_the_map_survives_the_list_drop():
 
     for free_text_keys in (None, set()):
         out = plan_slide_transforms(
-            wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=free_text_keys
+            wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=free_text_keys
         )
         texts = [t for t in out if t.kind == "text"]
         assert len(texts) == 1
@@ -2031,7 +2136,7 @@ def test_lone_map_label_over_the_map_survives_the_list_drop():
         assert 0 <= t.y and t.y + t.h <= 1080
 
 
-def test_a_church_name_column_over_the_map_is_still_dropped():
+def test_a_church_name_column_over_the_map_is_kept():
     items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
     items += [
         _item(kind="text", text=f"CHC Row{i}", x=3000, y=6 + i * 52, w=200, h=58, size=40) for i in range(3)
@@ -2040,11 +2145,11 @@ def test_a_church_name_column_over_the_map_is_still_dropped():
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
 
     out = plan_slide_transforms(
-        wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=None
+        wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=None
     )
     texts = [t for t in out if t.kind == "text"]
     assert texts
-    assert all(t.role == "hide" for t in texts)
+    assert all(t.role != "hide" for t in texts)
 
 
 def test_slide_9_style_map_labels_ride_the_map_affine():
@@ -2075,7 +2180,7 @@ def test_slide_9_style_map_labels_ride_the_map_affine():
     assert abs(recipe["mapDst"]["w"] / recipe["mapSrc"]["w"] - 1) < 1e-6
 
     out = plan_slide_transforms(
-        wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=None
+        wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=None
     )
     by = {t.kind_index: t for t in out if t.kind == "text"}
     assert len(by) == 15
@@ -2102,7 +2207,7 @@ def test_off_screen_objects_are_hidden_not_left_alone():
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
     template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
     recipe = learn_recipe(wall, template)
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), keep_side_panels=True)
     # The off-slide "CHC Kuching" (the only text parked at y=1678) is present but
     # hidden, so the canvas change cannot scale it back on-frame.
     off = [t for t in out if t.kind == "text" and t.y >= 1080]
@@ -2150,7 +2255,7 @@ def test_fit_pass_leaves_a_corner_label_and_its_width_alone():
         _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
     ]}]}
     recipe = learn_recipe(wall, template)
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), keep_side_panels=True)
     others = sorted(
         (t for t in out if t.kind == "text" and t.role == "other"), key=lambda t: t.w * t.h
     )
@@ -2191,7 +2296,7 @@ def test_sparkle_overlays_follow_the_body_after_the_fit_pass():
         _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
     ]}]}
     recipe = learn_recipe(wall, template)
-    tfs = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    tfs = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), keep_side_panels=True)
     others = [t for t in tfs if t.role == "other" and t.kind == "text"]
     body = max(others, key=lambda t: t.w * t.h)
     overlay = next(t for t in others if t is not body)
@@ -2237,7 +2342,7 @@ def test_corner_label_keeps_its_plate_size_not_the_template_slot():
     }
     recipe = learn_recipe(wall, template)
     assert recipe.get("badgePlateDst") == {"x": 20.0, "y": -77.0, "w": 227.0, "h": 160.0}
-    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), keep_side_panels=True)
     plate = next(t for t in out if t.kind == "shape")
     label = next(t for t in out if t.kind == "text" and t.role != "hide")
     # Plate moved to the corner but kept its own 362 width (rounding survives), not

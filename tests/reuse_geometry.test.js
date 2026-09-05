@@ -301,6 +301,35 @@ test("deleteRefs (geom): a deleted snapshot entry never matches a later distinct
   assert.strictEqual(flags.length, 0);
 });
 
+// --- kind-aware matching: text/line never compare on height ---------------------
+// A Keynote text box is AUTOSIZE: its live height is the laid-out height, never
+// the planner's `h`, and its live width can differ when the planner wrote none.
+// x/y (and w, when the ref carries one) stay load-bearing; h never is.
+
+test("deleteRefs (geom): a text ref matches even when the live autosized height drifts >4px", function () {
+  const arr = [elem(100, 100, 50, 92, "grown")]; // live height 92 vs the ref's planned h=30
+  const slide = slideOf("text", arr);
+  const flags = [];
+  const n = m.deleteRefs(keynoteFor(arr), slide, [{ kind: "text", x: 100, y: 100, w: 50, h: 30 }], flags);
+  assert.strictEqual(n, 1);
+  assert.strictEqual(arr.length, 0);
+  assert.strictEqual(flags.length, 0);
+});
+
+test("deleteRefs (geom): two same-position texts differing only in width still trip the count-equals-refs guard", function () {
+  // Width IS compared for text (unlike height), but it is only one more tolerance
+  // band, not a disambiguator: two live boxes whose widths both land within tol of
+  // the ref's w are still an unresolved split, and the guard must still refuse.
+  const arr = [elem(100, 100, 50, 30, "narrow"), elem(100, 100, 54, 30, "wide")];
+  const slide = slideOf("text", arr);
+  const flags = [];
+  const n = m.deleteRefs(keynoteFor(arr), slide, [{ kind: "text", x: 100, y: 100, w: 52, h: 30 }], flags);
+  assert.strictEqual(n, 0);
+  assert.strictEqual(arr.length, 2);
+  assert.strictEqual(flags.length, 1);
+  assert.ok(/geom split/.test(flags[0]));
+});
+
 // --- V: fail-loud remove verification ------------------------------------------
 // deleteRefs tallies the per-kind deleted count; removeShortfallOf turns that plus
 // the expected `remove` refs into a structured, uncapped per-kind shortfall. The
