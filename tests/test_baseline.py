@@ -18,11 +18,9 @@ from pathlib import Path
 from obed_edom.baseline import (
     deck_digest,
     deck_slide_digests,
-    folder_digests,
     index_map,
     insert_unpaired,
     load_pairing,
-    pair_index_gaps,
     remap_slots,
     reuse_slots,
     save_pairing,
@@ -48,22 +46,6 @@ def test_deck_digest_file_and_package(tmp_path: Path):
     assert deck_digest(pkg) == first
     (pkg / "Data" / "a.png").write_bytes(b"IMG")
     assert deck_digest(pkg) != first
-
-
-def test_folder_digests_ignore_mtime_when_bytes_match(tmp_path: Path):
-    folder = tmp_path / "previews"
-    folder.mkdir()
-    a = folder / "slide-001.png"
-    b = folder / "slide-002.png"
-    a.write_bytes(b"same-bytes")
-    b.write_bytes(b"other")
-    first = folder_digests(folder)
-    a.write_bytes(b"same-bytes")
-    again = folder_digests(folder)
-    assert first[0] == again[0]
-    assert first[1] == again[1]
-    a.write_bytes(b"changed")
-    assert folder_digests(folder)[0] != first[0]
 
 
 def test_deck_slide_digests_change_with_copy():
@@ -185,18 +167,6 @@ def test_reuse_below_threshold_is_fresh():
         )
         is None
     )
-
-
-def test_pair_index_gaps_zips_leftovers():
-    slots = [
-        slot_dict(0, [0], 1.0),
-        slot_dict(1, []),
-        slot_dict(None, [1]),
-        slot_dict(2, [2], 1.0),
-    ]
-    zipped = pair_index_gaps(slots)
-    mids = [s for s in zipped if s["leftIndex"] == 1]
-    assert mids and mids[0]["rightIndexes"] == [1]
 
 
 def test_insert_unpaired_places_new_index_in_order():

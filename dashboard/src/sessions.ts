@@ -22,6 +22,7 @@ export function libraryJobs(jobs: Job[]): Job[] {
   return jobs.filter((job) => {
     const feature = job.feature || job.kind;
     return feature === "generate" || feature === "diff" || feature === "visual" || feature === "check" || feature === "dsk" || feature === "resize";
+    // "visual" kept so leftover Visual Checker sessions still appear in History.
   });
 }
 
