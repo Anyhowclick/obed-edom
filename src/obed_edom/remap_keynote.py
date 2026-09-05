@@ -508,12 +508,6 @@ def resolve_source_previews(
     return {}, ""
 
 
-def _card_style_pair_key(style: dict[str, Any]) -> tuple:
-    r, g, b, a = style["color"]
-    rnd = tuple(round(v, 3) if v is not None else None for v in (r, g, b, a))
-    return (*rnd, style["pattern"])
-
-
 def restore_card_stroke_widths(
     dest: Path, source: Path, wall: dict[str, Any], say: Callable[[str], None]
 ) -> dict[str, Any]:
@@ -525,8 +519,8 @@ def restore_card_stroke_widths(
         from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415
         from obed_edom.iwa_write import (  # noqa: PLC0415
             card_styles,
+            match_card_stroke_styles,
             patch_stroke_widths,
-            select_card_styles,
         )
     except Exception as exc:  # noqa: BLE001 — optional iwa extra; never break the run
         say(f"Card-border stroke patch unavailable ({type(exc).__name__}: {exc}); skipping.")
@@ -539,56 +533,26 @@ def restore_card_stroke_widths(
         say(f"Card-border stroke patch could not read the deck(s) ({type(exc).__name__}: {exc}); skipping.")
         return {"skipped": True}
 
-    out_selected = select_card_styles(
-        [s for s in card_styles(out_objects, out_id_to_file) if not s["inherited"]], min_refs=10
-    )
-    if not out_selected:
-        return {"skipped": True, "reason": "no card styles selected in the output"}
-    src_styles = [s for s in card_styles(src_objects, src_id_to_file) if not s["inherited"]]
-
-    out_by_key: dict[tuple, list[dict]] = {}
-    for s in out_selected:
-        out_by_key.setdefault(_card_style_pair_key(s), []).append(s)
-    src_by_key: dict[tuple, list[dict]] = {}
-    for s in src_styles:
-        src_by_key.setdefault(_card_style_pair_key(s), []).append(s)
-
     wall_w = float(wall.get("slideWidth") or CG_WIDTH)
     canvas_scale = (CG_WIDTH / wall_w) if wall_w > 0 else 1.0
 
-    widths: dict[str, float] = {}
-    chosen: list[dict[str, Any]] = []
-    for key, out_candidates in out_by_key.items():
-        src_candidates = src_by_key.get(key) or []
-        if len(out_candidates) != 1 or len(src_candidates) != 1:
-            for oc in out_candidates:
-                say(
-                    f"Card-border stroke: skipping style {oc['id']} ({len(out_candidates)} "
-                    f"output / {len(src_candidates)} source candidate(s) for this colour+pattern "
-                    "pairing, need exactly 1 on each side)."
-                )
-            continue
-        out_style, src_style = out_candidates[0], src_candidates[0]
-        out_w, src_w = out_style["width"], src_style["width"]
-        if out_w is None or src_w is None:
-            continue
-        if not (out_w < src_w and out_w <= src_w * canvas_scale * 1.1):
-            say(
-                f"Card-border stroke: skipping style {out_style['id']} (out={out_w} vs "
-                f"src={src_w}, canvas_scale={canvas_scale:.4f} guard failed)."
-            )
-            continue
-        widths[out_style["id"]] = src_w
-        chosen.append(
-            {"id": out_style["id"], "old": out_w, "new": src_w, "refs": out_style["refs"]}
-        )
-
-    if not widths:
+    match = match_card_stroke_styles(
+        card_styles(out_objects, out_id_to_file),
+        card_styles(src_objects, src_id_to_file),
+        canvas_scale=canvas_scale,
+        min_refs=10,
+    )
+    if not match["out_selected"]:
+        return {"skipped": True, "reason": "no card styles selected in the output"}
+    for note in match["notes"]:
+        say(note)
+    if not match["widths"]:
         return {"skipped": True, "reason": "no card style pair passed the guard"}
 
-    for c in chosen:
+    for c in match["chosen"]:
         say(f"Card-border stroke: {c['id']} {c['old']} → {c['new']} ({c['refs']} refs).")
-    result = patch_stroke_widths(dest, widths)
+
+    result = patch_stroke_widths(dest, match["widths"])
     if result.get("refused"):
         say(f"Card-border stroke patch REFUSED: {result.get('reason')}")
     return result

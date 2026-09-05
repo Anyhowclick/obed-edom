@@ -9,6 +9,7 @@ image drawables.
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 
 import pytest
@@ -16,7 +17,12 @@ import pytest
 pytest.importorskip("keynote_parser")
 
 from obed_edom.iwa_runs import _load_deck  # noqa: E402
-from obed_edom.iwa_write import card_styles, patch_stroke_widths, select_card_styles  # noqa: E402
+from obed_edom.iwa_write import (  # noqa: E402
+    card_styles,
+    match_card_stroke_styles,
+    patch_stroke_widths,
+    select_card_styles,
+)
 from obed_edom.remap_keynote import restore_card_stroke_widths  # noqa: E402
 from test_iwa_write import _arch, _geom, _member  # noqa: E402
 
@@ -412,3 +418,134 @@ def test_restore_card_stroke_widths_guard_rejects_out_greater_than_src(tmp_path)
     objects, id_to_file, _fi = _load_deck(out_deck)
     styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
     assert styles["900"]["width"] == pytest.approx(5.0)  # deck untouched
+
+
+# --- match_card_stroke_styles (pure pairing; card_styles()-shaped dicts, no decks) ---
+_FULL_WHITE = (0.99992, 1.0, 0.99988, 1.0)  # the wall's actual card-border colour
+
+
+def _style_row(sid, width, refs, *, colour=_FULL_WHITE, pattern="TSDSolidPattern", inherited=False):
+    return {"id": sid, "width": width, "color": colour, "pattern": pattern,
+            "refs": refs, "inherited": inherited, "slides": [], "member": "Index/DocumentStylesheet.iwa"}
+
+
+def test_match_drops_the_full_decks_low_ref_source_stray():
+    out = [_style_row("18316959", 0.25, 269)]
+    src = [_style_row("18316959", 3.0, 83), _style_row("17682825", 5.0, 3)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {"18316959": 3.0}
+    assert result["chosen"] == [{"id": "18316959", "old": 0.25, "new": 3.0, "refs": 269}]
+    assert not any("candidate(s)" in n or "guard failed" in n for n in result["notes"])
+
+
+def test_match_drops_the_stray_even_without_donor_copy_inflation():
+    out = [_style_row("18316959", 0.25, 83)]
+    src = [_style_row("18316959", 3.0, 83), _style_row("17682825", 5.0, 3)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {"18316959": 3.0}
+    assert not any("candidate(s)" in n or "guard failed" in n for n in result["notes"])
+
+
+def test_match_success_notes_the_source_styles_the_floor_set_aside():
+    out = [_style_row("18316959", 0.25, 269)]
+    src = [_style_row("18316959", 3.0, 83), _style_row("17682825", 5.0, 3)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {"18316959": 3.0}
+    assert len(result["notes"]) == 1
+    assert "17682825 5.0pt/3 refs" in result["notes"][0]
+    assert "set aside" in result["notes"][0]
+
+
+def test_match_gold_single_source_candidate_still_pairs():
+    out = [_style_row("18316959", 0.25, 269)]
+    src = [_style_row("18316959", 3.0, 83)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {"18316959": 3.0}
+    assert result["notes"] == []
+
+
+def test_match_keeps_a_source_with_fewer_refs_than_min_refs():
+    out = [_style_row("900", 0.25, 19)]
+    src = [_style_row("700", 3.0, 6)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {"900": 3.0}
+
+
+def test_match_refuses_two_genuine_source_candidates():
+    out = [_style_row("900", 0.25, 269)]
+    src = [_style_row("700", 3.0, 83), _style_row("701", 5.0, 60)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {}
+    assert "1 output / 2 source candidate(s)" in result["notes"][0]
+    assert "need exactly 1 on each side" in result["notes"][0]
+
+
+def test_match_refuses_two_output_candidates():
+    out = [_style_row("900", 0.25, 269), _style_row("901", 0.42, 12)]
+    src = [_style_row("700", 3.0, 83)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {}
+    matching = [n for n in result["notes"] if "2 output / 1 source candidate(s)" in n]
+    assert len(matching) == 2
+    assert any("900" in n for n in matching)
+    assert any("901" in n for n in matching)
+
+
+def test_match_refusal_note_names_every_candidate_and_the_floor():
+    out = [_style_row("900", 0.25, 269)]
+    src = [_style_row("700", 3.0, 83), _style_row("701", 5.0, 60)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    last = result["notes"][-1]
+    assert "700 3.0pt/83 refs" in last
+    assert "701 5.0pt/60 refs" in last
+    assert re.search(r"source floor of \d+ refs", last)
+
+
+def test_match_guard_refuses_output_wider_than_source():
+    out = [_style_row("900", 5.0, 269)]
+    src = [_style_row("700", 3.0, 83)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {}
+    assert any("guard failed" in n and "canvas_scale=0.2500" in n for n in result["notes"])
+
+
+def test_match_guard_refuses_output_above_the_canvas_scale_margin():
+    out = [_style_row("900", 1.0, 269)]
+    src = [_style_row("700", 3.0, 83)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {}
+    assert any("guard failed" in n for n in result["notes"])
+
+
+def test_match_ignores_inherited_rows_on_both_sides():
+    out = [_style_row("900", 0.25, 269), _style_row("902", 0.25, 40, inherited=True)]
+    src = [_style_row("700", 3.0, 83), _style_row("702", 5.0, 40, inherited=True)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {"900": 3.0}
+    assert result["notes"] == []
+
+
+def test_match_skips_a_style_with_no_resolved_width():
+    out = [_style_row("900", None, 269)]
+    src = [_style_row("700", 3.0, 83)]
+    result = match_card_stroke_styles(out, src, canvas_scale=0.25)
+    assert result["widths"] == {}
+    assert result["notes"] == []
+
+
+def test_restore_card_stroke_widths_drops_a_relatively_tiny_source_stray(tmp_path):
+    """The stray clears the absolute min_refs=10 and is still dropped: the source floor
+    scales off the output style's own refs (88 // 8 = 11)."""
+    out_deck = _build_style_deck(tmp_path / "out.key", [{"id": 900, "width": 0.25, "refs": 88}])
+    src_deck = _build_style_deck(tmp_path / "src.key", [
+        {"id": 700, "width": 3.0, "refs": 40},
+        {"id": 701, "width": 5.0, "refs": 10},   # white+solid, >= min_refs, still not the cards
+    ])
+    say_lines: list[str] = []
+    result = restore_card_stroke_widths(out_deck, src_deck, {"slideWidth": 7680.0}, say_lines.append)
+    assert not result.get("refused")
+    assert result["applied"] == 1
+    assert result["edited_ids"] == ["900"]
+    assert not any("candidate(s)" in line for line in say_lines)
+    objects, id_to_file, _fi = _load_deck(out_deck)
+    assert {s["id"]: s for s in card_styles(objects, id_to_file)}["900"]["width"] == pytest.approx(3.0)
