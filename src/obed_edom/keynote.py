@@ -1079,7 +1079,8 @@ def _stat_job_handlers() -> list[str]:
         "on obedTopReal(slideNo, theKind, kindCount)",
         # Keynote appends the layout's empty placeholders after the real objects and they are not
         # in the slide's z-order, so Bring-to-Front can never reach `count`. Walk down past any
-        # trailing member sitting at the origin at ~1x1 (offline_inspect._is_placeholder_row).
+        # trailing member sitting at the origin at ~1x1 (both w and h within tol=3; narrower than
+        # offline_inspect._is_placeholder_row's origin-and-either-dimension rule, deliberately so).
         "  set _top to kindCount",
         "  repeat while _top > 0",
         "    if my obedBadgeFind(slideNo, theKind, _top, 0, 0, 1, 1, true, true, false) is not _top then exit repeat",
@@ -1124,13 +1125,13 @@ def _stat_job_handlers() -> list[str]:
         '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
         "    else",
         "      set _topReal to my obedTopReal(slideNo, theKind, _kindCount)",
-        "      if _topReal < 2 or _hit is 0 or _hit is not less than _topReal then",
+        "      if _topReal < 2 or _hit is not less than _topReal then",
         '        set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
         "      else",
         "        set _foundAt to my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)",
         "        if _foundAt is _topReal then",
         "          set badgeMoved to badgeMoved + 1",
-        "        else if _foundAt is 0 then",
+        "        else if _foundAt is 0 or _foundAt > _topReal then",
         '          set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
         "        else",
         "          set badgeFrontDead to 1",

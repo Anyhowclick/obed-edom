@@ -921,19 +921,41 @@ def test_badge_front_dead_needs_a_testable_probe():
     assert preceding.endswith("else")
 
     unknown_cond_at = handler.index(
-        "if _topReal < 2 or _hit is 0 or _hit is not less than _topReal then"
+        "if _topReal < 2 or _hit is not less than _topReal then"
     )
     unknown_block = handler[unknown_cond_at : handler.index("else", unknown_cond_at)]
     assert "badgeProbeUnknown(s=" in unknown_block
     assert "badgeMoved" not in unknown_block
     assert "badgeFrontDead" not in unknown_block
 
-    zero_cond_at = handler.index("else if _foundAt is 0 then")
-    zero_body_at = zero_cond_at + len("else if _foundAt is 0 then")
+    zero_cond_at = handler.index("else if _foundAt is 0 or _foundAt > _topReal then")
+    zero_body_at = zero_cond_at + len("else if _foundAt is 0 or _foundAt > _topReal then")
     zero_block = handler[zero_body_at : handler.index("else", zero_body_at)]
     assert "badgeProbeUnknown(s=" in zero_block
     assert "badgeMoved" not in zero_block
     assert "badgeFrontDead" not in zero_block
+
+
+def test_badge_found_above_top_real_is_probe_unknown_not_dead():
+    """An over-trimmed _topReal (a real member sitting at ~origin/~1x1 that obedTopReal
+    mistook for a placeholder) can put a live raise's re-probe ABOVE _topReal, i.e.
+    _foundAt > _topReal. That is inconclusive -- the trim was wrong, not the raise --
+    so it must route to badgeProbeUnknown, never badgeFrontDead, and must not latch."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "text", "index": 1, "isTitle": True, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    found_at_cond = handler.index("if _foundAt is _topReal then")
+    over_top_cond_at = handler.index("else if _foundAt is 0 or _foundAt > _topReal then", found_at_cond)
+    over_top_body_at = over_top_cond_at + len("else if _foundAt is 0 or _foundAt > _topReal then")
+    over_top_block = handler[over_top_body_at : handler.index("else", over_top_body_at)]
+    assert "badgeProbeUnknown(s=" in over_top_block
+    assert "badgeMoved" not in over_top_block
+    assert "badgeFrontDead" not in over_top_block
+    assert over_top_cond_at < handler.index("set badgeFrontDead to 1")
 
 
 def test_badge_probe_unknown_does_not_latch_or_count():

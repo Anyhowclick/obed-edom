@@ -1109,8 +1109,9 @@ def remap_keynote(
                 )
             if badge_raises:
                 detail = child_resize_result.get("detail") or ""
-                if detail:
-                    say(f"Badge raise detail: {detail}")
+                badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
+                if badge_detail:
+                    say(f"Badge raise detail: {badge_detail}")
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
