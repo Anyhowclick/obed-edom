@@ -33,6 +33,7 @@ from obed_edom.iwa_runs import (
     attach_group_child_text,
     attach_group_children,
     attach_runs,
+    attach_slide_builds,
     resolve_para_style,
     resolve_style,
 )
@@ -432,6 +433,27 @@ def test_group_child_text_absent_when_no_groups(monkeypatch):
     payload = {"slides": [{"index": 5, "items": []}]}  # index with no matching slide
     attach_group_child_text("ignored.key", payload)
     assert "groupChildText" not in payload["slides"][0]
+
+
+def test_attach_slide_builds_addresses_targets_by_kind_and_kindindex(tmp_path):
+    pytest.importorskip("keynote_parser")
+    from test_iwa_write import _build_builds_deck  # noqa: PLC0415 (cross-test-module fixture, established convention)
+
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    # index 9 has no matching slide -- must get no 'builds' key at all, not a crash.
+    payload = {"slides": [{"index": 0, "items": []}, {"index": 1, "items": []}, {"index": 9, "items": []}]}
+    attach_slide_builds(deck, payload)
+    slide0, slide1, slide9 = payload["slides"]
+    assert slide0["builds"] == [
+        {"effect": "apple:dissolve", "animationType": "In", "kind": "text", "kindIndex": 0},
+        {"effect": "apple:wipe-iris", "animationType": "In", "kind": "image", "kindIndex": 0},
+        {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 0},
+    ]
+    assert slide1["builds"] == [
+        {"effect": "apple:dissolve", "animationType": "In", "kind": "text", "kindIndex": 0},
+        {"effect": "apple:wipe-iris", "animationType": "In", "kind": "image", "kindIndex": 0},
+    ]
+    assert "builds" not in slide9
 
 
 # --------------------------------------------------------------------------

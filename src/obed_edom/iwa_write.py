@@ -1149,3 +1149,113 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
         "value_clean": value_clean,
         "edited_ids": sorted(widths, key=str),
     }
+
+
+def _contains_identifier(node: Any) -> bool:
+    """True if a nested dict anywhere under ``node`` carries an 'identifier' key — a
+    cross-member reference the patcher must refuse to copy verbatim into another slide."""
+    if isinstance(node, dict):
+        if "identifier" in node:
+            return True
+        return any(_contains_identifier(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_contains_identifier(v) for v in node)
+    return False
+
+
+def _archives_by_id(decoded: dict) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for ch in decoded["chunks"]:
+        for arch in ch["archives"]:
+            out[str(arch["header"]["identifier"])] = arch
+    return out
+
+
+def _archive_diff(before: dict, after: dict) -> tuple[set[str], set[str], list[str]]:
+    """(removed_ids, added_ids, changed_ids), by archive identifier (not position —
+    correct even if the archive count ever changed, which this patch never does)."""
+    b, a = _archives_by_id(before), _archives_by_id(after)
+    removed, added = set(b) - set(a), set(a) - set(b)
+    changed = [aid for aid in set(b) & set(a) if (b[aid].get("objects") or []) != (a[aid].get("objects") or [])]
+    return removed, added, changed
+
+
+def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
+    """Patch each named ``KN.SlideArchive``'s ``builds``/``buildChunks``/``transition``
+    in place — one ``_rewrite_members`` call for every member touched. ``plans`` is
+    ``{slideId: {"builds": [ids], "buildChunks": [ids], "transition": dict|None}}``
+    (``iwa_builds.plan_build_patch``'s ``"plans"``). Orphaned ``KN.BuildArchive``/
+    ``KN.BuildChunkArchive`` entries are left in place (same precedent as
+    ``patch_stroke_widths`` leaving other stylesheet entries alone).
+
+    Refuses (deck untouched) unless every named slide resolves to a
+    ``KN.SlideArchive`` and, per member, the re-encoded archive set changed EXACTLY
+    the intended slide(s) — nothing added or removed (the proven ``build_patch.py``
+    self-check gate).
+    """
+    deck = Path(deck)
+    plans = {str(k): v for k, v in plans.items()}
+    if not plans:
+        return {"refused": False, "touched": [], "applied": 0}
+    for slide_id, plan in plans.items():
+        transition = plan.get("transition")
+        if transition is not None and _contains_identifier(transition):
+            return {"refused": True, "reason": f"slide {slide_id}: transition holds a cross-member reference"}
+
+    objects, id_to_file, _file_ids = _load_deck(deck)
+    for slide_id in plans:
+        obj = objects.get(slide_id)
+        if obj is None:
+            return {"refused": True, "reason": f"slide {slide_id} not found in deck"}
+        if obj.get("_pbtype") != "KN.SlideArchive":
+            return {"refused": True, "reason": f"{slide_id} is not a KN.SlideArchive"}
+
+    by_member: dict[str, list[str]] = {}
+    for slide_id in plans:
+        member = id_to_file.get(slide_id)
+        if member is None:
+            return {"refused": True, "reason": f"slide {slide_id} has no owning member"}
+        by_member.setdefault(member, []).append(slide_id)
+
+    edits: dict[str, bytes] = {}
+    applied = 0
+    with zipfile.ZipFile(deck) as zf:
+        for member, slide_ids in by_member.items():
+            buf = zf.read(member)
+            decoded = IWAFile.from_buffer(buf, member).to_dict()
+            patched = copy.deepcopy(decoded)
+            touched = 0
+            wanted = set(slide_ids)
+            for ch in patched["chunks"]:
+                for arch in ch["archives"]:
+                    aid = str(arch["header"]["identifier"])
+                    if aid not in wanted:
+                        continue
+                    plan = plans[aid]
+                    for o in arch.get("objects") or []:
+                        o["builds"] = [{"identifier": bid} for bid in plan["builds"]]
+                        o["buildChunks"] = [{"identifier": cid} for cid in plan["buildChunks"]]
+                        if plan.get("transition") is not None:
+                            o["transition"] = plan["transition"]
+                        touched += 1
+
+            if touched != len(wanted):
+                return {
+                    "refused": True,
+                    "reason": f"expected to touch {len(wanted)} slide(s) in {member}, touched {touched}",
+                }
+
+            new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
+            reparsed = IWAFile.from_buffer(new_member, member).to_dict()
+            removed, added, changed = _archive_diff(decoded, reparsed)
+            if removed or added or set(changed) != wanted:
+                return {
+                    "refused": True,
+                    "reason": f"{member}: re-encode touched more than the intended slide(s) "
+                    f"(removed={sorted(removed)}, added={sorted(added)}, changed={sorted(changed)})",
+                }
+            edits[member] = new_member
+            applied += touched
+
+    _rewrite_members(deck, edits)
+    return {"refused": False, "touched": sorted(plans), "applied": applied}

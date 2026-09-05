@@ -626,6 +626,80 @@ def restore_card_stroke_widths(
     return result
 
 
+def restore_source_builds(
+    dest: Path, source: Path, slides: set[int], say: Callable[[str], None]
+) -> dict[str, Any]:
+    """A reuse-target slide must end up with its OWN source slide's builds and
+    transition, never the donor's (`duplicate slide` copies the donor's wholesale
+    and Keynote cannot script builds at all to fix it — see the "CG resizer" skill).
+    Offline IWA patch of KN.SlideArchive.builds/.buildChunks/.transition,
+    unconditional (not gated by OBED_OFFLINE_WRITE, exactly like
+    restore_card_stroke_widths), run after stat-finalize has closed the document.
+    Only `slides` (the reuse targets) are rewritten; every slide is verified but a
+    non-reuse one is never rewritten — the patcher never invents a build, so a
+    surplus anywhere is a bug, never a fix."""
+    try:
+        from obed_edom import iwa_builds  # noqa: PLC0415
+        from obed_edom.iwa_write import patch_slide_builds  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — optional iwa extra; never break the run
+        say(f"Build/transition patch unavailable ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+
+    try:
+        src_by_index = iwa_builds.deck_builds(source)
+    except Exception as exc:  # noqa: BLE001 — offline read is opt-in; never break the run
+        say(f"Build/transition patch could not read the source deck ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+    try:
+        out_by_index = iwa_builds.deck_builds(dest)
+    except Exception as exc:  # noqa: BLE001
+        say(f"Build/transition patch could not read the output deck ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+
+    if set(src_by_index) != set(out_by_index):
+        say(
+            "Build/transition patch REFUSED: source has "
+            f"{len(src_by_index)} slide(s), output has {len(out_by_index)} — skipping."
+        )
+        return {"skipped": True}
+
+    plan = iwa_builds.plan_build_patch(src_by_index, out_by_index, slides)
+    slide_ids = {out_by_index[n]["slideId"] for n in slides if n in out_by_index}
+    plans = {sid: p for sid, p in plan["plans"].items() if sid in slide_ids}
+    patch_result = patch_slide_builds(dest, plans)
+    if patch_result.get("refused"):
+        say(f"Build/transition patch REFUSED: {patch_result.get('reason')}")
+        return {"skipped": True, "reason": patch_result.get("reason")}
+
+    out_after = iwa_builds.deck_builds(dest)
+    verify = iwa_builds.verify_builds(src_by_index, out_after)
+    if verify["surplus"]:
+        raise RuntimeError(f"Build patch left a surplus build on the output: {verify['surplus'][:5]}")
+    if verify["transitions"]:
+        raise RuntimeError(f"Build patch left a transition mismatch: {verify['transitions'][:5]}")
+    for m in verify["missing"]:
+        say(
+            f"WARNING builds: slide {m['slide']} lost {m['count']} {m['effect']} "
+            "build(s) (the object is no longer on that slide)."
+        )
+
+    kept = sum(r.get("kept", 0) for r in plan["report"])
+    dropped = sum(r.get("dropped", 0) for r in plan["report"])
+    retimed = sum(1 for r in plan["report"] if r.get("retimed"))
+    say(
+        f"Builds follow source: {kept} kept, {dropped} dropped, {retimed} "
+        f"transition(s) restored on {len(slides)} reuse slide(s)."
+    )
+    return {
+        "skipped": False,
+        "kept": kept,
+        "dropped": dropped,
+        "retimed": retimed,
+        "report": plan["report"],
+        "shortfalls": verify["missing"],
+    }
+
+
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
@@ -701,11 +775,13 @@ def remap_keynote(
     try:
         from obed_edom.iwa_runs import (  # noqa: PLC0415
             _load_deck, attach_group_captions, attach_group_child_text, attach_group_children,
+            attach_slide_builds,
         )
 
         deck = _load_deck(source)
         attach_group_child_text(source, wall, deck=deck)
         attach_group_captions(source, wall, deck=deck)
+        attach_slide_builds(source, wall, deck=deck)
         # child_src's offsets are computed against the group's STORED archive frame
         # (gx, gy in _group_child_records); ItemTransform derives targets against
         # self.src, which under OBED_OFFLINE_READ=on is the offline-composed group
@@ -716,14 +792,15 @@ def remap_keynote(
         # payload actually came from the offline reader.
         if offline_read_mode(offline_read) == "on":
             attach_group_children(source, wall, deck=deck)
-    except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
+    except Exception as exc:  # noqa: BLE001 — no group signatures/captions/builds on any failure
         say(
             f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
-            "will report a shortfall instead of deduping, and photo cards will not be "
+            "will report a shortfall instead of deduping, photo cards will not be "
             "recognised as cards at all (no groupChildText signature to match on) — they "
             "keep today's affine-mapped size, same as any other unmatched group; groups "
             "holding an autosize text box keep today's group-level resize (which collapses "
-            "them)."
+            "them); and a coincident stat twin that carries a build cannot be told apart "
+            "from a magic-move leftover, so it stays hidden."
         )
 
     try:
@@ -1202,6 +1279,9 @@ def remap_keynote(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
                 "placement/size. See the .stat-finalize.applescript dump."
             )
+    # Builds/transitions follow the source, never the reuse donor. Unconditional and
+    # runs whether or not stat-finalize did — reuse targets are AppleScript slides.
+    build_result = restore_source_builds(dest, source, reuse_slides, say)
     result: dict[str, Any] = {
         "source": str(source),
         "dest": str(dest),
@@ -1233,6 +1313,7 @@ def remap_keynote(
     if offline_write_info is not None:
         result["offlineWrite"] = offline_write_info
     result["cardStroke"] = card_stroke_result
+    result["builds"] = build_result
     return result
 
 

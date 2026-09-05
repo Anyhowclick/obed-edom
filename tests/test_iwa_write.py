@@ -62,6 +62,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     bridge_specs_kindindex,
     expected_base_counts,
     line_inverse,
+    patch_slide_builds,
     patch_deck_geometry,
     patch_slide_geometry,
 )
@@ -290,6 +291,117 @@ def _build_shared_member_deck(path):
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("Index/Document.iwa", _member([show, node1, node2]))
         z.writestr("Index/Slide-101.iwa", _member([slide1, shape1]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _build_effect(effect, animation_type="In"):
+    return {
+        "animationAttributes": {
+            "animationType": animation_type,
+            "effect": effect,
+            "duration": 0.5,
+            "direction": 0,
+            "delay": 0.0,
+            "randomNumberSeed": 1,
+            "writingDirectionIsRtl": False,
+        },
+    }
+
+
+def _transition_dict(effect, duration):
+    return {
+        "attributes": {
+            "animationAttributes": {
+                "animationType": "Transition",
+                "effect": effect,
+                "duration": duration,
+                "delay": 0.5,
+                "isAutomatic": False,
+                "randomNumberSeed": 1,
+                "writingDirectionIsRtl": False,
+            },
+            "customMagicMoveFadeUnmatchedObjects": True,
+            "customTimingCurve": "TransitionCustomAttributesTimingCurveTypeEaseInEaseOut",
+            "customTextDeliveryType": "TransitionCustomAttributesTextDeliveryTypeByObject",
+        }
+    }
+
+
+def _build_builds_deck(path):
+    """Two slides, each in its OWN exclusive member (real Keynote layout): a text box,
+    an image and a group, plus KN.BuildArchive/KN.BuildChunkArchive objects and a
+    ``transition`` on the SlideArchive -- everything ``patch_slide_builds`` touches.
+
+    Slide 100: text 220 ("Hello"), image 230 (photo-500.png), group 250 (child 251,
+    "CHC Arao"); builds 900/901/902 target them 1:1; chunks 910/911/912; transition
+    none/1.0 (a pure inline dict, no nested reference).
+    Slide 101: text 320 ("World"), image 330 (photo-501.jpg), group 350 (child 351,
+    "Total Churches"); builds 903/904 target the text/image only; chunks 913/914;
+    transition dissolve/0.5.
+    """
+    text220 = _arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)})
+    storage221 = _arch(221, "TSWP.StorageArchive", {"text": ["Hello"]})
+    image230 = _arch(230, "TSD.ImageArchive", {"data": {"identifier": 500}, "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}})
+    child251 = _arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 252}, "super": _shape_super(0, 0, 30, 30)})
+    storage252 = _arch(252, "TSWP.StorageArchive", {"text": ["CHC Arao"]})
+    group250 = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 30, 30), "children": [{"identifier": 251}]})
+    build900 = _arch(900, "KN.BuildArchive", {"drawable": {"identifier": 220}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:dissolve"), "chunkIdSeed": 1})
+    build901 = _arch(901, "KN.BuildArchive", {"drawable": {"identifier": 230}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:wipe-iris"), "chunkIdSeed": 1})
+    build902 = _arch(902, "KN.BuildArchive", {"drawable": {"identifier": 250}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:bc-zoom-big"), "chunkIdSeed": 1})
+    chunk910 = _arch(910, "KN.BuildChunkArchive", {"build": {"identifier": 900}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "1", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "1", "upper": "1"}})
+    chunk911 = _arch(911, "KN.BuildChunkArchive", {"build": {"identifier": 901}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "2", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "2", "upper": "1"}})
+    chunk912 = _arch(912, "KN.BuildChunkArchive", {"build": {"identifier": 902}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "3", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "3", "upper": "1"}})
+    slide100 = _arch(
+        100,
+        "KN.SlideArchive",
+        {
+            "drawablesZOrder": [{"identifier": 220}, {"identifier": 230}, {"identifier": 250}],
+            "builds": [{"identifier": 900}, {"identifier": 901}, {"identifier": 902}],
+            "buildChunks": [{"identifier": 910}, {"identifier": 911}, {"identifier": 912}],
+            "transition": _transition_dict("none", 1.0),
+        },
+    )
+
+    text320 = _arch(320, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 321}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)})
+    storage321 = _arch(321, "TSWP.StorageArchive", {"text": ["World"]})
+    image330 = _arch(330, "TSD.ImageArchive", {"data": {"identifier": 501}, "super": _geom(300, 100, 120, 60), "originalSize": {"width": 120.0, "height": 60.0}})
+    child351 = _arch(351, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 352}, "super": _shape_super(0, 0, 30, 30)})
+    storage352 = _arch(352, "TSWP.StorageArchive", {"text": ["Total Churches"]})
+    group350 = _arch(350, "TSD.GroupArchive", {"super": _geom(500, 500, 30, 30), "children": [{"identifier": 351}]})
+    build903 = _arch(903, "KN.BuildArchive", {"drawable": {"identifier": 320}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:dissolve"), "chunkIdSeed": 1})
+    build904 = _arch(904, "KN.BuildArchive", {"drawable": {"identifier": 330}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:wipe-iris"), "chunkIdSeed": 1})
+    chunk913 = _arch(913, "KN.BuildChunkArchive", {"build": {"identifier": 903}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "4", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "4", "upper": "1"}})
+    chunk914 = _arch(914, "KN.BuildChunkArchive", {"build": {"identifier": 904}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "5", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "5", "upper": "1"}})
+    slide101 = _arch(
+        101,
+        "KN.SlideArchive",
+        {
+            "drawablesZOrder": [{"identifier": 320}, {"identifier": 330}, {"identifier": 350}],
+            "builds": [{"identifier": 903}, {"identifier": 904}],
+            "buildChunks": [{"identifier": 913}, {"identifier": 914}],
+            "transition": _transition_dict("apple:dissolve", 0.5),
+        },
+    )
+
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}, {"identifier": 11}]}})
+    node1 = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    node2 = _arch(11, "KN.SlideNodeArchive", {"slide": {"identifier": 101}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node1, node2]))
+        z.writestr(
+            "Index/Slide-100.iwa",
+            _member([slide100, text220, storage221, image230, child251, storage252, group250,
+                      build900, build901, build902, chunk910, chunk911, chunk912]),
+        )
+        z.writestr(
+            "Index/Slide-101.iwa",
+            _member([slide101, text320, storage321, image330, child351, storage352, group350,
+                      build903, build904, chunk913, chunk914]),
+        )
+        z.writestr("Data/photo-500.png", b"\x89PNG-fake-500")
+        z.writestr("Data/photo-501.jpg", b"\xff\xd8-fake-501")
     path.write_bytes(buf.getvalue())
     return path
 
@@ -1596,3 +1708,69 @@ def test_soft_fallbacks_not_counted_for_masked_image_with_full_spec(deck):
     res = patch_slide_geometry(deck, 1, specs)
     assert res.applied and not res.refused
     assert res.soft_fallbacks == 0
+
+
+# --------------------------------------------------------------------------
+# patch_slide_builds: surgical builds/buildChunks/transition rewrite (Part F).
+# --------------------------------------------------------------------------
+def test_patch_slide_builds_drops_the_unwanted_builds_and_leaves_the_rest(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    result = patch_slide_builds(deck, {"100": {"builds": ["901"], "buildChunks": ["911"], "transition": None}})
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert objects["100"]["builds"] == [{"identifier": "901"}]
+    assert objects["100"]["buildChunks"] == [{"identifier": "911"}]
+    # The untouched slide keeps every one of its own builds.
+    assert objects["101"]["builds"] == [{"identifier": "903"}, {"identifier": "904"}]
+
+
+def test_patch_slide_builds_writes_the_source_transition_verbatim(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    new_transition = _transition_dict("apple:magic-move-implied-motion-path", 1.2)
+    result = patch_slide_builds(
+        deck,
+        {"100": {"builds": ["900", "901", "902"], "buildChunks": ["910", "911", "912"], "transition": new_transition}},
+    )
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert objects["100"]["transition"] == new_transition
+
+
+def test_patch_slide_builds_refuses_a_transition_holding_a_reference(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    referencing = {"attributes": {"customImage": {"identifier": "777"}}}
+    result = patch_slide_builds(
+        deck,
+        {"100": {"builds": ["900"], "buildChunks": ["910"], "transition": referencing}},
+    )
+    assert result["refused"]
+    assert deck.read_bytes() == before  # deck untouched
+
+
+def test_patch_slide_builds_reorders_kept_builds_into_source_order(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    # An arbitrary (non-output, non-sorted) order: the write must preserve exactly
+    # what it is given -- ordering the survivors by source index is plan_build_patch's
+    # job (tested directly, no deck needed, in test_iwa_builds.py).
+    result = patch_slide_builds(
+        deck,
+        {"100": {"builds": ["902", "900", "901"], "buildChunks": ["912", "910", "911"], "transition": None}},
+    )
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert objects["100"]["builds"] == [{"identifier": "902"}, {"identifier": "900"}, {"identifier": "901"}]
+    assert objects["100"]["buildChunks"] == [{"identifier": "912"}, {"identifier": "910"}, {"identifier": "911"}]
+
+
+def test_patch_slide_builds_value_clean_touches_only_the_slide_archives(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    with zipfile.ZipFile(deck) as z:
+        before = {name: z.read(name) for name in z.namelist()}
+    result = patch_slide_builds(deck, {"100": {"builds": ["901"], "buildChunks": ["911"], "transition": None}})
+    assert not result["refused"]
+    with zipfile.ZipFile(deck) as z:
+        after = {name: z.read(name) for name in z.namelist()}
+    assert set(before) == set(after)  # no member added or removed
+    changed = [name for name in before if before[name] != after[name]]
+    assert changed == ["Index/Slide-100.iwa"]
