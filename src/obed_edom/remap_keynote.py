@@ -1101,10 +1101,11 @@ def remap_keynote(
                 )
             if badge_front_dead:
                 say(
-                    "WARNING stat-finalize: the GUI Bring-to-Front had NO effect on the first "
-                    "badge raise (selection/Accessibility) — every badge raise was skipped, "
-                    "badges keep their source stacking. Grant Accessibility to the launching "
-                    "process and re-run if a badge is buried."
+                    "WARNING stat-finalize: the GUI Bring-to-Front had NO effect on a badge "
+                    "raise (selection/Accessibility) — whether the triggering slide's badge "
+                    "was raised in full or not at all is NOT guaranteed, but later slides keep "
+                    "their source stacking. Grant Accessibility to the launching process and "
+                    "re-run if a badge is buried."
                 )
         else:
             say(

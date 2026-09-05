@@ -244,9 +244,9 @@ def _line_fields(rec: dict, obj: dict, spec: dict) -> list[tuple[str, dict]]:
 
 def _text_fields(rec: dict, spec: dict, reported: list[float],
                  stored: tuple[float, float, float, float, float]) -> list[tuple[str, dict]]:
-    """A stored height of ``0.0`` never reaches this function (the caller hard-misses it to
-    the AppleScript fallback -- ``naturalSize`` is Keynote's render cache and only a live
-    write refreshes it). ``naturalSize`` tracks ``geometry.size`` on both axes.
+    """A stored width or height of ``0.0`` never reaches this function (the caller hard-misses
+    it to the AppleScript fallback -- ``naturalSize`` is Keynote's render cache and only a
+    live write refreshes it). ``naturalSize`` tracks ``geometry.size`` on both axes.
     """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:  # left-aligned autosize x is exact absolute
@@ -588,16 +588,12 @@ def _slide_edits(
                     continue
                 ops = ops + child_ops
         elif kind == "text":
-            # An autosize text box (stored height == the 0.0 sentinel) carries its render
-            # frame in naturalSize, which Keynote refreshes ONLY when the live app writes
-            # that box -- the height is font-flow and is not derivable offline (measured:
-            # MISSIONS 83 -> 34, a ratio neither the affine's 0.485 nor the width's 0.38).
-            # Left at 0 Keynote re-shrink-wraps the box on open, discarding our width and
-            # re-anchoring it. Hard miss -> AppleScript fallback, which writes it correctly.
-            if stored[3] == 0.0:
+            # An autosize width or height (the 0.0 sentinel on either axis) is a Keynote
+            # render cache only the live app refreshes -- hard miss to the AppleScript fallback.
+            if stored[2] == 0.0 or stored[3] == 0.0:
                 missed_specs.append(spec)
                 continue
-            wants_h = spec.get("h") is not None and stored[3] != 0.0
+            wants_h = spec.get("h") is not None
             if (spec.get("w") is not None or wants_h) and not _natural_writable(obj, both_axes=wants_h):
                 missed_specs.append(spec)
                 continue

@@ -2779,12 +2779,15 @@ def plan_slide_transforms(
         )
     )
     if badge_raise_report is not None and _badge_hits:
-        # Take the frame from the emitted transform, not the mid-loop `mapped` value: a
-        # role="hide" member was deleted in pass 1 and is not on the slide to bury.
+        # Take the frame from the emitted transform's as_dict(), the AppleScript-facing
+        # values (a line is width=length/height=0 there, not the dataclass's bounding
+        # box), not the mid-loop `mapped` value. A member with no as_dict frame, or none
+        # at all, is reported without one so the frameless-row path voids the slide
+        # instead of silently burying it; role="hide" (deleted in pass 1) is the only
+        # case actually dropped.
         _by_key = {
             (t.kind, int(t.kind_index if t.kind_index is not None else t.item_index) + 1): t
             for t in out
-            if t.role != "hide"
         }
         _title_id = id(title_item) if title_item is not None else None
         _badge_order = list(badge_slots.keys())  # largest-area-first: plate is first
@@ -2795,13 +2798,16 @@ def plan_slide_transforms(
             if _hit is None:
                 continue
             _t = _by_key.get((_hit["kind"], _hit["index"]))
-            if _t is None:
-                continue  # hidden / dropped member: nothing to raise
-            badge_raise_report.append({
+            if _t is not None and _t.role == "hide":
+                continue  # deleted in pass 1: nothing on the slide to bury
+            row = {
                 "slide": number, "isTitle": _bid == _title_id,
                 "kind": _hit["kind"], "index": _hit["index"],
-                "x": _t.x, "y": _t.y, "w": _t.w, "h": _t.h,
-            })
+            }
+            _d = _t.as_dict() if _t is not None else {}
+            if {"w", "h"} <= _d.keys():
+                row.update(x=_d["x"], y=_d["y"], w=_d["w"], h=_d["h"])
+            badge_raise_report.append(row)
     return out
 
 

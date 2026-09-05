@@ -799,9 +799,20 @@ _STAT_ACCUMULATORS = (
     "badgeFrontDead",
 )
 
-# An autosize text box's live height is Keynote-derived and a rotated line's reported
-# height is its bounding box, not its length -- neither is a frame the planner can guard.
-_BADGE_MATCH_H = {"shape": True, "image": True, "group": True, "movie": True, "text": False, "line": False}
+# Position always matches. Width/height only match when the live frame is planner-
+# derived, not Keynote's own render cache: an autosize text box matches on neither axis,
+# a rotated line only on its length (width); its reported height is a bounding box, not
+# the length. kind -> (matchW, matchH).
+_BADGE_MATCH = {
+    "shape": (True, True), "image": (True, True), "group": (True, True), "movie": (True, True),
+    "line": (True, False), "text": (False, False),
+}
+
+
+def _as_fixed(value: float) -> str:
+    """Fixed-point AppleScript numeric literal -- Python's default float repr can emit
+    scientific notation (e.g. ``1e-05``), which osacompile does not parse as a number."""
+    return f"{float(value):.3f}"
 
 
 def _stat_job_handlers() -> list[str]:
@@ -939,9 +950,11 @@ def _stat_job_handlers() -> list[str]:
         "  if _d < 0 then set _d to -_d",
         "  return _d <= tol",
         "end obedWithinTol",
-        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol, matchH)",
-        "  if not (my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol) and "
-        "my obedWithinTol(pw, fw, tol)) then",
+        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol, matchW, matchH)",
+        "  if not (my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol)) then",
+        "    return false",
+        "  end if",
+        "  if matchW and not (my obedWithinTol(pw, fw, tol)) then",
         "    return false",
         "  end if",
         "  if matchH and not (my obedWithinTol(ph, fh, tol)) then",
@@ -949,11 +962,10 @@ def _stat_job_handlers() -> list[str]:
         "  end if",
         "  return true",
         "end obedFrameMatches",
-        # Every kind is resolved by frame, never blind index: direct-index guard, then a
-        # bulk scan of that kind's collection, unique hit only. `countFallback` lets the
-        # caller decide whether a bulk-scan hit counts against badgeFallbacks (phase 2's
-        # actual raise) or not (phase 1's resolve check, the post-raise liveness check).
-        "on obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchH, countFallback)",
+        # Every kind resolves by frame (direct-index guard, then a unique bulk-scan hit),
+        # never a blind index. countFallback: only phase 2's actual raise counts against
+        # badgeFallbacks, not the resolve/liveness checks.
+        "on obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, countFallback)",
         "  global theDoc, badgeFallbacks",
         "  set _tol to 3",
         "  set _hit to 0",
@@ -987,7 +999,7 @@ def _stat_job_handlers() -> list[str]:
         "            set _w to width of movie idx",
         "            set _h to height of movie idx",
         "          end if",
-        "          set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol, matchH)",
+        "          set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol, matchW, matchH)",
         "        end try",
         "        if _match then",
         "          set _hit to idx",
@@ -1026,7 +1038,7 @@ def _stat_job_handlers() -> list[str]:
         "            repeat with _k from 1 to count of _positions",
         "              set _pk to item _k of _positions",
         "              if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
-        "item _k of _heights, fx, fy, fw, fh, _tol, matchH) then",
+        "item _k of _heights, fx, fy, fw, fh, _tol, matchW, matchH) then",
         "                set _hitCount to _hitCount + 1",
         "                set _hitIdx to _k",
         "              end if",
@@ -1066,16 +1078,18 @@ def _stat_job_handlers() -> list[str]:
         "  end tell",
         "  return _n",
         "end obedKindCount",
-        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchH)",
+        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
         "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, report",
-        "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchH, true)",
+        "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, true)",
         "  if _hit is 0 then",
         "    set badgeUnresolved to badgeUnresolved + 1",
+        '    set report to report & " badgePhase2Miss(s=" & slideNo & ",k=" & theKind & ")"',
         "    return",
         "  end if",
+        "  set _found to false",
         "  " + _keynote_tell(),
-        "    tell slide slideNo of theDoc",
-        "      try",
+        "    try",
+        "      tell slide slideNo of theDoc",
         '        if theKind is "shape" then',
         "          set selection of theDoc to {shape _hit}",
         '        else if theKind is "image" then',
@@ -1089,13 +1103,15 @@ def _stat_job_handlers() -> list[str]:
         '        else if theKind is "movie" then',
         "          set selection of theDoc to {movie _hit}",
         "        end if",
-        "      end try",
-        "    end tell",
+        "        set _found to true",
+        "      end tell",
+        "    end try",
         "  end tell",
+        "  if not _found then return",
         "  my obedFront()",
         "  if badgeMoved is 0 and badgeFrontDead is 0 then",
         "    set _kindCount to my obedKindCount(slideNo, theKind)",
-        "    set _foundAt to my obedBadgeFind(slideNo, theKind, _kindCount, fx, fy, fw, fh, matchH, false)",
+        "    set _foundAt to my obedBadgeFind(slideNo, theKind, _kindCount, fx, fy, fw, fh, matchW, matchH, false)",
         "    if _foundAt is _kindCount and _foundAt > 0 then",
         "      set badgeMoved to badgeMoved + 1",
         "    else",
@@ -1109,12 +1125,15 @@ def _stat_job_handlers() -> list[str]:
         # All-or-nothing per slide: every member must resolve before anything is raised,
         # so a partial raise (which buries the un-raised members under the plate) never
         # happens. members[1] is the plate (largest area), so it lands at the bottom.
+        # Once badgeFrontDead trips mid-slide the plate has already moved, so phase 2
+        # keeps raising the rest of THIS slide (the safe outcome); only the entry guard
+        # above skips every LATER slide.
         "on obedBadgeSlide(slideNo, members)",
         "  global badgeUnresolved, badgeFrontDead, report",
         "  if badgeFrontDead is 1 then return",
         "  repeat with _e in members",
         "    set _r to contents of _e",
-        "    if my obedBadgeFind(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mh of _r, false) is 0 then",
+        "    if my obedBadgeFind(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r, false) is 0 then",
         "      set badgeUnresolved to badgeUnresolved + (count of members)",
         '      set report to report & " badgeSkip(s=" & slideNo & ",k=" & (k of _r) & ")"',
         "      return",
@@ -1122,8 +1141,7 @@ def _stat_job_handlers() -> list[str]:
         "  end repeat",
         "  repeat with _e in members",
         "    set _r to contents of _e",
-        "    my obedRaiseItem(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mh of _r)",
-        "    if badgeFrontDead is 1 then return",
+        "    my obedRaiseItem(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r)",
         "  end repeat",
         "end obedBadgeSlide",
         "on obedFront()",
@@ -1260,15 +1278,18 @@ def _build_stat_finalize_script(
         rows = [r for r in badge_by_slide[slide] if {"x", "y", "w", "h"} <= r.keys()]
         if len(rows) != len(badge_by_slide[slide]):
             continue  # a frameless row: pre-counted at init
-        members = ", ".join(
-            '{{k:"{k}", i:{i}, x:{x}, y:{y}, w:{w}, h:{h}, mh:{mh}}}'.format(
-                k=_as_escape(str(r.get("kind") or "shape")),
-                i=int(r.get("index") or 0),
-                x=float(r["x"]), y=float(r["y"]), w=float(r["w"]), h=float(r["h"]),
-                mh="true" if _BADGE_MATCH_H.get(str(r.get("kind") or "shape"), False) else "false",
+        members = []
+        for r in rows:
+            _kind = str(r.get("kind") or "shape")
+            _mw, _mh = _BADGE_MATCH.get(_kind, (False, False))
+            members.append(
+                '{{k:"{k}", i:{i}, x:{x}, y:{y}, w:{w}, h:{h}, mw:{mw}, mh:{mh}}}'.format(
+                    k=_as_escape(_kind), i=int(r.get("index") or 0),
+                    x=_as_fixed(r["x"]), y=_as_fixed(r["y"]), w=_as_fixed(r["w"]), h=_as_fixed(r["h"]),
+                    mw="true" if _mw else "false", mh="true" if _mh else "false",
+                )
             )
-            for r in rows
-        )
+        members = ", ".join(members)
         lines += [f"  my obedBadgeSlide({slide}, {{{members}}})"]
     lines += [
         "  try",

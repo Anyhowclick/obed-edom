@@ -203,9 +203,10 @@ def _build_deck(path, *, shapes=(200,), extra_drawables=("line", "text", "image"
         zorder.append(210)
     if "text" in extra_drawables:
         slide_member.append(_arch(221, "TSWP.StorageArchive", {"text": ["Hello"]}))
-        # Fixed (non-sentinel) stored height: a stored h==0.0 is now a hard miss to the
-        # AppleScript fallback (Fix 2), and this deck exercises the offline text writer.
-        slide_member.append(_arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 0, 60, nw=200, nh=60)}))
+        # Fixed (non-sentinel) stored width AND height: a stored w==0.0 or h==0.0 is a
+        # hard miss to the AppleScript fallback (Fix 2), and this deck exercises the
+        # offline text writer.
+        slide_member.append(_arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)}))
         zorder.append(220)
     if "image" in extra_drawables:
         # IDENTITY mask (mask == image frame, no crop): mask at (0,0,120,60) is the whole
@@ -1286,6 +1287,25 @@ def test_autosize_height_text_hard_misses_to_the_fallback():
     order = [("100", False)]
     id_to_file = {"1": "M"}
     specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "x": 107.15, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_autosize_width_text_hard_misses_to_the_fallback():
+    # Symmetric with the height sentinel: stored width == 0.0 is Keynote's own render
+    # cache too (naturalSize.width), and only a live write refreshes it -- a real stored
+    # height alongside it must not let this slip through as a silent partial write.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0.0, 34.0, nw=300.3, nh=34.0)},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "h": 34.0, "y": 391.0, "role": "other"}]
     _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
         1, specs, objects, id_to_file, order)
     assert refuse_reason is None
