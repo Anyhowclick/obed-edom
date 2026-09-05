@@ -1731,6 +1731,8 @@ def badge_members(slide: dict, title: dict) -> list[dict]:
     for item in slide.get("items") or []:
         if item is title or is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
             continue
+        if item.get("duplicateOf"):
+            continue
         cx, cy = item_center(item)
         if point_in_rect(cx, cy, src, TITLE_NEAR_PAD):
             out.append(item)

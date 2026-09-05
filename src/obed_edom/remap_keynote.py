@@ -1107,6 +1107,10 @@ def remap_keynote(
                     "their source stacking. Grant Accessibility to the launching process and "
                     "re-run if a badge is buried."
                 )
+            if badge_raises:
+                detail = child_resize_result.get("detail") or ""
+                if detail:
+                    say(f"Badge raise detail: {detail}")
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "

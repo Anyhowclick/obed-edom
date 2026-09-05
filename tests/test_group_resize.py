@@ -20,6 +20,7 @@ from obed_edom.map_remap import (
     ItemTransform,
     _resync_badge_rows_after_placement,
     adjust_child_resize_indexes,
+    badge_members,
     plan_slide_transforms,
 )
 
@@ -336,6 +337,23 @@ def test_badge_raise_report_resyncs_to_a_free_text_placement():
     assert (report[0]["w"], report[0]["h"]) == (296.0, 40.0)
 
 
+def test_badge_members_excludes_the_titles_own_shape_duplicate():
+    """A title with a plate has a shape:0 duplicateOf twin at its own rect (the same
+    physical object recorded once as kind:"text" via title_plate's dual, once as
+    kind:"shape") -- badge_members must not also pick it up as a member, or the same
+    object gets raised and probed twice for one physical object."""
+    title = _item(index=0, kindIndex=0, kind="text", text="Numbers 16", x=100.0, y=100.0, w=200.0, h=40.0)
+    dup = _item(
+        index=1, kindIndex=0, kind="shape", x=100.0, y=100.0, w=200.0, h=40.0,
+        duplicateOf={"kind": "text", "kindIndex": 0},
+    )
+    # w=200 clears PIN_KIND_MAX=180 on at least one axis, or is_pin_item would treat it
+    # as a pin-sized shape and drop it before the duplicateOf filter is ever exercised.
+    genuine = _item(index=2, kindIndex=1, kind="shape", x=150.0, y=145.0, w=200.0, h=20.0)
+    slide = {"number": 1, "items": [title, dup, genuine]}
+    assert badge_members(slide, title) == [genuine]
+
+
 # --- Generated AppleScript -------------------------------------------------------
 
 
@@ -544,26 +562,34 @@ def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_p
 
     import obed_edom.keynote as keynote_mod
 
-    raw = (
-        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
-        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=2 "
-        "badgeUnresolved=3 badgeMoved=4 badgeFrontDead=0 detail="
-    )
+    state = {"raw": ""}
 
     def fake_run(args, *a, **kw):
         if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=raw, stderr="")
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=2 "
+        "badgeUnresolved=3 badgeMoved=4 badgeFrontDead=0 "
+        "detail= badgeProbeUnknown(s=1,k=text) badgeSkip(s=3,k=shape)"
+    )
     result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
     assert result["badgeFallback"] == 2
     assert result["badgeUnresolved"] == 3
     assert result["badgeMoved"] == 4
     assert result["badgeFrontDead"] == 0
+    assert result["detail"] == "badgeProbeUnknown(s=1,k=text) badgeSkip(s=3,k=shape)"
+
+    state["raw"] = "done=1 skipped=0 sized=0 sizeSkips=0 front=0"
+    result_no_detail = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result_no_detail["detail"] == ""
 
 
 def test_obed_badge_find_unknown_kind_resolves_to_zero():
@@ -817,16 +843,116 @@ def test_obed_kind_count_zero_is_not_a_dead_raise():
         ],
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
-    guard_at = handler.index("if _kindCount > 0 then")
-    err_at = handler.index("badgeCountErr(s=", guard_at)
-    count_else_at = handler.rindex("else", guard_at, err_at)
-    dead_block = handler[guard_at:count_else_at]
-    err_block = handler[count_else_at : handler.index("end if", err_at)]
-    assert "set badgeFrontDead to 1" in dead_block
-    assert "set badgeMoved to badgeMoved + 1" in dead_block
+    guard_at = handler.index("if _kindCount is 0 then")
+    else_at = handler.index("else", guard_at)
+    err_block = handler[guard_at:else_at]
     assert "badgeCountErr(s=" in err_block
     assert "badgeFrontDead" not in err_block
     assert "badgeMoved" not in err_block
+
+
+def test_obed_top_real_trims_trailing_placeholders():
+    """obedTopReal walks down from the raw kind count past Keynote's trailing empty-
+    placeholder members (appended last by JXA, never in the slide's z-order) to find
+    the highest REAL member -- the invariant Bring-to-Front can actually satisfy."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "text", "index": 1, "isTitle": True, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    assert "on obedTopReal(slideNo, theKind, kindCount)" in script
+    handler = script[script.index("on obedTopReal") : script.index("end obedTopReal")]
+    assert "set _top to kindCount" in handler
+    repeat_at = handler.index("repeat while _top > 0")
+    find_at = handler.index(
+        "my obedBadgeFind(slideNo, theKind, _top, 0, 0, 1, 1, true, true, false)", repeat_at
+    )
+    assert find_at > repeat_at
+    assert "is not _top then exit repeat" in handler
+    assert "set _top to _top - 1" in handler
+    raise_handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert "my obedTopReal(slideNo, theKind, _kindCount)" in raise_handler
+
+
+def test_badge_liveness_probes_the_top_real_index_not_the_kind_count():
+    """The post-raise liveness check must probe obedBadgeFind at _topReal (the highest
+    REAL member), not raw _kindCount -- trailing layout placeholders inflate _kindCount
+    and Bring-to-Front can never move a real object past them."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "text", "index": 1, "isTitle": True, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert (
+        "my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)"
+        in handler
+    )
+    assert (
+        "my obedBadgeFind(slideNo, theKind, _kindCount, fx, fy, fw, fh, matchW, matchH, false)"
+        not in handler
+    )
+    top_if_at = handler.index("if badgeMoved is 0 and badgeFrontDead is 0 then")
+    top_else_at = handler.index("else if badgeFrontDead is 0 then", top_if_at)
+    probe_block = handler[top_if_at:top_else_at]
+    moved_at = probe_block.index("if _foundAt is _topReal then")
+    assert probe_block.count("set badgeMoved to badgeMoved + 1") == 1
+    assert probe_block.index("set badgeMoved to badgeMoved + 1") > moved_at
+
+
+def test_badge_front_dead_needs_a_testable_probe():
+    """badgeFrontDead only fires when the probe was BOTH testable (_topReal >= 2, the
+    pre-raise hit was below it) AND conclusive (the re-probe resolved to a real, non-
+    zero index still short of _topReal). Every other outcome -- unreadable count,
+    untestable topReal/hit, unresolvable re-probe -- is badgeProbeUnknown with no state
+    change, so a later raise still gets to prove liveness."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "text", "index": 1, "isTitle": True, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert handler.count("set badgeFrontDead to 1") == 1
+    dead_at = handler.index("set badgeFrontDead to 1")
+    preceding = handler[:dead_at].rstrip()
+    assert preceding.endswith("else")
+
+    unknown_cond_at = handler.index(
+        "if _topReal < 2 or _hit is 0 or _hit is not less than _topReal then"
+    )
+    unknown_block = handler[unknown_cond_at : handler.index("else", unknown_cond_at)]
+    assert "badgeProbeUnknown(s=" in unknown_block
+    assert "badgeMoved" not in unknown_block
+    assert "badgeFrontDead" not in unknown_block
+
+    zero_cond_at = handler.index("else if _foundAt is 0 then")
+    zero_body_at = zero_cond_at + len("else if _foundAt is 0 then")
+    zero_block = handler[zero_body_at : handler.index("else", zero_body_at)]
+    assert "badgeProbeUnknown(s=" in zero_block
+    assert "badgeMoved" not in zero_block
+    assert "badgeFrontDead" not in zero_block
+
+
+def test_badge_probe_unknown_does_not_latch_or_count():
+    """Every badgeProbeUnknown outcome must leave badgeMoved and badgeFrontDead
+    untouched -- it is deliberately inconclusive, not a verdict -- and the outer guard
+    must still read `badgeMoved is 0 and badgeFrontDead is 0` so a later raise re-probes."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "text", "index": 1, "isTitle": True, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert "if badgeMoved is 0 and badgeFrontDead is 0 then" in handler
+    unknown_lines = [line for line in handler.splitlines() if "badgeProbeUnknown(s=" in line]
+    assert len(unknown_lines) == 2
+    for line in unknown_lines:
+        assert "badgeMoved" not in line
+        assert "badgeFrontDead" not in line
 
 
 def test_stat_finalize_script_compiles_at_scale():
