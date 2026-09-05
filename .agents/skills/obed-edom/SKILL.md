@@ -358,10 +358,12 @@ text width, but lines and groups still need their specialised offline handling.
 Round geometry to whole points where matching Keynote values; sub-pixel noise can
 change affine fitting.
 
-`compose_geometry` is unreliable for AUTOSIZE text boxes: Keynote's live y is
-`stored y + h/2`, not the stored y, and a box built this way can be missed entirely by
-a geometry match. Never geometry-match autosize text — match on its text content, or
-read it live.
+For AUTOSIZE text, `compose_geometry`'s top (`stored y − naturalSize.h/2`) IS the visual
+truth, verified against previews; AppleScript `position` reports the centre-anchored
+stored y, i.e. composed top + h/2. Planned/offline rects and live rects therefore differ
+by `h/2` in y for autosize text only — compensate when comparing or packing them (e.g. a
+409-tall column packed at y=16 would otherwise land half off the top). Text-content
+identity remains the robust way to address text items across a reuse copy.
 
 ### Offline writes
 
