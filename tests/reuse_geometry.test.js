@@ -97,6 +97,7 @@ function colNameFor(kind) {
 function specFor(arr, index) {
   return {
     index: index,
+    arr: arr, // backing collection this specifier addresses — lets one Keynote fake span kinds
     position: function () {
       const rec = arr[index];
       return [rec.x, rec.y];
@@ -115,21 +116,29 @@ function specFor(arr, index) {
   };
 }
 
-function specSlideOf(kind, arr) {
+function specSlideOf(kind, arr, kind2, arr2) {
   const slide = {};
   slide[colNameFor(kind)] = function () {
     const specs = [];
     for (let i = 0; i < arr.length; i++) specs.push(specFor(arr, i));
     return specs;
   };
+  if (kind2) {
+    slide[colNameFor(kind2)] = function () {
+      const specs = [];
+      for (let i = 0; i < arr2.length; i++) specs.push(specFor(arr2, i));
+      return specs;
+    };
+  }
   return slide;
 }
 
 function keynoteForSpecs(arr) {
   return {
     delete: function (spec) {
-      if (spec.index >= arr.length) throw new Error("stale specifier: index " + spec.index + " >= " + arr.length);
-      arr.splice(spec.index, 1);
+      const backing = spec.arr || arr;
+      if (spec.index >= backing.length) throw new Error("stale specifier: index " + spec.index + " >= " + backing.length);
+      backing.splice(spec.index, 1);
     },
   };
 }
@@ -543,6 +552,30 @@ test("deleteRefs (text): falls back to geometry when two boxes share the text", 
   assert.strictEqual(arr.length, 2);
   assert.strictEqual(flags.length, 1);
   assert.ok(/geom split/.test(flags[0]));
+});
+
+test("deleteRefs (mixed kind): interleaved text and shape refs each delete within their own collection", function () {
+  // Text and shapes are separate JXA collections; the single global descending pass
+  // (sorted by raw index, not by kind) must still resolve correctly within each one.
+  const texts = [];
+  const shapes = [];
+  for (let i = 0; i < 4; i++) {
+    texts.push({ x: i * 100, y: 0, w: 50, h: 30, text: "t" + i });
+    shapes.push({ x: i * 100, y: 500, w: 40, h: 40 });
+  }
+  const refs = [
+    { kind: "text", x: 0, y: 0, w: 50, h: 30 },
+    { kind: "shape", x: 100, y: 500, w: 40, h: 40 },
+    { kind: "text", x: 200, y: 0, w: 50, h: 30 },
+    { kind: "shape", x: 300, y: 500, w: 40, h: 40 },
+  ];
+  const slide = specSlideOf("text", texts, "shape", shapes);
+  const flags = [];
+  const n = m.deleteRefs(keynoteForSpecs(), slide, refs, flags);
+  assert.strictEqual(n, 4);
+  assert.deepStrictEqual(texts.map((e) => e.text), ["t1", "t3"]);
+  assert.deepStrictEqual(shapes.map((e) => e.x), [0, 200]);
+  assert.deepStrictEqual(flags, []);
 });
 
 console.log("\n" + passed + " passed");

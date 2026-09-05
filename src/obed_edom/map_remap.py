@@ -3291,7 +3291,8 @@ def plan_slide_reuses(
         kept_mutate: list[tuple[dict, dict]] = []
         for donor_it, it in mutate:
             if _hidden(spec_map, it):
-                remove.append(donor_it)
+                if not any(x is donor_it for x in remove):
+                    remove.append(donor_it)
             else:
                 kept_mutate.append((donor_it, it))
         mutate = kept_mutate
@@ -3339,8 +3340,7 @@ def plan_slide_reuses(
                 text = (it.get("text") or "").strip()
                 if text:
                     payload["matchText"] = text
-            if payload.get("role") != "hide":
-                mutate_specs.append(payload)
+            mutate_specs.append(payload)
         # Select-all paste: strip everything on the original except the add-delta first, or leftovers ride onto the finished slide.
         add_keys = {(str(p.get("kind") or ""), int(p.get("kindIndex") or 0)) for p in add_specs}
         strip_items = [

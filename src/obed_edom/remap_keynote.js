@@ -559,8 +559,12 @@ function applyReuse(doc, Keynote, job, missReasons) {
   const afterCounts = collectionCounts(copy);
   const removedByKind = {};
   ["text", "image", "shape", "movie", "group", "line"].forEach(function (kind) {
-    const before = beforeCounts[kindColName(kind)] || 0;
-    const after = afterCounts[kindColName(kind)] || 0;
+    const before = beforeCounts[kindColName(kind)];
+    const after = afterCounts[kindColName(kind)];
+    if (before < 0 || after < 0) {
+      if (missReasons.length < 8) missReasons.push("slide " + to + " " + kind + " count failed, drop not measured");
+      return;
+    }
     if (before > after) removedByKind[kind] = before - after;
   });
   const add = job.add || [];

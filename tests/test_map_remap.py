@@ -4093,6 +4093,29 @@ def test_reuse_mutate_whose_target_is_hidden_becomes_a_donor_remove():
     assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (100, 100, 200, 50)
 
 
+def test_reuse_mutate_donor_not_doubled_when_two_hidden_targets_share_text():
+    """N1: prev_by_id keys a donor by text alone, so two incoming targets with the
+    same text both pair to the same donor item. If both targets are hidden, D2 must
+    still append that donor to `remove` once, not once per target."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    donor_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    target_a = _item(kind="text", kindIndex=0, text="CHC Alpha", x=500, y=500, w=200, h=50)
+    target_b = _item(kind="text", kindIndex=1, text="CHC Alpha", x=600, y=600, w=200, h=50)
+    wall = _reuse_wall_base(dict(donor_text), extra_slide2_items=(dict(target_a), dict(target_b)))
+    hide_a = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=500, y=500, w=200, h=50, kind_index=0, role="hide"
+    )
+    hide_b = ItemTransform(
+        slide_number=2, item_index=42, kind="text", x=600, y=600, w=200, h=50, kind_index=1, role="hide"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide_a, hide_b])}[2]
+    assert job["mutate"] == []
+    removed = [r for r in job["remove"] if r.get("kind") == "text"]
+    assert len(removed) == 1
+    assert removed[0]["matchText"] == "CHC Alpha"
+
+
 def test_reuse_mutate_whose_target_is_visible_still_mutates():
     """Guard over-application: the same fixture with the target's box left visible
     (role != hide) must still ride the normal mutate path; the donor's copy must
