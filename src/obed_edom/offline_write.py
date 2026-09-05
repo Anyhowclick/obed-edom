@@ -25,12 +25,15 @@ from typing import Any
 from obed_edom import keynote_app
 from obed_edom.keynote import _as_escape, _keynote_tell, _keynote_terms
 
-_OFFLINE_EXACT_KINDS = frozenset({"shape", "line"})
+# Line omitted: a line spec's x/y is an ordinary bbox, a composed line's is `_line_rect`'s
+# anchor — see `_spec_box`. Comparing them is a guaranteed-failing number on ANY deck.
+_OFFLINE_EXACT_KINDS = frozenset({"shape"})
 _OFFLINE_MEDIA_KINDS = frozenset({"image", "movie"})
-# Masked image/movie omitted: `iwa_write._slide_edits` only falls back to the `reported`
-# bulk seed for a masked image's x/y (never w/h — those read the mask geometry), and only
-# when the spec's x/y is None; `ItemTransform.as_dict()` always emits x/y, so a masked
-# image spec never actually needs a live seed in practice.
+# Masked image/movie omitted: `iwa_write._slide_edits` writes a masked image/movie from an
+# identity mask (`_masked_media_fields`) or hard-misses a real crop -- either way it only
+# falls back to the `reported` bulk seed for x/y (never w/h — those read the mask geometry),
+# and only when the spec's x/y is None; `ItemTransform.as_dict()` always emits x/y, so a
+# masked image spec never actually needs a live seed in practice.
 _OFFLINE_SOFT_SEED_KINDS = frozenset({"group", "text"})
 
 # Live-verify tolerance per kind (px), consumed by `_say_verify_report`'s per-kind lookup;
@@ -142,6 +145,10 @@ def _fallback_specs_by_slide(
             specs = list(specs_by_slide.get(n) or [])
         else:
             specs = list(getattr(res, "missed_specs", None) or [])
+            if specs:
+                # `bridge_specs_kindindex` needs the slide's hides to shift wall → saved;
+                # `_build_slide_geometry_script` skips them, so they only feed the bridge.
+                specs += [s for s in specs_by_slide.get(n) or [] if s.get("role") == "hide"]
         if specs:
             out[n] = specs
     return out
@@ -225,16 +232,21 @@ def build_fallback_scripts(
 
 def _run_fallback_scripts(
     dest: Path, scripts: list[str], say: Callable[[str], None]
-) -> tuple[bool, list[Path]]:
+) -> tuple[bool, list[Path], list[str]]:
     """Run each `build_fallback_scripts` session via osascript; dump + say on failure.
 
-    Returns `(ok, failed_dumps)` — `ok` is False if any session failed; `failed_dumps`
-    lists the `.applescript` file(s) kept beside `dest` for inspection.
+    Returns `(ok, failed_dumps, unwritable)` — `ok` is False if any session failed;
+    `failed_dumps` lists the `.applescript` file(s) kept beside `dest` for inspection;
+    `unwritable` lists the `GEOM_UNWRITABLE_MARKER` log line(s) parsed out of stderr —
+    per-spec addresses `_build_slide_geometry_script` could not write, even on success.
     """
+    from obed_edom.remap_keynote import GEOM_UNWRITABLE_MARKER  # noqa: PLC0415 (avoid a module cycle)
+
     subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
     ok = True
     failed_dumps: list[Path] = []
+    unwritable: list[str] = []
     for i, script in enumerate(scripts):
         with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
             handle.write(script)
@@ -245,6 +257,11 @@ def _run_fallback_scripts(
             )
         finally:
             script_path.unlink(missing_ok=True)
+        unwritable += [
+            ln.strip()
+            for ln in (proc.stderr or "").splitlines()
+            if GEOM_UNWRITABLE_MARKER in ln
+        ]
         if proc.returncode != 0:
             ok = False
             suffix = (
@@ -259,7 +276,7 @@ def _run_fallback_scripts(
                 f"Offline-write AppleScript fallback session {i + 1}/{len(scripts)} failed "
                 f"(script kept: {debug}): {proc.stderr or proc.stdout}"
             )
-    return ok, failed_dumps
+    return ok, failed_dumps, unwritable
 
 
 def _patch_offline_slides(
@@ -286,7 +303,7 @@ def _patch_offline_slides(
         try:
             from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
 
-            bulk = bulk_geometry(dest, slides=sorted(soft_slides))
+            bulk = bulk_geometry(dest, slides=sorted(soft_slides), log=say)
             reported_by_slide = _reported_from_bulk_rows(bulk)
         except Exception as exc:  # noqa: BLE001 — never patch soft classes blind
             say(
@@ -359,6 +376,26 @@ def _composed_frames(dest: Path, slides: set[int]) -> dict[int, list[dict[str, A
     return out
 
 
+def _natural_audit(dest: Path, slides: set[int]) -> dict[int, list[dict[str, Any]]]:
+    """Per-slide render-derived-field consistency, post-patch. One extra decode (measured
+    1.9 s on the 2.5 GB Gold deck); verify mode only, same diagnostic stance as
+    ``_composed_frames``."""
+    from obed_edom.iwa_geometry import audit_natural_consistency  # noqa: PLC0415
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = _load_deck(dest)
+    order = slide_order(objects)
+    out = {}
+    for n in slides:
+        if not (1 <= n <= len(order)):
+            continue
+        slide = objects.get(order[n - 1][0])
+        if slide is None:
+            continue
+        out[n] = audit_natural_consistency(slide, objects)
+    return out
+
+
 def _spec_box(
     spec: dict[str, Any], rec: dict[str, Any]
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
@@ -406,12 +443,12 @@ def verify_offline_frames(
     planned_specs_by_slide: dict[int, list[dict[str, Any]]],
     composed_by_slide: dict[int, list[dict[str, Any]]],
 ) -> dict[str, tuple[float, int, list[dict[str, Any]]]]:
-    """Planned vs offline-composed frame for the exact classes only: shape, line, and
-    UNMASKED image/movie (`geom_source == "iwa"`; masked/group/text need a live seed and
-    are excluded here). `composed_by_slide` is keyed by SAVED (post-deleteHides)
-    kindIndex, so each slide's specs are bridged (wall → saved) before the lookup — the
-    same bridge the patcher and the AppleScript fallback both use. Returns
-    `{kind: (max_delta, n, worst5)}`."""
+    """Planned vs offline-composed frame for the exact classes only: shape and UNMASKED
+    image/movie (`geom_source == "iwa"`; masked/group/text need a live seed and are
+    excluded here; line is skipped too — see the `_OFFLINE_EXACT_KINDS` comment).
+    `composed_by_slide` is keyed by SAVED (post-deleteHides) kindIndex, so each slide's
+    specs are bridged (wall → saved) before the lookup — the same bridge the patcher and
+    the AppleScript fallback both use. Returns `{kind: (max_delta, n, worst5)}`."""
     from obed_edom.iwa_write import bridge_specs_kindindex  # noqa: PLC0415 (optional iwa extra)
 
     per_kind: dict[str, list[dict[str, Any]]] = {}
@@ -554,16 +591,25 @@ def run_offline_write(
     say(f"Offline-write ({mode}): patching {len(offline_slides)} slide(s) in place…")
     patch_results = _patch_offline_slides(dest, offline_slides, specs_by_slide, wall, say)
     fallback_by_slide = _fallback_specs_by_slide(offline_slides, specs_by_slide, patch_results)
+    # Hides ride along only to feed the bridge; count the specs the script actually writes.
+    fallback_counts = {
+        str(n): sum(1 for s in v if s.get("role") != "hide")
+        for n, v in fallback_by_slide.items()
+    }
     fallback_ok = True
+    fallback_unwritable: list[str] = []
     if fallback_by_slide:
-        fallback_specs_n = sum(len(v) for v in fallback_by_slide.values())
+        fallback_specs_n = sum(fallback_counts.values())
         say(
             f"Offline-write fallback: {len(fallback_by_slide)} slide(s) "
             f"({fallback_specs_n} spec(s)) via AppleScript."
         )
         bodies = _fallback_bodies(fallback_by_slide)
         scripts = build_fallback_scripts(dest, bodies)
-        fallback_ok, failed_dumps = _run_fallback_scripts(dest, scripts, say)
+        fallback_ok, failed_dumps, fallback_unwritable = _run_fallback_scripts(dest, scripts, say)
+        if fallback_unwritable:
+            say(f"Offline-write fallback could NOT address {len(fallback_unwritable)} spec(s) "
+                f"— those objects still carry wall geometry: {fallback_unwritable[:10]}")
         if not fallback_ok:
             raise RuntimeError(
                 "offline-write fallback failed; see "
@@ -571,22 +617,38 @@ def run_offline_write(
                 "geometry, nothing else will write them."
             )
     offline_verify_pass: bool | None = None
+    natural_gating = 0
+    natural_informational = 0
     if mode == "verify":
         composed = _composed_frames(dest, offline_slides)
         offline_report = verify_offline_frames(specs_by_slide, composed)
+        issues = _natural_audit(dest, offline_slides)
+        gating = {n: [i for i in v if i.get("gating", True)] for n, v in issues.items()}
+        gating = {n: v for n, v in gating.items() if v}
+        natural_gating = sum(len(v) for v in gating.values())
+        natural_informational = sum(1 for v in issues.values() for i in v if not i.get("gating", True))
+        if natural_gating:
+            worst = next(iter(gating.values()))[:3]
+            say(f"Offline-write verify: naturalSize/originalSize/mask consistency FAILED: "
+                f"{natural_gating} violation(s) on slide(s) {sorted(gating)} — {worst}")
+        else:
+            say("Offline-write verify: naturalSize/originalSize/mask consistency PASS.")
         offline_verify_pass = _say_verify_report(
             "offline-write verify", offline_report, OFFLINE_VERIFY_TOL, say
-        )
+        ) and not natural_gating
     result: dict[str, Any] = {
         "mode": mode,
         "slides": sorted(offline_slides),
         "refused": sorted(n for n, r in patch_results.items() if getattr(r, "refused", False)),
-        "fallbackSpecs": {n: len(v) for n, v in fallback_by_slide.items()},
+        "fallbackSpecs": fallback_counts,
+        "fallbackUnwritable": len(fallback_unwritable),
         "applied": sum(getattr(r, "applied", 0) for r in patch_results.values()),
         "missedSpecs": sum(
             len(getattr(r, "missed_specs", None) or []) for r in patch_results.values()
         ),
         "softFallbacks": sum(getattr(r, "soft_fallbacks", 0) for r in patch_results.values()),
+        "naturalConsistencyIssues": natural_gating,
+        "naturalConsistencyInformational": natural_informational,
         "valueClean": all(
             getattr(r, "value_clean", False)
             for r in patch_results.values()

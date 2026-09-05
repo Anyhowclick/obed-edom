@@ -795,7 +795,22 @@ _STAT_ACCUMULATORS = (
     "unresolved",
     "badgeFallbacks",
     "badgeUnresolved",
+    "badgeMoved",
+    "badgeFrontDead",
 )
+
+# Position always matches; w/h only match where the live frame isn't Keynote's own
+# render cache. kind -> (matchW, matchH).
+_BADGE_MATCH = {
+    "shape": (True, True), "image": (True, True), "group": (True, True), "movie": (True, True),
+    "line": (True, False), "text": (False, False),
+}
+
+
+def _as_fixed(value: float) -> str:
+    """Fixed-point AppleScript numeric literal -- Python's default float repr can emit
+    scientific notation (e.g. ``1e-05``), which osacompile does not parse as a number."""
+    return f"{float(value):.3f}"
 
 
 def _stat_job_handlers() -> list[str]:
@@ -933,140 +948,223 @@ def _stat_job_handlers() -> list[str]:
         "  if _d < 0 then set _d to -_d",
         "  return _d <= tol",
         "end obedWithinTol",
-        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol)",
-        "  if my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol) and "
-        "my obedWithinTol(pw, fw, tol) and my obedWithinTol(ph, fh, tol) then",
-        "    return true",
+        "on obedFrameMatches(px, py, pw, ph, fx, fy, fw, fh, tol, matchW, matchH)",
+        "  if not (my obedWithinTol(px, fx, tol) and my obedWithinTol(py, fy, tol)) then",
+        "    return false",
         "  end if",
-        "  return false",
+        "  if matchW and not (my obedWithinTol(pw, fw, tol)) then",
+        "    return false",
+        "  end if",
+        "  if matchH and not (my obedWithinTol(ph, fh, tol)) then",
+        "    return false",
+        "  end if",
+        "  return true",
         "end obedFrameMatches",
-        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh)",
-        "  global theDoc, badgeFallbacks, badgeUnresolved, report",
+        # Every kind resolves by frame (direct-index guard, then a unique bulk-scan hit),
+        # never a blind index. countFallback: only phase 2's actual raise counts against
+        # badgeFallbacks, not the resolve/liveness checks.
+        "on obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, countFallback)",
+        "  global theDoc, badgeFallbacks",
         "  set _tol to 3",
-        "  set _found to false",
+        "  set _hit to 0",
         "  " + _keynote_tell(),
         "    try",
         "      tell slide slideNo of theDoc",
-        '        if theKind is "group" then',
-        "          set selection of theDoc to {group idx}",
-        "          set _found to true",
-        '        else if theKind is "text" then',
-        "          set selection of theDoc to {text item idx}",
-        "          set _found to true",
-        '        else if (theKind is "shape") or (theKind is "image") then',
-        "          set _match to false",
+        "        set _match to false",
+        "        try",
+        '          if theKind is "shape" then',
+        "            set _p to position of shape idx",
+        "            set _w to width of shape idx",
+        "            set _h to height of shape idx",
+        '          else if theKind is "image" then',
+        "            set _p to position of image idx",
+        "            set _w to width of image idx",
+        "            set _h to height of image idx",
+        '          else if theKind is "text" then',
+        "            set _p to position of text item idx",
+        "            set _w to width of text item idx",
+        "            set _h to height of text item idx",
+        '          else if theKind is "line" then',
+        "            set _p to position of line idx",
+        "            set _w to width of line idx",
+        "            set _h to height of line idx",
+        '          else if theKind is "group" then',
+        "            set _p to position of group idx",
+        "            set _w to width of group idx",
+        "            set _h to height of group idx",
+        '          else if theKind is "movie" then',
+        "            set _p to position of movie idx",
+        "            set _w to width of movie idx",
+        "            set _h to height of movie idx",
+        "          end if",
+        "          set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol, matchW, matchH)",
+        "        end try",
+        "        if _match then",
+        "          set _hit to idx",
+        "        else",
+        "          set _positions to missing value",
         "          try",
         '            if theKind is "shape" then',
-        "              set _p to position of shape idx",
-        "              set _w to width of shape idx",
-        "              set _h to height of shape idx",
-        "            else",
-        "              set _p to position of image idx",
-        "              set _w to width of image idx",
-        "              set _h to height of image idx",
+        "              set _positions to position of every shape",
+        "              set _widths to width of every shape",
+        "              set _heights to height of every shape",
+        '            else if theKind is "image" then',
+        "              set _positions to position of every image",
+        "              set _widths to width of every image",
+        "              set _heights to height of every image",
+        '            else if theKind is "text" then',
+        "              set _positions to position of every text item",
+        "              set _widths to width of every text item",
+        "              set _heights to height of every text item",
+        '            else if theKind is "line" then',
+        "              set _positions to position of every line",
+        "              set _widths to width of every line",
+        "              set _heights to height of every line",
+        '            else if theKind is "group" then',
+        "              set _positions to position of every group",
+        "              set _widths to width of every group",
+        "              set _heights to height of every group",
+        '            else if theKind is "movie" then',
+        "              set _positions to position of every movie",
+        "              set _widths to width of every movie",
+        "              set _heights to height of every movie",
         "            end if",
-        "            set _match to my obedFrameMatches(item 1 of _p, item 2 of _p, _w, _h, fx, fy, fw, fh, _tol)",
         "          end try",
-        "          if _match then",
-        '            if theKind is "shape" then',
-        "              set selection of theDoc to {shape idx}",
-        "            else",
-        "              set selection of theDoc to {image idx}",
-        "            end if",
-        "            set _found to true",
-        "          else",
-        "            set _hitIdx to 0",
+        "          if _positions is not missing value then",
         "            set _hitCount to 0",
-        "            set _scanOk to true",
-        "            try",
-        '              if theKind is "shape" then',
-        "                set _positions to position of every shape",
-        "                set _widths to width of every shape",
-        "                set _heights to height of every shape",
-        "              else",
-        "                set _positions to position of every image",
-        "                set _widths to width of every image",
-        "                set _heights to height of every image",
+        "            set _hitIdx to 0",
+        "            repeat with _k from 1 to count of _positions",
+        "              set _pk to item _k of _positions",
+        "              if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
+        "item _k of _heights, fx, fy, fw, fh, _tol, matchW, matchH) then",
+        "                set _hitCount to _hitCount + 1",
+        "                set _hitIdx to _k",
         "              end if",
-        "              repeat with _k from 1 to count of _positions",
-        "                set _pk to item _k of _positions",
-        "                if my obedFrameMatches(item 1 of _pk, item 2 of _pk, item _k of _widths, "
-        "item _k of _heights, fx, fy, fw, fh, _tol) then",
-        "                  set _hitCount to _hitCount + 1",
-        "                  set _hitIdx to _k",
-        "                end if",
-        "              end repeat",
-        "            on error",
-        "              set _scanOk to false",
-        "              set badgeUnresolved to badgeUnresolved + 1",
-        '              set report to report & " badgeScanErr(s=" & slideNo & ",k=" & theKind & ")"',
-        "            end try",
-        "            if _scanOk then",
-        "              if _hitCount is 1 then",
-        '                if theKind is "shape" then',
-        "                  set selection of theDoc to {shape _hitIdx}",
-        "                else",
-        "                  set selection of theDoc to {image _hitIdx}",
-        "                end if",
-        "                set _found to true",
-        "                set badgeFallbacks to badgeFallbacks + 1",
-        "              else",
-        "                set badgeUnresolved to badgeUnresolved + 1",
-        "              end if",
+        "            end repeat",
+        "            if _hitCount is 1 then",
+        "              set _hit to _hitIdx",
+        "              if countFallback then set badgeFallbacks to badgeFallbacks + 1",
         "            end if",
         "          end if",
         "        end if",
         "      end tell",
         "    end try",
         "  end tell",
-        "  if _found then my obedFront()",
-        "end obedRaiseItem",
-        "on obedBadgeRaise(slideNo)",
+        "  return _hit",
+        "end obedBadgeFind",
+        "on obedKindCount(slideNo, theKind)",
         "  global theDoc",
-        "  set _found to false",
+        "  set _n to 0",
         "  " + _keynote_tell(),
         "    try",
         "      tell slide slideNo of theDoc",
-        "        repeat with _gi from 1 to count of groups",
-        "          set _bg to group _gi",
-        "          repeat with _ti from 1 to count of text items of _bg",
-        "            try",
-        '              if (object text of text item _ti of _bg as string) contains "Global Missions" then',
-        "                set selection of theDoc to {_bg}",
-        "                set _found to true",
-        "              end if",
-        "            end try",
-        "            if _found then exit repeat",
-        "          end repeat",
-        "          if _found then exit repeat",
-        "        end repeat",
-        "        if not _found then",
-        "          repeat with _ti from 1 to count of text items",
-        "            try",
-        '              if (object text of text item _ti as string) contains "Global Missions" then',
-        "                set selection of theDoc to {text item _ti}",
-        "                set _found to true",
-        "              end if",
-        "            end try",
-        "            if _found then exit repeat",
-        "          end repeat",
-        "        end if",
-        "        if not _found then",
-        "          repeat with _si from 1 to count of shapes",
-        "            try",
-        '              if (object text of shape _si as string) contains "Global Missions" then',
-        "                set selection of theDoc to {shape _si}",
-        "                set _found to true",
-        "              end if",
-        "            end try",
-        "            if _found then exit repeat",
-        "          end repeat",
+        '        if theKind is "shape" then',
+        "          set _n to count of shapes",
+        '        else if theKind is "image" then',
+        "          set _n to count of images",
+        '        else if theKind is "text" then',
+        "          set _n to count of text items",
+        '        else if theKind is "line" then',
+        "          set _n to count of lines",
+        '        else if theKind is "group" then',
+        "          set _n to count of groups",
+        '        else if theKind is "movie" then',
+        "          set _n to count of movies",
         "        end if",
         "      end tell",
         "    end try",
         "  end tell",
-        "  if _found then my obedFront()",
-        "end obedBadgeRaise",
+        "  return _n",
+        "end obedKindCount",
+        "on obedTopReal(slideNo, theKind, kindCount)",
+        # Keynote appends the layout's empty placeholders after the real objects and they are not
+        # in the slide's z-order, so Bring-to-Front can never reach `count`. Walk down past any
+        # trailing member sitting at the origin at ~1x1 (both w and h within tol=3; narrower than
+        # offline_inspect._is_placeholder_row's origin-and-either-dimension rule, deliberately so).
+        "  set _top to kindCount",
+        "  repeat while _top > 0",
+        "    if my obedBadgeFind(slideNo, theKind, _top, 0, 0, 1, 1, true, true, false) is not _top then exit repeat",
+        "    set _top to _top - 1",
+        "  end repeat",
+        "  return _top",
+        "end obedTopReal",
+        "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
+        "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, report",
+        "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, badgeFrontDead is 0)",
+        "  if _hit is 0 then",
+        "    set badgeUnresolved to badgeUnresolved + 1",
+        '    set report to report & " badgePhase2Miss(s=" & slideNo & ",k=" & theKind & ")"',
+        "    return",
+        "  end if",
+        "  set _found to false",
+        "  " + _keynote_tell(),
+        "    try",
+        "      tell slide slideNo of theDoc",
+        '        if theKind is "shape" then',
+        "          set selection of theDoc to {shape _hit}",
+        '        else if theKind is "image" then',
+        "          set selection of theDoc to {image _hit}",
+        '        else if theKind is "text" then',
+        "          set selection of theDoc to {text item _hit}",
+        '        else if theKind is "line" then',
+        "          set selection of theDoc to {line _hit}",
+        '        else if theKind is "group" then',
+        "          set selection of theDoc to {group _hit}",
+        '        else if theKind is "movie" then',
+        "          set selection of theDoc to {movie _hit}",
+        "        end if",
+        "        set _found to true",
+        "      end tell",
+        "    end try",
+        "  end tell",
+        "  if not _found then return",
+        "  my obedFront()",
+        "  if badgeMoved is 0 and badgeFrontDead is 0 then",
+        "    set _kindCount to my obedKindCount(slideNo, theKind)",
+        "    if _kindCount is 0 then",
+        '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
+        "    else",
+        "      set _topReal to my obedTopReal(slideNo, theKind, _kindCount)",
+        "      if _topReal < 2 or _hit is not less than _topReal then",
+        '        set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+        "      else",
+        "        set _foundAt to my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)",
+        "        if _foundAt is _topReal then",
+        "          set badgeMoved to badgeMoved + 1",
+        "        else if _foundAt is 0 or _foundAt > _topReal then",
+        '          set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+        "        else",
+        "          set badgeFrontDead to 1",
+        '          set report to report & " badgeFrontDead(s=" & slideNo & ")"',
+        "        end if",
+        "      end if",
+        "    end if",
+        "  else if badgeFrontDead is 0 then",
+        "    set badgeMoved to badgeMoved + 1",
+        "  end if",
+        "end obedRaiseItem",
+        # All-or-nothing per slide: every member must resolve before anything is raised,
+        # so a partial raise (which buries the un-raised members under the plate) never
+        # happens. members[1] is the plate (largest area), so it lands at the bottom.
+        # Once badgeFrontDead trips mid-slide the plate has already moved, so phase 2
+        # keeps raising the rest of THIS slide (the safe outcome); only the entry guard
+        # above skips every LATER slide.
+        "on obedBadgeSlide(slideNo, members)",
+        "  global badgeUnresolved, badgeFrontDead, report",
+        "  if badgeFrontDead is 1 then return",
+        "  repeat with _e in members",
+        "    set _r to contents of _e",
+        "    if my obedBadgeFind(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r, false) is 0 then",
+        "      set badgeUnresolved to badgeUnresolved + (count of members)",
+        '      set report to report & " badgeSkip(s=" & slideNo & ",k=" & (k of _r) & ")"',
+        "      return",
+        "    end if",
+        "  end repeat",
+        "  repeat with _e in members",
+        "    set _r to contents of _e",
+        "    my obedRaiseItem(slideNo, k of _r, i of _r, x of _r, y of _r, w of _r, h of _r, mw of _r, mh of _r)",
+        "  end repeat",
+        "end obedBadgeSlide",
         "on obedFront()",
         "  global frontRaised, frontErr",
         "  delay 0.35",
@@ -1112,12 +1210,15 @@ def _build_stat_finalize_script(
         d = dedup.setdefault(key, {"count": 0, "expectedKeep": int(gr.get("expectedKeep") or 0)})
         d["count"] += 1
     badge_by_slide: dict[int, list[dict]] = {}
-    badge_missing_frame = 0
     for br in badge_raises:
         badge_by_slide.setdefault(int(br["slide"]), []).append(br)
-        if not br.get("isTitle") and str(br.get("kind") or "shape") in ("shape", "image"):
-            if "w" not in br or "h" not in br:
-                badge_missing_frame += 1
+    # A frameless row on a slide voids that slide's whole obedBadgeSlide call (all-or-
+    # nothing): every member on it is unresolved, not just the frameless one.
+    badge_missing_frame = sum(
+        len(rows)
+        for rows in badge_by_slide.values()
+        if not all({"x", "y", "w", "h"} <= r.keys() for r in rows)
+    )
     lines: list[str] = ["global " + ", ".join(_STAT_ACCUMULATORS)]
     lines += _stat_size_handler(size_map)
     lines += _sig_handlers()
@@ -1146,6 +1247,8 @@ def _build_stat_finalize_script(
         "  set unresolved to 0",
         "  set badgeFallbacks to 0",
         f"  set badgeUnresolved to {badge_missing_frame}",
+        "  set badgeMoved to 0",
+        "  set badgeFrontDead to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1193,22 +1296,22 @@ def _build_stat_finalize_script(
     for slide in sorted(font_by_slide):
         lines += [f"  my obedRaiseSlide({slide})"]
     for slide in sorted(badge_by_slide):
-        for entry in badge_by_slide[slide]:
-            if entry.get("isTitle"):
-                lines += [f"  my obedBadgeRaise({slide})"]
-                continue
-            kind_str = str(entry.get("kind") or "shape")
-            if kind_str in ("shape", "image") and ("w" not in entry or "h" not in entry):
-                continue  # no planned frame (skipped before the merge): counted at init
-            kind_lit = _as_escape(kind_str)
-            idx = int(entry.get("index") or 0)
-            fx = float(entry.get("x") or 0.0)
-            fy = float(entry.get("y") or 0.0)
-            fw = float(entry.get("w") or 0.0)
-            fh = float(entry.get("h") or 0.0)
-            lines += [
-                f'  my obedRaiseItem({slide}, "{kind_lit}", {idx}, {fx}, {fy}, {fw}, {fh})'
-            ]
+        rows = [r for r in badge_by_slide[slide] if {"x", "y", "w", "h"} <= r.keys()]
+        if len(rows) != len(badge_by_slide[slide]):
+            continue  # a frameless row: pre-counted at init
+        members = []
+        for r in rows:
+            _kind = str(r.get("kind") or "shape")
+            _mw, _mh = _BADGE_MATCH.get(_kind, (False, False))
+            members.append(
+                '{{k:"{k}", i:{i}, x:{x}, y:{y}, w:{w}, h:{h}, mw:{mw}, mh:{mh}}}'.format(
+                    k=_as_escape(_kind), i=int(r.get("index") or 0),
+                    x=_as_fixed(r["x"]), y=_as_fixed(r["y"]), w=_as_fixed(r["w"]), h=_as_fixed(r["h"]),
+                    mw="true" if _mw else "false", mh="true" if _mh else "false",
+                )
+            )
+        members = ", ".join(members)
+        lines += [f"  my obedBadgeSlide({slide}, {{{members}}})"]
     lines += [
         "  try",
         "    save theDoc",
@@ -1233,7 +1336,8 @@ def _build_stat_finalize_script(
         '& dedupDeleted & " dedupShortfall=" & dedupShortfall & " frontErr=" '
         '& frontErr & " exported=" & exported & " sigFallback=" & sigFallbacks '
         '& " unresolved=" & unresolved & " badgeFallback=" & badgeFallbacks '
-        '& " badgeUnresolved=" & badgeUnresolved & " detail=" & report',
+        '& " badgeUnresolved=" & badgeUnresolved & " badgeMoved=" & badgeMoved '
+        '& " badgeFrontDead=" & badgeFrontDead & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1308,6 +1412,9 @@ def _run_stat_finalize(
         "unresolved": _num("unresolved"),
         "badgeFallback": _num("badgeFallback"),
         "badgeUnresolved": _num("badgeUnresolved"),
+        "badgeMoved": _num("badgeMoved"),
+        "badgeFrontDead": _num("badgeFrontDead"),
+        "detail": raw.split("detail=", 1)[1].strip() if "detail=" in raw else "",
         "exported": exported,
         "previewFiles": preview_files,
         "raw": raw,

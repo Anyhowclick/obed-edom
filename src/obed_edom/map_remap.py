@@ -1731,6 +1731,8 @@ def badge_members(slide: dict, title: dict) -> list[dict]:
     for item in slide.get("items") or []:
         if item is title or is_map_item(item) or is_pin_item(item) or is_placeholder_text(item):
             continue
+        if item.get("duplicateOf"):
+            continue
         cx, cy = item_center(item)
         if point_in_rect(cx, cy, src, TITLE_NEAR_PAD):
             out.append(item)
@@ -2779,16 +2781,32 @@ def plan_slide_transforms(
         )
     )
     if badge_raise_report is not None and _badge_hits:
-        # badge_slots is already largest-first (badge_slot_keys); the title goes last.
+        # Frame from as_dict() (the AppleScript-facing values), not the mid-loop `mapped`.
+        # A member with no matching transform is reported frameless, not dropped; only
+        # role="hide" (deleted in pass 1) is skipped outright.
+        _by_key = {
+            (t.kind, int(t.kind_index if t.kind_index is not None else t.item_index) + 1): t
+            for t in out
+        }
         _title_id = id(title_item) if title_item is not None else None
-        _badge_order = list(badge_slots.keys())
+        _badge_order = list(badge_slots.keys())  # largest-area-first: plate is first
         if _title_id is not None:
             _badge_order.append(_title_id)
         for _bid in _badge_order:
-            if _bid in _badge_hits:
-                badge_raise_report.append(
-                    {"slide": number, "isTitle": _bid == _title_id, **_badge_hits[_bid]}
-                )
+            _hit = _badge_hits.get(_bid)
+            if _hit is None:
+                continue
+            _t = _by_key.get((_hit["kind"], _hit["index"]))
+            if _t is not None and _t.role == "hide":
+                continue  # deleted in pass 1: nothing on the slide to bury
+            row = {
+                "slide": number, "isTitle": _bid == _title_id,
+                "kind": _hit["kind"], "index": _hit["index"],
+            }
+            _d = _t.as_dict() if _t is not None else {}
+            if {"w", "h"} <= _d.keys():
+                row.update(x=_d["x"], y=_d["y"], w=_d["w"], h=_d["h"])
+            badge_raise_report.append(row)
     return out
 
 
@@ -3647,6 +3665,25 @@ def _place_free_text(
     return report
 
 
+def _resync_badge_rows_after_placement(
+    badge_raise_report: list[dict[str, Any]],
+    planned: list[ItemTransform],
+    number: int,
+) -> None:
+    """_place_free_text moves spec.x/y in place after the badge rows for this slide
+    were snapshotted; re-read the final frame for any row it touched."""
+    _by_key = {
+        (t.kind, int(t.kind_index if t.kind_index is not None else t.item_index) + 1): t
+        for t in planned
+    }
+    for row in badge_raise_report:
+        if row.get("slide") != number:
+            continue
+        _t = _by_key.get((row.get("kind"), row.get("index")))
+        if _t is not None and "w" in row:
+            row["x"], row["y"] = round(_t.x, 2), round(_t.y, 2)
+
+
 def offframe_rows(
     transforms: list[ItemTransform],
     slide: dict,
@@ -3853,6 +3890,8 @@ def plan_payload_transforms(
             rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)
+            if badge_raise_report is not None and rows:
+                _resync_badge_rows_after_placement(badge_raise_report, planned, number)
         if offframe_report is not None:
             offframe_report.extend(
                 offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)

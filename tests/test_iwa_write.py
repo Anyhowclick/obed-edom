@@ -40,7 +40,7 @@ pytest.importorskip("keynote_parser")
 from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom import iwa_write  # noqa: E402
-from obed_edom.iwa_geometry import _geom_dict, _xywha, compose_geometry  # noqa: E402
+from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _xywha, compose_geometry  # noqa: E402
 from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
 from obed_edom.iwa_write import (  # noqa: E402
     OfflineWriteCorrupted,
@@ -49,7 +49,10 @@ from obed_edom.iwa_write import (  # noqa: E402
     _apply_geom_fields,
     _group_child_scale_ops,
     _group_fields,
-    _masked_image_fields,
+    _is_identity_mask,
+    _masked_media_fields,
+    _natural_unwritable,
+    _natural_writable,
     _patch_member,
     _rewrite_members,
     _shape_fields,
@@ -146,20 +149,47 @@ def _geom(x, y, w, h, angle=0.0):
     return {"geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": h}, "angle": angle}}
 
 
-def _shape_super(x, y, w, h, *, nw=None, nh=None, line=False):
-    bez = {"naturalSize": {"width": nw if nw is not None else w, "height": nh if nh is not None else h}}
-    if line:
-        bez["path"] = {"elements": [
-            {"type": "moveTo", "points": [{"x": 0.0, "y": 0.0}]},
-            {"type": "lineTo", "points": [{"x": 1.0, "y": 0.0}]},
-        ]}
-    return {"pathsource": {"bezierPathSource": bez}, "super": _geom(x, y, w, h)}
+# Real coordinates off ids 20554069/20541783 (naturalSize (165.52277, 23)): thirds-spaced
+# bezier controls plus an exact-naturalSize endpoint node, and one (0,0) origin node.
+_EDITABLE_NODES = [
+    {"type": "bezier", "nodePoint": {"x": 0.0, "y": 0.0},
+     "inControlPoint": {"x": 0.0, "y": 0.0}, "outControlPoint": {"x": 13.793564, "y": 23.0}},
+    {"type": "bezier", "nodePoint": {"x": 41.38069, "y": 23.0},
+     "inControlPoint": {"x": 27.587128, "y": 23.0}, "outControlPoint": {"x": 62.071037, "y": 23.0}},
+    {"type": "bezier", "nodePoint": {"x": 165.52277, "y": 23.0},
+     "inControlPoint": {"x": 165.52277, "y": 23.0}, "outControlPoint": {"x": 165.52277, "y": 23.0}},
+]
+
+
+def _shape_super(x, y, w, h, *, nw=None, nh=None, line=False, kind="bezier"):
+    nat = {"width": nw if nw is not None else w, "height": nh if nh is not None else h}
+    if kind == "scalar":
+        ps = {"scalarPathSource": {"type": "kTSDRoundedRectangle", "scalar": 2.3926985, "naturalSize": nat}}
+    elif kind == "editable":
+        ps = {"editableBezierPathSource": {
+            "naturalSize": nat,
+            "subpaths": [{"closed": True, "nodes": copy.deepcopy(_EDITABLE_NODES)}],
+        }}
+    else:
+        bez = {"naturalSize": nat}
+        if line:
+            bez["path"] = {"elements": [
+                {"type": "moveTo", "points": [{"x": 0.0, "y": 0.0}]},
+                {"type": "lineTo", "points": [{"x": 1.0, "y": 0.0}]},
+            ]}
+        ps = {"bezierPathSource": bez}
+    return {"pathsource": ps, "super": _geom(x, y, w, h)}
+
+
+def _mask_super(x, y, w, h, *, nw=None, nh=None, angle=0.0):
+    nat = {"width": nw if nw is not None else w, "height": nh if nh is not None else h}
+    return {"pathsource": {"bezierPathSource": {"naturalSize": nat}}, "super": _geom(x, y, w, h, angle)}
 
 
 def _build_deck(path, *, shapes=(200,), extra_drawables=("line", "text", "image", "group")):
     """Write a one-slide .key with a configurable drawable set to ``path``.
 
-    Default set: one shape (id 200), a line (210), an autosize text box (220 +
+    Default set: one shape (id 200), a line (210), a fixed-height text box (220 +
     storage 221), a masked image (230 + mask 231), and a group (250 + child 251).
     ``shapes`` lets a test add extra bare shapes (ids given) for the bridge test.
     """
@@ -173,11 +203,18 @@ def _build_deck(path, *, shapes=(200,), extra_drawables=("line", "text", "image"
         zorder.append(210)
     if "text" in extra_drawables:
         slide_member.append(_arch(221, "TSWP.StorageArchive", {"text": ["Hello"]}))
-        slide_member.append(_arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 0, 0, nw=200, nh=60)}))
+        # Fixed (non-sentinel) stored width AND height: a stored w==0.0 or h==0.0 is a
+        # hard miss to the AppleScript fallback (Fix 2), and this deck exercises the
+        # offline text writer.
+        slide_member.append(_arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)}))
         zorder.append(220)
     if "image" in extra_drawables:
-        slide_member.append(_arch(231, "TSD.MaskArchive", {"super": _geom(5, 5, 80, 40)}))
-        slide_member.append(_arch(230, "TSD.ImageArchive", {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60)}))
+        # IDENTITY mask (mask == image frame, no crop): mask at (0,0,120,60) is the whole
+        # image, so image_pos + mask_pos == image_pos (300,100), size == mask size (120,60).
+        slide_member.append(_arch(231, "TSD.MaskArchive", _mask_super(0, 0, 120, 60)))
+        slide_member.append(_arch(230, "TSD.ImageArchive",
+                                  {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
+                                   "originalSize": {"width": 120.0, "height": 60.0}}))
         zorder.append(230)
     if "group" in extra_drawables:
         slide_member.append(_arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 30, 30)}))
@@ -190,6 +227,24 @@ def _build_deck(path, *, shapes=(200,), extra_drawables=("line", "text", "image"
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("Index/Document.iwa", _member([show, node]))
         z.writestr("Index/Slide-100.iwa", _member([slide, *slide_member]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _build_cropped_mask_deck(path):
+    """One masked image whose mask is a REAL crop (mask size < image size): the
+    identity-mask write must refuse this rather than guess a redistribution."""
+    mask = _arch(231, "TSD.MaskArchive", _mask_super(5, 5, 80, 40))
+    img = _arch(230, "TSD.ImageArchive",
+                {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60),
+                 "originalSize": {"width": 120.0, "height": 60.0}})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, img, mask]))
     path.write_bytes(buf.getvalue())
     return path
 
@@ -328,13 +383,123 @@ def test_text_fields_x_absolute_y_delta_on_stored_centre():
     assert "size_w" not in fields and "size_h" not in fields  # no reported w/h delta asked
 
 
+def test_text_fields_autosize_height_never_writes_size_h():
+    # stored h == 0.0 is the AUTOSIZE sentinel (iwa_geometry.py's `th == 0.0`) -- writing
+    # size_h here would freeze the box into a fixed-height frame (a real defect).
+    rec = {"id": "20539608", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 2327.5, 0.0, 0.0)
+    reported = [700.0, 344.0, 1140.0, 0.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 1139.88, "h": 43.0}
+    (obj_id, fields), = _text_fields(rec, spec, reported, stored)
+    assert obj_id == "20539608"
+    assert "pos_x" in fields and "pos_y" in fields
+    assert "size_w" in fields  # width is the wrap width, not the autosize sentinel
+    assert "size_h" not in fields  # NEVER write size_h when stored h is the sentinel
+
+
+def test_text_fields_fixed_height_still_writes_size_h():
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 200.0, 60.0, 0.0)  # non-zero stored h: a real fixed-frame box
+    reported = [700.0, 344.0, 200.0, 60.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0}
+    (_obj_id, fields), = _text_fields(rec, spec, reported, stored)
+    assert fields["size_h"] == pytest.approx(60.0 + (90.0 - 60.0))
+    assert fields["size_w"] == pytest.approx(200.0 + (250.0 - 200.0))
+
+
+def test_text_fields_zero_width_never_writes_size_w():
+    # A stored width of 0.0 is the autosize sentinel too -- it has no delta base AND no
+    # writable frame (naturalSize.width would go stale exactly like height), so it must
+    # never be written, not even the target outright.
+    rec = {"id": "1", "kind": "text", "kindIndex": 0}
+    stored = (297.0, 292.0, 0.0, 0.0, 0.0)
+    reported = [1188.0, 1168.0, 452.0, 136.0]
+    spec = {"kind": "text", "kindIndex": 0, "w": 113.0}
+    result = _text_fields(rec, spec, reported, stored)
+    assert result == []
+
+
+def test_text_fields_nonzero_width_keeps_delta_and_writes_natural_w():
+    rec = {"id": "1", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 200.0, 60.0, 0.0)
+    reported = [700.0, 344.0, 200.0, 60.0]  # reported width == stored width: zero delta
+    spec = {"kind": "text", "kindIndex": 0, "w": 250.0}
+    (_obj_id, fields), = _text_fields(rec, spec, reported, stored)
+    assert fields["size_w"] == pytest.approx(250.0) and fields["natural_w"] == pytest.approx(250.0)
+
+
+def test_text_fields_fixed_height_also_writes_natural_h():
+    rec = {"id": "9", "kind": "text", "kindIndex": 0}
+    stored = (700.0, 374.0, 200.0, 60.0, 0.0)
+    reported = [700.0, 344.0, 200.0, 60.0]
+    spec = {"kind": "text", "kindIndex": 0, "x": 760.0, "y": 404.0, "w": 250.0, "h": 90.0}
+    (_obj_id, fields), = _text_fields(rec, spec, reported, stored)
+    assert fields["size_h"] == fields["natural_h"] == pytest.approx(90.0)
+
+
 def test_shape_fields_size_writes_geometry_and_naturalsize():
     rec = {"id": "5", "kind": "shape", "kindIndex": 0}
     spec = {"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 300.0, "h": 120.0}
-    (_id, fields), = _shape_fields(rec, spec)
+    stored = (0.0, 0.0, 300.0, 120.0, 0.0)
+    (_id, fields), = _shape_fields(rec, spec, stored)
     assert fields["size_w"] == 300.0 and fields["natural_w"] == 300.0
     assert fields["size_h"] == 120.0 and fields["natural_h"] == 120.0
     assert fields["pos_x"] == 60.0 and fields["pos_y"] == 70.0
+
+
+def test_shape_fields_rotation_anchor_matches_slide59_image_17832898():
+    rec = {"id": "17832898", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": -8304.0, "y": 0.0, "w": 14244.0, "h": 10636.0}
+    stored = (0.0, 0.0, 14244.0, 10636.0, 332.5)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == pytest.approx(-6653.129720920795, abs=1e-6)
+    assert fields["pos_y"] == pytest.approx(2687.6972343016932, abs=1e-6)
+
+
+def test_shape_fields_rotation_anchor_matches_slide57_shape_17431696():
+    rec = {"id": "17431696", "kind": "shape", "kindIndex": 0}
+    spec = {"kind": "shape", "kindIndex": 0, "x": 363.0, "y": 286.0, "w": 17.0, "h": 17.0}
+    stored = (0.0, 0.0, 17.0, 17.0, 242.44)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == pytest.approx(365.9682343429508, abs=1e-6)
+    assert fields["pos_y"] == pytest.approx(288.9682343429508, abs=1e-6)
+
+
+@pytest.mark.parametrize("angle,w,h,x,y", [
+    (332.5, 14244.0, 10636.0, -8304.0, 0.0),
+    (242.44, 17.0, 17.0, 363.0, 286.0),
+    (90.0, 100.0, 50.0, 10.0, 20.0),
+    (0.0, 100.0, 50.0, 10.0, 20.0),
+])
+def test_shape_fields_rotation_round_trips_through_frame_rect(angle, w, h, x, y):
+    rec = {"id": "1", "kind": "shape", "kindIndex": 0}
+    spec = {"kind": "shape", "kindIndex": 0, "x": x, "y": y, "w": w, "h": h}
+    stored = (0.0, 0.0, w, h, angle)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    geom = {"position": {"x": fields["pos_x"], "y": fields["pos_y"]},
+            "size": {"width": w, "height": h}, "angle": angle}
+    x0, y0, _w0, _h0 = _frame_rect(geom)
+    assert x0 == pytest.approx(x, abs=1e-6)
+    assert y0 == pytest.approx(y, abs=1e-6)
+
+
+def test_shape_fields_sub_eps_angle_gets_no_correction():
+    rec = {"id": "1", "kind": "image", "kindIndex": 0}
+    spec = {"kind": "image", "kindIndex": 0, "x": -8304.0, "y": 0.0}
+    stored = (0.0, 0.0, 14244.0, 10636.0, 0.005)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == -8304.0
+    assert fields["pos_y"] == 0.0
+
+
+def test_shape_fields_uses_stored_size_when_spec_omits_wh():
+    rec = {"id": "1", "kind": "shape", "kindIndex": 0}
+    spec = {"kind": "shape", "kindIndex": 0, "x": 10.0, "y": 20.0}
+    stored = (0.0, 0.0, 100.0, 50.0, 90.0)
+    (_id, fields), = _shape_fields(rec, spec, stored)
+    assert fields["pos_x"] == pytest.approx(10.0 - 25.0, abs=1e-6)
+    assert fields["pos_y"] == pytest.approx(20.0 + 25.0, abs=1e-6)
+    assert "size_w" not in fields and "size_h" not in fields
 
 
 def test_apply_geom_fields_mutates_geometry_and_naturalsize():
@@ -347,6 +512,145 @@ def test_apply_geom_fields_mutates_geometry_and_naturalsize():
     assert geom["angle"] == 5.0
     ns = obj["super"]["pathsource"]["bezierPathSource"]["naturalSize"]
     assert (ns["width"], ns["height"]) == (6.0, 7.0)
+
+
+# --------------------------------------------------------------------------
+# _natural_writable / _natural_unwritable / _write_natural_size (universal
+# path-natural finder): scalar, editableBezier, callout/connectionLine, image/movie.
+# --------------------------------------------------------------------------
+def test_natural_writable_scalar_path_source():
+    obj = {"super": _shape_super(0, 0, 100, 50, kind="scalar")}
+    assert _natural_writable(obj, both_axes=True) is True
+    assert _natural_writable(obj, both_axes=False) is True  # plain kind: axis count irrelevant
+
+
+def test_apply_geom_fields_scalar_writes_naturalsize_and_leaves_scalar():
+    # ANISOTROPIC resize (ratios 4.0009 vs 4.0243, well past the 1e-3 uniform tolerance):
+    # naturalSize still writes, but `scalar` is left untouched.
+    obj = {"super": _shape_super(0, 0, 100, 50, nw=52.238213, nh=11.679036, kind="scalar")}
+    _apply_geom_fields(obj, {"natural_w": 209.0, "natural_h": 47.0})
+    sps = obj["super"]["pathsource"]["scalarPathSource"]
+    ns = sps["naturalSize"]
+    assert (ns["width"], ns["height"]) == pytest.approx((209.0, 47.0))
+    assert sps["scalar"] == 2.3926985  # anisotropic: scalar NOT rescaled
+
+
+def test_apply_geom_fields_scalar_scales_scalar_under_uniform_resize():
+    # UNIFORM resize (ratio 4.0012 on both axes, mask 20557359's measured deck evidence):
+    # `scalar` scales WITH naturalSize.
+    obj = {"super": _shape_super(0, 0, 100, 50, nw=69.72262, nh=78.727066, kind="scalar")}
+    obj["super"]["pathsource"]["scalarPathSource"]["scalar"] = 47.236244
+    _apply_geom_fields(obj, {"natural_w": 278.9717, "natural_h": 315.0})
+    sps = obj["super"]["pathsource"]["scalarPathSource"]
+    ns = sps["naturalSize"]
+    assert (ns["width"], ns["height"]) == pytest.approx((278.9717, 315.0))
+    assert sps["scalar"] == pytest.approx(189.0, abs=0.05)
+
+
+def test_apply_geom_fields_editable_bezier_scales_nodes_about_origin():
+    obj = {"super": _shape_super(0, 0, 165.52277, 23.0, kind="editable")}
+    _apply_geom_fields(obj, {"natural_w": 662.0, "natural_h": 92.0})
+    sub = obj["super"]["pathsource"]["editableBezierPathSource"]
+    ns = sub["naturalSize"]
+    assert (ns["width"], ns["height"]) == pytest.approx((662.0, 92.0))
+    nodes = sub["subpaths"][0]["nodes"]
+    assert nodes[0]["nodePoint"]["x"] == pytest.approx(0.0, abs=1e-3)  # (0,0) stays (0,0)
+    assert nodes[0]["nodePoint"]["y"] == pytest.approx(0.0, abs=1e-3)
+    assert nodes[0]["outControlPoint"]["x"] == pytest.approx(55.166666, abs=1e-3)
+    assert nodes[1]["nodePoint"]["x"] == pytest.approx(165.5, abs=1e-3)
+    assert nodes[1]["inControlPoint"]["x"] == pytest.approx(110.333332, abs=1e-3)
+    assert nodes[1]["outControlPoint"]["x"] == pytest.approx(248.25, abs=1e-3)
+    assert nodes[2]["nodePoint"]["x"] == pytest.approx(662.0, abs=1e-3)
+    for node in nodes[1:]:
+        for key in ("nodePoint", "inControlPoint", "outControlPoint"):
+            assert node[key]["y"] == pytest.approx(92.0, abs=1e-3)
+
+
+def test_apply_geom_fields_editable_bezier_needs_both_axes():
+    obj = {"super": _shape_super(0, 0, 165.52277, 23.0, kind="editable")}
+    before = copy.deepcopy(obj)
+    _apply_geom_fields(obj, {"natural_w": 662.0})  # natural_h missing
+    assert obj == before  # nodes and naturalSize untouched
+
+
+def test_natural_writable_editable_bezier_degenerate_naturalsize_is_false():
+    obj = {"super": _shape_super(0, 0, 165.52277, 23.0, nw=0.0, nh=23.0, kind="editable")}
+    assert _natural_writable(obj, both_axes=True) is False
+
+
+def test_natural_writable_callout_and_connection_line_are_false():
+    callout = {"super": {"pathsource": {"calloutPathSource": {}}, "super": _geom(0, 0, 10, 10)}}
+    connline = {"super": {"pathsource": {"connectionLinePathSource": {}}, "super": _geom(0, 0, 10, 10)}}
+    assert _natural_writable(callout, both_axes=True) is False
+    assert _natural_writable(connline, both_axes=True) is False
+
+
+def test_natural_writable_missing_pathsource_and_originalsize_is_false():
+    obj = {"super": _geom(0, 0, 10, 10)}
+    assert _natural_writable(obj, both_axes=True) is False
+    assert _natural_writable(obj, both_axes=False) is False
+
+
+def test_natural_writable_point_path_source():
+    obj = {"super": {"pathsource": {"pointPathSource": {"naturalSize": {"width": 10.0, "height": 10.0}}},
+                     "super": _geom(0, 0, 10, 10)}}
+    assert _natural_writable(obj, both_axes=True) is True
+    assert _natural_writable(obj, both_axes=False) is True  # plain kind: axis count irrelevant
+
+
+def test_apply_geom_fields_image_writes_originalsize_not_media_naturalsize():
+    obj = {"originalSize": {"width": 120.0, "height": 60.0},
+           "naturalSize": {"width": 7680.0, "height": 1080.0},  # media pixel size: untouched
+           "super": _geom(300, 100, 120, 60)}
+    _apply_geom_fields(obj, {"pos_x": 1.0, "natural_w": 200.0, "natural_h": 100.0})
+    assert obj["originalSize"] == pytest.approx({"width": 200.0, "height": 100.0})
+    assert obj["naturalSize"] == {"width": 7680.0, "height": 1080.0}
+
+
+def test_apply_geom_fields_movie_originalsize():
+    obj = {"originalSize": {"width": 960.0, "height": 540.0}, "super": _geom(0, 0, 960, 540)}
+    _apply_geom_fields(obj, {"natural_w": 3532.07, "natural_h": 1986.79})
+    assert obj["originalSize"] == pytest.approx({"width": 3532.07, "height": 1986.79})
+
+
+# --------------------------------------------------------------------------
+# Hard-miss gate: a shape whose path source can't carry a render-derived size
+# (callout) never mis-writes; a position-only spec is unaffected.
+# --------------------------------------------------------------------------
+def _build_unwritable_shape_deck(path):
+    """One shape (id 500) whose path source is a CALLOUT -- no writable render-derived
+    size (`_natural_writable` is False)."""
+    shape = _arch(500, "TSWP.ShapeInfoArchive",
+                  {"isTextBox": False, "super": {"pathsource": {"calloutPathSource": {}},
+                                                 "super": _geom(10, 20, 100, 50)}})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 500}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, shape]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_shape_fields_position_only_spec_never_hard_misses_on_unwritable_pathsource(tmp_path):
+    deck = _build_unwritable_shape_deck(tmp_path / "unwritable.key")
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert not res.refused and res.missed == 0 and res.applied == 1
+    after = _composed(deck)
+    assert [after[("shape", 0)][k] for k in "xy"] == pytest.approx([60.0, 70.0])
+
+
+def test_shape_resize_on_unwritable_pathsource_hard_misses(tmp_path):
+    deck = _build_unwritable_shape_deck(tmp_path / "unwritable.key")
+    original = deck.read_bytes()
+    specs = [{"kind": "shape", "kindIndex": 0, "x": 60.0, "y": 70.0, "w": 200.0, "h": 90.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.missed == 1 and res.applied == 0
+    assert res.missed_specs == specs
+    assert deck.read_bytes() == original
 
 
 # --------------------------------------------------------------------------
@@ -384,10 +688,10 @@ def test_shape_line_text_group_writes_value_clean_and_read_back(deck):
     )
 
 
-def test_masked_image_mask_and_size_write_value_clean(deck):
-    # TENTATIVE masked-image rule (deferred to the lead's live byte-reveal): the mask
-    # is moved+sized so the composed crop lands at target, value-clean; the image
-    # geometry.size is scaled too (the unverified bit). Read-back == target crop.
+def test_masked_image_identity_mask_writes_image_and_mask(deck):
+    # The fixture's mask is an IDENTITY window (mask == image frame, no crop): the mask
+    # is scaled+repositioned to the target size, the image moves/scales with it, and both
+    # naturalSize/originalSize track the write. Read-back == target crop.
     specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
     res = patch_slide_geometry(deck, 1, specs)
     assert res.applied and not res.refused and res.value_clean and res.header_diffs == 0
@@ -395,15 +699,50 @@ def test_masked_image_mask_and_size_write_value_clean(deck):
     assert set(res.edited_ids) == {"230", "231"}
     after = _composed(deck)
     assert [after[("image", 0)][k] for k in "xywh"] == pytest.approx([400.0, 200.0, 160.0, 80.0])
+    objects, _idf, _fi = _load_deck(deck)
+    mask_ns = objects["231"]["pathsource"]["bezierPathSource"]["naturalSize"]
+    assert (mask_ns["width"], mask_ns["height"]) == pytest.approx((160.0, 80.0))
+    img_original = objects["230"]["originalSize"]
+    assert (img_original["width"], img_original["height"]) == pytest.approx((160.0, 80.0))
+
+
+def test_masked_image_cropped_mask_hard_misses(tmp_path):
+    # A real crop (mask smaller than the image) is not an identity window: refuse rather
+    # than guess a redistribution. Deck left byte-identical.
+    deck = _build_cropped_mask_deck(tmp_path / "cropped.key")
+    original = deck.read_bytes()
+    specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.missed == 1 and res.applied == 0
+    assert res.missed_specs == specs
+    assert deck.read_bytes() == original
+
+
+def test_masked_media_identity_predicate_production_cases():
+    # Production spot-checks (frame w/h, mask x/y/w/h), all axis-aligned (angle 0).
+    assert _is_identity_mask(3840.0, 1080.0, 0.0, 0.0, 0.0, 3840.0, 1080.0, 0.0) is True
+    assert _is_identity_mask(80.01, 80.0, 0.0, 0.0, -0.0, 80.0, 80.0, 0.0) is True
+    assert _is_identity_mask(2365.92, 1194.79, 0.0, 0.0, -20.37, 2365.92, 1150.0, 0.0) is False
+    assert _is_identity_mask(619.43, 931.77, 0.0, 164.04, 226.5, 278.97, 315.0, 0.0) is False
+
+
+def test_is_identity_mask_boundaries():
+    # tol = min(1px, 0.5% of frame): a 3840px-wide frame hits the 1px bound (0.5% is looser).
+    assert _is_identity_mask(3840.0, 1080.0, 0.0, 0.9, 0.0, 3840.0, 1080.0, 0.0) is True
+    assert _is_identity_mask(3840.0, 1080.0, 0.0, 1.1, 0.0, 3840.0, 1080.0, 0.0) is False
+    # An 11.8px-wide icon hits the 0.5% bound instead (0.5% of 11.8 = 0.059, tighter than 1px).
+    assert _is_identity_mask(11.8, 20.9, 0.0, 0.05, 0.0, 11.8, 20.9, 0.0) is True
+    assert _is_identity_mask(11.8, 20.9, 0.0, 0.07, 0.0, 11.8, 20.9, 0.0) is False
 
 
 def test_value_clean_allows_noop_edit_below_edit_count(deck):
-    # A no-op masked-image edit: spec == the CURRENT composed crop (305,105,80,40) with
-    # crop ratio 1.0, so the written mask+image values EQUAL the stored ones and neither
-    # archive's bytes change. Two archives are in the edit set (230,231) but obj_diffs is
-    # 0 (< len(edits)). The relaxed self-check (obj_diffs <= len(edits)) must still call
-    # this value-clean — the OLD `==` check would have spuriously failed it.
-    specs = [{"kind": "image", "kindIndex": 0, "x": 305.0, "y": 105.0, "w": 80.0, "h": 40.0,
+    # A no-op masked-image edit: spec == the CURRENT composed crop (the identity fixture's
+    # own frame, 300,100,120,60) with scale 1.0, so the written mask+image values EQUAL the
+    # stored ones and neither archive's bytes change. Two archives are in the edit set
+    # (230,231) but obj_diffs is 0 (< len(edits)). The relaxed self-check
+    # (obj_diffs <= len(edits)) must still call this value-clean — the OLD `==` check would
+    # have spuriously failed it.
+    specs = [{"kind": "image", "kindIndex": 0, "x": 300.0, "y": 100.0, "w": 120.0, "h": 60.0,
               "role": "other"}]
     res = patch_slide_geometry(deck, 1, specs)
     assert not res.refused
@@ -533,26 +872,10 @@ def _build_rotated_mask_deck(path, *, img_angle=0.0, mask_angle=0.0):
     return path
 
 
-def test_masked_image_fields_refuses_rotated_image():
-    mask = {"_pbtype": "TSD.MaskArchive", "super": _geom(5, 5, 80, 40, angle=0.0)}
-    img = {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=90.0)}
-    ops, mask_id = _masked_image_fields(
-        {"id": "230"}, img, {"231": mask}, {"x": 1.0, "y": 2.0, "w": 10.0, "h": 20.0}, [0, 0, 0, 0]
-    )
-    assert ops == [] and mask_id == "231"  # rotated: refuse the axis-aligned crop write
-
-
-def test_masked_image_fields_refuses_rotated_mask():
-    mask = {"_pbtype": "TSD.MaskArchive", "super": _geom(5, 5, 80, 40, angle=90.0)}
-    img = {"mask": {"identifier": 231}, "super": _geom(300, 100, 120, 60, angle=0.0)}
-    ops, mask_id = _masked_image_fields(
-        {"id": "230"}, img, {"231": mask}, {"x": 1.0, "y": 2.0, "w": 10.0, "h": 20.0}, [0, 0, 0, 0]
-    )
-    assert ops == [] and mask_id == "231"
-
-
 @pytest.mark.parametrize("img_angle,mask_angle", [(90.0, 0.0), (0.0, 45.0)])
 def test_rotated_masked_image_missed_not_written(tmp_path, img_angle, mask_angle):
+    # A rotated image or mask is never an identity window (_is_identity_mask requires
+    # both unrotated): hard miss, deck left untouched.
     deck = _build_rotated_mask_deck(tmp_path / "rot.key", img_angle=img_angle, mask_angle=mask_angle)
     original = deck.read_bytes()
     specs = [{"kind": "image", "kindIndex": 0, "x": 400.0, "y": 200.0, "w": 160.0, "h": 80.0, "role": "other"}]
@@ -615,18 +938,33 @@ def test_group_child_scale_ops_scales_leaves_and_nested_group():
     assert by_id["4"]["size_w"] == 40.0 and by_id["4"]["size_h"] == 60.0
 
 
-def test_group_child_scale_ops_masked_child_scales_mask_uniformly():
+def test_group_child_scale_ops_masked_child_writes_mask_naturalsize():
     objects = {
-        "5": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "6"}, "super": _geom(10, 10, 80, 40)},
-        "6": {"_pbtype": "TSD.MaskArchive", "super": _geom(2, 2, 60, 30)},
+        "5": {"_pbtype": "TSD.ImageArchive", "mask": {"identifier": "6"}, "super": _geom(10, 10, 80, 40),
+              "originalSize": {"width": 80.0, "height": 40.0}},
+        "6": {"_pbtype": "TSD.MaskArchive", **_mask_super(2, 2, 60, 30)},
     }
     group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 5}]}
     ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {"5": "M", "6": "M"}, "M")
     assert ok
     by_id = dict(ops)
-    assert by_id["6"] == {"pos_x": 4.0, "pos_y": 4.0, "size_w": 120.0, "size_h": 60.0}
+    assert by_id["6"] == {"pos_x": 4.0, "pos_y": 4.0, "size_w": 120.0, "size_h": 60.0,
+                          "natural_w": 120.0, "natural_h": 60.0}
     assert by_id["5"]["pos_x"] == 20.0 and by_id["5"]["pos_y"] == 20.0
     assert by_id["5"]["size_w"] == 160.0 and by_id["5"]["size_h"] == 80.0
+    assert by_id["5"]["natural_w"] == 160.0 and by_id["5"]["natural_h"] == 80.0
+
+
+def test_group_child_scale_ops_unwritable_leaf_refuses_whole_group():
+    # A callout-path leaf has no writable render-derived size: the WHOLE group is refused
+    # rather than scale it while leaving its naturalSize stale.
+    objects = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive",
+              "super": {"pathsource": {"calloutPathSource": {}}, "super": _geom(10, 20, 100, 50)}},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    assert ops == [] and not ok
 
 
 @pytest.mark.parametrize("img_angle,mask_angle", [(90.0, 0.0), (0.0, 45.0)])
@@ -872,6 +1210,157 @@ def test_slide_edits_writes_nothing(deck):
     assert refuse_reason is None and len(edits) == 1 and not missed_specs
     assert target_member == "Index/Slide-100.iwa"
     assert deck.read_bytes() == original  # pure: no I/O happened
+
+
+def test_line_no_pathsource_hard_misses(monkeypatch):
+    # `_is_line` classification (iwa_kindindex) only ever fires off a `bezierPathSource` --
+    # a "plain" kind that is always natural-writable -- so a genuinely pathsource-less
+    # "line" record can never arise through normal derivation. Force one via
+    # `compose_geometry`'s own `derive_kind_index` call to pin the guard itself: line
+    # writes natural_w only, and without a path source `_write_natural_size` has nowhere
+    # to put it, so this must hard-miss rather than write geometry.size alone.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": False, "super": _geom(0, 0, 140, 0)},
+    }
+    fake_records = [{"kind": "line", "kindIndex": 0, "id": "1", "order": 0}]
+    monkeypatch.setattr("obed_edom.iwa_geometry.derive_kind_index", lambda slide, objs: fake_records)
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "line", "kindIndex": 0, "w": 140.0, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_text_editable_bezier_autosize_width_only_hard_misses():
+    # An editableBezier text box's naturalSize can only be rescaled with BOTH axes (the
+    # nodes need both ratios): a width-only autosize write (stored h == 0.0 sentinel, so
+    # `wants_h` is False) is unwritable even with a well-formed naturalSize.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0, 0, nw=165.52277, nh=23.0, kind="editable")},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.0, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_text_editable_bezier_fixed_height_only_hard_misses():
+    # h-only spec on a FIXED-height (stored h != 0, not the autosize sentinel) editableBezier
+    # text box: the old guard only keyed on spec["w"], so this slipped through and would have
+    # written size_h with naturalSize left stale (`_write_natural_size` bails when natural_w
+    # is absent from fields). Degenerate naturalSize width also independently makes this
+    # unwritable -- the guard must catch it either way.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0, 23.0, nw=0.0, nh=23.0, kind="editable")},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "h": 40.0, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_autosize_height_text_hard_misses_to_the_fallback():
+    # Stored height == 0.0 (the autosize sentinel): naturalSize.height is Keynote's
+    # render cache and only a live write refreshes it, so this is a hard miss
+    # regardless of what the spec asks for (here: x + w only, no h at all).
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0.0, 0.0, nw=300.3, nh=83.0)},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "x": 107.15, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_autosize_width_text_hard_misses_to_the_fallback():
+    # Symmetric with the height sentinel: stored width == 0.0 is Keynote's own render
+    # cache too (naturalSize.width), and only a live write refreshes it -- a real stored
+    # height alongside it must not let this slip through as a silent partial write.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 0.0, 34.0, nw=300.3, nh=34.0)},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "h": 34.0, "y": 391.0, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == specs
+    assert edits == {}
+
+
+def test_fixed_height_text_is_still_patched_offline():
+    # Same family, but a real (non-sentinel) stored height: still patched offline.
+    objects = {
+        "100": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "1"}]},
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(700, 374, 113.4, 34.0, nw=113.4, nh=34.0)},
+    }
+    order = [("100", False)]
+    id_to_file = {"1": "M"}
+    specs = [{"kind": "text", "kindIndex": 0, "w": 113.4, "h": 34.0, "x": 107.15, "role": "other"}]
+    _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+        1, specs, objects, id_to_file, order)
+    assert refuse_reason is None
+    assert missed_specs == []
+    fields = next(iter(edits.values()))
+    assert {"size_w", "natural_w", "size_h", "natural_h"} <= fields.keys()
+
+
+def test_group_with_autosize_text_child_refuses_whole_group():
+    # A group whose child is an autosize text box (either axis 0.0): Keynote must lay it
+    # out live, so the whole group hard-misses, same policy as an unwritable pathsource.
+    objects_h = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(10, 20, 100, 0.0)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects_h, 2.0, 2.0, {}, "member")
+    assert ops == [] and not ok
+
+    objects_w = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(10, 20, 0.0, 100)},
+    }
+    ops, ok = _group_child_scale_ops(group, objects_w, 2.0, 2.0, {}, "member")
+    assert ops == [] and not ok
+
+
+def test_group_with_fixed_height_text_child_still_scales():
+    # Regression guard for the slide-19 card groups: a child text box with a real
+    # stored height (not the autosize sentinel) keeps scaling offline.
+    objects = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(10, 20, 100, 40.0)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    assert ok
+    assert dict(ops)["1"]["size_h"] == 80.0
 
 
 def test_rewrite_refuses_when_disk_space_short(tmp_path, monkeypatch):

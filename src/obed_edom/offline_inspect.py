@@ -411,14 +411,34 @@ def _splice_bulk_geometry(
     return spliced, count_mismatch
 
 
+def _fn_accepts_log(fn: Any) -> bool:
+    """True when ``fn`` declares a ``log`` parameter (by name, or via ``**kwargs``) --
+    signature inspection, never a call-and-catch-TypeError probe (which could mask a
+    genuine bug inside ``fn`` as "doesn't accept log")."""
+    import inspect as _pyinspect  # noqa: PLC0415 — stdlib, distinct from obed_edom.inspect
+
+    try:
+        params = _pyinspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "log" in params or any(
+        p.kind == _pyinspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 def two_tier_wall_payload(
     key_path: str | Path,
     bulk_geometry_fn: Any = None,
     slide_range: Any = None,
     *,
     deck: Any = None,
+    log: Any = None,
 ) -> dict[str, Any]:
-    """Offline payload with bulk overwrite of soft geometry. Fallback is per class/slide unless bulk fails."""
+    """Offline payload with bulk overwrite of soft geometry. Fallback is per class/slide
+    unless bulk fails. ``log`` (the caller's operator-facing ``say``) is forwarded to
+    ``bulk_geometry_fn`` ONLY when that callable actually accepts a ``log`` kwarg
+    (:func:`_fn_accepts_log`) -- a test double built with a bare ``(key_path, slides=None)``
+    signature must keep working unmodified."""
     payload = offline_wall_payload(key_path, slide_range, deck=deck)
     sidecar = payload.setdefault("_offline", {})
     guard = sidecar.get("guard") or []
@@ -434,7 +454,8 @@ def two_tier_wall_payload(
     if bulk_geometry_fn is None:
         fallback = content_flags + [{**s, "reason": "bulk-missing"} for s in soft]
         _finalize_two_tier(payload, sidecar, bulk_ok=False, spliced=0, fallback=fallback,
-                           slide_range=slide_range, bulk_slides=0, skipped_numbers=skipped_numbers)
+                           slide_range=slide_range, bulk_slides=0, skipped_numbers=skipped_numbers,
+                           bulk_errors=[], bulk_notes=[])
         return payload
 
     live = [
@@ -447,15 +468,44 @@ def two_tier_wall_payload(
         from obed_edom.map_remap import slides_for_plan  # noqa: PLC0415
 
         wanted = sorted(set(live) & set(slides_for_plan(slide_range) or []))
+    bulk_kwargs: dict[str, Any] = {"slides": wanted}
+    if log is not None and _fn_accepts_log(bulk_geometry_fn):
+        bulk_kwargs["log"] = log
     try:
         # bulk_geometry reads the WHOLE deck for an empty list; nothing wants a skipped
         # slide. Subset relies on bulk_geometry_fn honouring `slides`.
-        bulk = bulk_geometry_fn(key_path, slides=wanted) if wanted else {}
+        bulk = bulk_geometry_fn(key_path, **bulk_kwargs) if wanted else {}
     except Exception:  # noqa: BLE001 — any bulk failure => tier 2 unavailable
         fallback = content_flags + [{**s, "reason": "bulk-missing"} for s in soft]
         _finalize_two_tier(payload, sidecar, bulk_ok=False, spliced=0, fallback=fallback,
-                           slide_range=slide_range, bulk_slides=0, skipped_numbers=skipped_numbers)
+                           slide_range=slide_range, bulk_slides=0, skipped_numbers=skipped_numbers,
+                           bulk_errors=[], bulk_notes=[])
         return payload
+
+    # `inspect.LAST_BULK_ERRORS`/`LAST_BULK_NOTES` are set by the LAST `bulk_geometry()`
+    # call ANY caller in this process made -- stale/ambiguous if read later. Snapshot
+    # HERE, immediately after THIS call, and thread through explicitly (never re-read
+    # downstream). Each entry is stamped with the `path` it came from (inspect.py); drop
+    # anything whose path isn't OURS -- extra insurance if the snapshot is ever somehow
+    # delayed past another caller's own bulk_geometry() call.
+    bulk_errors: list[dict[str, Any]] = []
+    bulk_notes: list[dict[str, Any]] = []
+    if wanted:
+        try:
+            from obed_edom import inspect as _inspect_mod  # noqa: PLC0415
+
+            own_path = str(Path(key_path).expanduser().resolve())
+            bulk_errors = [
+                e for e in (getattr(_inspect_mod, "LAST_BULK_ERRORS", None) or [])
+                if e.get("path") == own_path
+            ]
+            bulk_notes = [
+                n for n in (getattr(_inspect_mod, "LAST_BULK_NOTES", None) or [])
+                if n.get("path") == own_path
+            ]
+        except ImportError:
+            bulk_errors = []
+            bulk_notes = []
 
     spliced, count_mismatch = _splice_bulk_geometry(payload, bulk or {})
     unconfirmed = [
@@ -471,7 +521,8 @@ def two_tier_wall_payload(
     fallback = content_flags + unconfirmed + count_flags
     _finalize_two_tier(payload, sidecar, bulk_ok=True, spliced=len(spliced),
                        fallback=fallback, slide_range=slide_range,
-                       bulk_slides=len(wanted), skipped_numbers=skipped_numbers)
+                       bulk_slides=len(wanted), skipped_numbers=skipped_numbers,
+                       bulk_errors=bulk_errors, bulk_notes=bulk_notes)
     return payload
 
 
@@ -485,6 +536,8 @@ def _finalize_two_tier(
     slide_range: Any,
     bulk_slides: int,
     skipped_numbers: set[int],
+    bulk_errors: list[dict[str, Any]],
+    bulk_notes: list[dict[str, Any]],
 ) -> None:
     if slide_range is not None:
         from obed_edom.map_remap import wants_slide  # noqa: PLC0415
@@ -502,3 +555,15 @@ def _finalize_two_tier(
     sidecar["fallback_slides"] = sorted({int(f["slide"]) for f in fallback})
     # tripped = whole deck cannot be served two-tier (bulk unavailable and fallback nonempty).
     sidecar["tripped"] = bool(not bulk_ok and fallback)
+    # bulk_geometry.js's own per-collection/bulk-property/item failures (otherwise
+    # invisible -- a "bulk-missing" fallback carries no reason why), threaded in
+    # EXPLICITLY by the caller (never re-read from module-global state here -- it can go
+    # stale between calls). Sidecar copy PLUS a non-underscore top-level key: the
+    # cache-write strips every "_"-prefixed key (inspect.py), so `bulkErrors` (like
+    # `reader`) is what actually survives into a cached payload.
+    sidecar["bulk_errors"] = list(bulk_errors)
+    payload["bulkErrors"] = list(bulk_errors)
+    # Notes are informational-only (never gate) and stay under the sidecar -- unlike
+    # bulk_errors they are NOT promoted to a non-underscore key, so they do NOT survive
+    # into the cached payload.
+    sidecar["bulk_notes"] = list(bulk_notes)

@@ -41,6 +41,12 @@ _AS_KIND_NAMES = {
     "line": "line",
 }
 
+# Emitted by `_build_slide_geometry_script`'s per-spec `on error` and parsed back out of
+# osascript's stderr by `offline_write._run_fallback_scripts`. Pass 1 runs the same body
+# via JXA's `runAppleScript` -> `doShellScript`, which discards stderr on a zero exit, so
+# a pass-1 marker is swallowed today (harmless: no diagnostic, not a regression).
+GEOM_UNWRITABLE_MARKER = "OBED_GEOM_UNWRITABLE"
+
 
 def as_geometry_enabled() -> bool:
     """Batched-AppleScript geometry path (default ON). `OBED_AS_GEOMETRY=0` forces legacy JXA."""
@@ -157,7 +163,7 @@ def acquire_wall_payload(
         )
 
         offline = two_tier_wall_payload(
-            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range
+            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range, log=say
         )
     except Exception as exc:  # noqa: BLE001 — any tier-1 failure drops to legacy
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
@@ -329,6 +335,9 @@ def _build_slide_geometry_script(specs: list[dict[str, Any]], slide_no: int) -> 
             "    try",
             "      if wasLocked then set locked of theObj to true",
             "    end try",
+            "  on error",
+            f'    log "{GEOM_UNWRITABLE_MARKER} slide={int(slide_no)} kind={kind} '
+            f'kindIndex={int(kind_index)}"',
             "  end try",
         ]
         body += lines
@@ -929,6 +938,12 @@ def remap_keynote(
             plan_out["reuses"] = reuses
             plan_out["suppressGeometry"] = plan.get("suppressGeometry")
             plan_out["asGeom"] = plan.get("asGeom")
+            plan_out["groupRemoves"] = list(group_removes)
+            plan_out["badgeRaises"] = list(badge_raises)
+            # "statJobs" (not "childResize") — the run record's pass-2 RESULT dict already
+            # uses "childResize" for `_run_stat_finalize`'s return; this is the JOB LIST.
+            plan_out["statJobs"] = list(child_resize)
+            plan_out["statSlides"] = sorted({int(cr.get("slide", -1)) for cr in child_resize})
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
@@ -1052,6 +1067,8 @@ def remap_keynote(
         unresolved = child_resize_result.get("unresolved") or 0
         badge_fallback = child_resize_result.get("badgeFallback") or 0
         badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
+        badge_moved = child_resize_result.get("badgeMoved") or 0
+        badge_front_dead = child_resize_result.get("badgeFrontDead") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
@@ -1060,6 +1077,7 @@ def remap_keynote(
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
                 + (f", {badge_fallback} badge-fallback(s)" if badge_fallback else "")
+                + (f", {badge_moved} badge object(s) moved" if badge_moved else "")
                 + "."
             )
             if dedup_shortfall:
@@ -1081,6 +1099,19 @@ def remap_keynote(
                     "unambiguously resolved — kept, not guessed — those badge objects stay "
                     "buried under the map."
                 )
+            if badge_front_dead:
+                say(
+                    "WARNING stat-finalize: the GUI Bring-to-Front had NO effect on a badge "
+                    "raise (selection/Accessibility) — whether the triggering slide's badge "
+                    "was raised in full or not at all is NOT guaranteed, but later slides keep "
+                    "their source stacking. Grant Accessibility to the launching process and "
+                    "re-run if a badge is buried."
+                )
+            if badge_raises:
+                detail = child_resize_result.get("detail") or ""
+                badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
+                if badge_detail:
+                    say(f"Badge raise detail: {badge_detail}")
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "

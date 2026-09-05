@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from obed_edom.map_remap import ItemTransform
 from obed_edom.remap_keynote import (
+    GEOM_UNWRITABLE_MARKER,
     _build_as_geometry,
     _build_slide_geometry_script,
     as_geometry_enabled,
@@ -186,6 +187,18 @@ def test_hide_role_skipped():
 def test_empty_specs_yield_empty_string():
     assert _build_slide_geometry_script([], 3) == ""
     assert _build_slide_geometry_script([_spec(role="hide")], 3) == ""
+
+
+def test_unwritable_address_logged_instead_of_silently_swallowed():
+    script = _build_slide_geometry_script([_spec(kind="image", kindIndex=8)], 96)
+    assert "  on error" in script
+    assert f'log "{GEOM_UNWRITABLE_MARKER} slide=96 kind=image kindIndex=8"' in script
+    assert script.index("set theObj to image 9") < script.index("  on error")
+
+
+def test_on_error_does_not_wrap_the_relock_tail():
+    script = _build_slide_geometry_script([_spec()], 3)
+    assert script.index("if wasLocked then set locked of theObj to true") < script.index("  on error")
 
 
 # --- timeout wrapper -------------------------------------------------------

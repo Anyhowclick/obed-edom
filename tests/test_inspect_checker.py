@@ -53,7 +53,7 @@ def test_non_offline_cached_payload_is_rejected_and_rebuilt(deck, monkeypatch, r
 
     calls = {"n": 0}
 
-    def spy_build(key_path, bulk_geometry_fn):
+    def spy_build(key_path, bulk_geometry_fn, **kwargs):
         calls["n"] += 1
         return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
                 "sentinel": "REBUILT", "_offline": {"bulk_ok": True, "fallback_slides": []}}
@@ -233,3 +233,57 @@ def test_partial_preview_set_is_not_served_as_a_hit(deck, monkeypatch, tmp_path)
     assert filled["calls"] == 1, "a partial set must trigger a re-export, not a hit"
     assert len(inspect_mod.preview_pngs(png_dir)) == 2
     assert out["exported"] is True
+
+
+def test_cache_written_payload_keeps_bulk_errors(deck, monkeypatch):
+    """bulkErrors (non-underscore) must survive the cache-write's underscore strip --
+    unlike `_offline.bulk_errors`, which lives under a stripped "_offline" key. This is
+    what makes a silent-partial bulk read durable evidence in a LATER cache hit."""
+    sample_errors = [{"slide": 5, "kind": "movie", "where": "collection", "error": "boom"}]
+
+    def fake_build(key_path, bulk_geometry_fn, **kwargs):
+        return {
+            "slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+            "bulkErrors": sample_errors,
+            "_offline": {"bulk_ok": True, "fallback_slides": [], "bulk_errors": sample_errors},
+        }
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", fake_build)
+
+    inspect_mod.inspect_keynote_checker(deck, use_cache=True)
+
+    json_path = inspect_cache_path(deck_digest(deck))
+    stored = json.loads(json_path.read_text(encoding="utf-8"))
+    assert stored["bulkErrors"] == sample_errors
+    assert "_offline" not in stored  # underscore keys ARE stripped -- confirms the contrast
+
+
+def test_cache_hit_with_bulk_errors_warns_loudly(deck, monkeypatch):
+    sample_errors = [{"slide": 5, "kind": "movie", "where": "collection", "error": "boom"}]
+    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
+                       "slides": [{"index": 0, "number": 1, "items": []}],
+                       "bulkErrors": sample_errors})
+
+    def boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("builder must not run on a valid offline cache hit")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+
+    logged = []
+    out = inspect_mod.inspect_keynote_checker(deck, use_cache=True, log=logged.append)
+    assert out["_cached"] is True
+    assert any("bulk-geometry error" in m for m in logged), logged
+
+
+def test_cache_hit_without_bulk_errors_does_not_warn(deck, monkeypatch):
+    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
+                       "slides": [{"index": 0, "number": 1, "items": []}]})
+
+    def boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("builder must not run on a valid offline cache hit")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+
+    logged = []
+    inspect_mod.inspect_keynote_checker(deck, use_cache=True, log=logged.append)
+    assert logged == []

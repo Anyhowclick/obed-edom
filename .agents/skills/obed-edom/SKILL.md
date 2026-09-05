@@ -358,6 +358,14 @@ Load-bearing rules:
   Keynote honours the order on open, keeps it on save, and the AppleScript
   per-kind collection order follows it (probed 2026-09-02). A reorder changes
   every kindIndex on the slide, so it must be the last patch on that slide.
+* a stored `geometry.size` width or height of `0.0` on a text box is the AUTOSIZE
+  sentinel: Keynote re-derives that dimension on open. Never write it — a written
+  value freezes the box into a fixed frame (the whole-deck gate caught a 43pt-high
+  frame on 2026-09-04). Move autosize text; leave a zero dimension zero.
+* a text box with a stored width or height of `0.0` (autosize) is never patched offline:
+  `naturalSize` is Keynote's render cache and only a live write refreshes it, so an
+  offline byte-patch leaves it stale and Keynote re-shrink-wraps the box on open. Such
+  boxes hard-miss to the AppleScript fallback, which writes them correctly.
 
 ---
 
