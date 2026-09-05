@@ -2779,12 +2779,9 @@ def plan_slide_transforms(
         )
     )
     if badge_raise_report is not None and _badge_hits:
-        # Take the frame from the emitted transform's as_dict(), the AppleScript-facing
-        # values (a line is width=length/height=0 there, not the dataclass's bounding
-        # box), not the mid-loop `mapped` value. A member with no as_dict frame, or none
-        # at all, is reported without one so the frameless-row path voids the slide
-        # instead of silently burying it; role="hide" (deleted in pass 1) is the only
-        # case actually dropped.
+        # Frame from as_dict() (the AppleScript-facing values), not the mid-loop `mapped`.
+        # A member with no matching transform is reported frameless, not dropped; only
+        # role="hide" (deleted in pass 1) is skipped outright.
         _by_key = {
             (t.kind, int(t.kind_index if t.kind_index is not None else t.item_index) + 1): t
             for t in out
@@ -3666,6 +3663,25 @@ def _place_free_text(
     return report
 
 
+def _resync_badge_rows_after_placement(
+    badge_raise_report: list[dict[str, Any]],
+    planned: list[ItemTransform],
+    number: int,
+) -> None:
+    """_place_free_text moves spec.x/y in place after the badge rows for this slide
+    were snapshotted; re-read the final frame for any row it touched."""
+    _by_key = {
+        (t.kind, int(t.kind_index if t.kind_index is not None else t.item_index) + 1): t
+        for t in planned
+    }
+    for row in badge_raise_report:
+        if row.get("slide") != number:
+            continue
+        _t = _by_key.get((row.get("kind"), row.get("index")))
+        if _t is not None and "w" in row:
+            row["x"], row["y"] = round(_t.x, 2), round(_t.y, 2)
+
+
 def offframe_rows(
     transforms: list[ItemTransform],
     slide: dict,
@@ -3872,6 +3888,8 @@ def plan_payload_transforms(
             rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)
+            if badge_raise_report is not None and rows:
+                _resync_badge_rows_after_placement(badge_raise_report, planned, number)
         if offframe_report is not None:
             offframe_report.extend(
                 offframe_rows(planned, slide, slide_recipe, wall_w, wall_h)

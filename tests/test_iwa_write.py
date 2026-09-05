@@ -1332,14 +1332,21 @@ def test_fixed_height_text_is_still_patched_offline():
 
 
 def test_group_with_autosize_text_child_refuses_whole_group():
-    # A group whose child is an autosize-height text box: Keynote must lay it out
-    # live, so the whole group hard-misses, same policy as an unwritable pathsource.
-    objects = {
+    # A group whose child is an autosize text box (either axis 0.0): Keynote must lay it
+    # out live, so the whole group hard-misses, same policy as an unwritable pathsource.
+    objects_h = {
         "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
               "super": _shape_super(10, 20, 100, 0.0)},
     }
     group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
-    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    ops, ok = _group_child_scale_ops(group, objects_h, 2.0, 2.0, {}, "member")
+    assert ops == [] and not ok
+
+    objects_w = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True,
+              "super": _shape_super(10, 20, 0.0, 100)},
+    }
+    ops, ok = _group_child_scale_ops(group, objects_w, 2.0, 2.0, {}, "member")
     assert ops == [] and not ok
 
 

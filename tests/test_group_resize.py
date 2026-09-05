@@ -18,6 +18,7 @@ from pathlib import Path
 from obed_edom.keynote import _STAT_ACCUMULATORS, _build_stat_finalize_script, _run_stat_finalize
 from obed_edom.map_remap import (
     ItemTransform,
+    _resync_badge_rows_after_placement,
     adjust_child_resize_indexes,
     plan_slide_transforms,
 )
@@ -321,6 +322,18 @@ def test_badge_raise_report_frame_comes_from_the_emitted_transform():
     # hypot(110-12) along a vertical run of 98 -> length 98, height 0: as_dict's line
     # rule, not the dataclass bounding box (which this fixture's slot sets to 0, 98).
     assert (line_row["w"], line_row["h"]) == (98.0, 0.0)
+
+
+def test_badge_raise_report_resyncs_to_a_free_text_placement():
+    """A badge text member that is also a free-text placement target is snapshotted
+    before _place_free_text moves it; the row must carry the PLACED x/y, not the
+    pre-placement position it was built with."""
+    title = ItemTransform(slide_number=3, item_index=0, kind="text", kind_index=0, x=107.0, y=79.5, w=296.0, h=40.0)
+    report = [{"slide": 3, "isTitle": True, "kind": "text", "index": 1, "x": 107.0, "y": 79.5, "w": 296.0, "h": 40.0}]
+    title.x, title.y = 250.0, 60.0  # simulate _place_free_text's in-place move
+    _resync_badge_rows_after_placement(report, [title], 3)
+    assert (report[0]["x"], report[0]["y"]) == (250.0, 60.0)
+    assert (report[0]["w"], report[0]["h"]) == (296.0, 40.0)
 
 
 # --- Generated AppleScript -------------------------------------------------------
@@ -792,6 +805,28 @@ def test_badge_phase2_miss_continues_the_slide_without_marking_front_dead():
     assert 'badgePhase2Miss(s=" & slideNo & ",k=" & theKind & ")' in miss_block
     assert "badgeFrontDead" not in miss_block
     assert "return" in miss_block
+
+
+def test_obed_kind_count_zero_is_not_a_dead_raise():
+    """A failed/zero obedKindCount is 'unknown', not 'dead': it must not set
+    badgeFrontDead or count badgeMoved, so the next raise still re-checks liveness."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    guard_at = handler.index("if _kindCount > 0 then")
+    err_at = handler.index("badgeCountErr(s=", guard_at)
+    count_else_at = handler.rindex("else", guard_at, err_at)
+    dead_block = handler[guard_at:count_else_at]
+    err_block = handler[count_else_at : handler.index("end if", err_at)]
+    assert "set badgeFrontDead to 1" in dead_block
+    assert "set badgeMoved to badgeMoved + 1" in dead_block
+    assert "badgeCountErr(s=" in err_block
+    assert "badgeFrontDead" not in err_block
+    assert "badgeMoved" not in err_block
 
 
 def test_stat_finalize_script_compiles_at_scale():

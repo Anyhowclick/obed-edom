@@ -333,7 +333,7 @@ def _group_child_scale_ops(
                 "natural_w": mw * sx, "natural_h": mh * sy,
             }))
 
-        if pbtype == "TSWP.ShapeInfoArchive" and child.get("isTextBox") and ch == 0.0:
+        if pbtype == "TSWP.ShapeInfoArchive" and child.get("isTextBox") and (cw == 0.0 or ch == 0.0):
             return ([], False)  # autosize text child: Keynote must lay it out; whole group misses
 
         if not _natural_writable(child, both_axes=True):

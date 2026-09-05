@@ -799,10 +799,8 @@ _STAT_ACCUMULATORS = (
     "badgeFrontDead",
 )
 
-# Position always matches. Width/height only match when the live frame is planner-
-# derived, not Keynote's own render cache: an autosize text box matches on neither axis,
-# a rotated line only on its length (width); its reported height is a bounding box, not
-# the length. kind -> (matchW, matchH).
+# Position always matches; w/h only match where the live frame isn't Keynote's own
+# render cache. kind -> (matchW, matchH).
 _BADGE_MATCH = {
     "shape": (True, True), "image": (True, True), "group": (True, True), "movie": (True, True),
     "line": (True, False), "text": (False, False),
@@ -1080,7 +1078,7 @@ def _stat_job_handlers() -> list[str]:
         "end obedKindCount",
         "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
         "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, report",
-        "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, true)",
+        "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, badgeFrontDead is 0)",
         "  if _hit is 0 then",
         "    set badgeUnresolved to badgeUnresolved + 1",
         '    set report to report & " badgePhase2Miss(s=" & slideNo & ",k=" & theKind & ")"',
@@ -1111,12 +1109,16 @@ def _stat_job_handlers() -> list[str]:
         "  my obedFront()",
         "  if badgeMoved is 0 and badgeFrontDead is 0 then",
         "    set _kindCount to my obedKindCount(slideNo, theKind)",
-        "    set _foundAt to my obedBadgeFind(slideNo, theKind, _kindCount, fx, fy, fw, fh, matchW, matchH, false)",
-        "    if _foundAt is _kindCount and _foundAt > 0 then",
-        "      set badgeMoved to badgeMoved + 1",
+        "    if _kindCount > 0 then",
+        "      set _foundAt to my obedBadgeFind(slideNo, theKind, _kindCount, fx, fy, fw, fh, matchW, matchH, false)",
+        "      if _foundAt is _kindCount and _foundAt > 0 then",
+        "        set badgeMoved to badgeMoved + 1",
+        "      else",
+        "        set badgeFrontDead to 1",
+        '        set report to report & " badgeFrontDead(s=" & slideNo & ")"',
+        "      end if",
         "    else",
-        "      set badgeFrontDead to 1",
-        '      set report to report & " badgeFrontDead(s=" & slideNo & ")"',
+        '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
         "    end if",
         "  else if badgeFrontDead is 0 then",
         "    set badgeMoved to badgeMoved + 1",
