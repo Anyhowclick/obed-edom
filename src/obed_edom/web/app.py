@@ -19,9 +19,7 @@ from obed_edom.baseline import (
     deck_digest,
     deck_slide_digests,
     delete_pairing,
-    folder_digests,
     load_pairing,
-    pair_index_gaps,
     reuse_slots,
     save_pairing,
     slot_dict,
@@ -49,7 +47,6 @@ from obed_edom.inspect import (
     diff_work_dir,
     inspect_keynote,
     inspect_keynote_checker,
-    preview_inspect,
     preview_media_type,
     preview_pngs,
 )
@@ -83,7 +80,6 @@ from obed_edom.web.jobs import (
     default_output_root,
     preview_names,
     serialize_flags,
-    visual_result,
 )
 
 RUNNER = JobRunner()
@@ -327,6 +323,9 @@ def create_app() -> FastAPI:
         outline = Path(raw.strip()).expanduser()
         if not outline.exists():
             raise HTTPException(400, f"Outline not found: {raw}")
+        suffix = outline.suffix.lower()
+        if suffix not in {".docx", ".pdf"}:
+            raise HTTPException(400, f"Expected a .docx or .pdf outline, got {outline.name}")
         try:
             load_playlist(outline)
         except SemanticOutlineError as exc:
@@ -365,7 +364,7 @@ def create_app() -> FastAPI:
     def outline_endpoint(path: str = Form(...)) -> dict:
         outline = _outline_arg(path)
         if outline is None:
-            raise HTTPException(400, "An outline .docx is required.")
+            raise HTTPException(400, "An outline .docx or .pdf is required.")
         job = RUNNER.submit(
             "outline",
             lambda j, p=outline: _run_outline(j, p),
@@ -382,24 +381,6 @@ def create_app() -> FastAPI:
         if not path or not Path(path).is_file():
             raise HTTPException(404, "No outline report")
         return FileResponse(path, media_type="application/pdf", filename=Path(path).name)
-
-    @app.post("/api/visual")
-    def visual_endpoint(
-        left_path: str = Form(...),
-        right_path: str = Form(...),
-        fresh: str = Form("false"),
-    ) -> dict:
-        left = Path(left_path).expanduser()
-        right = Path(right_path).expanduser()
-        if not left.is_dir() or not right.is_dir():
-            raise HTTPException(400, "Both paths must be folders of preview images")
-        start_fresh = _form_flag(fresh)
-        job = RUNNER.submit(
-            "visual",
-            lambda j, a=left, b=right, fr=start_fresh: _run_visual(j, a, b, fresh=fr),
-            feature="visual",
-        )
-        return job.to_dict()
 
     @app.post("/api/diff/{job_id}/slots")
     def save_diff_slots(job_id: str, payload: DiffSlotsBody) -> dict:
@@ -430,36 +411,6 @@ def create_app() -> FastAPI:
         updated = RUNNER.update_result(job_id, result)
         return RUNNER.public_dict(updated) if updated else result
 
-    @app.post("/api/visual/{job_id}/slots")
-    def save_visual_slots(job_id: str, payload: DiffSlotsBody) -> dict:
-        job = RUNNER.get(job_id)
-        if not job or not job.result:
-            raise HTTPException(404, "Unknown job")
-        if job.status == "running":
-            raise HTTPException(409, "Job is already running")
-        result = dict(job.result)
-        if payload.slots is None and payload.pairs is None:
-            raise HTTPException(400, "slots or pairs required")
-        if payload.slots is not None:
-            result["slots"] = payload.slots
-            rebuilt = visual_result(
-                Path(str(result.get("leftPath") or "")),
-                Path(str(result.get("rightPath") or "")),
-                str(result.get("leftLabel") or "LW"),
-                str(result.get("rightLabel") or "DSK"),
-                slots=payload.slots,
-            )
-            result["pairs"] = rebuilt["pairs"]
-            result["leftCatalog"] = rebuilt.get("leftCatalog") or result.get("leftCatalog")
-            result["rightCatalog"] = rebuilt.get("rightCatalog") or result.get("rightCatalog")
-        else:
-            result["pairs"] = payload.pairs
-            result["slots"] = _slots_from_pairs(payload.pairs or [])
-        result["phase"] = "visual"
-        _remember_pairing(job, result, source="operator", force=True)
-        updated = RUNNER.update_result(job_id, result)
-        return RUNNER.public_dict(updated) if updated else result
-
     @app.post("/api/diff/{job_id}/check")
     def start_diff_check(job_id: str, payload: DiffSlotsBody = Body(default=DiffSlotsBody())) -> dict:
         job = RUNNER.get(job_id)
@@ -469,21 +420,6 @@ def create_app() -> FastAPI:
             save_diff_slots(job_id, payload)
         try:
             updated = RUNNER.rerun(job_id, _run_diff_check)
-        except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if not updated:
-            raise HTTPException(404, "Unknown job")
-        return RUNNER.public_dict(updated)
-
-    @app.post("/api/visual/{job_id}/check")
-    def start_visual_check(job_id: str, payload: DiffSlotsBody = Body(default=DiffSlotsBody())) -> dict:
-        job = RUNNER.get(job_id)
-        if not job or not job.result:
-            raise HTTPException(404, "Unknown job")
-        if payload and (payload.slots is not None or payload.pairs is not None):
-            save_visual_slots(job_id, payload)
-        try:
-            updated = RUNNER.rerun(job_id, _run_visual_check)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         if not updated:
@@ -757,10 +693,9 @@ def _remember_pairing(job: Job, result: dict[str, Any], *, source: str, force: b
     right = result.get("rightPath")
     if not left or not right:
         return
-    kind = "visual" if job.feature == "visual" or job.kind == "visual" else "diff"
     slots = result.get("slots") or _slots_from_pairs(result.get("pairs") or [])
     save_pairing(
-        kind,
+        "diff",
         left,
         right,
         list(result.get("leftDigests") or []),
@@ -965,43 +900,6 @@ def _run_diff(
     return result
 
 
-def _run_visual(job: Job, left: Path, right: Path, *, fresh: bool = False) -> dict[str, Any]:
-    settings = load_settings()
-    if fresh:
-        delete_pairing("visual", left, right)
-    job.log("Reading preview folders…")
-    t0 = time.perf_counter()
-    left_digests = folder_digests(left)
-    right_digests = folder_digests(right)
-    job.log(f"Hashed previews in {time.perf_counter() - t0:.1f}s.")
-    reuse_report = None
-    slots = None
-    if settings["reusePairings"] and not fresh:
-        baseline = load_pairing("visual", left, right)
-        if baseline:
-            reused = reuse_slots(
-                baseline, left_digests, right_digests, float(settings["reuseThreshold"])
-            )
-            if reused:
-                slots = pair_index_gaps(reused.slots)
-                reuse_report = {key: value for key, value in reused.as_dict().items() if key != "slots"}
-                job.log(
-                    f"Reusing {reused.carried} pairing(s) from an earlier run "
-                    f"({reused.changed} changed, {reused.added} added, {reused.removed} removed)."
-                )
-            else:
-                job.log("Earlier pairing no longer matches these folders; starting fresh.")
-    result = visual_result(left, right, slots=slots)
-    result["leftDigests"] = left_digests
-    result["rightDigests"] = right_digests
-    result["slots"] = _slots_from_pairs(result.get("pairs") or [])
-    if reuse_report:
-        result["reuse"] = reuse_report
-    source = "operator" if reuse_report and reuse_report.get("source") == "operator" else "auto"
-    _remember_pairing(job, result, source=source, force=True)
-    return result
-
-
 def _pairs_from_catalog(result: dict[str, Any], slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     left = {int(s["index"]): s for s in (result.get("leftCatalog") or []) if s.get("index") is not None}
     right = {int(s["index"]): s for s in (result.get("rightCatalog") or []) if s.get("index") is not None}
@@ -1144,57 +1042,6 @@ def _apply_outline(
         if found:
             pair.setdefault("flags", []).extend(found)
     return flags
-
-
-def _run_visual_check(job: Job) -> dict[str, Any]:
-    result = dict(job.result or {})
-    left = Path(str(result.get("leftPath") or result.get("leftPreviews") or ""))
-    right = Path(str(result.get("rightPath") or result.get("rightPreviews") or ""))
-    if not left.is_dir() or not right.is_dir():
-        raise FileNotFoundError("Preview folders are missing; choose them again.")
-    work = default_output_root() / ".visual" / job.id
-    heat_dir = work / "heat"
-    heat_dir.mkdir(parents=True, exist_ok=True)
-    job.log("Reading previews and checking wording, photos, and house style…")
-    t0 = time.perf_counter()
-    left_payload = preview_inspect(left)
-    right_payload = preview_inspect(right)
-    slots = slots_from_pairs(result.get("pairs") or [])
-    compared = compare_inspects(
-        left_payload,
-        right_payload,
-        left,
-        right,
-        heat_dir,
-        left_label=str(result.get("leftLabel") or "LW"),
-        right_label=str(result.get("rightLabel") or "DSK"),
-        slots=slots,
-        check=True,
-    )
-    job.log(f"Checked pairs in {time.perf_counter() - t0:.1f}s.")
-    flags = compared.pop("flags")
-    pairs = compared["pairs"]
-    for pair in pairs:
-        pair["flags"] = serialize_flags(pair.get("flags") or [])
-    result.update(
-        {
-            "phase": "checked",
-            "sameType": compared.get("sameType"),
-            "leftPreviews": str(left),
-            "rightPreviews": str(right),
-            "heatDir": str(heat_dir),
-            "evidenceDir": str(work / "evidence"),
-            "workDir": str(work),
-            "heatPngs": [p.name for p in preview_pngs(heat_dir)],
-            "leftCatalog": compared.get("leftCatalog") or result.get("leftCatalog") or [],
-            "rightCatalog": compared.get("rightCatalog") or result.get("rightCatalog") or [],
-            "summary": compared,
-            "pairs": pairs,
-            "slots": _slots_from_pairs(pairs),
-            "flags": serialize_flags(flags),
-        }
-    )
-    return result
 
 
 def _run_outline(job: Job, path: Path) -> dict[str, Any]:

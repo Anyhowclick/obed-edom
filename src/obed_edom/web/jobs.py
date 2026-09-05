@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import threading
 import time
@@ -148,9 +147,7 @@ class JobRunner:
         if not job:
             return None
         result = dict(job.result or {})
-        if folder and job.feature == "visual":
-            result = bind_visual_folder(result, Path(folder).expanduser())
-        elif folder:
+        if folder:
             result = bind_generate_folder(result, Path(folder).expanduser())
         if path:
             result["path"] = str(Path(path).expanduser())
@@ -158,11 +155,6 @@ class JobRunner:
             result["leftPath"] = str(Path(left_path).expanduser())
         if right_path:
             result["rightPath"] = str(Path(right_path).expanduser())
-        if job.feature == "visual" and (left_path or right_path or folder):
-            result = visual_result(
-                Path(str(result.get("leftPath") or "")),
-                Path(str(result.get("rightPath") or "")),
-            )
         return self.update_result(job_id, result)
 
     def delete(self, job_id: str, *, purge: bool = True) -> bool:
@@ -200,27 +192,6 @@ class JobRunner:
             self._jobs[job.id] = job
 
     def _purge_artifacts(self, job: Job) -> None:
-        if job.feature == "visual":
-            work_dir = (job.result or {}).get("workDir")
-            if not work_dir:
-                return
-            candidates: list[Path] = [Path(work_dir)]
-            root = self._output_root.resolve()
-            seen: set[Path] = set()
-            for path in candidates:
-                try:
-                    resolved = path.resolve()
-                    resolved.relative_to(root)
-                except (OSError, ValueError):
-                    continue
-                if resolved == root or resolved in seen:
-                    continue
-                seen.add(resolved)
-                if resolved.is_dir():
-                    shutil.rmtree(resolved, ignore_errors=True)
-                elif resolved.is_file():
-                    resolved.unlink(missing_ok=True)
-            return
         result = job.result or {}
         candidates: list[Path] = []
         output_dir = result.get("outputDir")
@@ -233,7 +204,7 @@ class JobRunner:
         if work_dir:
             candidates.append(Path(work_dir))
         left = result.get("leftPreviews")
-        if left:
+        if left and job.feature != "visual":
             candidates.append(Path(left).parent)
         from obed_edom.baseline import cache_root as _cache_root  # noqa: PLC0415
 
@@ -367,149 +338,3 @@ def bind_generate_folder(result: dict[str, Any], folder: Path) -> dict[str, Any]
 
 def preview_names(folder: Path) -> list[str]:
     return [p.name for p in preview_media(folder)]
-
-
-_PNG_NUM = re.compile(r"(\d+)")
-
-
-def _png_number(name: str, index: int) -> int:
-    found = _PNG_NUM.findall(Path(name).stem)
-    return int(found[-1]) if found else index + 1
-
-
-def _folder_catalog(folder: Path) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for i, name in enumerate(preview_names(folder)):
-        out.append(
-            {
-                "index": i,
-                "number": _png_number(name, i),
-                "skipped": False,
-                "png": name,
-                "text": "",
-            }
-        )
-    return out
-
-
-def _pair_record(i: int, ls: dict | None, rights: list[dict], left_label: str, right_label: str) -> dict[str, Any]:
-    rs = rights[0] if rights else None
-    pair: dict[str, Any] = {
-        "index": i,
-        "number": i + 1,
-        "leftIndex": None if ls is None else ls["index"],
-        "rightIndex": None if rs is None else rs["index"],
-        "rightIndexes": [r["index"] for r in rights],
-        "leftNumber": None if ls is None else ls["number"],
-        "rightNumber": None if rs is None else rs["number"],
-        "rightNumbers": [r["number"] for r in rights],
-        "leftSkipped": False,
-        "rightSkipped": False,
-        "leftPng": None if ls is None else ls["png"],
-        "rightPng": None if rs is None else rs["png"],
-        "rightPngs": [r["png"] for r in rights],
-        "leftText": "",
-        "rightText": "",
-        "score": 1.0 if ls and rights else 0.0,
-        "flags": [],
-    }
-    if ls is None:
-        pair["missing"] = left_label
-    elif not rights:
-        pair["missing"] = right_label
-    return pair
-
-
-def _index_pairs(
-    left_cat: list[dict], right_cat: list[dict], left_label: str, right_label: str
-) -> list[dict[str, Any]]:
-    pairs = []
-    for i in range(max(len(left_cat), len(right_cat))):
-        ls = left_cat[i] if i < len(left_cat) else None
-        rs = right_cat[i] if i < len(right_cat) else None
-        pairs.append(_pair_record(i, ls, [] if rs is None else [rs], left_label, right_label))
-    return pairs
-
-
-def _pairs_from_visual_slots(
-    left_cat: list[dict],
-    right_cat: list[dict],
-    slots: list[dict[str, Any]],
-    left_label: str,
-    right_label: str,
-) -> list[dict[str, Any]]:
-    left = {int(s["index"]): s for s in left_cat}
-    right = {int(s["index"]): s for s in right_cat}
-    pairs = []
-    for i, slot in enumerate(slots):
-        li = slot.get("leftIndex")
-        ris = slot.get("rightIndexes")
-        if ris is None:
-            ri = slot.get("rightIndex")
-            ris = [] if ri is None else [ri]
-        ls = left.get(int(li)) if li is not None else None
-        rights = [right[int(x)] for x in ris if int(x) in right]
-        pairs.append(_pair_record(i, ls, rights, left_label, right_label))
-        if rights:
-            pairs[-1]["score"] = float(slot.get("score") or 1.0)
-    return pairs
-
-
-def bind_visual_folder(result: dict[str, Any], folder: Path) -> dict[str, Any]:
-    folder = folder.expanduser()
-    if not folder.is_dir():
-        raise FileNotFoundError(f"Not a folder: {folder}")
-    lw = folder / "previews" / "lw"
-    dsk = folder / "previews" / "dsk"
-    if not lw.is_dir():
-        lw = folder / "lw"
-    if not dsk.is_dir():
-        dsk = folder / "dsk"
-    if lw.is_dir() and dsk.is_dir():
-        return {"leftPath": str(lw), "rightPath": str(dsk)}
-    updated = dict(result)
-    if lw.is_dir():
-        updated["leftPath"] = str(lw)
-    if dsk.is_dir():
-        updated["rightPath"] = str(dsk)
-    return updated
-
-
-def visual_result(
-    left: Path,
-    right: Path,
-    left_label: str = "LW",
-    right_label: str = "DSK",
-    *,
-    slots: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    left = left.expanduser()
-    right = right.expanduser()
-    if not left.is_dir() or not right.is_dir():
-        raise FileNotFoundError("Both paths must be folders of preview images")
-    left_cat = _folder_catalog(left)
-    right_cat = _folder_catalog(right)
-    if not left_cat and not right_cat:
-        raise FileNotFoundError("No PNG, JPEG, or MOV previews in those folders")
-    if slots is None:
-        pairs = _index_pairs(left_cat, right_cat, left_label, right_label)
-    else:
-        pairs = _pairs_from_visual_slots(left_cat, right_cat, slots, left_label, right_label)
-    return {
-        "leftPath": str(left),
-        "rightPath": str(right),
-        "leftLabel": left_label,
-        "rightLabel": right_label,
-        "phase": "visual",
-        "sameType": False,
-        "leftPreviews": str(left),
-        "rightPreviews": str(right),
-        "heatDir": "",
-        "leftPngs": [item["png"] for item in left_cat],
-        "rightPngs": [item["png"] for item in right_cat],
-        "heatPngs": [],
-        "leftCatalog": left_cat,
-        "rightCatalog": right_cat,
-        "pairs": pairs,
-        "flags": [],
-    }

@@ -123,6 +123,9 @@ def _is_superscript(run) -> bool:
 
 
 def load_paragraphs(path: Path) -> list[Paragraph]:
+    path = Path(path)
+    if path.suffix.lower() == ".pdf":
+        return _load_paragraphs_pdf(path)
     doc = Document(str(path))
     paragraphs: list[Paragraph] = []
     for i, para in enumerate(doc.paragraphs):
@@ -143,6 +146,21 @@ def load_paragraphs(path: Path) -> list[Paragraph]:
             )
         paragraphs.append(Paragraph(runs=runs, index=i))
     return paragraphs
+
+
+def _load_paragraphs_pdf(path: Path) -> list[Paragraph]:
+    """Plain-text paragraphs from a text PDF (Word export / print-to-PDF). No run styling."""
+    from pypdf import PdfReader  # noqa: PLC0415
+
+    reader = PdfReader(str(path))
+    lines: list[str] = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+    return [Paragraph(runs=[Run(text=line)], index=i) for i, line in enumerate(lines)]
 
 
 def normalize_cue(raw: str) -> Cue:
@@ -441,6 +459,8 @@ def _mark_verse_follows(blocks: list[SlideDraft]) -> None:
 
 def parse_outline(path: Path | str) -> OutlineDoc:
     path = Path(path)
+    if path.suffix.lower() != ".docx":
+        raise ValueError(f"parse_outline expects a .docx, got {path.name}")
     doc = Document(str(path))
     paragraphs = load_paragraphs(path)
     list_numbers = ListNumberResolver(doc)

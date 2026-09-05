@@ -18,7 +18,6 @@ from obed_edom import keynote_app
 from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
-HASH_CACHE_VERSION = 1
 # Bump on payload-shape change. Digest-keyed cache; `.k<version>` partitions Keynote builds. Untagged = 14.5, unread.
 INSPECT_VERSION = 4
 # Bump on template stat-size map shape change. Also `.k<version>` (AppleScript read).
@@ -86,12 +85,6 @@ def _hash_file(hasher: hashlib._Hash, path: Path, chunk: int = 1024 * 1024) -> N
             hasher.update(data)
 
 
-def sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    _hash_file(hasher, Path(path))
-    return hasher.hexdigest()
-
-
 def deck_digest(path: Path | str) -> str:
     """SHA-256 of a .key file, or of a package directory walked in sorted order."""
     path = Path(path).expanduser()
@@ -107,45 +100,6 @@ def deck_digest(path: Path | str) -> str:
         hasher.update(b"\0")
         _hash_file(hasher, child)
     return hasher.hexdigest()
-
-
-def _file_hash_cache_path(path: Path) -> Path:
-    return path.with_suffix(path.suffix + ".sha.json")
-
-
-def _cached_file_digest(path: Path) -> str:
-    """SHA-256 of one preview, remembered beside the file by size and mtime."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return sha256_file(path)
-    key = {
-        "version": HASH_CACHE_VERSION,
-        "size": stat.st_size,
-        "mtime": int(stat.st_mtime),
-    }
-    sidecar = _file_hash_cache_path(path)
-    if sidecar.is_file():
-        try:
-            data = json.loads(sidecar.read_text(encoding="utf-8"))
-            if data.get("key") == key and data.get("sha256"):
-                return str(data["sha256"])
-        except (OSError, json.JSONDecodeError, TypeError):
-            pass
-    digest = sha256_file(path)
-    try:
-        sidecar.write_text(json.dumps({"key": key, "sha256": digest}), encoding="utf-8")
-    except OSError:
-        pass
-    return digest
-
-
-def folder_digests(folder: Path | str) -> list[str]:
-    """Per-preview SHA-256, in the same order Visual Checker lists the folder."""
-    from obed_edom.inspect import preview_media  # noqa: PLC0415
-
-    folder = Path(folder)
-    return [_cached_file_digest(path) for path in preview_media(folder)]
 
 
 def _walk_items(node: dict):
@@ -370,27 +324,6 @@ def unpaired_gaps(slots: list[dict]) -> list[tuple[int, int, list[int], list[int
             gaps.append((i, j, lefts, rights))
         i = j if j > i else i + 1
     return gaps
-
-
-def pair_index_gaps(slots: list[dict]) -> list[dict]:
-    """Zip leftover lefts and rights 1:1 inside each gap (Visual Checker)."""
-    gaps = unpaired_gaps(slots)
-    if not gaps:
-        return slots
-    out: list[dict] = []
-    cursor = 0
-    for start, end, lefts, rights in gaps:
-        out.extend(normalize_slot(s) for s in slots[cursor:start])
-        n = min(len(lefts), len(rights))
-        for k in range(n):
-            out.append(slot_dict(lefts[k], [rights[k]], 1.0))
-        for li in lefts[n:]:
-            out.append(slot_dict(li, []))
-        for ri in rights[n:]:
-            out.append(slot_dict(None, [ri]))
-        cursor = end
-    out.extend(normalize_slot(s) for s in slots[cursor:])
-    return out
 
 
 @dataclass

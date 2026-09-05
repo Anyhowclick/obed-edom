@@ -105,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.docx.exists():
             print(f"File not found: {args.docx}", file=sys.stderr)
             return 1
+        if args.docx.suffix.lower() != ".docx":
+            print(f"Generate expects a .docx outline, got {args.docx.name}", file=sys.stderr)
+            return 1
         try:
             result = generate(
                 args.docx,
@@ -113,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 lw_template=args.lw_template,
                 dsk_template=args.dsk_template,
             )
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
         print(f"Output: {result.output_dir}")

@@ -1,12 +1,11 @@
 import { createContext, useContext } from "react";
 
-export type FeatureId = "generate" | "diff" | "visual" | "check" | "dsk" | "resize";
+export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize";
 export type TabId = FeatureId | "history" | "settings";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
   generate: "Sermon Base Generator",
   diff: "Sermon Checker",
-  visual: "Visual Checker",
   check: "Sermon Checker",
   dsk: "DSK Generator",
   resize: "CG resizer",
@@ -15,7 +14,6 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
 export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   generate: "Open in Generator",
   diff: "Open in Sermon Checker",
-  visual: "Open in Visual Checker",
   check: "Open in Sermon Checker",
   dsk: "Open in DSK Generator",
   resize: "Open in CG resizer",
@@ -75,7 +73,6 @@ export const TAB_SHORT: Record<TabId, string> = {
   generate: "Gen",
   check: "Chk",
   diff: "Diff",
-  visual: "Vis",
   dsk: "DSK",
   resize: "CG",
   history: "Hist",
@@ -83,6 +80,6 @@ export const TAB_SHORT: Record<TabId, string> = {
 };
 
 export function asFeature(value: string | undefined): FeatureId | null {
-  if (value === "generate" || value === "diff" || value === "visual" || value === "check" || value === "dsk" || value === "resize") return value;
+  if (value === "generate" || value === "diff" || value === "check" || value === "dsk" || value === "resize") return value;
   return null;
 }

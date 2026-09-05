@@ -29,6 +29,8 @@ def generate(
     dsk_template: Path | str | None = None,
 ) -> GenerationResult:
     docx = Path(docx).expanduser().resolve()
+    if docx.suffix.lower() != ".docx":
+        raise ValueError(f"Generate expects a .docx outline, got {docx.name}")
     outline = parse_outline(docx)
     lw, dsk, map_flags = map_slides(outline)
     flags: list[Flag] = []

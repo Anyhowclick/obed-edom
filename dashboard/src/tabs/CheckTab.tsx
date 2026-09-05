@@ -84,7 +84,7 @@ export function CheckTab() {
     try {
       const prompt =
         which === "outline"
-          ? "Cued outline (.docx)"
+          ? "Cued outline (.docx or .pdf)"
           : which === "left"
             ? "Final LW Keynote"
             : "Keynote to compare";
@@ -179,8 +179,8 @@ export function CheckTab() {
         </p>
         <div className="row">
           <FileWell
-            label="Cued outline (.docx)"
-            hint="Optional — the _CUED.docx from the generator"
+            label="Cued outline (.docx or .pdf)"
+            hint="Optional — _CUED.docx / PDF"
             file={outline}
             tone="document"
             onChoose={() => pick("outline")}

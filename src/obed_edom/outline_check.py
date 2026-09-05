@@ -215,7 +215,8 @@ def load_playlist(path: Path | str) -> tuple[Playlist, list[Paragraph]]:
         raise SemanticOutlineError(
             "This looks like a pre-generate outline: it still has semantic cues "
             f"({', '.join(sorted(SEMANTIC_TAGS))}) rather than operator [LW] / [DSK] "
-            "cues. Run the Sermon Base Generator first, then check the _CUED.docx."
+            "cues. Run the Sermon Base Generator first, then check the _CUED.docx "
+            "(or a PDF of that cued outline)."
             if flavour == "semantic"
             else "No operator [LW] / [DSK] cues found in this outline."
         )
@@ -224,6 +225,7 @@ def load_playlist(path: Path | str) -> tuple[Playlist, list[Paragraph]]:
 
 def outline_report(path: Path | str) -> dict:
     """Paragraphs with cue spans plus findings pinned to a paragraph."""
+    from obed_edom.models import OutlineDoc  # noqa: PLC0415
     from obed_edom.parse_outline import parse_outline  # noqa: PLC0415
     from obed_edom.validate import flag_dict, validate_outline_paragraphs  # noqa: PLC0415
 
@@ -249,7 +251,15 @@ def outline_report(path: Path | str) -> dict:
 
     flags = list(correspondence(playlist, {}))
     try:
-        flags.extend(validate_outline_paragraphs(parse_outline(path)))
+        if path.suffix.lower() == ".pdf":
+            outline = OutlineDoc(
+                path=path,
+                paragraphs=paragraphs,
+                full_text="\n".join(p.text for p in paragraphs),
+            )
+        else:
+            outline = parse_outline(path)
+        flags.extend(validate_outline_paragraphs(outline))
     except Exception as exc:  # noqa: BLE001
         note = make_flag(
             "cue.unknown",

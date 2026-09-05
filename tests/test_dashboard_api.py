@@ -77,6 +77,57 @@ def test_generate_rejects_missing_single_template(tmp_path):
     assert "lw template not found" in res.json()["detail"].lower()
 
 
+def test_generate_rejects_pdf_upload(tmp_path):
+    client = TestClient(app)
+    template = tmp_path / "Sermon_GW.key"
+    template.write_text("placeholder")
+    res = client.post(
+        "/api/generate",
+        data={"lw_template": str(template)},
+        files={"files": ("outline.pdf", b"%PDF-1.4 fake", "application/pdf")},
+    )
+    assert res.status_code == 400
+    assert "expected .docx" in res.json()["detail"].lower()
+
+
+def _write_cued_pdf(path: Path) -> Path:
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(path))
+    y = 800
+    for line in (
+        "[LW] [DSK-PP]",
+        "Ezekiel 36:26 I will give you a new heart.",
+        "[LW-TITLE]",
+        "Faith",
+    ):
+        c.drawString(72, y, line)
+        y -= 18
+    c.save()
+    return path
+
+
+def test_outline_endpoint_accepts_pdf(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path)})
+    assert started.status_code == 200
+    job = _wait(client, started.json()["id"])
+    assert job["status"] == "done", job.get("error")
+    result = job["result"]
+    assert result["kind"] == "outline"
+    assert (result["lwCues"], result["dskCues"]) == (2, 1)
+
+
+def test_outline_endpoint_rejects_unsupported_suffix(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_text("[LW] hello")
+    client = TestClient(app)
+    res = client.post("/api/outline", data={"path": str(path)})
+    assert res.status_code == 400
+    assert ".docx or .pdf" in res.json()["detail"].lower()
+
+
 def test_resolve_drop_unknown_name():
     client = TestClient(app)
     res = client.post("/api/resolve-drop", data={"name": "definitely-not-a-real-deck-zzzz.key"})

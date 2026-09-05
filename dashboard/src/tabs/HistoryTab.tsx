@@ -14,7 +14,9 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
   const { openInFeature } = useRunNav();
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const feature = asFeature(active?.feature || active?.kind || "");
+  const rawFeature = active?.feature || active?.kind || "";
+  const feature = asFeature(rawFeature);
+  const isLeftoverVisual = rawFeature === "visual";
 
   useEffect(() => {
     if (visible) reload();
@@ -28,12 +30,6 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
       if (feature === "generate") {
         const folder = await chooseFolder("Folder with this run’s Keynotes and previews");
         upsert(await relocateJob(active.id, { folder: folder.path }));
-        return;
-      }
-      if (feature === "visual") {
-        const left = await chooseFolder("LW preview folder");
-        const right = await chooseFolder("DSK preview folder");
-        upsert(await relocateJob(active.id, { leftPath: left.path, rightPath: right.path }));
         return;
       }
       if (feature === "dsk" || feature === "resize" || feature === "check") {
@@ -96,13 +92,15 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                       Use this folder
                     </button>
                   )}
-                  <button className="btn secondary" type="button" onClick={relocate}>
-                    Relocate…
-                  </button>
+                  {feature && (
+                    <button className="btn secondary" type="button" onClick={relocate}>
+                      Relocate…
+                    </button>
+                  )}
                 </div>
                 {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} />}
                 {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} />}
-                {feature === "visual" && <DiffResultView job={active} onOpen={setOpen} />}
+                {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} />}
                 {feature === "check" && <CheckResultView job={active} onOpen={setOpen} />}
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
                 {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}

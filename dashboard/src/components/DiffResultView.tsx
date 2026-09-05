@@ -394,11 +394,9 @@ export function DiffResultView({
         )}
         {canEdit && (
           <p className="note playlist-note">
-            {phase === "visual"
-              ? "Folders are listed in file order. Drag a slide onto another row to pair it. Combine next DSK when one wall holds two graphics."
-              : matching
-                ? "First pass matched these pairs. Drag a slide onto another row to fix it. If one wall holds two DSK verses, Combine next DSK. Deck order stays. Then run checks."
-                : "Checks are on the confirmed pairs. You can still rearrange, combine, and run checks again."}
+            {matching
+              ? "First pass matched these pairs. Drag a slide onto another row to fix it. If one wall holds two DSK verses, Combine next DSK. Deck order stays. Then run checks."
+              : "Checks are on the confirmed pairs. You can still rearrange, combine, and run checks again."}
           </p>
         )}
         <div className="playlist-bar">
