@@ -130,8 +130,11 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
             elif kind == "group":
                 child_sig = group_child_text.get(kind_index)
             effect, animation_type = _build_effect_animtype(build)
+            # A chunk absent from the slide's own buildChunks is not this build's to
+            # keep -- drop it rather than silently appending it after the real ones.
             chunk_ids = sorted(
-                chunks_by_build.get(bid, []), key=lambda cid: chunk_order.get(cid, len(chunk_order))
+                (cid for cid in chunks_by_build.get(bid, []) if cid in chunk_order),
+                key=lambda cid: chunk_order[cid],
             )
             records.append(
                 {

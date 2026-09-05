@@ -1253,10 +1253,12 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
             new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
             reparsed = IWAFile.from_buffer(new_member, member).to_dict()
             removed, added, changed = _archive_diff(decoded, reparsed)
-            if removed or added or set(changed) != wanted:
+            # A byte-identical no-op write for one of the wanted slides is fine --
+            # `changed` need only be a SUBSET of `wanted`, not equal to it.
+            if removed or added or not set(changed) <= wanted:
                 return {
                     "refused": True,
-                    "reason": f"{member}: re-encode touched more than the intended slide(s) "
+                    "reason": f"{member}: re-encode touched fewer/other than the intended slide(s) "
                     f"(removed={sorted(removed)}, added={sorted(added)}, changed={sorted(changed)})",
                 }
             edits[member] = new_member

@@ -39,7 +39,7 @@ pytest.importorskip("keynote_parser")
 
 from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
-from obed_edom import iwa_write  # noqa: E402
+from obed_edom import iwa_builds, iwa_write  # noqa: E402
 from obed_edom.iwa_builds import deck_builds  # noqa: E402
 from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _xywha, compose_geometry  # noqa: E402
 from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: E402
@@ -469,6 +469,30 @@ def _build_multi_chunk_deck(path):
         z.writestr("Index/Document.iwa", _member([show, node]))
         # Archive order in the member is A then B -- the REVERSE of buildChunks above.
         z.writestr("Index/Slide-100.iwa", _member([slide100, text220, storage221, build900, chunk_a, chunk_b]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def _build_orphan_chunk_deck(path):
+    """One slide, one build with TWO chunk archives referencing it, but the slide's
+    OWN buildChunks names only one -- the other is an orphan that must be DROPPED,
+    not appended after the real ones."""
+    text220 = _arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)})
+    storage221 = _arch(221, "TSWP.StorageArchive", {"text": ["Hello"]})
+    build900 = _arch(900, "KN.BuildArchive", {"drawable": {"identifier": 220}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:dissolve"), "chunkIdSeed": 1})
+    chunk_listed = _arch(950, "KN.BuildChunkArchive", {"build": {"identifier": 900}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "1", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "1", "upper": "1"}})
+    chunk_orphan = _arch(951, "KN.BuildChunkArchive", {"build": {"identifier": 900}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "1", "upper": "1"}, "buildChunkId": 2}, "buildId": {"lower": "1", "upper": "1"}})
+    slide100 = _arch(100, "KN.SlideArchive", {
+        "drawablesZOrder": [{"identifier": 220}],
+        "builds": [{"identifier": 900}],
+        "buildChunks": [{"identifier": 950}],  # 951 exists in the member but is not listed here
+    })
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide100, text220, storage221, build900, chunk_listed, chunk_orphan]))
     path.write_bytes(buf.getvalue())
     return path
 
@@ -1915,18 +1939,76 @@ def test_patch_slide_builds_self_check_gate_refuses_a_forced_collateral_edit(tmp
     assert deck.read_bytes() == before
 
 
+def test_patch_slide_builds_self_check_gate_refuses_a_forced_header_edit(tmp_path, monkeypatch):
+    """Wrap IWAFile.from_dict so the write ALSO mutates the HEADER (not the objects)
+    of an untouched archive (901) in the same member -- the self-check gate's
+    header comparison must catch this on its own. Dropping that half of the gate
+    left the whole suite green (G1)."""
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    real_from_dict = IWAFile.from_dict.__func__
+
+    def _corrupting_from_dict(cls, data):
+        mutated = copy.deepcopy(data)
+        for ch in mutated["chunks"]:
+            for arch in ch["archives"]:
+                if str(arch["header"]["identifier"]) == "901":
+                    arch["header"]["shouldMerge"] = True
+        return real_from_dict(cls, mutated)
+
+    monkeypatch.setattr(IWAFile, "from_dict", classmethod(_corrupting_from_dict))
+    result = patch_slide_builds(deck, {"100": {"builds": ["901"], "buildChunks": ["911"], "transition": None}})
+    assert result["refused"]
+    assert deck.read_bytes() == before
+
+
+def test_patch_slide_builds_no_op_write_for_one_slide_does_not_refuse_the_call(tmp_path):
+    """A byte-identical no-op write for one slide in a shared member must not
+    refuse the whole call: `changed` need only be a SUBSET of the intended slides,
+    not equal to it (G5)."""
+    deck = _build_builds_shared_member_deck(tmp_path / "shared_builds.key")
+    result = patch_slide_builds(
+        deck,
+        {
+            "100": {"builds": [], "buildChunks": [], "transition": None},  # a real change
+            "101": {"builds": ["901"], "buildChunks": ["911"],
+                     "transition": _transition_dict("apple:dissolve", 0.5)},  # byte-identical no-op
+        },
+    )
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert not objects["100"].get("builds")
+    assert objects["101"]["builds"] == [{"identifier": "901"}]
+
+
 def test_deck_builds_orders_chunk_ids_by_the_slides_own_buildchunks_order(tmp_path):
     deck = _build_multi_chunk_deck(tmp_path / "chunks.key")
     by_number = deck_builds(deck)
     assert by_number[1]["builds"][0]["chunkIds"] == ["951", "950"]
 
 
+def test_deck_builds_drops_a_chunk_not_listed_in_the_slides_own_buildchunks(tmp_path):
+    """A KN.BuildChunkArchive that references the build but is absent from the
+    slide's own buildChunks is dropped, not silently appended (G7)."""
+    deck = _build_orphan_chunk_deck(tmp_path / "orphan.key")
+    by_number = deck_builds(deck)
+    assert by_number[1]["builds"][0]["chunkIds"] == ["950"]
+
+
 # --------------------------------------------------------------------------
 # restore_source_builds (remap_keynote.py): the production entry point.
 # --------------------------------------------------------------------------
-def test_restore_source_builds_with_no_reuse_slides_is_a_noop_that_still_verifies(tmp_path):
+def test_restore_source_builds_with_no_reuse_slides_is_a_noop_that_still_verifies(tmp_path, monkeypatch):
     source = _build_builds_deck(tmp_path / "source.key")
     dest = _build_builds_deck(tmp_path / "dest.key")
+    real_deck_builds = iwa_builds.deck_builds
+    calls: list = []
+
+    def counting_deck_builds(path, *, deck=None):
+        calls.append(path)
+        return real_deck_builds(path, deck=deck)
+
+    monkeypatch.setattr(iwa_builds, "deck_builds", counting_deck_builds)
     messages = []
     result = restore_source_builds(dest, source, set(), messages.append)
     assert result == {
@@ -1935,3 +2017,31 @@ def test_restore_source_builds_with_no_reuse_slides_is_a_noop_that_still_verifie
     objects, _id_to_file, _file_ids = _load_deck(dest)
     assert objects["100"]["builds"] == [{"identifier": "900"}, {"identifier": "901"}, {"identifier": "902"}]
     assert any("Builds follow source: 0 kept, 0 dropped, 0 transition(s)" in m for m in messages)
+    # No reuse slides -> `plans` is empty -> out_after reuses out_by_number instead of
+    # paying an unconditional second dest decode (G3).
+    assert len(calls) == 2
+
+
+def test_restore_source_builds_excludes_a_skipped_transition_from_the_raise(tmp_path, monkeypatch):
+    """A source transition of None, alongside a REAL build change on the same
+    slide (a no-op plan would be refused by the self-check gate -- G5), must not
+    raise: the report-side transitionSkipped exclusion (F1) must also apply on
+    the raise side. Dropping the skipped-slide exclusion, or the WARNING `say`,
+    left the suite green (G2)."""
+    dest = _build_builds_deck(tmp_path / "dest.key")
+    source = _build_builds_deck(tmp_path / "source.key")
+    real_deck_builds = iwa_builds.deck_builds
+    src_map = copy.deepcopy(real_deck_builds(source))
+    src_map[1]["builds"] = [b for b in src_map[1]["builds"] if b["buildId"] == "900"]
+    src_map[1]["transition"] = None
+
+    def fake_deck_builds(path, *, deck=None):
+        if Path(path).name == source.name:
+            return copy.deepcopy(src_map)
+        return real_deck_builds(path, deck=deck)
+
+    monkeypatch.setattr(iwa_builds, "deck_builds", fake_deck_builds)
+    messages = []
+    result = restore_source_builds(dest, source, {1}, messages.append)
+    assert result["skipped"] is False
+    assert any("WARNING builds: slide 1 transition not restored (source has none)" in m for m in messages)

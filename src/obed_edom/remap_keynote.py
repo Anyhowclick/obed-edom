@@ -626,6 +626,10 @@ def restore_card_stroke_widths(
     return result
 
 
+def _surplus_slide_note(slide_no: int, patched_slides: set[int]) -> str:
+    return f"slide {slide_no} ({'a patched reuse slide' if slide_no in patched_slides else 'NOT a patched reuse slide'})"
+
+
 def restore_source_builds(
     dest: Path, source: Path, slides: set[int], say: Callable[[str], None]
 ) -> dict[str, Any]:
@@ -673,9 +677,13 @@ def restore_source_builds(
     skipped_transitions = {r["slide"]: r["transitionSkipped"] for r in plan["report"] if r.get("transitionSkipped")}
     for slide_no, reason in skipped_transitions.items():
         say(f"WARNING builds: slide {slide_no} transition not restored ({reason}); the output's own transition is kept.")
+    shortfall_totals: dict[tuple[int, Any], int] = {}
     for m in verify["missing"]:
+        key = (m["slide"], m["effect"])
+        shortfall_totals[key] = shortfall_totals.get(key, 0) + m["count"]
+    for (slide_no, effect), count in sorted(shortfall_totals.items()):
         say(
-            f"WARNING builds: slide {m['slide']} lost {m['count']} {m['effect']} "
+            f"WARNING builds: slide {slide_no} lost {count} {effect} "
             "build(s) (the object is no longer on that slide)."
         )
     kept = sum(r.get("kept", 0) for r in plan["report"])
@@ -687,9 +695,7 @@ def restore_source_builds(
     )
 
     if verify["surplus"]:
-        def _note(n: int) -> str:
-            return f"slide {n} ({'a patched reuse slide' if n in slides else 'NOT a patched reuse slide'})"
-        notes = sorted({_note(s["slide"]) for s in verify["surplus"]})
+        notes = sorted({_surplus_slide_note(s["slide"], slides) for s in verify["surplus"]})
         raise RuntimeError(f"Build patch left a surplus build on {', '.join(notes)}: {verify['surplus'][:5]}")
     transitions = [t for t in verify["transitions"] if t["slide"] not in skipped_transitions]
     if transitions:
@@ -780,13 +786,11 @@ def remap_keynote(
     try:
         from obed_edom.iwa_runs import (  # noqa: PLC0415
             _load_deck, attach_group_captions, attach_group_child_text, attach_group_children,
-            attach_slide_builds,
         )
 
         deck = _load_deck(source)
         attach_group_child_text(source, wall, deck=deck)
         attach_group_captions(source, wall, deck=deck)
-        attach_slide_builds(source, wall, deck=deck)
         # child_src's offsets are computed against the group's STORED archive frame
         # (gx, gy in _group_child_records); ItemTransform derives targets against
         # self.src, which under OBED_OFFLINE_READ=on is the offline-composed group
@@ -797,15 +801,25 @@ def remap_keynote(
         # payload actually came from the offline reader.
         if offline_read_mode(offline_read) == "on":
             attach_group_children(source, wall, deck=deck)
-    except Exception as exc:  # noqa: BLE001 — no group signatures/captions/builds on any failure
+    except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
         say(
             f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
             "will report a shortfall instead of deduping, photo cards will not be "
             "recognised as cards at all (no groupChildText signature to match on) — they "
             "keep today's affine-mapped size, same as any other unmatched group; groups "
             "holding an autosize text box keep today's group-level resize (which collapses "
-            "them); and a coincident stat twin that carries a build cannot be told apart "
-            "from a magic-move leftover, so it stays hidden."
+            "them)."
+        )
+
+    try:
+        from obed_edom.iwa_runs import attach_slide_builds  # noqa: PLC0415
+
+        attach_slide_builds(source, wall, deck=deck)
+    except Exception as exc:  # noqa: BLE001 — reuse targets keep the donor's builds/transition
+        say(
+            f"Wall build/transition read unavailable ({type(exc).__name__}: {exc}); reuse donor "
+            "rejection for an unfixable build shortfall cannot run, and a coincident stat twin "
+            "that carries a build cannot be told apart from a magic-move leftover (stays hidden)."
         )
 
     try:
