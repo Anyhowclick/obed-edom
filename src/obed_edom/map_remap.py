@@ -3107,9 +3107,14 @@ def plan_slide_reuses(
     payload: dict[str, Any],
     transforms: list[ItemTransform],
     slide_range: SlideRange = None,
+    canvas: tuple[float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Reuse a remapped donor when map+dots are unchanged: duplicate, strip extras, paste the
     delta; group dedup counts derive from the donor's modeled pre-dedup output state."""
+    wall_w0 = _f(payload.get("slideWidth"), CG_WIDTH)
+    wall_h0 = _f(payload.get("slideHeight"), CG_HEIGHT)
+    sx = (canvas[0] / wall_w0) if canvas and wall_w0 else 1.0
+    sy = (canvas[1] / wall_h0) if canvas and wall_h0 else 1.0
     slides: list[dict] = []
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
@@ -3280,6 +3285,12 @@ def plan_slide_reuses(
                     "kind": str(it.get("kind") or "item"),
                     "kindIndex": int(it.get("kindIndex") or 0),
                     "itemIndex": int(it.get("index") if it.get("index") is not None else it.get("_index") or 0),
+                    # No transform for this item: scale it with the canvas rather than let the paste ride the wall coordinate.
+                    "x": round(_f(it.get("x")) * sx, 2),
+                    "y": round(_f(it.get("y")) * sy, 2),
+                    "w": round(_f(it.get("w")) * sx, 2),
+                    "h": round(_f(it.get("h")) * sy, 2),
+                    "role": "other",
                 }
                 text = (it.get("text") or "").strip()
                 if text:

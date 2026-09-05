@@ -874,7 +874,12 @@ def remap_keynote(
             + ("…" if len(hidden) > 10 else "")
             + ". Un-skip in Keynote and re-run to include them."
         )
-    reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
+    reuses = plan_slide_reuses(
+        wall,
+        transforms,
+        slide_range=slide_range,
+        canvas=(float(recipe.get("destWidth") or CG_WIDTH), float(recipe.get("destHeight") or CG_HEIGHT)),
+    )
     reuse_slides = {int(r["slide"]) for r in reuses}
     # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
     group_removes: list[dict[str, Any]] = []

@@ -1314,6 +1314,50 @@ def test_reuse_strips_hidden_side_panel_delta_before_the_paste():
     assert any(r.get("kind") == "text" and r.get("kindIndex") == 1 for r in job["strip"])
 
 
+def _reuse_extra_item_wall(extra):
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    return {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [dict(map_img), *[dict(p) for p in pins]]},
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], extra]},
+        ],
+    }
+
+
+def test_reuse_add_without_a_transform_is_canvas_scaled():
+    """An added item the planner never gave a transform (map_remap.py:2468's
+    continue) must not ride the paste at its wall coordinate: plan_slide_reuses
+    scales the wall rect by the destination canvas itself."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=200, w=400, h=100)
+    wall = _reuse_extra_item_wall(extra)
+
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [], canvas=(1920, 1080))}
+    add = jobs[2]["add"]
+    assert len(add) == 1
+    payload = add[0]
+    assert payload["x"] == 1250.0 and payload["y"] == 200.0
+    assert payload["w"] == 100.0 and payload["h"] == 100.0
+    assert payload.get("role") != "hide"
+
+
+def test_reuse_add_without_a_canvas_still_carries_a_rect():
+    """Guards the invariant remap_keynote.js now assumes: an add payload never
+    has a null x. Without a canvas, the fallback rect is the wall rect itself."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=200, w=400, h=100)
+    wall = _reuse_extra_item_wall(extra)
+
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    payload = jobs[2]["add"][0]
+    assert payload["x"] == 5000.0 and payload["y"] == 200.0
+    assert payload["w"] == 400.0 and payload["h"] == 100.0
+
+
 def test_unpaired_text_resizes_when_swatch_face_differs():
     wall = {
         "slideWidth": 7680,

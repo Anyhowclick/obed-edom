@@ -575,8 +575,8 @@ function applyReuse(doc, Keynote, job, missReasons) {
     for (let i = 0; i < add.length; i++) {
       const spec = add[i];
       const obj = getItem(orig, spec);
-      if (!obj || spec.x == null) {
-        if (spec.x != null) missed += 1;
+      if (!obj) {
+        missed += 1;
         continue;
       }
       if (applySpec(obj, spec)) applied += 1;
