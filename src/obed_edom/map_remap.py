@@ -2328,7 +2328,6 @@ def plan_slide_transforms(
     keep_side_panels: bool = False,
     wall_size: tuple[float, float] | None = None,
     defer_list_packing: bool = False,
-    free_text_keys: set[tuple[str, int]] | None = None,
     child_resize_report: list[dict[str, Any]] | None = None,
     badge_raise_report: list[dict[str, Any]] | None = None,
     card_stroke: float = DEFAULT_CARD_STROKE,
@@ -3110,7 +3109,8 @@ def plan_slide_reuses(
     canvas: tuple[float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Reuse a remapped donor when map+dots are unchanged: duplicate, strip extras, paste the
-    delta; group dedup counts derive from the donor's modeled pre-dedup output state."""
+    delta; group dedup counts derive from the donor's modeled pre-dedup output state. `canvas`
+    is the CG destination size, used to scale an add that has no transform of its own."""
     wall_w0 = _f(payload.get("slideWidth"), CG_WIDTH)
     wall_h0 = _f(payload.get("slideHeight"), CG_HEIGHT)
     sx = (canvas[0] / wall_w0) if canvas and wall_w0 else 1.0
@@ -3230,9 +3230,7 @@ def plan_slide_reuses(
             for k, it in curr_keys.items()
         }
 
-        # persist assumes donor and target agree on visibility; a per-slide side-panel
-        # whitelist can disagree. Reconcile before add/remove/persist are read further so
-        # a target-only side item is added fresh and a donor-only one is actively removed.
+        # Reconcile persist pairs where donor/target disagree on side-panel visibility.
         donor_specs = {_spec_key(t): t for t in (by_slide.get(from_n) or [])}
 
         def _hidden(smap: dict[tuple[str, int], ItemTransform], item: dict) -> bool:
@@ -3241,14 +3239,13 @@ def plan_slide_reuses(
 
         reconciled: list[tuple[dict, dict]] = []
         for curr_it, prev_it in persist_pairs:
-            # Groups already have their own signature-keyed hide/dedup accounting
-            # below (kindIndex drifts on a reuse copy); leave their persist pairs
-            # alone so that machinery — not a geometry ref — resolves the hide.
-            if str(curr_it.get("kind") or "") == "group":
-                continue
+            is_group = str(curr_it.get("kind") or "") == "group"
             donor_hidden = _hidden(donor_specs, prev_it)
             target_hidden = _hidden(spec_map, curr_it)
             if target_hidden and not donor_hidden:
+                # A hidden group is already surplus in the dedup accounting below.
+                if is_group:
+                    continue
                 remove.append(prev_it)
                 reconciled.append((curr_it, prev_it))
             elif donor_hidden and not target_hidden:
@@ -3261,8 +3258,7 @@ def plan_slide_reuses(
             persist = [c for c, _p in persist_pairs]
             persist_n = len(persist)
 
-        # A donor item already deleted (role=hide there) never exists on the duplicated
-        # copy; a remove ref for it is a phantom deleteRefs can never satisfy.
+        # A donor item already hidden there has no live copy; skip its phantom remove ref.
         remove = [it for it in remove if not _hidden(donor_specs, it)]
 
         def _xf(item: dict, match: str | None = None) -> dict[str, Any] | None:
@@ -3285,7 +3281,7 @@ def plan_slide_reuses(
                     "kind": str(it.get("kind") or "item"),
                     "kindIndex": int(it.get("kindIndex") or 0),
                     "itemIndex": int(it.get("index") if it.get("index") is not None else it.get("_index") or 0),
-                    # No transform for this item: scale it with the canvas rather than let the paste ride the wall coordinate.
+                    # No transform: scale the wall rect by the canvas instead of a null x/y.
                     "x": round(_f(it.get("x")) * sx, 2),
                     "y": round(_f(it.get("y")) * sy, 2),
                     "w": round(_f(it.get("w")) * sx, 2),
@@ -3954,7 +3950,6 @@ def plan_payload_transforms(
             keep_side_panels=slide_lists,
             wall_size=(wall_w, wall_h),
             defer_list_packing=slide_lists and analysis is not None,
-            free_text_keys=analysis["free"] if analysis else None,
             child_resize_report=child_resize_report,
             badge_raise_report=badge_raise_report,
             card_stroke=card_stroke,

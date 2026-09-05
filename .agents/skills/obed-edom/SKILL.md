@@ -50,8 +50,12 @@ CG resize:
 
 ```bash
 python -m obed_edom remap "Wall.key" --template "Base_CG_Assets.key" \
-  --slides 2 --include-lists [--source-previews FOLDER]
+  --slides 2 --keep-side-panels [SLIDES] [--source-previews FOLDER]
 ```
+
+`--keep-side-panels` keeps content outside the centre wall band (church-name
+side panels, badges); bare flag keeps it on every slide, `4,7` or `4-9` keeps
+it only on those.
 
 Generate writes `output/<stem>/` containing the LW/DSK decks, `_CUED.docx`,
 `review.pdf`, and previews when applicable.

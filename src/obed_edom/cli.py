@@ -173,7 +173,7 @@ def _run_remap(args: argparse.Namespace) -> int:
         side = (
             None
             if (keep_all or not args.keep_side_panels)
-            else set(parse_slide_spec(args.keep_side_panels))
+            else set(parse_slide_spec(args.keep_side_panels) or ())
         )
     except ValueError as err:
         print(str(err), file=sys.stderr)

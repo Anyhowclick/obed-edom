@@ -316,6 +316,23 @@ test("deleteRefs (geom): a text ref matches even when the live autosized height 
   assert.strictEqual(flags.length, 0);
 });
 
+test("deleteRefs (geom): two co-located text refs with different planned h both delete", function () {
+  // The grouping key must ignore h for text/line, same as matchesRect — otherwise
+  // these land in two separate 1-ref groups, each seeing both live objects as a
+  // "2 matches vs 1 ref" split, and neither one deletes.
+  const arr = [elem(100, 100, 50, 60, "a"), elem(100, 100, 50, 90, "b")];
+  const slide = slideOf("text", arr);
+  const flags = [];
+  const refs = [
+    { kind: "text", x: 100, y: 100, w: 50, h: 30 },
+    { kind: "text", x: 100, y: 100, w: 50, h: 954 },
+  ];
+  const n = m.deleteRefs(keynoteFor(arr), slide, refs, flags);
+  assert.strictEqual(n, 2);
+  assert.strictEqual(arr.length, 0);
+  assert.strictEqual(flags.length, 0);
+});
+
 test("deleteRefs (geom): two same-position texts differing only in width still trip the count-equals-refs guard", function () {
   // Width IS compared for text (unlike height), but it is only one more tolerance
   // band, not a disambiguator: two live boxes whose widths both land within tol of

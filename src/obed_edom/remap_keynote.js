@@ -277,13 +277,12 @@ function whOf(obj) {
   return [w, h];
 }
 
-// Text/line boxes autosize their height (and sometimes width, when the plan wrote
-// none); only x/y (and w, when the rect carries one) are ever load-bearing there.
+// Text/line boxes autosize their height; only x/y/w are ever load-bearing there.
 function matchesRect(kind, x, y, w, h, rect, tol) {
   const t = tol != null ? Number(tol) : 4;
   if (Math.abs(x - Number(rect.x)) > t || Math.abs(y - Number(rect.y)) > t) return false;
   if (kind === "text" || kind === "line") {
-    return rect.w == null || Math.abs(w - Number(rect.w)) <= t;
+    return Math.abs(w - Number(rect.w)) <= t;
   }
   return Math.abs(w - Number(rect.w)) <= t && Math.abs(h - Number(rect.h)) <= t;
 }
@@ -345,16 +344,10 @@ function deleteRefs(Keynote, slide, refs, flags, tally) {
   const order = [];
   for (let i = 0; i < geomRefs.length; i++) {
     const r = geomRefs[i];
+    const kind = String(r.kind || "");
+    const hPart = kind === "text" || kind === "line" ? "*" : Math.round(Number(r.h));
     const key =
-      String(r.kind || "") +
-      "|" +
-      Math.round(Number(r.x)) +
-      "|" +
-      Math.round(Number(r.y)) +
-      "|" +
-      Math.round(Number(r.w)) +
-      "|" +
-      Math.round(Number(r.h));
+      kind + "|" + Math.round(Number(r.x)) + "|" + Math.round(Number(r.y)) + "|" + Math.round(Number(r.w)) + "|" + hPart;
     if (!groups[key]) {
       groups[key] = [];
       order.push(key);

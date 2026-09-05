@@ -1314,14 +1314,14 @@ def test_reuse_strips_hidden_side_panel_delta_before_the_paste():
     assert any(r.get("kind") == "text" and r.get("kindIndex") == 1 for r in job["strip"])
 
 
-def _reuse_extra_item_wall(extra):
+def _reuse_extra_item_wall(*extras):
     map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
     pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
     return {
         "slideWidth": 7680, "slideHeight": 1080,
         "slides": [
             {"number": 1, "items": [dict(map_img), *[dict(p) for p in pins]]},
-            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], extra]},
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], *extras]},
         ],
     }
 
@@ -1329,33 +1329,48 @@ def _reuse_extra_item_wall(extra):
 def test_reuse_add_without_a_transform_is_canvas_scaled():
     """An added item the planner never gave a transform (map_remap.py:2468's
     continue) must not ride the paste at its wall coordinate: plan_slide_reuses
-    scales the wall rect by the destination canvas itself."""
-    from obed_edom.map_remap import plan_slide_reuses
+    scales the wall rect by the destination canvas itself — and only for the
+    item that actually lacks a spec; a sibling add WITH a transform keeps it."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
 
     extra = _item(kind="shape", kindIndex=40, x=5000, y=200, w=400, h=100)
-    wall = _reuse_extra_item_wall(extra)
+    specced = _item(kind="shape", kindIndex=41, x=6000, y=300, w=200, h=150)
+    wall = _reuse_extra_item_wall(extra, specced)
+    xf = ItemTransform(
+        slide_number=2, item_index=43, kind="shape", kind_index=41, x=10.0, y=20.0, w=30.0, h=40.0, role="other"
+    )
 
-    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [], canvas=(1920, 1080))}
-    add = jobs[2]["add"]
-    assert len(add) == 1
-    payload = add[0]
-    assert payload["x"] == 1250.0 and payload["y"] == 200.0
-    assert payload["w"] == 100.0 and payload["h"] == 100.0
-    assert payload.get("role") != "hide"
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [xf], canvas=(1920, 1080))}
+    add = {(a["kind"], a["kindIndex"]): a for a in jobs[2]["add"]}
+    assert len(add) == 2
+    fallback = add[("shape", 40)]
+    assert fallback["x"] == 1250.0 and fallback["y"] == 200.0
+    assert fallback["w"] == 100.0 and fallback["h"] == 100.0
+    assert fallback.get("role") != "hide"
+    from_spec = add[("shape", 41)]
+    assert (from_spec["x"], from_spec["y"], from_spec["w"], from_spec["h"]) == (10.0, 20.0, 30.0, 40.0)
 
 
 def test_reuse_add_without_a_canvas_still_carries_a_rect():
     """Guards the invariant remap_keynote.js now assumes: an add payload never
-    has a null x. Without a canvas, the fallback rect is the wall rect itself."""
-    from obed_edom.map_remap import plan_slide_reuses
+    has a null x. Without a canvas, the fallback rect is the wall rect itself —
+    a sibling add WITH a transform still gets placed by its own spec."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
 
     extra = _item(kind="shape", kindIndex=40, x=5000, y=200, w=400, h=100)
-    wall = _reuse_extra_item_wall(extra)
+    specced = _item(kind="shape", kindIndex=41, x=6000, y=300, w=200, h=150)
+    wall = _reuse_extra_item_wall(extra, specced)
+    xf = ItemTransform(
+        slide_number=2, item_index=43, kind="shape", kind_index=41, x=10.0, y=20.0, w=30.0, h=40.0, role="other"
+    )
 
-    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
-    payload = jobs[2]["add"][0]
-    assert payload["x"] == 5000.0 and payload["y"] == 200.0
-    assert payload["w"] == 400.0 and payload["h"] == 100.0
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [xf])}
+    add = {(a["kind"], a["kindIndex"]): a for a in jobs[2]["add"]}
+    fallback = add[("shape", 40)]
+    assert fallback["x"] == 5000.0 and fallback["y"] == 200.0
+    assert fallback["w"] == 400.0 and fallback["h"] == 100.0
+    from_spec = add[("shape", 41)]
+    assert (from_spec["x"], from_spec["y"], from_spec["w"], from_spec["h"]) == (10.0, 20.0, 30.0, 40.0)
 
 
 def test_unpaired_text_resizes_when_swatch_face_differs():
@@ -2053,7 +2068,7 @@ def test_reuse_removes_donor_side_content_when_only_the_donor_is_whitelisted():
     job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
     removed = [r for r in job["remove"] if r.get("kind") == "text" and r.get("kindIndex") == 0]
     assert len(removed) == 1
-    assert removed[0]["w"] > 0 and removed[0]["h"] > 0
+    assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (-2680.0, 100.0, 126.0, 25.2)
 
 
 def test_reuse_emits_no_remove_ref_for_a_donor_hidden_object():
@@ -2080,6 +2095,33 @@ def test_reuse_emits_no_remove_ref_for_a_donor_hidden_object():
     assert job["remove"] == []
 
 
+def test_reuse_adds_target_side_content_group_when_only_the_target_is_whitelisted():
+    """The group exclusion in the reconcile loop must only skip the REMOVE
+    direction (groups already get a synthetic groupRemove there); a target-only
+    whitelisted group has no such other channel, so it must still land in `add`
+    with the target's own spec, and never survive in `strip`."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+
+    def slide(n):
+        return {
+            "number": n,
+            "items": [dict(map_img), *[dict(p) for p in pins], _item(kind="group", kindIndex=0, x=200, y=100, w=300, h=200)],
+            "groupChildText": {"0": "SIDEBADGE"},
+        }
+
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide(1), slide(2)]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides={2})
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    added = [a for a in job["add"] if a.get("kind") == "group" and a.get("kindIndex") == 0]
+    assert len(added) == 1
+    assert not any(s.get("kind") == "group" and s.get("kindIndex") == 0 for s in job["strip"])
+
+
 def test_church_summary_list_over_the_map_is_kept_when_side_panels_are_dropped():
     """A church-name list in the centre wall band is always kept, even over the
     map and even as a large list — "keep side panels" is positional, not a list
@@ -2099,10 +2141,7 @@ def test_church_summary_list_over_the_map_is_kept_when_side_panels_are_dropped()
     assert sum(1 for it in many["slides"][0]["items"] if is_list_item(it)) >= 6
 
     recipe = learn_recipe(many, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
-    # free_text_keys empty simulates a real run where every name sits over artwork.
-    off = plan_slide_transforms(
-        many["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=set()
-    )
+    off = plan_slide_transforms(many["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
     placed_names = [t for t in off if t.kind == "text" and t.role != "hide"]
     assert len(placed_names) == 20  # the whole centre-band list is kept, not hidden
     for t in placed_names:
@@ -2112,9 +2151,7 @@ def test_church_summary_list_over_the_map_is_kept_when_side_panels_are_dropped()
     # A couple of labels over artwork keep their protection (unchanged).
     few = church_slide(2)
     recipe2 = learn_recipe(few, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
-    off2 = plan_slide_transforms(
-        few["slides"][0], recipe2, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=set()
-    )
+    off2 = plan_slide_transforms(few["slides"][0], recipe2, keep_side_panels=False, wall_size=(7680, 1080))
     kept = [t for t in off2 if t.kind == "text" and t.role != "hide"]
     assert kept  # few labels over artwork are not dropped
 
@@ -2168,16 +2205,13 @@ def test_lone_map_label_over_the_map_survives_the_list_drop():
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
 
-    for free_text_keys in (None, set()):
-        out = plan_slide_transforms(
-            wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=free_text_keys
-        )
-        texts = [t for t in out if t.kind == "text"]
-        assert len(texts) == 1
-        t = texts[0]
-        assert t.role == "other"
-        assert 0 <= t.x and t.x + t.w <= 1920
-        assert 0 <= t.y and t.y + t.h <= 1080
+    out = plan_slide_transforms(wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
+    texts = [t for t in out if t.kind == "text"]
+    assert len(texts) == 1
+    t = texts[0]
+    assert t.role == "other"
+    assert 0 <= t.x and t.x + t.w <= 1920
+    assert 0 <= t.y and t.y + t.h <= 1080
 
 
 def test_a_church_name_column_over_the_map_is_kept():
@@ -2188,12 +2222,13 @@ def test_a_church_name_column_over_the_map_is_kept():
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
 
-    out = plan_slide_transforms(
-        wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=None
-    )
+    out = plan_slide_transforms(wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
     texts = [t for t in out if t.kind == "text"]
     assert texts
     assert all(t.role != "hide" for t in texts)
+    for t in texts:
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= t.y and t.y + t.h <= 1080
 
 
 def test_slide_9_style_map_labels_ride_the_map_affine():
@@ -2223,9 +2258,7 @@ def test_slide_9_style_map_labels_ride_the_map_affine():
     assert abs(recipe["mapDst"]["x"] - (-2880)) < 1
     assert abs(recipe["mapDst"]["w"] / recipe["mapSrc"]["w"] - 1) < 1e-6
 
-    out = plan_slide_transforms(
-        wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080), free_text_keys=None
-    )
+    out = plan_slide_transforms(wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
     by = {t.kind_index: t for t in out if t.kind == "text"}
     assert len(by) == 15
     assert not any(t.role == "hide" for t in by.values())
