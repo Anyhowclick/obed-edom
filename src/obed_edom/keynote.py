@@ -665,7 +665,7 @@ def _stat_leaf_font_writes(container: str) -> list[str]:
         "              set size of characters 1 thru -1 of object text of _leaf to _tgt",
         "            else if leafPt > 0 then",
         "              set size of characters 1 thru -1 of object text of _leaf to leafPt",
-        "            else",
+        "            else if s > 0 then",
         "              set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)",
         "            end if",
         "            set sized to sized + 1",

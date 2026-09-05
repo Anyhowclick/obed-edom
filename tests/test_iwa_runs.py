@@ -672,3 +672,109 @@ def test_single_text_leaf_ignores_object_replacement_only_siblings():
     assert leaf is not None and leaf is objects["802"]
     sig = _group_child_signature("800", objects, {})
     assert sig == "CHC Villamonte"  # one part: the placeholder normalizes to empty and drops out
+
+
+# --------------------------------------------------------------------------
+# _group_child_records (fix3) — per-child address + SOURCE geometry for a flat
+# group holding an autosize text box. A Keynote group resize is an aspect-locked
+# uniform scale about the group's LIVE frame that permanently freezes such a
+# child wrapped, so the children must be written instead of the group.
+# --------------------------------------------------------------------------
+from obed_edom.iwa_runs import _group_child_records  # noqa: E402
+
+
+def test_group_child_records_refuses_a_group_without_an_autosize_child():
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "901"}, {"identifier": "902"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "902": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+    }
+    assert _group_child_records(objects["900"], objects) is None
+
+
+def test_group_child_records_refuses_a_nested_group_or_rotated_child():
+    nested = {
+        "910": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "911"}, {"identifier": "912"}],
+        },
+        "911": {"_pbtype": "TSD.GroupArchive", "geometry": {"position": {"x": 0.0, "y": 0.0},
+                                                            "size": {"width": 50.0, "height": 40.0}, "angle": 0.0},
+                "children": []},
+        "912": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "912-st"},
+            "super": {
+                "geometry": {"position": {"x": 50.0, "y": 0.0}, "size": {"width": 150.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 150.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(nested["910"], nested) is None
+
+    rotated = {
+        "920": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "921"}, {"identifier": "922"}],
+        },
+        "921": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 15.0}},
+        },
+        "922": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "922-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(rotated["920"], rotated) is None
+
+
+def test_group_child_records_maps_autosize_centre_and_natural_size():
+    # Shaped like Gold slide 2's badge group: plate local (42.6, 0, 278.0, 87.6),
+    # text local (47.5, 42.8, 268.2, 0.0) with naturalSize (268.2, 70.0).
+    objects = {
+        "930": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4121.7, "y": 39.4}, "size": {"width": 278.0, "height": 87.6}, "angle": 0.0},
+            "children": [{"identifier": "931"}, {"identifier": "932"}],
+        },
+        "931": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 42.6, "y": 0.0}, "size": {"width": 278.0, "height": 87.6}, "angle": 0.0}},
+        },
+        "932": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "932-st"},
+            "super": {
+                "geometry": {"position": {"x": 47.5, "y": 42.8}, "size": {"width": 268.2, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 268.2, "height": 70.0}}},
+            },
+        },
+    }
+    records = _group_child_records(objects["930"], objects)
+    assert records is not None
+    plate, text = records
+    assert plate["kind"] == "shape" and plate["kindIndex"] == 0 and plate["autosize"] is False
+    assert plate["x"] == pytest.approx(4164.3)
+    assert plate["y"] == pytest.approx(39.4)
+    assert plate["w"] == pytest.approx(278.0)
+    assert plate["h"] == pytest.approx(87.6)
+    assert text["kind"] == "text" and text["kindIndex"] == 0 and text["autosize"] is True
+    assert text["x"] == pytest.approx(4169.2)
+    assert text["cy"] == pytest.approx(82.2)
+    assert text["y"] == pytest.approx(47.2)
+    assert text["w"] == pytest.approx(268.2)
+    assert text["h"] == pytest.approx(70.0)

@@ -118,6 +118,39 @@ class ItemTransform:
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
     src: Rect | None = None
+    # Groups holding an autosize text box: pass 1 must write these CHILDREN (absolute,
+    # slide coords) and never the group. A Keynote group resize is an aspect-locked
+    # uniform scale about the group's LIVE frame — after setSlideSize that frame is the
+    # union of a word-wrapped autosize child (measured 278x88 -> 69x261 on Gold slide 2),
+    # and the resize freezes the child wrapped permanently. Source-deck rects; the targets
+    # are derived in as_dict so they survive _pack_left_groups moving x/y afterwards.
+    child_src: list[dict[str, Any]] | None = None
+
+    def _child_payload(self) -> list[dict[str, Any]] | None:
+        if not self.child_src or self.src is None or self.src.w <= 0 or self.src.h <= 0:
+            return None
+        sx = self.w / self.src.w
+        sy = self.h / self.src.h
+        # A group's affine is uniform; anything else would shear the text (whose font
+        # cannot scale anisotropically) — refuse rather than guess.
+        if sx <= 0 or sy <= 0 or abs(sx - sy) > 0.01 * max(sx, sy):
+            return None
+        out: list[dict[str, Any]] = []
+        for c in self.child_src:
+            rec: dict[str, Any] = {
+                "kind": str(c["kind"]),
+                "kindIndex": int(c["kindIndex"]),
+                "x": round(self.x + (float(c["x"]) - self.src.x) * sx, 2),
+                "y": round(self.y + (float(c["y"]) - self.src.y) * sy, 2),
+                "w": round(float(c["w"]) * sx, 2),
+                "h": round(float(c["h"]) * sy, 2),
+            }
+            if c.get("autosize"):
+                # Keynote derives the height; y is only the fallback if the read-back fails.
+                rec["autosize"] = True
+                rec["cy"] = round(self.y + (float(c["cy"]) - self.src.y) * sy, 2)
+            out.append(rec)
+        return out
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -140,6 +173,9 @@ class ItemTransform:
                 math.hypot(self.end[0] - self.start[0], self.end[1] - self.start[1]), 2
             )
             payload["h"] = 0.0
+        children = self._child_payload()
+        if children:
+            payload["children"] = children
         if self.font_size is not None:
             payload["fontSize"] = round(self.font_size, 2)
         if self.font:
@@ -2324,6 +2360,7 @@ def plan_slide_transforms(
     body_for_body = slide_body_text_item(slide, wall_size)
     body_item = body_for_body if body_dst is not None else None
     badge_dsts = dict(recipe.get("badgeSlots") or {})
+    group_children: dict[int, list[dict[str, Any]]] = slide.get("groupChildren") or {}
     styles_pre = list(recipe.get("characterStyles") or [])
     overlay_ids = sparkle_overlays(slide, body_for_body)
     body_final_size: float | None = None
@@ -2626,6 +2663,7 @@ def plan_slide_transforms(
             _badge_hits[id(item)].update(
                 {"x": mapped.x, "y": mapped.y, "w": mapped.w, "h": mapped.h}
             )
+        child_src: list[dict[str, Any]] | None = None
         if str(item.get("kind") or "") == "group" and role == "other":
             _gct = slide.get("groupChildText") or {}
             _sig = _gct.get(kind_index)
@@ -2679,12 +2717,23 @@ def plan_slide_transforms(
             # old source-w/h override is obsolete and only made the box oversized.
             if mapped.x < 16:
                 mapped = Rect(16.0, mapped.y, mapped.w, mapped.h)
+            # A card is sized to a TEMPLATE rect and its caption is a fixed-frame shape
+            # (never an autosize box), so its live frame stays proportional and today's
+            # absolute group write is right — live-verified, 71/71. Badge-slot groups
+            # likewise take a slot rect. Everything else with an autosize text member
+            # takes the child-write path (fix3).
+            if ("group", kind_index) not in card_keys and badge_dst is None:
+                child_src = group_children.get(kind_index)
             if child_resize_report is not None:
                 row: dict[str, Any] = {
                     "slide": number,
                     "groupIndex": kind_index + 1,
                     "childSig": _sig,
-                    # Group frame scales by this; fonts don't, so the pass scales them.
+                    # The factor pass 1 scales this group by; Keynote does not scale a
+                    # group's child fonts on resize, so the font pass applies the same
+                    # factor. Since fix3 a group with an autosize text member is written
+                    # child-by-child with this same ratio, so plate and text stay
+                    # proportional by construction.
                     "s": (mapped.w / _src_rect.w) if _src_rect.w else 1.0,
                     "captionPt": caption_pt,
                 }
@@ -2745,6 +2794,7 @@ def plan_slide_transforms(
                 role=role,
                 kind_index=kind_index,
                 src=item_rect(item),
+                child_src=child_src,
             )
         )
         if parked_left:

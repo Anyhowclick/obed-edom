@@ -840,6 +840,15 @@ def test_leaf_font_writes_prefer_stat_size_then_caption_then_scale():
     assert tgt < leaf < scale
 
 
+def test_leaf_font_write_needs_a_positive_scale():
+    # s<=0 (e.g. an unresolved group) must not write a bogus/negative font size.
+    from obed_edom.keynote import _stat_leaf_font_writes
+
+    lines = "\n".join(_stat_leaf_font_writes("g"))
+    assert "else if s > 0 then" in lines
+    assert "set size of characters 1 thru -1 of object text of _leaf to (_c1 * s)" in lines
+
+
 def test_caption_point_size_zero_reproduces_todays_script():
     # A stat-only job set (captionPt always 0.0) falls through to `_c1 * s`, byte-for-byte
     # what a job dict without "captionPt" produces.

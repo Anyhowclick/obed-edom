@@ -487,3 +487,98 @@ def attach_group_captions(key_path: str | Path, payload: dict, *, deck: Any = No
         caps = caps_by_index.get(slide.get("index"))
         if caps:
             slide["groupCaption"] = caps
+
+
+def _group_child_records(group_obj: dict, objects: dict[str, dict]) -> list[dict] | None:
+    """Per-child AppleScript address + SOURCE-deck geometry for a flat group, else None.
+
+    None = "keep today's absolute group write". Only a group holding an autosize text box
+    needs this: a Keynote group resize is an aspect-locked uniform scale about the group's
+    LIVE frame, and after the canvas resize that frame is the union of a word-wrapped
+    autosize child (measured 69x261 for a 278x88 badge). The resize also freezes the child
+    wrapped for ever, so the children must be written instead of the group.
+    Autosize children carry `cy` (their geometry.y IS the vertical centre) and naturalSize.
+    """
+    from obed_edom.iwa_geometry import (  # noqa: PLC0415
+        _geom_dict, _leaf_bbox, _mask_geom, _masked_rect, _natural_size, _xywha,
+    )
+    from obed_edom.iwa_kindindex import _memberships  # noqa: PLC0415
+
+    gx, gy, _gw, _gh, gangle = _xywha(_geom_dict(group_obj))
+    if gangle % 360.0:
+        return None
+    counters: dict[str, int] = {}
+    out: list[dict] = []
+    autosize_seen = False
+    for ref in group_obj.get("children") or []:
+        cid = ref.get("identifier")
+        child = objects.get(str(cid)) if cid is not None else None
+        if child is None or child.get("_pbtype") == "TSD.GroupArchive":
+            return None  # nested group: same aspect-lock problem one level down
+        kinds = _memberships(child)
+        if not kinds:
+            return None
+        assigned: dict[str, int] = {}
+        for kind in kinds:  # identical counter rule to derive_kind_index
+            assigned[kind] = counters.get(kind, 0)
+            counters[kind] = assigned[kind] + 1
+        geom = _geom_dict(child)
+        cx, cy, _cw, ch, ca = _xywha(geom)
+        if ca % 360.0:
+            return None
+        if (child.get("mask") or {}).get("identifier") is not None:
+            mask_geom = _mask_geom(child, objects)
+            if not mask_geom:
+                return None
+            _rect, off_axis = _masked_rect(geom, mask_geom)
+            if off_axis:
+                return None
+        autosize = child.get("_pbtype") == "TSWP.ShapeInfoArchive" and ch == 0.0
+        if autosize:
+            if "text" not in assigned:
+                return None
+            nw, nh = _natural_size(child)
+            if nw <= 0:
+                return None
+            autosize_seen = True
+            out.append({
+                "kind": "text", "kindIndex": assigned["text"], "autosize": True,
+                "x": gx + cx, "cy": gy + cy, "y": gy + cy - nh / 2.0, "w": nw, "h": nh,
+            })
+            continue
+        kind = "shape" if "shape" in assigned else kinds[0]
+        x0, y0, x1, y1 = _leaf_bbox(child, gx, gy, objects)
+        out.append({
+            "kind": kind, "kindIndex": assigned[kind], "autosize": False,
+            "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0,
+        })
+    return out if autosize_seen else None
+
+
+def attach_group_children(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
+    """Attach slide['groupChildren'] = {kindIndex: [child record, ...]} for top-level
+    groups holding an autosize text box. Read-only; mirrors attach_group_captions."""
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
+    kids_by_index: dict[int, dict[int, list[dict]]] = {}
+    for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
+        slide_archive = objects.get(slide_id)
+        if slide_archive is None:
+            continue
+        kids: dict[int, list[dict]] = {}
+        for rec in derive_kind_index(slide_archive, objects):
+            if rec.get("kind") != "group":
+                continue
+            group_obj = objects.get(str(rec["id"]))
+            if not group_obj:
+                continue
+            records = _group_child_records(group_obj, objects)
+            if records:
+                kids[int(rec["kindIndex"])] = records
+        if kids:
+            kids_by_index[idx] = kids
+    for slide in payload.get("slides") or []:
+        kids = kids_by_index.get(slide.get("index"))
+        if kids:
+            slide["groupChildren"] = kids
