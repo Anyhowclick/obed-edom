@@ -160,7 +160,12 @@ The genuine scripting gaps are narrower:
 * character styling beyond `font`, `color`, and `size`, including superscript,
   baseline shift, small-caps, underline, and strikethrough;
 * shape corner radius;
-* dictionary-level arrange/z-order commands.
+* dictionary-level arrange/z-order commands;
+* builds/animations — Keynote's sdef has **no build class at all**. `slide.builds()`
+  never existed (an offline `attachBuildCounts` call on it always returns early with
+  `buildCount: 0`). `transition properties` of a slide is the only scriptable piece,
+  readable and writable; a transition record cannot be coerced `as string` — compare
+  its enumerator fields explicitly instead.
 
 GUI automation can bridge some of the latter, notably Bring to Front and
 Ungroup.
@@ -225,6 +230,20 @@ the slide rather than silently losing it.
 Framing is an editorial decision, not a metric problem. Do not keep adding
 heuristics to infer a choice an operator can see immediately. Reuse the existing
 Sermon Checker pairing/confirmation pattern where human confirmation is needed.
+
+### Side panels and church-name rosters
+
+`--keep-side-panels` is positional and per-slide: content outside the centre wall
+band (`x ∈ [1920,5760]` on a 7680-wide wall) is dropped unless that slide is
+whitelisted; content inside the band is a separate question. The owner's roster rule
+(2026-09-05): a church-name roster is kept only on the church-list slide(s) — the
+slide it first appears on, plus an immediately following slide that is purely that
+roster's own re-layout — and there it is packed into the visible frame, not left at
+its wall extent. Every later slide that still carries the roster as a wall leftover
+hides it entirely, side band or centre band alike. Reuse must honour this on both the
+donor and the target: a persisted item invisible on one side and visible on the other
+needs an explicit add/remove job, not silent inheritance from whichever side reuse
+happened to copy.
 
 ### Loose text
 
@@ -339,6 +358,11 @@ text width, but lines and groups still need their specialised offline handling.
 Round geometry to whole points where matching Keynote values; sub-pixel noise can
 change affine fitting.
 
+`compose_geometry` is unreliable for AUTOSIZE text boxes: Keynote's live y is
+`stored y + h/2`, not the stored y, and a box built this way can be missed entirely by
+a geometry match. Never geometry-match autosize text — match on its text content, or
+read it live.
+
 ### Offline writes
 
 A whole-deck IWA decode/re-encode is unsafe.
@@ -375,6 +399,13 @@ Load-bearing rules:
   `naturalSize` is Keynote's render cache and only a live write refreshes it, so an
   offline byte-patch leaves it stale and Keynote re-shrink-wraps the box on open. Such
   boxes hard-miss to the AppleScript fallback, which writes them correctly.
+* `KN.SlideArchive.builds` and `.buildChunks` are the **only** references to a build
+  anywhere in a slide member. Shrinking/reordering those two lists and writing
+  `.transition` on the same `SlideArchive` survives a Keynote 15.3.1 open + re-save with
+  geometry and every other slide byte-identical (probed live 2026-09-05); orphaned
+  `Build`/`BuildChunk` archives may be left behind unreferenced and are harmless. The
+  patcher self-checks by archive id and header before writing and refuses rather than
+  guess.
 
 ---
 
