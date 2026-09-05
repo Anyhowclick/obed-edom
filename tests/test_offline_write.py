@@ -1135,6 +1135,63 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
     )
 
 
+# --- fix3 review finding 2: attach_group_children is offline-read-only ----------
+
+
+def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
+    """child_src's offsets (iwa_runs._group_child_records) are computed against the
+    group's STORED archive frame; ItemTransform derives targets against `self.src`,
+    which under OBED_OFFLINE_READ=on is the offline-composed group rect (same stored-
+    frame space, or the child union — both fine) but under =off is Keynote's LIVE
+    frame. For a group whose children have already wrapped, stored != live union, so
+    the subtraction would mix origins and displace every child. attach_group_children
+    must simply not run when the wall payload did not come from the offline reader."""
+    import obed_edom.iwa_runs as iwa_mod
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rk, "recipe_for",
+        lambda wall, template: {
+            "source": "test", "mapSrc": "src", "mapDst": "dst",
+            "destWidth": 1920, "destHeight": 1080, "characterStyles": [],
+        },
+    )
+    monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
+    monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
+    monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+
+    monkeypatch.setattr(iwa_mod, "_load_deck", lambda _p: ({}, {}, {}))
+    monkeypatch.setattr(iwa_mod, "attach_group_child_text", lambda *a, **k: None)
+    monkeypatch.setattr(iwa_mod, "attach_group_captions", lambda *a, **k: None)
+    calls: list = []
+    monkeypatch.setattr(iwa_mod, "attach_group_children", lambda *a, **k: calls.append(1))
+
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    dest = tmp_path / "out.key"
+    source.touch()
+    template.touch()
+    wall_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        offline_read="off", log=lambda m: None,
+    )
+    assert calls == []
+
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        offline_read="on", log=lambda m: None,
+    )
+    assert calls == [1]
+
+
 # --- R2: gate keys land + the gate logic that reads them -------------------------
 
 

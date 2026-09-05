@@ -145,6 +145,43 @@ function xyOf(obj) {
   }
 }
 
+// Mirror of _child_ops_lines. Never resizes the group: a Keynote group resize is an
+// aspect-locked uniform scale about the group's live frame, which after setSlideSize is
+// the union of a word-wrapped autosize child — and the resize freezes that child wrapped.
+// All-or-nothing: every child must resolve before any write happens, otherwise the
+// group's live frame (the union of whatever landed) becomes a phantom straddling both
+// the old and new positions with no repair path.
+function applyGroupChildren(obj, spec, mode) {
+  const kids = spec.children || [];
+  const resolved = [];
+  for (let i = 0; i < kids.length; i++) {
+    const child = getItem(obj, kids[i]);
+    if (!child) return false;
+    resolved.push(child);
+  }
+  let wrote = false;
+  for (let i = 0; i < kids.length; i++) {
+    const c = kids[i];
+    const child = resolved[i];
+    if (mode === "full" && c.w != null) {
+      try { child.width = c.w; wrote = true; } catch (eW) {}
+      if (!c.autosize && c.h != null) {
+        try { child.height = c.h; wrote = true; } catch (eH) {}
+      }
+    }
+    if (mode !== "attrs" && c.x != null) {
+      let y = c.y;
+      if (c.autosize && c.cy != null) {
+        let ch = 0;
+        try { ch = Number(child.height()); } catch (eR) {}
+        if (ch > 0) y = Number(c.cy) - ch / 2;
+      }
+      if (setPos(child, c.x, y)) wrote = true;
+    }
+  }
+  return wrote;
+}
+
 // Never size in a pos-only pass (JXA yank). Line width=length / height=0 — size places the rule.
 function applyGeom(obj, spec, mode) {
   mode = mode || "full";
@@ -167,13 +204,15 @@ function applyGeom(obj, spec, mode) {
       ok = true;
     } catch (eO) {}
   }
-  if (writeSize && spec.w != null) {
+  const useChildren = spec.kind === "group" && spec.children && spec.children.length > 0;
+  if (useChildren && applyGroupChildren(obj, spec, mode)) ok = true;
+  if (!useChildren && writeSize && spec.w != null) {
     try {
       obj.width = spec.w;
       ok = true;
     } catch (eW) {}
   }
-  if (writeSize && spec.h != null) {
+  if (!useChildren && writeSize && spec.h != null) {
     try {
       obj.height = spec.h;
       ok = true;
@@ -198,7 +237,7 @@ function applyGeom(obj, spec, mode) {
       } catch (eC2) {}
     }
   }
-  if (writePos && spec.role !== "hide" && spec.x != null && spec.y != null) {
+  if (!useChildren && writePos && spec.role !== "hide" && spec.x != null && spec.y != null) {
     if (setPos(obj, spec.x, spec.y)) {
       ok = true;
     }
@@ -1125,5 +1164,7 @@ if (typeof module !== "undefined" && module.exports) {
     deleteRefs: deleteRefs,
     removeShortfallOf: removeShortfallOf,
     tempScriptPath: tempScriptPath,
+    applyGeom: applyGeom,
+    applyGroupChildren: applyGroupChildren,
   };
 }

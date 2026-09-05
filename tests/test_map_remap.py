@@ -4339,3 +4339,151 @@ def test_resolve_template_card_sample_for_the_operator_summary():
     assert resolved["gutterY"] == pytest.approx(7.753, abs=0.01)
     assert _resolve_template_card_sample([]) is None
     assert _resolve_template_card_sample(None) is None
+
+
+# ---- group child geometry (fix3) --------------------------------------------------------
+# A Keynote 15.3.1 group resize is an aspect-locked uniform scale about the group's LIVE
+# frame and permanently freezes an autosize text child at its wrapped height. Groups
+# holding one are therefore written child-by-child (never resized as a group).
+
+
+def _badge_child_src():
+    return [
+        {"kind": "shape", "kindIndex": 0, "x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6},
+        {
+            "kind": "text", "kindIndex": 0, "autosize": True,
+            "x": 4169.2, "cy": 82.2, "y": 47.2, "w": 268.2, "h": 70.0,
+        },
+    ]
+
+
+def test_item_transform_emits_child_targets_only_when_flagged():
+    src = Rect(4164.3, 39.4, 278.0, 87.6)
+    tf = ItemTransform(
+        slide_number=2, item_index=0, kind="group", x=1700.0, y=40.0, w=273.0, h=86.0,
+        kind_index=0, src=src, child_src=_badge_child_src(),
+    )
+    d = tf.as_dict()
+    assert d["w"] == 273.0 and d["h"] == 86.0  # the group's own rect is unchanged
+    children = d["children"]
+    assert len(children) == 2
+    assert "autosize" not in children[0]
+    assert children[0]["x"] == pytest.approx(1700.0, abs=0.05)
+    assert children[0]["y"] == pytest.approx(40.0, abs=0.05)
+    assert children[0]["w"] == pytest.approx(273.0, abs=0.05)
+    assert children[0]["h"] == pytest.approx(86.0, abs=0.05)
+    assert children[1]["w"] == pytest.approx(263.4, abs=0.1)
+    assert children[1]["cy"] == pytest.approx(82.0, abs=0.1)
+    assert children[1]["autosize"] is True
+
+    no_children_src = ItemTransform(
+        slide_number=2, item_index=0, kind="group", x=1700.0, y=40.0, w=273.0, h=86.0,
+        kind_index=0, src=src, child_src=None,
+    )
+    assert "children" not in no_children_src.as_dict()
+
+    no_src = ItemTransform(
+        slide_number=2, item_index=0, kind="group", x=1700.0, y=40.0, w=273.0, h=86.0,
+        kind_index=0, src=None, child_src=_badge_child_src(),
+    )
+    assert "children" not in no_src.as_dict()
+
+    zero_src = ItemTransform(
+        slide_number=2, item_index=0, kind="group", x=1700.0, y=40.0, w=273.0, h=86.0,
+        kind_index=0, src=Rect(0.0, 0.0, 0.0, 87.6), child_src=_badge_child_src(),
+    )
+    assert "children" not in zero_src.as_dict()
+
+
+def test_non_uniform_group_target_refuses_child_writes():
+    # h=140 makes sy diverge from sx by well over 1% — a group's affine is uniform;
+    # anything else would shear the text (whose font cannot scale anisotropically).
+    tf = ItemTransform(
+        slide_number=2, item_index=0, kind="group", x=1700.0, y=40.0, w=273.0, h=140.0,
+        kind_index=0, src=Rect(4164.3, 39.4, 278.0, 87.6), child_src=_badge_child_src(),
+    )
+    assert "children" not in tf.as_dict()
+
+
+def test_badge_group_reaches_the_child_write_path():
+    """Modelled on test_caption_bearing_pin_sized_group_reaches_the_font_pass: groupChildren
+    threads through plan_slide_transforms the same way groupChildText/child_resize_report
+    do, so geometry and font scale by the same number."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert len(d["children"]) == 2
+    assert d["children"][0]["w"] / 278.0 == pytest.approx(report[0]["s"])
+
+
+def test_card_group_never_takes_the_child_write_path():
+    # The test_roster_group_is_not_a_card cardSamples recipe, but with an aspect-matching
+    # group AND a groupChildren entry present: a card's caption is a fixed-frame shape
+    # (never an autosize box), so it must stay on the template-card path untouched.
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [_item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5)],
+        "groupChildText": {0: "CHC Arao"},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    card = next(t for t in out if t.kind == "group")
+    d = card.as_dict()
+    assert "children" not in d
+    assert (round(card.w, 1), round(card.h, 1)) == (120.0, 100.0)
+
+
+def test_badge_slot_group_never_takes_the_child_write_path():
+    # The other half of the same guard line (map_remap.py: "not in card_keys and
+    # badge_dst is None") — a group sharing the title's badge box takes the
+    # template's badge slot rect, not an affine-mapped size, so it must stay off
+    # the child-write path even when groupChildren has an entry for it.
+    # >PIN_KIND_MAX (180) so is_pin_item does not swallow the group as a map pin
+    # before badge_members ever sees it.
+    title = _item(kind="text", text="Global Missions", x=2000.0, y=50.0, w=500.0, h=100.0)
+    badge_group = _item(kindIndex=0, kind="group", x=2150.0, y=0.0, w=200.0, h=200.0)
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        # plan_slide_transforms bails out with [] when there is neither a "groups"
+        # affine list nor a map — an off-map slide, but the guard needs SOME reason
+        # to run; a degenerate no-op map is enough and never classifies anything.
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "titleDst": {"x": 800.0, "y": 40.0, "w": 300.0, "h": 60.0},
+        "badgeSlots": {"group:0": {"x": 700.0, "y": 20.0, "w": 90.0, "h": 90.0}},
+    }
+    slide = {
+        "number": 6,
+        "items": [title, badge_group],
+        "groupChildText": {0: "Ps George"},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert "children" not in d
+    assert (round(group_tf.w, 1), round(group_tf.h, 1)) == (90.0, 90.0)

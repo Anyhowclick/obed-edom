@@ -260,6 +260,11 @@ Do not rewrite verse-box text to force reflow. Keynote cannot faithfully rebuild
 all run styling, and rewriting can lose superscripts, small-caps, and authored
 line breaks.
 
+A Keynote 15.3.1 group resize is an aspect-locked uniform scale about the
+group's LIVE frame and permanently freezes an autosize text child at its
+wrapped height. Groups holding an autosize text box are therefore written
+child-by-child (width only for the autosize child), never resized as a group.
+
 ---
 
 ## Scoring and validation

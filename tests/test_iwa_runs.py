@@ -31,6 +31,7 @@ from obed_edom.iwa_runs import (
     _slide_grouped_text,
     attach_group_captions,
     attach_group_child_text,
+    attach_group_children,
     attach_runs,
     resolve_para_style,
     resolve_style,
@@ -672,3 +673,336 @@ def test_single_text_leaf_ignores_object_replacement_only_siblings():
     assert leaf is not None and leaf is objects["802"]
     sig = _group_child_signature("800", objects, {})
     assert sig == "CHC Villamonte"  # one part: the placeholder normalizes to empty and drops out
+
+
+# --------------------------------------------------------------------------
+# _group_child_records (fix3) — per-child address + SOURCE geometry for a flat
+# group holding an autosize text box. A Keynote group resize is an aspect-locked
+# uniform scale about the group's LIVE frame that permanently freezes such a
+# child wrapped, so the children must be written instead of the group.
+# --------------------------------------------------------------------------
+from obed_edom.iwa_runs import _group_child_records  # noqa: E402
+
+
+def test_group_child_records_refuses_a_group_without_an_autosize_child():
+    objects = {
+        "900": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "901"}, {"identifier": "902"}],
+        },
+        "901": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "902": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+    }
+    assert _group_child_records(objects["900"], objects) is None
+
+
+def test_group_child_records_refuses_a_nested_group_or_rotated_child():
+    nested = {
+        "910": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "911"}, {"identifier": "912"}],
+        },
+        "911": {"_pbtype": "TSD.GroupArchive", "geometry": {"position": {"x": 0.0, "y": 0.0},
+                                                            "size": {"width": 50.0, "height": 40.0}, "angle": 0.0},
+                "children": []},
+        "912": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "912-st"},
+            "super": {
+                "geometry": {"position": {"x": 50.0, "y": 0.0}, "size": {"width": 150.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 150.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(nested["910"], nested) is None
+
+    rotated = {
+        "920": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "921"}, {"identifier": "922"}],
+        },
+        "921": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 15.0}},
+        },
+        "922": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "922-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(rotated["920"], rotated) is None
+
+
+def test_group_child_records_maps_autosize_centre_and_natural_size():
+    # Shaped like Gold slide 2's badge group: plate local (42.6, 0, 278.0, 87.6),
+    # text local (47.5, 42.8, 268.2, 0.0) with naturalSize (268.2, 70.0).
+    objects = {
+        "930": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4121.7, "y": 39.4}, "size": {"width": 278.0, "height": 87.6}, "angle": 0.0},
+            "children": [{"identifier": "931"}, {"identifier": "932"}],
+        },
+        "931": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 42.6, "y": 0.0}, "size": {"width": 278.0, "height": 87.6}, "angle": 0.0}},
+        },
+        "932": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "932-st"},
+            "super": {
+                "geometry": {"position": {"x": 47.5, "y": 42.8}, "size": {"width": 268.2, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 268.2, "height": 70.0}}},
+            },
+        },
+    }
+    records = _group_child_records(objects["930"], objects)
+    assert records is not None
+    plate, text = records
+    assert plate["kind"] == "shape" and plate["kindIndex"] == 0 and plate["autosize"] is False
+    assert plate["x"] == pytest.approx(4164.3)
+    assert plate["y"] == pytest.approx(39.4)
+    assert plate["w"] == pytest.approx(278.0)
+    assert plate["h"] == pytest.approx(87.6)
+    assert text["kind"] == "text" and text["kindIndex"] == 0 and text["autosize"] is True
+    assert text["x"] == pytest.approx(4169.2)
+    assert text["cy"] == pytest.approx(82.2)
+    assert text["y"] == pytest.approx(47.2)
+    assert text["w"] == pytest.approx(268.2)
+    assert text["h"] == pytest.approx(70.0)
+
+
+def test_group_child_records_refuses_zero_natural_height():
+    # naturalSize.height, not just .width, must be positive: an untested gate (review
+    # finding 4) — h == 0 both disqualifies the "real" height AND is exactly the value
+    # the AS/JS writers' _ch <= 0 fallback triggers on, so the two failure modes would
+    # otherwise coincide and land the box half a box low.
+    objects = {
+        "970": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "971"}, {"identifier": "972"}],
+        },
+        "971": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "972": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "972-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 0.0}}},
+            },
+        },
+    }
+    assert _group_child_records(objects["970"], objects) is None
+
+
+def test_group_child_records_refuses_zero_natural_width():
+    objects = {
+        "975": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "976"}, {"identifier": "977"}],
+        },
+        "976": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "977": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "977-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 0.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 0.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(objects["975"], objects) is None
+
+
+def test_group_child_records_refuses_frame_width_natural_size_mismatch():
+    # iwa_geometry._autosize_rect documents naturalSize as stale; the fix must not
+    # trust it blindly when it disagrees with the child's own frame width (also read
+    # from the pristine source deck) by more than 1% (review finding 3) — refuse
+    # rather than write the wrong width and re-wrap the very box this fix un-wraps.
+    objects = {
+        "980": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "981"}, {"identifier": "982"}],
+        },
+        "981": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "982": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "982-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 50.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(objects["980"], objects) is None
+
+
+def test_group_child_records_refuses_unresolved_mask():
+    objects = {
+        "940": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "941"}, {"identifier": "942"}],
+        },
+        "941": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "mask": {"identifier": "999"},  # no "999" in objects: unresolvable
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "942": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "942-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(objects["940"], objects) is None
+
+
+def test_group_child_records_refuses_off_axis_mask():
+    # Same frame/mask numbers as test_group_off_axis_masked_child_is_residual_flagged
+    # in test_iwa_geometry.py (known to swing the snapped-vs-raw corner past
+    # _MASK_TRUST_PX): a long lever arm (4000x1000) at a 2 degree residual angle.
+    objects = {
+        "950": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 4200.0, "height": 1100.0}, "angle": 0.0},
+            "children": [{"identifier": "951"}, {"identifier": "952"}],
+        },
+        "951": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "mask": {"identifier": "951-mask"},
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 4000.0, "height": 1000.0}, "angle": 2.0}},
+        },
+        "951-mask": {"geometry": {"position": {"x": 10.0, "y": 10.0}, "size": {"width": 100.0, "height": 60.0}, "angle": 0.0}},
+        "952": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "952-st"},
+            "super": {
+                "geometry": {"position": {"x": 4000.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
+            },
+        },
+    }
+    assert _group_child_records(objects["950"], objects) is None
+
+
+def test_group_child_records_line_child_does_not_disqualify_the_group():
+    # A zero-height line legitimately has h == 0 (iwa_kindindex._is_line's own
+    # docstring): review finding 5 — the group must NOT be refused just because a
+    # child shares TSWP.ShapeInfoArchive + h == 0 with a genuine autosize text box.
+    objects = {
+        "960": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "961"}, {"identifier": "962"}],
+        },
+        "961": {
+            "_pbtype": "TSWP.ShapeInfoArchive",  # not isTextBox: a plain line
+            "super": {
+                "geometry": {"position": {"x": 0.0, "y": 20.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 0.0}}},
+            },
+        },
+        "962": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "962-st"},
+            "super": {
+                "geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 100.0, "height": 30.0}}},
+            },
+        },
+    }
+    records = _group_child_records(objects["960"], objects)
+    assert records is not None
+    kinds = {r["kind"] for r in records}
+    assert kinds == {"line", "text"}
+    line = next(r for r in records if r["kind"] == "line")
+    assert line["autosize"] is False
+    assert line["w"] == pytest.approx(100.0)
+    assert line["h"] == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------
+# attach_group_children — slide-index alignment, int kindIndex keys, group-only
+# filter, omitting the key entirely when a slide has no qualifying group. The
+# wiring itself (as opposed to _group_child_records, covered above) had no test.
+# --------------------------------------------------------------------------
+def _badge_deck():
+    """Slide 230 owns a badge group (plate + autosize text, same shape as Gold slide
+    2); slide 231 owns a plain two-shape group with no autosize child."""
+
+    def storage(text):
+        return {"_pbtype": "TSWP.StorageArchive", "text": [text]}
+
+    objects = {
+        "130": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "230"}},
+        "131": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "231"}},
+        "230": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "930"}]},
+        "231": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "940"}]},
+        "930": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 4121.7, "y": 39.4}, "size": {"width": 278.0, "height": 87.6}, "angle": 0.0},
+            "children": [{"identifier": "931"}, {"identifier": "932"}],
+        },
+        "931": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 42.6, "y": 0.0}, "size": {"width": 278.0, "height": 87.6}, "angle": 0.0}},
+        },
+        "932": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "932-st"},
+            "super": {
+                "geometry": {"position": {"x": 47.5, "y": 42.8}, "size": {"width": 268.2, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 268.2, "height": 70.0}}},
+            },
+        },
+        "932-st": storage("Ps George"),
+        "940": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "941"}, {"identifier": "942"}],
+        },
+        "941": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "942": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 100.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "slideTree": {"slides": [{"identifier": "130"}, {"identifier": "131"}]},
+        },
+    }
+    return objects, {}, {}
+
+
+def test_attach_group_children_wires_records_by_slide_index_and_int_kindindex(monkeypatch):
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _badge_deck())
+    payload = {"slides": [{"index": 0, "items": []}, {"index": 1, "items": []}]}
+    attach_group_children("ignored.key", payload)
+    assert "groupChildren" in payload["slides"][0]
+    kids = payload["slides"][0]["groupChildren"]
+    assert set(kids.keys()) == {0}
+    assert all(isinstance(k, int) for k in kids)  # JSON-payload keys, not numpy/str
+    assert {r["kind"] for r in kids[0]} == {"shape", "text"}
+    # The plain (no-autosize-child) group's slide never gets a groupChildren key at all.
+    assert "groupChildren" not in payload["slides"][1]

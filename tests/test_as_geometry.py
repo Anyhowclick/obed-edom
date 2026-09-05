@@ -324,3 +324,126 @@ def test_reads_itemtransform_as_dict():
     assert "set theObj to image 4" in script  # kind_index 3 -> element 4
     assert "set properties of theObj to {width:200, height:100}" in script
     assert "set position of theObj to {12.34, 56.78}" in script
+
+
+# --- group child geometry (fix3) --------------------------------------------
+# A Keynote 15.3.1 group resize is an aspect-locked uniform scale about the
+# group's LIVE frame and permanently freezes an autosize text child at its
+# wrapped height. A group holding an autosize text child is therefore written
+# child-by-child (never resized as a group): plate/other children get an
+# absolute {width, height} + position; the autosize text child gets a width
+# only, then a position centred on its mapped vertical centre using the height
+# Keynote has just derived from that width.
+
+
+def _child_spec():
+    return _spec(
+        kind="group",
+        kindIndex=0,
+        x=1700,
+        y=40,
+        w=273,
+        h=86,
+        children=[
+            {"kind": "shape", "kindIndex": 0, "x": 1700, "y": 40, "w": 273, "h": 86},
+            {
+                "kind": "text",
+                "kindIndex": 0,
+                "x": 1704.8,
+                "y": 47.66,
+                "cy": 82.02,
+                "w": 263.4,
+                "h": 68.7,
+                "autosize": True,
+            },
+        ],
+    )
+
+
+def test_group_with_children_writes_children_and_never_the_group():
+    script = _build_slide_geometry_script([_child_spec()], 4)
+    assert "set theObj to group 1" in script
+    assert "set _c to shape 1 of theObj" in script
+    assert "set properties of _c to {width:273, height:86}" in script
+    assert "set position of _c to {1700, 40}" in script
+    assert "set properties of theObj" not in script
+    assert "set position of theObj" not in script
+
+
+def test_autosize_child_gets_width_then_readback_centred_position():
+    script = _build_slide_geometry_script([_child_spec()], 4)
+    assert "set width of _c to 263.4" in script
+    assert "set _ch to height of _c" in script
+    assert "set position of _c to {1704.8, (82.02 - (_ch / 2))}" in script
+    assert "set position of _c to {1704.8, 47.66}" in script  # else fallback
+    assert "set height of _c to" not in script  # ignored AND re-anchors the box
+
+
+def test_child_writes_precede_relock_and_each_child_is_try_wrapped():
+    script = _build_slide_geometry_script([_child_spec()], 4)
+    assert script.index("set _c to shape 1") < script.index(
+        "if wasLocked then set locked of theObj to true"
+    )
+    assert script.count("    try") == script.count("    end try")  # every try closes
+    assert script.count("set _c to") == 2  # two child try/end-try pairs
+
+
+def test_group_without_children_keeps_the_absolute_write():
+    spec = _spec(kind="group", kindIndex=0, x=50, y=60, w=400, h=300, children=[])
+    script = _build_slide_geometry_script([spec], 4)
+    assert "set properties of theObj to {width:400, height:300}" in script
+
+
+def test_children_ignored_for_non_group_kinds():
+    spec = _spec(kind="text", kindIndex=0, children=_child_spec()["children"])
+    script = _build_slide_geometry_script([spec], 3)
+    assert "set properties of theObj" in script  # the key is group-scoped
+
+
+def test_legacy_geom_props_off_still_uses_children(monkeypatch):
+    monkeypatch.setenv("OBED_GEOM_PROPS", "0")
+    script = _build_slide_geometry_script([_child_spec()], 4)
+    assert "set _c to shape 1 of theObj" in script
+    assert "set width of theObj" not in script
+
+
+# --- all-or-nothing child writes (review finding 1) -------------------------
+#
+# The refusal gates in _group_child_records only cover the PLANNING side; a
+# mis-addressed or already-stale child at WRITE time was previously skipped
+# silently (its own `try` swallows the miss) while its siblings still got
+# absolute writes. Since the group itself is never resized, its live frame is
+# the union of whatever landed — a half write produces a phantom group
+# straddling both the old and new positions with no repair path. The whole
+# block must be guarded by a live collection-count check before anything
+# writes, so a short collection skips every child, not just the missing one.
+
+
+def test_child_writes_are_guarded_by_a_live_collection_count_precheck():
+    script = _build_slide_geometry_script([_child_spec()], 4)
+    assert "if (count of shapes of theObj) >= 1 and (count of text items of theObj) >= 1 then" in script
+    guard_at = script.index("if (count of shapes of theObj)")
+    first_try_at = script.index("set _c to shape 1")
+    end_if_at = script.rindex("end if")
+    # The guard wraps BOTH child try/end-try pairs, and closes before the relock.
+    assert guard_at < first_try_at < end_if_at < script.index("if wasLocked then set locked of theObj to true")
+
+
+def test_child_write_guard_counts_the_highest_kindindex_per_kind():
+    spec = _spec(
+        kind="group",
+        kindIndex=0,
+        x=0,
+        y=0,
+        w=100,
+        h=100,
+        children=[
+            {"kind": "shape", "kindIndex": 0, "x": 0, "y": 0, "w": 10, "h": 10},
+            {"kind": "shape", "kindIndex": 2, "x": 20, "y": 0, "w": 10, "h": 10},  # highest shape index
+            {"kind": "text", "kindIndex": 0, "x": 40, "y": 0, "w": 10, "h": 10, "cy": 5, "autosize": True},
+        ],
+    )
+    script = _build_slide_geometry_script([spec], 4)
+    # Needs 3 shapes (index 2 + 1) and 1 text item, not just "at least 1 of each".
+    assert "(count of shapes of theObj) >= 3" in script
+    assert "(count of text items of theObj) >= 1" in script
