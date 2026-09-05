@@ -25,6 +25,7 @@ from typing import Any
 
 from keynote_parser.codec import IWAFile
 
+from obed_edom.iwa_builds import _contains_identifier
 from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _path_source, _xywha, compose_geometry
 from obed_edom.iwa_kindindex import (
     derive_kind_index,
@@ -1151,18 +1152,6 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
     }
 
 
-def _contains_identifier(node: Any) -> bool:
-    """True if a nested dict anywhere under ``node`` carries an 'identifier' key — a
-    cross-member reference the patcher must refuse to copy verbatim into another slide."""
-    if isinstance(node, dict):
-        if "identifier" in node:
-            return True
-        return any(_contains_identifier(v) for v in node.values())
-    if isinstance(node, list):
-        return any(_contains_identifier(v) for v in node)
-    return False
-
-
 def _archives_by_id(decoded: dict) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for ch in decoded["chunks"]:
@@ -1176,7 +1165,11 @@ def _archive_diff(before: dict, after: dict) -> tuple[set[str], set[str], list[s
     correct even if the archive count ever changed, which this patch never does)."""
     b, a = _archives_by_id(before), _archives_by_id(after)
     removed, added = set(b) - set(a), set(a) - set(b)
-    changed = [aid for aid in set(b) & set(a) if (b[aid].get("objects") or []) != (a[aid].get("objects") or [])]
+    changed = [
+        aid
+        for aid in set(b) & set(a)
+        if (b[aid].get("objects") or []) != (a[aid].get("objects") or []) or b[aid]["header"] != a[aid]["header"]
+    ]
     return removed, added, changed
 
 
@@ -1189,9 +1182,10 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
     ``patch_stroke_widths`` leaving other stylesheet entries alone).
 
     Refuses (deck untouched) unless every named slide resolves to a
-    ``KN.SlideArchive`` and, per member, the re-encoded archive set changed EXACTLY
-    the intended slide(s) — nothing added or removed (the proven ``build_patch.py``
-    self-check gate).
+    ``KN.SlideArchive``, every id in its plan resolves to a same-member
+    ``KN.BuildArchive``/``KN.BuildChunkArchive``, and, per member, the re-encoded
+    archive set changed EXACTLY the intended slide(s) — nothing added or removed
+    (the proven ``build_patch.py`` self-check gate).
     """
     deck = Path(deck)
     plans = {str(k): v for k, v in plans.items()}
@@ -1216,6 +1210,17 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
         if member is None:
             return {"refused": True, "reason": f"slide {slide_id} has no owning member"}
         by_member.setdefault(member, []).append(slide_id)
+
+    for slide_id, plan in plans.items():
+        member = id_to_file[slide_id]
+        for pbtype, field in (("KN.BuildArchive", "builds"), ("KN.BuildChunkArchive", "buildChunks")):
+            for oid in plan.get(field) or []:
+                obj = objects.get(oid)
+                if obj is None or obj.get("_pbtype") != pbtype or id_to_file.get(oid) != member:
+                    return {
+                        "refused": True,
+                        "reason": f"slide {slide_id}: {field} id {oid} does not resolve to a {pbtype} in {member}",
+                    }
 
     edits: dict[str, bytes] = {}
     applied = 0

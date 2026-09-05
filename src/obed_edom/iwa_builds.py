@@ -84,14 +84,8 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
     offers no patch instruction.
     """
     objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(path)
-    try:
-        with zipfile.ZipFile(path) as zf:
-            data_index = _build_data_index(zf.namelist())
-    except (OSError, zipfile.BadZipFile):
-        # `deck` already decoded (a caller-supplied tuple, e.g. a test double, or a
-        # `path` that is no longer the real file) — image/movie identity degrades to
-        # an empty fileName rather than crashing a read-only attach.
-        data_index = {}
+    with zipfile.ZipFile(path) as zf:
+        data_index = _build_data_index(zf.namelist())
 
     chunks_by_build: dict[str, list[str]] = {}
     for obj_id, obj in objects.items():
@@ -113,6 +107,7 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
         for rec in derive_kind_index(slide, objects):
             addressed.setdefault(rec["id"], rec)
         group_child_text = _slide_group_child_text(slide, objects, cache)
+        chunk_order = {_ref_id(ref): i for i, ref in enumerate(slide.get("buildChunks") or [])}
 
         records: list[dict] = []
         for ref in slide.get("builds") or []:
@@ -135,10 +130,13 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
             elif kind == "group":
                 child_sig = group_child_text.get(kind_index)
             effect, animation_type = _build_effect_animtype(build)
+            chunk_ids = sorted(
+                chunks_by_build.get(bid, []), key=lambda cid: chunk_order.get(cid, len(chunk_order))
+            )
             records.append(
                 {
                     "buildId": bid,
-                    "chunkIds": list(chunks_by_build.get(bid, [])),
+                    "chunkIds": chunk_ids,
                     "kind": kind,
                     "kindIndex": kind_index,
                     "effect": effect,
@@ -154,8 +152,12 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
     return out
 
 
+def _key_of(build: dict) -> tuple:
+    return (build["effect"], build["animationType"], build["identity"])
+
+
 def plan_build_patch(
-    src_by_index: dict[int, dict], out_by_index: dict[int, dict], slides: Any
+    src_by_number: dict[int, dict], out_by_number: dict[int, dict], slides: Any
 ) -> dict[str, Any]:
     """Per-slide build/transition patch instructions for ``slides`` (the reuse
     targets) — pure, no I/O. Keeps ``min(source_count, output_count)`` per
@@ -163,26 +165,25 @@ def plan_build_patch(
     source, and orders survivors by their matched SOURCE build's index so click
     order matches the source exactly. Returns ``{"plans": {slideId: {"builds":
     [ids], "buildChunks": [ids], "transition": dict|None}}, "report": [{"slide",
-    "kept", "dropped", "retimed"}, ...]}``.
+    "kept", "dropped", "retimed", "transitionSkipped"?}, ...]}``. A source with no
+    transition, or one holding a cross-member reference, leaves the output's own
+    transition untouched; ``report[i]["transitionSkipped"]`` names why.
     """
     plans: dict[str, dict] = {}
     report: list[dict] = []
     for number in sorted(slides):
-        src = src_by_index.get(number)
-        out = out_by_index.get(number)
+        src = src_by_number.get(number)
+        out = out_by_number.get(number)
         if src is None or out is None:
             report.append({"slide": number, "kept": 0, "dropped": 0, "retimed": False, "missing": True})
             continue
 
-        def key_of(build: dict) -> tuple:
-            return (build["effect"], build["animationType"], build["identity"])
-
         src_by_key: dict[tuple, list[tuple[int, dict]]] = {}
         for src_index, build in enumerate(src["builds"]):
-            src_by_key.setdefault(key_of(build), []).append((src_index, build))
+            src_by_key.setdefault(_key_of(build), []).append((src_index, build))
         out_by_key: dict[tuple, list[dict]] = {}
         for build in out["builds"]:
-            out_by_key.setdefault(key_of(build), []).append(build)
+            out_by_key.setdefault(_key_of(build), []).append(build)
 
         assigned: list[tuple[int, dict]] = []
         for key, out_group in out_by_key.items():
@@ -197,10 +198,14 @@ def plan_build_patch(
             chunk_ids.extend(build["chunkIds"])
 
         transition = src.get("transition")
-        if transition is not None and _contains_identifier(transition):
-            transition = None  # refuse a cross-member reference; leave the output's own
-        retimed = _transition_effect_duration(transition) != _transition_effect_duration(
-            out.get("transition")
+        transition_skipped = None
+        if transition is None:
+            transition_skipped = "source has none"
+        elif _contains_identifier(transition):
+            transition_skipped = "holds a reference"
+            transition = None
+        retimed = transition_skipped is None and (
+            _transition_effect_duration(transition) != _transition_effect_duration(out.get("transition"))
         )
 
         plans[out["slideId"]] = {
@@ -208,19 +213,20 @@ def plan_build_patch(
             "buildChunks": chunk_ids,
             "transition": transition,
         }
-        report.append(
-            {
-                "slide": number,
-                "kept": len(ordered),
-                "dropped": len(out["builds"]) - len(ordered),
-                "retimed": retimed,
-            }
-        )
+        entry = {
+            "slide": number,
+            "kept": len(ordered),
+            "dropped": len(out["builds"]) - len(ordered),
+            "retimed": retimed,
+        }
+        if transition_skipped:
+            entry["transitionSkipped"] = transition_skipped
+        report.append(entry)
     return {"plans": plans, "report": report}
 
 
 def verify_builds(
-    src_by_index: dict[int, dict], out_by_index: dict[int, dict], slides: Any = None
+    src_by_number: dict[int, dict], out_by_number: dict[int, dict], slides: Any = None
 ) -> dict[str, list[dict]]:
     """Multiset-compare every slide in ``slides`` (default: every slide in either
     deck) by ``(effect, animationType, identity)`` and its transition. Surplus
@@ -228,13 +234,13 @@ def verify_builds(
     — the caller raises. Shortfall is expected (an object may legitimately have been
     deleted, e.g. a dropped side-panel column) and is reported, never raised.
     """
-    wanted = set(slides) if slides is not None else set(out_by_index) | set(src_by_index)
+    wanted = set(slides) if slides is not None else set(out_by_number) | set(src_by_number)
     surplus: list[dict] = []
     missing: list[dict] = []
     transitions: list[dict] = []
     for number in sorted(wanted):
-        src = src_by_index.get(number) or {"builds": [], "transition": None}
-        out = out_by_index.get(number) or {"builds": [], "transition": None}
+        src = src_by_number.get(number) or {"builds": [], "transition": None}
+        out = out_by_number.get(number) or {"builds": [], "transition": None}
         src_counts = Counter((b["effect"], b["animationType"], b["identity"]) for b in src["builds"])
         out_counts = Counter((b["effect"], b["animationType"], b["identity"]) for b in out["builds"])
         for key in set(src_counts) | set(out_counts):

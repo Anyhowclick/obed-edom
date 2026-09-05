@@ -2417,9 +2417,7 @@ def plan_slide_transforms(
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
         parked_left = False
-        # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts
-        # back on-frame. A twin that carries a build is authored emphasis, not a
-        # magic-move leftover.
+        # Hide coincident magic-move copies, unless the twin carries its own build.
         if id(item) in coincident_dups and (str(item.get("kind") or ""), kind_index) not in build_keys:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
@@ -3206,9 +3204,7 @@ def plan_slide_reuses(
             continue
         curr_items = _live_items(slide)
         curr_keys = _keyed(curr_items)
-        # A reuse target can only ever LOSE builds offline (the patch never invents
-        # one); a donor that cannot supply a build the target's own source needs is
-        # rejected here so the slide falls through to a fresh remap instead.
+        # A donor that cannot supply a build the target's source needs is rejected below.
         target_builds_by_key = _build_multiset_by_key(slide.get("builds"))
         best: tuple[int, int, int, dict, list, list, list] | None = None
         for prev_n, prev in done:
@@ -3275,10 +3271,8 @@ def plan_slide_reuses(
             donor_hidden = _hidden(donor_specs, prev_it)
             target_hidden = _hidden(spec_map, curr_it)
             if target_hidden and not donor_hidden:
-                # A hidden group with a groupChildText signature is already surplus in
-                # the sig-keyed dedup accounting below; a sig-less one is invisible to
-                # that accounting, so fall through to the sig-less passthrough instead
-                # of leaking the donor's live copy onto the target.
+                # A sig-less group is invisible to the sig-keyed dedup below; fall through
+                # to the sig-less passthrough instead of leaking the donor's live copy.
                 if is_group and donor_gct.get(int(prev_it.get("kindIndex") or 0)) is not None:
                     continue
                 remove.append(prev_it)

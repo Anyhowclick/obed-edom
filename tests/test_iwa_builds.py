@@ -51,7 +51,10 @@ def test_plan_build_patch_keeps_min_of_source_and_output_per_key():
     assert len(plan["builds"]) == 1
     assert plan["builds"][0] in ("o1", "o2", "o3")
     report = result["report"][0]
-    assert report == {"slide": 1, "kept": 1, "dropped": 2, "retimed": False}
+    # src's transition is None -- reported and excluded from the write, not guessed.
+    assert report == {
+        "slide": 1, "kept": 1, "dropped": 2, "retimed": False, "transitionSkipped": "source has none",
+    }
 
 
 def test_plan_build_patch_drops_every_key_absent_from_source():
@@ -94,8 +97,22 @@ def test_plan_build_patch_refuses_to_copy_a_referencing_transition():
     referencing = {"attributes": {"customImage": {"identifier": "777"}}}
     src = {1: {"builds": [], "transition": referencing}}
     out = {1: {"slideId": "sid1", "builds": [], "transition": None}}
-    plan = plan_build_patch(src, out, [1])["plans"]["sid1"]
-    assert plan["transition"] is None
+    result = plan_build_patch(src, out, [1])
+    assert result["plans"]["sid1"]["transition"] is None
+    assert result["report"][0]["transitionSkipped"] == "holds a reference"
+
+
+def test_plan_build_patch_reports_and_excludes_a_none_source_transition():
+    # Source has no transition at all; the output's own must survive untouched,
+    # and the report must say why, not leave a silent, unexplained mismatch.
+    out_transition = {"attributes": {"animationAttributes": {"effect": "apple:dissolve", "duration": 0.5}}}
+    src = {1: {"builds": [], "transition": None}}
+    out = {1: {"slideId": "sid1", "builds": [], "transition": out_transition}}
+    result = plan_build_patch(src, out, [1])
+    assert result["plans"]["sid1"]["transition"] is None
+    report = result["report"][0]
+    assert report["transitionSkipped"] == "source has none"
+    assert report["retimed"] is False
 
 
 def test_plan_build_patch_reports_retimed_only_when_transition_actually_changes():

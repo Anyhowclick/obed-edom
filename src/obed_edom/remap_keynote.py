@@ -629,15 +629,11 @@ def restore_card_stroke_widths(
 def restore_source_builds(
     dest: Path, source: Path, slides: set[int], say: Callable[[str], None]
 ) -> dict[str, Any]:
-    """A reuse-target slide must end up with its OWN source slide's builds and
-    transition, never the donor's (`duplicate slide` copies the donor's wholesale
-    and Keynote cannot script builds at all to fix it — see the "CG resizer" skill).
-    Offline IWA patch of KN.SlideArchive.builds/.buildChunks/.transition,
-    unconditional (not gated by OBED_OFFLINE_WRITE, exactly like
-    restore_card_stroke_widths), run after stat-finalize has closed the document.
-    Only `slides` (the reuse targets) are rewritten; every slide is verified but a
-    non-reuse one is never rewritten — the patcher never invents a build, so a
-    surplus anywhere is a bug, never a fix."""
+    """Patch each reuse-target slide's builds/buildChunks/transition to match its
+    own source slide, never the donor's — Keynote cannot script builds at all.
+    Offline IWA write, unconditional (like restore_card_stroke_widths), after
+    stat-finalize. Only `slides` are rewritten; every slide is verified, and a
+    surplus anywhere raises."""
     try:
         from obed_edom import iwa_builds  # noqa: PLC0415
         from obed_edom.iwa_write import patch_slide_builds  # noqa: PLC0415
@@ -646,43 +642,42 @@ def restore_source_builds(
         return {"skipped": True}
 
     try:
-        src_by_index = iwa_builds.deck_builds(source)
+        src_by_number = iwa_builds.deck_builds(source)
     except Exception as exc:  # noqa: BLE001 — offline read is opt-in; never break the run
         say(f"Build/transition patch could not read the source deck ({type(exc).__name__}: {exc}); skipping.")
         return {"skipped": True}
     try:
-        out_by_index = iwa_builds.deck_builds(dest)
+        out_by_number = iwa_builds.deck_builds(dest)
     except Exception as exc:  # noqa: BLE001
         say(f"Build/transition patch could not read the output deck ({type(exc).__name__}: {exc}); skipping.")
         return {"skipped": True}
 
-    if set(src_by_index) != set(out_by_index):
+    if set(src_by_number) != set(out_by_number):
         say(
             "Build/transition patch REFUSED: source has "
-            f"{len(src_by_index)} slide(s), output has {len(out_by_index)} — skipping."
+            f"{len(src_by_number)} slide(s), output has {len(out_by_number)} — skipping."
         )
         return {"skipped": True}
 
-    plan = iwa_builds.plan_build_patch(src_by_index, out_by_index, slides)
-    slide_ids = {out_by_index[n]["slideId"] for n in slides if n in out_by_index}
+    plan = iwa_builds.plan_build_patch(src_by_number, out_by_number, slides)
+    slide_ids = {out_by_number[n]["slideId"] for n in slides if n in out_by_number}
     plans = {sid: p for sid, p in plan["plans"].items() if sid in slide_ids}
     patch_result = patch_slide_builds(dest, plans)
     if patch_result.get("refused"):
         say(f"Build/transition patch REFUSED: {patch_result.get('reason')}")
         return {"skipped": True, "reason": patch_result.get("reason")}
 
-    out_after = iwa_builds.deck_builds(dest)
-    verify = iwa_builds.verify_builds(src_by_index, out_after)
-    if verify["surplus"]:
-        raise RuntimeError(f"Build patch left a surplus build on the output: {verify['surplus'][:5]}")
-    if verify["transitions"]:
-        raise RuntimeError(f"Build patch left a transition mismatch: {verify['transitions'][:5]}")
+    out_after = iwa_builds.deck_builds(dest) if plans else out_by_number
+    verify = iwa_builds.verify_builds(src_by_number, out_after)
+
+    skipped_transitions = {r["slide"]: r["transitionSkipped"] for r in plan["report"] if r.get("transitionSkipped")}
+    for slide_no, reason in skipped_transitions.items():
+        say(f"WARNING builds: slide {slide_no} transition not restored ({reason}); the output's own transition is kept.")
     for m in verify["missing"]:
         say(
             f"WARNING builds: slide {m['slide']} lost {m['count']} {m['effect']} "
             "build(s) (the object is no longer on that slide)."
         )
-
     kept = sum(r.get("kept", 0) for r in plan["report"])
     dropped = sum(r.get("dropped", 0) for r in plan["report"])
     retimed = sum(1 for r in plan["report"] if r.get("retimed"))
@@ -690,6 +685,16 @@ def restore_source_builds(
         f"Builds follow source: {kept} kept, {dropped} dropped, {retimed} "
         f"transition(s) restored on {len(slides)} reuse slide(s)."
     )
+
+    if verify["surplus"]:
+        def _note(n: int) -> str:
+            return f"slide {n} ({'a patched reuse slide' if n in slides else 'NOT a patched reuse slide'})"
+        notes = sorted({_note(s["slide"]) for s in verify["surplus"]})
+        raise RuntimeError(f"Build patch left a surplus build on {', '.join(notes)}: {verify['surplus'][:5]}")
+    transitions = [t for t in verify["transitions"] if t["slide"] not in skipped_transitions]
+    if transitions:
+        raise RuntimeError(f"Build patch left a transition mismatch: {transitions[:5]}")
+
     return {
         "skipped": False,
         "kept": kept,

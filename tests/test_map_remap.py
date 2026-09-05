@@ -3609,6 +3609,24 @@ def test_reuse_refuses_a_donor_that_lacks_a_build_the_target_needs():
     assert 3 not in jobs  # no reuse: the only candidate donor is rejected
 
 
+def test_reuse_donor_shortfall_falls_through_to_an_earlier_candidate():
+    """A rejected donor must not abort the whole candidate search: the `continue`
+    is inside the candidate loop, so an earlier donor that DOES have the build
+    still wins."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    text = _item(kind="text", kindIndex=40, text="Total Churches", x=2671, y=389, w=200, h=60, size=42)
+    build = [{"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "text", "kindIndex": 40}]
+    donor_good = {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], dict(text)], "builds": build}
+    donor_bad = {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], dict(text)], "builds": []}
+    target_slide = {"number": 4, "items": [dict(map_img), *[dict(p) for p in pins], dict(text)], "builds": build}
+    wall = {"slides": [donor_good, donor_bad, target_slide]}
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[4]["from"] == 2  # donor 3 rejected; falls through to donor 2
+
+
 def _reuse_gold_cache_payload(name):
     """Return the CACHED inspect payload for a wall deck, or None if the cache is
     cold. Never opens Keynote: it hashes the file offline and only reads the cache
