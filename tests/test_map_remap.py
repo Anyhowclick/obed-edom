@@ -4053,6 +4053,104 @@ def test_reuse_stray_outliving_keeper_downgrades_to_sig_less():
     assert grs[0]["kindIndex"] == 51  # the partitioned twin, emitted sig-less
 
 
+# --- D1/D2 (plan2 round 2): index-stale deletes, hidden-mutate donor leak -------
+
+
+def test_reuse_remove_ref_carries_the_donor_text():
+    """D1(4): a text remove ref carries the donor's stripped text as `matchText`,
+    for deleteRefs's content-first resolution; a non-text remove ref has none."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    extra_text = _item(kind="text", kindIndex=0, text="  CHC Bravo  ", x=100, y=100, w=200, h=50)
+    extra_shape = _item(kind="shape", kindIndex=40, x=300, y=300, w=60, h=60)
+    wall = _reuse_wall_base(dict(extra_text), dict(extra_shape))
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    text_ref = [r for r in job["remove"] if r.get("kind") == "text"][0]
+    assert text_ref["matchText"] == "CHC Bravo"
+    assert (text_ref["x"], text_ref["y"], text_ref["w"], text_ref["h"]) == (100, 100, 200, 50)
+    shape_ref = [r for r in job["remove"] if r.get("kind") == "shape" and r.get("kindIndex") == 40][0]
+    assert "matchText" not in shape_ref
+
+
+def test_reuse_mutate_whose_target_is_hidden_becomes_a_donor_remove():
+    """D2: a target text box that text-matches the donor becomes a mutate pair;
+    when the target's OWN spec hides it, the donor's live copy must be deleted
+    instead of silently riding onto the pasted duplicate (the mutate payload is
+    already discarded for a hidden target, and nothing else touches the donor)."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    donor_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    target_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=500, y=500, w=200, h=50)
+    wall = _reuse_wall_base(dict(donor_text), extra_slide2_items=(dict(target_text),))
+    hide_spec = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=500, y=500, w=200, h=50, kind_index=0, role="hide"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide_spec])}[2]
+    assert job["mutate"] == []
+    removed = [r for r in job["remove"] if r.get("kind") == "text"]
+    assert len(removed) == 1
+    assert removed[0]["matchText"] == "CHC Alpha"
+    assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (100, 100, 200, 50)
+
+
+def test_reuse_mutate_whose_target_is_visible_still_mutates():
+    """Guard over-application: the same fixture with the target's box left visible
+    (role != hide) must still ride the normal mutate path; the donor's copy must
+    not also be removed."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    donor_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    target_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=500, y=500, w=200, h=50)
+    wall = _reuse_wall_base(dict(donor_text), extra_slide2_items=(dict(target_text),))
+    visible_spec = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=50, y=60, w=70, h=20, kind_index=0, role="other"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [visible_spec])}[2]
+    assert len(job["mutate"]) == 1
+    assert job["mutate"][0]["matchText"] == "CHC Alpha"
+    assert [r for r in job["remove"] if r.get("kind") == "text"] == []
+
+
+def test_reuse_hidden_mutate_does_not_leak_down_a_three_slide_chain():
+    """D2: slide 2 keeps a centre name (mutates the donor's copy from slide 1);
+    slide 3 hides that same name. Slide 3's job must remove it at slide 2's OWN
+    kept position (not slide 1's), and the reuse chain must not move."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    base = [dict(map_img), *[dict(p) for p in pins]]
+    # Present only from slide 2 on: without it, slide 1 would tie slide 2 as
+    # slide 3's donor (both offer the same "CHC Alpha" mutate at equal cost).
+    anchor = _item(kind="shape", kindIndex=40, x=9999, y=9999, w=5, h=5)
+    chc_1 = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    chc_2 = _item(kind="text", kindIndex=0, text="CHC Alpha", x=400, y=200, w=180, h=44)
+    chc_3 = _item(kind="text", kindIndex=0, text="CHC Alpha", x=700, y=700, w=190, h=48)
+    wall = {
+        "slides": [
+            {"number": 1, "items": [*[dict(b) for b in base], dict(chc_1)]},
+            {"number": 2, "items": [*[dict(b) for b in base], dict(chc_2), dict(anchor)]},
+            {"number": 3, "items": [*[dict(b) for b in base], dict(chc_3), dict(anchor)]},
+        ]
+    }
+    kept_spec = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=400, y=200, w=180, h=44, kind_index=0, role="other"
+    )
+    hide_spec = ItemTransform(
+        slide_number=3, item_index=41, kind="text", x=700, y=700, w=190, h=48, kind_index=0, role="hide"
+    )
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [kept_spec, hide_spec])}
+    assert jobs[2]["from"] == 1
+    assert jobs[3]["from"] == 2
+    assert jobs[3]["mutate"] == []
+    removed = [r for r in jobs[3]["remove"] if r.get("kind") == "text"]
+    assert len(removed) == 1
+    assert removed[0]["matchText"] == "CHC Alpha"
+    # Slide 2's OWN kept rect, not slide 1's original — proves the fix walks the
+    # chain rather than always blaming the base donor.
+    assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (400, 200, 180, 44)
+
+
 # --------------------------------------------------------------------------
 # Batch 2 — card template size + caption step-down + grid reflow.
 # --------------------------------------------------------------------------

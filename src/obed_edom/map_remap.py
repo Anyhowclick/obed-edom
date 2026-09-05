@@ -3287,6 +3287,15 @@ def plan_slide_reuses(
             persist = [c for c, _p in persist_pairs]
             persist_n = len(persist)
 
+        # A mutate the target hides is not a mutate: delete the donor's copy or it rides the chain.
+        kept_mutate: list[tuple[dict, dict]] = []
+        for donor_it, it in mutate:
+            if _hidden(spec_map, it):
+                remove.append(donor_it)
+            else:
+                kept_mutate.append((donor_it, it))
+        mutate = kept_mutate
+
         # A donor item already hidden there has no live copy; skip its phantom remove ref.
         remove = [it for it in remove if not _hidden(donor_specs, it)]
 
@@ -3348,6 +3357,9 @@ def plan_slide_reuses(
                 removed_groups.append(it)
                 continue
             ref = _ref(it)
+            text = (it.get("text") or "").strip()
+            if ref["kind"] == "text" and text:
+                ref["matchText"] = text
             key = prev_key_of.get(id(it))
             rect = donor_keys.get(key) if key is not None else None
             if rect is not None:

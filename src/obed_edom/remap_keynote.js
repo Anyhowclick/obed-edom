@@ -339,21 +339,9 @@ function deleteRefs(Keynote, slide, refs, flags, tally) {
       }
     }
   }
-  // Geometry-addressed reuse removals: delete only when live match count equals ref count; else fail loud, never guess.
-  const groups = {};
-  const order = [];
-  for (let i = 0; i < geomRefs.length; i++) {
-    const r = geomRefs[i];
-    const kind = String(r.kind || "");
-    const hPart = kind === "text" || kind === "line" ? "*" : Math.round(Number(r.h));
-    const key =
-      kind + "|" + Math.round(Number(r.x)) + "|" + Math.round(Number(r.y)) + "|" + Math.round(Number(r.w)) + "|" + hPart;
-    if (!groups[key]) {
-      groups[key] = [];
-      order.push(key);
-    }
-    groups[key].push(r);
-  }
+  // A JXA element ref is bound to its index: deleting a lower one renumbers every
+  // specifier captured above it. Match every ref against a snapshot first, claim at
+  // match time, then delete every claimed entry in one pass, highest index first.
   const snapByKind = {};
   function snapshotFor(kind) {
     if (snapByKind[kind]) return snapByKind[kind];
@@ -365,10 +353,57 @@ function deleteRefs(Keynote, slide, refs, flags, tally) {
       if (!obj) continue;
       const p = xyOf(obj);
       const wh = whOf(obj);
-      snap.push({ obj: obj, index: i, x: p[0], y: p[1], w: wh[0], h: wh[1] });
+      const entry = { obj: obj, index: i, x: p[0], y: p[1], w: wh[0], h: wh[1] };
+      if (kind === "text") {
+        try {
+          entry.text = String(obj.objectText()).trim();
+        } catch (e) {
+          entry.text = "";
+        }
+      }
+      snap.push(entry);
     }
     snapByKind[kind] = snap;
     return snap;
+  }
+  const claimed = [];
+  function claim(entry, kind) {
+    entry.claimed = true;
+    claimed.push({ entry: entry, kind: kind });
+  }
+  // Text refs resolve by content first: a unique text match survives a drifted rect.
+  const geomOnly = [];
+  for (let i = 0; i < geomRefs.length; i++) {
+    const r = geomRefs[i];
+    const kind = String(r.kind || "");
+    if (kind === "text" && r.matchText) {
+      const want = String(r.matchText).trim();
+      const snap = snapshotFor("text");
+      const hits = [];
+      for (let s = 0; s < snap.length; s++) {
+        if (!snap[s].claimed && snap[s].text === want) hits.push(snap[s]);
+      }
+      if (hits.length === 1) {
+        claim(hits[0], "text");
+        continue;
+      }
+    }
+    geomOnly.push(r);
+  }
+  // Geometry-addressed reuse removals: delete only when live match count equals ref count; else fail loud, never guess.
+  const groups = {};
+  const order = [];
+  for (let i = 0; i < geomOnly.length; i++) {
+    const r = geomOnly[i];
+    const kind = String(r.kind || "");
+    const hPart = kind === "text" || kind === "line" ? "*" : Math.round(Number(r.h));
+    const key =
+      kind + "|" + Math.round(Number(r.x)) + "|" + Math.round(Number(r.y)) + "|" + Math.round(Number(r.w)) + "|" + hPart;
+    if (!groups[key]) {
+      groups[key] = [];
+      order.push(key);
+    }
+    groups[key].push(r);
   }
   for (let g = 0; g < order.length; g++) {
     const key = order[g];
@@ -378,25 +413,13 @@ function deleteRefs(Keynote, slide, refs, flags, tally) {
     const hits = [];
     for (let s = 0; s < snap.length; s++) {
       const e = snap[s];
-      if (e.deleted) continue;
+      if (e.claimed) continue;
       if (matchesRect(r0.kind, e.x, e.y, e.w, e.h, r0, 4)) {
-        hits.push({ obj: e.obj, index: e.index, entry: e });
+        hits.push(e);
       }
     }
     if (hits.length === grp.length) {
-      hits.sort(function (a, b) {
-        return b.index - a.index;
-      });
-      for (let i = 0; i < hits.length; i++) {
-        if (deleteObj(Keynote, hits[i].obj)) {
-          n += 1;
-          hits[i].entry.deleted = true;
-          if (tally) {
-            const k = String(r0.kind || "item");
-            tally[k] = (tally[k] || 0) + 1;
-          }
-        }
-      }
+      for (let i = 0; i < hits.length; i++) claim(hits[i], r0.kind);
     } else if (flags && flags.length < 8) {
       flags.push(
         "reuse remove geom split: " +
@@ -409,6 +432,18 @@ function deleteRefs(Keynote, slide, refs, flags, tally) {
           key +
           " — kept, no delete (fail loud)"
       );
+    }
+  }
+  claimed.sort(function (a, b) {
+    return b.entry.index - a.entry.index;
+  });
+  for (let i = 0; i < claimed.length; i++) {
+    if (deleteObj(Keynote, claimed[i].entry.obj)) {
+      n += 1;
+      if (tally) {
+        const k = String(claimed[i].kind || "item");
+        tally[k] = (tally[k] || 0) + 1;
+      }
     }
   }
   return n;
@@ -515,11 +550,19 @@ function applyReuse(doc, Keynote, job, missReasons) {
   }
   let copy = slides[to - 1];
   let orig = slides[to];
-  const removedByKind = {};
-  const removed = deleteRefs(Keynote, copy, job.remove || [], missReasons, removedByKind);
+  const beforeCounts = collectionCounts(copy);
+  // Count what actually disappeared, not what did not throw.
+  const removed = deleteRefs(Keynote, copy, job.remove || [], missReasons);
   slides = doc.slides();
   copy = slides[to - 1];
   orig = slides[to];
+  const afterCounts = collectionCounts(copy);
+  const removedByKind = {};
+  ["text", "image", "shape", "movie", "group", "line"].forEach(function (kind) {
+    const before = beforeCounts[kindColName(kind)] || 0;
+    const after = afterCounts[kindColName(kind)] || 0;
+    if (before > after) removedByKind[kind] = before - after;
+  });
   const add = job.add || [];
   let applied = 0;
   let missed = 0;
@@ -562,8 +605,12 @@ function applyReuse(doc, Keynote, job, missReasons) {
       const spec = mutate[i];
       let obj = spec.matchText ? byText[String(spec.matchText).trim()] : null;
       if (!obj) obj = getItem(copy, spec);
-      if (!obj || spec.x == null) {
-        if (!obj && spec.x != null) missed += 1;
+      if (spec.x == null) {
+        missed += 1;
+        continue;
+      }
+      if (!obj) {
+        missed += 1;
         continue;
       }
       if (applySpec(obj, spec)) applied += 1;
