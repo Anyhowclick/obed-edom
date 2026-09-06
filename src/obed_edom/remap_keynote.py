@@ -842,9 +842,12 @@ def remap_keynote(
         )
 
     recipe = recipe_for(wall, template_data)
-    previews, preview_note = resolve_source_previews(
-        source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
-    )
+    previews: dict[int, Any] = {}
+    preview_note = ""
+    if keep_side_panels or side_content_slides:
+        previews, preview_note = resolve_source_previews(
+            source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
+        )
     placements: list[dict[str, Any]] = []
     hidden: list[int] = []
     fitted: list[int] = []

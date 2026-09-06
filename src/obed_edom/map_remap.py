@@ -630,21 +630,27 @@ def pack_columns_from_right(
         return []
     top = margin
     bottom = max(margin + 8.0, dest_h - margin)
-    placed: list[Rect] = []
-    col_left: float | None = None
+    # A column is as wide as its widest box, so a later, wider name cannot spill past dest_w.
+    columns: list[list[int]] = []
     y = top
-    for box in boxes:
-        w = max(8.0, box.w)
+    for i, box in enumerate(boxes):
         h = max(8.0, box.h)
-        if col_left is None:
-            col_left = dest_w - margin - w
+        if not columns or y + h > bottom + 0.5:
+            columns.append([])
             y = top
-        elif y + h > bottom + 0.5:
-            col_left = col_left - gap - w
-            y = top
-        x = max(margin - w * 0.15, col_left)
-        placed.append(Rect(x, y, w, h))
+        columns[-1].append(i)
         y += h + gap
+    placed: list[Rect] = [Rect(0.0, 0.0, 0.0, 0.0)] * len(boxes)
+    col_left = dest_w - margin
+    for column in columns:
+        col_left -= max(max(8.0, boxes[i].w) for i in column)
+        y = top
+        for i in column:
+            w = max(8.0, boxes[i].w)
+            h = max(8.0, boxes[i].h)
+            placed[i] = Rect(max(margin - w * 0.15, col_left), y, w, h)
+            y += h + gap
+        col_left -= gap
     return placed
 
 
@@ -3911,6 +3917,8 @@ def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
             if id(it) in roster_ids:
                 names.update(line.strip() for line in (it.get("text") or "").split("\n") if line.strip())
             elif not is_placeholder_text(it):
+                # Excludes placeholder text but not is_duplicate_item; a coincident twin on
+                # one slide of a pair would tip this comparison (accepted for now).
                 signature.append(item_content_key(it))
         return names, sorted(signature)
 

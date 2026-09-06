@@ -953,6 +953,20 @@ def test_parse_slide_spec_lists_and_gaps():
     assert wants_slide(4, frozenset({2, 4, 5, 6})) is True
 
 
+def test_roster_log_line_matches_remap_keynote_formatting():
+    """Pins the `Roster kept on slide(s) ... dropped on ...` line built in
+    remap_keynote.py from format_slide_range(), including the en-dash -> hyphen swap."""
+    from obed_edom.map_remap import format_slide_range
+
+    kept = format_slide_range({11, 12}).replace("–", "-")
+    dropped = format_slide_range({13}).replace("–", "-")
+    message = (
+        f"Roster kept on slide(s) {kept}, dropped on {dropped} "
+        "(a wall leftover behind newer content)."
+    )
+    assert message == "Roster kept on slide(s) 11-12, dropped on 13 (a wall leftover behind newer content)."
+
+
 def test_plan_only_the_requested_slide():
     recipe = recipe_from_cover(Rect(0, 0, 7680, 1080))
     wall = {
@@ -1169,12 +1183,13 @@ def test_kept_centre_roster_is_packed_inside_the_frame():
     planner's y for an autosize text frame is the box's vertical CENTRE, not its
     top."""
     items = [_item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)]
+    widths = (200, 90, 240, 120)  # mixed widths: a column must fit its widest box, not just its first
     for i, x in enumerate((2000, 3000, 4000, 5000)):  # centre band, far outside the 1920-wide frame
         items.append(
             _item(
                 kind="text",
                 text=f"CHC {i}A\nCHC {i}B\nCHC {i}C\nCHC {i}D",
-                x=x, y=459, w=200, h=400, size=42, autosize=True,
+                x=x, y=459, w=widths[i], h=400, size=42, autosize=True,
             )
         )
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
@@ -1210,6 +1225,17 @@ def test_pack_columns_steps_left_when_taller_than_frame():
     assert len(placed) == 3
     assert placed[0].x > placed[2].x
     assert placed[0].y < placed[1].y
+
+
+def test_pack_columns_sizes_a_column_by_its_widest_box():
+    """Gold 12's right column opens with an 84pt name and later carries 245pt ones;
+    anchoring the column on the first box's width spilled 21 of them past 1920."""
+    from obed_edom.map_remap import pack_columns_from_right
+
+    boxes = [Rect(0, 0, 84, 28), Rect(0, 0, 245, 28), Rect(0, 0, 120, 28)]
+    placed = pack_columns_from_right(boxes, 1920, 1080)
+    assert len({round(r.x, 1) for r in placed}) == 1       # one column
+    assert all(r.x + r.w <= 1920 - 16 + 0.5 for r in placed)
 
 
 def test_match_character_style_prefers_font_family_then_size():
