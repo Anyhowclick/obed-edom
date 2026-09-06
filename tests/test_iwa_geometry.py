@@ -11,6 +11,8 @@ Raw IWA vs JXA: masked images report the mask rect; rotated frames report AABB
 position + unrotated size; groups are a child-union (stale stored frames);
 autosize text has a zero-height frame and stale naturalSize (~20%, flagged
 autosize-soft). Lines come from length + rotation.
+An autosize box's stored y is the visual top / centre / bottom according to
+shapeProperties.verticalAlignment, resolved up the style parent chain.
 
 _MASK_TRUST_PX is a displacement gate, not an angle threshold: a 1° residual on
 a long lever arm still misses by tens of pixels (DSK17 flip). needs_keynote is
@@ -86,6 +88,25 @@ def _shape(objects, ident, *, x=0.0, y=0.0, w=10.0, h=10.0, angle=0.0, is_textbo
         obj["ownedStorage"] = {"identifier": f"{ident}-st"}
     objects[ident] = obj
     return ident
+
+
+def _style(objects, ident, *, alignment=None, parent=None):
+    """A TSWP.ShapeStyleArchive. Own anchor at shapeProperties.verticalAlignment; a parent style
+    sits at super.super.parent -- the depth measured on the Gold wall deck (style 20491592 ->
+    2651131), the same shape tests/test_iwa_text_shape.py pins for shape_padding."""
+    obj = {"_pbtype": "TSWP.ShapeStyleArchive", "shapeProperties": {}}
+    if alignment is not None:
+        obj["shapeProperties"]["verticalAlignment"] = alignment
+    if parent is not None:
+        obj["super"] = {"super": {"parent": {"identifier": parent}}, "shapeProperties": {}}
+    objects[ident] = obj
+    return ident
+
+
+def _styled(objects, shape_id, style_id):
+    """Attach a style ref where a real TSWP.ShapeInfoArchive keeps it: obj.super.style."""
+    objects[shape_id]["super"]["style"] = {"identifier": style_id}
+    return shape_id
 
 
 def _slide(*ids):
@@ -394,7 +415,8 @@ def test_fixed_text_uses_frame():
 
 def test_autosize_text_x_exact_and_flagged_soft():
     objects = {}
-    # zero-height frame at vertical CENTRE 200; naturalSize 120x30.
+    # No style ref -> alignment unresolved -> the middle default: zero-height frame at
+    # vertical CENTRE 200; naturalSize 120x30.
     tid = _shape(objects, "t", x=15.0, y=200.0, w=0.0, h=0.0, is_textbox=True,
                  text="CHC Kuching", natural=(120.0, 30.0))
     rec = _one(_slide(tid), objects)
@@ -404,6 +426,82 @@ def test_autosize_text_x_exact_and_flagged_soft():
     assert rec["x"] == 15.0                       # x exact for left-aligned
     assert rec["y"] == pytest.approx(200.0 - 15.0)  # top = centre - h/2
     assert (rec["w"], rec["h"]) == (120.0, 30.0)
+
+
+@pytest.mark.parametrize(("alignment", "stored_y", "nh", "expect_top"), [
+    # Live-probed on the 2026-09-06 Gold build (output/handover-2026-09-06/anchor-diagnosis).
+    ("kFrameAlignTop", 173.0, 313.0, 173.0),     # s11 "CHC Fu Chang" column (old model: 16.5)
+    ("kFrameAlignTop", 796.0, 313.0, 796.0),     # s11 "CHC Jiang Shou" column (old model: 639.5)
+    ("kFrameAlignMiddle", 97.5, 61.0, 67.0),     # s11 "Global Missions" (old memory model: 97)
+    ("kFrameAlignMiddle", 643.0, 26.0, 630.0),   # s12 first packed name (old memory model: 643)
+    ("kFrameAlignBottom", 100.0, 40.0, 60.0),    # synthetic: 0 bottom-aligned boxes on the wall
+    ("kFrameAlignJustify", 100.0, 40.0, 80.0),   # unhandled enum keeps the middle default
+])
+def test_autosize_top_is_alignment_aware(alignment, stored_y, nh, expect_top):
+    """The stored y is the visual TOP for kFrameAlignTop, the visual BOTTOM for
+    kFrameAlignBottom, and the visual CENTRE otherwise. Keynote's `position` (read and
+    write) is the visual top for every anchor -- this is a READ-model branch only."""
+    objects = {}
+    tid = _shape(objects, "t", x=15.0, y=stored_y, w=0.0, h=0.0, is_textbox=True,
+                 text="CHC Fu Chang", natural=(200.0, nh))
+    _styled(objects, tid, _style(objects, "s", alignment=alignment))
+    rec = _one(_slide(tid), objects)
+    assert rec["geom_source"] == "autosize"
+    assert rec["needs_keynote"] == "autosize-soft"
+    assert rec["x"] == 15.0
+    assert rec["y"] == pytest.approx(expect_top)
+    assert (rec["w"], rec["h"]) == (200.0, nh)
+
+
+def test_autosize_alignment_inherits_from_the_parent_style():
+    """163 of the Gold wall deck's 179 autosize boxes inherit the anchor from the parent
+    style rather than setting it (all resolving Middle); the 11 top-aligned boxes set
+    verticalAlignment on their own style. This synthetic Top-via-parent case exercises
+    the parent hop directly, so the parent hop is load-bearing."""
+    objects = {}
+    tid = _shape(objects, "t", x=0.0, y=221.0, w=0.0, h=0.0, is_textbox=True,
+                 text="CHC Lipat-On", natural=(200.0, 409.0))
+    _style(objects, "root", alignment="kFrameAlignTop")
+    _styled(objects, tid, _style(objects, "own", parent="root"))
+    rec = _one(_slide(tid), objects)
+    assert rec["y"] == pytest.approx(221.0)     # s11 "CHC Lipat-On"; old model said 16.5
+
+
+def test_autosize_style_without_an_alignment_keeps_the_centre_default():
+    """A style ref that never sets verticalAlignment anywhere up the chain: MessageToDict omits
+    an unset field entirely, and absent must keep today's centre behaviour."""
+    objects = {}
+    tid = _shape(objects, "t", x=15.0, y=200.0, w=0.0, h=0.0, is_textbox=True,
+                 text="CHC Kuching", natural=(120.0, 30.0))
+    _styled(objects, tid, _style(objects, "s"))
+    rec = _one(_slide(tid), objects)
+    assert rec["y"] == pytest.approx(185.0)
+
+
+def test_autosize_alignment_accepts_the_raw_enum_code():
+    """TSWP.ShapeStylePropertiesArchive.VerticalAlignmentType: Top=0, Middle=1, Bottom=2,
+    Justify=3. keynote-parser's MessageToDict emits the NAME; a descriptor-less decode would
+    emit the int, and both must resolve to the same anchor."""
+    objects = {}
+    tid = _shape(objects, "t", x=0.0, y=173.0, w=0.0, h=0.0, is_textbox=True,
+                 text="CHC Fu Chang", natural=(200.0, 313.0))
+    _styled(objects, tid, _style(objects, "s", alignment=0))
+    rec = _one(_slide(tid), objects)
+    assert rec["y"] == pytest.approx(173.0)
+
+
+def test_top_aligned_packed_column_composes_back_to_the_packed_rect():
+    """Regression for the offline frame-containment oracle. Since 80cb442 the packer writes the
+    planner's visual top straight through (map_remap._pack_list_transforms), so a 313-tall
+    top-aligned column written at y 16.5 must compose back to 16.5 -- not to 16.5 - 313/2 =
+    -140.0, the artifact that false-failed 6/6 Gold slide-11 columns that were on-frame live."""
+    objects = {}
+    tid = _shape(objects, "t", x=1332.0, y=16.5, w=0.0, h=0.0, is_textbox=True,
+                 text="CHC Fu Chang", natural=(200.0, 313.0))
+    _styled(objects, tid, _style(objects, "s", alignment="kFrameAlignTop"))
+    rec = _one(_slide(tid), objects)
+    assert rec["y"] == pytest.approx(16.5)
+    assert rec["y"] >= 0.0 and rec["y"] + rec["h"] <= 1080.0
 
 
 # --------------------------------------------------------------------------
