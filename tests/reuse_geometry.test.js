@@ -79,6 +79,70 @@ function rect(x, y, w, h) {
   return { x: x, y: y, w: w, h: h };
 }
 
+// --- JXA-faithful fake: an element ref is an INDEX specifier, not a stable handle --
+// `elem`/`slideOf`/`keynoteFor` above hand out stable object references, which is why
+// they cannot reproduce the C1 bug: deleting through a specifier renumbers every OTHER
+// specifier captured against the same backing array. `arr` here is the live "document"
+// state; slide.<col>() hands out specifiers bound to an index, reading arr[index]
+// lazily, and delete() splices arr by that index — exactly what JXA does.
+
+function colNameFor(kind) {
+  if (kind === "text") return "textItems";
+  if (kind === "image") return "images";
+  if (kind === "shape") return "shapes";
+  if (kind === "group") return "groups";
+  return kind + "s";
+}
+
+function specFor(arr, index) {
+  return {
+    index: index,
+    arr: arr, // backing collection this specifier addresses — lets one Keynote fake span kinds
+    position: function () {
+      const rec = arr[index];
+      return [rec.x, rec.y];
+    },
+    width: function () {
+      return arr[index].w;
+    },
+    height: function () {
+      return arr[index].h;
+    },
+    objectText: function () {
+      const rec = arr[index];
+      if (rec.text == null) throw new Error("objectText: no text on this kind");
+      return rec.text;
+    },
+  };
+}
+
+function specSlideOf(kind, arr, kind2, arr2) {
+  const slide = {};
+  slide[colNameFor(kind)] = function () {
+    const specs = [];
+    for (let i = 0; i < arr.length; i++) specs.push(specFor(arr, i));
+    return specs;
+  };
+  if (kind2) {
+    slide[colNameFor(kind2)] = function () {
+      const specs = [];
+      for (let i = 0; i < arr2.length; i++) specs.push(specFor(arr2, i));
+      return specs;
+    };
+  }
+  return slide;
+}
+
+function keynoteForSpecs(arr) {
+  return {
+    delete: function (spec) {
+      const backing = spec.arr || arr;
+      if (spec.index >= backing.length) throw new Error("stale specifier: index " + spec.index + " >= " + backing.length);
+      backing.splice(spec.index, 1);
+    },
+  };
+}
+
 test("getItemByGeom picks the right object from a drifted/append-ordered set", function () {
   // Wall order would put the target first; the donor copy appended it LAST.
   const arr = [
@@ -301,6 +365,52 @@ test("deleteRefs (geom): a deleted snapshot entry never matches a later distinct
   assert.strictEqual(flags.length, 0);
 });
 
+// --- kind-aware matching: text/line never compare on height ---------------------
+// A Keynote text box is AUTOSIZE: its live height is the laid-out height, never
+// the planner's `h`, and its live width can differ when the planner wrote none.
+// x/y (and w, when the ref carries one) stay load-bearing; h never is.
+
+test("deleteRefs (geom): a text ref matches even when the live autosized height drifts >4px", function () {
+  const arr = [elem(100, 100, 50, 92, "grown")]; // live height 92 vs the ref's planned h=30
+  const slide = slideOf("text", arr);
+  const flags = [];
+  const n = m.deleteRefs(keynoteFor(arr), slide, [{ kind: "text", x: 100, y: 100, w: 50, h: 30 }], flags);
+  assert.strictEqual(n, 1);
+  assert.strictEqual(arr.length, 0);
+  assert.strictEqual(flags.length, 0);
+});
+
+test("deleteRefs (geom): two co-located text refs with different planned h both delete", function () {
+  // The grouping key must ignore h for text/line, same as matchesRect — otherwise
+  // these land in two separate 1-ref groups, each seeing both live objects as a
+  // "2 matches vs 1 ref" split, and neither one deletes.
+  const arr = [elem(100, 100, 50, 60, "a"), elem(100, 100, 50, 90, "b")];
+  const slide = slideOf("text", arr);
+  const flags = [];
+  const refs = [
+    { kind: "text", x: 100, y: 100, w: 50, h: 30 },
+    { kind: "text", x: 100, y: 100, w: 50, h: 954 },
+  ];
+  const n = m.deleteRefs(keynoteFor(arr), slide, refs, flags);
+  assert.strictEqual(n, 2);
+  assert.strictEqual(arr.length, 0);
+  assert.strictEqual(flags.length, 0);
+});
+
+test("deleteRefs (geom): two same-position texts differing only in width still trip the count-equals-refs guard", function () {
+  // Width IS compared for text (unlike height), but it is only one more tolerance
+  // band, not a disambiguator: two live boxes whose widths both land within tol of
+  // the ref's w are still an unresolved split, and the guard must still refuse.
+  const arr = [elem(100, 100, 50, 30, "narrow"), elem(100, 100, 54, 30, "wide")];
+  const slide = slideOf("text", arr);
+  const flags = [];
+  const n = m.deleteRefs(keynoteFor(arr), slide, [{ kind: "text", x: 100, y: 100, w: 52, h: 30 }], flags);
+  assert.strictEqual(n, 0);
+  assert.strictEqual(arr.length, 2);
+  assert.strictEqual(flags.length, 1);
+  assert.ok(/geom split/.test(flags[0]));
+});
+
 // --- V: fail-loud remove verification ------------------------------------------
 // deleteRefs tallies the per-kind deleted count; removeShortfallOf turns that plus
 // the expected `remove` refs into a structured, uncapped per-kind shortfall. The
@@ -355,6 +465,117 @@ test("removeShortfallOf: fully-removed refs report zero shortfall", function () 
 
 test("removeShortfallOf: empty remove list yields an empty record", function () {
   assert.deepStrictEqual(m.removeShortfallOf([], {}), {});
+});
+
+// --- C1: match-then-delete-once, on the JXA-faithful fake -----------------------
+
+test("deleteRefs (geom): six ascending refs delete six objects, not every other one", function () {
+  // 7 text boxes at distinct x; refs for collection positions 0..5, ascending — the
+  // exact shape of the Gold slide-12 bug. The old per-group immediate-delete code
+  // renumbers the backing array after its first delete, so later refs (captured
+  // against the pre-delete indices) land on the wrong object: it deletes 0, 2, 4 and
+  // then runs past the end, leaving 1, 3, 5 behind instead of just the 7th (index 6).
+  const arr = [];
+  const refs = [];
+  for (let i = 0; i < 7; i++) {
+    arr.push({ x: i * 100, y: 0, w: 50, h: 30, text: "n" + i });
+  }
+  for (let i = 0; i < 6; i++) {
+    refs.push({ kind: "text", x: i * 100, y: 0, w: 50, h: 30 });
+  }
+  const slide = specSlideOf("text", arr);
+  const flags = [];
+  const n = m.deleteRefs(keynoteForSpecs(arr), slide, refs, flags);
+  assert.strictEqual(n, 6);
+  assert.strictEqual(arr.length, 1);
+  assert.strictEqual(arr[0].text, "n6");
+  assert.deepStrictEqual(flags, []);
+});
+
+test("deleteRefs (geom): a flagged group claims nothing and blocks no other delete", function () {
+  // An ambiguous pair sits between two clean, unique-rect refs. The split must not
+  // claim either twin, and — on the fixed match-everything-first code — must not
+  // disturb the two clean deletes either, even though a clean ref's specifier
+  // (captured before any delete) would otherwise go stale once an earlier one lands.
+  const arr = [
+    { x: 0, y: 0, w: 20, h: 20, text: "cleanA" },
+    { x: 300, y: 0, w: 20, h: 20, text: "pairA" },
+    { x: 300, y: 0, w: 20, h: 20, text: "pairB" },
+    { x: 600, y: 0, w: 20, h: 20, text: "cleanB" },
+  ];
+  const slide = specSlideOf("text", arr);
+  const flags = [];
+  const refs = [
+    { kind: "text", x: 0, y: 0, w: 20, h: 20 },
+    { kind: "text", x: 300, y: 0, w: 20, h: 20 },
+    { kind: "text", x: 600, y: 0, w: 20, h: 20 },
+  ];
+  const n = m.deleteRefs(keynoteForSpecs(arr), slide, refs, flags);
+  assert.strictEqual(n, 2);
+  assert.deepStrictEqual(arr.map((e) => e.text).sort(), ["pairA", "pairB"]);
+  assert.strictEqual(flags.length, 1);
+  assert.ok(/geom split/.test(flags[0]));
+});
+
+test("deleteRefs (text): matchText deletes the named box even when its rect has drifted 200px", function () {
+  const arr = [{ x: 900, y: 900, w: 50, h: 30, text: "CHC Alpha" }];
+  const slide = specSlideOf("text", arr);
+  const flags = [];
+  // The ref's planned rect is 200px off the live position; only the text agrees.
+  const n = m.deleteRefs(
+    keynoteForSpecs(arr),
+    slide,
+    [{ kind: "text", x: 700, y: 700, w: 50, h: 30, matchText: "CHC Alpha" }],
+    flags
+  );
+  assert.strictEqual(n, 1);
+  assert.strictEqual(arr.length, 0);
+  assert.deepStrictEqual(flags, []);
+});
+
+test("deleteRefs (text): falls back to geometry when two boxes share the text", function () {
+  // Two live boxes share both text AND rect: matchText finds 2, not 1, so it defers
+  // to the geometry path — which also sees 2 matches for 1 ref and fails loud.
+  const arr = [
+    { x: 100, y: 100, w: 50, h: 30, text: "CHC Alpha" },
+    { x: 100, y: 100, w: 50, h: 30, text: "CHC Alpha" },
+  ];
+  const slide = specSlideOf("text", arr);
+  const flags = [];
+  const n = m.deleteRefs(
+    keynoteForSpecs(arr),
+    slide,
+    [{ kind: "text", x: 100, y: 100, w: 50, h: 30, matchText: "CHC Alpha" }],
+    flags
+  );
+  assert.strictEqual(n, 0);
+  assert.strictEqual(arr.length, 2);
+  assert.strictEqual(flags.length, 1);
+  assert.ok(/geom split/.test(flags[0]));
+});
+
+test("deleteRefs (mixed kind): interleaved text and shape refs each delete within their own collection", function () {
+  // Text and shapes are separate JXA collections; the single global descending pass
+  // (sorted by raw index, not by kind) must still resolve correctly within each one.
+  const texts = [];
+  const shapes = [];
+  for (let i = 0; i < 4; i++) {
+    texts.push({ x: i * 100, y: 0, w: 50, h: 30, text: "t" + i });
+    shapes.push({ x: i * 100, y: 500, w: 40, h: 40 });
+  }
+  const refs = [
+    { kind: "text", x: 0, y: 0, w: 50, h: 30 },
+    { kind: "shape", x: 100, y: 500, w: 40, h: 40 },
+    { kind: "text", x: 200, y: 0, w: 50, h: 30 },
+    { kind: "shape", x: 300, y: 500, w: 40, h: 40 },
+  ];
+  const slide = specSlideOf("text", texts, "shape", shapes);
+  const flags = [];
+  const n = m.deleteRefs(keynoteForSpecs(), slide, refs, flags);
+  assert.strictEqual(n, 4);
+  assert.deepStrictEqual(texts.map((e) => e.text), ["t1", "t3"]);
+  assert.deepStrictEqual(shapes.map((e) => e.x), [0, 200]);
+  assert.deepStrictEqual(flags, []);
 });
 
 console.log("\n" + passed + " passed");

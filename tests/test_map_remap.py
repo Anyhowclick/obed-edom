@@ -11,7 +11,8 @@ Keynote traps this suite locks (kept out of the production file):
 - A badge plate colour mismatch is an in-map label, not the badge; snapping onto
   it drags the cyan badge into the map.
 - A church-name list is a stacked column of ≥3 same-left-edge boxes; a map label
-  stands alone. An unticked include-lists drops the column, never the labels.
+  stands alone. Keeping side panels is positional: a column wholly on a side
+  panel is dropped unless whitelisted; a centre-band column is always kept.
 - Centre-panel panoramas (~2 CG frames wide) frame 1:1; thumbnails on them ride
   the panel affine and must not vote on the crop.
 - Judge a framing on the artwork it is about, not whole-slide extent (side-panel
@@ -367,7 +368,7 @@ def test_gold_recipe_pairs_pins_and_list():
     assert score["pinPairs"] == 1
     assert score["pinRmse"] < 5
 
-    with_lists = plan_payload_transforms(wall, recipe, include_lists=True)
+    with_lists = plan_payload_transforms(wall, recipe, keep_side_panels=True)
     assert summarize_plan(with_lists)["list"] == 1
     name = next(t for t in with_lists if t.role == "list")
     assert name.font_size == 28
@@ -660,7 +661,7 @@ def test_base_map_is_applied_before_the_overlays_that_sit_on_it():
     slide = {"number": 1, "items": [pin, title, australia, asia]}
     roles = [
         (t.role, t.w * t.h)
-        for t in plan_slide_transforms(slide, _identity_recipe(), include_lists=True)
+        for t in plan_slide_transforms(slide, _identity_recipe(), keep_side_panels=True)
     ]
     assert [r for r, _ in roles] == ["map", "map", "pin", "title"]
     # Largest map first: Australia must land on top of the Asia plate.
@@ -913,7 +914,7 @@ def test_same_size_overlays_keep_deck_order_because_z_is_unreadable():
     india = _item(index=0, kindIndex=0, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
     white = _item(index=1, kindIndex=1, kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771)
     slide = {"number": 1, "items": [india, white]}
-    out = plan_slide_transforms(slide, _identity_recipe(), include_lists=True)
+    out = plan_slide_transforms(slide, _identity_recipe(), keep_side_panels=True)
     assert [t.kind_index for t in out] == [0, 1]
 
 
@@ -950,6 +951,20 @@ def test_parse_slide_spec_lists_and_gaps():
     assert resolve_slides(spec="2,4-6") == frozenset({2, 4, 5, 6})
     assert wants_slide(3, frozenset({2, 4, 5, 6})) is False
     assert wants_slide(4, frozenset({2, 4, 5, 6})) is True
+
+
+def test_roster_log_line_matches_remap_keynote_formatting():
+    """Pins the `Roster kept on slide(s) ... dropped on ...` line built in
+    remap_keynote.py from format_slide_range(), including the en-dash -> hyphen swap."""
+    from obed_edom.map_remap import format_slide_range
+
+    kept = format_slide_range({11, 12}).replace("–", "-")
+    dropped = format_slide_range({13}).replace("–", "-")
+    message = (
+        f"Roster kept on slide(s) {kept}, dropped on {dropped} "
+        "(a wall leftover behind newer content)."
+    )
+    assert message == "Roster kept on slide(s) 11-12, dropped on 13 (a wall leftover behind newer content)."
 
 
 def test_plan_only_the_requested_slide():
@@ -1145,7 +1160,7 @@ def test_church_lists_use_sample_font_and_pack_in_gutter():
     assert recipe["listFontSize"] == 20
     assert recipe["titleFontSize"] == 50
     assert abs(recipe["titleDst"]["x"] - 135) < 1
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True)
     lists = [t for t in transforms if t.role == "list"]
     assert len(lists) == 2
     assert all(t.font_size == 20 for t in lists)
@@ -1162,6 +1177,49 @@ def test_church_lists_use_sample_font_and_pack_in_gutter():
     assert all(t.x + 1 >= map_right for t in lists)
 
 
+def test_kept_centre_roster_is_packed_inside_the_frame():
+    """D4: a D5-kept roster is packed into 1920x1080 instead of left at its wall
+    extent. The planner's y (like Keynote's `position`) is always the visual
+    top, autosize or not -- no h/2 conversion is needed."""
+    items = [_item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)]
+    widths = (200, 90, 240, 120)  # mixed widths: a column must fit its widest box, not just its first
+    for i, x in enumerate((2000, 3000, 4000, 5000)):  # centre band, far outside the 1920-wide frame
+        items.append(
+            _item(
+                kind="text",
+                text=f"CHC {i}A\nCHC {i}B\nCHC {i}C\nCHC {i}D",
+                # autosize=True is the canary here: the item-level flag is dead in
+                # src/, so re-introducing it with anchor (+h/2) compensation must
+                # break the exact-y assertion below.
+                x=x, y=459, w=widths[i], h=400, size=42, autosize=True,
+            )
+        )
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                ],
+            }
+        ],
+    }
+    recipe = learn_recipe(wall, template)
+    assert recipe["listFontSize"] == 20
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), pack_lists=True)
+    lists = [t for t in out if t.role == "list"]
+    assert len(lists) == 4
+    assert sorted(round(t.y, 2) for t in lists) == [16.0, 216.48, 416.95, 617.43]
+    for t in lists:
+        top = t.y
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= top and top + t.h <= 1080
+
+
 def test_pack_columns_steps_left_when_taller_than_frame():
     from obed_edom.map_remap import pack_columns_from_right
 
@@ -1170,6 +1228,17 @@ def test_pack_columns_steps_left_when_taller_than_frame():
     assert len(placed) == 3
     assert placed[0].x > placed[2].x
     assert placed[0].y < placed[1].y
+
+
+def test_pack_columns_sizes_a_column_by_its_widest_box():
+    """Gold 12's right column opens with an 84pt name and later carries 245pt ones;
+    anchoring the column on the first box's width spilled 21 of them past 1920."""
+    from obed_edom.map_remap import pack_columns_from_right
+
+    boxes = [Rect(0, 0, 84, 28), Rect(0, 0, 245, 28), Rect(0, 0, 120, 28)]
+    placed = pack_columns_from_right(boxes, 1920, 1080)
+    assert len({round(r.x, 1) for r in placed}) == 1       # one column
+    assert all(r.x + r.w <= 1920 - 16 + 0.5 for r in placed)
 
 
 def test_match_character_style_prefers_font_family_then_size():
@@ -1313,6 +1382,65 @@ def test_reuse_strips_hidden_side_panel_delta_before_the_paste():
     assert any(r.get("kind") == "text" and r.get("kindIndex") == 1 for r in job["strip"])
 
 
+def _reuse_extra_item_wall(*extras):
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    return {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [dict(map_img), *[dict(p) for p in pins]]},
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], *extras]},
+        ],
+    }
+
+
+def test_reuse_add_without_a_transform_is_canvas_scaled():
+    """An added item the planner never gave a transform (map_remap.py:2468's
+    continue) must not ride the paste at its wall coordinate: plan_slide_reuses
+    scales the wall rect by the destination canvas itself — and only for the
+    item that actually lacks a spec; a sibling add WITH a transform keeps it."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=200, w=400, h=100)
+    specced = _item(kind="shape", kindIndex=41, x=6000, y=300, w=200, h=150)
+    wall = _reuse_extra_item_wall(extra, specced)
+    xf = ItemTransform(
+        slide_number=2, item_index=43, kind="shape", kind_index=41, x=10.0, y=20.0, w=30.0, h=40.0, role="other"
+    )
+
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [xf], canvas=(1920, 1080))}
+    add = {(a["kind"], a["kindIndex"]): a for a in jobs[2]["add"]}
+    assert len(add) == 2
+    fallback = add[("shape", 40)]
+    assert fallback["x"] == 1250.0 and fallback["y"] == 200.0
+    assert fallback["w"] == 100.0 and fallback["h"] == 100.0
+    assert fallback.get("role") != "hide"
+    from_spec = add[("shape", 41)]
+    assert (from_spec["x"], from_spec["y"], from_spec["w"], from_spec["h"]) == (10.0, 20.0, 30.0, 40.0)
+
+
+def test_reuse_add_without_a_canvas_still_carries_a_rect():
+    """Guards the invariant remap_keynote.js now assumes: an add payload never
+    has a null x. Without a canvas, the fallback rect is the wall rect itself —
+    a sibling add WITH a transform still gets placed by its own spec."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    extra = _item(kind="shape", kindIndex=40, x=5000, y=200, w=400, h=100)
+    specced = _item(kind="shape", kindIndex=41, x=6000, y=300, w=200, h=150)
+    wall = _reuse_extra_item_wall(extra, specced)
+    xf = ItemTransform(
+        slide_number=2, item_index=43, kind="shape", kind_index=41, x=10.0, y=20.0, w=30.0, h=40.0, role="other"
+    )
+
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [xf])}
+    add = {(a["kind"], a["kindIndex"]): a for a in jobs[2]["add"]}
+    fallback = add[("shape", 40)]
+    assert fallback["x"] == 5000.0 and fallback["y"] == 200.0
+    assert fallback["w"] == 400.0 and fallback["h"] == 100.0
+    from_spec = add[("shape", 41)]
+    assert (from_spec["x"], from_spec["y"], from_spec["w"], from_spec["h"]) == (10.0, 20.0, 30.0, 40.0)
+
+
 def test_unpaired_text_resizes_when_swatch_face_differs():
     wall = {
         "slideWidth": 7680,
@@ -1380,7 +1508,7 @@ def test_unpaired_text_resizes_when_swatch_face_differs():
     recipe = learn_recipe(wall, template)
     styles = recipe.get("characterStyles") or []
     assert any(s["size"] == 50 and "AmplitudeCond" in s["font"] for s in styles)
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     taiwan = next(t for t in transforms if t.role == "other" and abs((t.font_size or 0) - 50) < 0.1)
     assert taiwan.font == "AmplitudeCond-Medium"
     # Photo crop translate is ~-2848; Taiwan stays with the photo, not packed as a list.
@@ -1456,7 +1584,7 @@ def test_unpaired_text_keeps_source_colour_takes_only_template_size():
     recipe = learn_recipe(wall, template)
     styles = recipe.get("characterStyles") or []
     assert any(abs(s["size"] - 50) < 0.1 and "helvetica" in (s["font"] or "").lower() for s in styles)
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     verse = next(t for t in transforms if t.role == "other" and t.kind == "text")
     # Size comes from the swatch...
     assert verse.font_size is not None and abs(verse.font_size - 50) < 0.1
@@ -1525,7 +1653,7 @@ def test_title_keeps_source_font_and_colour_takes_template_position_and_size():
     assert recipe["titleFont"] == "Helvetica"
     assert recipe.get("titleColor") is not None
     assert recipe["titleFontSize"] == 50
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True)
     title = next(t for t in transforms if t.role == "title")
     # ...position and size come from the template...
     assert abs(title.x - 135) < 1
@@ -1579,7 +1707,7 @@ def test_centre_panel_panorama_frames_one_to_one_over_overlaid_thumbnails():
     recipe = learn_recipe(wall, template)
     # 1:1, not the thumbnail scale it would take if the grid drove the framing.
     assert abs(frame_affine(recipe).s - 1.0) < 0.05
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     placed = [t for t in transforms if t.kind == "image" and t.role != "hide"]
     # Every overlay is still placed — held out of the crop choice, not dropped.
     assert len(placed) >= 10
@@ -1683,7 +1811,7 @@ def test_scripture_body_text_snaps_to_template_box_keeping_source_style():
     }
     recipe = learn_recipe(wall, template)
     assert recipe.get("bodyTextDst") == {"x": 698.0, "y": 119.0, "w": 1140.0, "h": 675.0}
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     body = next(t for t in transforms if t.kind == "text" and t.role == "other")
     assert (round(body.x), round(body.y), round(body.w), round(body.h)) == (698, 119, 1140, 675)
     assert abs((body.font_size or 0) - 46.67) < 0.1
@@ -1748,7 +1876,7 @@ def test_full_bleed_cover_is_not_vetoed_by_reflowed_body_and_cropped_side_conten
     # page is not vetoed.
     assert on_canvas_fraction(wall["slides"][0], recipe, 7680, 1080) >= 0.5
     fitted: list[int] = []
-    plan_payload_transforms(wall, recipe, include_lists=True, template=template, fitted_slides=fitted)
+    plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template, fitted_slides=fitted)
     assert fitted == []  # covered, not scaled to fit
 
 
@@ -1823,7 +1951,7 @@ def test_sparkle_overlay_takes_body_size_not_its_own_clamp():
     overlays = sparkle_overlays(s, body)
     assert len(overlays) == 1  # only the overlapping substring, not the far one
     recipe = learn_recipe(wall, template)
-    transforms = plan_payload_transforms(wall, recipe, include_lists=True, template=template)
+    transforms = plan_payload_transforms(wall, recipe, keep_side_panels=True, template=template)
     others = [t for t in transforms if t.role == "other" and t.kind == "text"]
     body_tf = max(others, key=lambda t: t.w * t.h)
     overlay_tf = next(t for t in others if t is not body_tf and 300 < t.w < 600)
@@ -1873,6 +2001,41 @@ def test_coincident_dup_is_hidden_not_dropped_from_plan():
     assert len(groups) == 2 and all(t.role == "hide" and t.opacity == 0.0 for t in groups)
 
 
+def test_coincident_twin_is_hidden_even_when_it_carries_a_build():
+    """Gold slide 13's two stat-group twins (e.g. `{"183", group[2]}` at the exact
+    same rect) both carry authored builds (bc-zoom-big / KLNSparkle), but un-hiding
+    the twin gives pass 2 two identical-signature stat groups it cannot resolve
+    (12 unresolved groups, 8 dedup shortfalls) -- so the twin stays hidden and its
+    build is reported as a loud shortfall instead (the trade this round makes)."""
+    def slide_with(builds):
+        return {
+            "number": 1,
+            "items": [
+                _item(kind="image", fileName="Building.png", x=1920, y=-126, w=3840, h=1250),
+                _item(kind="group", kindIndex=0, x=1993, y=365, w=111, h=78, childCount=2),
+                _item(kind="group", kindIndex=1, x=1993, y=365, w=111, h=78, childCount=2),  # coincident twin
+            ],
+            "builds": builds,
+        }
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    slide = slide_with([])
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    groups = {t.kind_index: t for t in out if t.kind == "group"}
+    assert groups[0].role != "hide"
+    assert groups[1].role == "hide"
+
+    slide2 = slide_with([{"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 1}])
+    wall2 = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide2]}
+    recipe2 = learn_recipe(wall2, template)
+    out2 = plan_slide_transforms(slide2, recipe2, wall_size=(7680, 1080))
+    groups2 = {t.kind_index: t for t in out2 if t.kind == "group"}
+    assert groups2[0].role != "hide"
+    assert groups2[1].role == "hide"  # still hidden: the build cannot be re-pointed onto it
+
+
 def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
     """On the LW wall, content wholly on a side panel is dropped unless side
     content is being kept; centre and boundary-straddling content stay."""
@@ -1896,13 +2059,13 @@ def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
     dropped = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080))
     assert not any(t.kind == "text" and t.role != "hide" for t in dropped)  # side text dropped
-    kept = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    kept = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), keep_side_panels=True)
     assert any(t.kind == "text" and t.role != "hide" for t in kept)  # kept when side content is kept
 
 
 def test_side_content_whitelist_keeps_only_the_named_slide():
     """plan_payload_transforms drops side content by default and keeps it on the
-    slides named in side_content_slides — the per-slide form of include_lists."""
+    slides named in side_content_slides — the per-slide form of keep_side_panels."""
     def slide(n):
         return {
             "number": n,
@@ -1932,15 +2095,143 @@ def test_side_content_whitelist_keeps_only_the_named_slide():
     assert side_text_visible(picked, 2)
 
 
-def test_church_summary_list_over_map_is_hidden_when_flag_off():
-    """A church-name list is dropped when 'include lists' is off even where it
-    sits over the map. The background test marks names over land as non-free, and
-    they used to be left remapped in place; a slide of many names is a list, not a
-    set of map labels. A slide with only a couple of labels keeps the old
-    protection."""
+def test_side_panel_column_is_dropped_but_the_centre_column_is_kept():
+    """Gold slide-11 shape: three name columns on each 1920 side panel, three in
+    the centre band. Side columns are dropped; centre columns are always kept —
+    "keep side panels" is positional, never a list-wide toggle."""
+    def column(x, ki_start):
+        return [
+            _item(
+                kind="text", text=f"CHC R{ki_start + i}", x=x + (i % 2), y=6 + i * 52,
+                w=200, h=58, size=40, kindIndex=ki_start + i,
+            )
+            for i in range(3)
+        ]
+
+    items = [_item(kind="image", fileName="worldmap.png", x=1920, y=0, w=3840, h=1080, kindIndex=0)]
+    for i, x in enumerate((260, 755, 1242)):
+        items += column(x, i * 3)
+    for i, x in enumerate((1943, 2476, 3055)):
+        items += column(x, 9 + i * 3)
+
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080))
+    texts = {t.kind_index: t for t in out if t.kind == "text"}
+    assert len(texts) == 18
+    for ki in range(9):
+        assert texts[ki].role == "hide"
+    for ki in range(9, 18):
+        assert texts[ki].role != "hide"
+
+
+def _reuse_side_panel_wall():
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+
+    def slide(n):
+        return {
+            "number": n,
+            "items": [
+                dict(map_img),
+                *[dict(p) for p in pins],
+                _item(kind="text", kindIndex=0, text="CHC Left Panel", x=200, y=100, w=300, h=60),
+            ],
+        }
+
+    return {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide(1), slide(2)]}
+
+
+def test_reuse_adds_target_side_content_when_only_the_target_is_whitelisted():
+    """Reuse must read the TARGET's own whitelist decision, not inherit the
+    donor's: a side-panel item hidden on the donor and kept on the target must be
+    freshly added, never silently missing (persist can't see the disagreement)."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    wall = _reuse_side_panel_wall()
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides={2})
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    assert any(a.get("kind") == "text" and a.get("kindIndex") == 0 for a in job["add"])
+    assert not any(s.get("kind") == "text" and s.get("kindIndex") == 0 for s in job["strip"])
+
+
+def test_reuse_removes_donor_side_content_when_only_the_donor_is_whitelisted():
+    """The reverse disagreement: kept on the donor, dropped on the target — the
+    leaked side content must be actively removed from the pasted duplicate, by
+    the donor's OWN output rect (what is actually live on the copy)."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    wall = _reuse_side_panel_wall()
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides={1})
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    removed = [r for r in job["remove"] if r.get("kind") == "text" and r.get("kindIndex") == 0]
+    assert len(removed) == 1
+    assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (-2680.0, 100.0, 126.0, 25.2)
+
+
+def test_reuse_emits_no_remove_ref_for_a_donor_hidden_object():
+    """A donor-only side-panel object already deleted by pass 1 (role=hide) must
+    not get a `remove` ref: deleteRefs can never find it on the duplicated copy,
+    so the ref was always a phantom, not a genuine geometry miss."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    donor_only = _item(kind="text", kindIndex=0, text="CHC Donor Only Name", x=200, y=100, w=300, h=60)
+
+    wall = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [dict(map_img), *[dict(p) for p in pins], donor_only]},
+            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins]]},
+        ],
+    }
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides=set())
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    assert job["remove"] == []
+
+
+def test_reuse_adds_target_side_content_group_when_only_the_target_is_whitelisted():
+    """The group exclusion in the reconcile loop must only skip the REMOVE
+    direction (groups already get a synthetic groupRemove there); a target-only
+    whitelisted group has no such other channel, so it must still land in `add`
+    with the target's own spec, and never survive in `strip`."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="worldmap.png", x=2600, y=0, w=2400, h=1080)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+
+    def slide(n):
+        return {
+            "number": n,
+            "items": [dict(map_img), *[dict(p) for p in pins], _item(kind="group", kindIndex=0, x=200, y=100, w=300, h=200)],
+            "groupChildText": {"0": "SIDEBADGE"},
+        }
+
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide(1), slide(2)]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    transforms = plan_payload_transforms(wall, recipe, template=template, side_content_slides={2})
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, transforms)}[2]
+    added = [a for a in job["add"] if a.get("kind") == "group" and a.get("kindIndex") == 0]
+    assert len(added) == 1
+    assert not any(s.get("kind") == "group" and s.get("kindIndex") == 0 for s in job["strip"])
+
+
+def test_church_summary_list_over_the_map_is_kept_when_side_panels_are_dropped():
+    """A church-name list in the centre wall band is always kept, even over the
+    map and even as a large list — "keep side panels" is positional, not a list
+    toggle. Only true side-panel content (a separate test) is dropped."""
     def church_slide(n_names):
         # Names over the centre map (x within 1920..5760) so this exercises the
-        # summary-list rule, not the side-panel drop that has its own test.
+        # centre-band rule, not the side-panel drop that has its own test.
         items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
         for i in range(n_names):
             items.append(_item(kind="text", text=f"CHC Place{i}", x=3000, y=6 + i * 52, w=215, h=58, size=42))
@@ -1953,19 +2244,17 @@ def test_church_summary_list_over_map_is_hidden_when_flag_off():
     assert sum(1 for it in many["slides"][0]["items"] if is_list_item(it)) >= 6
 
     recipe = learn_recipe(many, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
-    # free_text_keys empty simulates a real run where every name sits over artwork.
-    off = plan_slide_transforms(
-        many["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=set()
-    )
+    off = plan_slide_transforms(many["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
     placed_names = [t for t in off if t.kind == "text" and t.role != "hide"]
-    assert not placed_names  # the whole list is hidden, not remapped over the map
+    assert len(placed_names) == 20  # the whole centre-band list is kept, not hidden
+    for t in placed_names:
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= t.y and t.y + t.h <= 1080
 
-    # A couple of labels over artwork keep their protection (not a summary list).
+    # A couple of labels over artwork keep their protection (unchanged).
     few = church_slide(2)
     recipe2 = learn_recipe(few, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
-    off2 = plan_slide_transforms(
-        few["slides"][0], recipe2, include_lists=False, wall_size=(7680, 1080), free_text_keys=set()
-    )
+    off2 = plan_slide_transforms(few["slides"][0], recipe2, keep_side_panels=False, wall_size=(7680, 1080))
     kept = [t for t in off2 if t.kind == "text" and t.role != "hide"]
     assert kept  # few labels over artwork are not dropped
 
@@ -2019,19 +2308,16 @@ def test_lone_map_label_over_the_map_survives_the_list_drop():
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
 
-    for free_text_keys in (None, set()):
-        out = plan_slide_transforms(
-            wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=free_text_keys
-        )
-        texts = [t for t in out if t.kind == "text"]
-        assert len(texts) == 1
-        t = texts[0]
-        assert t.role == "other"
-        assert 0 <= t.x and t.x + t.w <= 1920
-        assert 0 <= t.y and t.y + t.h <= 1080
+    out = plan_slide_transforms(wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
+    texts = [t for t in out if t.kind == "text"]
+    assert len(texts) == 1
+    t = texts[0]
+    assert t.role == "other"
+    assert 0 <= t.x and t.x + t.w <= 1920
+    assert 0 <= t.y and t.y + t.h <= 1080
 
 
-def test_a_church_name_column_over_the_map_is_still_dropped():
+def test_a_church_name_column_over_the_map_is_kept():
     items = [_item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)]
     items += [
         _item(kind="text", text=f"CHC Row{i}", x=3000, y=6 + i * 52, w=200, h=58, size=40) for i in range(3)
@@ -2039,12 +2325,13 @@ def test_a_church_name_column_over_the_map_is_still_dropped():
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": items}]}
     recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
 
-    out = plan_slide_transforms(
-        wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=None
-    )
+    out = plan_slide_transforms(wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
     texts = [t for t in out if t.kind == "text"]
     assert texts
-    assert all(t.role == "hide" for t in texts)
+    assert all(t.role != "hide" for t in texts)
+    for t in texts:
+        assert 0 <= t.x and t.x + t.w <= 1920
+        assert 0 <= t.y and t.y + t.h <= 1080
 
 
 def test_slide_9_style_map_labels_ride_the_map_affine():
@@ -2074,9 +2361,7 @@ def test_slide_9_style_map_labels_ride_the_map_affine():
     assert abs(recipe["mapDst"]["x"] - (-2880)) < 1
     assert abs(recipe["mapDst"]["w"] / recipe["mapSrc"]["w"] - 1) < 1e-6
 
-    out = plan_slide_transforms(
-        wall["slides"][0], recipe, include_lists=False, wall_size=(7680, 1080), free_text_keys=None
-    )
+    out = plan_slide_transforms(wall["slides"][0], recipe, keep_side_panels=False, wall_size=(7680, 1080))
     by = {t.kind_index: t for t in out if t.kind == "text"}
     assert len(by) == 15
     assert not any(t.role == "hide" for t in by.values())
@@ -2084,6 +2369,82 @@ def test_slide_9_style_map_labels_ride_the_map_affine():
         t = by[i]
         assert abs(t.x - (wall_x - 2880)) < 1
         assert abs(t.y - wall_y) < 1
+
+
+def _roster_slide(number, n_names=8, extra=None, kind_index_offset=0):
+    items = [
+        _item(
+            kind="text", text=f"CHC Place{i}", x=3000, y=6 + i * 52, w=215, h=58, size=42,
+            kindIndex=kind_index_offset + i,
+        )
+        for i in range(n_names)
+    ]
+    if extra is not None:
+        items.append(extra)
+    return {"number": number, "items": items}
+
+
+def test_roster_run_keeps_the_first_two_slides_and_drops_the_third():
+    """Owner rule: a church roster is kept on the slide it first appears on, plus
+    an immediately-following slide that only re-lays-out the same roster; every
+    later slide of the run hides its roster, even though its names still overlap
+    (Gold 11 keep, 12 keep, 13 drop)."""
+    from obed_edom.map_remap import roster_slides
+
+    slide1 = _roster_slide(1)
+    slide2 = _roster_slide(2)  # same names, same non-roster content: a pure re-layout
+    slide3 = _roster_slide(3, extra=_item(kind="group", kindIndex=99, x=100, y=100, w=50, h=50))
+
+    keep, drop = roster_slides([slide1, slide2, slide3])
+    assert keep == {1, 2}
+    assert drop == {3}
+
+
+def test_roster_run_of_one_slide_keeps_its_roster():
+    """A roster run bordered by slides that never reach ROSTER_MIN_NAMES is a run
+    of one: it is kept outright (Full wall slide 57)."""
+    from obed_edom.map_remap import roster_slides
+
+    before = {"number": 1, "items": [_item(kind="text", text="CHC Solo", x=3000, y=6, w=215, h=58, size=42)]}
+    roster = _roster_slide(2)
+    after = {"number": 3, "items": [_item(kind="text", text="CHC Solo2", x=3000, y=6, w=215, h=58, size=42)]}
+
+    keep, drop = roster_slides([before, roster, after])
+    assert keep == {2}
+    assert drop == set()
+
+
+def test_roster_second_slide_with_new_content_drops_the_roster():
+    """The second slide of a run only keeps its roster when its non-roster
+    content matches the first's exactly; new content (an extra group here) drops
+    it instead of leaving it undecided."""
+    from obed_edom.map_remap import roster_slides
+
+    slide1 = _roster_slide(1)
+    slide2 = _roster_slide(2, extra=_item(kind="group", kindIndex=99, x=100, y=100, w=50, h=50))
+
+    keep, drop = roster_slides([slide1, slide2])
+    assert keep == {1}
+    assert drop == {2}
+
+
+def test_dropped_roster_hides_centre_band_items_too():
+    """drop_roster overrides the positional keep rule: a centre-band roster item
+    that `is_side_panel_item` would never touch is still hidden."""
+    slide = _roster_slide(1)
+    slide["items"].insert(
+        0, _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080, kindIndex=50)
+    )
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]})
+
+    kept = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    names = [t for t in kept if t.kind == "text"]
+    assert names and all(t.role != "hide" for t in names)  # centre band: kept without drop_roster
+
+    dropped = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), drop_roster=True)
+    names2 = [t for t in dropped if t.kind == "text"]
+    assert names2 and all(t.role == "hide" for t in names2)
 
 
 def test_off_screen_objects_are_hidden_not_left_alone():
@@ -2102,7 +2463,7 @@ def test_off_screen_objects_are_hidden_not_left_alone():
     wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
     template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
     recipe = learn_recipe(wall, template)
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), keep_side_panels=True)
     # The off-slide "CHC Kuching" (the only text parked at y=1678) is present but
     # hidden, so the canvas change cannot scale it back on-frame.
     off = [t for t in out if t.kind == "text" and t.y >= 1080]
@@ -2150,7 +2511,7 @@ def test_fit_pass_leaves_a_corner_label_and_its_width_alone():
         _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
     ]}]}
     recipe = learn_recipe(wall, template)
-    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), include_lists=True)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), keep_side_panels=True)
     others = sorted(
         (t for t in out if t.kind == "text" and t.role == "other"), key=lambda t: t.w * t.h
     )
@@ -2191,7 +2552,7 @@ def test_sparkle_overlays_follow_the_body_after_the_fit_pass():
         _item(kind="image", fileName="Wilderness.png", x=-544, y=0, w=3840, h=1080),
     ]}]}
     recipe = learn_recipe(wall, template)
-    tfs = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    tfs = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), keep_side_panels=True)
     others = [t for t in tfs if t.role == "other" and t.kind == "text"]
     body = max(others, key=lambda t: t.w * t.h)
     overlay = next(t for t in others if t is not body)
@@ -2237,7 +2598,7 @@ def test_corner_label_keeps_its_plate_size_not_the_template_slot():
     }
     recipe = learn_recipe(wall, template)
     assert recipe.get("badgePlateDst") == {"x": 20.0, "y": -77.0, "w": 227.0, "h": 160.0}
-    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), include_lists=True)
+    out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), keep_side_panels=True)
     plate = next(t for t in out if t.kind == "shape")
     label = next(t for t in out if t.kind == "text" and t.role != "hide")
     # Plate moved to the corner but kept its own 362 width (rounding survives), not
@@ -2350,28 +2711,6 @@ def test_title_badge_follows_globe_not_map():
     assert badge.x < 500
     title = next(t for t in transforms if t.role == "title")
     assert abs(title.x - 135) < 1
-
-
-def test_reuse_strips_builds_missing_on_dest():
-    from obed_edom.map_remap import plan_slide_reuses
-
-    map_img = _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
-    pins = [
-        _item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11, buildCount=1 if i == 0 else 0)
-        for i in range(40)
-    ]
-    dest_pins = [
-        _item(kind="shape", x=3563 + i * 13, y=255, w=11, h=11, buildCount=0) for i in range(40)
-    ]
-    wall = {
-        "slides": [
-            {"number": 2, "items": [map_img, *pins]},
-            {"number": 5, "items": [dict(map_img), *dest_pins]},
-        ]
-    }
-    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
-    assert jobs[5]["from"] == 2
-    assert any(r["kind"] == "shape" for r in jobs[5]["stripBuilds"])
 
 
 def test_reuse_strips_mutated_text_before_pasting_the_delta():
@@ -3265,6 +3604,41 @@ def test_pack_left_groups_moves_wall_size_groups_without_overlap():
     assert by_src_y[0].x == 16
 
 
+def test_packing_writes_the_visual_top():
+    """Live-proven on the Gold build: AppleScript/JXA `position` is always the
+    object's visual top-left, autosize or not. Two text boxes, each too tall to
+    share a column, must pack to the SAME visual top -- no h/2 offset for either.
+    (Pre-fix, an autosize box was pushed down by h/2, double-shifting top-aligned
+    roster columns and causing slide 11's columns to overprint each other.)"""
+    from obed_edom.map_remap import _pack_list_transforms
+
+    auto = ItemTransform(
+        slide_number=1, item_index=0, kind="text", x=0, y=0, w=200, h=700,
+        role="list",
+    )
+    plain = ItemTransform(
+        slide_number=1, item_index=1, kind="text", x=0, y=0, w=200, h=700,
+        role="list",
+    )
+    _pack_list_transforms([auto, plain], {"destWidth": 1920.0, "destHeight": 1080.0})
+    assert plain.y == pytest.approx(16.0)
+    assert auto.y == pytest.approx(16.0)
+    assert auto.y == plain.y
+
+
+def test_packing_a_single_tall_column_uses_the_top_margin():
+    """A single 700-tall list box packs flush against the top margin -- y == 16.0,
+    not 16.0 + h/2."""
+    from obed_edom.map_remap import _pack_list_transforms
+
+    tall = ItemTransform(
+        slide_number=1, item_index=0, kind="text", x=0, y=0, w=200, h=700,
+        role="list",
+    )
+    _pack_list_transforms([tall], {"destWidth": 1920.0, "destHeight": 1080.0})
+    assert tall.y == pytest.approx(16.0)
+
+
 # --- Part A: per-slide occurrence-ordinal partition key (co-located dedup) ---
 
 
@@ -3317,39 +3691,51 @@ def test_reuse_duplicated_map_images_stay_ordinal_paired_and_persist():
 
 
 def test_reuse_persisting_collided_pair_aligns_by_ordinal_across_slides():
-    """A PERSISTING collided pair (the Map deck never exercises this) proves the
-    donor pair aligns to the current pair BY ORDINAL, not cross-matched/collapsed:
-    the donor's ordinal-0 member carries a build the target lost, the ordinal-1
-    member does not. `stripBuilds` must name exactly the ordinal-0 donor. Pre-fix
-    the dict kept only the last (ordinal-1, build-free) copy, so the lost build was
-    invisible and `stripBuilds` was empty."""
+    """Three co-located (colliding) donor twins prove `_keyed` aligns pairs BY
+    ORDINAL (encounter order in each slide's own item list), not by a plain dict
+    keyed only on content (which would collapse every twin to the last one seen).
+    Two twins persist paired ordinal-for-ordinal (different childSig each, so a
+    collapse would be observable); the third, donor-only, has no counterpart and
+    must be named precisely by ITS OWN kindIndex+childSig in `groupRemove` — the
+    remaining consumer of `persist_pairs`' per-ordinal alignment is `persist_map`,
+    which feeds the `keep`/`check` signature counts groupRemove reads."""
     from obed_edom.map_remap import plan_slide_reuses
 
     map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
     pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
-    # Donor: co-located pair, ordinal-0 (ki 0) animates, ordinal-1 (ki 1) is static.
-    donor_pair = [
-        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, buildCount=1),
-        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, buildCount=0),
+    donor_twins = [
+        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50),
+        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50),
+        _item(kind="group", kindIndex=2, x=100, y=100, w=50, h=50),  # no target counterpart
     ]
-    # Target: same co-located pair, both static (the ordinal-0 build was dropped).
-    curr_pair = [
-        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, buildCount=0),
-        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, buildCount=0),
+    curr_twins = [
+        _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50),
+        _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50),
     ]
     wall = {
         "slides": [
-            {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], *donor_pair]},
-            {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], *curr_pair]},
+            {
+                "number": 2,
+                "items": [dict(map_img), *[dict(p) for p in pins], *donor_twins],
+                "groupChildText": {0: "27\nSchools", 1: "110\nWorkers", 2: "83\nAffiliate"},
+            },
+            {
+                "number": 3,
+                "items": [dict(map_img), *[dict(p) for p in pins], *curr_twins],
+                "groupChildText": {0: "27\nSchools", 1: "110\nWorkers"},
+            },
         ]
     }
     job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[3]
     assert job["from"] == 2
-    # 40 pins + 1 map + both twins persist.
+    # 40 pins + 1 map + both twins persist, aligned ordinal-for-ordinal.
     assert job["persist"] == 43
-    build_refs = [r for r in job["stripBuilds"] if r.get("kind") == "group"]
-    # Exactly the ordinal-0 donor (ki 0) — proves per-ordinal pairing, not collapse.
-    assert build_refs == [{"kind": "group", "kindIndex": 0, "itemIndex": 0}]
+    assert not any(r.get("kind") == "group" for r in job["remove"])
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    assert grs[0]["kind"] == "group" and grs[0]["kindIndex"] == 2
+    assert grs[0]["childSig"] == "83\nAffiliate"
+    assert grs[0]["expectedKeep"] == 0
 
 
 def test_reuse_collision_free_wall_all_ordinals_zero():
@@ -3372,6 +3758,55 @@ def test_reuse_collision_free_wall_all_ordinals_zero():
     assert job["from"] == 2
     # 40 pins + 1 map; the differing text is not in persist. No duplication.
     assert job["persist"] == 41
+
+
+def test_reuse_refuses_a_donor_that_lacks_a_build_the_target_needs():
+    """A reuse target can only LOSE builds offline (the patch never invents one):
+    when the target's own source needs a build on a persisting item the donor
+    physically lacks, the donor candidate is rejected -- the slide falls through
+    to a fresh remap (which keeps its builds by construction) instead of an
+    unfixable reuse."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    text = _item(kind="text", kindIndex=40, text="Total Churches", x=2671, y=389, w=200, h=60, size=42)
+    donor_slide = {
+        "number": 2,
+        "items": [dict(map_img), *[dict(p) for p in pins], dict(text)],
+        "builds": [],  # the donor's own text carries no build
+    }
+    target_slide = {
+        "number": 3,
+        "items": [dict(map_img), *[dict(p) for p in pins], dict(text)],
+        "builds": [
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "text", "kindIndex": 40}
+        ],
+    }
+    wall = {"slides": [donor_slide, target_slide]}
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert 3 not in jobs  # no reuse: the only candidate donor is rejected
+
+
+def test_reuse_donor_shortfall_falls_through_to_an_earlier_candidate():
+    """A rejected donor must not abort the whole candidate search: the `continue`
+    is inside the candidate loop, so a LATER donor that DOES have the build still
+    wins even though an earlier one was rejected. (The good donor must come AFTER
+    the bad one here -- otherwise `best` is already set by the time the rejected
+    candidate is reached, and turning the `continue` into a `break` would leave
+    the suite green.)"""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    text = _item(kind="text", kindIndex=40, text="Total Churches", x=2671, y=389, w=200, h=60, size=42)
+    build = [{"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "text", "kindIndex": 40}]
+    donor_bad = {"number": 2, "items": [dict(map_img), *[dict(p) for p in pins], dict(text)], "builds": []}
+    donor_good = {"number": 3, "items": [dict(map_img), *[dict(p) for p in pins], dict(text)], "builds": build}
+    target_slide = {"number": 4, "items": [dict(map_img), *[dict(p) for p in pins], dict(text)], "builds": build}
+    wall = {"slides": [donor_bad, donor_good, target_slide]}
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[4]["from"] == 3  # donor 2 rejected; falls through to donor 3
 
 
 def _reuse_gold_cache_payload(name):
@@ -3433,32 +3868,6 @@ def test_gold_full_report_card_deck_if_warm():
     # Whatever donor selection this deck makes, gating must never trip.
     for j in jobs:
         assert j["persist"] >= REUSE_MIN_PERSIST
-
-
-def test_gold_map_deck_stripbuilds_empty():
-    """A5: stripBuildRefs is left wall-index addressed on the drifted copy
-    (deferred (f) build work) and guarded to fail loud only if it is ever
-    non-empty. Assert it stays empty on the Map gold deck so the guard never
-    fires today; also assert every remove ref carries a plausible output rect."""
-    import math
-
-    import pytest
-
-    from obed_edom.map_remap import plan_slide_reuses
-
-    payload = _reuse_gold_cache_payload("Map_Extracted_Wall_1st.key")
-    if payload is None:
-        pytest.skip("Map wall deck cache is cold; refuse to open Keynote")
-    # Empty transforms (as the sibling donor-selection gold test): stripBuilds
-    # emptiness depends only on the wall buildCounts, and remove refs still carry
-    # finite wall-fallback output rects with no spec present.
-    jobs = plan_slide_reuses(payload, [])
-    for j in jobs:
-        assert j["stripBuilds"] == []
-        # Every remove ref carries a finite output rect (Part B1 / Part C tiles).
-        for r in j["remove"]:
-            for f in ("x", "y", "w", "h"):
-                assert f in r and math.isfinite(float(r[f]))
 
 
 # --- Part B1: per-object OUTPUT-rect map threaded onto `remove` refs -----------
@@ -3641,6 +4050,28 @@ def test_reuse_group_remove_without_groupchildtext_has_no_sig():
     assert all(r.get("kind") != "group" for r in job["remove"])
 
 
+def test_reuse_sigless_target_hidden_persisted_group_falls_through_to_removal():
+    """R1: the target-hidden/donor-visible reconcile `continue` (treating a hidden
+    group as already-covered by the sig-keyed dedup accounting below) is only sound
+    when the donor group carries a groupChildText signature -- that accounting is
+    blind to a sig-less group. Without one it must fall through to the existing
+    sig-less passthrough instead of silently leaking the donor's live copy onto
+    the target."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    g = _grp(50, 4600, "side\nlist")[0]
+    wall = _reuse_chain([
+        ([dict(g)], {}),  # no groupChildText entry for kindIndex 50
+        ([dict(g)], {}),  # same geometry => persists, still no signature
+    ])
+    hide = ItemTransform(slide_number=2, item_index=50, kind="group", kind_index=50, role="hide", x=1, y=1, w=1, h=1)
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide])}[2]
+    assert not any(r.get("kind") == "group" for r in job["remove"])
+    grs = job.get("groupRemove")
+    assert grs and len(grs) == 1
+    assert "childSig" not in grs[0]
+
+
 def test_reuse_no_groupremove_key_when_no_group_removes():
     """A reuse job with only tile removes carries no `groupRemove` key at all."""
     from obed_edom.map_remap import plan_slide_reuses
@@ -3799,6 +4230,127 @@ def test_reuse_stray_outliving_keeper_downgrades_to_sig_less():
     assert len(grs) == 1
     assert "childSig" not in grs[0] and "expectedKeep" not in grs[0]
     assert grs[0]["kindIndex"] == 51  # the partitioned twin, emitted sig-less
+
+
+# --- D1/D2 (plan2 round 2): index-stale deletes, hidden-mutate donor leak -------
+
+
+def test_reuse_remove_ref_carries_the_donor_text():
+    """D1(4): a text remove ref carries the donor's stripped text as `matchText`,
+    for deleteRefs's content-first resolution; a non-text remove ref has none."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    extra_text = _item(kind="text", kindIndex=0, text="  CHC Bravo  ", x=100, y=100, w=200, h=50)
+    extra_shape = _item(kind="shape", kindIndex=40, x=300, y=300, w=60, h=60)
+    wall = _reuse_wall_base(dict(extra_text), dict(extra_shape))
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    text_ref = [r for r in job["remove"] if r.get("kind") == "text"][0]
+    assert text_ref["matchText"] == "CHC Bravo"
+    assert (text_ref["x"], text_ref["y"], text_ref["w"], text_ref["h"]) == (100, 100, 200, 50)
+    shape_ref = [r for r in job["remove"] if r.get("kind") == "shape" and r.get("kindIndex") == 40][0]
+    assert "matchText" not in shape_ref
+
+
+def test_reuse_mutate_whose_target_is_hidden_becomes_a_donor_remove():
+    """D2: a target text box that text-matches the donor becomes a mutate pair;
+    when the target's OWN spec hides it, the donor's live copy must be deleted
+    instead of silently riding onto the pasted duplicate (the mutate payload is
+    already discarded for a hidden target, and nothing else touches the donor)."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    donor_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    target_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=500, y=500, w=200, h=50)
+    wall = _reuse_wall_base(dict(donor_text), extra_slide2_items=(dict(target_text),))
+    hide_spec = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=500, y=500, w=200, h=50, kind_index=0, role="hide"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide_spec])}[2]
+    assert job["mutate"] == []
+    removed = [r for r in job["remove"] if r.get("kind") == "text"]
+    assert len(removed) == 1
+    assert removed[0]["matchText"] == "CHC Alpha"
+    assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (100, 100, 200, 50)
+
+
+def test_reuse_mutate_donor_not_doubled_when_two_hidden_targets_share_text():
+    """N1: prev_by_id keys a donor by text alone, so two incoming targets with the
+    same text both pair to the same donor item. If both targets are hidden, D2 must
+    still append that donor to `remove` once, not once per target."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    donor_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    target_a = _item(kind="text", kindIndex=0, text="CHC Alpha", x=500, y=500, w=200, h=50)
+    target_b = _item(kind="text", kindIndex=1, text="CHC Alpha", x=600, y=600, w=200, h=50)
+    wall = _reuse_wall_base(dict(donor_text), extra_slide2_items=(dict(target_a), dict(target_b)))
+    hide_a = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=500, y=500, w=200, h=50, kind_index=0, role="hide"
+    )
+    hide_b = ItemTransform(
+        slide_number=2, item_index=42, kind="text", x=600, y=600, w=200, h=50, kind_index=1, role="hide"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [hide_a, hide_b])}[2]
+    assert job["mutate"] == []
+    removed = [r for r in job["remove"] if r.get("kind") == "text"]
+    assert len(removed) == 1
+    assert removed[0]["matchText"] == "CHC Alpha"
+
+
+def test_reuse_mutate_whose_target_is_visible_still_mutates():
+    """Guard over-application: the same fixture with the target's box left visible
+    (role != hide) must still ride the normal mutate path; the donor's copy must
+    not also be removed."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    donor_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    target_text = _item(kind="text", kindIndex=0, text="CHC Alpha", x=500, y=500, w=200, h=50)
+    wall = _reuse_wall_base(dict(donor_text), extra_slide2_items=(dict(target_text),))
+    visible_spec = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=50, y=60, w=70, h=20, kind_index=0, role="other"
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [visible_spec])}[2]
+    assert len(job["mutate"]) == 1
+    assert job["mutate"][0]["matchText"] == "CHC Alpha"
+    assert [r for r in job["remove"] if r.get("kind") == "text"] == []
+
+
+def test_reuse_hidden_mutate_does_not_leak_down_a_three_slide_chain():
+    """D2: slide 2 keeps a centre name (mutates the donor's copy from slide 1);
+    slide 3 hides that same name. Slide 3's job must remove it at slide 2's OWN
+    kept position (not slide 1's), and the reuse chain must not move."""
+    from obed_edom.map_remap import ItemTransform, plan_slide_reuses
+
+    map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
+    pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    base = [dict(map_img), *[dict(p) for p in pins]]
+    # Present only from slide 2 on: without it, slide 1 would tie slide 2 as
+    # slide 3's donor (both offer the same "CHC Alpha" mutate at equal cost).
+    anchor = _item(kind="shape", kindIndex=40, x=9999, y=9999, w=5, h=5)
+    chc_1 = _item(kind="text", kindIndex=0, text="CHC Alpha", x=100, y=100, w=200, h=50)
+    chc_2 = _item(kind="text", kindIndex=0, text="CHC Alpha", x=400, y=200, w=180, h=44)
+    chc_3 = _item(kind="text", kindIndex=0, text="CHC Alpha", x=700, y=700, w=190, h=48)
+    wall = {
+        "slides": [
+            {"number": 1, "items": [*[dict(b) for b in base], dict(chc_1)]},
+            {"number": 2, "items": [*[dict(b) for b in base], dict(chc_2), dict(anchor)]},
+            {"number": 3, "items": [*[dict(b) for b in base], dict(chc_3), dict(anchor)]},
+        ]
+    }
+    kept_spec = ItemTransform(
+        slide_number=2, item_index=41, kind="text", x=400, y=200, w=180, h=44, kind_index=0, role="other"
+    )
+    hide_spec = ItemTransform(
+        slide_number=3, item_index=41, kind="text", x=700, y=700, w=190, h=48, kind_index=0, role="hide"
+    )
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [kept_spec, hide_spec])}
+    assert jobs[2]["from"] == 1
+    assert jobs[3]["from"] == 2
+    assert jobs[3]["mutate"] == []
+    removed = [r for r in jobs[3]["remove"] if r.get("kind") == "text"]
+    assert len(removed) == 1
+    assert removed[0]["matchText"] == "CHC Alpha"
+    # Slide 2's OWN kept rect, not slide 1's original — proves the fix walks the
+    # chain rather than always blaming the base donor.
+    assert (removed[0]["x"], removed[0]["y"], removed[0]["w"], removed[0]["h"]) == (400, 200, 180, 44)
 
 
 # --------------------------------------------------------------------------

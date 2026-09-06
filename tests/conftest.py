@@ -4,6 +4,8 @@ import os
 import shutil
 import tempfile
 
+os.environ.setdefault("OBED_OFFLINE_WRITE", "off")
+
 # The dashboard app builds its JobRunner at import time, and a finished run is
 # saved to disk. Without this, every test that touches the app leaves sessions
 # in the real output/.sessions, and they turn up in the dashboard's History

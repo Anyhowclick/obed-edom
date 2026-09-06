@@ -88,7 +88,6 @@ def test_splice_overwrites_jxa_fields_keeps_offline_addressing_and_runs():
         "fileName": "",
         "rotation": 0,
         "locked": False,
-        "buildCount": 0,
         "runs": [{"text": "Hello", "color": [1, 2, 3]}],
     }
     jxa_rec = {
@@ -100,7 +99,6 @@ def test_splice_overwrites_jxa_fields_keeps_offline_addressing_and_runs():
         "fileName": "",
         "locked": False,
         "rotation": 0,
-        "buildCount": 0,
         "kindIndex": 1,
     }
     inspect_mod._splice_item_record(offline_item, jxa_rec)
@@ -120,10 +118,10 @@ def test_splice_adds_group_children_childcount():
     # the splice must add them so a spliced group == the slide-level (full-JXA) group.
     offline_group = {"index": 0, "kind": "group", "kindIndex": 0,
                      "x": 0, "y": 0, "w": 0, "h": 0, "rotation": 0, "locked": False,
-                     "buildCount": 0, "runs": []}
+                     "runs": []}
     jxa_rec = {"index": 0, "kind": "group", "text": "", "x": 5, "y": 6, "w": 700, "h": 800,
                "size": 0, "font": "", "color": None, "fileName": "", "locked": False,
-               "rotation": 0, "buildCount": 0, "children": [], "childCount": 0, "kindIndex": 0}
+               "rotation": 0, "children": [], "childCount": 0, "kindIndex": 0}
     inspect_mod._splice_item_record(offline_group, jxa_rec)
     assert offline_group["children"] == []
     assert offline_group["childCount"] == 0

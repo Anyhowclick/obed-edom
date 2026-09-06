@@ -1166,6 +1166,9 @@ def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
     monkeypatch.setattr(iwa_mod, "_load_deck", lambda _p: ({}, {}, {}))
     monkeypatch.setattr(iwa_mod, "attach_group_child_text", lambda *a, **k: None)
     monkeypatch.setattr(iwa_mod, "attach_group_captions", lambda *a, **k: None)
+    # attach_slide_builds re-reads the raw zip for image identity (deck_builds); the
+    # fixture's `source` is a 0-byte stand-in, not a real .key, so it must be mocked too.
+    monkeypatch.setattr(iwa_mod, "attach_slide_builds", lambda *a, **k: None)
     calls: list = []
     monkeypatch.setattr(iwa_mod, "attach_group_children", lambda *a, **k: calls.append(1))
 

@@ -626,13 +626,98 @@ def restore_card_stroke_widths(
     return result
 
 
+def _surplus_slide_note(slide_no: int, patched_slides: set[int]) -> str:
+    return f"slide {slide_no} ({'a patched reuse slide' if slide_no in patched_slides else 'NOT a patched reuse slide'})"
+
+
+def restore_source_builds(
+    dest: Path, source: Path, slides: set[int], say: Callable[[str], None]
+) -> dict[str, Any]:
+    """Patch each reuse-target slide's builds/buildChunks/transition to match its
+    own source slide, never the donor's — Keynote cannot script builds at all.
+    Offline IWA write, unconditional (like restore_card_stroke_widths), after
+    stat-finalize. Only `slides` are rewritten; every slide is verified, and a
+    surplus anywhere raises."""
+    try:
+        from obed_edom import iwa_builds  # noqa: PLC0415
+        from obed_edom.iwa_write import patch_slide_builds  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — optional iwa extra; never break the run
+        say(f"Build/transition patch unavailable ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+
+    try:
+        src_by_number = iwa_builds.deck_builds(source)
+    except Exception as exc:  # noqa: BLE001 — offline read is opt-in; never break the run
+        say(f"Build/transition patch could not read the source deck ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+    try:
+        out_by_number = iwa_builds.deck_builds(dest)
+    except Exception as exc:  # noqa: BLE001
+        say(f"Build/transition patch could not read the output deck ({type(exc).__name__}: {exc}); skipping.")
+        return {"skipped": True}
+
+    if set(src_by_number) != set(out_by_number):
+        say(
+            "Build/transition patch REFUSED: source has "
+            f"{len(src_by_number)} slide(s), output has {len(out_by_number)} — skipping."
+        )
+        return {"skipped": True}
+
+    plan = iwa_builds.plan_build_patch(src_by_number, out_by_number, slides)
+    slide_ids = {out_by_number[n]["slideId"] for n in slides if n in out_by_number}
+    plans = {sid: p for sid, p in plan["plans"].items() if sid in slide_ids}
+    patch_result = patch_slide_builds(dest, plans)
+    if patch_result.get("refused"):
+        say(f"Build/transition patch REFUSED: {patch_result.get('reason')}")
+        return {"skipped": True, "reason": patch_result.get("reason")}
+
+    out_after = iwa_builds.deck_builds(dest) if plans else out_by_number
+    verify = iwa_builds.verify_builds(src_by_number, out_after)
+
+    skipped_transitions = {r["slide"]: r["transitionSkipped"] for r in plan["report"] if r.get("transitionSkipped")}
+    for slide_no, reason in skipped_transitions.items():
+        say(f"WARNING builds: slide {slide_no} transition not restored ({reason}); the output's own transition is kept.")
+    shortfall_totals: dict[tuple[int, Any], int] = {}
+    for m in verify["missing"]:
+        key = (m["slide"], m["effect"])
+        shortfall_totals[key] = shortfall_totals.get(key, 0) + m["count"]
+    for (slide_no, effect), count in sorted(shortfall_totals.items()):
+        say(
+            f"WARNING builds: slide {slide_no} lost {count} {effect} "
+            "build(s) (the object is no longer on that slide)."
+        )
+    kept = sum(r.get("kept", 0) for r in plan["report"])
+    dropped = sum(r.get("dropped", 0) for r in plan["report"])
+    retimed = sum(1 for r in plan["report"] if r.get("retimed"))
+    say(
+        f"Builds follow source: {kept} kept, {dropped} dropped, {retimed} "
+        f"transition(s) restored on {len(slides)} reuse slide(s)."
+    )
+
+    if verify["surplus"]:
+        notes = sorted({_surplus_slide_note(s["slide"], slides) for s in verify["surplus"]})
+        raise RuntimeError(f"Build patch left a surplus build on {', '.join(notes)}: {verify['surplus'][:5]}")
+    transitions = [t for t in verify["transitions"] if t["slide"] not in skipped_transitions]
+    if transitions:
+        raise RuntimeError(f"Build patch left a transition mismatch: {transitions[:5]}")
+
+    return {
+        "skipped": False,
+        "kept": kept,
+        "dropped": dropped,
+        "retimed": retimed,
+        "report": plan["report"],
+        "shortfalls": verify["missing"],
+    }
+
+
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
     *,
     template: Path | str,
     slide_range: tuple[int, int] | frozenset[int] | None = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     framing_overrides: dict[int, int] | None = None,
@@ -719,11 +804,22 @@ def remap_keynote(
     except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
         say(
             f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
-            "will report a shortfall instead of deduping, and photo cards will not be "
+            "will report a shortfall instead of deduping, photo cards will not be "
             "recognised as cards at all (no groupChildText signature to match on) — they "
             "keep today's affine-mapped size, same as any other unmatched group; groups "
             "holding an autosize text box keep today's group-level resize (which collapses "
             "them)."
+        )
+
+    try:
+        from obed_edom.iwa_runs import attach_slide_builds  # noqa: PLC0415
+
+        attach_slide_builds(source, wall, deck=deck)
+    except Exception as exc:  # noqa: BLE001 — reuse targets keep the donor's builds/transition
+        say(
+            f"Wall build/transition read unavailable ({type(exc).__name__}: {exc}); reuse donor "
+            "rejection for an unfixable build shortfall cannot run, and a coincident stat twin "
+            "that carries a build cannot be told apart from a magic-move leftover (stays hidden)."
         )
 
     try:
@@ -748,7 +844,7 @@ def remap_keynote(
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
-    if include_lists or side_content_slides:
+    if keep_side_panels or side_content_slides:
         previews, preview_note = resolve_source_previews(
             source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
         )
@@ -760,11 +856,12 @@ def remap_keynote(
     child_resize: list[dict[str, Any]] = []
     badge_raises: list[dict[str, Any]] = []
     card_grid: list[dict[str, Any]] = []
+    roster: dict[str, set[int]] = {}
     transforms = plan_payload_transforms(
         wall,
         recipe,
         slide_range=slide_range,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         template=template_data,
         previews=previews or None,
         placement_report=placements,
@@ -778,6 +875,7 @@ def remap_keynote(
         badge_raise_report=badge_raises,
         card_stroke=card_stroke,
         card_grid_report=card_grid,
+        roster_report=roster,
     )
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
@@ -874,7 +972,12 @@ def remap_keynote(
             + ("…" if len(hidden) > 10 else "")
             + ". Un-skip in Keynote and re-run to include them."
         )
-    reuses = plan_slide_reuses(wall, transforms, slide_range=slide_range)
+    reuses = plan_slide_reuses(
+        wall,
+        transforms,
+        slide_range=slide_range,
+        canvas=(float(recipe.get("destWidth") or CG_WIDTH), float(recipe.get("destHeight") or CG_HEIGHT)),
+    )
     reuse_slides = {int(r["slide"]) for r in reuses}
     # Group removes skip JXA deleteRefs (duplicate re-derives the frame). Dedup by child-text in stat-finalize.
     group_removes: list[dict[str, Any]] = []
@@ -898,11 +1001,18 @@ def remap_keynote(
     counts = summarize_plan(transforms)
     say(
         f"Recipe {recipe.get('source')}: map {recipe.get('mapSrc')} → {recipe.get('mapDst')}; "
-        f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, {counts.get('list', 0)} list, "
-        f"{counts.get('hide', 0)} hidden names"
-        f"{'' if (include_lists or side_content_slides) else ' (side content dropped; whitelist a slide in the framing review to keep it)'}."
+        f"{counts.get('map', 0)} map, {counts.get('pin', 0)} pin, "
+        f"{counts.get('list', 0)} list, {counts.get('hide', 0)} hidden"
+        f"{'' if (keep_side_panels or side_content_slides) else ' (side-panel content dropped; keep it with --keep-side-panels N or the framing review)'}."
     )
-    if include_lists and recipe.get("listFontSize"):
+    if roster.get("drop"):
+        kept = format_slide_range(roster.get("keep") or set()).replace("–", "-")
+        dropped = format_slide_range(roster["drop"]).replace("–", "-")
+        say(
+            f"Roster kept on slide(s) {kept}, dropped on {dropped} "
+            "(a wall leftover behind newer content)."
+        )
+    if keep_side_panels and recipe.get("listFontSize"):
         if placements:
             crowded = [row for row in placements if row.get("overlap")]
             detail = f"{len(placements)} moved into empty space"
@@ -1197,6 +1307,9 @@ def remap_keynote(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
                 "placement/size. See the .stat-finalize.applescript dump."
             )
+    # Builds/transitions follow the source, never the reuse donor. Unconditional and
+    # runs whether or not stat-finalize did — reuse targets are AppleScript slides.
+    build_result = restore_source_builds(dest, source, reuse_slides, say)
     result: dict[str, Any] = {
         "source": str(source),
         "dest": str(dest),
@@ -1228,6 +1341,7 @@ def remap_keynote(
     if offline_write_info is not None:
         result["offlineWrite"] = offline_write_info
     result["cardStroke"] = card_stroke_result
+    result["builds"] = build_result
     return result
 
 
@@ -1237,7 +1351,7 @@ def remap_and_inspect(
     *,
     template: Path | str,
     slide_range: tuple[int, int] | frozenset[int] | None = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     export_dir: Path | str | None = None,
     source_previews: Path | str | None = None,
     framing_overrides: dict[int, int] | None = None,
@@ -1253,7 +1367,7 @@ def remap_and_inspect(
         dest,
         template=template,
         slide_range=slide_range,
-        include_lists=include_lists,
+        keep_side_panels=keep_side_panels,
         source_previews=source_previews,
         framing_overrides=framing_overrides,
         side_content_slides=side_content_slides,

@@ -387,6 +387,31 @@ def attach_group_child_text(
             slide["groupChildText"] = gct
 
 
+def attach_slide_builds(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
+    """Attach slide['builds'] = [{"effect","animationType","kind","kindIndex"}, ...],
+    source order. Read-only, mirrors attach_group_child_text's shape. Delegates the
+    IWA extraction to iwa_builds.deck_builds (single source of truth), converting its
+    1-based slide number keying to this payload's 0-based slide index."""
+    from obed_edom.iwa_builds import deck_builds  # noqa: PLC0415
+
+    by_number = deck_builds(key_path, deck=deck if deck is not None else _load_deck(key_path))
+    for slide in payload.get("slides") or []:
+        idx = slide.get("index")
+        if idx is None:
+            continue
+        records = (by_number.get(idx + 1) or {}).get("builds") or []
+        if records:
+            slide["builds"] = [
+                {
+                    "effect": b["effect"],
+                    "animationType": b["animationType"],
+                    "kind": b["kind"],
+                    "kindIndex": b["kindIndex"],
+                }
+                for b in records
+            ]
+
+
 def _single_text_leaf(group_id: str, objects: dict[str, dict]) -> dict | None:
     """This group's one non-empty text leaf (direct or nested); None if zero or more than one."""
     found: list[dict] = []

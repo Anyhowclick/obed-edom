@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -39,8 +40,6 @@ TITLE_NEAR_PAD = 120.0
 BADGE_PLATE_PAD = 24.0
 # Separates a paragraph from a phrase/label.
 BODY_TEXT_MIN_CHARS = 60
-# ≥6 name-column boxes is a list even where a preview reads the text as free.
-LIST_SUMMARY_MIN = 6
 # A name column is a stack of same-left-edge rows; a map label stands alone.
 NAME_COLUMN_MIN_ROWS = 3
 NAME_COLUMN_X_TOL = 6.0
@@ -628,21 +627,27 @@ def pack_columns_from_right(
         return []
     top = margin
     bottom = max(margin + 8.0, dest_h - margin)
-    placed: list[Rect] = []
-    col_left: float | None = None
+    # A column is as wide as its widest box, so a later, wider name cannot spill past dest_w.
+    columns: list[list[int]] = []
     y = top
-    for box in boxes:
-        w = max(8.0, box.w)
+    for i, box in enumerate(boxes):
         h = max(8.0, box.h)
-        if col_left is None:
-            col_left = dest_w - margin - w
+        if not columns or y + h > bottom + 0.5:
+            columns.append([])
             y = top
-        elif y + h > bottom + 0.5:
-            col_left = col_left - gap - w
-            y = top
-        x = max(margin - w * 0.15, col_left)
-        placed.append(Rect(x, y, w, h))
+        columns[-1].append(i)
         y += h + gap
+    placed: list[Rect] = [Rect(0.0, 0.0, 0.0, 0.0)] * len(boxes)
+    col_left = dest_w - margin
+    for column in columns:
+        col_left -= max(max(8.0, boxes[i].w) for i in column)
+        y = top
+        for i in column:
+            w = max(8.0, boxes[i].w)
+            h = max(8.0, boxes[i].h)
+            placed[i] = Rect(max(margin - w * 0.15, col_left), y, w, h)
+            y += h + gap
+        col_left -= gap
     return placed
 
 
@@ -2100,6 +2105,9 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     order = sorted(range(len(lists)), key=lambda i: (-lists[i].x, lists[i].y))
+    # The planner's y and Keynote's `position` are both the visual top; the IWA
+    # stored y is the centre only for a kFrameAlignMiddle autosize box, which is
+    # why compose_geometry can disagree.
     boxes = [Rect(lists[i].x, lists[i].y, lists[i].w, lists[i].h) for i in order]
     placed = pack_columns_from_right(boxes, dest_w, dest_h, map_dst)
     for idx, rect in zip(order, placed, strict=True):
@@ -2327,10 +2335,11 @@ def plan_slide_transforms(
     slide: dict,
     recipe: dict[str, Any],
     *,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
+    pack_lists: bool = False,
+    drop_roster: bool = False,
     wall_size: tuple[float, float] | None = None,
     defer_list_packing: bool = False,
-    free_text_keys: set[tuple[str, int]] | None = None,
     child_resize_report: list[dict[str, Any]] | None = None,
     badge_raise_report: list[dict[str, Any]] | None = None,
     card_stroke: float = DEFAULT_CARD_STROKE,
@@ -2387,7 +2396,7 @@ def plan_slide_transforms(
     styles = list(recipe.get("characterStyles") or [])
     # Blind packing would drag map labels off their plates. With a preview, only free (background) text is packed — never drop labels.
     pack_lists = bool(
-        include_lists
+        pack_lists
         and not defer_list_packing
         and recipe.get("listFontSize")
         and slide_has_column_lists(slide)
@@ -2429,7 +2438,11 @@ def plan_slide_transforms(
         if is_chrome_bg(item):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
-        if not include_lists and is_side_panel_item(item, wall_w, wall_h):
+        # Roster kept only on the church-list slide(s); a later slide hides every roster item regardless of position.
+        if drop_roster and id(item) in name_col_ids:
+            out.append(_hide_item_transform(item, number, item_index, kind_index))
+            continue
+        if not keep_side_panels and is_side_panel_item(item, wall_w, wall_h):
             out.append(_hide_item_transform(item, number, item_index, kind_index))
             continue
         if corner_translate is not None and id(item) in corner_ids:
@@ -2468,28 +2481,8 @@ def plan_slide_transforms(
         if role == "other" and aff is None and (item.get("kind") or "") != "text":
             continue
         # A lone church label lives on the map; only a real name column is list content.
-        if role == "list" and not include_lists and id(item) not in name_col_ids:
+        if role == "list" and not keep_side_panels and id(item) not in name_col_ids:
             role = "other"
-        # Unticked lists drop name columns, never map labels; ≥ LIST_SUMMARY_MIN names is a list even over the map.
-        loose = free_text_keys is None or (str(item.get("kind") or "text"), kind_index) in free_text_keys
-        is_summary_list = list_count >= LIST_SUMMARY_MIN
-        if role == "list" and not include_lists and (loose or is_summary_list):
-            out.append(
-                ItemTransform(
-                    slide_number=number,
-                    item_index=item_index,
-                    kind=str(item.get("kind") or "text"),
-                    x=_f(item.get("x")),
-                    y=_f(item.get("y")),
-                    w=_f(item.get("w")),
-                    h=_f(item.get("h")),
-                    locked=bool(item.get("locked")),
-                    role="hide",
-                    kind_index=kind_index,
-                    opacity=0.0,
-                )
-            )
-            continue
         if role == "title":
             dst = _rect_from_dict(recipe.get("titleDst"))
             if dst is None:
@@ -2543,7 +2536,7 @@ def plan_slide_transforms(
             if item is body_for_body:
                 body_tf = out[-1]
             continue
-        if role == "list" and include_lists and recipe.get("listPaired") and list_count == 1:
+        if role == "list" and keep_side_panels and recipe.get("listPaired") and list_count == 1:
             dst = _rect_from_dict(recipe.get("listDst"))
             style = match_character_style(item, styles)
             size_only = {"size": recipe.get("listFontSize")} if recipe.get("listFontSize") else None
@@ -3129,9 +3122,15 @@ def plan_slide_reuses(
     payload: dict[str, Any],
     transforms: list[ItemTransform],
     slide_range: SlideRange = None,
+    canvas: tuple[float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Reuse a remapped donor when map+dots are unchanged: duplicate, strip extras, paste the
-    delta; group dedup counts derive from the donor's modeled pre-dedup output state."""
+    delta; group dedup counts derive from the donor's modeled pre-dedup output state. `canvas`
+    is the CG destination size, used to scale an add that has no transform of its own."""
+    wall_w0 = _f(payload.get("slideWidth"), CG_WIDTH)
+    wall_h0 = _f(payload.get("slideHeight"), CG_HEIGHT)
+    sx = (canvas[0] / wall_w0) if canvas and wall_w0 else 1.0
+    sy = (canvas[1] / wall_h0) if canvas and wall_h0 else 1.0
     slides: list[dict] = []
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
@@ -3193,6 +3192,24 @@ def plan_slide_reuses(
         )
         group_out[num] = [(gct[ki], ("group", ki)) for ki in kis if ki in gct and ki not in hidden]
 
+    def _build_multiset_by_key(slide_builds: list[dict] | None) -> dict[tuple[str, int], Counter]:
+        out: dict[tuple[str, int], Counter] = {}
+        for b in slide_builds or []:
+            key = (str(b.get("kind") or ""), int(b.get("kindIndex") or 0))
+            out.setdefault(key, Counter())[(b.get("effect"), b.get("animationType"))] += 1
+        return out
+
+    def _donor_missing_a_build(target_it: dict, donor_it: dict, donor_builds_by_key: dict) -> bool:
+        need = target_builds_by_key.get(
+            (str(target_it.get("kind") or ""), int(target_it.get("kindIndex") or 0))
+        )
+        if not need:
+            return False
+        have = donor_builds_by_key.get(
+            (str(donor_it.get("kind") or ""), int(donor_it.get("kindIndex") or 0))
+        ) or Counter()
+        return any(have[k] < c for k, c in need.items())
+
     for slide in slides:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not done:
@@ -3201,6 +3218,8 @@ def plan_slide_reuses(
             continue
         curr_items = _live_items(slide)
         curr_keys = _keyed(curr_items)
+        # A donor that cannot supply a build the target's source needs is rejected below.
+        target_builds_by_key = _build_multiset_by_key(slide.get("builds"))
         best: tuple[int, int, int, dict, list, list, list] | None = None
         for prev_n, prev in done:
             prev_items = _live_items(prev)
@@ -3230,6 +3249,11 @@ def plan_slide_reuses(
                 else:
                     add.append(it)
             remove = [it for it in remove if prev_key_of[id(it)] not in mutate_prev_keys]
+            donor_builds_by_key = _build_multiset_by_key(prev.get("builds"))
+            if any(_donor_missing_a_build(curr_it, prev_it, donor_builds_by_key) for curr_it, prev_it in persist_pairs) or any(
+                _donor_missing_a_build(it, donor_it, donor_builds_by_key) for donor_it, it in mutate
+            ):
+                continue
             cost = len(remove) + len(add)
             rank = (len(persist), -cost)
             if best is None or rank > (best[0], -best[1]):
@@ -3246,6 +3270,49 @@ def plan_slide_reuses(
             k: (donor_keys[k] if k in donor_keys else _out_rect(it, spec_map))
             for k, it in curr_keys.items()
         }
+
+        # Reconcile persist pairs where donor/target disagree on side-panel visibility.
+        donor_specs = {_spec_key(t): t for t in (by_slide.get(from_n) or [])}
+        donor_gct = {int(k): v for k, v in (_prev.get("groupChildText") or {}).items()}
+
+        def _hidden(smap: dict[tuple[str, int], ItemTransform], item: dict) -> bool:
+            spec = smap.get((str(item.get("kind") or ""), int(item.get("kindIndex") or 0)))
+            return spec is not None and spec.role == "hide"
+
+        reconciled: list[tuple[dict, dict]] = []
+        for curr_it, prev_it in persist_pairs:
+            is_group = str(curr_it.get("kind") or "") == "group"
+            donor_hidden = _hidden(donor_specs, prev_it)
+            target_hidden = _hidden(spec_map, curr_it)
+            if target_hidden and not donor_hidden:
+                # A sig-less group is invisible to the sig-keyed dedup below; fall through
+                # to the sig-less passthrough instead of leaking the donor's live copy.
+                if is_group and donor_gct.get(int(prev_it.get("kindIndex") or 0)) is not None:
+                    continue
+                remove.append(prev_it)
+                reconciled.append((curr_it, prev_it))
+            elif donor_hidden and not target_hidden:
+                add.append(curr_it)
+                donor_out[number][prev_key_of[id(prev_it)]] = _out_rect(curr_it, spec_map)
+                reconciled.append((curr_it, prev_it))
+        if reconciled:
+            reconciled_ids = {id(prev_it) for _curr_it, prev_it in reconciled}
+            persist_pairs = [pair for pair in persist_pairs if id(pair[1]) not in reconciled_ids]
+            persist = [c for c, _p in persist_pairs]
+            persist_n = len(persist)
+
+        # A mutate the target hides is not a mutate: delete the donor's copy or it rides the chain.
+        kept_mutate: list[tuple[dict, dict]] = []
+        for donor_it, it in mutate:
+            if _hidden(spec_map, it):
+                if not any(x is donor_it for x in remove):
+                    remove.append(donor_it)
+            else:
+                kept_mutate.append((donor_it, it))
+        mutate = kept_mutate
+
+        # A donor item already hidden there has no live copy; skip its phantom remove ref.
+        remove = [it for it in remove if not _hidden(donor_specs, it)]
 
         def _xf(item: dict, match: str | None = None) -> dict[str, Any] | None:
             spec = spec_map.get((str(item.get("kind") or ""), int(item.get("kindIndex") or 0)))
@@ -3267,6 +3334,12 @@ def plan_slide_reuses(
                     "kind": str(it.get("kind") or "item"),
                     "kindIndex": int(it.get("kindIndex") or 0),
                     "itemIndex": int(it.get("index") if it.get("index") is not None else it.get("_index") or 0),
+                    # No transform: scale the wall rect by the canvas instead of a null x/y.
+                    "x": round(_f(it.get("x")) * sx, 2),
+                    "y": round(_f(it.get("y")) * sy, 2),
+                    "w": round(_f(it.get("w")) * sx, 2),
+                    "h": round(_f(it.get("h")) * sy, 2),
+                    "role": "other",
                 }
                 text = (it.get("text") or "").strip()
                 if text:
@@ -3281,8 +3354,7 @@ def plan_slide_reuses(
                 text = (it.get("text") or "").strip()
                 if text:
                     payload["matchText"] = text
-            if payload.get("role") != "hide":
-                mutate_specs.append(payload)
+            mutate_specs.append(payload)
         # Select-all paste: strip everything on the original except the add-delta first, or leftovers ride onto the finished slide.
         add_keys = {(str(p.get("kind") or ""), int(p.get("kindIndex") or 0)) for p in add_specs}
         strip_items = [
@@ -3290,13 +3362,7 @@ def plan_slide_reuses(
             for it in (slide.get("items") or [])
             if (str(it.get("kind") or ""), int(it.get("kindIndex") or 0)) not in add_keys
         ]
-        strip_builds = [
-            _ref(prev)
-            for curr, prev in persist_pairs
-            if int(curr.get("buildCount") or 0) == 0 and int(prev.get("buildCount") or 0) > 0
-        ]
         # Delete drifted copies by output rect; groups re-derive their frame after duplicate — those go to groupRemove.
-        donor_gct = {int(k): v for k, v in (_prev.get("groupChildText") or {}).items()}
         target_gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
         remove_refs: list[dict[str, Any]] = []
         removed_groups: list[dict] = []
@@ -3305,6 +3371,9 @@ def plan_slide_reuses(
                 removed_groups.append(it)
                 continue
             ref = _ref(it)
+            text = (it.get("text") or "").strip()
+            if ref["kind"] == "text" and text:
+                ref["matchText"] = text
             key = prev_key_of.get(id(it))
             rect = donor_keys.get(key) if key is not None else None
             if rect is not None:
@@ -3394,7 +3463,6 @@ def plan_slide_reuses(
             "persist": persist_n,
             "remove": remove_refs,
             "strip": [_ref(it) for it in strip_items],
-            "stripBuilds": strip_builds,
             "add": add_specs,
             "mutate": mutate_specs,
         }
@@ -3701,7 +3769,8 @@ def _place_free_text(
     placed = place_boxes(space, [Box(t.x, t.y, t.w, t.h) for t in targets])
     report: list[dict[str, Any]] = []
     for spec, spot in zip(targets, placed, strict=True):
-        spec.x, spec.y = spot.box.x, spot.box.y
+        spec.x = spot.box.x
+        spec.y = spot.box.y
         report.append(
             {
                 "slide": spec.slide_number,
@@ -3810,12 +3879,65 @@ def _recipe_reusing_affine(
     return out
 
 
+ROSTER_MIN_NAMES = 8
+ROSTER_RUN_OVERLAP = 0.6
+
+
+def roster_slides(slides: list[dict]) -> tuple[set[int], set[int]]:
+    """(keep, drop) slide numbers. Names come from name_column_ids items, split per line.
+
+    A roster (>= ROSTER_MIN_NAMES names) starts a run with the slide it first
+    appears on; the next slide joins the run while its names overlap the
+    previous slide's by ROSTER_RUN_OVERLAP and the two are consecutive. Per
+    run: keep the first slide; keep the second only when its non-roster
+    content matches the first's; drop every slide after that.
+    """
+
+    def names_and_signature(slide: dict) -> tuple[set[str], list[tuple[Any, ...]]]:
+        roster_ids = name_column_ids(slide.get("items") or [])
+        names: set[str] = set()
+        signature: list[tuple[Any, ...]] = []
+        for it in slide.get("items") or []:
+            if id(it) in roster_ids:
+                names.update(line.strip() for line in (it.get("text") or "").split("\n") if line.strip())
+            elif not is_placeholder_text(it):
+                # Excludes placeholder text but not is_duplicate_item; a coincident twin on
+                # one slide of a pair would tip this comparison (accepted for now).
+                signature.append(item_content_key(it))
+        return names, sorted(signature)
+
+    runs: list[list[tuple[int, set[str], list[tuple[Any, ...]]]]] = []
+    for slide in sorted(slides, key=_slide_number_of):
+        number = _slide_number_of(slide)
+        names, signature = names_and_signature(slide)
+        if len(names) < ROSTER_MIN_NAMES:
+            continue
+        last_run = runs[-1] if runs else None
+        joins = False
+        if last_run is not None and number == last_run[-1][0] + 1:
+            prev_names = last_run[-1][1]
+            joins = len(prev_names & names) / min(len(prev_names), len(names)) >= ROSTER_RUN_OVERLAP
+        if joins:
+            last_run.append((number, names, signature))
+        else:
+            runs.append([(number, names, signature)])
+
+    keep: set[int] = set()
+    drop: set[int] = set()
+    for run in runs:
+        keep.add(run[0][0])
+        if len(run) > 1:
+            (keep if run[1][2] == run[0][2] else drop).add(run[1][0])
+        drop.update(number for number, _, _ in run[2:])
+    return keep, drop
+
+
 def plan_payload_transforms(
     payload: dict[str, Any],
     recipe: dict[str, Any],
     *,
     slide_range: SlideRange = None,
-    include_lists: bool = False,
+    keep_side_panels: bool = False,
     template: dict[str, Any] | None = None,
     previews: dict[int, Any] | None = None,
     placement_report: list[dict[str, Any]] | None = None,
@@ -3830,6 +3952,7 @@ def plan_payload_transforms(
     min_on_canvas: float = MIN_ON_CANVAS_FRACTION,
     card_stroke: float = DEFAULT_CARD_STROKE,
     card_grid_report: list[dict[str, Any]] | None = None,
+    roster_report: dict[str, set[int]] | None = None,
 ) -> list[ItemTransform]:
     """Plan every slide's moves. `side_content_slides` keeps side panels; skipped slides stay at wall geometry."""
     wall_w = _f(payload.get("slideWidth"), CG_WIDTH)
@@ -3838,6 +3961,10 @@ def plan_payload_transforms(
     prev_number: int | None = None
     prev_pin: int | None = None
     prev_affine: Affine | None = None
+    roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
+    if roster_report is not None:
+        roster_report["keep"] = roster_keep
+        roster_report["drop"] = roster_drop
     for slide in payload.get("slides") or []:
         number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
         if not wants_slide(number, slide_range):
@@ -3921,16 +4048,24 @@ def plan_payload_transforms(
             if preview is not None
             else None
         )
-        slide_lists = include_lists or (
+        slide_lists = keep_side_panels or (
             side_content_slides is not None and number in side_content_slides
+        )
+        drop_roster = number in roster_drop
+        roster_ids = name_column_ids(slide.get("items") or [])
+        slide_keeps_centre_roster = number in roster_keep and any(
+            not is_side_panel_item(it, wall_w, wall_h)
+            for it in (slide.get("items") or [])
+            if id(it) in roster_ids
         )
         planned = plan_slide_transforms(
             slide,
             slide_recipe,
-            include_lists=slide_lists,
+            keep_side_panels=slide_lists,
+            pack_lists=slide_lists or slide_keeps_centre_roster,
+            drop_roster=drop_roster,
             wall_size=(wall_w, wall_h),
             defer_list_packing=slide_lists and analysis is not None,
-            free_text_keys=analysis["free"] if analysis else None,
             child_resize_report=child_resize_report,
             badge_raise_report=badge_raise_report,
             card_stroke=card_stroke,

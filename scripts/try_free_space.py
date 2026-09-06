@@ -57,7 +57,7 @@ def main() -> int:
         },
         template,
     )
-    transforms = plan_slide_transforms(slide, recipe, include_lists=True)
+    transforms = plan_slide_transforms(slide, recipe, keep_side_panels=True)
 
     dest_w = float(recipe.get("destWidth") or 1920)
     dest_h = float(recipe.get("destHeight") or 1080)

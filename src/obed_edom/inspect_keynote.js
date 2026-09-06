@@ -119,7 +119,6 @@ function describeItem(obj, index, kindHint) {
     fileName: "",
     locked: false,
     rotation: 0,
-    buildCount: 0,
   };
   const pos = positionOf(obj);
   rec.x = pos[0];
@@ -258,7 +257,6 @@ function describeItemBulk(obj, index, kindHint, bulk, i) {
     fileName: "",
     locked: false,
     rotation: 0,
-    buildCount: 0,
   };
   const pos = bulk.position ? xyFrom(bulk.position[i]) || [0, 0] : positionOf(obj);
   rec.x = pos[0];
@@ -356,14 +354,13 @@ function describeItemBulk(obj, index, kindHint, bulk, i) {
   return rec;
 }
 
-function collectFromBulk(slide, name, kind, items, kindCounts, identity) {
+function collectFromBulk(slide, name, kind, items, kindCounts) {
   try {
     const col = slide[name]();
     let n = col.length;
     if (typeof n === "function") n = n.call(col);
     n = Number(n) || 0;
     const bulk = fetchBulkArrays(slide, name, kind, n);
-    const objs = [];
     for (let i = 0; i < n; i++) {
       let rec;
       try {
@@ -374,27 +371,22 @@ function collectFromBulk(slide, name, kind, items, kindCounts, identity) {
       rec.kindIndex = i;
       kindCounts[kind] = (kindCounts[kind] || 0) + 1;
       items.push(rec);
-      objs.push(col[i]);
     }
-    if (identity) identity.push({ kind: kind, objs: objs });
   } catch (e) {}
 }
 
-function collectFrom(slide, name, kind, items, kindCounts, identity) {
+function collectFrom(slide, name, kind, items, kindCounts) {
   try {
     const col = slide[name]();
     let n = col.length;
     if (typeof n === "function") n = n.call(col);
     n = Number(n) || 0;
-    const objs = [];
     for (let i = 0; i < n; i++) {
       const rec = describeItem(col[i], items.length, kind);
       rec.kindIndex = i;
       kindCounts[kind] = (kindCounts[kind] || 0) + 1;
       items.push(rec);
-      objs.push(col[i]);
     }
-    if (identity) identity.push({ kind: kind, objs: objs });
   } catch (e) {}
 }
 
@@ -426,15 +418,14 @@ function markDuplicateShapes(items) {
 function collectItems(slide, bulkRead) {
   const items = [];
   const kindCounts = {};
-  const identity = [];
   // Kind collect order is load-bearing — kindIndex is assigned in this sequence.
   const collect = bulkRead === false ? collectFrom : collectFromBulk;
-  collect(slide, "textItems", "text", items, kindCounts, identity);
-  collect(slide, "images", "image", items, kindCounts, identity);
-  collect(slide, "shapes", "shape", items, kindCounts, identity);
-  collect(slide, "movies", "movie", items, kindCounts, identity);
-  collect(slide, "groups", "group", items, kindCounts, identity);
-  collect(slide, "lines", "line", items, kindCounts, identity);
+  collect(slide, "textItems", "text", items, kindCounts);
+  collect(slide, "images", "image", items, kindCounts);
+  collect(slide, "shapes", "shape", items, kindCounts);
+  collect(slide, "movies", "movie", items, kindCounts);
+  collect(slide, "groups", "group", items, kindCounts);
+  collect(slide, "lines", "line", items, kindCounts);
   if (!items.length) {
     try {
       const all = slide.iWorkItems();
@@ -448,63 +439,11 @@ function collectItems(slide, bulkRead) {
       }
     } catch (e) {}
   }
-  const byKindIndex = {};
-  for (let k = 0; k < items.length; k++) {
-    byKindIndex[items[k].kind + ":" + items[k].kindIndex] = items[k];
-  }
-  attachBuildCounts(slide, items, identity, byKindIndex);
   markDuplicateShapes(items);
   return items;
 }
 
 // No z-order from iWorkItems (reports 0 on real slides). Remap stacking is role_order, not recovered z.
-
-function attachBuildCounts(slide, items, identity, byKindIndex) {
-  let builds = null;
-  try {
-    builds = slide.builds();
-  } catch (e) {
-    return;
-  }
-  const n = countOfSafe(builds);
-  for (let i = 0; i < n; i++) {
-    let obj = null;
-    try {
-      obj = builds[i].object();
-    } catch (eO) {}
-    if (!obj) continue;
-    const hit = matchItemRecord(identity, byKindIndex, obj);
-    if (hit) hit.buildCount = (hit.buildCount || 0) + 1;
-  }
-}
-
-function countOfSafe(col) {
-  try {
-    let n = col.length;
-    if (typeof n === "function") n = n.call(col);
-    n = Number(n);
-    return isNaN(n) ? 0 : n;
-  } catch (e) {
-    return 0;
-  }
-}
-
-function matchItemRecord(identity, byKindIndex, obj) {
-  if (!identity || !identity.length) return null;
-  for (let c = 0; c < identity.length; c++) {
-    const objs = identity[c].objs;
-    const kind = identity[c].kind;
-    for (let i = 0; i < objs.length; i++) {
-      try {
-        if (objs[i] !== obj) continue;
-      } catch (e2) {
-        continue;
-      }
-      return byKindIndex[kind + ":" + i] || null;
-    }
-  }
-  return null;
-}
 
 function exportImages(Keynote, doc, exportDir) {
   const folder = Path(exportDir);
