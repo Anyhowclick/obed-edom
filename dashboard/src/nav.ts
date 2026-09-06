@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize";
+export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize" | "maps";
 export type TabId = FeatureId | "history" | "settings";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
@@ -9,6 +9,7 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
   check: "Sermon Checker",
   dsk: "DSK Generator",
   resize: "CG resizer",
+  maps: "Maps",
 };
 
 export const OPEN_IN_LABELS: Record<FeatureId, string> = {
@@ -17,15 +18,18 @@ export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   check: "Open in Sermon Checker",
   dsk: "Open in DSK Generator",
   resize: "Open in CG resizer",
+  maps: "Open in Maps",
 };
 
 type Nav = {
   openInFeature: (feature: FeatureId, jobId: string) => void;
+  clearOpenRun: () => void;
   openRun: { feature: FeatureId; jobId: string } | null;
 };
 
 export const RunNavContext = createContext<Nav>({
   openInFeature: () => undefined,
+  clearOpenRun: () => undefined,
   openRun: null,
 });
 
@@ -75,11 +79,12 @@ export const TAB_SHORT: Record<TabId, string> = {
   diff: "Diff",
   dsk: "DSK",
   resize: "CG",
+  maps: "Map",
   history: "Hist",
   settings: "Set",
 };
 
 export function asFeature(value: string | undefined): FeatureId | null {
-  if (value === "generate" || value === "diff" || value === "check" || value === "dsk" || value === "resize") return value;
+  if (value === "generate" || value === "diff" || value === "check" || value === "dsk" || value === "resize" || value === "maps") return value;
   return null;
 }

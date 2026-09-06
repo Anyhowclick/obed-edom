@@ -30,6 +30,8 @@ export function useSessionToggle(key: string, fallback: boolean): [boolean, (nex
 
 export const SHOW_INFO_KEY = "obed-edom.findings.showInfo";
 export const SIDE_PANELS_KEY = "obed-edom.diff.sidePanels";
+export const MAPS_SIDE_PANELS_KEY = "obed-edom.maps.sidePanels";
+export const MAPS_INSPECTOR_KEY = "obed-edom.maps.inspector";
 export const LW_TEMPLATE_KEY = "obed-edom.generate.lwTemplate";
 export const DSK_TEMPLATE_KEY = "obed-edom.generate.dskTemplate";
 

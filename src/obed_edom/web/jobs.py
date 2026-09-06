@@ -142,6 +142,8 @@ class JobRunner:
         path: str | None = None,
         left_path: str | None = None,
         right_path: str | None = None,
+        dest_path: str | None = None,
+        dest_path_cg: str | None = None,
     ) -> Job | None:
         job = self._jobs.get(job_id)
         if not job:
@@ -155,6 +157,10 @@ class JobRunner:
             result["leftPath"] = str(Path(left_path).expanduser())
         if right_path:
             result["rightPath"] = str(Path(right_path).expanduser())
+        if dest_path:
+            result["destPath"] = str(Path(dest_path).expanduser())
+        if dest_path_cg:
+            result["destPathCg"] = str(Path(dest_path_cg).expanduser())
         return self.update_result(job_id, result)
 
     def delete(self, job_id: str, *, purge: bool = True) -> bool:
@@ -211,6 +217,7 @@ class JobRunner:
         root = self._output_root.resolve()
         # Never purge the warm cache (rebuild is ~1h of Keynote). Honour OBED_EDOM_CACHE_DIR even inside output/.
         cache_root = _cache_root().resolve()
+        geocode_root = (self._output_root / ".geocode").resolve()
         seen: set[Path] = set()
         for path in candidates:
             try:
@@ -222,6 +229,11 @@ class JobRunner:
                 continue
             try:
                 resolved.relative_to(cache_root)
+                continue
+            except ValueError:
+                pass
+            try:
+                resolved.relative_to(geocode_root)
                 continue
             except ValueError:
                 pass
@@ -273,13 +285,19 @@ def artifact_status(job: Job, output_root: Path) -> dict[str, Any]:
         ("review.pdf", result.get("reviewPath")),
         ("preview dir", result.get("previewDir")),
         ("source Keynote", result.get("path")),
-        ("CG Keynote", result.get("destPath")),
         ("left Keynote", result.get("leftPath")),
         ("right Keynote", result.get("rightPath")),
         ("left previews", result.get("leftPreviews")),
         ("right previews", result.get("rightPreviews")),
         ("visual diff", result.get("heatDir")),
     ]
+    if job.feature == "maps":
+        if result.get("destPath"):
+            checks.append(("Map Keynote", result.get("destPath")))
+        if result.get("destPathCg"):
+            checks.append(("CG Keynote", result.get("destPathCg")))
+    else:
+        checks.append(("CG Keynote", result.get("destPath")))
     previews = result.get("previews") or {}
     if isinstance(previews, dict):
         checks.append(("LW previews", previews.get("lw")))

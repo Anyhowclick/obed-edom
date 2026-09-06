@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { CheckTab } from "./tabs/CheckTab";
 import { DskTab } from "./tabs/DskTab";
 import { GeneratorTab } from "./tabs/GeneratorTab";
@@ -15,11 +15,14 @@ import {
   type TabId,
 } from "./nav";
 
+const MapsTab = lazy(() => import("./tabs/MapsTab").then((m) => ({ default: m.MapsTab })));
+
 const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Sermon Base Generator" },
   { id: "check", label: "Sermon Checker" },
   { id: "dsk", label: "DSK Generator" },
   { id: "resize", label: "CG resizer" },
+  { id: "maps", label: "Maps" },
   { id: "history", label: "History" },
   { id: "settings", label: "Settings" },
 ];
@@ -64,8 +67,12 @@ export function App() {
     setTab(feature === "diff" ? "check" : feature);
   }
 
+  function clearOpenRun() {
+    setOpenRun(null);
+  }
+
   return (
-    <RunNavContext.Provider value={{ openInFeature, openRun }}>
+    <RunNavContext.Provider value={{ openInFeature, clearOpenRun, openRun }}>
       <LayoutContext.Provider value={{ sidebarCollapsed, setSidebarCollapsed, focusMode, setFocusMode }}>
       <div className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}${focusMode ? " focus-mode" : ""}`}>
         <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
@@ -87,7 +94,10 @@ export function App() {
               type="button"
               className={`nav-btn ${tab === item.id ? "active" : ""}`}
               title={item.label}
-              onClick={() => setTab(item.id)}
+              onClick={() => {
+                if (item.id !== tab) setOpenRun(null);
+                setTab(item.id);
+              }}
             >
               {sidebarCollapsed ? TAB_SHORT[item.id] : item.label}
             </button>
@@ -106,6 +116,13 @@ export function App() {
           <div className={tab === "resize" ? "pane" : "pane off"}>
             <ResizeTab />
           </div>
+          {tab === "maps" ? (
+            <div className="pane maps-pane">
+              <Suspense fallback={<p className="note">Loading maps…</p>}>
+                <MapsTab />
+              </Suspense>
+            </div>
+          ) : null}
           <div className={tab === "history" ? "pane" : "pane off"}>
             <HistoryTab active={tab === "history"} />
           </div>

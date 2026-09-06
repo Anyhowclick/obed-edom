@@ -99,6 +99,8 @@ class RelocateBody(BaseModel):
     path: str | None = None
     leftPath: str | None = None
     rightPath: str | None = None
+    destPath: str | None = None
+    destPathCg: str | None = None
 
 
 class DiffSlotsBody(BaseModel):
@@ -221,6 +223,11 @@ def create_app() -> FastAPI:
 
     @app.patch("/api/jobs/{job_id}")
     def patch_job(job_id: str, payload: JobPatch) -> dict:
+        existing = RUNNER.get(job_id)
+        if not existing:
+            raise HTTPException(404, "Unknown job")
+        if existing.feature == "maps":
+            raise HTTPException(409, "Maps jobs use POST /api/maps/{id}/state")
         job = RUNNER.update_result(job_id, payload.result)
         if not job:
             raise HTTPException(404, "Unknown job")
@@ -235,6 +242,8 @@ def create_app() -> FastAPI:
                 path=payload.path,
                 left_path=payload.leftPath,
                 right_path=payload.rightPath,
+                dest_path=payload.destPath,
+                dest_path_cg=payload.destPathCg,
             )
         except FileNotFoundError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -605,6 +614,10 @@ def create_app() -> FastAPI:
         if not updated:
             raise HTTPException(404, "Unknown job")
         return RUNNER.public_dict(updated)
+
+    from obed_edom.web.maps import router as maps_router
+
+    app.include_router(maps_router)
 
     if DASHBOARD_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")

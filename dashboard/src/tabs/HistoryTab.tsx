@@ -4,6 +4,7 @@ import { CheckResultView } from "../components/CheckResultView";
 import { DiffResultView } from "../components/DiffResultView";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { InspectResultView } from "../components/InspectResultView";
+import { MapsResultView } from "../components/MapsResultView";
 import { Lightbox } from "../components/PreviewGrid";
 import { SessionList } from "../components/SessionList";
 import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
@@ -35,6 +36,22 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
       if (feature === "dsk" || feature === "resize" || feature === "check") {
         const file = await chooseKeynote("Keynote this run should point at");
         upsert(await relocateJob(active.id, { path: file.path }));
+        return;
+      }
+      if (feature === "maps") {
+        const wall = await chooseKeynote("LED wall Map Keynote");
+        const result = (active.result || {}) as { exportCg?: boolean; destPathCg?: string };
+        const needCg = result.exportCg !== false || Boolean(result.destPathCg);
+        const body: { destPath: string; destPathCg?: string } = { destPath: wall.path };
+        if (needCg) {
+          try {
+            const cg = await chooseKeynote("CG Map Keynote");
+            body.destPathCg = cg.path;
+          } catch {
+            /* wall relocate still proceeds */
+          }
+        }
+        upsert(await relocateJob(active.id, body));
         return;
       }
       const left = await chooseKeynote("Left / LW Keynote");
@@ -87,7 +104,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                       {OPEN_IN_LABELS[feature]}
                     </button>
                   )}
-                  {active.artifacts?.suggestedPath && (
+                  {active.artifacts?.suggestedPath && feature !== "maps" && (
                     <button className="btn secondary" type="button" onClick={useSuggested}>
                       Use this folder
                     </button>
@@ -104,6 +121,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                 {feature === "check" && <CheckResultView job={active} onOpen={setOpen} />}
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
                 {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
+                {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} />}
               </>
             )}
           </div>
