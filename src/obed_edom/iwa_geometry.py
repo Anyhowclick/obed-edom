@@ -139,10 +139,62 @@ def _natural_size(obj: dict) -> tuple[float, float]:
     return (natural.get("width") or 0.0, natural.get("height") or 0.0)
 
 
-def _autosize_rect(obj: dict, geom: dict) -> tuple[float, float, float, float]:
-    """Best-effort (x, top, w, h); position is left/vertical-centre so top = y − h/2. naturalSize is stale."""
+# TSWP.ShapeStylePropertiesArchive.VerticalAlignmentType: Top=0, Middle=1, Bottom=2, Justify=3.
+# MessageToDict emits the name; the int only appears from a descriptor-less decode.
+_ALIGN_TOP = "kFrameAlignTop"
+_ALIGN_BOTTOM = "kFrameAlignBottom"
+_ALIGN_CODES = {0: _ALIGN_TOP, 1: "kFrameAlignMiddle", 2: _ALIGN_BOTTOM, 3: "kFrameAlignJustify"}
+
+
+def _resolve_vertical_alignment(style_id: str, objects: dict[str, dict], seen: set[str],
+                                hops: int = 0) -> str | None:
+    """First ``shapeProperties.verticalAlignment`` up this style's own super-nesting, else its
+    parent style (``...super.parent``). Same archive shape as iwa_text_shape._resolve_shape_padding."""
+    if style_id in seen or hops > 8:
+        return None
+    seen.add(style_id)
+    obj = objects.get(style_id)
+    if not obj:
+        return None
+    cur: Any = obj
+    parent_id: str | None = None
+    for _ in range(6):
+        if not isinstance(cur, dict):
+            break
+        props = cur.get("shapeProperties")
+        if isinstance(props, dict) and props.get("verticalAlignment") is not None:
+            value = props["verticalAlignment"]
+            return _ALIGN_CODES.get(value) if isinstance(value, int) else str(value)
+        parent = cur.get("parent")
+        if isinstance(parent, dict) and parent_id is None and parent.get("identifier") is not None:
+            parent_id = str(parent["identifier"])
+        cur = cur.get("super")
+    if parent_id:
+        return _resolve_vertical_alignment(parent_id, objects, seen, hops + 1)
+    return None
+
+
+def _vertical_alignment(obj: dict, objects: dict[str, dict]) -> str | None:
+    """Effective vertical anchor for a TSWP.ShapeInfoArchive (``obj.super.style`` -> parent chain).
+    None when never set anywhere."""
+    style_ref = (obj.get("super") or {}).get("style")
+    style_id = style_ref.get("identifier") if isinstance(style_ref, dict) else None
+    if style_id is None:
+        return None
+    return _resolve_vertical_alignment(str(style_id), objects, set())
+
+
+def _autosize_rect(obj: dict, geom: dict, objects: dict[str, dict]
+                   ) -> tuple[float, float, float, float]:
+    """Best-effort (x, top, w, h). Stored y is the visual top for kFrameAlignTop and the visual
+    bottom for kFrameAlignBottom; middle/justify/unknown/absent keep the centre. naturalSize is stale."""
     x, y, _w, _h, _angle = _xywha(geom)
     nw, nh = _natural_size(obj)
+    align = _vertical_alignment(obj, objects)
+    if align == _ALIGN_TOP:
+        return (x, y, nw, nh)
+    if align == _ALIGN_BOTTOM:
+        return (x, y - nh, nw, nh)
     return (x, y - nh / 2.0, nw, nh)
 
 
@@ -317,7 +369,7 @@ def _compose_record(rec: dict, objects: dict[str, dict]) -> None:
     elif kind == "text":
         _tx, _ty, _tw, th, _ta = _xywha(geom)
         if th == 0.0:  # autosize box: zero-height frame
-            x, y, w, h = _autosize_rect(obj, geom)
+            x, y, w, h = _autosize_rect(obj, geom, objects)
             source = "autosize"
             needs = "autosize-soft"  # x is good (left-aligned); y/h/w are stale-soft
         else:

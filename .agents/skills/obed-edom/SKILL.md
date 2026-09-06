@@ -359,20 +359,26 @@ Round geometry to whole points where matching Keynote values; sub-pixel noise ca
 change affine fitting.
 
 For AUTOSIZE text, Keynote's AppleScript/JXA `position` (read AND write) is always the
-object's VISUAL TOP-LEFT — for both anchors, verified live 2026-09-06 (see
+object's VISUAL TOP-LEFT — for every anchor, verified live 2026-09-06 (see
 `output/handover-2026-09-06/anchor-diagnosis/diagnosis.md`). What varies is the IWA
-STORED y: it is the visual top for a `kFrameAlignTop` autosize text box, and the visual
-CENTRE only for a `kFrameAlignMiddle` one (`shapeProperties.verticalAlignment`, readable
-offline via the style parent chain). `_autosize_rect` (`iwa_geometry.py`) still assumes
-centre unconditionally, so `compose_geometry` under-reports the top of a TOP-aligned
-autosize box by `h/2` — a known READ-side artifact, not a live/offline mismatch (open
-follow-up: make `_autosize_rect` alignment-aware). Practical rules: composed rects are the
-visual truth for MIDDLE-aligned autosize boxes only; a TOP-aligned box's true visual top is
-the stored y itself; never add `±h/2` anchor compensation on a write path — the planner's y
-and Keynote's `position` are already the same visual top, so writing the planner's y
-straight through is correct (a compensation once shipped on this basis was a pure write
-bug, reverted 2026-09-06). Text-content identity remains the robust way to address text
-items across a reuse copy.
+STORED y: it is the visual top for a `kFrameAlignTop` autosize text box, the visual
+CENTRE for a `kFrameAlignMiddle` one, and the visual BOTTOM for a `kFrameAlignBottom`
+one. The anchor lives at `shapeProperties.verticalAlignment` on the box's own style
+(`shape.super.style` → `TSWP.ShapeStyleArchive`) and is resolved up the style parent
+chain (`super.super.parent`) exactly like `shape_padding` — archive-correct, though it
+changes no composed value on this deck: 163 of the Gold wall deck's 179 autosize boxes
+inherit the anchor from the parent style rather than setting it (all 163 resolve
+Middle, the default arm), and the remaining 11 top-aligned boxes set verticalAlignment
+on their own style. Enum codes: Top=0, Middle=1,
+Bottom=2, Justify=3, emitted by keynote-parser as the NAME. `_autosize_rect`
+(`iwa_geometry.py`) branches on it since 2026-09-06, so composed rects are the visual
+truth for EVERY anchor, offline-only reads (no bulk splice) included; justify, unknown
+and absent values keep the middle default. Practical rules: never add `±h/2` anchor
+compensation on a write path — the planner's y and Keynote's `position` are already the
+same visual top, so writing the planner's y straight through is correct (a compensation
+once shipped on this basis was a pure write bug, reverted 2026-09-06); and never "fix" a
+composed-vs-live disagreement at write time — by construction that is a read-model bug.
+Text-content identity remains the robust way to address text items across a reuse copy.
 
 ### Offline writes
 
