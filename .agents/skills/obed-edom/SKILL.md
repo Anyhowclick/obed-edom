@@ -358,12 +358,21 @@ text width, but lines and groups still need their specialised offline handling.
 Round geometry to whole points where matching Keynote values; sub-pixel noise can
 change affine fitting.
 
-For AUTOSIZE text, `compose_geometry`'s top (`stored y − naturalSize.h/2`) IS the visual
-truth, verified against previews; AppleScript `position` reports the centre-anchored
-stored y, i.e. composed top + h/2. Planned/offline rects and live rects therefore differ
-by `h/2` in y for autosize text only — compensate when comparing or packing them (e.g. a
-409-tall column packed at y=16 would otherwise land half off the top). Text-content
-identity remains the robust way to address text items across a reuse copy.
+For AUTOSIZE text, Keynote's AppleScript/JXA `position` (read AND write) is always the
+object's VISUAL TOP-LEFT — for both anchors, verified live 2026-09-06 (see
+`output/handover-2026-09-06/anchor-diagnosis/diagnosis.md`). What varies is the IWA
+STORED y: it is the visual top for a `kFrameAlignTop` autosize text box, and the visual
+CENTRE only for a `kFrameAlignMiddle` one (`shapeProperties.verticalAlignment`, readable
+offline via the style parent chain). `_autosize_rect` (`iwa_geometry.py`) still assumes
+centre unconditionally, so `compose_geometry` under-reports the top of a TOP-aligned
+autosize box by `h/2` — a known READ-side artifact, not a live/offline mismatch (open
+follow-up: make `_autosize_rect` alignment-aware). Practical rules: composed rects are the
+visual truth for MIDDLE-aligned autosize boxes only; a TOP-aligned box's true visual top is
+the stored y itself; never add `±h/2` anchor compensation on a write path — the planner's y
+and Keynote's `position` are already the same visual top, so writing the planner's y
+straight through is correct (a compensation once shipped on this basis was a pure write
+bug, reverted 2026-09-06). Text-content identity remains the robust way to address text
+items across a reuse copy.
 
 ### Offline writes
 
