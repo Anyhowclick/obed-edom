@@ -1179,9 +1179,8 @@ def test_church_lists_use_sample_font_and_pack_in_gutter():
 
 def test_kept_centre_roster_is_packed_inside_the_frame():
     """D4: a D5-kept roster is packed into 1920x1080 instead of left at its wall
-    extent. Autosize boxes must be checked in VISUAL space (y - h/2) -- the
-    planner's y for an autosize text frame is the box's vertical CENTRE, not its
-    top."""
+    extent. The planner's y (like Keynote's `position`) is always the visual
+    top, autosize or not -- no h/2 conversion is needed."""
     items = [_item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)]
     widths = (200, 90, 240, 120)  # mixed widths: a column must fit its widest box, not just its first
     for i, x in enumerate((2000, 3000, 4000, 5000)):  # centre band, far outside the 1920-wide frame
@@ -1189,6 +1188,9 @@ def test_kept_centre_roster_is_packed_inside_the_frame():
             _item(
                 kind="text",
                 text=f"CHC {i}A\nCHC {i}B\nCHC {i}C\nCHC {i}D",
+                # autosize=True is the canary here: the item-level flag is dead in
+                # src/, so re-introducing it with anchor (+h/2) compensation must
+                # break the exact-y assertion below.
                 x=x, y=459, w=widths[i], h=400, size=42, autosize=True,
             )
         )
@@ -1211,8 +1213,9 @@ def test_kept_centre_roster_is_packed_inside_the_frame():
     out = plan_slide_transforms(wall["slides"][0], recipe, wall_size=(7680, 1080), pack_lists=True)
     lists = [t for t in out if t.role == "list"]
     assert len(lists) == 4
+    assert sorted(round(t.y, 2) for t in lists) == [16.0, 216.48, 416.95, 617.43]
     for t in lists:
-        top = t.y - t.h / 2 if t.autosize else t.y
+        top = t.y
         assert 0 <= t.x and t.x + t.w <= 1920
         assert 0 <= top and top + t.h <= 1080
 
@@ -3601,23 +3604,39 @@ def test_pack_left_groups_moves_wall_size_groups_without_overlap():
     assert by_src_y[0].x == 16
 
 
-def test_packing_compensates_the_autosize_anchor():
-    """One autosize and one ordinary text box, each too tall to share a column,
-    are packed to the same visual top -- their plan `y` values must differ by
-    h/2, since an autosize box's `y` is its vertical CENTRE, not its top."""
+def test_packing_writes_the_visual_top():
+    """Live-proven on the Gold build: AppleScript/JXA `position` is always the
+    object's visual top-left, autosize or not. Two text boxes, each too tall to
+    share a column, must pack to the SAME visual top -- no h/2 offset for either.
+    (Pre-fix, an autosize box was pushed down by h/2, double-shifting top-aligned
+    roster columns and causing slide 11's columns to overprint each other.)"""
     from obed_edom.map_remap import _pack_list_transforms
 
     auto = ItemTransform(
         slide_number=1, item_index=0, kind="text", x=0, y=0, w=200, h=700,
-        role="list", autosize=True,
+        role="list",
     )
     plain = ItemTransform(
         slide_number=1, item_index=1, kind="text", x=0, y=0, w=200, h=700,
-        role="list", autosize=False,
+        role="list",
     )
     _pack_list_transforms([auto, plain], {"destWidth": 1920.0, "destHeight": 1080.0})
     assert plain.y == pytest.approx(16.0)
-    assert auto.y == pytest.approx(16.0 + auto.h / 2)
+    assert auto.y == pytest.approx(16.0)
+    assert auto.y == plain.y
+
+
+def test_packing_a_single_tall_column_uses_the_top_margin():
+    """A single 700-tall list box packs flush against the top margin -- y == 16.0,
+    not 16.0 + h/2."""
+    from obed_edom.map_remap import _pack_list_transforms
+
+    tall = ItemTransform(
+        slide_number=1, item_index=0, kind="text", x=0, y=0, w=200, h=700,
+        role="list",
+    )
+    _pack_list_transforms([tall], {"destWidth": 1920.0, "destHeight": 1080.0})
+    assert tall.y == pytest.approx(16.0)
 
 
 # --- Part A: per-slide occurrence-ordinal partition key (co-located dedup) ---

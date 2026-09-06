@@ -117,9 +117,6 @@ class ItemTransform:
     color: tuple[float, float, float] | None = None
     match_text: str | None = None
     src: Rect | None = None
-    # Zero-height autosize text: planner y is the box's vertical CENTRE, not its top
-    # (Keynote renders it at y - h/2). Packing must convert to/from visual space.
-    autosize: bool = False
     # Groups holding an autosize text box: pass 1 must write these CHILDREN (absolute,
     # slide coords) and never the group. A Keynote group resize is an aspect-locked
     # uniform scale about the group's LIVE frame — after setSlideSize that frame is the
@@ -2108,20 +2105,14 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
     map_dst = _rect_from_dict(recipe.get("mapDst"))
     order = sorted(range(len(lists)), key=lambda i: (-lists[i].x, lists[i].y))
-    # Pack in VISUAL space: an autosize box's y is its vertical centre, not its top.
-    boxes = [
-        Rect(
-            lists[i].x,
-            (lists[i].y - lists[i].h / 2) if lists[i].autosize else lists[i].y,
-            lists[i].w,
-            lists[i].h,
-        )
-        for i in order
-    ]
+    # The planner's y and Keynote's `position` are both the visual top; the IWA
+    # stored y is the centre only for a kFrameAlignMiddle autosize box, which is
+    # why compose_geometry can disagree.
+    boxes = [Rect(lists[i].x, lists[i].y, lists[i].w, lists[i].h) for i in order]
     placed = pack_columns_from_right(boxes, dest_w, dest_h, map_dst)
     for idx, rect in zip(order, placed, strict=True):
         lists[idx].x = rect.x
-        lists[idx].y = (rect.y + rect.h / 2) if lists[idx].autosize else rect.y
+        lists[idx].y = rect.y
         lists[idx].w = rect.w
         lists[idx].h = rect.h
 
@@ -2436,7 +2427,6 @@ def plan_slide_transforms(
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
         parked_left = False
-        autosize = bool(item.get("autosize"))
         # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts back on-frame.
         if id(item) in coincident_dups:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
@@ -2568,7 +2558,6 @@ def plan_slide_transforms(
                     color=None,
                     role="list",
                     kind_index=kind_index,
-                    autosize=autosize,
                 )
             )
             continue
@@ -2610,7 +2599,6 @@ def plan_slide_transforms(
                     color=None,
                     role="list",
                     kind_index=kind_index,
-                    autosize=autosize,
                 )
             )
             continue
@@ -2643,7 +2631,6 @@ def plan_slide_transforms(
                     color=None,
                     role="other" if role == "other" else "list",
                     kind_index=kind_index,
-                    autosize=autosize,
                 )
             )
             if item is body_for_body:
@@ -3779,14 +3766,11 @@ def _place_free_text(
     if not targets:
         return []
     targets.sort(key=lambda t: (-t.x, t.y))
-    # Place in VISUAL space: an autosize box's y is its vertical centre, not its top.
-    placed = place_boxes(
-        space, [Box(t.x, (t.y - t.h / 2) if t.autosize else t.y, t.w, t.h) for t in targets]
-    )
+    placed = place_boxes(space, [Box(t.x, t.y, t.w, t.h) for t in targets])
     report: list[dict[str, Any]] = []
     for spec, spot in zip(targets, placed, strict=True):
         spec.x = spot.box.x
-        spec.y = (spot.box.y + spec.h / 2) if spec.autosize else spot.box.y
+        spec.y = spot.box.y
         report.append(
             {
                 "slide": spec.slide_number,
