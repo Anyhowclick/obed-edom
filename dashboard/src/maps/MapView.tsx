@@ -112,7 +112,7 @@ async function addOverlays(
         "circle-radius": ["case", ["==", ["get", "kind"], "dropPin"], 7, 5],
         "circle-color": ["get", "color"],
         "circle-stroke-width": ["case", ["boolean", ["get", "sel"], false], 3, 1.25],
-        "circle-stroke-color": ["case", ["boolean", ["get", "sel"], false], "#8fc4e8", "#f4f1ea"],
+        "circle-stroke-color": ["case", ["boolean", ["get", "sel"], false], "#B8F64B", "#FFFFFF"],
       },
     });
     map.addLayer({
@@ -127,7 +127,7 @@ async function addOverlays(
         "text-anchor": "top",
         "text-allow-overlap": true,
       },
-      paint: { "text-color": ["get", "color"], "text-halo-color": "#1b2a4a", "text-halo-width": 1 },
+      paint: { "text-color": ["get", "color"], "text-halo-color": "#07070A", "text-halo-width": 1 },
     });
     map.addLayer({
       id: "churches-labels",
@@ -139,7 +139,7 @@ async function addOverlays(
         "text-offset": [0, 1.35],
         "text-anchor": "top",
       },
-      paint: { "text-color": "#f4f1ea", "text-halo-color": "#1b2a4a", "text-halo-width": 1.2 },
+      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": 1.2 },
     });
   } else {
     (map.getSource("churches") as GeoJSONSource).setData(pins);
