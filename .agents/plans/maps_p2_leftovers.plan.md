@@ -91,6 +91,15 @@ Already satisfied by `is_backdrop(kind=="movie")` plus `test_movie_backdrop_is_r
 
 ## Done when
 
+Leftover P2 (this plan):
+
 - Fly JPEGs show the OSM bar, one encode per frame, always `.jpg`.
-- A Movie departing slide with pins exports exactly one map movie item.
-- A Movie hop with ≥2 FROM pins can write a validated `route.points` and the fly follows it; zero-length or missing route uses lerp.
+- A Movie departing slide with pins exports exactly one map movie item. Arrival still gets pins.
+- A Movie hop with ≥2 FROM pins can write a validated `route.points` (`extra="forbid"`, `min_length=2`) and the fly follows it; zero-length or missing route uses lerp.
+- `documentPayload` is gone. Non-movie hops drop `route` (and `easing`).
+
+After [leftover review](3e545ec8-1474-44c5-a51a-e2480f6ad10f):
+
+- Export locks the tab for the whole capture (`exporting` in `locked` + Working overlay), not only while JobRunner is queued/running. A second Export cannot `rmtree` frames mid-sequence.
+- `encode_pending` raises via `require_contiguous_frames` when `meta.json` exists and the sequence is short or gapped. Soft-skip only if there is no meta.
+- Play hop / Play from here uses the same `cameraAtHop` + easing as capture, so “Use pins as route” is visible before Export.
