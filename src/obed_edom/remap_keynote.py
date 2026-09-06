@@ -1043,6 +1043,8 @@ def remap_keynote(
         bits = []
         for job in reuses:
             extra = []
+            if job.get("basePreAdd"):
+                extra.append("pre-add")
             if job.get("remove"):
                 extra.append(f"drop {len(job['remove'])}")
             if job.get("add"):

@@ -1341,6 +1341,168 @@ def test_reuse_duplicates_donor_then_only_text_delta():
     assert jobs[9]["from"] == 8
     assert jobs[9]["add"] == []
     assert jobs[9]["remove"] == []
+    # Chain-of-3 (2<-... via 3<-2, 4<-3): job3's add ("CHC Aaliana") is mutated, not
+    # removed, on job4 (`donor_adds & mutated`), so the pre-add gate stays inert.
+    assert "basePreAdd" not in jobs[4]
+
+
+def _preadd_chain_wall(*, slide2_extra, slide3_items, groupChildText2=None):
+    """A base slide (map+40 pins) plus 4 junk shapes that donor search always sheds
+    by slide 2 — without the junk, a reuse target 2 slides down ties slide 1 and
+    slide 2 on persist count and (being cheaper) picks the non-adjacent slide 1,
+    which the pre-add gate (adjacency, G1) must never see."""
+    map_img = _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)
+    pins = [_item(kind="shape", x=100 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    junk = [_item(kind="shape", x=9000 + i * 5, y=9000, w=3, h=3) for i in range(4)]
+
+    def base():
+        return [dict(map_img), *[dict(p) for p in pins]]
+
+    slide2 = {"number": 2, "items": [*base(), *[dict(it) for it in slide2_extra]]}
+    if groupChildText2 is not None:
+        slide2["groupChildText"] = groupChildText2
+    return {
+        "slides": [
+            {"number": 1, "items": [*base(), *[dict(j) for j in junk]]},
+            slide2,
+            {"number": 3, "items": [*base(), *[dict(it) for it in slide3_items]]},
+        ]
+    }
+
+
+def test_reuse_chain_duplicates_before_the_donors_adds():
+    from obed_edom.map_remap import plan_slide_reuses
+
+    texts = [
+        _item(kind="text", text="Text A", x=10, y=10, w=50, h=20, size=20),
+        _item(kind="text", text="Text B", x=70, y=10, w=50, h=20, size=20),
+        _item(kind="text", text="Text C", x=130, y=10, w=50, h=20, size=20),
+    ]
+    wall = _preadd_chain_wall(slide2_extra=texts, slide3_items=[])
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[3]["from"] == 2
+    assert jobs[3]["basePreAdd"] is True
+    assert jobs[3]["remove"] == []
+    assert len(jobs[3]["removeFallback"]) == 3
+    assert jobs[2]["snapshotNext"] == 3
+    assert len(jobs[2]["add"]) == 3
+    assert jobs[2]["remove"] == [
+        {"kind": "shape", "kindIndex": 40, "itemIndex": 0, "x": 9000.0, "y": 9000.0, "w": 3.0, "h": 3.0},
+        {"kind": "shape", "kindIndex": 41, "itemIndex": 0, "x": 9005.0, "y": 9000.0, "w": 3.0, "h": 3.0},
+        {"kind": "shape", "kindIndex": 42, "itemIndex": 0, "x": 9010.0, "y": 9000.0, "w": 3.0, "h": 3.0},
+        {"kind": "shape", "kindIndex": 43, "itemIndex": 0, "x": 9015.0, "y": 9000.0, "w": 3.0, "h": 3.0},
+    ]
+
+
+def test_reuse_chain_keeps_the_deletes_when_a_donor_add_survives():
+    # G2: one of slide 2's three adds ("Text A") also lands on slide 3, so it
+    # persists into job 3 instead of dying there — the pre-add base can't drop it.
+    from obed_edom.map_remap import plan_slide_reuses
+
+    texts = [
+        _item(kind="text", text="Text A", x=10, y=10, w=50, h=20, size=20),
+        _item(kind="text", text="Text B", x=70, y=10, w=50, h=20, size=20),
+        _item(kind="text", text="Text C", x=130, y=10, w=50, h=20, size=20),
+    ]
+    wall = _preadd_chain_wall(slide2_extra=texts, slide3_items=[texts[0]])
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[3]["from"] == 2
+    assert "basePreAdd" not in jobs[3]
+    assert "snapshotNext" not in jobs[2]
+    assert len(jobs[3]["remove"]) == 2
+    assert "removeFallback" not in jobs[3]
+
+
+def test_reuse_chain_skips_the_preadd_base_for_a_mutating_donor():
+    # G4: slide 2 also carries an identity-matched text ("Badge") whose point size
+    # changed from slide 1, so job 2 has a mutate; a pre-add snapshot of slide 2
+    # would predate that mutate and hand job 3 the donor's stale (unmutated) text.
+    from obed_edom.map_remap import plan_slide_reuses
+
+    badge1 = _item(kind="text", text="Badge", x=200, y=200, w=100, h=40, size=40)
+    badge2 = _item(kind="text", text="Badge", x=200, y=200, w=150, h=60, size=60)
+    extra = _item(kind="text", text="Extra", x=400, y=400, w=80, h=30, size=24)
+    map_img = _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)
+    pins = [_item(kind="shape", x=100 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    junk = [_item(kind="shape", x=9000 + i * 5, y=9000, w=3, h=3) for i in range(4)]
+
+    def base():
+        return [dict(map_img), *[dict(p) for p in pins]]
+
+    wall = {
+        "slides": [
+            {"number": 1, "items": [*base(), *[dict(j) for j in junk], dict(badge1)]},
+            {"number": 2, "items": [*base(), dict(badge2), dict(extra)]},
+            {"number": 3, "items": [*base(), dict(badge2)]},
+        ]
+    }
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[2]["mutate"] != []
+    assert jobs[3]["from"] == 2
+    assert "basePreAdd" not in jobs[3]
+
+
+def test_reuse_chain_skips_the_preadd_base_for_a_group_add():
+    # G3: slide 2's delta is a pasted GROUP that dies entirely on slide 3. Even
+    # though every donor add would satisfy G2, a pasted group must never seed a
+    # pre-add base — it would desync the donor-copy group-dedup accounting.
+    # groupRemove is asserted as an explicit literal, not re-derived from the code.
+    from obed_edom.map_remap import plan_slide_reuses
+
+    group_item = _item(kind="group", kindIndex=0, x=500, y=500, w=200, h=100)
+    wall = _preadd_chain_wall(
+        slide2_extra=[group_item], slide3_items=[], groupChildText2={"0": "SigA"}
+    )
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[3]["from"] == 2
+    assert "basePreAdd" not in jobs[3]
+    assert jobs[3]["groupRemove"] == [
+        {"kind": "group", "kindIndex": 0, "itemIndex": 0, "childSig": "SigA", "expectedKeep": 0}
+    ]
+
+
+def test_reuse_chain_preadd_base_needs_an_adjacent_donor():
+    # G1: slide 4 reuses slide 2 (slide 3 is unrelated, not a reuse job at all) —
+    # a non-adjacent donor must never take the pre-add path, since the snapshot
+    # only exists in the deck for the one run() iteration right after its producer.
+    # The 3 texts added on slide 2 are exactly what slide 4 removes, so every OTHER
+    # gate clause (non-empty donor_adds, no group, no mutate, full subset) is satisfied —
+    # only adjacency (slide 3 sits between donor and target) blocks basePreAdd, so this
+    # is a genuine adjacency test rather than one masked by an empty donor_adds set.
+    from obed_edom.map_remap import plan_slide_reuses
+
+    map_img = _item(kind="image", fileName="worldmap.png", x=0, y=0, w=7680, h=1080)
+    pins = [_item(kind="shape", x=100 + i * 13, y=255, w=11, h=11) for i in range(40)]
+    junk = [_item(kind="shape", x=9000 + i * 5, y=9000, w=3, h=3) for i in range(4)]
+    texts = [
+        _item(kind="text", text=f"Extra {i}", x=200 + i * 300, y=700, w=250, h=60, size=24)
+        for i in range(3)
+    ]
+    unrelated = _item(kind="text", text="Unrelated Title", x=200, y=200, w=900, h=200, size=30)
+
+    def base():
+        return [dict(map_img), *[dict(p) for p in pins]]
+
+    wall = {
+        "slides": [
+            {"number": 1, "items": [*base(), *[dict(j) for j in junk]]},
+            {"number": 2, "items": [*base(), *[dict(t) for t in texts]]},
+            {"number": 3, "items": [dict(unrelated)]},
+            {"number": 4, "items": base()},
+        ]
+    }
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert 3 not in jobs
+    assert jobs[4]["from"] == 2
+    assert "basePreAdd" not in jobs[4]
+
+    # Pin the fixture non-vacuous: slide 2 genuinely added the 3 texts, and slide 4
+    # genuinely removes those same (kind, kindIndex) keys — the donor_adds <= rm_keys
+    # subset clause was reachable and would have passed had G1 not intervened.
+    add_keys = {(a["kind"], a.get("kindIndex")) for a in jobs[2]["add"]}
+    remove_keys = {(r["kind"], r.get("kindIndex")) for r in jobs[4]["remove"]}
+    assert add_keys == {("text", 0), ("text", 1), ("text", 2)}
+    assert remove_keys == add_keys
 
 
 def test_reuse_strips_hidden_side_panel_delta_before_the_paste():
