@@ -1135,6 +1135,72 @@ def test_flag_off_builds_the_same_plan_as_today(monkeypatch, tmp_path):
     )
 
 
+def test_reuse_chain_line_marks_the_preadd_links(monkeypatch, tmp_path):
+    """The chain-summary line (`remap_keynote.py:1042-1058`) must prepend `pre-add` for
+    a `basePreAdd` job ahead of its `drop`/`add`/`tweak` bits. Built on the harness at
+    `test_flag_off_builds_the_same_plan_as_today` above; `plan_slide_reuses` is stubbed
+    to hand back two hand-built jobs mirroring Gold's `12<-11`/`13<-12` link so the
+    asserted line is the exact string, not a re-derivation.
+
+    SAFETY: OBED_OFFLINE_WRITE is set EXPLICITLY (not delenv'd) — see the safety note
+    on `test_flag_off_builds_the_same_plan_as_today` above.
+    """
+    import obed_edom.remap_keynote as rk
+
+    monkeypatch.setenv("OBED_OFFLINE_WRITE", "off")
+    monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
+    monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
+
+    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rk,
+        "plan_slide_reuses",
+        lambda *a, **k: [
+            {"slide": 12, "from": 11, "remove": [{}] * 6, "add": [{}] * 85, "mutate": []},
+            {
+                "slide": 13,
+                "from": 12,
+                "basePreAdd": True,
+                "remove": [],
+                "add": [{}] * 7,
+                "mutate": [],
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        rk, "recipe_for",
+        lambda wall, template: {
+            "source": "test", "mapSrc": "src", "mapDst": "dst",
+            "destWidth": 1920, "destHeight": 1080, "characterStyles": [],
+        },
+    )
+    monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
+    monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
+    monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    dest = tmp_path / "out.key"
+    source.touch()
+    template.touch()
+
+    wall_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    lines: list[str] = []
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        log=lines.append,
+    )
+
+    assert (
+        "Duplicating remapped slides for unchanged map/dots: "
+        "slide 12←11 (drop 6, add 85); slide 13←12 (pre-add, add 7)."
+    ) in lines
+
+
 # --- fix3 review finding 2: attach_group_children is offline-read-only ----------
 
 

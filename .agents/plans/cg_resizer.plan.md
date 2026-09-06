@@ -50,6 +50,63 @@ todos:
   - id: pack-lists-gate-widen
     content: "BUG BACKLOG (B), deferred from review-B (`output/handover-2026-09-06/review-B/review.md`, deviation (2); see side-panels-positional). `_place_free_text` (`map_remap.py:3743-3792`) still picks targets via `_spec_key(t) in movable`, where `movable` is built from every `is_list_item` on the slide with no role or hide filter. Widening its gate from `slide_lists` to run unconditionally (as plan2 originally imagined) would move map labels `plan_slide_transforms` has just demoted to `role=\"other\"` and reposition side-panel roster boxes that were just hidden — a real regression, not just missing scope. Spec: change `targets = [t for t in transforms if _spec_key(t) in movable]` to also require `t.role == \"list\"`, widen both gates from `slide_lists` to the same `pack_lists` expression used at `plan_slide_transforms:4072`, and only then restore the unconditional `resolve_source_previews` (37dbb90 already re-gated it conditional as B2 pending this fix — un-revert it together with this change, not before)."
     status: pending
+  - id: reuse-chain-preadd-duplicate
+    content: "DONE 2026-09-06 evening — landed as 08a5130 on feat/reuse-preadd-duplicate (stacked on
+      d31fedc alignment-aware _autosize_rect), pushed, owner merging. OPTIMIZATION (W), opened
+      2026-09-06 by the owner off the round-2 Gold chain log. The reuse chain pastes a slide's delta
+      then deletes it again one slide later: Gold
+      `slide 12←11 (drop 6, add 85); slide 13←12 (drop 85, add 7)` — the 85 names pasted onto 12 are
+      deleted one AppleEvent at a time off 13's copy, plus deleteRefs' ~86-object text snapshot
+      (~430 AppleEvents for nothing). FIX: `applyReuse` duplicates the donor into the next target's
+      slot BEFORE pasting its own adds (`duplicate slide to to before slide to+2`, between the remove
+      pass and the paste); the consumer then skips its own duplicate — one duplicate per reuse slide
+      either way, so `Duplicated 6` is unchanged. Planner gate (all four): donor is the immediately
+      previous slide (a parked slide must never be live while `applyTransforms`'s `slides[n-1]`
+      addressing runs), every donor-pasted item dies on the target, no pasted GROUP (keeps the
+      group-dedup model bit-identical), no donor mutate (mutates land after the paste, so a pre-add
+      snapshot would carry stale text). `removeFallback` restores the trimmed refs if the parked base
+      failed to materialise. Magic move is unaffected: transitions are restored verbatim offline by
+      `restore_source_builds` and Gold's two magic moves carry no identifier reference (they are not
+      `transitionSkipped`), the surviving objects on 13 are duplicates of the same slide-12 objects
+      with the same z-order, and the 85 never render either way. MEASURED: Gold reuse deletes 91→6;
+      on the cached (transform-less) Full-wall payload the adjacent-only gate qualifies 0 links — the
+      adjacent intersections are partial (2 and 1 objects) and the gate needs the full subset; the win
+      this round is Gold-only (91→6). The Full wall's 197-object delete at slide 125 is an ANCESTOR
+      paste (pasted at 123, mutated at 124), which needs the parked variant spun off as
+      `reuse-chain-parked-snapshot`. TRUE BATCH DELETES judged NOT worth doing: no sdef bulk-delete,
+      D1 already deletes in one descending pass, and after this fix 6 refs remain. Banked plan:
+      `output/handover-2026-09-06/plan/preadd-duplicate-plan.md`. TIMED PRODUCTION GOLD BUILD
+      `output/gold-baseline/preadd/` (@08a5130, owner-acked window): EXIT=0, single attempt, cold
+      Keynote start, 910s wall-clock (epoch stamps in remap.log; ENV.txt notes the banked comparisons
+      are NOT like-for-like — reuse-builds2 806s and main 745s were warm-Keynote, round 2 right after
+      three -1712 retries; the ~430 saved AppleEvents ≈40s theoretical sit within run variance; future
+      timing A/Bs should pair cold-cold or warm-warm). ALL 11 DEFERRED ACCEPTANCE ITEMS PASSED: chain
+      `slide 12←11 (drop 6, add 85); slide 13←12 (pre-add, add 7); slide 14←13 (add 45); slide 15←14
+      (add 29); slide 16←15 (add 3); slide 17←16 (add 3)`; roster kept 11-12, dropped 13; stat-finalize
+      1 skipped, 198 deduped, no dedup/unresolved warnings; both known lost-build WARNINGs only (11: 6
+      twist-and-scale, 13: 2 KLNSparkle); `Builds follow source: 84 kept, 936 dropped, 6
+      transition(s)`; applied 830 missed 0; no `WARNING reuse slide 13: only removed …` line; recipe
+      377 hidden; `count_deck` EXACT (text 7/86/1/1/1/1/1, groups 0/0/6/50/35/9/8, builds
+      158/0/7/44/29/1/3 on 11-17). OFFLINE A/B vs `output/gold-baseline/reuse-builds2`: composed
+      geometry 0.00px identical on ALL 19 slides (write_gate_ab.slide_units +
+      offline_write_ab.compare_units_multiset — ab_geom_diff.py needs Keynote inspect caches that
+      don't exist for these decks); builds/transitions multisets identical; 19/19 preview PNGs
+      byte-identical — this also closes the plan's magic-move preview-A/B caveat at the render level.
+      FIRST TRUSTED USE of the alignment-aware containment oracle (`compose_deck_geometry`) on the
+      output deck: slide 11 packed columns 6/6 in frame at composed tops 16/436/640 (no −140
+      artifact), slide 12 85/85, slide 13 zero roster items. Gold bank now holds main (6161bcd),
+      reuse-builds2 (80cb442) and preadd (08a5130)."
+    status: completed
+  - id: reuse-chain-parked-snapshot
+    content: "OPTIMIZATION (W) backlog, spun off from `reuse-chain-preadd-duplicate`. Let a pre-add
+      snapshot serve a NON-adjacent later target: on the Full wall slide 125 deletes 197 names that were
+      pasted at 123 and re-texted at 124, so 125 wants 123's pre-add state (cost ≈ +9 pastes for −197
+      deletes). Needs the snapshot parked across several `run()` iterations — park it at the END of the
+      deck so `applyTransforms`'s `slides[n-1]` addressing stays valid, delete it after its last
+      consumer and before `skipOutsideRange`/save — plus a donor search over snapshot states and
+      `donor_out`/`group_out` bookkeeping for a base that is not any wall slide. Needs a Full-wall build
+      to validate; do not attempt without one."
+    status: pending
   - id: map-label-classification-fix
     content: "BUG (fixed), off main, branch fix/map-label-classification, commit cbde0a7. `is_list_item` called any CHC/CHLI/CHEL text a roster list, and the unticked-list gate hid it by default (`loose` is True whenever there are no previews) — 23 single-line map labels on Gold slides 3/4/8/9 were deleted. Fix: `name_columns()`/`name_column_ids()` — a name column is now ≥3 same-left-edge rows (x tol 6, pitch 2.0×h) or a multi-line box; a lone label demotes to role=other before the hide gate (only when `include_lists` is False). Gold hide 491→468, everything else byte-identical; Full-deck sweep: 0 roster rows demoted, 134 labels newly kept across 58 slides. Live-verified (output/gold-baseline/labelfix/): labels land within 1px of the human ideal on slide 9; slide 8's offset is the human's own map shift, not error. `name_columns()` is the reusable primitive for the side-panel item (bug a, see builds-follow-source) — kept separate per owner decision."
     status: completed
@@ -191,6 +248,7 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
 | R0 | `r-cache-quick-wins` | no (A/B on warmed decks) | anytime, Keynote-free |
 | B | reuse yank / framing fallback, cluster affine, builds | yes | independent |
 | B (branch) | `fix/reuse-builds-side-panels`: `builds-follow-source`, `side-panels-positional`, reuse-add placement (part Y) | two Gold builds (3296ef3, 80cb442) | round 1 + round 2 (D1-D5) both DONE + Gold-verified; `autosize-rect-alignment-fix` DONE 2026-09-06 (read-side, offline); open follow-up `pack-lists-gate-widen` |
+| W (branch) | `reuse-chain-preadd-duplicate` (backlog: `reuse-chain-parked-snapshot`) | Gold build `output/gold-baseline/preadd/` (08a5130) | timed Gold build preadd/ 910s cold, all acceptance passed, 0.00px vs reuse-builds2, previews byte-identical |
 | drop | `w-hides-offline` (optin chose the deleteHides bridge), skipped-slide option (2), Stage B / batch z-order / batch delete via their original mechanisms | | closed |
 
 R1/R2 touch `inspect.py` / `bulk_geometry.js` / `remap_and_inspect`; W1 edits

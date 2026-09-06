@@ -3141,6 +3141,7 @@ def plan_slide_reuses(
     for spec in transforms:
         by_slide.setdefault(spec.slide_number, []).append(spec)
     jobs: list[dict[str, Any]] = []
+    job_of: dict[int, dict[str, Any]] = {}
     done: list[tuple[int, dict]] = []
 
     def _keyed(items: list[dict]) -> dict[tuple[Any, ...], dict]:
@@ -3457,6 +3458,33 @@ def plan_slide_reuses(
             group_removes += [
                 {**synth, "childSig": sig, "expectedKeep": keep} for _ in range(total - n_real)
             ]
+        # Chain order: when every item the donor PASTED dies here, duplicate the donor before its
+        # own adds instead of deleting them off the copy. Groups (dedup accounting) and mutates
+        # (they land after the paste, so a pre-add snapshot has stale text) disqualify the link.
+        pre_add = job_of.get(from_n) if number == from_n + 1 else None
+        remove_fallback: list[dict[str, Any]] = []
+        if pre_add is not None:
+            donor_adds = {(str(p.get("kind") or ""), int(p.get("kindIndex") or 0)) for p in pre_add["add"]}
+            mutated = {(str(d.get("kind") or ""), int(d.get("kindIndex") or 0)) for d, _t in mutate}
+            rm_keys = {(str(r.get("kind") or ""), int(r.get("kindIndex") or 0)) for r in remove_refs}
+            if (
+                donor_adds
+                # Defensive: groups never enter remove_refs (they route to groupRemove), so
+                # donor_adds <= rm_keys below already rejects a group add on its own.
+                and not any(k == "group" for k, _i in donor_adds)
+                and not pre_add.get("mutate")
+                and not (donor_adds & mutated)
+                and donor_adds <= rm_keys
+            ):
+                def _is_donor_add(r: dict[str, Any]) -> bool:
+                    return (str(r.get("kind") or ""), int(r.get("kindIndex") or 0)) in donor_adds
+
+                remove_fallback = [r for r in remove_refs if _is_donor_add(r)]
+                remove_refs = [r for r in remove_refs if not _is_donor_add(r)]
+                pre_add["snapshotNext"] = number
+            else:
+                pre_add = None
+
         job: dict[str, Any] = {
             "slide": number,
             "from": from_n,
@@ -3468,7 +3496,11 @@ def plan_slide_reuses(
         }
         if group_removes:
             job["groupRemove"] = group_removes
+        if pre_add is not None:
+            job["basePreAdd"] = True
+            job["removeFallback"] = remove_fallback
         jobs.append(job)
+        job_of[number] = job
         done.append((number, slide))
     return jobs
 

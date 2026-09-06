@@ -529,7 +529,7 @@ function removeShortfallOf(refs, tally) {
   return out;
 }
 
-function applyReuse(doc, Keynote, job, missReasons) {
+function applyReuse(doc, Keynote, job, missReasons, basePlaced) {
   const from = Number(job.from);
   const to = Number(job.slide);
   let slides = doc.slides();
@@ -537,22 +537,25 @@ function applyReuse(doc, Keynote, job, missReasons) {
     return { ok: false, duplicated: 0, applied: 0, missed: 1 };
   }
   const nBefore = countOf(slides);
-  try {
-    Keynote.activate();
-    runAppleScript(doc, "duplicate slide " + from + " to before slide " + to);
-  } catch (eDup) {
-    if (missReasons.length < 8) missReasons.push("duplicate slide " + from + " failed: " + eDup);
-    return { ok: false, duplicated: 0, applied: 0, missed: 1 };
-  }
-  slides = doc.slides();
-  if (countOf(slides) !== nBefore + 1) {
-    return { ok: false, duplicated: 0, applied: 0, missed: 1 };
+  if (!basePlaced) {
+    try {
+      Keynote.activate();
+      runAppleScript(doc, "duplicate slide " + from + " to before slide " + to);
+    } catch (eDup) {
+      if (missReasons.length < 8) missReasons.push("duplicate slide " + from + " failed: " + eDup);
+      return { ok: false, duplicated: 0, applied: 0, missed: 1 };
+    }
+    slides = doc.slides();
+    if (countOf(slides) !== nBefore + 1) {
+      return { ok: false, duplicated: 0, applied: 0, missed: 1 };
+    }
   }
   let copy = slides[to - 1];
   let orig = slides[to];
   const beforeCounts = collectionCounts(copy);
   // Count what actually disappeared, not what did not throw.
-  const removed = deleteRefs(Keynote, copy, job.remove || [], missReasons);
+  const refs = basePlaced ? (job.remove || []) : (job.remove || []).concat(job.removeFallback || []);
+  const removed = deleteRefs(Keynote, copy, refs, missReasons);
   slides = doc.slides();
   copy = slides[to - 1];
   orig = slides[to];
@@ -567,6 +570,20 @@ function applyReuse(doc, Keynote, job, missReasons) {
     }
     if (before > after) removedByKind[kind] = before - after;
   });
+  // Next slide's base is this slide BEFORE its adds — one duplicate either way, minus the deletes.
+  let parked = false;
+  if (job.snapshotNext) {
+    try {
+      runAppleScript(doc, "duplicate slide " + to + " to before slide " + (to + 2));
+      slides = doc.slides();
+      parked = countOf(slides) === nBefore + (basePlaced ? 1 : 2);
+      if (!parked && missReasons.length < 8) missReasons.push("snapshot slide " + to + " count mismatch");
+      copy = slides[to - 1];
+      orig = slides[to];
+    } catch (eSnap) {
+      if (missReasons.length < 8) missReasons.push("snapshot slide " + to + " failed: " + eSnap);
+    }
+  }
   const add = job.add || [];
   let applied = 0;
   let missed = 0;
@@ -631,8 +648,9 @@ function applyReuse(doc, Keynote, job, missReasons) {
   return {
     ok: true,
     duplicated: 1,
+    parked: parked,
     removed: removed,
-    removeShortfall: removeShortfallOf(job.remove || [], removedByKind),
+    removeShortfall: removeShortfallOf(refs, removedByKind),
     applied: applied,
     missed: missed,
   };
@@ -1085,15 +1103,17 @@ function run(argv) {
   let appliedFirst = 0;
   let missedFirst = 0;
   const removeShortfalls = [];
+  const baseReady = {};
   for (let i = 0; i < order.length; i++) {
     const n = order[i];
     if (reuseBy[n]) {
-      const r = applyReuse(doc, Keynote, reuseBy[n], missReasons);
+      const r = applyReuse(doc, Keynote, reuseBy[n], missReasons, baseReady[n] === true);
       if (r.ok) {
         cloned += r.duplicated || 0;
         appliedFirst += r.applied || 0;
         missedFirst += r.missed || 0;
         if (r.removeShortfall) removeShortfalls.push({ slide: n, byKind: r.removeShortfall });
+        if (r.parked) baseReady[reuseBy[n].snapshotNext] = true;
       } else {
         const rf = applyNonReuseSlide(
           doc, Keynote, n, transforms, collections, missReasons, asGeom, suppressGeometry
@@ -1170,5 +1190,6 @@ if (typeof module !== "undefined" && module.exports) {
     tempScriptPath: tempScriptPath,
     applyGeom: applyGeom,
     applyGroupChildren: applyGroupChildren,
+    applyReuse: applyReuse,
   };
 }
