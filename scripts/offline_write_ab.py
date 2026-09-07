@@ -26,7 +26,11 @@ to a drawable id via the SOURCE deck's kind index and checks the id's composed g
 BOTH A and B against the spec's target — independent of Keynote's own z-order/kindIndex
 bookkeeping (immune to Bring-to-Front re-indexing and to a deleted hide shifting the
 surviving indices), so stat-finalize slides need no exclusion. This oracle covers
-shape/line, unmasked image/movie, and group (its union). Text (autosize geometry) is NOT
+shape/line, unmasked image/movie, and group (its composed union, measured at 0.46px
+median / 1.92px max over 240 comparable specs on a Keynote-written reference deck).
+Records the reader itself flags approximate (`needs_keynote` set, e.g.
+`rotated-group`/`group-residual`) are NOT comparable and are counted in `skipped` and
+listed in `approx`, which is reported but never gates. Text (autosize geometry) is NOT
 offline-recoverable from raw IWA, so it is skipped by this oracle and left entirely to
 the identity compare above.
 
@@ -47,9 +51,15 @@ z-order raises silently no-op without it), a Keynote-open-documents pre-flight
 (:func:`keynote_open_documents` -- ABORTS if anything is already open; a stray document
 left by a swallowed close is what made a real run inherit the previous run's B_flagged
 and blow memory on the two-tier read), pass-2 (stat-finalize) health on run A --
-aborting before B ever starts -- then A/B pass-2 parity and plan parity. Each fresh run
-(A and B) is followed by the SAME open-documents check, WARNing loudly and closing only
-that run's own deck if Keynote left it open (never anyone else's). Plan parity
+aborting before B ever starts -- then a stolen-interaction check (:func:`card_border_refs`
++ :func:`stolen_interaction_reasons`, D1): an arm whose card-border media-style ref
+count falls below ``CARD_REF_FLOOR`` of the SOURCE deck's is DAMAGED and hard-fails,
+naming the cause (a stolen GUI focus/clipboard interaction during pass 1's reuse paste)
+and the remedy (re-run on an untouched machine). A's check ABORTS before B ever starts
+(exit 6); B's check cannot abort B (already paid for) but folds into ``gate_ok`` so a
+damaged B can no longer report GREEN. Then A/B pass-2 parity and plan parity. Each fresh
+run (A and B) is followed by the SAME open-documents check, WARNing loudly and closing
+only that run's own deck if Keynote left it open (never anyone else's). Plan parity
 checks ``transforms``/``reuses`` for exact equality, but NOT ``suppressGeometry`` — that
 key differs from A to B BY CONSTRUCTION (A, the production path, never suppresses
 geometry; B suppresses exactly the compared-slide set) — instead A's must be empty and
@@ -304,6 +314,37 @@ def pass2_parity(a: dict[str, Any] | None, b: dict[str, Any] | None, *,
     return reasons
 
 
+def pass2_bar_line(*, zero_keys_hard: bool, parity: list[str],
+                   a: dict[str, Any] | None, b: dict[str, Any] | None) -> str:
+    """The `pass-2 bar:` summary line. "tolerated because A==B" is claimed ONLY when
+    `parity` (the actual A-vs-B diff) came back empty -- the banked 2026-09-07 run
+    printed that tolerance directly under seven `A != B` lines."""
+    if zero_keys_hard:
+        return "pass-2 bar: strict"
+    ua, ub = int((a or {}).get("unresolved") or 0), int((b or {}).get("unresolved") or 0)
+    da, db = int((a or {}).get("dedupShortfall") or 0), int((b or {}).get("dedupShortfall") or 0)
+    if parity:
+        return (f"pass-2 bar: parity NOT MET — {len(parity)} key(s) differ between A and B "
+                f"(unresolved A={ua} B={ub}, dedupShortfall A={da} B={db}); "
+                "see the RED lines above.")
+    return (f"pass-2 bar: parity (unresolved A={ua} B={ub}, dedupShortfall A={da} B={db} "
+            "tolerated because A==B)")
+
+
+def pass2_zero_warn(label: str, result: dict[str, Any] | None, *, tolerated: bool) -> str:
+    """The per-arm PASS2_ZERO_KEYS WARN under `--pass2-bar parity`; "" when there is
+    nothing non-zero to report."""
+    zero_warns = [f"{key}={result.get(key)}" for key in PASS2_ZERO_KEYS
+                 if int((result or {}).get(key) or 0)]
+    if not zero_warns:
+        return ""
+    if tolerated:
+        return (f"WARN {label}: {', '.join(zero_warns)} "
+                "(pass2-bar=parity: tolerated because A==B, does not gate).")
+    return (f"WARN {label}: {', '.join(zero_warns)} "
+            "(pass2-bar=parity: A != B, NOT tolerated — see the RED lines above).")
+
+
 def plan_parity(
     plan_a: dict[str, Any], plan_b: dict[str, Any], compared_slides: list[int]
 ) -> list[str]:
@@ -329,6 +370,106 @@ def plan_parity(
     if b_suppress != expected:
         reasons.append(f"plan B suppressGeometry {b_suppress} != compared slides {expected}")
     return reasons
+
+
+# An output card-border ref count below this fraction of the SOURCE's is the
+# stolen-interaction signature (D1): a healthy arm dedups back to the source count
+# (measured 83 == 83); the damaged arm measured 43/83 = 0.518. The floor sits roughly
+# midway, tolerating a legitimate reuse-chain deviation of up to a quarter of all card
+# images -- nothing in the reuse plan comes close (D1 §2: population byte-identical
+# outside the documented slide-125 void).
+CARD_REF_FLOOR = 0.75
+
+
+def stolen_interaction_reasons(
+    label: str, out_refs: int | None, src_refs: int | None,
+    child_resize: dict[str, Any] | None,
+) -> list[str]:
+    """RED reason(s) for one arm's card-border media style having lost refs against the
+    SOURCE deck -- the end-state signature of a stolen GUI focus/clipboard interaction
+    during pass 1's reuse paste (``remap_keynote.js:applyReuse``'s unverified
+    Cmd-A/Cmd-C/Cmd-V, which throws no exception on a no-op). Empty when not applicable
+    (``src_refs`` falsy -- the source deck has no single unambiguous card-border style,
+    same rule ``iwa_write.match_card_stroke_styles`` applies) or when ``out_refs`` is
+    within ``CARD_REF_FLOOR`` of ``src_refs``. Only a SHORTFALL hard-fails -- a surplus
+    (stranded donor copies) is a dedup shortfall, already covered by ``PASS2_ZERO_KEYS``
+    and by :func:`pass2_bar_line`'s honest parity line, not a second gate here.
+    """
+    if not src_refs:
+        return []
+    if out_refs is not None and out_refs >= CARD_REF_FLOOR * src_refs:
+        return []
+    corroboration = ""
+    if child_resize:
+        dedup = int(child_resize.get("dedupShortfall") or 0)
+        unresolved = int(child_resize.get("unresolved") or 0)
+        if dedup or unresolved:
+            corroboration = f" (dedupShortfall={dedup} unresolved={unresolved})"
+    if out_refs is None:
+        return [
+            f"{label}: the output deck no longer carries an unambiguous card-border "
+            f"style (source has {src_refs}){corroboration} — this can be either a "
+            "shortfall (stolen-interaction damage) or a surplus of stranded donor "
+            "copies creating a second selectable style; the two look identical here. "
+            "REMEDY: inspect the deck's media styles; do not assume the machine is at fault."
+        ]
+    ratio = out_refs / src_refs
+    return [
+        f"{label}: card-border refs {out_refs} vs source {src_refs} (ratio {ratio:.3f}, "
+        f"floor {CARD_REF_FLOOR}){corroboration} — a stolen GUI focus/clipboard "
+        "interaction during pass 1's reuse paste is the known cause. REMEDY: re-run "
+        "this arm on an untouched machine; do NOT debug the code first."
+    ]
+
+
+def card_border_refs(deck: Path | str) -> int | None:
+    """Total refs of the deck's single card-border media style, or None when the deck
+    has no unambiguous one -- same classifier ``restore_card_stroke_widths`` uses.
+
+    Offline ``Index/*.iwa`` only, one deck's object map at a time. May raise on a
+    genuinely unreadable deck; callers must not let that abort a healthy gate (see
+    :func:`main`'s WARN-and-skip wrapper around every call site).
+    """
+    from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415 (optional iwa extra)
+    from obed_edom.iwa_write import card_styles, select_card_styles  # noqa: PLC0415
+
+    objects, id_to_file, _file_ids = _load_deck(deck)
+    styles = select_card_styles(
+        [s for s in card_styles(objects, id_to_file) if not s["inherited"]], 10
+    )
+    return int(styles[0]["refs"]) if len(styles) == 1 else None
+
+
+def _card_border_refs_or_none(label: str, deck: Path | str) -> tuple[int | None, bool]:
+    """``card_border_refs``, but a read failure WARNs and returns ``(None, False)``
+    instead of propagating -- an exception here must never abort an otherwise-healthy
+    gate, nor silently masquerade as :func:`stolen_interaction_reasons`'s "lost its
+    unambiguous style" case. ``ok`` False means the caller must skip the check."""
+    try:
+        return card_border_refs(deck), True
+    except Exception as exc:  # noqa: BLE001 — optional iwa extra; never abort on a read failure
+        _log(f"WARN: {label}: could not read card-border refs ({type(exc).__name__}: {exc}); "
+             "skipping the stolen-interaction check.")
+        return None, False
+
+
+def damage_check_line(
+    label: str, *, src_ok: bool, refs_ok: bool, src_refs: int | None,
+    out_refs: int | None, damage: list[str],
+) -> str:
+    """The ``<label> damage check: ...`` status line, mirroring :func:`pass2_health`'s
+    positive line -- without it ``gate.log`` jumps straight from pass-2 health to the
+    compare with no way to tell whether the stolen-interaction check ran and passed, was
+    SKIPPED (a read failure, already WARNed by :func:`_card_border_refs_or_none`), or was
+    NOT APPLICABLE (the source has no unambiguous card-border style). "" when ``damage``
+    is non-empty -- the RED line(s) already say it."""
+    if not src_ok or not refs_ok:
+        return f"{label} damage check: SKIPPED (card-border read failed; see WARN above)."
+    if not src_refs:
+        return f"{label} damage check: NOT APPLICABLE (source has no unambiguous card-border style)."
+    if damage:
+        return ""
+    return f"{label} damage check: OK ({out_refs} vs source {src_refs} card-border refs)."
 
 
 # ==========================================================================
@@ -681,8 +822,12 @@ def plan_oracle_slide(
     Covers the SAME exact classes as ``offline_write.verify_offline_frames`` (shape at
     ``tols.hard``, unmasked image/movie -- the resolved record's ``geom_source == "iwa"``
     -- at ``tols.soft``) PLUS ``group`` (its union x/y/w/h vs the composed group-union
-    record, also at ``tols.soft`` -- a group's union IS offline-recoverable, unlike its
-    children's live layout). Text (autosize ``y``/``w``/``h`` are not offline-recoverable)
+    record, also at ``tols.soft``). Measured on the banked A/B arms: the composed union
+    tracks a Keynote-written plan at 0.46px median / 1.92px max over 240 comparable
+    specs. A record the reader itself flags approximate (``needs_keynote`` set, e.g.
+    ``rotated-group``/``group-residual``) is NOT comparable -- it is counted in
+    ``skipped`` and listed in ``approx`` (magnitude included) rather than gated on or
+    silently dropped. Text (autosize ``y``/``w``/``h`` are not offline-recoverable)
     is NOT exactly recoverable from raw IWA and would spuriously RED a text-heavy deck, so
     it is skipped here and left entirely to the A-vs-B identity compare instead. A masked
     image/movie (``geom_source == "mask"``) is skipped too -- its crop is covered by the
@@ -701,10 +846,10 @@ def plan_oracle_slide(
     kindIndex"`` — never silently dropped.
 
     Returns ``{"pass": bool, "per_kind": {kind: {n, worst, pass, fails}}, "missing_ids":
-    [...], "skipped": int, "compared": int}`` where ``compared`` is the total number of
-    specs actually compared (``sum`` of every ``per_kind[kind]["n"]``) — 0 alongside a
-    non-zero ``skipped`` is a VACUOUS pass (every spec on the slide was an inexact class)
-    the caller should call out, not treat as a clean result.
+    [...], "skipped": int, "compared": int, "approx": [...]}`` where ``compared`` is the
+    total number of specs actually compared (``sum`` of every ``per_kind[kind]["n"]``) —
+    0 alongside a non-zero ``skipped`` is a VACUOUS pass (every spec on the slide was an
+    inexact class) the caller should call out, not treat as a clean result.
     """
     from obed_edom.offline_write import (  # noqa: PLC0415 — lazy, see module docstring
         _OFFLINE_EXACT_KINDS,
@@ -715,6 +860,7 @@ def plan_oracle_slide(
     oracle_kinds = _OFFLINE_EXACT_KINDS | _OFFLINE_MEDIA_KINDS | {"group"}
     per_kind: dict[str, dict[str, Any]] = {}
     missing_ids: list[dict[str, Any]] = []
+    approx: list[dict[str, Any]] = []
     skipped = 0
     for spec in specs:
         if spec.get("role") == "hide":
@@ -739,6 +885,11 @@ def plan_oracle_slide(
         if kind in _OFFLINE_MEDIA_KINDS and rec.get("geom_source") != "iwa":
             skipped += 1
             continue
+        if kind == "group" and rec.get("needs_keynote"):
+            skipped += 1
+            approx.append({"addr": addr, "id": obj_id, "needs": rec["needs_keynote"],
+                           "worst": max(abs(a - b) for a, b in zip(*_spec_box(spec, rec)))})
+            continue
         entry = per_kind.setdefault(kind, {"n": 0, "worst": 0.0, "pass": True, "fails": []})
         tol = tols.hard if kind in _OFFLINE_EXACT_KINDS else tols.soft
         planned, actual = _spec_box(spec, rec)
@@ -751,7 +902,7 @@ def plan_oracle_slide(
     overall = not missing_ids and all(e["pass"] for e in per_kind.values())
     compared = sum(e["n"] for e in per_kind.values())
     return {"pass": overall, "per_kind": per_kind, "missing_ids": missing_ids,
-            "skipped": skipped, "compared": compared}
+            "skipped": skipped, "compared": compared, "approx": approx}
 
 
 def _log_plan_oracle_report(label: str, report: dict[str, Any]) -> None:
@@ -762,6 +913,12 @@ def _log_plan_oracle_report(label: str, report: dict[str, Any]) -> None:
         _log(f"      {kind:8} n={entry['n']:<4} worst={entry['worst']:.2f}px  {status}")
     if report["missing_ids"]:
         _log(f"      missing_ids: {report['missing_ids']}")
+    if report["approx"]:
+        worst = max(a["worst"] for a in report["approx"])
+        _log(f"      group-approx n={len(report['approx'])} worst={worst:.2f}px  "
+             "NOT GATED (reader flagged the union approximate)")
+        for a in sorted(report["approx"], key=lambda r: -r["worst"])[:5]:
+            _log(f"        {a['addr']} worst={a['worst']:.2f} {a['needs']}")
 
 
 # ==========================================================================
@@ -1119,6 +1276,22 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     _log("A pass-2 health: OK.")
 
+    src_refs, src_ok = _card_border_refs_or_none("source", args.source)
+    out_refs_a, a_refs_ok = _card_border_refs_or_none("A", a_deck)
+    damage_a = (
+        stolen_interaction_reasons("A", out_refs_a, src_refs, child_resize_a)
+        if src_ok and a_refs_ok else []
+    )
+    line_a = damage_check_line("A", src_ok=src_ok, refs_ok=a_refs_ok, src_refs=src_refs,
+                               out_refs=out_refs_a, damage=damage_a)
+    if line_a:
+        _log(line_a)
+    for r in damage_a:
+        _log(f"RED: {r}")
+    if damage_a:
+        _log("ABORT: run A is DAMAGED — see RED lines above. B never ran.")
+        return 6
+
     # `compared_slides` depends only on A's plan (transforms/reuses) — compute it once,
     # before B runs, so B's own suppressGeometry can be checked against it (D5/D1) and
     # the per-slide loop below does not recompute it.
@@ -1197,6 +1370,22 @@ def main(argv: list[str] | None = None) -> int:
     for r in reasons_b:
         _log(f"RED: {r}")
 
+    out_refs_b, b_refs_ok = _card_border_refs_or_none("B", b_deck)
+    damage_b = (
+        stolen_interaction_reasons("B", out_refs_b, src_refs, child_resize_b)
+        if src_ok and b_refs_ok else []
+    )
+    line_b = damage_check_line("B", src_ok=src_ok, refs_ok=b_refs_ok, src_refs=src_refs,
+                               out_refs=out_refs_b, damage=damage_b)
+    if line_b:
+        _log(line_b)
+    for r in damage_b:
+        _log(f"RED: {r}")
+
+    parity = pass2_parity(child_resize_a, child_resize_b, front_hard=zero_keys_hard)
+    for r in parity:
+        _log(f"RED: {r}")
+
     for label, result in (("A", child_resize_a), ("B", child_resize_b)):
         if not result:
             continue
@@ -1208,10 +1397,9 @@ def main(argv: list[str] | None = None) -> int:
         for label, result in (("A", child_resize_a), ("B", child_resize_b)):
             if not result:
                 continue
-            zero_warns = [f"{key}={result.get(key)}" for key in PASS2_ZERO_KEYS if int(result.get(key) or 0)]
-            if zero_warns:
-                _log(f"WARN {label}: {', '.join(zero_warns)} "
-                     "(pass2-bar=parity: tolerated because A==B, does not gate).")
+            warn = pass2_zero_warn(label, result, tolerated=not parity)
+            if warn:
+                _log(warn)
             front_err = front_err_from_raw((result.get("raw") or ""))
             if front_err and not any(code in front_err for code in _ACCESSIBILITY_ERR_CODES):
                 _log(f"WARN {label}: frontErr={front_err!r} "
@@ -1219,10 +1407,6 @@ def main(argv: list[str] | None = None) -> int:
 
     drift = plan_parity(plan_a, plan_b, compared_slides)
     for r in drift:
-        _log(f"RED: {r}")
-
-    parity = pass2_parity(child_resize_a, child_resize_b, front_hard=zero_keys_hard)
-    for r in parity:
         _log(f"RED: {r}")
 
     if not zero_keys_hard:
@@ -1243,7 +1427,7 @@ def main(argv: list[str] | None = None) -> int:
     for r in summary_reasons:
         _log(f"RED: {r}")
 
-    gate_ok = not (reasons_b or drift or parity or summary_reasons)
+    gate_ok = not (reasons_b or drift or parity or summary_reasons or damage_b)
 
     # ============================ per-slide compare =================================
     # Decode A, extract every compared slide's units, then DROP A's raw archive map
@@ -1307,13 +1491,8 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"NOTE: plan-oracle VACUOUS PASS on slide(s) {vacuous_slides} — 0 specs compared "
              "(every planned spec was a non-exact class); those slides' oracle result rests "
              "entirely on the identity compare above, not this oracle.")
-    if zero_keys_hard:
-        _log("pass-2 bar: strict")
-    else:
-        unresolved_n = int((child_resize_a or {}).get("unresolved") or 0)
-        dedup_m = int((child_resize_a or {}).get("dedupShortfall") or 0)
-        _log(f"pass-2 bar: parity (unresolved={unresolved_n}, dedupShortfall={dedup_m} "
-             "tolerated because A==B)")
+    _log(pass2_bar_line(zero_keys_hard=zero_keys_hard, parity=parity,
+                        a=child_resize_a, b=child_resize_b))
     _log("OFFLINE-WRITE GATE: GREEN" if gate_ok else "OFFLINE-WRITE GATE: RED (see above)")
     return 0 if gate_ok else 1
 

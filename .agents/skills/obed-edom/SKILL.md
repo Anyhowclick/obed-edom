@@ -311,6 +311,16 @@ consistency and live geometry verify passed at 0.00px, but pass-2 parity and 12
 slides' identity geometry failed. Offline write therefore remains opt-in with
 the default OFF.
 
+A 2026-09-07 gate-integrity follow-up added a gating `group` bar (composed
+child-union vs the planned rect, 2.5px) to the offline verify — it is expected
+FAIL against today's writer (the known `sx = spec/reported` defect), not a new
+regression, plus slide 36 `ki2..ki5` (≈139px), the separate never-written-spec
+bug, which will keep this line RED after the writer fix — and a pre-comparison
+stolen-interaction hard-fail (card-border
+media-style ref count vs the source deck): re-gating this bank now ABORTs with
+"run A is DAMAGED" rather than running the geometry compare at all, which is
+the correct, intended outcome.
+
 ---
 
 ## Scoring and validation

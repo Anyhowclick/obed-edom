@@ -18,14 +18,17 @@ import pytest
 
 from obed_edom.iwa_geometry import audit_natural_consistency
 from obed_edom.offline_write import (
+    OFFLINE_VERIFY_TOL,
     _fallback_bodies,
     _fallback_specs_by_slide,
     _offline_write_slides,
     _reported_from_bulk_rows,
     _run_fallback_scripts,
     _soft_seed_slides,
+    _tol_for_kind,
     build_fallback_scripts,
     counts_from_payload,
+    group_frame_rows,
     probe_iwa_extra,
     run_offline_write,
     verify_live_frames,
@@ -33,19 +36,25 @@ from obed_edom.offline_write import (
 )
 from obed_edom.remap_keynote import offline_write_mode
 from scripts.offline_write_ab import (
+    CARD_REF_FLOOR,
     Tolerances,
     accessibility_ok,
+    card_border_refs,
     compare_units_by_addr,
     compare_units_identity,
     compare_units_multiset,
+    damage_check_line,
     front_err_from_raw,
     keynote_open_documents,
     load_run_record,
+    pass2_bar_line,
     pass2_health,
     pass2_parity,
+    pass2_zero_warn,
     plan_oracle_slide,
     plan_parity,
     run_record,
+    stolen_interaction_reasons,
     tol_for_bucket,
     unit_bucket,
     write_run_record,
@@ -446,6 +455,98 @@ def test_verify_offline_frames_bridges_before_lookup(monkeypatch):
     assert out["shape"][1] == 1  # found via the bridged kindIndex 5, not the raw 0
 
 
+def test_verify_offline_frames_reports_group_bar():
+    planned = {1: [_spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50)]}
+    composed = {1: [{"id": "g1", "kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 102,
+                      "h": 50, "geom_source": "group-union", "needs_keynote": None}]}
+    out = verify_offline_frames(planned, composed)
+    assert set(out) == {"group"}
+    max_delta, n, worst5 = out["group"]
+    assert max_delta == 2.0
+    assert n == 1
+    assert worst5[0]["slide"] == 1
+
+
+def test_verify_offline_frames_group_skips_needs_keynote_records():
+    # Regression, banked numbers (slide 35 ki0, 2026-09-07 Full bank arm A): the composed
+    # union is a `group-residual` record, so it must never enter the gating "group" bar --
+    # but its magnitude must still surface via `group_frame_rows`' approximate list.
+    planned = {35: [_spec(slide=35, kind="group", kindIndex=0,
+                          x=960.0, y=212.55, w=3549.09, h=605.70)]}
+    composed = {35: [{"id": "g35", "kind": "group", "kindIndex": 0,
+                       "x": 961.43, "y": 292.31, "w": 1764.48, "h": 496.51,
+                       "geom_source": "group-union", "needs_keynote": "group-residual"}]}
+    out = verify_offline_frames(planned, composed)
+    assert "group" not in out
+    rows, approx = group_frame_rows(planned, composed)
+    assert rows == []
+    assert len(approx) == 1
+    assert approx[0]["delta"] == pytest.approx(1784.61, abs=0.01)
+    assert approx[0]["needs"] == "group-residual"
+
+
+def test_group_frame_rows_addresses_every_failing_group():
+    # The writer-fix consumer contract: every comparable group is individually
+    # addressable (slide/kindIndex/id), not folded into a bare max.
+    planned = {
+        1: [_spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50),
+            _spec(slide=1, kind="group", kindIndex=1, x=0, y=0, w=100, h=50)],
+        2: [_spec(slide=2, kind="group", kindIndex=0, x=0, y=0, w=100, h=50)],
+    }
+    composed = {
+        1: [{"id": "g1", "kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 100.1, "h": 50,
+             "geom_source": "group-union", "needs_keynote": None},
+            {"id": "g2", "kind": "group", "kindIndex": 1, "x": 0, "y": 0, "w": 103, "h": 50,
+             "geom_source": "group-union", "needs_keynote": None}],
+        2: [{"id": "g3", "kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 104, "h": 50,
+             "geom_source": "group-union", "needs_keynote": None}],
+    }
+    rows, approx = group_frame_rows(planned, composed)
+    assert approx == []
+    assert len(rows) == 3
+    for r in rows:
+        assert set(r) == {"slide", "kindIndex", "id", "delta"}
+    failing = {(r["slide"], r["kindIndex"]) for r in rows if r["delta"] > 2.5}
+    assert failing == {(1, 1), (2, 0)}
+
+
+def test_verify_offline_frames_group_extends_rather_than_clobbers(monkeypatch):
+    # N6: `per_kind["group"]` must never be a bare overwrite -- if "group" ever joined
+    # `_OFFLINE_EXACT_KINDS`, rows the top-level scan already collected must survive
+    # `group_frame_rows`' union-based rows, not be silently discarded by `=`.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_OFFLINE_EXACT_KINDS", frozenset({"shape", "group"}))
+    planned = {1: [_spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50),
+                   _spec(slide=1, kind="group", kindIndex=1, x=0, y=0, w=100, h=50)]}
+    composed = {1: [{"id": "g1", "kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 102,
+                      "h": 50, "geom_source": "group-union", "needs_keynote": None},
+                    {"id": "g2", "kind": "group", "kindIndex": 1, "x": 0, "y": 0, "w": 100,
+                     "h": 50, "geom_source": "group-union", "needs_keynote": None}]}
+    out = verify_offline_frames(planned, composed)
+    # Each of the 2 group specs is picked up once by the top-level exact-kind scan and
+    # once more by `group_frame_rows` -- 4 rows if merged, only 2 if clobbered by `=`.
+    assert out["group"][1] == 4
+
+
+def test_verify_offline_frames_group_uses_bridged_kindindex(monkeypatch):
+    def fake_bridge(specs):
+        return [dict(s, kindIndex=int(s["kindIndex"]) + 5) for s in specs]
+
+    monkeypatch.setattr("obed_edom.iwa_write.bridge_specs_kindindex", fake_bridge, raising=False)
+    planned = {1: [_spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=10, h=10)]}
+    composed = {1: [{"id": "g1", "kind": "group", "kindIndex": 5, "x": 0, "y": 0, "w": 10.3,
+                      "h": 10, "geom_source": "group-union", "needs_keynote": None}]}
+    out = verify_offline_frames(planned, composed)
+    assert set(out) == {"group"}
+    assert out["group"][1] == 1  # found via the bridged kindIndex 5, not the raw 0
+
+
+def test_offline_verify_tol_is_per_kind():
+    assert _tol_for_kind(OFFLINE_VERIFY_TOL, "shape") == 0.5
+    assert _tol_for_kind(OFFLINE_VERIFY_TOL, "group") == 2.5
+
+
 # --- audit_natural_consistency (naturalSize/originalSize/mask consistency) -------
 
 
@@ -661,6 +762,92 @@ def test_run_offline_write_sets_offline_verify_pass_in_verify_mode(monkeypatch):
         Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kindIndex=0)], {}, [], lambda m: None
     )
     assert info_bad["offlineVerifyPass"] is False  # 5.0px > 0.5px
+
+
+def test_run_offline_write_group_bar_gates_at_group_tolerance(monkeypatch):
+    # Proves group is judged at OFFLINE_VERIFY_TOL["group"] (2.5px), not the 0.5px default.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    group_specs = [_spec(slide=1, kind="group", kindIndex=0)]
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"group": (1.0, 5, [])})
+    info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], lambda m: None)
+    assert info["offlineVerifyPass"] is True  # 1.0px <= 2.5px
+
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"group": (3.0, 5, [])})
+    info_bad = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], lambda m: None)
+    assert info_bad["offlineVerifyPass"] is False  # 3.0px > 2.5px
+
+
+def test_run_offline_write_fails_when_group_specs_planned_but_no_group_line(monkeypatch):
+    # Regression for the silent PASS that shipped the writer bug: a "group" line missing
+    # from the report entirely (not just failing) must itself fail offlineVerifyPass.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"shape": (0.0, 1, [])})
+    said: list[str] = []
+    info = run_offline_write(
+        Path("/tmp/x.key"), "verify", {1}, [_spec(slide=1, kind="group", kindIndex=0)], {}, [],
+        said.append,
+    )
+    assert info["offlineVerifyPass"] is False
+    assert any("group bar did NOT run" in m for m in said)
+
+
+def test_run_offline_write_group_verify_payload(monkeypatch):
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"group": (1.0, 1, [])})
+    group_specs = [_spec(slide=1, kind="group", kindIndex=0)]
+    info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], lambda m: None)
+    assert info["groupVerify"] == {"planned": 1, "n": 1, "max": 1.0}
+
+    info_on = run_offline_write(Path("/tmp/x.key"), "on", {1}, group_specs, {}, [], lambda m: None)
+    assert "groupVerify" not in info_on
+
+
+def test_run_offline_write_group_verify_max_none_when_zero_rows(monkeypatch):
+    # N7: a 0.0 "max" reads as a perfect score to a later record reader; when the group
+    # bar produced zero comparable rows (no "group" key in the report at all), max must
+    # be None, not the falsely-perfect 0.0 default.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"shape": (0.0, 1, [])})
+    group_specs = [_spec(slide=1, kind="group", kindIndex=0)]
+    info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], lambda m: None)
+    assert info["groupVerify"]["n"] == 0
+    assert info["groupVerify"]["max"] is None
+
+
+def test_run_offline_write_reports_group_approx_not_gated(monkeypatch):
+    # N3: needs_keynote-flagged group rows are excluded from the gating bar but must
+    # still surface -- a `verify` run must never look silently perfect while 13.5% of
+    # groups sat outside the compare, unnoticed.
+    import obed_edom.offline_write as ow_mod
+
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"group": (1.0, 1, [])})
+    approx_row = {"slide": 36, "kindIndex": 2, "id": "ki2", "delta": 139.25,
+                 "needs": "group-residual"}
+    monkeypatch.setattr(ow_mod, "group_frame_rows", lambda *a, **k: ([], [approx_row]))
+    said: list[str] = []
+    group_specs = [_spec(slide=1, kind="group", kindIndex=0)]
+    info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], said.append)
+    assert any("group-approx n=1 worst=139.25px NOT GATED" in m for m in said)
+    assert info["offlineVerifyPass"] is True  # the approx line is informational, not gating
 
 
 def test_run_offline_write_raises_when_fallback_fails(monkeypatch):
@@ -1783,6 +1970,54 @@ def test_pass2_parity_excludes_front_when_not_hard():
     assert any("unresolved" in r for r in reasons)
 
 
+# --- pass2_bar_line / pass2_zero_warn (item 3: false "tolerated because A==B") -------
+
+
+def test_pass2_bar_line_strict():
+    assert pass2_bar_line(zero_keys_hard=True, parity=[], a=None, b=None) == "pass-2 bar: strict"
+
+
+def test_pass2_bar_line_parity_tolerated_when_equal():
+    line = pass2_bar_line(zero_keys_hard=False, parity=[],
+                          a=_pass2(unresolved=0), b=_pass2(unresolved=0))
+    assert "tolerated because A==B" in line
+
+
+def test_pass2_bar_line_parity_not_tolerated_when_a_differs_from_b():
+    # Regression, the banked 2026-09-07 run: `parity` carries the seven real A!=B
+    # reasons, and A's unresolved/dedupShortfall are non-zero while B's are clean --
+    # the summary line must never claim "tolerated because A==B" underneath that.
+    parity = [f"pass-2 key{i}: A=x != B=y" for i in range(7)]
+    line = pass2_bar_line(
+        zero_keys_hard=False, parity=parity,
+        a={"unresolved": 67, "dedupShortfall": 141}, b={"unresolved": 0, "dedupShortfall": 0},
+    )
+    assert "tolerated" not in line
+    assert "7 key(s)" in line
+    assert "A=67 B=0" in line
+    assert "A=141 B=0" in line
+
+
+def test_pass2_bar_line_reports_both_arms():
+    # The old code read child_resize_a's counters only; both arms must appear now.
+    # Distinct A/B values so a `f"A={ua} B={ua}"` regression (reading A twice) fails.
+    line = pass2_bar_line(zero_keys_hard=False, parity=[],
+                          a=_pass2(unresolved=3), b=_pass2(unresolved=5))
+    assert "A=3 B=5" in line
+
+
+def test_pass2_zero_warn_not_tolerated_when_parity_nonempty():
+    warn = pass2_zero_warn("A", _pass2(unresolved=67, dedupShortfall=141), tolerated=False)
+    assert "tolerated because A==B" not in warn
+    assert "NOT tolerated" in warn
+    assert "unresolved=67" in warn
+
+
+def test_pass2_zero_warn_empty_when_all_zero():
+    assert pass2_zero_warn("A", _pass2(), tolerated=True) == ""
+    assert pass2_zero_warn("A", _pass2(), tolerated=False) == ""
+
+
 # --- plan_parity (D5) ----------------------------------------------------------------
 
 
@@ -1838,6 +2073,114 @@ def test_plan_parity_suppress_geometry_never_an_equality_check():
     plan_b = _plan(suppressGeometry=[2, 5])
     assert plan_a["suppressGeometry"] != plan_b["suppressGeometry"]
     assert plan_parity(plan_a, plan_b, compared_slides=[2, 5]) == []
+
+
+# --- stolen_interaction_reasons / card_border_refs (item 4) --------------------------
+
+
+def test_stolen_interaction_reasons_clean_arm():
+    # Arm B, banked (2026-09-07 Full bank): output refs == source refs.
+    assert stolen_interaction_reasons("B", 83, 83, None) == []
+
+
+def test_stolen_interaction_reasons_hard_fails_on_card_loss():
+    # Regression, banked numbers (2026-09-07 Full bank arm A: 43 vs source 83).
+    reasons = stolen_interaction_reasons("A", 43, 83, {"dedupShortfall": 141, "unresolved": 67})
+    assert len(reasons) == 1
+    r = reasons[0]
+    assert "43" in r
+    assert "83" in r
+    assert "dedupShortfall=141" in r
+    assert "unresolved=67" in r
+    assert "re-run" in r
+    assert "do NOT debug the code first" in r
+
+
+def test_stolen_interaction_reasons_tolerates_borderline_shortfall():
+    # 70/83 = 0.843 >= CARD_REF_FLOOR (0.75) — the false-positive guard.
+    assert CARD_REF_FLOOR == 0.75
+    assert stolen_interaction_reasons("A", 70, 83, None) == []
+
+
+def test_stolen_interaction_reasons_not_applicable_without_card_style():
+    # No unambiguous card-border style in the SOURCE — the check cannot apply.
+    assert stolen_interaction_reasons("A", 43, None, None) == []
+
+
+def test_stolen_interaction_reasons_output_lost_its_card_style():
+    # N2: an ambiguous OUTPUT style is not a measured shortfall -- no fabricated ratio,
+    # and the remedy must not blame the machine (a surplus of stranded donor copies
+    # lands here too, and a surplus must never be told "re-run on an untouched machine").
+    reasons = stolen_interaction_reasons("A", None, 83, None)
+    assert len(reasons) == 1
+    r = reasons[0]
+    assert "83" in r
+    assert "no longer carries an unambiguous card-border style" in r
+    assert "ratio" not in r
+    assert "0.000" not in r
+    assert "re-run this arm on an untouched machine" not in r
+    assert "inspect the deck's media styles" in r
+
+
+def test_stolen_interaction_reasons_surplus_is_not_hard():
+    # A surplus (stranded donor copies) is a dedup shortfall, not this hard fail.
+    assert stolen_interaction_reasons("B", 120, 83, None) == []
+
+
+def test_card_border_refs_single_style(monkeypatch):
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck",
+                        lambda deck: ({}, {}, {}), raising=False)
+    monkeypatch.setattr(
+        "obed_edom.iwa_write.card_styles",
+        lambda objects, id_to_file: [
+            {"id": "m1", "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern",
+             "refs": 83, "inherited": False},
+        ],
+        raising=False,
+    )
+    assert card_border_refs(Path("/tmp/x.key")) == 83
+
+
+def test_card_border_refs_none_when_ambiguous(monkeypatch):
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck",
+                        lambda deck: ({}, {}, {}), raising=False)
+    monkeypatch.setattr(
+        "obed_edom.iwa_write.card_styles",
+        lambda objects, id_to_file: [
+            {"id": "m1", "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern",
+             "refs": 83, "inherited": False},
+            {"id": "m2", "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern",
+             "refs": 50, "inherited": False},
+        ],
+        raising=False,
+    )
+    assert card_border_refs(Path("/tmp/x.key")) is None
+
+
+# --- damage_check_line (N1) -----------------------------------------------------------
+
+
+def test_damage_check_line_ok_reports_both_counts():
+    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=83, out_refs=83, damage=[])
+    assert line == "A damage check: OK (83 vs source 83 card-border refs)."
+
+
+def test_damage_check_line_not_applicable_when_source_ambiguous():
+    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=None, out_refs=43, damage=[])
+    assert line == "A damage check: NOT APPLICABLE (source has no unambiguous card-border style)."
+
+
+def test_damage_check_line_skipped_on_read_failure():
+    line = damage_check_line("B", src_ok=False, refs_ok=True, src_refs=None, out_refs=None, damage=[])
+    assert "SKIPPED" in line
+    assert "read failed" in line
+
+
+def test_damage_check_line_empty_when_damage_present():
+    # The RED reason line(s) already say it -- no redundant status line on top.
+    line = damage_check_line("A", src_ok=True, refs_ok=True, src_refs=83, out_refs=43,
+                             damage=["A: card-border refs 43 vs source 83 ..."])
+    assert line == ""
 
 
 # --- unit_bucket / tol_for_bucket (D7/D8) ---------------------------------------------
@@ -2106,7 +2449,8 @@ def test_plan_oracle_slide_matches_by_id():
 def test_plan_oracle_slide_skips_hide_role():
     specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "role": "hide"}]
     report = plan_oracle_slide(specs, {}, {}, Tolerances())
-    assert report == {"pass": True, "per_kind": {}, "missing_ids": [], "skipped": 0, "compared": 0}
+    assert report == {"pass": True, "per_kind": {}, "missing_ids": [], "skipped": 0,
+                       "compared": 0, "approx": []}
 
 
 def test_plan_oracle_slide_skips_text_spec():
@@ -2144,6 +2488,47 @@ def test_plan_oracle_slide_group_fails_beyond_soft_tol():
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0))
     assert report["per_kind"]["group"]["worst"] == 5.0
     assert report["pass"] is False
+
+
+def test_plan_oracle_slide_skips_group_with_needs_keynote():
+    # Regression, banked numbers (slide 35 ki0, 2026-09-07 Full bank arm A).
+    specs = [{"slide": 35, "kind": "group", "kindIndex": 0,
+              "x": 960.0, "y": 212.55, "w": 3549.09, "h": 605.70}]
+    id_by_addr = {("group", 0): "g35"}
+    recs_by_id = {"g35": {"id": "g35", "kind": "group", "kindIndex": 0,
+                          "x": 961.43, "y": 292.31, "w": 1764.48, "h": 496.51,
+                          "geom_source": "group-union", "needs_keynote": "group-residual"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["per_kind"] == {}
+    assert report["pass"] is True
+    assert report["skipped"] == 1
+    assert report["compared"] == 0
+    assert len(report["approx"]) == 1
+    assert report["approx"][0]["worst"] == pytest.approx(1784.61, abs=0.01)
+    assert report["approx"][0]["needs"] == "group-residual"
+
+
+def test_plan_oracle_slide_group_without_needs_flag_still_gates():
+    # The flagged skip must not become a blanket group exemption.
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                        "needs_keynote": None}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0))
+    assert report["pass"] is False
+    assert report["approx"] == []
+
+
+def test_plan_oracle_slide_approx_is_not_counted_as_compared():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union",
+                        "needs_keynote": "rotated-group"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report["compared"] == 0
+    assert report["skipped"] == 1
 
 
 def test_plan_oracle_slide_skips_masked_image():
@@ -2215,6 +2600,20 @@ def test_plan_oracle_slide_worst_per_kind():
     report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5))
     assert report["per_kind"]["shape"]["worst"] == 5.0
     assert report["pass"] is False
+
+
+def test_log_plan_oracle_report_prints_approx_line(capsys):
+    from scripts.offline_write_ab import _log_plan_oracle_report
+
+    report = {"pass": True, "per_kind": {}, "missing_ids": [], "skipped": 1, "compared": 0,
+              "approx": [{"addr": ("group", 0), "id": "g35", "needs": "group-residual",
+                         "worst": 1784.61}]}
+    _log_plan_oracle_report("A", report)
+    out = capsys.readouterr().out
+    assert "group-approx" in out
+    assert "n=1" in out
+    assert "1784.61" in out
+    assert "NOT GATED" in out
 
 
 # --- run_record / write_run_record / load_run_record (D13) ---------------------------

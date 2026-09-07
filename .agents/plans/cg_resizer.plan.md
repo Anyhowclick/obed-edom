@@ -418,6 +418,14 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
 - The final log line incorrectly says parity tolerated A's unresolved/dedup shortfall “because
   A==B” after the preceding RED lines prove A!=B. Fix that summary text during diagnosis; it did
   not affect the RED exit status. Offline write remains opt-in/default OFF and W2 remains gated.
+- 2026-09-07 gate-integrity follow-up: the offline verify now prints a gating `group` line
+  at 2.5px; it is expected FAIL until the separate group-writer fix lands — a `group … FAIL`
+  is the known `sx = spec/reported` defect, not a new regression, plus slide 36 `ki2..ki5`
+  (≈139px, `needs=None`), the separate never-written-spec bug, which will keep this line RED
+  after the writer fix. The same follow-up adds a
+  pre-comparison stolen-interaction hard-fail (card-border ref count vs the source deck);
+  re-gating this bank with `--reuse-a`/`--reuse-b` now ABORTs with "run A is DAMAGED"
+  (43 vs 83 refs) — also expected, and the live proof the check works, not a new regression.
 
 ## Historical state log
 
