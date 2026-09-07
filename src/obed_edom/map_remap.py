@@ -2603,7 +2603,11 @@ def plan_slide_transforms(
             )
             continue
         if role in {"list", "other"} and (item.get("kind") or "") == "text":
-            style = match_character_style(item, styles)
+            # Predict with the affine the text rides: the 0.5 prior made the
+            # template's 35pt swatch beat its 40pt one on every colour tie.
+            style = match_character_style(
+                item, styles, size_ratio=aff.s if aff is not None else 0.5
+            )
             mapped, font, _face, _colour = _style_text_box(item, aff, style)
             if id(item) in overlay_ids and body_final_size is not None:
                 src = item_rect(item)

@@ -2710,6 +2710,49 @@ def test_place_free_text_erases_and_moves_only_role_list():
     assert frame.getpixel((600, 520)) == (255, 255, 255)  # mover's old spot freed
 
 
+def test_label_swatch_tie_breaks_on_the_affine_it_rides():
+    """map-label-text-sizing: the Gold template palette carries two white
+    Amplitude-Bold swatches (40pt Malaysia tile, 35pt China tile). A colour tie
+    must resolve with the affine the text rides (translate-only map, s=1.0 ->
+    predicted 40), not the fixed 0.5 prior (predicted 20), which made the 35pt
+    swatch beat the 40pt one on every Gold slide-3/4 label."""
+    from obed_edom.map_remap import match_character_style
+
+    styles = [
+        {"font": "Amplitude-Bold", "size": 35.0, "text": "CHC Foshan"},
+        {"font": "Amplitude-Bold", "size": 40.0, "text": "CHC Kuching"},
+    ]
+    label = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40, w=243, h=52)
+    assert match_character_style(label, styles, size_ratio=1.0)["size"] == 40.0
+    assert match_character_style(label, styles, size_ratio=0.5)["size"] == 35.0
+
+
+def test_demoted_label_takes_the_swatch_matching_its_ridden_affine():
+    """End to end through plan_slide_transforms: a demoted 40pt label on a
+    translate-only map recipe picks the 40pt swatch, not the 35pt one."""
+    label = _item(
+        kind="text", text="CHC Kuching", font="Amplitude-Bold", size=40,
+        x=4200, y=300, w=235, h=52, kindIndex=40,
+    )
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+            label,
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, _map_and_swatch_template())
+    recipe["characterStyles"] = [
+        {"font": "Amplitude-Bold", "size": 35.0, "text": "CHC Foshan"},
+        {"font": "Amplitude-Bold", "size": 40.0, "text": "CHC Kuching"},
+    ]
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    label_t = next(t for t in out if t.kind == "text" and t.kind_index == 40)
+    assert label_t.role == "other"
+    assert label_t.font_size == 40.0
+
+
 def test_preview_wanted_covers_roster_keep_slides_without_the_whitelist():
     """resolve_source_previews is no longer gated on the whitelist, but only the
     slides the plan will consume are decoded (a full preview set is ~3.9GB as
