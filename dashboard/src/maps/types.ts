@@ -1,5 +1,6 @@
 export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
+export const HILLSHADE_NE2_LAYER_ID = "terrarium-ne2";
 
 export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d";
 export type MapsCropId = "wall" | "center+cg";
@@ -190,18 +191,27 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   };
 }
 
+export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade";
+
+export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearanceField[] {
+  const out: MapsAppearanceField[] = [];
+  if (from.style !== to.style) out.push("style");
+  const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
+  if (hi(from) !== hi(to)) out.push("highlights");
+  const layers = (s: MapsSlide) => [...(s.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
+  if (layers(from) !== layers(to)) out.push("hiddenLayers");
+  if ((from.hillshade === true) !== (to.hillshade === true)) out.push("hillshade");
+  return out;
+}
+
+export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
+  if (appearanceMismatch(from, to).length > 0) return true;
+  if (!from.cg && !to.cg) return false;
+  return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(to, "cg")).length > 0;
+}
+
 export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
-  const fromHi = [...from.highlights].map((h) => h.toUpperCase()).sort().join(",");
-  const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort().join(",");
-  const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
-  const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
-  if (
-    from.style !== to.style ||
-    fromHi !== toHi ||
-    fromLayers !== toLayers ||
-    (from.hillshade === true) !== (to.hillshade === true)
-  )
-    return "cut";
+  if (appearanceMismatch(from, to).length) return "cut";
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);

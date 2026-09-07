@@ -1,5 +1,5 @@
 import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
-import { HILLSHADE_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
+import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./stampOsm";
 
@@ -23,8 +23,8 @@ export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[]
 
 const styleCache = new Map<string, Promise<StyleSpecification>>();
 
-/** Top-down relief only: no `setTerrain()`, no draping, no pitch. Inserted before the first
- * water layer so the opaque water fill covers terrarium's ETOPO1 ocean-floor bathymetry. */
+/** Top-down relief only: no `setTerrain()`, no draping, no pitch. Both layers are spliced in
+ * before the first water layer (so opaque water covers terrarium's ETOPO1 bathymetry), NE2 boost first so hillshade composites over it. */
 function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSpecification {
   style.sources[HILLSHADE_SOURCE_ID] = {
     type: "raster-dem",
@@ -46,7 +46,7 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
       "hillshade-method": "igor",
       "hillshade-illumination-anchor": "map",
       "hillshade-illumination-direction": 335,
-      "hillshade-exaggeration": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, dark ? 0.5 : 0.35],
+      "hillshade-exaggeration": dark ? 0.5 : 0.35,
       "hillshade-shadow-color": dark ? "#000000" : "#4a4033",
       "hillshade-highlight-color": dark ? "#7f93ad" : "#ffffff",
       "hillshade-accent-color": dark ? "#000814" : "#6b5c46",
@@ -58,7 +58,18 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
     style.layers.find((l) => l.type === "symbol")
   )?.id;
   const index = anchor ? style.layers.findIndex((l) => l.id === anchor) : style.layers.length;
-  style.layers.splice(index, 0, layer);
+  const ne2 =
+    style.sources.ne2_shaded && style.layers.some((l) => l.type === "raster")
+      ? ({
+          id: HILLSHADE_NE2_LAYER_ID,
+          type: "raster",
+          source: "ne2_shaded",
+          maxzoom: 6,
+          layout: { visibility: "none" },
+          paint: { "raster-opacity": dark ? 0.28 : 0.45, "raster-saturation": -1 },
+        } as LayerSpecification)
+      : null;
+  style.layers.splice(index, 0, ...(ne2 ? [ne2, layer] : [layer]));
   return style;
 }
 

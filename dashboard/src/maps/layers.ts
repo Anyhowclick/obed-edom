@@ -1,9 +1,16 @@
 import type { Map as MapLibreMap } from "maplibre-gl";
-import { HILLSHADE_LAYER_ID, type MapsLayerFilterId } from "./types";
+import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsLayerFilterId } from "./types";
 
 type LayerBits = { id: string; type?: string; "source-layer"?: string };
 
-const SKIP = new Set(["background", "ne2-shaded-fallback", "admin0-fill", "admin0-line", HILLSHADE_LAYER_ID]);
+const SKIP = new Set([
+  "background",
+  "ne2-shaded-fallback",
+  "admin0-fill",
+  "admin0-line",
+  HILLSHADE_LAYER_ID,
+  HILLSHADE_NE2_LAYER_ID,
+]);
 
 function bits(layer: { id: string; type?: string; "source-layer"?: string }): LayerBits {
   return { id: layer.id, type: layer.type, "source-layer": layer["source-layer"] };

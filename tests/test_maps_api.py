@@ -305,6 +305,21 @@ def test_slide_hillshade_roundtrip_and_demotes_morph():
     assert result["links"][0]["kind"] == "cut"
 
 
+def test_manual_movie_survives_state_save_on_appearance_mismatch():
+    job = _seed()
+    doc = _doc(job)
+    assert doc["slides"][0].get("hillshade") is False
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    slide2["hillshade"] = True
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.2, "playWithoutClick": False}]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["links"][0]["kind"] == "movie"
+
+
 def test_geocode_empty_and_ua_and_429(monkeypatch):
     empty = client.get("/api/maps/geocode?q=")
     assert empty.status_code == 400

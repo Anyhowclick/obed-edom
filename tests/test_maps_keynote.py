@@ -830,6 +830,34 @@ def test_coerce_preserves_explicit_movie_on_style_mismatch():
     assert next_links[0]["flyZoom"] == 5.0
 
 
+def test_coerce_keeps_manual_movie_on_appearance_mismatch():
+    movie_link = {"from": "s1", "to": "s2", "kind": "movie", "duration": 1.2, "playWithoutClick": False}
+
+    a = _slide("s1", _camera(3.0, 101.0, 8), highlights=["MYS"])
+    b = _slide("s2", _camera(3.0, 102.0, 8), highlights=["SGP"])
+    assert coerce_link_kinds([a, b], [movie_link])[0]["kind"] == "movie"
+
+    a = _slide("s1", _camera(3.0, 101.0, 8), hiddenLayers=["roadnames"])
+    b = _slide("s2", _camera(3.0, 102.0, 8), hiddenLayers=["roadnames", "pois"])
+    assert coerce_link_kinds([a, b], [movie_link])[0]["kind"] == "movie"
+
+    a = _slide("s1", _camera(3.0, 101.0, 8), hillshade=True)
+    b = _slide("s2", _camera(3.0, 102.0, 8), hillshade=False)
+    assert coerce_link_kinds([a, b], [movie_link])[0]["kind"] == "movie"
+
+
+def test_coerce_keeps_manual_movie_on_cg_appearance_mismatch():
+    a = _slide("s1", _camera(3.0, 101.0, 8))
+    b = _slide("s2", _camera(3.0, 102.0, 8))
+    b["cg"] = {"camera": _camera(3.0, 102.0, 8), "style": "positron", "highlights": [], "churches": [], "hillshade": True}
+
+    morph_link = {"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}
+    assert coerce_link_kinds([a, b], [morph_link])[0]["kind"] == "cut"
+
+    movie_link = {"from": "s1", "to": "s2", "kind": "movie", "duration": 1.2, "playWithoutClick": False}
+    assert coerce_link_kinds([a, b], [movie_link])[0]["kind"] == "movie"
+
+
 def test_plan_deck_movie_slide_omits_churches(tmp_path: Path):
     a, b, links = _backdrop_movie_slides_links()
     a["churches"] = [

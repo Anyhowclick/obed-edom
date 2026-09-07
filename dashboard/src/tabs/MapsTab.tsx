@@ -28,7 +28,7 @@ import { captureExportRaster } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
-import { MorphGates } from "../maps/MorphGates";
+import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
@@ -39,6 +39,7 @@ import {
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
+  appearanceMismatch,
   authoredSurfaceWidth,
   captureWidth,
   slideForAudience,
@@ -47,6 +48,7 @@ import {
   coerceHopKinds,
   documentFromResult,
   minZoomForView,
+  movieAppearanceMismatch,
   worldCopyWarning,
   nextPinId,
   nextSlideId,
@@ -580,6 +582,14 @@ export function MapsTab() {
   function toggleHiddenLayer(id: MapsLayerFilterId) {
     const has = activeHiddenLayers.includes(id);
     updateActive({ hiddenLayers: has ? activeHiddenLayers.filter((item) => item !== id) : [...activeHiddenLayers, id] });
+  }
+
+  function matchHopAppearance() {
+    if (!nextView) return;
+    updateActive({
+      hiddenLayers: [...(nextView.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)],
+      hillshade: nextView.hillshade === true,
+    });
   }
 
   function toggleCachedCountry(code: string, nextSelected: string[]) {
@@ -1253,6 +1263,12 @@ export function MapsTab() {
   const pin = activeView?.churches.find((c) => c.id === selectedPin) || null;
   const nextSlide = outgoing && activeIndex >= 0 ? slides[activeIndex + 1] : null;
   const nextView = nextSlide ? slideForAudience(nextSlide, activeAudience) : null;
+  const otherAudience: MapsAudience = activeAudience === "lw" ? "cg" : "lw";
+  const crossAudienceMismatch =
+    !!active &&
+    !!nextSlide &&
+    (!!active.cg || !!nextSlide.cg) &&
+    appearanceMismatch(slideForAudience(active, otherAudience), slideForAudience(nextSlide, otherAudience)).length > 0;
   const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
   const morphOk = suggested === "morph";
   const cruiseAuto =
@@ -1531,6 +1547,7 @@ export function MapsTab() {
           {slides.map((slide, index) => {
             const next = slides[index + 1];
             const hop = next ? linkBetween(doc?.links || [], slide.id, next.id) : null;
+            const hopWarn = hop?.kind === "movie" && next ? movieAppearanceMismatch(slide, next) : false;
             const src = slide.stillPng && job.id ? previewUrl(job.id, "maps", slide.stillPng) : "";
             const cgSrc = slide.cg?.stillPng && job.id ? previewUrl(job.id, "maps", slide.cg.stillPng) : "";
             return (
@@ -1580,9 +1597,9 @@ export function MapsTab() {
                     <span className="maps-gutter-line" />
                     <button
                       type="button"
-                      className="maps-gutter-kind"
+                      className={`maps-gutter-kind${hopWarn ? " warn" : ""}`}
                       disabled={locked}
-                      title={`${HOP_TIPS[hop.kind]} Open animation settings.`}
+                      title={`${HOP_TIPS[hop.kind]} Open animation settings.${hopWarn ? " The fly hop's appearance does not match the destination." : ""}`}
                       aria-label={`Open ${HOP_LABELS[hop.kind]} animation for ${slide.title}`}
                       onClick={() => {
                         setSelectedPin(null);
@@ -2022,6 +2039,15 @@ export function MapsTab() {
                       {HOP_LABELS[kind]}
                     </label>
                   ))}
+                  {outgoing.kind === "movie" && nextView && activeView && (
+                    <MovieAppearanceGate
+                      from={activeView}
+                      to={nextView}
+                      crossAudience={crossAudienceMismatch}
+                      disabled={locked}
+                      onMatch={matchHopAppearance}
+                    />
+                  )}
                   {nextView && activeView && <MorphGates from={activeView} to={nextView} />}
                   <button
                     className="btn secondary"

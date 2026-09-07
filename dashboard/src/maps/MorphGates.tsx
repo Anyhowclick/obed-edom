@@ -7,6 +7,7 @@ import {
   MORPH_MAX_DZOOM,
   MORPH_MAX_PITCH,
   MORPH_MAX_PLATE_PX,
+  appearanceMismatch,
   morphPlatePx,
   bearingDelta,
   captureWidth,
@@ -36,13 +37,13 @@ function fmtDeg(n: number): string {
 }
 
 export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
+  const mismatch = new Set(appearanceMismatch(from, to));
   const fromHi = [...from.highlights].map((h) => h.toUpperCase()).sort();
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort();
   const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
   const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
   const fromRelief = from.hillshade === true;
   const toRelief = to.hillshade === true;
-  const layersSame = fromLayers.join(",") === toLayers.join(",") && fromRelief === toRelief;
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
@@ -52,18 +53,19 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   let threeDDetail = "flat";
   if (from.style === "buildings3d" || to.style === "buildings3d") threeDDetail = "3D buildings";
   else if (pitch > MORPH_MAX_PITCH) threeDDetail = `pitch ${fmtDeg(pitch)}`;
+  const layersSame = !mismatch.has("hiddenLayers") && !mismatch.has("hillshade");
   return [
     {
       id: "style",
       label: "Same map style",
-      ok: from.style === to.style,
+      ok: !mismatch.has("style"),
       detail: from.style === to.style ? styleLabel(from.style) : `${styleLabel(from.style)} → ${styleLabel(to.style)}`,
       tip: "Positron, Liberty, 3D, and the rest must match on both shots.",
     },
     {
       id: "countries",
       label: "Same region highlights",
-      ok: fromHi.join(",") === toHi.join(","),
+      ok: !mismatch.has("highlights"),
       detail:
         fromHi.join(",") === toHi.join(",")
           ? countriesLabel(fromHi)
@@ -156,6 +158,69 @@ export function MorphGates({ from, to }: { from: MapsSlide; to: MapsSlide }) {
         ))}
       </ul>
       <p className="morph-gates-hint">{gateHint(gates)}</p>
+    </div>
+  );
+}
+
+export function MovieAppearanceGate({
+  from,
+  to,
+  crossAudience,
+  disabled,
+  onMatch,
+}: {
+  from: MapsSlide;
+  to: MapsSlide;
+  crossAudience: boolean;
+  disabled: boolean;
+  onMatch: () => void;
+}) {
+  const rows = morphGateList(from, to).filter((gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "layers") && !gate.ok);
+  if (!rows.length && !crossAudience) return null;
+  const showMatchButton = rows.some((gate) => gate.id === "layers");
+  return (
+    <div className="morph-gates warn" role="status" aria-label="Movie appearance mismatch">
+      <div className="morph-gates-head">
+        <span className="morph-mark bad" aria-hidden="true">
+          ✕
+        </span>
+        Movie appearance
+        <span className="morph-gates-state">Mismatch</span>
+      </div>
+      {rows.length > 0 && (
+        <ul className="morph-gate-list">
+          {rows.map((gate) => (
+            <li key={gate.id} className="morph-gate bad" title={gate.tip}>
+              <span className="morph-mark bad" aria-hidden="true">
+                ✕
+              </span>
+              <span className="morph-gate-label">
+                <span className="morph-sr">Fail: </span>
+                {gate.label}
+              </span>
+              <span className="morph-gate-detail">{gate.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="morph-gates-hint">
+        The fly renders entirely in the source shot's appearance, so these differences pop at the cut to the next
+        slide. Style or highlight mismatches are not auto-copied — use "Reset hop" to re-suggest a hop kind instead.
+      </p>
+      {crossAudience && (
+        <p className="morph-gates-hint">The other audience also mismatches on this hop and must be fixed by switching audiences.</p>
+      )}
+      {showMatchButton && (
+        <button
+          type="button"
+          className="btn secondary"
+          disabled={disabled}
+          onClick={onMatch}
+          title={`Copy hidden layers and relief from "${to.title}" onto "${from.title}".`}
+        >
+          Match layers to destination
+        </button>
+      )}
     </div>
   );
 }
