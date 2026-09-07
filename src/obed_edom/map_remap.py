@@ -3777,6 +3777,12 @@ def _place_free_text(
     movable: set[tuple[str, int]] = analysis["free"]
     if not movable:
         return []
+    # Only role="list" moves: demoted lone map labels and hidden roster boxes stay
+    # put, and their pixels stay occupied (erase exactly what is about to move).
+    targets = [t for t in transforms if t.role == "list" and _spec_key(t) in movable]
+    if not targets:
+        return []
+    target_keys = {_spec_key(t) for t in targets}
     frame = analysis["frame"]
     bg = analysis["bg"]
     aff: Affine = analysis["affine"]
@@ -3786,7 +3792,7 @@ def _place_free_text(
     cy = frame.height / dest_h
     eraser = ImageDraw.Draw(frame)
     for item in slide.get("items") or []:
-        if (str(item.get("kind")), int(item.get("kindIndex") or 0)) not in movable:
+        if (str(item.get("kind")), int(item.get("kindIndex") or 0)) not in target_keys:
             continue
         rect = aff.apply_rect(item_rect(item))
         eraser.rectangle(
@@ -3794,9 +3800,6 @@ def _place_free_text(
         )
 
     space = occupancy_from_image(frame, slide_w=dest_w, slide_h=dest_h, bg=bg)
-    targets = [t for t in transforms if _spec_key(t) in movable]
-    if not targets:
-        return []
     targets.sort(key=lambda t: (-t.x, t.y))
     placed = place_boxes(space, [Box(t.x, t.y, t.w, t.h) for t in targets])
     report: list[dict[str, Any]] = []
@@ -4090,20 +4093,21 @@ def plan_payload_transforms(
             for it in (slide.get("items") or [])
             if id(it) in roster_ids
         )
+        slide_packs = slide_lists or slide_keeps_centre_roster
         planned = plan_slide_transforms(
             slide,
             slide_recipe,
             keep_side_panels=slide_lists,
-            pack_lists=slide_lists or slide_keeps_centre_roster,
+            pack_lists=slide_packs,
             drop_roster=drop_roster,
             wall_size=(wall_w, wall_h),
-            defer_list_packing=slide_lists and analysis is not None,
+            defer_list_packing=slide_packs and analysis is not None,
             child_resize_report=child_resize_report,
             badge_raise_report=badge_raise_report,
             card_stroke=card_stroke,
             card_grid_report=card_grid_report,
         )
-        if slide_lists and analysis is not None:
+        if slide_packs and analysis is not None:
             rows = _place_free_text(planned, slide, slide_recipe, analysis)
             if placement_report is not None:
                 placement_report.extend(rows)

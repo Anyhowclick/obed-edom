@@ -24,6 +24,7 @@ from obed_edom.map_remap import (
     learn_recipe,
     plan_payload_transforms,
     plan_slide_reuses,
+    roster_slides,
     score_against_gold,
     slides_for_plan,
     summarize_plan,
@@ -525,6 +526,28 @@ def _resolve_template_card_sample(card_samples: list[dict[str, Any]] | None) -> 
     return {"w": w, "h": h, "gutterX": pitch["gutterX"], "gutterY": pitch["gutterY"]}
 
 
+def preview_wanted_slides(
+    wall: dict[str, Any],
+    slide_range: Any,
+    *,
+    keep_side_panels: bool,
+    side_content_slides: set[int] | None,
+) -> list[int] | None:
+    """Slide numbers whose previews the plan will consume: whitelisted slides plus
+    roster-keep slides, which pack names from measured free space without the
+    whitelist. None means every slide; [] means none (skip preview resolution).
+    Decoding only the consumed slides keeps a full-wall run off the ~3.9 GB cost
+    of the whole preview set as RGB."""
+    plan_slides = slides_for_plan(slide_range)
+    if keep_side_panels:
+        return plan_slides
+    roster_keep, _roster_drop = roster_slides(wall.get("slides") or [])
+    packable = set(side_content_slides or ()) | roster_keep
+    if plan_slides is not None:
+        packable &= set(plan_slides)
+    return sorted(packable)
+
+
 def resolve_source_previews(
     source: Path,
     wall: dict[str, Any],
@@ -844,9 +867,15 @@ def remap_keynote(
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
-    if keep_side_panels or side_content_slides:
+    preview_wanted = preview_wanted_slides(
+        wall,
+        slide_range,
+        keep_side_panels=keep_side_panels,
+        side_content_slides=side_content_slides,
+    )
+    if preview_wanted is None or preview_wanted:
         previews, preview_note = resolve_source_previews(
-            source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
+            source, wall, folder=source_previews, wanted=preview_wanted
         )
     placements: list[dict[str, Any]] = []
     hidden: list[int] = []
