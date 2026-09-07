@@ -80,15 +80,15 @@ def test_validate_false_falls_back_when_not_folded(monkeypatch, tmp_path, export
 
 def test_validate_true_does_not_thread_export_dir(monkeypatch, tmp_path, export_dir):
     seen = _capture_remap(monkeypatch, exported=False)
-    # The read-back path exports through inspect_keynote; stub it out.
+    # The read-back path exports through the two-tier checker; stub it out.
     inspect_calls = {}
 
-    def fake_inspect(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
+    def fake_checker(dest, *, export_dir=None, slide_range=None, use_cache=None, **kwargs):
         inspect_calls["export_dir"] = export_dir
         inspect_calls["use_cache"] = use_cache
         return {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 1, "exported": True}
 
-    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(rk, "inspect_keynote_checker", fake_checker)
     export_calls = []
     monkeypatch.setattr(
         rk, "export_slide_images", lambda *a, **k: export_calls.append(a) or None
@@ -104,7 +104,7 @@ def test_validate_true_does_not_thread_export_dir(monkeypatch, tmp_path, export_
 
     # remap_keynote must not fold export on the validate=True path…
     assert seen["export_dir"] is None
-    # …the read-back inspect handles the export instead, and no standalone export runs.
+    # …the read-back checker handles the export instead, and no standalone export runs.
     assert inspect_calls["export_dir"] == export_dir
     assert export_calls == []
     # …and the read-back must NOT cache: dest is a fresh output deck (unique digest every

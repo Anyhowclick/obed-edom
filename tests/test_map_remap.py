@@ -2609,6 +2609,168 @@ def test_dropped_roster_hides_centre_band_items_too():
     assert names2 and all(t.role == "hide" for t in names2)
 
 
+def _white_preview():
+    from PIL import Image
+
+    return Image.new("RGB", (768, 108), (255, 255, 255))
+
+
+def _map_and_swatch_template():
+    return {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 1,
+                "items": [
+                    _item(kind="image", fileName="pasted-image.pdf", x=11, y=18, w=1248, h=771),
+                    _item(kind="text", text="CHC Aaliana", x=39, y=527, w=101, h=26, size=20),
+                ],
+            }
+        ],
+    }
+
+
+def test_roster_keep_slide_gets_measured_placement_without_the_whitelist():
+    """pack-lists-gate-widen: a D5-kept centre roster reaches _place_free_text
+    (measured free space from the preview) with keep_side_panels off and no
+    side_content_slides whitelist. Before the widen, placement only ran on
+    whitelisted slides and a kept roster used the geometric packer alone."""
+    slide = _roster_slide(1)
+    slide["items"].insert(
+        0, _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771, kindIndex=0)
+    )
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, _map_and_swatch_template())
+    placements: list[dict] = []
+    plan_payload_transforms(
+        wall, recipe, previews={1: _white_preview()}, placement_report=placements
+    )
+    assert placements, "roster-keep slide skipped the measured placement path"
+    roster_keys = {("text", it["kindIndex"]) for it in slide["items"] if it["kind"] == "text"}
+    assert {(r["kind"], r["kindIndex"]) for r in placements} <= roster_keys
+    assert all(r["slide"] == 1 for r in placements)
+
+
+def test_measured_placement_never_moves_a_demoted_map_label():
+    """A lone church-name label demoted to role=other (map-label-classification
+    fix) sits on clear background and lands in the free-text analysis, but the
+    placement pass must leave it riding the map affine: only role=list moves."""
+    label = _item(kind="text", text="CHC Kuching", x=4200, y=300, w=235, h=52, size=40, kindIndex=40)
+    slide = _roster_slide(1, extra=label)
+    slide["items"].insert(
+        0, _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771, kindIndex=0)
+    )
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, _map_and_swatch_template())
+    placements: list[dict] = []
+    transforms = plan_payload_transforms(
+        wall, recipe, previews={1: _white_preview()}, placement_report=placements
+    )
+    assert placements  # the roster itself was measured-placed
+    assert all((r["kind"], r["kindIndex"]) != ("text", 40) for r in placements)
+    label_t = next(t for t in transforms if t.kind == "text" and t.kind_index == 40)
+    assert label_t.role not in {"list", "hide"}
+    # Still at the map affine's position (s=1, tx=11-3052), not re-packed.
+    assert abs(label_t.x - (4200 + 11 - 3052)) < 2
+
+
+def test_place_free_text_erases_and_moves_only_role_list():
+    """The occupancy eraser must clear exactly the boxes about to move: erasing a
+    demoted label's pixels would let packed text land on top of rendered text."""
+    from PIL import Image, ImageDraw
+
+    from obed_edom.map_remap import _place_free_text
+
+    frame = Image.new("RGB", (1920, 1080), (255, 255, 255))
+    draw = ImageDraw.Draw(frame)
+    draw.rectangle([600, 100, 800, 140], fill=(255, 0, 0))  # the demoted label's pixels
+    draw.rectangle([500, 500, 700, 540], fill=(0, 0, 255))  # the list box's own pixels
+    analysis = {
+        "frame": frame,
+        "bg": (255, 255, 255),
+        "affine": Affine(1.0, 0.0, 0.0),
+        "free": {("text", 0), ("text", 1)},
+        "dest": (1920.0, 1080.0),
+    }
+    slide = {
+        "items": [
+            _item(kind="text", text="CHC A", kindIndex=0, x=500, y=500, w=200, h=40),
+            _item(kind="text", text="CHC Kuching", kindIndex=1, x=600, y=100, w=200, h=40),
+        ]
+    }
+    specs = [
+        ItemTransform(1, 0, "text", 500, 500, 200, 40, role="list", kind_index=0),
+        ItemTransform(1, 1, "text", 600, 100, 200, 40, role="other", kind_index=1),
+    ]
+    rows = _place_free_text(specs, slide, {}, analysis)
+    assert [(r["kind"], r["kindIndex"]) for r in rows] == [("text", 0)]
+    assert (specs[1].x, specs[1].y) == (600.0, 100.0)
+    assert frame.getpixel((700, 120)) == (255, 0, 0)  # label pixels stay occupied
+    assert frame.getpixel((600, 520)) == (255, 255, 255)  # mover's old spot freed
+
+
+def test_label_swatch_tie_breaks_on_the_affine_it_rides():
+    """map-label-text-sizing: the Gold template palette carries two white
+    Amplitude-Bold swatches (40pt Malaysia tile, 35pt China tile). A colour tie
+    must resolve with the affine the text rides (translate-only map, s=1.0 ->
+    predicted 40), not the fixed 0.5 prior (predicted 20), which made the 35pt
+    swatch beat the 40pt one on every Gold slide-3/4 label."""
+    from obed_edom.map_remap import match_character_style
+
+    styles = [
+        {"font": "Amplitude-Bold", "size": 35.0, "text": "CHC Foshan"},
+        {"font": "Amplitude-Bold", "size": 40.0, "text": "CHC Kuching"},
+    ]
+    label = _item(kind="text", text="CHC Sitiawan", font="Amplitude-Bold", size=40, w=243, h=52)
+    assert match_character_style(label, styles, size_ratio=1.0)["size"] == 40.0
+    assert match_character_style(label, styles, size_ratio=0.5)["size"] == 35.0
+
+
+def test_demoted_label_takes_the_swatch_matching_its_ridden_affine():
+    """End to end through plan_slide_transforms: a demoted 40pt label on a
+    translate-only map recipe picks the 40pt swatch, not the 35pt one."""
+    label = _item(
+        kind="text", text="CHC Kuching", font="Amplitude-Bold", size=40,
+        x=4200, y=300, w=235, h=52, kindIndex=40,
+    )
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="image", fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771),
+            label,
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, _map_and_swatch_template())
+    recipe["characterStyles"] = [
+        {"font": "Amplitude-Bold", "size": 35.0, "text": "CHC Foshan"},
+        {"font": "Amplitude-Bold", "size": 40.0, "text": "CHC Kuching"},
+    ]
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    label_t = next(t for t in out if t.kind == "text" and t.kind_index == 40)
+    assert label_t.role == "other"
+    assert label_t.font_size == 40.0
+
+
+def test_preview_wanted_covers_roster_keep_slides_without_the_whitelist():
+    """resolve_source_previews is no longer gated on the whitelist, but only the
+    slides the plan will consume are decoded (a full preview set is ~3.9GB as
+    RGB). None = every slide; [] = skip resolution entirely."""
+    from obed_edom.remap_keynote import preview_wanted_slides
+
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [_roster_slide(2), {"number": 5, "items": []}],
+    }
+    assert preview_wanted_slides(wall, None, keep_side_panels=True, side_content_slides=None) is None
+    assert preview_wanted_slides(wall, None, keep_side_panels=False, side_content_slides={4}) == [2, 4]
+    assert preview_wanted_slides(wall, frozenset({4, 5}), keep_side_panels=False, side_content_slides={4}) == [4]
+    bare = {"slides": [{"number": 1, "items": []}]}
+    assert preview_wanted_slides(bare, None, keep_side_panels=False, side_content_slides=None) == []
+
+
 def test_off_screen_objects_are_hidden_not_left_alone():
     """An object wholly off the wall is pinned to zero opacity, not dropped from the
     plan. Changing the canvas to 16:9 scales every object Keynote still owns into
@@ -3246,6 +3408,11 @@ def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path,
         "inspect_keynote",
         lambda *a, **k: calls.append("inspect") or {"slides": []},
     )
+    monkeypatch.setattr(
+        remap_mod,
+        "inspect_keynote_checker",
+        lambda *a, **k: calls.append("checker") or {"slides": []},
+    )
 
     def fake_export(key_path, export_dir):
         calls.append("export")
@@ -3269,7 +3436,7 @@ def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path,
         tmp_path / "Wall.key", dest, template=tmp_path / "T.key",
         export_dir=previews, validate=True,
     )
-    assert calls == ["inspect"]
+    assert calls == ["checker"]
 
 
 def test_planned_rects_carry_the_wall_source_to_cut_from():

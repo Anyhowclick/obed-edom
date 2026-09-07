@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from obed_edom import keynote_app, offline_write
-from obed_edom.inspect import export_slide_images, inspect_keynote, preview_pngs
+from obed_edom.inspect import (
+    LegacyInspectFailed,
+    export_slide_images,
+    inspect_keynote,
+    inspect_keynote_checker,
+    preview_pngs,
+)
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
     adjust_child_resize_indexes,
@@ -24,6 +30,7 @@ from obed_edom.map_remap import (
     learn_recipe,
     plan_payload_transforms,
     plan_slide_reuses,
+    roster_slides,
     score_against_gold,
     slides_for_plan,
     summarize_plan,
@@ -525,6 +532,28 @@ def _resolve_template_card_sample(card_samples: list[dict[str, Any]] | None) -> 
     return {"w": w, "h": h, "gutterX": pitch["gutterX"], "gutterY": pitch["gutterY"]}
 
 
+def preview_wanted_slides(
+    wall: dict[str, Any],
+    slide_range: Any,
+    *,
+    keep_side_panels: bool,
+    side_content_slides: set[int] | None,
+) -> list[int] | None:
+    """Slide numbers whose previews the plan will consume: whitelisted slides plus
+    roster-keep slides, which pack names from measured free space without the
+    whitelist. None means every slide; [] means none (skip preview resolution).
+    Decoding only the consumed slides keeps a full-wall run off the ~3.9 GB cost
+    of the whole preview set as RGB."""
+    plan_slides = slides_for_plan(slide_range)
+    if keep_side_panels:
+        return plan_slides
+    roster_keep, _roster_drop = roster_slides(wall.get("slides") or [])
+    packable = set(side_content_slides or ()) | roster_keep
+    if plan_slides is not None:
+        packable &= set(plan_slides)
+    return sorted(packable)
+
+
 def resolve_source_previews(
     source: Path,
     wall: dict[str, Any],
@@ -844,9 +873,15 @@ def remap_keynote(
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
     preview_note = ""
-    if keep_side_panels or side_content_slides:
+    preview_wanted = preview_wanted_slides(
+        wall,
+        slide_range,
+        keep_side_panels=keep_side_panels,
+        side_content_slides=side_content_slides,
+    )
+    if preview_wanted is None or preview_wanted:
         previews, preview_note = resolve_source_previews(
-            source, wall, folder=source_previews, wanted=slides_for_plan(slide_range)
+            source, wall, folder=source_previews, wanted=preview_wanted
         )
     placements: list[dict[str, Any]] = []
     hidden: list[int] = []
@@ -1012,7 +1047,7 @@ def remap_keynote(
             f"Roster kept on slide(s) {kept}, dropped on {dropped} "
             "(a wall leftover behind newer content)."
         )
-    if keep_side_panels and recipe.get("listFontSize"):
+    if recipe.get("listFontSize") and (keep_side_panels or placements):
         if placements:
             crowded = [row for row in placements if row.get("overlap")]
             detail = f"{len(placements)} moved into empty space"
@@ -1347,6 +1382,46 @@ def remap_keynote(
     return result
 
 
+def _readback_payload(
+    dest: Path,
+    export_dir: Path | str | None,
+    slide_range: tuple[int, int] | frozenset[int] | None,
+    log: Callable[[str], None] | None,
+    *,
+    offline_read: str | None = None,
+    force_legacy: bool = False,
+) -> dict[str, Any]:
+    """Validated resize readback: two-tier offline+bulk, fail-safe to legacy JXA, cache off.
+
+    `force_legacy` is set when the just-applied offline-write ran in ``verify`` mode:
+    `verify_live_frames` exists as an INDEPENDENT oracle beside `verify_offline_frames`, and
+    a two-tier readback would self-confirm the `shape`/`line` frames the surgical float patch
+    just wrote (their geometry never rides the bulk tier, see `offline_inspect.BULK_KINDS`).
+    """
+    if force_legacy:
+        if log:
+            log("Offline-write verify is on; reading the deck back with Keynote inspect so "
+                "the live-frame check stays an independent oracle.")
+        return inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range, use_cache=False)
+    if offline_read_mode(offline_read) == "off":
+        return inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range, use_cache=False)
+    if dest.is_dir():
+        if log:
+            log(f"{dest.name} was saved as a package directory; offline read unavailable -- "
+                "using Keynote inspect.")
+        return inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range, use_cache=False)
+    try:
+        return inspect_keynote_checker(
+            dest, export_dir=export_dir, slide_range=slide_range, use_cache=False, log=log
+        )
+    except LegacyInspectFailed:
+        raise  # legacy already ran and failed inside the checker; today's behaviour is to raise
+    except Exception as exc:  # noqa: BLE001 — fail-safe, matches acquire_wall_payload
+        if log:
+            log(f"Two-tier readback failed ({type(exc).__name__}: {exc}); using Keynote inspect.")
+    return inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range, use_cache=False)
+
+
 def remap_and_inspect(
     source: Path | str,
     dest: Path | str,
@@ -1362,6 +1437,7 @@ def remap_and_inspect(
     template_payload: dict[str, Any] | None = None,
     validate: bool = True,
     plan_out: dict[str, Any] | None = None,
+    offline_read: str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     info = remap_keynote(
@@ -1377,6 +1453,7 @@ def remap_and_inspect(
         template_payload=template_payload,
         plan_out=plan_out,
         export_dir=export_dir if not validate else None,
+        offline_read=offline_read,
         log=log,
     )
     if not validate:
@@ -1392,8 +1469,14 @@ def remap_and_inspect(
         return info
     if log:
         log("Inspecting remapped deck…")
-    payload = inspect_keynote(
-        dest, export_dir=export_dir, slide_range=slide_range, use_cache=False
+    ow = info.get("offlineWrite")
+    payload = _readback_payload(
+        Path(dest),
+        export_dir,
+        slide_range,
+        log,
+        offline_read=offline_read,
+        force_legacy=bool(ow and ow.get("mode") == "verify"),
     )
     info["inspect"] = {
         "slideWidth": payload.get("slideWidth"),
@@ -1403,7 +1486,6 @@ def remap_and_inspect(
         "exportError": payload.get("exportError") or "",
     }
     info["payload"] = payload
-    ow = info.get("offlineWrite")
     if ow and ow.get("mode") == "verify":
         planned = {int(n): specs for n, specs in (ow.get("specs") or {}).items()}
         stat_slides = frozenset(ow.get("statSlides") or [])
