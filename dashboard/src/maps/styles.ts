@@ -1,5 +1,6 @@
 import type { StyleSpecification } from "maplibre-gl";
 import type { MapsStyleId } from "./types";
+import { proxyOpenFreeMapUrl } from "./tileProxy";
 
 export const OPENFREEMAP_STYLES: Record<MapsStyleId, string> = {
   positron: "https://tiles.openfreemap.org/styles/positron",
@@ -26,7 +27,7 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpec
   const url = OPENFREEMAP_STYLES[styleId];
   let pending = styleCache.get(url);
   if (!pending) {
-    pending = fetch(url)
+    pending = fetch(proxyOpenFreeMapUrl(url))
       .then((res) => {
         if (!res.ok) throw new Error(`OpenFreeMap style ${styleId} failed (${res.status})`);
         return res.json() as Promise<StyleSpecification>;
@@ -39,7 +40,7 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpec
               return;
             }
             try {
-              const tilejson = (await (await fetch(source.url)).json()) as {
+              const tilejson = (await (await fetch(proxyOpenFreeMapUrl(source.url))).json()) as {
                 tiles?: string[];
                 minzoom?: number;
                 maxzoom?: number;

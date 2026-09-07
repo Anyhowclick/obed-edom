@@ -336,6 +336,8 @@ export type MapsExportPlan = {
     style: string;
     camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
     highlights: string[];
+    width?: number;
+    height?: number;
   }>;
   plates: Array<{
     plateId: string;
@@ -377,6 +379,22 @@ export async function postMapsFrame(
   const res = await fetch(`/api/maps/${id}/frame?${params.toString()}`, {
     method: "POST",
     body: blob,
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function prefetchMapsTiles(body: {
+  countries?: string[];
+  cameras?: Array<{ lat: number; lon: number; zoom: number; bearing?: number; pitch?: number }>;
+  maxzoom?: number;
+  width?: number;
+  height?: number;
+}): Promise<{ ok: boolean; tiles: number; cached: number; fetched: number; failed: number }> {
+  const res = await fetch("/api/maps/tile-cache/prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

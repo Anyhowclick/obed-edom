@@ -109,6 +109,94 @@ def test_easing_stripped_unless_movie():
     assert "easing" not in links[0]
 
 
+def test_fly_opts_stripped_unless_movie():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["camera"] = {**slide["camera"], "zoom": slide["camera"]["zoom"]}
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "morph",
+            "duration": 1.2,
+            "playWithoutClick": False,
+            "easeIn": 0.4,
+            "easeOut": 0.4,
+            "flyZoom": 5.0,
+        }
+    ]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    links = saved.json()["result"]["links"]
+    assert "easeIn" not in links[0]
+    assert "easeOut" not in links[0]
+    assert "flyZoom" not in links[0]
+
+
+def test_movie_fly_opts_roundtrip():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["camera"] = {**slide["camera"], "pitch": 40}
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 2.0,
+            "playWithoutClick": False,
+            "easing": "ease-in-out",
+            "easeIn": 0.6,
+            "easeOut": 0.5,
+            "flyZoom": 6.2,
+        }
+    ]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    link = saved.json()["result"]["links"][0]
+    assert link["kind"] == "movie"
+    assert link["easeIn"] == 0.6
+    assert link["easeOut"] == 0.5
+    assert link["flyZoom"] == 6.2
+
+
+def test_dissolve_roundtrip():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["style"] = "dark"
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "dissolve",
+            "duration": 0.8,
+            "playWithoutClick": True,
+            "easing": "ease-in-out",
+        }
+    ]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    link = saved.json()["result"]["links"][0]
+    assert link["kind"] == "dissolve"
+    assert link["duration"] == 0.8
+    assert link["playWithoutClick"] is True
+    assert "easing" not in link
+
+
 def test_route_roundtrip_and_rejects_extra_keys():
     job = _seed()
     doc = _doc(job)
@@ -317,8 +405,66 @@ def test_export_plan_small_morph_has_plate_camera():
     assert payload["stills"] == []
     assert len(payload["plates"]) == 1
     plate = payload["plates"][0]
-    assert plate["plateW"] >= 7680
+    assert plate["plateW"] >= 3840
     assert plate["plateH"] >= 1080
     assert plate["camera"]["bearing"] == 0
     assert plate["camera"]["pitch"] == 0
     assert set(plate["camera"]) >= {"lat", "lon", "zoom", "bearing", "pitch"}
+
+
+def test_include_side_panels_and_cached_countries_roundtrip():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    slide["includeSidePanels"] = True
+    doc["slides"] = [slide]
+    doc["cachedCountries"] = ["phl", "ind"]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["slides"][0]["includeSidePanels"] is True
+    assert result["cachedCountries"] == ["PHL", "IND"]
+    plan = client.get(f"/api/maps/{job['id']}/export-plan")
+    assert plan.status_code == 200, plan.text
+    still = plan.json()["stills"][0]
+    assert still["width"] == 7680
+    assert still["height"] == 1080
+
+
+def test_export_plan_default_still_is_lw():
+    job = _seed()
+    plan = client.get(f"/api/maps/{job['id']}/export-plan")
+    assert plan.status_code == 200, plan.text
+    still = plan.json()["stills"][0]
+    assert still["width"] == 3840
+    assert still["height"] == 1080
+
+
+def test_tile_cache_countries_pins_series_first():
+    res = client.get("/api/maps/tiles/countries")
+    assert res.status_code == 200, res.text
+    codes = [row["code"] for row in res.json()]
+    assert codes[:4] == ["PHL", "IND", "IDN", "MYS"]
+
+
+def test_tile_proxy_and_prefetch_use_disk_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.fetch_upstream", lambda rel: b"pbf-bytes")
+    tile = client.get("/api/maps/tiles/planet/0/0/0.pbf")
+    assert tile.status_code == 200, tile.text
+    assert tile.content == b"pbf-bytes"
+    cached = client.get("/api/maps/tiles/planet/0/0/0.pbf")
+    assert cached.content == b"pbf-bytes"
+    prefetch = client.post(
+        "/api/maps/tile-cache/prefetch",
+        json={
+            "cameras": [{"lat": 3.0, "lon": 101.0, "zoom": 4, "bearing": 0, "pitch": 0}],
+            "width": 3840,
+            "height": 1080,
+            "maxzoom": 4,
+        },
+    )
+    assert prefetch.status_code == 200, prefetch.text
+    body = prefetch.json()
+    assert body["ok"] is True
+    assert body["tiles"] > 0

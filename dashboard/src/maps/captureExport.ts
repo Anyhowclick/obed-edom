@@ -4,7 +4,8 @@ import { applyLayerFilters } from "./layers";
 import { ensureAdmin0Highlights, ensureLowZoomRaster } from "./overlays";
 import { stampOsm } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
-import { DEFAULT_HIDDEN_LAYERS, type MapsCamera, type MapsLayerFilterId, type MapsStyleId } from "./types";
+import { mapsTransformRequest } from "./tileProxy";
+import { DEFAULT_HIDDEN_LAYERS, WORLD_MIN_ZOOM, type MapsCamera, type MapsLayerFilterId, type MapsStyleId } from "./types";
 
 const HARD_CAP = 8192;
 
@@ -17,17 +18,20 @@ function maxTextureSize(): number {
   return max;
 }
 
-export function waitEvent(map: MapLibreMap, name: "load" | "idle"): Promise<void> {
+export function waitEvent(map: MapLibreMap, name: "load" | "idle", timeoutMs = 45000): Promise<void> {
   return new Promise((resolve, reject) => {
-    const onError = (event: { error?: { message?: string } }) => {
+    const timer = setTimeout(() => {
       map.off(name, onReady);
-      reject(new Error(event.error?.message || "MapLibre export map failed"));
-    };
+      if (name === "idle" && map.areTilesLoaded()) {
+        resolve();
+        return;
+      }
+      reject(new Error(`MapLibre export map ${name} timed out.`));
+    }, timeoutMs);
     const onReady = () => {
-      map.off("error", onError);
+      clearTimeout(timer);
       resolve();
     };
-    map.once("error", onError);
     map.once(name, onReady);
   });
 }
@@ -59,12 +63,14 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     zoom: camera.zoom,
     bearing: camera.bearing,
     pitch: camera.pitch,
-    renderWorldCopies: false,
+    renderWorldCopies: true,
+    minZoom: WORLD_MIN_ZOOM,
     attributionControl: false,
     fadeDuration: 0,
     pixelRatio: 1,
     maxCanvasSize: [cap, cap],
     interactive: false,
+    transformRequest: (url) => mapsTransformRequest(url),
     canvasContextAttributes: { preserveDrawingBuffer: true },
   });
   try {

@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
-from obed_edom.maps_geo import clamp_cg_shift, world_width
+from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, world_width
 from obed_edom.maps_keynote import (
     MAP_BG_RE,
     PANEL_EDGES,
@@ -151,8 +151,8 @@ def test_cg_shift_clamp_used():
         wall=False,
     )
     mapped = next(item for item in items if item.get("map"))
-    assert mapped["x"] == whole_wall_to_cg(0, origin[0])
-    assert mapped["w"] == WALL_WIDTH
+    assert mapped["x"] == whole_wall_to_cg(CENTRE_ORIGIN_X, origin[0])
+    assert mapped["w"] == CENTRE_WIDTH
 
 
 def whole_wall_to_cg(wall_x: float, origin_x: float) -> int:
@@ -330,10 +330,32 @@ def test_stale_plate_id_stripped_on_cut():
     assert "plateId" not in next_links[0]
 
 
+def test_plan_deck_dissolve_writes_keynote_duration(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0, 8), style="positron")
+    b = _slide("s2", _camera(3.0, 102.0, 8), style="dark")
+    links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 0.8, "playWithoutClick": True}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 0.8, "automatic": True}
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert "transition effect:dissolve" in script
+    assert "transition duration:0.8" in script
+    assert "automatic transition:true" in script
+
+
+def test_coerce_keeps_dissolve_on_style_mismatch():
+    a = _slide("s1", _camera(3.0, 101.0, 8), style="positron")
+    b = _slide("s2", _camera(3.0, 102.0, 8), style="dark")
+    links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 0.8, "playWithoutClick": False}]
+    next_links = coerce_link_kinds([a, b], links)
+    assert next_links[0]["kind"] == "dissolve"
+
+
 def test_oversized_morph_becomes_movie():
     cam_a, cam_b = _pan_camera(8, 800)
-    a = _slide("s1", cam_a)
-    b = _slide("s2", cam_b)
+    a = _slide("s1", cam_a, includeSidePanels=True)
+    b = _slide("s2", cam_b, includeSidePanels=True)
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
     geom = morph_plate_geom([a["camera"], b["camera"]])
     assert geom is not None
@@ -388,7 +410,7 @@ def test_plan_deck_uses_backdrop_movie_when_present(tmp_path: Path):
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     item = ops[0]["items"][0]
     assert item["kind"] == "movie"
-    assert (item["x"], item["y"], item["w"], item["h"]) == (0, 0, WALL_WIDTH, WALL_HEIGHT)
+    assert (item["x"], item["y"], item["w"], item["h"]) == (CENTRE_ORIGIN_X, 0, CENTRE_WIDTH, WALL_HEIGHT)
     assert item["map"] is True
     assert ops[0]["transition"] == {"effect": None, "duration": 1.0, "automatic": True, "delay": 2.5}
 
@@ -402,7 +424,8 @@ def test_plan_deck_backdrop_movie_cg_shift(tmp_path: Path):
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=False)
     item = ops[0]["items"][0]
     origin = cg_crop_origin(a)
-    assert item["x"] == whole_wall_to_cg(0, origin[0])
+    assert item["x"] == whole_wall_to_cg(CENTRE_ORIGIN_X, origin[0])
+    assert item["w"] == CENTRE_WIDTH
 
 
 def test_plan_deck_backdrop_movie_missing_file_falls_back_to_still(tmp_path: Path):
@@ -455,11 +478,17 @@ def test_coerce_movie_to_cut_on_style_mismatch():
             "duration": 1.2,
             "playWithoutClick": False,
             "easing": "ease-in-out",
+            "easeIn": 0.4,
+            "easeOut": 0.3,
+            "flyZoom": 5.0,
         }
     ]
     next_links = coerce_link_kinds([a, b], links)
     assert next_links[0]["kind"] == "cut"
     assert "easing" not in next_links[0]
+    assert "easeIn" not in next_links[0]
+    assert "easeOut" not in next_links[0]
+    assert "flyZoom" not in next_links[0]
 
 
 def test_plan_deck_movie_slide_omits_churches(tmp_path: Path):
@@ -525,3 +554,25 @@ def test_build_deck_script_movie_backdrop_has_delay(tmp_path: Path):
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     assert "make new movie" in script
     assert "transition delay:2.5" in script
+
+
+def test_lw_still_sits_on_centre_wall(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0))
+    still = tmp_path / "s1.png"
+    still.write_bytes(b"\x89PNG\r\n\x1a\n")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    mapped = next(item for item in items if item.get("map"))
+    assert mapped["x"] == CENTRE_ORIGIN_X
+    assert mapped["w"] == CENTRE_WIDTH
+    assert mapped["h"] == WALL_HEIGHT
+
+
+def test_fw_still_fills_wall(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), includeSidePanels=True)
+    still = tmp_path / "s1.png"
+    still.write_bytes(b"\x89PNG\r\n\x1a\n")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    mapped = next(item for item in items if item.get("map"))
+    assert mapped["x"] == 0
+    assert mapped["w"] == WALL_WIDTH
+    assert mapped["h"] == WALL_HEIGHT

@@ -19,6 +19,8 @@ from PIL import Image
 
 from obed_edom import keynote_app
 from obed_edom.maps_geo import (
+    CENTRE_ORIGIN_X,
+    CENTRE_WIDTH,
     WALL_HEIGHT,
     WALL_WIDTH,
     camera_dict,
@@ -100,6 +102,21 @@ def cg_crop_origin(slide: dict[str, Any]) -> tuple[float, float]:
     return (CG_ORIGIN_X + dx, 0.0)
 
 
+def slide_includes_side_panels(slide: dict[str, Any]) -> bool:
+    return bool(slide.get("includeSidePanels"))
+
+
+def slide_capture_size(slide: dict[str, Any]) -> tuple[int, int]:
+    """Raster size for this slide. Off (default) is the 3840×1080 LED centre."""
+    if slide_includes_side_panels(slide):
+        return int(WALL_WIDTH), int(WALL_HEIGHT)
+    return int(CENTRE_WIDTH), int(WALL_HEIGHT)
+
+
+def slide_map_origin_x(slide: dict[str, Any]) -> int:
+    return 0 if slide_includes_side_panels(slide) else int(CENTRE_ORIGIN_X)
+
+
 def normalized_viewport(
     camera: dict[str, Any],
     width: float = WALL_WIDTH,
@@ -133,11 +150,21 @@ def morph_plate_geom(
     *,
     width: float = WALL_WIDTH,
     height: float = WALL_HEIGHT,
+    widths: list[float] | None = None,
 ) -> dict[str, Any] | None:
     """Union mercator viewports; one raster at the deeper zoom. None if too large."""
     if not cameras:
         return None
-    union = union_viewports(cameras, width, height)
+    canvas = list(widths) if widths is not None else [width] * len(cameras)
+    if len(canvas) != len(cameras):
+        canvas = [width] * len(cameras)
+    boxes = [normalized_viewport(cam, w, height) for cam, w in zip(cameras, canvas)]
+    union = (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
     z_plate = max(float(cam.get("zoom") or 0) for cam in cameras)
     world = world_width(z_plate)
     plate_w = (union[2] - union[0]) * world
@@ -152,16 +179,22 @@ def morph_plate_geom(
         "zPlate": z_plate,
         "plateW": plate_w,
         "plateH": plate_h,
-        "width": float(width),
+        "width": float(max(canvas) if canvas else width),
         "height": float(height),
         "captureCamera": capture,
     }
 
 
-def plate_placement(camera: dict[str, Any], plate: dict[str, Any]) -> dict[str, int]:
-    """Place the shared plate so this camera is full-bleed on the wall."""
-    width = float(plate.get("width") or WALL_WIDTH)
-    height = float(plate.get("height") or WALL_HEIGHT)
+def plate_placement(
+    camera: dict[str, Any],
+    plate: dict[str, Any],
+    *,
+    width: float | None = None,
+    height: float | None = None,
+) -> dict[str, int]:
+    """Place the shared plate so this camera is full-bleed on its capture canvas."""
+    width = float(width if width is not None else plate.get("width") or WALL_WIDTH)
+    height = float(height if height is not None else plate.get("height") or WALL_HEIGHT)
     union = plate["union"]
     z_plate = float(plate["zPlate"])
     world = world_width(z_plate)
@@ -278,6 +311,9 @@ def coerce_link_kinds(slides: list[dict[str, Any]], links: list[dict[str, Any]])
         if str(item.get("kind") or "") != "movie":
             item.pop("easing", None)
             item.pop("route", None)
+            item.pop("easeIn", None)
+            item.pop("easeOut", None)
+            item.pop("flyZoom", None)
         next_links.append(item)
     return next_links
 
@@ -296,7 +332,8 @@ def assign_morph_plates(
     movie_pairs: set[tuple[str, str]] = set()
     for run in morph_runs(slides, links):
         cameras = [(by_id[sid].get("camera") or {}) for sid in run if sid in by_id]
-        geom = morph_plate_geom(cameras, width=width, height=height)
+        widths = [float(slide_capture_size(by_id[sid])[0]) for sid in run if sid in by_id]
+        geom = morph_plate_geom(cameras, width=width, height=height, widths=widths)
         hops = [(run[index], run[index + 1]) for index in range(len(run) - 1)]
         too_big = geom is None or max(float(geom["plateW"]), float(geom["plateH"])) > MAX_TEXTURE_SIZE
         if too_big:
@@ -340,12 +377,15 @@ def maps_export_plan(
         sid = str(slide.get("id") or "")
         if not sid or sid in covered:
             continue
+        cap_w, cap_h = slide_capture_size(slide)
         stills.append(
             {
                 "slideId": sid,
                 "style": slide.get("style") or "positron",
                 "camera": slide.get("camera") or {},
                 "highlights": list(slide.get("highlights") or []),
+                "width": cap_w,
+                "height": cap_h,
             }
         )
     plate_list: list[dict[str, Any]] = []
@@ -448,6 +488,8 @@ def _place_churches(
     camera: dict[str, Any],
     wall: bool,
     movie: Path | None,
+    origin_x: float = 0,
+    capture_w: float = WALL_WIDTH,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for church in churches:
@@ -456,7 +498,8 @@ def _place_churches(
         if plate is not None and placement is not None:
             cx, cy = project_into_plate(lat, lon, plate, placement)
         else:
-            cx, cy = project_into_camera(lat, lon, camera)
+            cx, cy = project_into_camera(lat, lon, camera, width=capture_w)
+        cx += origin_x
         size = _pin_size(church, movie)
         x = cx - size / 2.0
         y = cy - size / 2.0
@@ -495,14 +538,16 @@ def _map_item(
     bg_movie: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, int] | None]:
     camera = slide.get("camera") or {}
+    cap_w, cap_h = slide_capture_size(slide)
+    ox = slide_map_origin_x(slide)
     if bg_movie is not None:
-        return _item("movie", 0, 0, WALL_WIDTH, WALL_HEIGHT, path=str(bg_movie), map=True), None
+        return _item("movie", ox, 0, cap_w, cap_h, path=str(bg_movie), map=True), None
     if plate is not None and plate_path is not None:
-        geom = plate_placement(camera, plate)
-        return _item("image", geom["x"], geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True), geom
+        geom = plate_placement(camera, plate, width=cap_w, height=cap_h)
+        return _item("image", geom["x"] + ox, geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True), geom
     if still is None:
         raise FileNotFoundError("Missing export still for a non-morph slide")
-    return _item("image", 0, 0, WALL_WIDTH, WALL_HEIGHT, path=str(still), map=True), None
+    return _item("image", ox, 0, cap_w, cap_h, path=str(still), map=True), None
 
 
 def _to_cg(items: list[dict[str, Any]], origin: tuple[float, float]) -> list[dict[str, Any]]:
@@ -528,6 +573,8 @@ def build_slide_items(
 ) -> list[dict[str, Any]]:
     mapped, placement = _map_item(slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie)
     items = [mapped]
+    cap_w, _cap_h = slide_capture_size(slide)
+    origin_x = slide_map_origin_x(slide)
     if bg_movie is None:
         items.extend(
             _place_churches(
@@ -537,6 +584,8 @@ def build_slide_items(
                 camera=slide.get("camera") or {},
                 wall=wall,
                 movie=movie,
+                origin_x=origin_x,
+                capture_w=cap_w,
             )
         )
     if not wall:
@@ -561,6 +610,8 @@ def _transition_for(
     if bg_movie:
         delay = float((slide or {}).get("movieDuration") or duration)
         return {"effect": None, "duration": duration, "automatic": True, "delay": delay}
+    if kind == "dissolve":
+        return {"effect": "dissolve", "duration": duration, "automatic": automatic}
     if automatic:
         return {"effect": None, "duration": duration, "automatic": True}
     return None
@@ -730,8 +781,11 @@ def _emit_transition(slide_no: int, trans: dict[str, Any] | None) -> list[str]:
     """Always write a transition. Duplicate inherits Magic Move; None must clear it."""
     trans = trans or {}
     props: list[str] = []
-    if trans.get("effect") == "magic_move":
+    effect = trans.get("effect")
+    if effect == "magic_move":
         props.append("transition effect:magic move")
+    elif effect == "dissolve":
+        props.append("transition effect:dissolve")
     else:
         props.append("transition effect:none")
     if trans.get("duration") is not None:

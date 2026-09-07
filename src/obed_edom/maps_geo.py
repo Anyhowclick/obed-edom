@@ -29,6 +29,8 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 TILE_SIZE = 512
 WALL_WIDTH = 7680
 WALL_HEIGHT = 1080
+CENTRE_WIDTH = 3840
+CENTRE_ORIGIN_X = 1920
 WORLD_MIN_ZOOM = math.log2(WALL_WIDTH / TILE_SIZE)
 MAX_LAT = 85.051129
 DEFAULT_POINT_ZOOM = 8
@@ -82,7 +84,7 @@ def clamp_lon(lon: float) -> float:
 
 
 def clamp_zoom(zoom: float) -> float:
-    return max(0.0, min(22.0, float(zoom)))
+    return max(WORLD_MIN_ZOOM, min(22.0, float(zoom)))
 
 
 def world_width(zoom: float) -> float:
@@ -131,7 +133,8 @@ def camera_from_bbox(
         z_height = WORLD_MIN_ZOOM
     else:
         z_height = math.log2(height / (TILE_SIZE * span))
-    # Height-contain, but never zoom below WORLD_MIN_ZOOM (no world wrap).
+    # Height-contain, but never zoom below WORLD_MIN_ZOOM. The wall is 7680px;
+    # below that zoom a wrapped world tiles and pins/highlights repeat.
     zoom = max(z_height, WORLD_MIN_ZOOM)
     lon = clamp_lon((west + east) / 2.0)
     lat = inverse_mercator_y((mercator_y(north) + mercator_y(south)) / 2.0)

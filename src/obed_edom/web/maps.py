@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from obed_edom.maps_geo import (
@@ -25,6 +25,17 @@ from obed_edom.maps_geo import (
     sea_overview_camera,
 )
 from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_filename
+from obed_edom.maps_tiles import (
+    DEFAULT_CAMERA_MAXZOOM,
+    DEFAULT_COUNTRY_MAXZOOM,
+    cache_country_rows,
+    fetch_and_cache,
+    media_type_for,
+    normalize_rel,
+    prefetch_rels,
+    rels_for_cameras,
+    rels_for_countries,
+)
 from obed_edom.paths import output_root
 
 router = APIRouter(prefix="/api/maps", tags=["maps"])
@@ -36,7 +47,7 @@ MapsCropId = Literal["wall", "center+cg"]
 MapsLayerFilterId = Literal[
     "roads", "roadnames", "shields", "pois", "rail", "buildings", "labels", "boundaries"
 ]
-MapsHopKind = Literal["morph", "movie", "cut"]
+MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
 MapsPinKind = Literal["dot", "dropPin"]
 MapsIconId = Literal["none", "building", "cross"]
 MapsEasing = Literal["ease-in-out", "linear", "ease-in", "ease-out"]
@@ -82,6 +93,14 @@ class MapsSlide(BaseModel):
     movieDuration: float | None = None
     cgShiftX: float = 0
     cgShiftY: float = 0
+    includeSidePanels: bool = False
+
+    @field_validator("includeSidePanels", mode="before")
+    @classmethod
+    def _side_panels(cls, value: object) -> object:
+        if value is None:
+            return False
+        return value
 
     @model_validator(mode="after")
     def _clamp_shift(self) -> MapsSlide:
@@ -112,18 +131,22 @@ class MapsLink(BaseModel):
     easing: MapsEasing | None = None
     plateId: str | None = None
     route: MapsRoute | None = None
+    easeIn: float | None = None
+    easeOut: float | None = None
+    flyZoom: float | None = None
 
     def dumped(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True)
+        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom")
         if data.get("kind") != "movie":
-            data.pop("easing", None)
-            data.pop("route", None)
-        elif data.get("easing") is None:
-            data.pop("easing", None)
+            for key in movie_only:
+                data.pop(key, None)
+        else:
+            for key in movie_only:
+                if data.get(key) is None:
+                    data.pop(key, None)
         if data.get("plateId") is None:
             data.pop("plateId", None)
-        if data.get("route") is None:
-            data.pop("route", None)
         return data
 
 
@@ -134,6 +157,7 @@ class MapsDocument(BaseModel):
     exportLw: bool = True
     exportCg: bool = True
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: ["roadnames"])
+    cachedCountries: list[str] = Field(default_factory=list)
 
     @field_validator("hiddenLayers", mode="before")
     @classmethod
@@ -141,6 +165,23 @@ class MapsDocument(BaseModel):
         if value is None:
             return ["roadnames"]
         return value
+
+    @field_validator("cachedCountries", mode="before")
+    @classmethod
+    def _cached_countries(cls, value: object) -> object:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            code = str(item or "").strip().upper()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            out.append(code)
+        return out
     slides: list[MapsSlide]
     links: list[MapsLink]
 
@@ -154,6 +195,15 @@ class MapsDocument(BaseModel):
         if not self.exportLw and not self.exportCg:
             raise ValueError("At least one of exportLw or exportCg must be on")
         return self
+
+
+class TilePrefetchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    countries: list[str] = Field(default_factory=list)
+    cameras: list[MapsCamera] = Field(default_factory=list)
+    maxzoom: int | None = None
+    width: float = 7680
+    height: float = 1080
 
 
 class ExportBody(BaseModel):
@@ -189,6 +239,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "exportLw": doc.exportLw,
         "exportCg": doc.exportCg,
         "hiddenLayers": list(doc.hiddenLayers),
+        "cachedCountries": list(doc.cachedCountries),
         "slides": [slide.model_dump() for slide in doc.slides],
         "links": [link.dumped() for link in doc.links],
     }
@@ -196,7 +247,16 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
 
 def _parse_document(payload: dict[str, Any]) -> MapsDocument:
     cleaned = {key: value for key, value in payload.items() if key not in DIR_KEYS}
-    keep = ("defaultStyle", "crop", "exportLw", "exportCg", "hiddenLayers", "slides", "links")
+    keep = (
+        "defaultStyle",
+        "crop",
+        "exportLw",
+        "exportCg",
+        "hiddenLayers",
+        "cachedCountries",
+        "slides",
+        "links",
+    )
     body = {key: cleaned[key] for key in keep if key in cleaned}
     try:
         return MapsDocument.model_validate(body)
@@ -224,6 +284,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "defaultStyle": "positron",
         "crop": "center+cg",
         "hiddenLayers": ["roadnames"],
+        "cachedCountries": [],
         "slides": [
             {
                 "id": "s1",
@@ -348,13 +409,65 @@ def create_maps() -> dict:
     return _runner().public_dict(job)
 
 
+@router.get("/tiles/countries")
+def tile_cache_countries() -> list[dict[str, str]]:
+    return cache_country_rows()
+
+
+@router.get("/tiles/{rest:path}")
+def get_cached_tile(rest: str):
+    try:
+        rel = normalize_rel(rest)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid tile path") from exc
+    try:
+        path = fetch_and_cache(rel)
+    except Exception as exc:
+        raise HTTPException(502, f"Tile fetch failed: {exc}") from exc
+    return FileResponse(
+        path,
+        media_type=media_type_for(rel),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.post("/tile-cache/prefetch")
+def prefetch_tiles(payload: TilePrefetchBody) -> dict[str, Any]:
+    rels: list[str] = []
+    if payload.countries:
+        z = DEFAULT_COUNTRY_MAXZOOM if payload.maxzoom is None else int(payload.maxzoom)
+        rels.extend(rels_for_countries(payload.countries, maxzoom=z))
+    if payload.cameras:
+        z = DEFAULT_CAMERA_MAXZOOM if payload.maxzoom is None else int(payload.maxzoom)
+        rels.extend(
+            rels_for_cameras(
+                [cam.model_dump() for cam in payload.cameras],
+                width=payload.width,
+                height=payload.height,
+                maxzoom=z,
+            )
+        )
+    stats = prefetch_rels(rels)
+    stats["ok"] = True
+    return stats
+
+
 @router.post("/{job_id}/state")
 def save_state(job_id: str, payload: dict[str, Any]) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
     result = dict(job.result or {})
     incoming = payload if isinstance(payload, dict) else {}
-    keep = ("defaultStyle", "crop", "exportLw", "exportCg", "hiddenLayers", "slides", "links")
+    keep = (
+        "defaultStyle",
+        "crop",
+        "exportLw",
+        "exportCg",
+        "hiddenLayers",
+        "cachedCountries",
+        "slides",
+        "links",
+    )
     merged = {key: result.get(key) for key in keep}
     for key in keep:
         if key in incoming:

@@ -1,9 +1,16 @@
 import { Map as MapLibreMap, MercatorCoordinate } from "maplibre-gl";
 import { createExportMap } from "./captureExport";
 import { stampOsmOnCanvas } from "./stampOsm";
-import type { MapsCamera, MapsEasing, MapsLayerFilterId, MapsRoutePoint, MapsStyleId } from "./types";
+import {
+  WORLD_MIN_ZOOM,
+  type MapsCamera,
+  type MapsEasing,
+  type MapsLayerFilterId,
+  type MapsRoutePoint,
+  type MapsStyleId,
+} from "./types";
 
-const IDLE_TIMEOUT_MS = 6000;
+const TILE = 512;
 
 function easeLinear(t: number): number {
   return t;
@@ -57,36 +64,117 @@ function segmentLength(from: MapsRoutePoint, to: MapsRoutePoint): number {
   return Math.hypot(bx - a.x, b.y - a.y);
 }
 
-export function lerpCamera(from: MapsCamera, to: MapsCamera, t: number): MapsCamera {
+const WALL_W = 7680;
+const WALL_H = 1080;
+const CRUISE_PAD = 0.35;
+
+/** Zoom that fits the hop on the 7680×1080 wall, or the start/end zoom if the hop is already on-screen. */
+export function cruiseZoom(fromZ: number, toZ: number, distX: number, distY: number): number {
+  let zFit = 22;
+  if (distX > 1e-9) zFit = Math.min(zFit, Math.log2(WALL_W / TILE / distX));
+  if (distY > 1e-9) zFit = Math.min(zFit, Math.log2(WALL_H / TILE / distY));
+  return Math.max(WORLD_MIN_ZOOM, Math.min(fromZ, toZ, zFit - CRUISE_PAD));
+}
+
+export function autoCruiseZoom(from: MapsCamera, to: MapsCamera): number {
   const a = mercatorOf(from);
   const b = mercatorOf(to);
   const bx = unwrapMercatorX(a.x, b.x);
-  const merc = new MercatorCoordinate(wrapUnit(a.x + (bx - a.x) * t), a.y + (b.y - a.y) * t, 0);
-  const lngLat = merc.toLngLat();
-  return {
-    lat: lngLat.lat,
-    lon: lngLat.lng,
-    zoom: from.zoom + (to.zoom - from.zoom) * t,
-    bearing: shortestAngleLerp(from.bearing, to.bearing, t),
-    pitch: from.pitch + (to.pitch - from.pitch) * t,
-  };
+  return cruiseZoom(from.zoom, to.zoom, Math.abs(bx - a.x), Math.abs(b.y - a.y));
+}
+
+export type HopInterp = {
+  easing?: MapsEasing;
+  routePoints?: MapsRoutePoint[];
+  flyZoom?: number;
+  easeIn?: number;
+  easeOut?: number;
+  duration?: number;
+};
+
+export type HopPhases = { zoomOut: number; move: number; zoomIn: number };
+
+export function resolveHopPhases(interp: Pick<HopInterp, "duration" | "easeIn" | "easeOut">): HopPhases {
+  const duration = Math.max(0.15, interp.duration ?? 1);
+  const minP = Math.min(0.05, duration / 6);
+  let zoomOut = interp.easeIn != null && Number.isFinite(interp.easeIn) ? interp.easeIn : duration * 0.25;
+  let zoomIn = interp.easeOut != null && Number.isFinite(interp.easeOut) ? interp.easeOut : duration * 0.25;
+  zoomOut = Math.max(minP, zoomOut);
+  zoomIn = Math.max(minP, zoomIn);
+  let move = duration - zoomOut - zoomIn;
+  if (move < minP) {
+    const scale = (duration - minP) / Math.max(minP, zoomOut + zoomIn);
+    zoomOut *= scale;
+    zoomIn *= scale;
+    move = minP;
+  }
+  return { zoomOut, move, zoomIn };
+}
+
+function hopFractions(interp: HopInterp): { inF: number; outF: number } {
+  const phases = resolveHopPhases(interp);
+  const duration = phases.zoomOut + phases.move + phases.zoomIn;
+  return { inF: phases.zoomOut / duration, outF: phases.zoomIn / duration };
+}
+
+/** Zoom out, hold cruise, zoom in. `t` is linear 0–1 over the whole hop. */
+export function flyZoomAt(t: number, z0: number, z1: number, zCruise: number, inF: number, outF: number): number {
+  const outStart = 1 - outF;
+  if (t <= inF) {
+    const u = inF > 0 ? easeInOut(Math.max(0, Math.min(1, t / inF))) : 1;
+    return z0 + (zCruise - z0) * u;
+  }
+  if (t >= outStart) {
+    const u = outF > 0 ? easeInOut(Math.max(0, Math.min(1, (t - outStart) / outF))) : 1;
+    return zCruise + (z1 - zCruise) * u;
+  }
+  return zCruise;
+}
+
+export function lerpCamera(from: MapsCamera, to: MapsCamera, t: number, interp: HopInterp = {}): MapsCamera {
+  return cameraAtHop(from, to, t, interp);
 }
 
 export function easeAt(easing: MapsEasing, t: number): number {
   return (EASE_FNS[easing] || EASE_FNS["ease-in-out"])(t);
 }
 
-export function cameraAtHop(
-  from: MapsCamera,
-  to: MapsCamera,
-  t: number,
-  routePoints?: MapsRoutePoint[],
-): MapsCamera {
-  return routePoints && routePoints.length >= 2 ? cameraAlongRoute(from, to, routePoints, t) : lerpCamera(from, to, t);
+export function cameraAtHop(from: MapsCamera, to: MapsCamera, t: number, interp: HopInterp = {}): MapsCamera {
+  const tClamped = Math.max(0, Math.min(1, t));
+  const { inF, outF } = hopFractions(interp);
+  const moveEnd = 1 - outF;
+  const moveSpan = Math.max(1e-9, moveEnd - inF);
+  let tPos = 0;
+  if (tClamped >= moveEnd) tPos = 1;
+  else if (tClamped > inF) tPos = easeAt(interp.easing || "ease-in-out", (tClamped - inF) / moveSpan);
+  const zCruiseRaw = interp.flyZoom;
+  const zCruise =
+    zCruiseRaw != null && Number.isFinite(zCruiseRaw)
+      ? Math.max(WORLD_MIN_ZOOM, Math.min(22, zCruiseRaw))
+      : autoCruiseZoom(from, to);
+  const zoom = flyZoomAt(tClamped, from.zoom, to.zoom, zCruise, inF, outF);
+  const a = mercatorOf(from);
+  const b = mercatorOf(to);
+  const bx = unwrapMercatorX(a.x, b.x);
+  const merc = new MercatorCoordinate(wrapUnit(a.x + (bx - a.x) * tPos), a.y + (b.y - a.y) * tPos, 0);
+  const lngLat = merc.toLngLat();
+  const zTop = Math.min(from.zoom, to.zoom);
+  const flatten =
+    zTop - zCruise > 0.2 ? Math.max(0, Math.min(1, (zTop - zoom) / (zTop - zCruise))) : 0;
+  const pitchLine = from.pitch + (to.pitch - from.pitch) * tPos;
+  const cam: MapsCamera = {
+    lat: lngLat.lat,
+    lon: lngLat.lng,
+    zoom,
+    bearing: shortestAngleLerp(from.bearing, to.bearing, tPos),
+    pitch: pitchLine * (1 - 0.85 * flatten),
+  };
+  const route = interp.routePoints;
+  if (route && route.length >= 2) return cameraAlongRoute(cam, route, tPos);
+  return cam;
 }
 
-export function cameraAlongRoute(from: MapsCamera, to: MapsCamera, points: MapsRoutePoint[], t: number): MapsCamera {
-  const base = lerpCamera(from, to, t);
+export function cameraAlongRoute(base: MapsCamera, points: MapsRoutePoint[], t: number): MapsCamera {
   if (points.length < 2) return base;
   const lengths = points.slice(0, -1).map((point, i) => segmentLength(point, points[i + 1]));
   const total = lengths.reduce((sum, len) => sum + len, 0);
@@ -110,43 +198,37 @@ export function cameraAlongRoute(from: MapsCamera, to: MapsCamera, points: MapsR
   return base;
 }
 
-function raceIdle(map: MapLibreMap): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      map.off("idle", onIdle);
-      map.off("error", onError);
-      reject(new Error("idle-timeout"));
-    }, IDLE_TIMEOUT_MS);
-    const onIdle = () => {
-      clearTimeout(timer);
-      map.off("error", onError);
-      resolve();
-    };
-    const onError = (event: { error?: { message?: string } }) => {
-      clearTimeout(timer);
-      map.off("idle", onIdle);
-      reject(new Error(event.error?.message || "MapLibre export map failed"));
-    };
-    map.once("idle", onIdle);
-    map.once("error", onError);
-  });
+const TILE_WAIT_MS = 45000;
+const TILE_POLL_MS = 80;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitIdleForFrame(map: MapLibreMap): Promise<void> {
-  try {
-    await raceIdle(map);
-    return;
-  } catch (err) {
-    if (err instanceof Error && err.message !== "idle-timeout") throw err;
+async function waitIdleForFrame(map: MapLibreMap, timeoutMs = TILE_WAIT_MS): Promise<void> {
+  map.triggerRepaint();
+  const deadline = Date.now() + timeoutMs;
+  if (map.areTilesLoaded()) return;
+  while (Date.now() < deadline) {
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        const done = () => {
+          map.off("idle", done);
+          resolve();
+        };
+        map.once("idle", done);
+        window.setTimeout(() => {
+          map.off("idle", done);
+          resolve();
+        }, TILE_POLL_MS);
+      }),
+    ]);
     if (map.areTilesLoaded()) return;
+    map.triggerRepaint();
+    await sleep(16);
   }
-  try {
-    await raceIdle(map);
-  } catch (err) {
-    if (err instanceof Error && err.message !== "idle-timeout") throw err;
-    if (map.areTilesLoaded()) return;
-    throw new Error("Map tiles did not finish loading before a fly frame was captured.");
-  }
+  if (map.areTilesLoaded()) return;
+  throw new Error("Map tiles did not finish loading before a fly frame was captured.");
 }
 
 export async function captureFlyFrames(opts: {
@@ -161,15 +243,31 @@ export async function captureFlyFrames(opts: {
   fps?: number;
   easing?: MapsEasing;
   routePoints?: MapsRoutePoint[];
+  flyZoom?: number;
+  easeIn?: number;
+  easeOut?: number;
   onFrame: (blob: Blob, index: number, count: number) => Promise<void>;
 }): Promise<number> {
-  const { width, height, from, to, styleId, highlights, hiddenLayers, duration, fps = 30, easing = "ease-in-out", routePoints, onFrame } = opts;
+  const { width, height, from, to, styleId, highlights, hiddenLayers, duration, fps = 30, easing = "ease-in-out", routePoints, flyZoom, easeIn, easeOut, onFrame } = opts;
   const count = Math.max(2, Math.round(duration * fps));
   const { map, host } = await createExportMap({ width, height, camera: from, styleId, highlights, hiddenLayers });
   try {
+    const cameras: MapsCamera[] = [];
     for (let i = 0; i < count; i++) {
-      const t = easeAt(easing, i / (count - 1));
-      const cam = cameraAtHop(from, to, t, routePoints);
+      const t = i / (count - 1);
+      cameras.push(cameraAtHop(from, to, t, { easing, routePoints, flyZoom, easeIn, easeOut, duration }));
+    }
+    const stride = Math.max(1, Math.floor(count / 20));
+    for (let i = 0; i < count; i += stride) {
+      const cam = cameras[i];
+      map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
+      await waitIdleForFrame(map);
+    }
+    const last = cameras[cameras.length - 1];
+    map.jumpTo({ center: [last.lon, last.lat], zoom: last.zoom, bearing: last.bearing, pitch: last.pitch });
+    await waitIdleForFrame(map);
+    for (let i = 0; i < count; i++) {
+      const cam = cameras[i];
       map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
       await waitIdleForFrame(map);
       const blob = await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95);

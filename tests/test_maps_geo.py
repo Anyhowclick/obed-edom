@@ -4,6 +4,8 @@ from obed_edom.maps_geo import (
     camera_from_bbox,
     clamp_cg_shift,
     clamp_lat,
+    clamp_lon,
+    clamp_zoom,
     geocode,
     geometry_bbox,
     infer_hop_kind,
@@ -43,6 +45,20 @@ def test_lat_clamp_is_web_mercator_not_90():
     assert clamp_lat(90) == MAX_LAT
     assert clamp_lat(-90) == -MAX_LAT
     assert MAX_LAT == 85.051129
+
+
+def test_lon_wraps_across_the_dateline():
+    assert clamp_lon(190) == -170
+    assert clamp_lon(-190) == 170
+    assert clamp_lon(180) == 180
+    assert clamp_lon(-180) == -180
+
+
+def test_world_min_zoom_is_the_camera_floor():
+    assert clamp_zoom(0) == WORLD_MIN_ZOOM
+    assert clamp_zoom(2) == WORLD_MIN_ZOOM
+    assert clamp_zoom(8) == 8
+    assert clamp_zoom(30) == 22
 
 
 def test_toggle_adm0():

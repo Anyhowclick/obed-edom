@@ -3,11 +3,23 @@ import { GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import type { MapMouseEvent } from "maplibre-gl";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { cameraAtHop, easeAt } from "./captureFly";
+import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { applyHighlights, ensureAdmin0Highlights, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
-import type { MapsCamera, MapsChurch, MapsCropId, MapsEasing, MapsLayerFilterId, MapsRoutePoint, MapsStyleId } from "./types";
+import { mapsTransformRequest } from "./tileProxy";
+import {
+  WORLD_MIN_ZOOM,
+  clampZoom,
+  wrapLon,
+  type MapsCamera,
+  type MapsChurch,
+  type MapsCropId,
+  type MapsEasing,
+  type MapsLayerFilterId,
+  type MapsRoutePoint,
+  type MapsStyleId,
+} from "./types";
 
 const WALL_W = 7680;
 const FW_W = 1920;
@@ -15,6 +27,64 @@ const CG_W = 1920;
 const CG_ORIGIN = 2880;
 const PIN_LAYERS = ["churches-dots", "churches-drops", "churches-labels"];
 const COUNTRY_PICK_MAX_ZOOM = 7;
+
+/** MapLibre zoom is relative to the preview CSS width; cameras are authored for 7680. */
+function previewZoomDelta(map: MapLibreMap): number {
+  const width = map.getContainer().clientWidth;
+  if (!width) return 0;
+  return Math.log2(width / WALL_W);
+}
+
+function authoredZoomOf(map: MapLibreMap, delta = previewZoomDelta(map)): number {
+  return clampZoom(map.getZoom() - delta);
+}
+
+function mapZoomOf(authored: number, delta: number): number {
+  return clampZoom(authored) + delta;
+}
+
+function readCamera(map: MapLibreMap, delta = previewZoomDelta(map)): MapsCamera {
+  const center = map.getCenter();
+  return {
+    lat: center.lat,
+    lon: wrapLon(center.lng),
+    zoom: authoredZoomOf(map, delta),
+    bearing: map.getBearing(),
+    pitch: map.getPitch(),
+  };
+}
+
+function cameraView(map: MapLibreMap, camera: MapsCamera, delta = previewZoomDelta(map)) {
+  return {
+    center: [camera.lon, camera.lat] as [number, number],
+    zoom: mapZoomOf(camera.zoom, delta),
+    bearing: camera.bearing,
+    pitch: camera.pitch,
+  };
+}
+
+function applyPreviewZoomLimits(map: MapLibreMap, delta = previewZoomDelta(map)): number {
+  map.setMinZoom(WORLD_MIN_ZOOM + delta);
+  map.setMaxZoom(22 + delta);
+  return delta;
+}
+
+function recastPreviewCamera(
+  map: MapLibreMap,
+  deltaRef: { current: number },
+  suppress: { current: boolean }
+) {
+  if (!map.getContainer().clientWidth) return;
+  const authored = readCamera(map, deltaRef.current);
+  map.resize();
+  const d = applyPreviewZoomLimits(map);
+  deltaRef.current = d;
+  suppress.current = true;
+  map.jumpTo(cameraView(map, authored, d));
+  map.once("moveend", () => {
+    suppress.current = false;
+  });
+}
 
 export type MapViewHandle = {
   jumpTo: (camera: MapsCamera) => void;
@@ -26,6 +96,9 @@ export type MapViewHandle = {
     durationMs: number;
     easing?: MapsEasing;
     routePoints?: MapsRoutePoint[];
+    flyZoom?: number;
+    easeIn?: number;
+    easeOut?: number;
   }) => Promise<void>;
   stop: () => void;
   getCamera: () => MapsCamera | null;
@@ -49,31 +122,11 @@ type Props = {
   onCameraCommit: (camera: MapsCamera) => void;
   onToggleCountry: (adm0: string) => void;
   onAddPin: (lat: number, lon: number) => void;
-  onSelectPin: (id: string) => void;
+  onSelectPin: (id: string | null) => void;
   onEditPin: (id: string) => void;
   onCgShift: (dx: number) => void;
   onPreviewAbort?: () => void;
 };
-
-function readCamera(map: MapLibreMap): MapsCamera {
-  const center = map.getCenter();
-  return {
-    lat: center.lat,
-    lon: center.lng,
-    zoom: map.getZoom(),
-    bearing: map.getBearing(),
-    pitch: map.getPitch(),
-  };
-}
-
-function cameraView(camera: MapsCamera) {
-  return {
-    center: [camera.lon, camera.lat] as [number, number],
-    zoom: camera.zoom,
-    bearing: camera.bearing,
-    pitch: camera.pitch,
-  };
-}
 
 function churchesGeo(churches: MapsChurch[], selectedPinId: string | null, numberPins = false): GeoJSON.FeatureCollection {
   return {
@@ -188,6 +241,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
   const hopResolve = useRef<(() => void) | null>(null);
+  const deltaRef = useRef(0);
+  const cameraRef = useRef(camera);
   const [texWarn, setTexWarn] = useState<string | null>(null);
 
   function finishHop() {
@@ -202,6 +257,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   }
 
   previewingRef.current = previewing;
+  cameraRef.current = camera;
   callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, numberPins };
 
@@ -210,7 +266,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const map = mapRef.current;
       if (!map) return;
       suppress.current = true;
-      map.jumpTo(cameraView(next));
+      map.jumpTo(cameraView(map, next));
       map.once("moveend", () => {
         suppress.current = false;
       });
@@ -221,7 +277,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       return new Promise((resolve) => {
         suppress.current = true;
         // MapsTab passes milliseconds (duration * 1000); MapLibre easeTo is ms.
-        map.easeTo({ ...cameraView(next), duration: Math.max(0, durationMs) });
+        map.easeTo({ ...cameraView(map, next), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
@@ -233,22 +289,34 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (!map) return Promise.resolve();
       return new Promise((resolve) => {
         suppress.current = true;
-        map.flyTo({ ...cameraView(next), duration: Math.max(0, durationMs) });
+        map.flyTo({ ...cameraView(map, next), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
         });
       });
     },
-    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints }) {
+    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, flyZoom, easeIn, easeOut }) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
       hopAbort.current = false;
       finishHop();
       return new Promise((resolve) => {
         const apply = (t: number) => {
-          const cam = cameraAtHop(from, to, easeAt(easing, t), routePoints);
-          map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
+          const cam = cameraAtHop(from, to, t, {
+            easing,
+            routePoints,
+            flyZoom,
+            easeIn,
+            easeOut,
+            duration: durationMs / 1000,
+          });
+          map.jumpTo({
+            center: [cam.lon, cam.lat],
+            zoom: mapZoomOf(cam.zoom, deltaRef.current),
+            bearing: cam.bearing,
+            pitch: cam.pitch,
+          });
         };
         const duration = Math.max(0, durationMs);
         hopResolve.current = resolve;
@@ -288,7 +356,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       });
     },
     resize() {
-      mapRef.current?.resize();
+      const map = mapRef.current;
+      if (!map) return;
+      recastPreviewCamera(map, deltaRef, suppress);
     },
   }));
 
@@ -297,7 +367,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const hostEl = host.current;
     let cancelled = false;
     let map: MapLibreMap | null = null;
-    const ro = new ResizeObserver(() => map?.resize());
+    const recast = () => {
+      if (!map) return;
+      recastPreviewCamera(map, deltaRef, suppress);
+    };
+    const ro = new ResizeObserver(() => recast());
     const onPointerUp = () => {
       if (!map || suppress.current || previewingRef.current) return;
       callbacks.current.onCameraCommit(readCamera(map));
@@ -305,18 +379,22 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
     void resolveOpenFreeMapStyle(styleId).then((style) => {
       if (cancelled) return;
+      const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / WALL_W) : 0;
+      deltaRef.current = d0;
       map = new MapLibreMap({
         container: hostEl,
         style,
         center: [camera.lon, camera.lat],
-        zoom: camera.zoom,
+        zoom: mapZoomOf(camera.zoom, d0),
         bearing: camera.bearing,
         pitch: camera.pitch,
-        renderWorldCopies: false,
+        renderWorldCopies: true,
         doubleClickZoom: false,
-        minZoom: 0,
-        maxZoom: 22,
+        boxZoom: false,
+        minZoom: WORLD_MIN_ZOOM + d0,
+        maxZoom: 22 + d0,
         attributionControl: { compact: true },
+        transformRequest: (url) => mapsTransformRequest(url),
         canvasContextAttributes: { preserveDrawingBuffer: true },
       });
       mapRef.current = map;
@@ -361,6 +439,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         probeTex();
         map?.resize();
         if (map) {
+          const d = applyPreviewZoomLimits(map);
+          deltaRef.current = d;
+          suppress.current = true;
+          map.jumpTo(cameraView(map, cameraRef.current, d));
+          map.once("moveend", () => {
+            suppress.current = false;
+          });
           ensureLowZoomRaster(map, overlay.current.styleId);
           applyLayerFilters(map, overlay.current.hiddenLayers);
         }
@@ -394,7 +479,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           callbacks.current.onSelectPin(pin);
           return;
         }
-        if (map.getZoom() >= COUNTRY_PICK_MAX_ZOOM) return;
+        callbacks.current.onSelectPin(null);
+        if (authoredZoomOf(map) >= COUNTRY_PICK_MAX_ZOOM) return;
         if (!map.getLayer("admin0-fill")) return;
         const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
         const code = String(hits[0]?.properties?.ADM0_A3 || "");
@@ -453,7 +539,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   }, [highlights]);
 
   useEffect(() => {
-    mapRef.current?.resize();
+    const map = mapRef.current;
+    if (!map) return;
+    recastPreviewCamera(map, deltaRef, suppress);
   }, [crop, sidePanels]);
 
   useEffect(() => {
@@ -462,9 +550,22 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     applyLayerFilters(map, hiddenLayers);
   }, [hiddenLayers]);
 
+  function eventToLngLat(event: { clientX: number; clientY: number }): { lat: number; lon: number } | null {
+    const map = mapRef.current;
+    if (!map) return null;
+    const rect = map.getCanvas().getBoundingClientRect();
+    const lngLat = map.unproject([event.clientX - rect.left, event.clientY - rect.top]);
+    return { lat: lngLat.lat, lon: lngLat.lng };
+  }
+
   function onCgPointerDown(event: React.PointerEvent<HTMLElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (event.shiftKey) {
+      const at = eventToLngLat(event);
+      if (at) callbacks.current.onAddPin(at.lat, at.lon);
+      return;
+    }
     const band = event.currentTarget.closest(".maps-export-band");
     const width = band?.clientWidth || 1;
     event.currentTarget.setPointerCapture(event.pointerId);

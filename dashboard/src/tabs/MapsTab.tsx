@@ -8,6 +8,7 @@ import {
   pollJob,
   postMapsFrame,
   postMapsPng,
+  prefetchMapsTiles,
   previewUrl,
   saveMapsState,
   startMaps,
@@ -19,7 +20,10 @@ import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../p
 import { useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster } from "../maps/captureExport";
-import { captureFlyFrames } from "../maps/captureFly";
+import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
+import { CountryCachePicker } from "../maps/CountryCache";
+import { HopTimeline } from "../maps/HopTimeline";
+import { MorphGates } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
@@ -30,12 +34,14 @@ import {
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
+  WORLD_MIN_ZOOM,
+  captureWidth,
   clampCgShift,
   coerceHopKinds,
   documentFromResult,
-  inferHopKind,
   nextPinId,
   nextSlideId,
+  suggestedHopKind,
   type MapsCamera,
   type MapsChurch,
   type MapsDocument,
@@ -49,10 +55,20 @@ import {
 } from "../maps/types";
 
 const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same style, no 3D, zoom change ≤ 1.",
-  movie: "Movie: rendered fly when pitch, bearing, 3D buildings, or a zoom jump > 1.",
-  cut: "Cut: hard cut when style or highlighted countries differ.",
+  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, no 3D, zoom change ≤ 1. Region highlights must match; panning off-screen is fine.",
+  movie: "Movie: rendered fly when pitch, bearing, 3D buildings, or a zoom jump > 1. Three phases: zoom out, move, zoom in.",
+  dissolve: "Dissolve: Keynote crossfade of the two stills, using the duration below.",
+  cut: "Cut: instant switch. No Keynote transition.",
 };
+
+type InspectorTab = "properties" | "pins" | "animation" | "export";
+
+const INSPECTOR_TABS: { id: InspectorTab; label: string }[] = [
+  { id: "properties", label: "Properties" },
+  { id: "pins", label: "Pins" },
+  { id: "animation", label: "Animation" },
+  { id: "export", label: "Export" },
+];
 
 function IconPlay() {
   return (
@@ -86,6 +102,16 @@ function IconLibrary() {
   );
 }
 
+function IconLayers() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4.2 21 8.5 12 12.8 3 8.5 12 4.2z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M5.2 12.2 12 15.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5.2 16.2 12 19.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
   return {
     ...slide,
@@ -94,6 +120,7 @@ function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
     stillPng: undefined,
     cgShiftX: slide.cgShiftX,
     cgShiftY: 0,
+    includeSidePanels: slide.includeSidePanels === true,
   };
 }
 
@@ -109,6 +136,7 @@ export function MapsTab() {
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
+  const [inspTab, setInspTab] = useState<InspectorTab>("properties");
   const [previewing, setPreviewing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
@@ -395,6 +423,21 @@ export function MapsTab() {
     });
   }
 
+  function toggleCachedCountry(code: string, nextSelected: string[]) {
+    const current = docRef.current;
+    if (!current) return;
+    patchDoc({ ...current, cachedCountries: nextSelected });
+    const adding = nextSelected.some((item) => item.toUpperCase() === code.toUpperCase());
+    if (!adding) return;
+    void prefetchMapsTiles({ countries: [code], maxzoom: 8 })
+      .then((stats) => {
+        setLogs((prev) => [...prev, `Cached ${code}: ${stats.cached + stats.fetched} tiles.`]);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  }
+
   function addSlide() {
     const current = docRef.current;
     if (!current || !active || locked) return;
@@ -421,7 +464,7 @@ export function MapsTab() {
         existing || {
           from: from.id,
           to: to.id,
-          kind: inferHopKind(from, to),
+          kind: suggestedHopKind(from, to),
           duration: 1.2,
           playWithoutClick: false,
         }
@@ -442,7 +485,7 @@ export function MapsTab() {
     mapRef.current?.jumpTo(fallback.camera);
   }
 
-  function setHop(partial: Partial<MapsLink>, opts?: { dropRoute?: boolean }) {
+  function setHop(partial: Partial<MapsLink>, opts?: { dropRoute?: boolean; resetFly?: boolean; dropFlyZoom?: boolean }) {
     const current = docRef.current;
     if (!current || !outgoing) return;
     patchDoc({
@@ -451,10 +494,26 @@ export function MapsTab() {
         if (link.from !== outgoing.from || link.to !== outgoing.to) return link;
         const next: MapsLink = { ...link, ...partial };
         if (next.kind !== "movie" || opts?.dropRoute) delete next.route;
-        if (next.kind !== "movie") delete next.easing;
+        if (next.kind !== "movie") {
+          delete next.easing;
+          delete next.easeIn;
+          delete next.easeOut;
+          delete next.flyZoom;
+        } else if (opts?.resetFly) {
+          delete next.easeIn;
+          delete next.easeOut;
+          delete next.flyZoom;
+        } else if (opts?.dropFlyZoom) {
+          delete next.flyZoom;
+        }
         return next;
       }),
     });
+  }
+
+  function openPin(id: string) {
+    setSelectedPin(id);
+    setInspTab("properties");
   }
 
   async function search() {
@@ -471,7 +530,7 @@ export function MapsTab() {
   }
 
   async function previewLink(link: MapsLink, from: MapsSlide, to: MapsSlide) {
-    if (link.kind === "cut") {
+    if (link.kind === "cut" || link.kind === "dissolve") {
       await new Promise((r) => setTimeout(r, link.duration * 1000));
       if (!previewAbort.current) mapRef.current?.jumpTo(to.camera);
       return;
@@ -483,6 +542,9 @@ export function MapsTab() {
         durationMs: link.duration * 1000,
         easing: link.easing,
         routePoints: link.route?.points,
+        flyZoom: link.flyZoom,
+        easeIn: link.easeIn,
+        easeOut: link.easeOut,
       });
       return;
     }
@@ -572,8 +634,8 @@ export function MapsTab() {
       await saveMapsState(id, next).then((updated) => mergeServerMeta(updated));
       for (const still of plan.stills) {
         const blob = await captureExportRaster({
-          width: 7680,
-          height: 1080,
+          width: still.width || 3840,
+          height: still.height || 1080,
           camera: still.camera,
           styleId: still.style as MapsSlide["style"],
           highlights: still.highlights,
@@ -598,10 +660,31 @@ export function MapsTab() {
         const from = slidesById.get(link.from);
         const to = slidesById.get(link.to);
         if (!from || !to) continue;
+        const width = captureWidth(from);
+        const height = 1080;
+        const fps = 30;
+        const count = Math.max(2, Math.round(link.duration * fps));
+        const cameras = Array.from({ length: count }, (_, i) =>
+          cameraAtHop(from.camera, to.camera, i / (count - 1), {
+            easing: link.easing,
+            routePoints: link.route?.points,
+            flyZoom: link.flyZoom,
+            easeIn: link.easeIn,
+            easeOut: link.easeOut,
+            duration: link.duration,
+          })
+        );
+        setLogs((prev) => [...prev, `Prefetching tiles for ${from.id} → ${to.id}…`]);
+        try {
+          const stats = await prefetchMapsTiles({ cameras, width, height, maxzoom: 14 });
+          setLogs((prev) => [...prev, `Cached ${stats.cached + stats.fetched} / ${stats.tiles} tiles (${stats.failed} failed).`]);
+        } catch (err) {
+          setLogs((prev) => [...prev, `Tile prefetch skipped: ${err instanceof Error ? err.message : String(err)}`]);
+        }
         setLogs((prev) => [...prev, `Rendering movie ${from.id} → ${to.id}…`]);
         await captureFlyFrames({
-          width: 7680,
-          height: 1080,
+          width,
+          height,
           from: from.camera,
           to: to.camera,
           styleId: from.style,
@@ -611,6 +694,9 @@ export function MapsTab() {
           fps: 30,
           easing: link.easing,
           routePoints: link.route?.points,
+          flyZoom: link.flyZoom,
+          easeIn: link.easeIn,
+          easeOut: link.easeOut,
           onFrame: (blob, i, n) => postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 }).then(() => undefined),
         });
       }
@@ -640,9 +726,11 @@ export function MapsTab() {
   }, []);
 
   const pin = active?.churches.find((c) => c.id === selectedPin) || null;
-  const suggested = outgoing ? inferHopKind(active!, slides[activeIndex + 1]) : "morph";
+  const nextSlide = outgoing && activeIndex >= 0 ? slides[activeIndex + 1] : null;
+  const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
   const morphOk = suggested === "morph";
   const movieOk = suggested !== "cut";
+  const cruiseAuto = active && nextSlide ? autoCruiseZoom(active.camera, nextSlide.camera) : WORLD_MIN_ZOOM;
 
   if (!job) {
     return (
@@ -736,7 +824,6 @@ export function MapsTab() {
         <span className="note">{job.id}</span>
       </div>
       <div className="maps-stylebar">
-        <h1>Maps</h1>
         <div className="maps-swatches" role="group" aria-label="Map style">
           {STYLE_SWATCHES.map((swatch) => (
             <button
@@ -752,13 +839,16 @@ export function MapsTab() {
         </div>
         <div className="maps-layers" ref={layersRef}>
           <button
-            className={`btn secondary${layersOpen || (doc?.hiddenLayers.length || 0) ? " on" : ""}`}
+            className={`btn secondary icon-btn maps-layers-btn${layersOpen || (doc?.hiddenLayers.length || 0) ? " on" : ""}`}
             type="button"
             aria-expanded={layersOpen}
             aria-haspopup="true"
+            title={(doc?.hiddenLayers.length || 0) ? `${doc?.hiddenLayers.length} layers hidden` : "Map layers"}
+            aria-label={(doc?.hiddenLayers.length || 0) ? `Map layers, ${doc?.hiddenLayers.length} hidden` : "Map layers"}
             onClick={() => setLayersOpen((open) => !open)}
           >
-            {(doc?.hiddenLayers.length || 0) ? `Layers · ${doc?.hiddenLayers.length} hidden` : "Layers"}
+            <IconLayers />
+            {(doc?.hiddenLayers.length || 0) ? <span className="maps-layers-count">{doc?.hiddenLayers.length}</span> : null}
           </button>
           {layersOpen && (
             <div className="maps-layers-menu" role="group" aria-label="Hide map layers">
@@ -779,6 +869,11 @@ export function MapsTab() {
             </div>
           )}
         </div>
+        <CountryCachePicker
+          selected={doc?.cachedCountries || []}
+          disabled={locked}
+          onToggle={toggleCachedCountry}
+        />
       </div>
       </div>
       {(error || openError) && <p className="err">{error || openError}</p>}
@@ -786,7 +881,7 @@ export function MapsTab() {
 
       <div
         className="maps-stage"
-        style={{ gridTemplateColumns: inspectorOpen ? `${navW}px 8px minmax(0, 1fr) 280px` : `${navW}px 8px minmax(0, 1fr)` }}
+        style={{ gridTemplateColumns: inspectorOpen ? `${navW}px 8px minmax(0, 1fr) 312px` : `${navW}px 8px minmax(0, 1fr)` }}
       >
         <div className="maps-nav">
           {slides.map((slide, index) => {
@@ -797,8 +892,9 @@ export function MapsTab() {
               <div key={slide.id}>
                 <button
                   type="button"
-                  className={`maps-thumb${slide.id === active?.id ? " active" : ""}`}
+                  className={`maps-thumb${slide.id === active?.id ? " active" : ""}${slide.includeSidePanels ? " fw" : " lw"}`}
                   disabled={locked}
+                  title={slide.includeSidePanels ? "Full wall render (side panels)" : "Centre wall (LW)"}
                   onClick={() => void selectSlide(slide.id)}
                 >
                   {src ? <img src={`${src}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">{slide.title}</span>}
@@ -810,16 +906,18 @@ export function MapsTab() {
                     <span className="maps-gutter-kind" title={HOP_TIPS[hop.kind]}>
                       {HOP_LABELS[hop.kind]}
                     </span>
-                    <button
-                      type="button"
-                      className="btn secondary maps-gutter-play"
-                      disabled={locked}
-                      title="Play hop"
-                      aria-label={`Play ${HOP_LABELS[hop.kind]}`}
-                      onClick={() => void playHop(index, true)}
-                    >
-                      <IconPlay />
-                    </button>
+                    {hop.kind !== "cut" && (
+                      <button
+                        type="button"
+                        className="btn secondary maps-gutter-play"
+                        disabled={locked}
+                        title="Play hop"
+                        aria-label={`Play ${HOP_LABELS[hop.kind]}`}
+                        onClick={() => void playHop(index, true)}
+                      >
+                        <IconPlay />
+                      </button>
+                    )}
                     <span className="maps-gutter-line" />
                   </div>
                 )}
@@ -876,9 +974,12 @@ export function MapsTab() {
                     color: "#c44a42",
                   };
                   updateActive({ churches: [...active.churches, church] });
-                  setSelectedPin(church.id);
+                  openPin(church.id);
                 }}
-                onSelectPin={setSelectedPin}
+                onSelectPin={(id) => {
+                  if (id) openPin(id);
+                  else setSelectedPin(null);
+                }}
                 onEditPin={(id) => {
                   const church = active.churches.find((c) => c.id === id);
                   if (!church) return;
@@ -893,10 +994,10 @@ export function MapsTab() {
                 <span>Zoom</span>
                 <input
                   type="range"
-                  min={0}
+                  min={WORLD_MIN_ZOOM}
                   max={22}
                   step={0.1}
-                  value={Number.isFinite(active.camera.zoom) ? active.camera.zoom : 0}
+                  value={Number.isFinite(active.camera.zoom) ? active.camera.zoom : WORLD_MIN_ZOOM}
                   disabled={locked}
                   onChange={(event) => {
                     const camera = { ...active.camera, zoom: Number(event.target.value) };
@@ -912,198 +1013,30 @@ export function MapsTab() {
 
         {inspectorOpen && (
         <div className="maps-inspector">
+          <div className="maps-insp-tabs" role="tablist" aria-label="Inspector">
+            {INSPECTOR_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={inspTab === tab.id}
+                className={`maps-insp-tab${inspTab === tab.id ? " active" : ""}`}
+                onClick={() => setInspTab(tab.id)}
+              >
+                {tab.label}
+                {tab.id === "pins" && (active?.churches.length || 0) > 0 && (
+                  <span className="maps-insp-count">{active?.churches.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
           {active && (
-            <>
-              <label>
-                Title:
-                <input value={active.title} disabled={locked} onChange={(event) => updateActive({ title: event.target.value })} />
-              </label>
-              <AeScrub
-                label="Latitude"
-                value={active.camera.lat}
-                min={-MAX_LAT}
-                max={MAX_LAT}
-                step={0.01}
-                digits={4}
-                disabled={locked}
-                onChange={(lat) => {
-                  const camera = { ...active.camera, lat };
-                  updateActive({ camera });
-                  mapRef.current?.jumpTo(camera);
-                }}
-                onCommit={() => void flushAndSave(true)}
-              />
-              <AeScrub
-                label="Longitude"
-                value={active.camera.lon}
-                min={-180}
-                max={180}
-                step={0.01}
-                digits={4}
-                disabled={locked}
-                onChange={(lon) => {
-                  const camera = { ...active.camera, lon };
-                  updateActive({ camera });
-                  mapRef.current?.jumpTo(camera);
-                }}
-                onCommit={() => void flushAndSave(true)}
-              />
-              <AeScrub
-                label="Zoom"
-                value={active.camera.zoom}
-                min={0}
-                max={22}
-                step={0.1}
-                slider
-                disabled={locked}
-                onChange={(zoom) => {
-                  const camera = { ...active.camera, zoom };
-                  updateActive({ camera });
-                  mapRef.current?.jumpTo(camera);
-                }}
-                onCommit={() => void flushAndSave(true)}
-              />
-              <AeScrub
-                label="Pitch"
-                value={active.camera.pitch}
-                min={0}
-                max={60}
-                step={1}
-                digits={0}
-                disabled={locked}
-                onChange={(pitch) => {
-                  const camera = { ...active.camera, pitch };
-                  updateActive({ camera });
-                  mapRef.current?.jumpTo(camera);
-                }}
-                onCommit={() => void flushAndSave(true)}
-              />
-              <AeScrub
-                label="CG shift X"
-                value={active.cgShiftX}
-                min={-CG_SHIFT_MAX}
-                max={CG_SHIFT_MAX}
-                step={1}
-                digits={0}
-                disabled={locked || doc?.exportCg === false}
-                onChange={(dx) => updateActive(clampCgShift(dx, 0))}
-                onCommit={() => void flushAndSave(true)}
-              />
-              {active.highlights.length > 0 && (
-                <div className="maps-hl">
-                  <div className="cap">Orange countries</div>
-                  <div className="maps-hl-list">
-                    {active.highlights.map((code) => (
-                      <button
-                        key={`${code}-${namesTick}`}
-                        className="maps-hl-chip"
-                        type="button"
-                        disabled={locked}
-                        title="Remove highlight"
-                        onClick={() =>
-                          updateActive({ highlights: active.highlights.filter((item) => item !== code) })
-                        }
-                      >
-                        {admin0Name(code)}
-                        <span aria-hidden="true">×</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {outgoing && (
-                <div className="maps-hop">
-                  <div className="cap">Hop to next</div>
-                  {(["morph", "movie", "cut"] as MapsHopKind[]).map((kind) => (
-                    <label key={kind} className="maps-check" title={HOP_TIPS[kind]}>
-                      <input
-                        type="radio"
-                        checked={outgoing.kind === kind}
-                        disabled={locked || (kind === "morph" && !morphOk) || (kind === "movie" && !movieOk)}
-                        onChange={() => setHop({ kind, easing: kind === "movie" ? outgoing.easing : undefined })}
-                      />
-                      {HOP_LABELS[kind]}
-                    </label>
-                  ))}
-                  <button
-                    className="btn secondary"
-                    type="button"
-                    disabled={locked}
-                    onClick={() =>
-                      setHop(
-                        { kind: suggested, easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined },
-                        { dropRoute: true }
-                      )
-                    }
-                  >
-                    Reset hop
+            <div className="maps-insp-body">
+              {inspTab === "properties" && pin && (
+                <>
+                  <button className="maps-insp-back" type="button" onClick={() => setSelectedPin(null)}>
+                    ← Camera
                   </button>
-                  <AeScrub
-                    label="Duration"
-                    value={outgoing.duration}
-                    min={0.1}
-                    max={10}
-                    step={0.1}
-                    disabled={locked}
-                    onChange={(duration) => setHop({ duration })}
-                  />
-                  <label className="maps-check">
-                    <input
-                      type="checkbox"
-                      checked={outgoing.playWithoutClick}
-                      disabled={locked}
-                      onChange={(event) => setHop({ playWithoutClick: event.target.checked })}
-                    />
-                    Play without a click
-                  </label>
-                  {outgoing.kind === "movie" && (
-                    <>
-                    <label>
-                      Easing:
-                      <select
-                        value={outgoing.easing || "ease-in-out"}
-                        disabled={locked}
-                        onChange={(event) => setHop({ easing: event.target.value as MapsEasing })}
-                      >
-                        <option value="ease-in-out">ease-in-out</option>
-                        <option value="linear">linear</option>
-                        <option value="ease-in">ease-in</option>
-                        <option value="ease-out">ease-out</option>
-                      </select>
-                    </label>
-                    <button
-                      className="btn secondary"
-                      type="button"
-                      disabled={locked || (active?.churches.length || 0) < 2}
-                      onClick={() =>
-                        setHop({
-                          route: { points: (active?.churches || []).map((church) => ({ lat: church.lat, lon: church.lon })) },
-                        })
-                      }
-                    >
-                      Use pins as route
-                    </button>
-                    {outgoing.route?.points && outgoing.route.points.length >= 2 && (
-                      <button
-                        className="btn secondary"
-                        type="button"
-                        disabled={locked}
-                        title="Clear route"
-                        onClick={() => setHop({}, { dropRoute: true })}
-                      >
-                        Route: {outgoing.route.points.length} pts
-                      </button>
-                    )}
-                    </>
-                  )}
-                  <button className="btn secondary" type="button" disabled={locked} onClick={() => void playFromHere()}>
-                    <IconPlay />
-                    Play from here
-                  </button>
-                </div>
-              )}
-              {pin && (
-                <div>
                   <div className="cap">Pin</div>
                   <label>
                     Name:
@@ -1152,43 +1085,332 @@ export function MapsTab() {
                   >
                     Remove pin
                   </button>
+                </>
+              )}
+              {inspTab === "properties" && !pin && (
+                <>
+                  <div className="cap">Camera</div>
+                  <label>
+                    Title:
+                    <input value={active.title} disabled={locked} onChange={(event) => updateActive({ title: event.target.value })} />
+                  </label>
+                  <AeScrub
+                    label="Latitude"
+                    value={active.camera.lat}
+                    min={-MAX_LAT}
+                    max={MAX_LAT}
+                    step={0.01}
+                    digits={4}
+                    disabled={locked}
+                    onChange={(lat) => {
+                      const camera = { ...active.camera, lat };
+                      updateActive({ camera });
+                      mapRef.current?.jumpTo(camera);
+                    }}
+                    onCommit={() => void flushAndSave(true)}
+                  />
+                  <AeScrub
+                    label="Longitude"
+                    value={active.camera.lon}
+                    min={-180}
+                    max={180}
+                    step={0.01}
+                    digits={4}
+                    disabled={locked}
+                    onChange={(lon) => {
+                      const camera = { ...active.camera, lon };
+                      updateActive({ camera });
+                      mapRef.current?.jumpTo(camera);
+                    }}
+                    onCommit={() => void flushAndSave(true)}
+                  />
+                  <AeScrub
+                    label="Zoom"
+                    value={active.camera.zoom}
+                    min={WORLD_MIN_ZOOM}
+                    max={22}
+                    step={0.1}
+                    slider
+                    disabled={locked}
+                    onChange={(zoom) => {
+                      const camera = { ...active.camera, zoom };
+                      updateActive({ camera });
+                      mapRef.current?.jumpTo(camera);
+                    }}
+                    onCommit={() => void flushAndSave(true)}
+                  />
+                  <AeScrub
+                    label="Pitch"
+                    value={active.camera.pitch}
+                    min={0}
+                    max={60}
+                    step={1}
+                    digits={0}
+                    disabled={locked}
+                    onChange={(pitch) => {
+                      const camera = { ...active.camera, pitch };
+                      updateActive({ camera });
+                      mapRef.current?.jumpTo(camera);
+                    }}
+                    onCommit={() => void flushAndSave(true)}
+                  />
+                  <AeScrub
+                    label="Bearing"
+                    value={active.camera.bearing}
+                    min={-180}
+                    max={180}
+                    step={1}
+                    digits={0}
+                    disabled={locked}
+                    onChange={(bearing) => {
+                      const camera = { ...active.camera, bearing };
+                      updateActive({ camera });
+                      mapRef.current?.jumpTo(camera);
+                    }}
+                    onCommit={() => void flushAndSave(true)}
+                  />
+                  <AeScrub
+                    label="CG shift X"
+                    value={active.cgShiftX}
+                    min={-CG_SHIFT_MAX}
+                    max={CG_SHIFT_MAX}
+                    step={1}
+                    digits={0}
+                    disabled={locked || doc?.exportCg === false}
+                    onChange={(dx) => updateActive(clampCgShift(dx, 0))}
+                    onCommit={() => void flushAndSave(true)}
+                  />
+                  <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
+                    <input
+                      type="checkbox"
+                      checked={active.includeSidePanels === true}
+                      disabled={locked}
+                      onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
+                    />
+                    Include side panels for render
+                  </label>
+                  {active.highlights.length > 0 && (
+                    <div className="maps-hl">
+                      <div className="cap">Orange countries</div>
+                      <div className="maps-hl-list">
+                        {active.highlights.map((code) => (
+                          <button
+                            key={`${code}-${namesTick}`}
+                            className="maps-hl-chip"
+                            type="button"
+                            disabled={locked}
+                            title="Remove highlight"
+                            onClick={() =>
+                              updateActive({ highlights: active.highlights.filter((item) => item !== code) })
+                            }
+                          >
+                            {admin0Name(code)}
+                            <span aria-hidden="true">×</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {inspTab === "pins" && (
+                <>
+                  {active.churches.length === 0 ? (
+                    <p className="note">Shift-click the map to add a pin. Double-click a pin to rename it.</p>
+                  ) : (
+                    <div className="maps-pin-list">
+                      {active.churches.map((church) => (
+                        <button
+                          key={church.id}
+                          type="button"
+                          className={`maps-pin-row${selectedPin === church.id ? " active" : ""}`}
+                          disabled={locked}
+                          onClick={() => openPin(church.id)}
+                        >
+                          <span className="maps-pin-swatch" style={{ background: church.color }} />
+                          <span className="maps-pin-name">{church.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {inspTab === "animation" && !outgoing && (
+                <p className="note">Last slide — no hop to the next shot.</p>
+              )}
+              {inspTab === "animation" && outgoing && (
+                <div className="maps-hop">
+                  <div className="cap">Hop to next</div>
+                  {(["morph", "movie", "dissolve", "cut"] as MapsHopKind[]).map((kind) => (
+                    <label key={kind} className="maps-check" title={HOP_TIPS[kind]}>
+                      <input
+                        type="radio"
+                        checked={outgoing.kind === kind}
+                        disabled={locked || (kind === "morph" && !morphOk) || (kind === "movie" && !movieOk)}
+                        onChange={() => setHop({ kind, easing: kind === "movie" ? outgoing.easing : undefined })}
+                      />
+                      {HOP_LABELS[kind]}
+                    </label>
+                  ))}
+                  {nextSlide && <MorphGates from={active} to={nextSlide} />}
+                  <button
+                    className="btn secondary"
+                    type="button"
+                    disabled={locked}
+                    onClick={() =>
+                      setHop(
+                        { kind: suggested, easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined },
+                        { dropRoute: true, resetFly: true }
+                      )
+                    }
+                  >
+                    Reset hop
+                  </button>
+                  <AeScrub
+                    label="Duration"
+                    value={outgoing.duration}
+                    min={0.15}
+                    max={10}
+                    step={0.1}
+                    disabled={locked}
+                    onChange={(duration) => {
+                      const prev = Math.max(0.15, outgoing.duration);
+                      if (outgoing.kind === "movie" && (outgoing.easeIn != null || outgoing.easeOut != null)) {
+                        const scale = duration / prev;
+                        setHop({
+                          duration,
+                          easeIn: (outgoing.easeIn ?? prev * 0.25) * scale,
+                          easeOut: (outgoing.easeOut ?? prev * 0.25) * scale,
+                        });
+                        return;
+                      }
+                      setHop({ duration });
+                    }}
+                  />
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={outgoing.playWithoutClick}
+                      disabled={locked}
+                      onChange={(event) => setHop({ playWithoutClick: event.target.checked })}
+                    />
+                    Play without a click
+                  </label>
+                  {outgoing.kind === "movie" && (
+                    <>
+                      <HopTimeline
+                        duration={outgoing.duration}
+                        easeIn={outgoing.easeIn}
+                        easeOut={outgoing.easeOut}
+                        disabled={locked}
+                        onChange={(next) => setHop(next)}
+                        onCommit={() => void flushAndSave(true)}
+                      />
+                      <AeScrub
+                        label="Cruise zoom"
+                        value={outgoing.flyZoom ?? cruiseAuto}
+                        min={WORLD_MIN_ZOOM}
+                        max={22}
+                        step={0.1}
+                        slider
+                        disabled={locked}
+                        onChange={(flyZoom) => setHop({ flyZoom })}
+                      />
+                      {outgoing.flyZoom != null && (
+                        <button className="btn secondary" type="button" disabled={locked} onClick={() => setHop({}, { dropFlyZoom: true })}>
+                          Auto cruise zoom
+                        </button>
+                      )}
+                      <label>
+                        Move easing:
+                        <select
+                          value={outgoing.easing || "ease-in-out"}
+                          disabled={locked}
+                          onChange={(event) => setHop({ easing: event.target.value as MapsEasing })}
+                        >
+                          <option value="ease-in-out">ease-in-out</option>
+                          <option value="linear">linear</option>
+                          <option value="ease-in">ease-in</option>
+                          <option value="ease-out">ease-out</option>
+                        </select>
+                      </label>
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={locked || (active?.churches.length || 0) < 2}
+                        onClick={() =>
+                          setHop({
+                            route: { points: (active?.churches || []).map((church) => ({ lat: church.lat, lon: church.lon })) },
+                          })
+                        }
+                      >
+                        Use pins as route
+                      </button>
+                      {outgoing.route?.points && outgoing.route.points.length >= 2 && (
+                        <button
+                          className="btn secondary"
+                          type="button"
+                          disabled={locked}
+                          title="Clear route"
+                          onClick={() => setHop({}, { dropRoute: true })}
+                        >
+                          Route: {outgoing.route.points.length} pts
+                        </button>
+                      )}
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={locked}
+                        onClick={() => void playHop(activeIndex, true)}
+                      >
+                        <IconPlay />
+                        Play hop
+                      </button>
+                    </>
+                  )}
+                  <button className="btn secondary" type="button" disabled={locked} onClick={() => void playFromHere()}>
+                    <IconPlay />
+                    Play from here
+                  </button>
                 </div>
               )}
-              <div>
-                <div className="cap">Export to Keynote</div>
-                <label className="maps-check">
-                  <input
-                    type="checkbox"
-                    checked={doc?.exportLw !== false}
-                    disabled={locked}
-                    onChange={(event) => {
-                      if (!doc) return;
-                      const exportLw = event.target.checked;
-                      const exportCg = exportLw ? doc.exportCg : true;
-                      patchDoc({ ...doc, exportLw, exportCg });
-                    }}
-                  />
-                  LED wall (7680×1080)
-                </label>
-                <label className="maps-check">
-                  <input
-                    type="checkbox"
-                    checked={doc?.exportCg !== false}
-                    disabled={locked}
-                    onChange={(event) => {
-                      if (!doc) return;
-                      const exportCg = event.target.checked;
-                      const exportLw = exportCg ? doc.exportLw : true;
-                      patchDoc({ ...doc, exportLw, exportCg });
-                    }}
-                  />
-                  CG (1920×1080)
-                </label>
-                <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
-                  Export
-                </button>
-              </div>
-            </>
+              {inspTab === "export" && (
+                <div>
+                  <div className="cap">Export to Keynote</div>
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={doc?.exportLw !== false}
+                      disabled={locked}
+                      onChange={(event) => {
+                        if (!doc) return;
+                        const exportLw = event.target.checked;
+                        const exportCg = exportLw ? doc.exportCg : true;
+                        patchDoc({ ...doc, exportLw, exportCg });
+                      }}
+                    />
+                    LED wall (7680×1080)
+                  </label>
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={doc?.exportCg !== false}
+                      disabled={locked}
+                      onChange={(event) => {
+                        if (!doc) return;
+                        const exportCg = event.target.checked;
+                        const exportLw = exportCg ? doc.exportLw : true;
+                        patchDoc({ ...doc, exportLw, exportCg });
+                      }}
+                    />
+                    CG (1920×1080)
+                  </label>
+                  <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
+                    Export
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
         )}
