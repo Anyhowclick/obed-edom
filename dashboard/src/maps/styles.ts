@@ -1,6 +1,7 @@
-import type { StyleSpecification } from "maplibre-gl";
-import type { MapsStyleId } from "./types";
+import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
+import { HILLSHADE_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
+import { TERRAIN_ATTRIBUTION } from "./stampOsm";
 
 export const OPENFREEMAP_STYLES: Record<MapsStyleId, string> = {
   positron: "https://tiles.openfreemap.org/styles/positron",
@@ -21,6 +22,45 @@ export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[]
 ];
 
 const styleCache = new Map<string, Promise<StyleSpecification>>();
+
+/** Top-down relief only: no `setTerrain()`, no draping, no pitch. Inserted before the first
+ * water layer so the opaque water fill covers terrarium's ETOPO1 ocean-floor bathymetry. */
+function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSpecification {
+  style.sources[HILLSHADE_SOURCE_ID] = {
+    type: "raster-dem",
+    encoding: "terrarium",
+    tiles: ["/api/maps/tiles/terrarium/{z}/{x}/{y}.png"],
+    tileSize: 256,
+    minzoom: 0,
+    maxzoom: 12,
+    attribution: TERRAIN_ATTRIBUTION,
+  };
+  const dark = styleId === "dark" || styleId === "fiord";
+  const layer: LayerSpecification = {
+    id: HILLSHADE_LAYER_ID,
+    type: "hillshade",
+    source: HILLSHADE_SOURCE_ID,
+    minzoom: 6,
+    layout: { visibility: "none" },
+    paint: {
+      "hillshade-method": "igor",
+      "hillshade-illumination-anchor": "map",
+      "hillshade-illumination-direction": 335,
+      "hillshade-exaggeration": ["interpolate", ["linear"], ["zoom"], 6, 0, 8, dark ? 0.5 : 0.35],
+      "hillshade-shadow-color": dark ? "#000000" : "#4a4033",
+      "hillshade-highlight-color": dark ? "#7f93ad" : "#ffffff",
+      "hillshade-accent-color": dark ? "#000814" : "#6b5c46",
+    },
+  };
+  const anchor = (
+    style.layers.find((l) => (l as { "source-layer"?: string })["source-layer"] === "water") ||
+    style.layers.find((l) => l.type === "line") ||
+    style.layers.find((l) => l.type === "symbol")
+  )?.id;
+  const index = anchor ? style.layers.findIndex((l) => l.id === anchor) : style.layers.length;
+  style.layers.splice(index, 0, layer);
+  return style;
+}
 
 /** Inline TileJSON `tiles` so MapLibre actually requests vector PBFs past the NE raster. */
 export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpecification> {
@@ -63,5 +103,5 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpec
       });
     styleCache.set(url, pending);
   }
-  return pending.then((s) => structuredClone(s));
+  return pending.then((s) => withHillshade(structuredClone(s), styleId));
 }

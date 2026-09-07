@@ -379,6 +379,7 @@ export type MapsExportPlan = {
     camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
     highlights: string[];
     hiddenLayers?: string[];
+    hillshade?: boolean;
     width?: number;
     height?: number;
   }>;
@@ -390,6 +391,7 @@ export type MapsExportPlan = {
     style: string;
     highlights: string[];
     hiddenLayers?: string[];
+    hillshade?: boolean;
   }>;
   cg?: {
     links: Array<Record<string, unknown>>;
@@ -442,6 +444,7 @@ export async function prefetchMapsTiles(body: {
   maxzoom?: number;
   width?: number;
   height?: number;
+  terrain?: boolean;
 }): Promise<{ ok: boolean; tiles: number; cached: number; fetched: number; failed: number }> {
   const res = await fetch("/api/maps/tile-cache/prefetch", {
     method: "POST",

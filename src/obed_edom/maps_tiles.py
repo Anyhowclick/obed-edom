@@ -34,6 +34,10 @@ from obed_edom.maps_geo import (
 from obed_edom.paths import output_root
 
 UPSTREAM = "https://tiles.openfreemap.org"
+TERRAIN_PREFIX = "terrarium/"
+TERRAIN_UPSTREAM = "https://s3.amazonaws.com/elevation-tiles-prod"
+TERRAIN_TEMPLATE = "terrarium/{z}/{x}/{y}.png"
+TERRAIN_MAXZOOM = 12
 TILE_UA = "Obed-Edom-Maps/1.0 (local dashboard tile cache)"
 PINNED_CACHE_COUNTRIES = ("PHL", "IND", "IDN", "MYS")
 PLANET_TILEJSON = "planet"
@@ -100,12 +104,19 @@ def media_type_for(rel: str) -> str:
 
 
 def fetch_upstream(rel: str) -> bytes:
-    encoded = "/".join(quote(part, safe="") for part in normalize_rel(rel).split("/"))
-    url = f"{UPSTREAM}/{encoded}"
+    rel = normalize_rel(rel)
+    terrain = rel.startswith(TERRAIN_PREFIX)
+    encoded = "/".join(quote(part, safe="") for part in rel.split("/"))
+    url = f"{(TERRAIN_UPSTREAM if terrain else UPSTREAM)}/{encoded}"
     resp = requests.get(url, timeout=45, headers={"User-Agent": TILE_UA}, allow_redirects=True)
     resp.raise_for_status()
-    final = urlparse(resp.url)
-    if final.hostname and final.hostname.lower() != "tiles.openfreemap.org":
+    host = (urlparse(resp.url).hostname or "").lower()
+    ok = (
+        (host == "amazonaws.com" or host.endswith(".amazonaws.com"))
+        if terrain
+        else (host == "tiles.openfreemap.org")
+    )
+    if host and not ok:
         raise ValueError("Unexpected tile redirect")
     return resp.content
 
@@ -251,6 +262,29 @@ def tiles_for_camera(
     return tiles
 
 
+def terrain_tiles_for_camera(
+    camera: dict[str, Any],
+    *,
+    width: float = WALL_WIDTH,
+    height: float = WALL_HEIGHT,
+    maxzoom: int = TERRAIN_MAXZOOM,
+) -> set[tuple[int, int, int]]:
+    """256px DEM: MapLibre requests round(zoom + 1) (round-half-up), capped at the source maxzoom."""
+    lat = float(camera.get("lat") or 0)
+    lon = float(camera.get("lon") or 0)
+    zoom = float(camera.get("zoom") or 0)
+    pitch = abs(float(camera.get("pitch") or 0))
+    bearing = float(camera.get("bearing") or 0)
+    pad = 0.3 + 0.6 * min(1.0, pitch / 60.0)
+    z = max(0, min(int(maxzoom), math.floor(zoom + 1.5)))
+    west, south, east, north = viewport_bbox(lat, lon, zoom, width, height, pad=pad, bearing=bearing)
+    return tiles_for_bbox(west, south, east, north, z)
+
+
+def terrain_rels(tiles: Iterable[tuple[int, int, int]]) -> list[str]:
+    return sorted(TERRAIN_TEMPLATE.format(z=z, x=x, y=y) for z, x, y in tiles)
+
+
 def planet_tile_template(*, fetch=None) -> str:
     try:
         path = fetch_and_cache(PLANET_TILEJSON, fetch=fetch)
@@ -302,14 +336,18 @@ def _subsample_even(items: list[Any], n: int) -> list[Any]:
     return [items[i] for i in idxs]
 
 
-def _cap_tiles(tiles: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
-    if len(tiles) <= MAX_PREFETCH_TILES:
+def _cap_tiles(
+    tiles: set[tuple[int, int, int]], limit: int = MAX_PREFETCH_TILES
+) -> set[tuple[int, int, int]]:
+    if limit <= 0:
+        return set()
+    if len(tiles) <= limit:
         return tiles
     ordered = sorted(tiles)
-    if MAX_PREFETCH_TILES <= 1:
+    if limit <= 1:
         return {ordered[0]}
     count = len(ordered)
-    return {ordered[round(i * (count - 1) / (MAX_PREFETCH_TILES - 1))] for i in range(MAX_PREFETCH_TILES)}
+    return {ordered[round(i * (count - 1) / (limit - 1))] for i in range(limit)}
 
 
 def rels_for_cameras(
@@ -318,31 +356,38 @@ def rels_for_cameras(
     width: float = WALL_WIDTH,
     height: float = WALL_HEIGHT,
     maxzoom: int = DEFAULT_CAMERA_MAXZOOM,
+    terrain: bool = False,
 ) -> list[str]:
     cams = list(cameras)
     if not cams:
         return planet_rels([])
 
-    def tiles_for(subset: list[dict[str, Any]]) -> set[tuple[int, int, int]]:
-        tiles: set[tuple[int, int, int]] = set()
+    def tiles_for(subset: list[dict[str, Any]]) -> tuple[set[tuple[int, int, int]], set[tuple[int, int, int]]]:
+        vector: set[tuple[int, int, int]] = set()
+        dem: set[tuple[int, int, int]] = set()
         for camera in subset:
-            tiles.update(tiles_for_camera(camera, width=width, height=height, maxzoom=maxzoom))
-        return tiles
+            vector.update(tiles_for_camera(camera, width=width, height=height, maxzoom=maxzoom))
+            if terrain:
+                dem.update(terrain_tiles_for_camera(camera, width=width, height=height))
+        return vector, dem
 
-    tiles = tiles_for(cams)
-    if len(tiles) > MAX_PREFETCH_TILES and len(cams) > 1:
+    pair = tiles_for(cams)
+    if len(pair[0]) + len(pair[1]) > MAX_PREFETCH_TILES and len(cams) > 1:
         lo, hi = 2, len(cams)
-        best_tiles = tiles_for(_subsample_even(cams, 2))
+        best_pair = tiles_for(_subsample_even(cams, 2))
         while lo <= hi:
             mid = (lo + hi) // 2
             candidate = tiles_for(_subsample_even(cams, mid))
-            if len(candidate) <= MAX_PREFETCH_TILES:
-                best_tiles = candidate
+            if len(candidate[0]) + len(candidate[1]) <= MAX_PREFETCH_TILES:
+                best_pair = candidate
                 lo = mid + 1
             else:
                 hi = mid - 1
-        tiles = best_tiles
-    return planet_rels(_cap_tiles(tiles))
+        pair = best_pair
+    vector, dem = pair
+    capped_vector = _cap_tiles(vector)
+    capped_dem = _cap_tiles(dem, MAX_PREFETCH_TILES - len(capped_vector)) if dem else set()
+    return planet_rels(capped_vector) + terrain_rels(capped_dem)
 
 
 def prefetch_rels(rels: Iterable[str], *, fetch=None) -> dict[str, int]:

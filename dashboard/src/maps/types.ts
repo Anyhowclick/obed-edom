@@ -1,3 +1,6 @@
+export const HILLSHADE_LAYER_ID = "hillshade";
+export const HILLSHADE_SOURCE_ID = "terrarium";
+
 export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d";
 export type MapsCropId = "wall" | "center+cg";
 export type MapsLayerFilterId =
@@ -41,6 +44,7 @@ export type MapsCgOverride = {
   highlights: string[];
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
+  hillshade?: boolean;
   stillPng?: string;
   movieMov?: string;
   movieDuration?: number;
@@ -54,6 +58,7 @@ export type MapsSlide = {
   highlights: string[];
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
+  hillshade?: boolean;
   stillPng?: string;
   cgShiftX: number;
   cgShiftY: number;
@@ -190,7 +195,13 @@ export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort().join(",");
   const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
   const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
-  if (from.style !== to.style || fromHi !== toHi || fromLayers !== toLayers) return "cut";
+  if (
+    from.style !== to.style ||
+    fromHi !== toHi ||
+    fromLayers !== toLayers ||
+    (from.hillshade === true) !== (to.hillshade === true)
+  )
+    return "cut";
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
@@ -334,12 +345,13 @@ export function parseRoute(raw: unknown): MapsRoute | undefined {
 
 function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {
   if (!cg) return undefined;
-  const { hiddenLayers, ...rest } = cg;
+  const { hiddenLayers, hillshade, ...rest } = cg;
   return {
     ...rest,
     highlights: cg.highlights || [],
     churches: cg.churches || [],
     ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
+    ...(typeof hillshade === "boolean" ? { hillshade } : {}),
     camera: { ...cg.camera, zoom: clampZoom(cg.camera.zoom), lon: wrapLon(cg.camera.lon) },
   };
 }
@@ -355,6 +367,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     highlights: slide.highlights || [],
     churches: slide.churches || [],
     hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
+    hillshade: slide.hillshade === true,
     cg: cgFromResult(slide.cg),
     camera: {
       ...slide.camera,

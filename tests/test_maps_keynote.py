@@ -594,6 +594,29 @@ def test_export_plan_stills_and_plates_carry_hidden_layers():
     assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {"s1": ["pois"], "s2": ["pois"]}
 
 
+def test_coerce_cg_hillshade_override_demotes_morph():
+    a = _slide("s1", _camera(3.0, 101.0, 8), hillshade=True)
+    b = _slide("s2", _camera(3.0, 102.0, 8), hillshade=True)
+    b["cg"] = {"camera": _camera(3.0, 102.0, 8), "style": "positron", "highlights": [], "churches": []}
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}]
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
+    b["cg"]["hillshade"] = False
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "cut"
+    b["cg"]["hillshade"] = None
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
+
+
+def test_export_plan_stills_and_plates_carry_hillshade():
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, hillshade=True)
+    b = _slide("s2", cam_b, hillshade=True)
+    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
+    assert plan["stills"] == []
+    assert plan["plates"][0]["hillshade"] is True
+    plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
+    assert {row["slideId"]: row["hillshade"] for row in plan_cut["stills"]} == {"s1": True, "s2": True}
+
+
 def test_export_plan_still_defaults_hidden_layers_when_missing():
     a = _slide("s1", _camera(3.0, 101.0, 8))
     plan = maps_export_plan([a], [])

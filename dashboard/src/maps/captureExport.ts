@@ -1,7 +1,7 @@
 import "./maplibreWorker";
 import { Map as MapLibreMap } from "maplibre-gl";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, ensureAdmin0Highlights, ensureLowZoomRaster } from "./overlays";
+import { addOverlays, applyHillshade, ensureAdmin0Highlights, ensureLowZoomRaster } from "./overlays";
 import { stampOsm } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
@@ -123,6 +123,7 @@ export type ExportMapOpts = {
   styleId: MapsStyleId;
   highlights: string[];
   hiddenLayers?: MapsLayerFilterId[];
+  hillshade?: boolean;
   churches?: MapsChurch[];
   numberPins?: boolean;
   isCancelled?: () => boolean;
@@ -136,6 +137,7 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     styleId,
     highlights,
     hiddenLayers = DEFAULT_HIDDEN_LAYERS,
+    hillshade = false,
     churches,
     numberPins = false,
     isCancelled,
@@ -171,12 +173,14 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     await waitEvent(map, "load", TILE_WAIT_MS, isCancelled);
     ensureLowZoomRaster(map, styleId);
     applyLayerFilters(map, hiddenLayers);
+    applyHillshade(map, hillshade);
     if (churches) {
       await addOverlays(map, highlights, churches, null, styleId, numberPins);
     } else {
       await ensureAdmin0Highlights(map, highlights, styleId);
     }
     applyLayerFilters(map, hiddenLayers);
+    applyHillshade(map, hillshade);
     await waitIdleForFrame(map, undefined, isCancelled);
     return { map, host };
   } catch (err) {
@@ -199,7 +203,7 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
         reject(new Error("Map canvas is tainted (CORS). Cannot export."));
       }
     });
-    return await stampOsm(raw);
+    return await stampOsm(raw, opts.hillshade === true);
   } finally {
     map.remove();
     host.remove();

@@ -25,9 +25,9 @@ function countriesLabel(codes: string[]): string {
   return codes.map((code) => admin0Name(code)).join(", ");
 }
 
-function layersLabel(ids: MapsLayerFilterId[]): string {
-  if (!ids.length) return "none hidden";
-  return ids.map((id) => LAYER_FILTERS.find((item) => item.id === id)?.label || id).join(", ");
+function layersLabel(ids: MapsLayerFilterId[], relief: boolean): string {
+  const base = ids.length ? ids.map((id) => LAYER_FILTERS.find((item) => item.id === id)?.label || id).join(", ") : "none hidden";
+  return relief ? `${base} · relief on` : base;
 }
 
 function fmtDeg(n: number): string {
@@ -40,6 +40,9 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort();
   const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
   const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
+  const fromRelief = from.hillshade === true;
+  const toRelief = to.hillshade === true;
+  const layersSame = fromLayers.join(",") === toLayers.join(",") && fromRelief === toRelief;
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
@@ -70,12 +73,11 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
     {
       id: "layers",
       label: "Same layers",
-      ok: fromLayers.join(",") === toLayers.join(","),
-      detail:
-        fromLayers.join(",") === toLayers.join(",")
-          ? layersLabel(fromLayers)
-          : `${layersLabel(fromLayers)} → ${layersLabel(toLayers)}`,
-      tip: "Hidden map layers (roads, POIs, labels…) must match on both shots.",
+      ok: layersSame,
+      detail: layersSame
+        ? layersLabel(fromLayers, fromRelief)
+        : `${layersLabel(fromLayers, fromRelief)} → ${layersLabel(toLayers, toRelief)}`,
+      tip: "Hidden map layers (roads, POIs, labels…) and relief shading must match on both shots.",
     },
     {
       id: "3d",

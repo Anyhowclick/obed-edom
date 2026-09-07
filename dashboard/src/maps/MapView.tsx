@@ -5,7 +5,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, churchesGeo, ensureDropPinImages, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
+import { addOverlays, applyHighlights, applyHillshade, churchesGeo, ensureDropPinImages, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
 import {
@@ -187,6 +187,7 @@ type Props = {
   sidePanels: boolean;
   exportCg: boolean;
   hiddenLayers: MapsLayerFilterId[];
+  hillshade: boolean;
   cgShiftX: number;
   authoredWidth?: number;
   previewing: boolean;
@@ -217,6 +218,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     sidePanels,
     exportCg,
     hiddenLayers,
+    hillshade,
     cgShiftX,
     authoredWidth = WALL_W,
     previewing,
@@ -239,7 +241,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const overlayGeneration = useRef(0);
   const previewingRef = useRef(previewing);
   const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort });
-  const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, numberPins });
+  const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, numberPins });
   const cgDrag = useRef<{ x: number; shift: number; width: number } | null>(null);
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
@@ -266,7 +268,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   minZoomRef.current = minZoomForView();
   authoredWidthRef.current = authoredWidth;
   callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort };
-  overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, numberPins };
+  overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, numberPins };
 
   useImperativeHandle(ref, () => ({
     jumpTo(next) {
@@ -493,6 +495,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         styleReady.current = false;
         ensureLowZoomRaster(currentMap, overlay.current.styleId);
         applyLayerFilters(currentMap, overlay.current.hiddenLayers);
+        applyHillshade(currentMap, overlay.current.hillshade);
         void addOverlays(
           currentMap,
           overlay.current.highlights,
@@ -532,6 +535,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             });
             ensureLowZoomRaster(map, overlay.current.styleId);
             applyLayerFilters(map, overlay.current.hiddenLayers);
+            applyHillshade(map, overlay.current.hillshade);
           }
         } catch (err) {
           suppress.current = false;
@@ -546,6 +550,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         if (map) {
           ensureLowZoomRaster(map, overlay.current.styleId);
           applyLayerFilters(map, overlay.current.hiddenLayers);
+          applyHillshade(map, overlay.current.hillshade);
         }
         void loadAdmin0().then(() => {
           if (mapRef.current === map) paintOverlays();
@@ -611,6 +616,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.resize();
         ensureLowZoomRaster(map, styleId);
         applyLayerFilters(map, overlay.current.hiddenLayers);
+        applyHillshade(map, overlay.current.hillshade);
       });
     });
   }, [styleId]);
@@ -646,6 +652,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!map) return;
     applyLayerFilters(map, hiddenLayers);
   }, [hiddenLayers]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    applyHillshade(map, hillshade);
+  }, [hillshade]);
 
   function eventToLngLat(event: { clientX: number; clientY: number }): { lat: number; lon: number } | null {
     const map = mapRef.current;

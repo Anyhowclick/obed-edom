@@ -111,6 +111,15 @@ def test_infer_hop_kind_cut_on_hidden_layers():
     assert infer_hop_kind(a, c) == "morph"
 
 
+def test_infer_hop_kind_cut_on_hillshade():
+    a = {"style": "positron", "highlights": [], "hillshade": True, "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    b = {"style": "positron", "highlights": [], "hillshade": False, "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    assert infer_hop_kind(a, b) == "cut"
+    c = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    d = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    assert infer_hop_kind(c, d) == "morph"
+
+
 def test_infer_hop_kind_distinguishes_explicit_empty_hidden_layers():
     a = {"style": "positron", "highlights": [], "hiddenLayers": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     b = {"style": "positron", "highlights": [], "hiddenLayers": ["roadnames"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}

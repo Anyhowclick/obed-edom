@@ -1,5 +1,5 @@
 import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
-import type { MapsChurch, MapsStyleId } from "./types";
+import { HILLSHADE_LAYER_ID, type MapsChurch, type MapsStyleId } from "./types";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -62,6 +62,11 @@ export function ensureLowZoomRaster(map: MapLibreMap, styleId?: string): void {
     },
     before
   );
+}
+
+export function applyHillshade(map: MapLibreMap, on: boolean): void {
+  if (!map.getLayer(HILLSHADE_LAYER_ID)) return;
+  map.setLayoutProperty(HILLSHADE_LAYER_ID, "visibility", on ? "visible" : "none");
 }
 
 export function applyHighlights(map: MapLibreMap, highlights: string[]) {

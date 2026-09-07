@@ -122,6 +122,14 @@ function IconLayers() {
   );
 }
 
+function IconRelief() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 17 8.5 8l4 6.5L15 10l6 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
   return {
     ...slide,
@@ -214,6 +222,7 @@ export function MapsTab() {
   const active = slides.find((s) => s.id === activeId) || slides[0] || null;
   const activeView = active ? slideForAudience(active, activeAudience) : null;
   const activeHiddenLayers = activeView?.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS;
+  const activeHillshade = activeView?.hillshade === true;
   const renderedView = previewView || activeView;
   const renderedAuthoredWidth = previewView
     ? authoredSurfaceWidth(previewView, activeAudience)
@@ -434,7 +443,9 @@ export function MapsTab() {
     const audience = activeAudienceRef.current;
     const blob = await mapRef.current?.captureBlob();
     if (!blob) return;
-    const stamped = await stampOsm(blob);
+    const slide = docRef.current?.slides.find((s) => s.id === slideId);
+    const hillshade = (slide ? slideForAudience(slide, audience) : null)?.hillshade === true;
+    const stamped = await stampOsm(blob, hillshade);
     const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience });
     const stored = (updated.result?.slides as Array<{ id?: string; stillPng?: string; cg?: { stillPng?: string } }> | undefined)?.find((s) => s.id === slideId);
     const still = audience === "cg" ? stored?.cg?.stillPng : stored?.stillPng;
@@ -1014,6 +1025,7 @@ export function MapsTab() {
           styleId: still.style as MapsSlide["style"],
           highlights: still.highlights,
           hiddenLayers: (still.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+          hillshade: (still.hillshade as boolean | undefined) === true,
           isCancelled: () => exportAbort.current,
         });
         throwIfCancelled();
@@ -1028,6 +1040,7 @@ export function MapsTab() {
           styleId: plate.style as MapsSlide["style"],
           highlights: plate.highlights,
           hiddenLayers: (plate.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+          hillshade: (plate.hillshade as boolean | undefined) === true,
           isCancelled: () => exportAbort.current,
         });
         throwIfCancelled();
@@ -1043,6 +1056,7 @@ export function MapsTab() {
             styleId: still.style as MapsSlide["style"],
             highlights: still.highlights,
             hiddenLayers: (still.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+            hillshade: (still.hillshade as boolean | undefined) === true,
             isCancelled: () => exportAbort.current,
           });
           throwIfCancelled();
@@ -1057,6 +1071,7 @@ export function MapsTab() {
             styleId: plate.style as MapsSlide["style"],
             highlights: plate.highlights,
             hiddenLayers: (plate.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+            hillshade: (plate.hillshade as boolean | undefined) === true,
             isCancelled: () => exportAbort.current,
           });
           throwIfCancelled();
@@ -1088,7 +1103,7 @@ export function MapsTab() {
         setLogs((prev) => [...prev, `Prefetching tiles for ${from.id} → ${to.id}…`]);
         try {
           throwIfCancelled();
-          const stats = await prefetchMapsTiles({ cameras, width, height, maxzoom: 14 });
+          const stats = await prefetchMapsTiles({ cameras, width, height, maxzoom: 14, terrain: from.hillshade === true });
           setLogs((prev) => [...prev, `Cached ${stats.cached + stats.fetched} / ${stats.tiles} tiles (${stats.failed} failed).`]);
         } catch (err) {
           if (exportAbort.current) throw err;
@@ -1104,6 +1119,7 @@ export function MapsTab() {
           styleId: from.style,
           highlights: from.highlights,
           hiddenLayers: from.hiddenLayers ?? local.hiddenLayers,
+          hillshade: from.hillshade === true,
           churches: from.churches,
           numberPins: true,
           duration: link.duration,
@@ -1151,7 +1167,7 @@ export function MapsTab() {
             })
           );
           try {
-            await prefetchMapsTiles({ cameras, width, height: 1080, maxzoom: 14 });
+            await prefetchMapsTiles({ cameras, width, height: 1080, maxzoom: 14, terrain: from.hillshade === true });
           } catch (err) {
             if (exportAbort.current) throw err;
           }
@@ -1164,6 +1180,7 @@ export function MapsTab() {
             styleId: from.style,
             highlights: from.highlights,
             hiddenLayers: from.hiddenLayers ?? local.hiddenLayers,
+            hillshade: from.hillshade === true,
             churches: from.churches,
             numberPins: true,
             duration: link.duration,
@@ -1485,6 +1502,17 @@ export function MapsTab() {
             </div>
           )}
         </div>
+        <button
+          type="button"
+          className={`btn secondary icon-btn maps-relief-btn${activeHillshade ? " on" : ""}`}
+          title={activeHillshade ? "Relief on" : "Relief off"}
+          aria-label="Terrain relief"
+          aria-pressed={activeHillshade}
+          disabled={locked}
+          onClick={() => updateActive({ hillshade: !activeHillshade })}
+        >
+          <IconRelief />
+        </button>
         <CountryCachePicker
           selected={doc?.cachedCountries || []}
           disabled={locked}
@@ -1615,6 +1643,7 @@ export function MapsTab() {
                 sidePanels={renderedSidePanels}
                 exportCg={doc?.exportCg !== false && !active.cg}
                 hiddenLayers={renderedView?.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS}
+                hillshade={renderedView?.hillshade === true}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
                 authoredWidth={renderedAuthoredWidth}
                 previewing={previewing}

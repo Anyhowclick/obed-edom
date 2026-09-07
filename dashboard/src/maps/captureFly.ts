@@ -283,6 +283,7 @@ export async function captureFlyFrames(opts: {
   styleId: MapsStyleId;
   highlights: string[];
   hiddenLayers?: MapsLayerFilterId[];
+  hillshade?: boolean;
   churches?: MapsChurch[];
   numberPins?: boolean;
   duration: number;
@@ -311,6 +312,7 @@ export async function captureFlyFrames(opts: {
     styleId,
     highlights,
     hiddenLayers,
+    hillshade,
     churches,
     numberPins = false,
     duration,
@@ -334,6 +336,7 @@ export async function captureFlyFrames(opts: {
     styleId,
     highlights,
     hiddenLayers,
+    hillshade,
     churches,
     numberPins,
     isCancelled,
@@ -358,9 +361,10 @@ export async function captureFlyFrames(opts: {
             outputCrop.width,
             outputCrop.height,
             "image/jpeg",
-            0.95
+            0.95,
+            hillshade === true
           )
-        : await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95);
+        : await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95, hillshade === true);
       if (cancelled()) throw new Error("Export cancelled.");
       await onFrame(blob, i, count);
     }

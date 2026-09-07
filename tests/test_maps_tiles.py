@@ -10,14 +10,17 @@ import pytest
 
 from obed_edom.maps_tiles import (
     PINNED_CACHE_COUNTRIES,
+    TERRAIN_MAXZOOM,
     cache_country_rows,
     cache_path,
     cache_stats,
     fetch_and_cache,
     fetch_upstream,
+    media_type_for,
     normalize_rel,
     prefetch_rels,
     rels_for_cameras,
+    terrain_tiles_for_camera,
     tiles_for_bbox,
     tiles_for_camera,
     viewport_bbox,
@@ -213,6 +216,106 @@ def test_cache_stats_counts_bytes(tmp_path, monkeypatch):
     stats = cache_stats()
     assert stats["files"] >= 1
     assert stats["bytes"] >= 4
+
+
+class _FakeResp:
+    def __init__(self, url: str, content: bytes = b"ok"):
+        self.url = url
+        self.content = content
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+def test_terrain_rel_routes_to_aws_and_ofm_unchanged(monkeypatch):
+    seen: list[str] = []
+
+    def fake_get(url, **_kwargs):
+        seen.append(url)
+        return _FakeResp(url)
+
+    monkeypatch.setattr("obed_edom.maps_tiles.requests.get", fake_get)
+    fetch_upstream("terrarium/9/3/4.png")
+    fetch_upstream("planet/0/0/0.pbf")
+    assert seen[0] == "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/9/3/4.png"
+    assert seen[1] == "https://tiles.openfreemap.org/planet/0/0/0.pbf"
+
+
+def test_terrain_redirect_host_guard(monkeypatch):
+    def fake_get(_url, **_kwargs):
+        return _FakeResp("https://evil.example.com/terrarium/9/3/4.png")
+
+    monkeypatch.setattr("obed_edom.maps_tiles.requests.get", fake_get)
+    with pytest.raises(ValueError):
+        fetch_upstream("terrarium/9/3/4.png")
+
+    def fake_get_lookalike(_url, **_kwargs):
+        return _FakeResp("https://evil-amazonaws.com/terrarium/9/3/4.png")
+
+    monkeypatch.setattr("obed_edom.maps_tiles.requests.get", fake_get_lookalike)
+    with pytest.raises(ValueError):
+        fetch_upstream("terrarium/9/3/4.png")
+
+    def fake_get_regional(_url, **_kwargs):
+        return _FakeResp("https://elevation-tiles-prod.s3.us-east-1.amazonaws.com/terrarium/9/3/4.png")
+
+    monkeypatch.setattr("obed_edom.maps_tiles.requests.get", fake_get_regional)
+    fetch_upstream("terrarium/9/3/4.png")
+
+    def fake_get_planet_to_s3(_url, **_kwargs):
+        return _FakeResp("https://elevation-tiles-prod.s3.amazonaws.com/planet/0/0/0.pbf")
+
+    monkeypatch.setattr("obed_edom.maps_tiles.requests.get", fake_get_planet_to_s3)
+    with pytest.raises(ValueError):
+        fetch_upstream("planet/0/0/0.pbf")
+
+
+def test_terrain_rel_caches_under_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.fetch_upstream", lambda rel: b"dem-bytes")
+    path = fetch_and_cache("terrarium/9/3/4.png")
+    assert path == cache_path("terrarium/9/3/4.png")
+    assert path.read_bytes() == b"dem-bytes"
+    assert media_type_for("terrarium/9/3/4.png") == "image/png"
+    with pytest.raises(ValueError):
+        normalize_rel("terrarium/../planet/0/0/0.pbf")
+
+
+def test_terrain_tiles_are_one_zoom_deeper_and_capped():
+    tiles = terrain_tiles_for_camera(
+        {"lat": 27.9, "lon": 86.9, "zoom": 9, "bearing": 0, "pitch": 0},
+        width=3840,
+        height=1080,
+    )
+    assert tiles
+    assert all(z == 10 for z, _x, _y in tiles)
+
+    capped = terrain_tiles_for_camera(
+        {"lat": 27.9, "lon": 86.9, "zoom": 14, "bearing": 0, "pitch": 0},
+        width=3840,
+        height=1080,
+    )
+    assert capped
+    assert all(z == TERRAIN_MAXZOOM for z, _x, _y in capped)
+
+
+def test_rels_for_cameras_terrain_adds_dem_within_one_budget(monkeypatch):
+    # A single camera bypasses the binary search entirely, so this is the path
+    # that exposed the vector+dem double-budget bug (each family capped against
+    # the full MAX_PREFETCH_TILES independently).
+    monkeypatch.setattr("obed_edom.maps_tiles.MAX_PREFETCH_TILES", 100)
+    monkeypatch.setattr("obed_edom.maps_tiles.planet_tile_template", lambda **_: "planet/{z}/{x}/{y}.pbf")
+    camera = {"lat": 0.0, "lon": 0.0, "zoom": 10, "bearing": 0, "pitch": 0}
+
+    without = rels_for_cameras([camera], width=3840, height=1080, maxzoom=10, terrain=False)
+    assert without
+    assert all(not rel.startswith("terrarium/") for rel in without)
+    assert len(without) <= 100
+
+    withit = rels_for_cameras([camera], width=3840, height=1080, maxzoom=10, terrain=True)
+    assert any(rel.startswith("planet/") for rel in withit)
+    assert any(rel.startswith("terrarium/") for rel in withit)
+    assert len(withit) <= 100
 
 
 def test_fetch_and_cache_two_threads_same_missing_rel(tmp_path, monkeypatch):

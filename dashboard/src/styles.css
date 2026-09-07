@@ -1584,6 +1584,11 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   cursor: pointer;
 }
 .maps-layers-item input { accent-color: var(--sky); width: auto; }
+.maps-relief-btn.on {
+  background: var(--sky);
+  color: var(--ink-inverse);
+  border-color: transparent;
+}
 .maps-cache-menu {
   max-height: min(70vh, 420px);
   overflow: auto;

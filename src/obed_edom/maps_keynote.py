@@ -460,6 +460,7 @@ def maps_export_plan(
                 "camera": slide.get("camera") or {},
                 "highlights": list(slide.get("highlights") or []),
                 "hiddenLayers": list(hidden_layers if hidden_layers is not None else DEFAULT_HIDDEN_LAYERS),
+                "hillshade": bool(slide.get("hillshade")),
                 "width": cap_w,
                 "height": cap_h,
             }
@@ -482,6 +483,7 @@ def maps_export_plan(
                 "style": (first or {}).get("style") or "positron",
                 "highlights": list((first or {}).get("highlights") or []),
                 "hiddenLayers": list(first_hidden_layers if first_hidden_layers is not None else DEFAULT_HIDDEN_LAYERS),
+                "hillshade": bool((first or {}).get("hillshade")),
             }
         )
     if audience == "cg":

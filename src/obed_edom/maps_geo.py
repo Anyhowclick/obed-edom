@@ -200,7 +200,9 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     to_hidden = to_slide.get("hiddenLayers")
     from_layers = sorted(from_hidden if from_hidden is not None else list(DEFAULT_HIDDEN_LAYERS))
     to_layers = sorted(to_hidden if to_hidden is not None else list(DEFAULT_HIDDEN_LAYERS))
-    if from_style != to_style or from_hi != to_hi or from_layers != to_layers:
+    from_hillshade = bool(from_slide.get("hillshade"))
+    to_hillshade = bool(to_slide.get("hillshade"))
+    if from_style != to_style or from_hi != to_hi or from_layers != to_layers or from_hillshade != to_hillshade:
         return "cut"
     from_cam = from_slide.get("camera") or {}
     to_cam = to_slide.get("camera") or {}

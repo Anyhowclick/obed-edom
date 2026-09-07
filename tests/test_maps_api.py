@@ -288,6 +288,23 @@ def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
     assert result["links"][0]["kind"] == "cut"
 
 
+def test_slide_hillshade_roundtrip_and_demotes_morph():
+    job = _seed()
+    doc = _doc(job)
+    assert doc["slides"][0].get("hillshade") is False
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    slide2["hillshade"] = True
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["slides"][0]["hillshade"] is False
+    assert result["slides"][1]["hillshade"] is True
+    assert result["links"][0]["kind"] == "cut"
+
+
 def test_geocode_empty_and_ua_and_429(monkeypatch):
     empty = client.get("/api/maps/geocode?q=")
     assert empty.status_code == 400
@@ -725,6 +742,54 @@ def test_tile_proxy_and_prefetch_use_disk_cache(tmp_path, monkeypatch):
     stats = client.get("/api/maps/tile-cache")
     assert stats.status_code == 200, stats.text
     assert stats.json()["bytes"] > 0
+    cleared = client.delete("/api/maps/tile-cache")
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["bytes"] == 0
+
+
+def test_tile_proxy_serves_terrarium_png(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.fetch_upstream", lambda rel: b"dem-png-bytes")
+    tile = client.get("/api/maps/tiles/terrarium/9/3/4.png")
+    assert tile.status_code == 200, tile.text
+    assert tile.headers["content-type"] == "image/png"
+    assert tile.content == b"dem-png-bytes"
+    cached = client.get("/api/maps/tiles/terrarium/9/3/4.png")
+    assert cached.status_code == 200, cached.text
+    assert cached.content == b"dem-png-bytes"
+
+
+def test_prefetch_terrain_flag_fetches_dem_tiles(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.fetch_upstream", lambda rel: b"bytes")
+    prefetch = client.post(
+        "/api/maps/tile-cache/prefetch",
+        json={
+            "cameras": [{"lat": 27.9, "lon": 86.9, "zoom": 9, "bearing": 0, "pitch": 0}],
+            "width": 3840,
+            "height": 1080,
+            "maxzoom": 9,
+            "terrain": True,
+        },
+    )
+    assert prefetch.status_code == 200, prefetch.text
+    body = prefetch.json()
+    assert body["ok"] is True
+    assert body["tiles"] > 0
+    stats = client.get("/api/maps/tile-cache")
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["files"] > 0
+    without_terrain = client.post(
+        "/api/maps/tile-cache/prefetch",
+        json={
+            "cameras": [{"lat": 27.9, "lon": 86.9, "zoom": 9, "bearing": 0, "pitch": 0}],
+            "width": 3840,
+            "height": 1080,
+            "maxzoom": 9,
+        },
+    )
+    assert without_terrain.status_code == 200, without_terrain.text
+    assert without_terrain.json()["tiles"] < body["tiles"]
     cleared = client.delete("/api/maps/tile-cache")
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["bytes"] == 0

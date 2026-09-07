@@ -102,6 +102,7 @@ class MapsCgOverride(BaseModel):
     highlights: list[str] = Field(default_factory=list)
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
+    hillshade: bool | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
@@ -116,6 +117,7 @@ class MapsSlide(BaseModel):
     highlights: list[str] = Field(default_factory=list)
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
+    hillshade: bool = False
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
@@ -234,6 +236,7 @@ class TilePrefetchBody(BaseModel):
     maxzoom: int | None = None
     width: float = 7680
     height: float = 1080
+    terrain: bool = False
 
 
 class ExportBody(BaseModel):
@@ -328,6 +331,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
                 "highlights": [],
                 "churches": [],
                 "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
+                "hillshade": False,
                 "cgShiftX": 0,
                 "cgShiftY": 0,
             }
@@ -390,6 +394,7 @@ def _row_slide(row: dict[str, str], slide_id: str, hidden_layers: list[str] | No
         "highlights": [],
         "churches": [church],
         "hiddenLayers": hidden_layers or list(DEFAULT_HIDDEN_LAYERS),
+        "hillshade": False,
         "cgShiftX": 0,
         "cgShiftY": 0,
     }
@@ -700,6 +705,7 @@ def prefetch_tiles(payload: TilePrefetchBody) -> dict[str, Any]:
                 width=payload.width,
                 height=payload.height,
                 maxzoom=z,
+                terrain=payload.terrain,
             )
         )
     stats = prefetch_rels(rels)
