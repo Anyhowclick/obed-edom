@@ -20,6 +20,8 @@ export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
   if (id.includes("shield")) return "shields";
   if (sl === "transportation_name") return "roadnames";
   if (sl === "poi" || sl === "housenumber" || sl === "aerodrome_label" || id.startsWith("poi_")) return "pois";
+  const norm = id.replace(/_/g, "");
+  if (norm.includes("oneway") || id.includes("arrow")) return "arrows";
   if (sl === "transportation" || sl === "aeroway") return "roads";
   if (sl === "building" || id.includes("building")) return "buildings";
   if (sl === "place" || sl === "water_name" || id.startsWith("label_")) return "labels";

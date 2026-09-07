@@ -4,6 +4,7 @@ export type MapsLayerFilterId =
   | "roads"
   | "roadnames"
   | "shields"
+  | "arrows"
   | "pois"
   | "rail"
   | "buildings"
@@ -39,6 +40,7 @@ export type MapsCgOverride = {
   style: MapsStyleId;
   highlights: string[];
   churches: MapsChurch[];
+  hiddenLayers?: MapsLayerFilterId[];
   stillPng?: string;
   movieMov?: string;
   movieDuration?: number;
@@ -51,6 +53,7 @@ export type MapsSlide = {
   camera: MapsCamera;
   highlights: string[];
   churches: MapsChurch[];
+  hiddenLayers?: MapsLayerFilterId[];
   stillPng?: string;
   cgShiftX: number;
   cgShiftY: number;
@@ -104,6 +107,7 @@ export const LAYER_FILTERS: { id: MapsLayerFilterId; label: string }[] = [
   { id: "roads", label: "Roads" },
   { id: "roadnames", label: "Road names" },
   { id: "shields", label: "Road signs" },
+  { id: "arrows", label: "One-way arrows" },
   { id: "pois", label: "POIs (bus stops…)" },
   { id: "rail", label: "Rail" },
   { id: "buildings", label: "Buildings" },
@@ -113,7 +117,7 @@ export const LAYER_FILTERS: { id: MapsLayerFilterId; label: string }[] = [
 
 const LAYER_FILTER_IDS = new Set(LAYER_FILTERS.map((item) => item.id));
 
-export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames"];
+export const DEFAULT_HIDDEN_LAYERS: MapsLayerFilterId[] = ["roadnames", "arrows"];
 
 export function parseHiddenLayers(raw: unknown): MapsLayerFilterId[] {
   if (raw == null) return [...DEFAULT_HIDDEN_LAYERS];
@@ -184,7 +188,9 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
 export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const fromHi = [...from.highlights].map((h) => h.toUpperCase()).sort().join(",");
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort().join(",");
-  if (from.style !== to.style || fromHi !== toHi) return "cut";
+  const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
+  const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
+  if (from.style !== to.style || fromHi !== toHi || fromLayers !== toLayers) return "cut";
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
@@ -326,8 +332,21 @@ export function parseRoute(raw: unknown): MapsRoute | undefined {
   return { points: next };
 }
 
+function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {
+  if (!cg) return undefined;
+  const { hiddenLayers, ...rest } = cg;
+  return {
+    ...rest,
+    highlights: cg.highlights || [],
+    churches: cg.churches || [],
+    ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
+    camera: { ...cg.camera, zoom: clampZoom(cg.camera.zoom), lon: wrapLon(cg.camera.lon) },
+  };
+}
+
 export function documentFromResult(result: Record<string, unknown> | null | undefined): MapsDocument | null {
   if (!result || !Array.isArray(result.slides)) return null;
+  const deckHidden = parseHiddenLayers(result.hiddenLayers);
   const slides = (result.slides as MapsSlide[]).map((slide) => ({
     ...slide,
     cgShiftX: slide.cgShiftX ?? 0,
@@ -335,14 +354,8 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     includeSidePanels: slide.includeSidePanels === true,
     highlights: slide.highlights || [],
     churches: slide.churches || [],
-    cg: slide.cg
-      ? {
-          ...slide.cg,
-          highlights: slide.cg.highlights || [],
-          churches: slide.cg.churches || [],
-          camera: { ...slide.cg.camera, zoom: clampZoom(slide.cg.camera.zoom), lon: wrapLon(slide.cg.camera.lon) },
-        }
-      : undefined,
+    hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
+    cg: cgFromResult(slide.cg),
     camera: {
       ...slide.camera,
       zoom: clampZoom(slide.camera.zoom),
@@ -365,7 +378,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     exportLw: result.exportLw !== false,
     exportCg: result.exportCg !== false,
     exportDsk: result.exportDsk === true,
-    hiddenLayers: parseHiddenLayers(result.hiddenLayers),
+    hiddenLayers: deckHidden,
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
       : [],

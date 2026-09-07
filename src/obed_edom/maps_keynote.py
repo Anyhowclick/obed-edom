@@ -21,6 +21,7 @@ from obed_edom import keynote_app
 from obed_edom.maps_geo import (
     CENTRE_ORIGIN_X,
     CENTRE_WIDTH,
+    DEFAULT_HIDDEN_LAYERS,
     WALL_HEIGHT,
     WALL_WIDTH,
     camera_dict,
@@ -322,6 +323,14 @@ def _link_ends(link: dict[str, Any]) -> tuple[str, str]:
     return str(link.get("from") or link.get("from_") or ""), str(link.get("to") or "")
 
 
+def _cg_view(slide: dict[str, Any]) -> dict[str, Any]:
+    """Merge a slide with its CG override, letting unset override fields (e.g. hiddenLayers) inherit."""
+    cg = slide.get("cg")
+    if not isinstance(cg, dict):
+        return slide
+    return {**slide, **{key: value for key, value in cg.items() if value is not None}}
+
+
 def morph_runs(slides: list[dict[str, Any]], links: list[dict[str, Any]]) -> list[list[str]]:
     """Consecutive morph hops share one plate (pairwise union would dissolve on a chain)."""
     by_pair = {_link_ends(link): link for link in links}
@@ -355,9 +364,7 @@ def coerce_link_kinds(slides: list[dict[str, Any]], links: list[dict[str, Any]])
         if from_slide is not None and to_slide is not None:
             suggested = infer_hop_kind(from_slide, to_slide)
             if isinstance(from_slide.get("cg"), dict) or isinstance(to_slide.get("cg"), dict):
-                from_cg = {**from_slide, **(from_slide.get("cg") or {})}
-                to_cg = {**to_slide, **(to_slide.get("cg") or {})}
-                cg_suggested = infer_hop_kind(from_cg, to_cg)
+                cg_suggested = infer_hop_kind(_cg_view(from_slide), _cg_view(to_slide))
                 rank = {"morph": 0, "movie": 1, "cut": 2}
                 if rank[cg_suggested] > rank[suggested]:
                     suggested = cg_suggested
@@ -427,7 +434,7 @@ def maps_export_plan(
     """Coerced links plus still/plate capture jobs for Keynote export."""
     if audience == "cg":
         slides = [
-            {**slide, **slide["cg"], "cgShiftX": 0, "cgShiftY": 0, "includeSidePanels": False, "_splitCg": True}
+            {**_cg_view(slide), "cgShiftX": 0, "cgShiftY": 0, "includeSidePanels": False, "_splitCg": True}
             if isinstance(slide.get("cg"), dict)
             else slide
             for slide in slides
@@ -445,12 +452,14 @@ def maps_export_plan(
         if not sid or sid in covered:
             continue
         cap_w, cap_h = slide_capture_size(slide)
+        hidden_layers = slide.get("hiddenLayers")
         stills.append(
             {
                 "slideId": sid,
                 "style": slide.get("style") or "positron",
                 "camera": slide.get("camera") or {},
                 "highlights": list(slide.get("highlights") or []),
+                "hiddenLayers": list(hidden_layers if hidden_layers is not None else DEFAULT_HIDDEN_LAYERS),
                 "width": cap_w,
                 "height": cap_h,
             }
@@ -463,6 +472,7 @@ def maps_export_plan(
             for link in links:
                 if link.get("plateId") == plate_id:
                     link["plateId"] = output_id
+        first_hidden_layers = (first or {}).get("hiddenLayers")
         plate_list.append(
             {
                 "plateId": output_id,
@@ -471,6 +481,7 @@ def maps_export_plan(
                 "camera": geom["captureCamera"],
                 "style": (first or {}).get("style") or "positron",
                 "highlights": list((first or {}).get("highlights") or []),
+                "hiddenLayers": list(first_hidden_layers if first_hidden_layers is not None else DEFAULT_HIDDEN_LAYERS),
             }
         )
     if audience == "cg":
@@ -1338,7 +1349,7 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         if split_cg:
             cg_plan = split_cg_export_plan(slides, links)
             cg_slides = [
-                {**slide, **slide["cg"], "_splitCg": True} if isinstance(slide.get("cg"), dict) else slide
+                {**_cg_view(slide), "_splitCg": True} if isinstance(slide.get("cg"), dict) else slide
                 for slide in slides
             ]
             affected = set(cg_plan["affectedSlideIds"])

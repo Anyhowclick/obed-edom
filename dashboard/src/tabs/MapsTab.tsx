@@ -193,8 +193,10 @@ export function MapsTab() {
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
   const [layersOpen, setLayersOpen] = useState(false);
   const layersRef = useRef<HTMLDivElement | null>(null);
-  const [deckActionsOpen, setDeckActionsOpen] = useState(false);
-  const deckActionsRef = useRef<HTMLDivElement | null>(null);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement | null>(null);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
 
   useEffect(() => {
@@ -211,6 +213,7 @@ export function MapsTab() {
   const slides = doc?.slides || [];
   const active = slides.find((s) => s.id === activeId) || slides[0] || null;
   const activeView = active ? slideForAudience(active, activeAudience) : null;
+  const activeHiddenLayers = activeView?.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS;
   const renderedView = previewView || activeView;
   const renderedAuthoredWidth = previewView
     ? authoredSurfaceWidth(previewView, activeAudience)
@@ -301,12 +304,16 @@ export function MapsTab() {
   }, [layersOpen]);
 
   useEffect(() => {
-    if (!deckActionsOpen) return;
+    if (!addMenuOpen && !sessionMenuOpen) return;
     function onDoc(event: PointerEvent) {
-      if (deckActionsRef.current && !deckActionsRef.current.contains(event.target as Node)) setDeckActionsOpen(false);
+      if (addMenuRef.current && !addMenuRef.current.contains(event.target as Node)) setAddMenuOpen(false);
+      if (sessionMenuRef.current && !sessionMenuRef.current.contains(event.target as Node)) setSessionMenuOpen(false);
     }
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setDeckActionsOpen(false);
+      if (event.key === "Escape") {
+        setAddMenuOpen(false);
+        setSessionMenuOpen(false);
+      }
     }
     document.addEventListener("pointerdown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -314,7 +321,7 @@ export function MapsTab() {
       document.removeEventListener("pointerdown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [deckActionsOpen]);
+  }, [addMenuOpen, sessionMenuOpen]);
 
   const locked = job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy;
 
@@ -555,29 +562,13 @@ export function MapsTab() {
     requestAnimationFrame(() => mapRef.current?.jumpTo(active.camera));
   }
 
-  function setDeckStyle(style: MapsStyleId) {
-    const current = docRef.current;
-    if (!current) return;
-    if (activeAudienceRef.current === "cg" && active?.cg) {
-      updateActive({ style });
-      return;
-    }
-    patchDoc({
-      ...current,
-      defaultStyle: style,
-      slides: current.slides.map((slide) => ({ ...slide, style })),
-    });
+  function setSlideStyle(style: MapsStyleId) {
+    updateActive({ style });
   }
 
   function toggleHiddenLayer(id: MapsLayerFilterId) {
-    const current = docRef.current;
-    if (!current) return;
-    const hidden = current.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS;
-    const has = hidden.includes(id);
-    patchDoc({
-      ...current,
-      hiddenLayers: has ? hidden.filter((item) => item !== id) : [...hidden, id],
-    });
+    const has = activeHiddenLayers.includes(id);
+    updateActive({ hiddenLayers: has ? activeHiddenLayers.filter((item) => item !== id) : [...activeHiddenLayers, id] });
   }
 
   function toggleCachedCountry(code: string, nextSelected: string[]) {
@@ -723,9 +714,10 @@ export function MapsTab() {
         type="button"
         className="maps-thumb-label maps-thumb-title"
         disabled={locked}
-        title="Rename slide"
-        aria-label={`Rename slide ${slide.title}`}
-        onClick={() => beginSlideRename(slide)}
+        title="Select slide (double-click to rename)"
+        aria-label={`Select slide ${slide.title} (double-click to rename)`}
+        onClick={() => void selectSlide(slide.id)}
+        onDoubleClick={() => beginSlideRename(slide)}
       >
         {slide.title}
       </button>
@@ -1021,7 +1013,7 @@ export function MapsTab() {
           camera: still.camera,
           styleId: still.style as MapsSlide["style"],
           highlights: still.highlights,
-          hiddenLayers: local.hiddenLayers,
+          hiddenLayers: (still.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
           isCancelled: () => exportAbort.current,
         });
         throwIfCancelled();
@@ -1035,7 +1027,7 @@ export function MapsTab() {
           camera: plate.camera,
           styleId: plate.style as MapsSlide["style"],
           highlights: plate.highlights,
-          hiddenLayers: local.hiddenLayers,
+          hiddenLayers: (plate.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
           isCancelled: () => exportAbort.current,
         });
         throwIfCancelled();
@@ -1050,7 +1042,7 @@ export function MapsTab() {
             camera: still.camera,
             styleId: still.style as MapsSlide["style"],
             highlights: still.highlights,
-            hiddenLayers: local.hiddenLayers,
+            hiddenLayers: (still.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
             isCancelled: () => exportAbort.current,
           });
           throwIfCancelled();
@@ -1064,7 +1056,7 @@ export function MapsTab() {
             camera: plate.camera,
             styleId: plate.style as MapsSlide["style"],
             highlights: plate.highlights,
-            hiddenLayers: local.hiddenLayers,
+            hiddenLayers: (plate.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
             isCancelled: () => exportAbort.current,
           });
           throwIfCancelled();
@@ -1111,7 +1103,7 @@ export function MapsTab() {
           to: to.camera,
           styleId: from.style,
           highlights: from.highlights,
-          hiddenLayers: local.hiddenLayers,
+          hiddenLayers: from.hiddenLayers ?? local.hiddenLayers,
           churches: from.churches,
           numberPins: true,
           duration: link.duration,
@@ -1171,7 +1163,7 @@ export function MapsTab() {
             to: to.camera,
             styleId: from.style,
             highlights: from.highlights,
-            hiddenLayers: local.hiddenLayers,
+            hiddenLayers: from.hiddenLayers ?? local.hiddenLayers,
             churches: from.churches,
             numberPins: true,
             duration: link.duration,
@@ -1293,23 +1285,25 @@ export function MapsTab() {
     <div className="maps-tab">
       <div className="maps-chrome">
       <div className="maps-toolbar">
-        <div className="maps-deck-actions" ref={deckActionsRef}>
+        <div className="maps-deck-actions" ref={addMenuRef}>
           <button
             className="btn secondary"
             type="button"
             disabled={locked}
-            aria-expanded={deckActionsOpen}
+            aria-expanded={addMenuOpen}
             aria-haspopup="true"
-            onClick={() => setDeckActionsOpen((open) => !open)}
+            aria-label="Add"
+            title="Add"
+            onClick={() => setAddMenuOpen((open) => !open)}
           >
-            Deck…
+            ＋
           </button>
-          {deckActionsOpen && (
-            <div className="maps-deck-actions-menu" role="group" aria-label="Deck actions">
+          {addMenuOpen && (
+            <div className="maps-deck-actions-menu" role="group" aria-label="Add">
               <button
                 type="button"
                 onClick={() => {
-                  setDeckActionsOpen(false);
+                  setAddMenuOpen(false);
                   void createDeck();
                 }}
               >
@@ -1318,7 +1312,7 @@ export function MapsTab() {
               <button
                 type="button"
                 onClick={() => {
-                  setDeckActionsOpen(false);
+                  setAddMenuOpen(false);
                   csvMode.current = "append";
                   csvInput.current?.click();
                 }}
@@ -1329,7 +1323,7 @@ export function MapsTab() {
                 type="button"
                 disabled={!active}
                 onClick={() => {
-                  setDeckActionsOpen(false);
+                  setAddMenuOpen(false);
                   csvMode.current = "pins";
                   csvInput.current?.click();
                 }}
@@ -1340,17 +1334,33 @@ export function MapsTab() {
                 type="button"
                 onClick={() => {
                   if (!window.confirm("Replace the whole deck from a CSV? Existing slides will be discarded.")) return;
-                  setDeckActionsOpen(false);
+                  setAddMenuOpen(false);
                   csvMode.current = "replace";
                   csvInput.current?.click();
                 }}
               >
                 Replace deck from CSV…
               </button>
+            </div>
+          )}
+        </div>
+        <div className="maps-deck-actions" ref={sessionMenuRef}>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={locked}
+            aria-expanded={sessionMenuOpen}
+            aria-haspopup="true"
+            onClick={() => setSessionMenuOpen((open) => !open)}
+          >
+            Session ▾
+          </button>
+          {sessionMenuOpen && (
+            <div className="maps-deck-actions-menu" role="group" aria-label="Session">
               <button
                 type="button"
                 onClick={() => {
-                  setDeckActionsOpen(false);
+                  setSessionMenuOpen(false);
                   void saveSession();
                 }}
               >
@@ -1360,7 +1370,7 @@ export function MapsTab() {
                 type="button"
                 onClick={() => {
                   if (!window.confirm("Load a saved map session? The current deck will be replaced; cached tiles from the session will be added to this cache.")) return;
-                  setDeckActionsOpen(false);
+                  setSessionMenuOpen(false);
                   sessionInput.current?.click();
                 }}
               >
@@ -1439,27 +1449,27 @@ export function MapsTab() {
               className={`maps-swatch${(activeView?.style || doc?.defaultStyle) === swatch.id ? " active" : ""}`}
               style={{ background: swatch.color }}
               disabled={locked}
-              onClick={() => setDeckStyle(swatch.id)}
+              onClick={() => setSlideStyle(swatch.id)}
             />
           ))}
         </div>
         <div className="maps-layers" ref={layersRef}>
           <button
-            className={`btn secondary icon-btn maps-layers-btn${layersOpen || (doc?.hiddenLayers.length || 0) ? " on" : ""}`}
+            className={`btn secondary icon-btn maps-layers-btn${layersOpen || activeHiddenLayers.length ? " on" : ""}`}
             type="button"
             aria-expanded={layersOpen}
             aria-haspopup="true"
-            title={(doc?.hiddenLayers.length || 0) ? `${doc?.hiddenLayers.length} layers hidden` : "Map layers"}
-            aria-label={(doc?.hiddenLayers.length || 0) ? `Map layers, ${doc?.hiddenLayers.length} hidden` : "Map layers"}
+            title={activeHiddenLayers.length ? `${activeHiddenLayers.length} layers hidden` : "Map layers"}
+            aria-label={activeHiddenLayers.length ? `Map layers, ${activeHiddenLayers.length} hidden` : "Map layers"}
             onClick={() => setLayersOpen((open) => !open)}
           >
             <IconLayers />
-            {(doc?.hiddenLayers.length || 0) ? <span className="maps-layers-count">{doc?.hiddenLayers.length}</span> : null}
+            {activeHiddenLayers.length ? <span className="maps-layers-count">{activeHiddenLayers.length}</span> : null}
           </button>
           {layersOpen && (
             <div className="maps-layers-menu" role="group" aria-label="Hide map layers">
               {LAYER_FILTERS.map((item) => {
-                const hidden = doc?.hiddenLayers.includes(item.id) || false;
+                const hidden = activeHiddenLayers.includes(item.id);
                 return (
                   <label key={item.id} className="maps-layers-item">
                     <input
@@ -1604,7 +1614,7 @@ export function MapsTab() {
                 crop={doc?.crop || "center+cg"}
                 sidePanels={renderedSidePanels}
                 exportCg={doc?.exportCg !== false && !active.cg}
-                hiddenLayers={doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS}
+                hiddenLayers={renderedView?.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
                 authoredWidth={renderedAuthoredWidth}
                 previewing={previewing}

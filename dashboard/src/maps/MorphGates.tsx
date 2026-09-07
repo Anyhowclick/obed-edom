@@ -1,6 +1,8 @@
 import { admin0Name } from "./overlays";
 import { STYLE_SWATCHES } from "./styles";
 import {
+  DEFAULT_HIDDEN_LAYERS,
+  LAYER_FILTERS,
   MORPH_MAX_DBEARING,
   MORPH_MAX_DZOOM,
   MORPH_MAX_PITCH,
@@ -8,6 +10,7 @@ import {
   morphPlatePx,
   bearingDelta,
   captureWidth,
+  type MapsLayerFilterId,
   type MapsSlide,
 } from "./types";
 
@@ -22,6 +25,11 @@ function countriesLabel(codes: string[]): string {
   return codes.map((code) => admin0Name(code)).join(", ");
 }
 
+function layersLabel(ids: MapsLayerFilterId[]): string {
+  if (!ids.length) return "none hidden";
+  return ids.map((id) => LAYER_FILTERS.find((item) => item.id === id)?.label || id).join(", ");
+}
+
 function fmtDeg(n: number): string {
   const rounded = Math.abs(n) < 0.05 ? 0 : n;
   return `${rounded.toFixed(0)}°`;
@@ -30,6 +38,8 @@ function fmtDeg(n: number): string {
 export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const fromHi = [...from.highlights].map((h) => h.toUpperCase()).sort();
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort();
+  const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
+  const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
   const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
@@ -56,6 +66,16 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
           ? countriesLabel(fromHi)
           : `${countriesLabel(fromHi)} → ${countriesLabel(toHi)}`,
       tip: "Highlighted regions must match on both shots. Panning part of the map off-screen is fine.",
+    },
+    {
+      id: "layers",
+      label: "Same layers",
+      ok: fromLayers.join(",") === toLayers.join(","),
+      detail:
+        fromLayers.join(",") === toLayers.join(",")
+          ? layersLabel(fromLayers)
+          : `${layersLabel(fromLayers)} → ${layersLabel(toLayers)}`,
+      tip: "Hidden map layers (roads, POIs, labels…) must match on both shots.",
     },
     {
       id: "3d",
@@ -94,8 +114,8 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
 function gateHint(gates: Gate[]): string {
   if (gates.every((gate) => gate.ok)) return "Keynote can pan this hop on one plate — land leaving the frame is fine.";
   const failed = gates.filter((gate) => !gate.ok);
-  if (failed.some((gate) => gate.id === "style" || gate.id === "countries")) {
-    return "Map style or region highlights changed — that cannot Magic Move. Use Cut or Dissolve.";
+  if (failed.some((gate) => gate.id === "style" || gate.id === "countries" || gate.id === "layers")) {
+    return "Map style, region highlights, or layers changed — that cannot Magic Move. Use Cut or Dissolve.";
   }
   if (failed.every((gate) => gate.id === "plate")) {
     return "The two cameras do not fit on one 8192px plate — Export will use Movie.";

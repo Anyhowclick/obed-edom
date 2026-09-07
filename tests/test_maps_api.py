@@ -49,7 +49,8 @@ def test_post_maps_seeds_under_output_root_without_dest():
     assert "destPath" not in result
     assert result["exportLw"] is True
     assert result["exportCg"] is True
-    assert result["hiddenLayers"] == ["roadnames"]
+    assert result["hiddenLayers"] == ["roadnames", "arrows"]
+    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows"]
     assert result["slides"][0]["id"] == "s1"
     assert result["previewDir"].endswith("/previews")
     assert "/.maps/" in result["outputDir"].replace("\\", "/")
@@ -269,6 +270,22 @@ def test_hidden_layers_roundtrip():
     saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
     assert saved.status_code == 200, saved.text
     assert saved.json()["result"]["hiddenLayers"] == ["pois", "shields"]
+
+
+def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    slide2["hiddenLayers"] = ["pois"]
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows"]
+    assert result["slides"][1]["hiddenLayers"] == ["pois"]
+    assert result["links"][0]["kind"] == "cut"
 
 
 def test_geocode_empty_and_ua_and_429(monkeypatch):

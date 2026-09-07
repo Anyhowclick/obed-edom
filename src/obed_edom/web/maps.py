@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from starlette.concurrency import run_in_threadpool
 
 from obed_edom.maps_geo import (
+    DEFAULT_HIDDEN_LAYERS,
     GeocodeError,
     camera_dict,
     clamp_cg_shift,
@@ -58,7 +59,7 @@ STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d")
 MapsStyleId = Literal["positron", "liberty", "bright", "dark", "fiord", "buildings3d"]
 MapsCropId = Literal["wall", "center+cg"]
 MapsLayerFilterId = Literal[
-    "roads", "roadnames", "shields", "pois", "rail", "buildings", "labels", "boundaries"
+    "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "boundaries"
 ]
 MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
 MapsPinKind = Literal["dot", "dropPin"]
@@ -100,6 +101,7 @@ class MapsCgOverride(BaseModel):
     style: MapsStyleId
     highlights: list[str] = Field(default_factory=list)
     churches: list[MapsChurch] = Field(default_factory=list)
+    hiddenLayers: list[MapsLayerFilterId] | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
@@ -113,6 +115,7 @@ class MapsSlide(BaseModel):
     camera: MapsCamera
     highlights: list[str] = Field(default_factory=list)
     churches: list[MapsChurch] = Field(default_factory=list)
+    hiddenLayers: list[MapsLayerFilterId] | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
@@ -183,14 +186,14 @@ class MapsDocument(BaseModel):
     exportLw: bool = True
     exportCg: bool = True
     exportDsk: bool = False
-    hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: ["roadnames"])
+    hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
 
     @field_validator("hiddenLayers", mode="before")
     @classmethod
     def _hidden_layers(cls, value: object) -> object:
         if value is None:
-            return ["roadnames"]
+            return list(DEFAULT_HIDDEN_LAYERS)
         return value
 
     @field_validator("cachedCountries", mode="before")
@@ -314,7 +317,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "exportDsk": False,
         "defaultStyle": "positron",
         "crop": "center+cg",
-        "hiddenLayers": ["roadnames"],
+        "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
         "cachedCountries": [],
         "slides": [
             {
@@ -324,6 +327,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
                 "camera": camera,
                 "highlights": [],
                 "churches": [],
+                "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
                 "cgShiftX": 0,
                 "cgShiftY": 0,
             }
@@ -344,7 +348,7 @@ def _next_slide_id(slides: list[dict[str, Any]]) -> str:
     return f"s{index}"
 
 
-def _row_slide(row: dict[str, str], slide_id: str) -> dict[str, Any]:
+def _row_slide(row: dict[str, str], slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
     name = (row.get("name") or row.get("title") or "Untitled").strip() or "Untitled"
     lat_raw = (row.get("lat") or row.get("latitude") or "").strip()
     lon_raw = (row.get("lon") or row.get("lng") or row.get("longitude") or "").strip()
@@ -385,6 +389,7 @@ def _row_slide(row: dict[str, str], slide_id: str) -> dict[str, Any]:
         "camera": camera,
         "highlights": [],
         "churches": [church],
+        "hiddenLayers": hidden_layers or list(DEFAULT_HIDDEN_LAYERS),
         "cgShiftX": 0,
         "cgShiftY": 0,
     }
@@ -411,8 +416,9 @@ def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
         _clear_derived_maps_output(result)
     slides = [] if replace else list(result.get("slides") or [])
     links = [] if replace else list(result.get("links") or [])
+    hidden_layers = result.get("hiddenLayers") or list(DEFAULT_HIDDEN_LAYERS)
     for row in _parse_csv(csv_text):
-        slide = _row_slide(row, _next_slide_id(slides))
+        slide = _row_slide(row, _next_slide_id(slides), hidden_layers)
         if slides:
             prev = slides[-1]
             links.append(

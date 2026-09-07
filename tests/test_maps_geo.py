@@ -103,6 +103,22 @@ def test_infer_hop_kind_cut_on_style_or_highlights():
     assert infer_hop_kind(a, c) == "cut"
 
 
+def test_infer_hop_kind_cut_on_hidden_layers():
+    a = {"style": "positron", "highlights": [], "hiddenLayers": ["roadnames", "arrows"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    b = {"style": "positron", "highlights": [], "hiddenLayers": ["roadnames", "pois"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    assert infer_hop_kind(a, b) == "cut"
+    c = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    assert infer_hop_kind(a, c) == "morph"
+
+
+def test_infer_hop_kind_distinguishes_explicit_empty_hidden_layers():
+    a = {"style": "positron", "highlights": [], "hiddenLayers": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    b = {"style": "positron", "highlights": [], "hiddenLayers": ["roadnames"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    assert infer_hop_kind(a, b) == "cut"
+    c = {"style": "positron", "highlights": [], "hiddenLayers": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
+    assert infer_hop_kind(a, c) == "morph"
+
+
 def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
     a = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 22}}
     b = {"style": "positron", "highlights": [], "camera": {"zoom": 6, "pitch": 0, "bearing": 22}}

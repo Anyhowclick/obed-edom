@@ -562,6 +562,50 @@ def test_coerce_uses_strictest_cg_transition_requirement():
     assert dissolve["duration"] == 1.7
 
 
+def test_coerce_demotes_morph_on_hidden_layers_mismatch():
+    a = _slide("s1", _camera(3.0, 101.0, 8), hiddenLayers=["roadnames"])
+    b = _slide("s2", _camera(3.0, 102.0, 8), hiddenLayers=["roadnames", "pois"])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}]
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "cut"
+    b["hiddenLayers"] = ["roadnames"]
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
+
+
+def test_coerce_cg_layer_override_can_demote_while_lw_stays_morph():
+    a = _slide("s1", _camera(3.0, 101.0, 8), hiddenLayers=["roadnames"])
+    b = _slide("s2", _camera(3.0, 102.0, 8), hiddenLayers=["roadnames"])
+    b["cg"] = {"camera": _camera(3.0, 102.0, 8), "style": "positron", "highlights": [], "churches": []}
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}]
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
+    b["cg"]["hiddenLayers"] = ["roadnames", "pois"]
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "cut"
+    b["cg"]["hiddenLayers"] = None
+    assert coerce_link_kinds([a, b], links)[0]["kind"] == "morph"
+
+
+def test_export_plan_stills_and_plates_carry_hidden_layers():
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, hiddenLayers=["pois"])
+    b = _slide("s2", cam_b, hiddenLayers=["pois"])
+    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
+    assert plan["stills"] == []
+    assert plan["plates"][0]["hiddenLayers"] == ["pois"]
+    plan_cut = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.2}])
+    assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {"s1": ["pois"], "s2": ["pois"]}
+
+
+def test_export_plan_still_defaults_hidden_layers_when_missing():
+    a = _slide("s1", _camera(3.0, 101.0, 8))
+    plan = maps_export_plan([a], [])
+    assert plan["stills"][0]["hiddenLayers"] == ["roadnames", "arrows"]
+
+
+def test_export_plan_still_preserves_explicit_empty_hidden_layers():
+    a = _slide("s1", _camera(3.0, 101.0, 8), hiddenLayers=[])
+    plan = maps_export_plan([a], [])
+    assert plan["stills"][0]["hiddenLayers"] == []
+
+
 def test_split_cg_plan_uses_direct_1920_still_capture():
     slide = _slide("s1", _camera(3.0, 101.0, 8))
     slide["cg"] = {"camera": _camera(3.0, 102.0, 8), "style": "positron", "highlights": [], "churches": []}

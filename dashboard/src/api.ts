@@ -378,6 +378,7 @@ export type MapsExportPlan = {
     style: string;
     camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
     highlights: string[];
+    hiddenLayers?: string[];
     width?: number;
     height?: number;
   }>;
@@ -388,6 +389,7 @@ export type MapsExportPlan = {
     camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
     style: string;
     highlights: string[];
+    hiddenLayers?: string[];
   }>;
   cg?: {
     links: Array<Record<string, unknown>>;
