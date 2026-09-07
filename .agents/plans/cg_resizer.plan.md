@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "ONE plan for the CG resizer (merged 2026-09-03 from cg_resizer.plan.md + resizer_optimizations.plan.md; the umbrella tranche map lives here now). Read `.agents/skills/obed-edom/SKILL.md` first — every durable Keynote/IWA finding lives there; this plan points into it. PRIORITY = the optimization tracks. ORDER: (1) current output-bug fixes (batch 1 in flight, batch 2 next) → (2) clear TRANCHE 1 (W1 offline-write stabilise + default-flip bar; R1 nested-bulk probe) → (3) TRANCHE 2 = the immediate optimization TODO: R2 readback two-tier → propose two-tier, W2 z-order patch (stroke restore lands with batch 1) → (4) R0 leftovers + feature backlog + constellation cluster affine. Shipped work is a compact table at the end; insights are one section. Discipline: measure first, probe before trusting (AppleScript first; COUNT affected objects), 2/1/2 workflow (planners sonnet+opus, fresh sonnet implements, reviewers sonnet+opus; implementers never review their own work), never concurrent Keynote, commits at real wall-clock time (forward-dating retired 2026-09-04), no PRs."
+overview: "Single active plan for the CG resizer. As of 2026-09-07, R2 validated-readback has passed ranged and four-deck whole-deck parity, so R2b propose caching is unblocked. R0.1–R0.3 are code-complete and independently approved; the remaining R0 work is the misc cleanup slice, followed by the pack-list residuals. The restored full-report inputs enabled a fresh whole-deck W1 `offline_write_ab.py` bank on 2026-09-07. The gate completed RED: the surgical write's own consistency/live verification passed at 0.00px, but A/B stat-finalize parity and 12 slides' identity geometry failed. Both reusable decks and run records are banked for Keynote-free diagnosis; W1 remains opt-in/default OFF and W2 stays gated on W1. The old single-slide `write_gate_ab.py` Map bank remains absent but was superseded by this whole-deck gate. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03 — code-complete AND live-verified (2/1/2: sonnet+opus planners, fresh sonnet implementer, sonnet+opus reviewers, two live Map remaps). Commits: 90aaa4e F nits; 171fc65 E backdrop y=0; e689c23 A badge_raise_report + obedRaiseItem plate→globe→text on every remapped slide (three gates relaxed); 56a735c C card stroke restore-to-source (ONE Index/DocumentStylesheet.iwa patch, unconditional, guarded out<src and out≤src·canvas_scale·1.1, pairing by (colour,pattern)); caee7a0 B1/D1 caption-bearing groups (≥3-char leaf text, checked in classify_item only) are `other` not `pin`; 95c722b review nits; f9261b7 + 8e5d3b2 A2 geometry-guarded badge raise (the first live run showed the image-index raise hitting the MAP on reuse slide 6 — index drifted by one — so plate/globe rows carry the planned CG frame, `<kind> idx` is accepted only within 3px, else one bulk read per property scans for the unique match, else skip+report; title stays on the content search). LIVE RESULT (output/batch1-verify.key, previews output/previews/batch1-verify/): verify_batch1.py PASS — badge above the map on slides 1–7, backdrop y=0, stroke 18316959 = 3.0 after pass 2's save, 0 caption overflow; verify_slide9.py PASS — 66/66 text groups at 0.483×, frontmost, unions within 1.3% of plan (live runs at f9261b7; 8e5d3b2 is error-path accounting only, osacompile-checked); score_resize identical before/after (cached payloads carry no child text, so it does not exercise B1 — the gold side of the scorer still classifies without child text, a known asymmetry). The '+' marks were Keynote's editor-only clip badge (exports show none). Residual nits from review (not blocking): scorer gold-side classification asymmetry; `result['cardStroke']` has three shapes; PIN origin guard is looser with 32 fewer pins."
@@ -9,7 +9,7 @@ todos:
     content: "DONE 2026-09-03 — BATCH 2 code-complete AND live-verified (2/1/2: sonnet+opus planners, fresh sonnet implementer, sonnet+opus reviewers, one live Map remap). Commits: 0ad68b0 iwa attach_group_captions + shape_padding; 0cdcd2b template card size + job-scoped caption step-down + grid re-pitch/reflow; 753acef score_resize attachers + card lane. What shipped vs the accepted item: cards = wall groups with ONE caption leaf (≥2 words, non-numeric) + aspect within 2% of the template card group (slide 12, 120.37×100) take the template rect; caption = template swatch 10pt Amplitude-Bold stepped down whole points while the AppKit-measured line exceeds box − 2·inset (inset = the shape's own padding, 4.0pt — NOT iwa_text_shape.TEXT_INSET), floor 8; the size travels JOB-SCOPED (child_resize captionPt → obedStatJob leafPt) because 38/44 slide-4 captions also occur as roster-list leaves, so the global exact-text size_map was unsafe; the pitch is TEMPLATE-derived from the 3-card L the owner added to slide 12 (gutters 7/7 → pitch 127/107 from payload ints), wall-derived + stroke+7 floor only for a single-card template; grid = 6 columns right-aligned beside the map, origin descending below stat blocks while the grid still fits (slide 4 y0=176, slide 5 y0=392), reading order kept; slide 5 (27 cards, 7→6 cols) included. LIVE (output/batch2-verify.key, previews output/previews/batch2-verify/): 71 cards matched, exactly the 5 predicted 9pt step-downs, 0 off-canvas cards, off-frame 29 → 2 (slides 7/8 pre-existing), 4 + 6 cards overlap stat blocks (reported; owner accepted — gold hand-reshaped those), clearance 4.0/4.0pt (below the batch-1 ≥7pt guideline; template-authoritative, reported), verify_batch1 + verify_slide9 PASS, pass-2 counts identical to batch 1. Gold agreement 70/71 (Bian Lan 9 vs gold 8, accepted). First live attempt crashed on a variable shadowing `source` in a say() line — no offline gate reaches remap_keynote's say path; the live run is that gate."
     status: completed
   - id: w-offline-write-stabilise
-    content: "TRANCHE 1 (W1). SHIPPED ec20f4b/a8b27ac/5577e27 (OBED_OFFLINE_WRITE off|on|verify, default OFF = byte-identical production; deck-level patcher, streaming in-place rewrite, reconcile_counts refuse gate, AS fallback, read-back verify, scripts/offline_write_ab.py). The 'pass-2 0.48× group shrink' was an ORACLE ARTIFACT (banked specs_slide9.json + A_prime predate 8a8ef7a); the offline write itself is correct and survives pass 2. 2026-09-04 evening: GOLD BASELINE A/B KIT built and run — `remap` on main 869a28f vs this branch f083a67, PRODUCTION DEFAULT PATH (offline write OFF) — NO regression: geometry 0.00px on all 19 Gold slides, styles identical; the only diff between runs is Keynote's own drawablesZOrder scrambling (see w-zorder-patch). So the branch is safe to sit on at default OFF. Separately, opt-in mode (`on`) has a SEVERE REGRESSION, now root-caused: the IWA patcher writes correct frames but leaves Keynote's render-derived fields stale — shape pathsource naturalSize for non-bezier sources (`_find_bezier` only knows bezierPathSource), masked images (originalSize + mask naturalSize never written, displacement parked in the mask), text naturalSize never written, group children inheriting all of it. Content renders ÷4 inside otherwise-correct frames: 587 stale objects on the 12 offline Gold slides, 0 on the AppleScript ones. `verify_offline_frames` is structurally blind to this (compares the bytes it just wrote; skips masked/groups/text) — this also explains badgeUnresolved (10 Gold / 84 Full: stale-naturalSize plates + globes with a 467px anchor drift); the badge probe is correct and must stay as-is. So 'Map deck gate GREEN' in the tranche-1 handover was luck of object classes, not a clean gate. FIX SCOPE (2/1/2 planning, feature branch, in progress): universal path-natural writer (scalar corner constant, editable-bezier nodes rescaled per production); hard-miss on any unwritable field → AppleScript fallback for that object; masked media REFUSE for now; groups refuse on any unwritable descendant; text width naturalSize written (height stays informational); a spec-independent consistency audit (naturalSize==size, mask naturalSize==mask size, originalSize==size, mask offset within frame, 2% tol) that fails the run. TO CLEAR: (1) SUPERSEDED — see below, the whole-deck gate replaced the single-slide re-bank plan; (2) re-run offline_write_ab.py with a HEALTHY A (Accessibility granted; gate must hard-fail on an unhealthy A: pass-2 done/skipped counts, dedup counts), plan-as-oracle for exact classes, identity matching, group children bucketed separately, groups compared as a SET; (3) default-flip bar = gate GREEN on both gold decks with real patches AND one end-to-end `on` run placement-identical to a scripted run, now including the consistency audit. FLIP STAYS ON HOLD. The Full-deck A/B bank under output/offline-write-ab-full/ was deleted with output/ (owner) — needs ~1h Keynote to rebuild if wanted again. Design points that stand: deleteHides stays in pass 1 and the patcher bridges kindIndex (never both); reuse slides stay fully in Keynote; the JXA attrs pass stays in pass 1; mapReadback assertion moves to the verify. Payoff: replaces the ~100ms/command AS geometry phase (~100–155s Map, multi-minute Full) with seconds. UPDATE 2026-09-04 (fe44f6b) — the gate was hardened and earned its keep: 49cbc7e whole-deck gate (Accessibility pre-flight, clean-pass-2 bars, identity matching by drawable id — output ids == source ids on every non-reuse slide — plan-as-oracle for the exact classes via _spec_box, run records with digests, --mode on|verify, --no-validate); 36e2d81 REAL patcher defect found by the gate and fixed (iwa_write._text_fields wrote size_h onto an autosize text box whose stored h==0.0 is the sentinel; B's slide-8 text became a fixed 43pt frame); 6ac80d8 every bucket gates at doubled per-side budgets (measured Map: line 0.95 group 1.43 child:image 1.83); 3ca6385 refuses open Keynote docs + closes own stray decks; 08d2e2b --pass2-bar parity; 94df47f bulk-tier errors loud+durable (bulkErrors rides the cache) + gate quits Keynote between runs. MAP DECK GREEN in verify AND on modes (output/offline-write-ab-v2, -on; identity 100%, plan oracle B exact 0.00px, A ≤0.49 = AppleScript integer rounding). FULL DECK NOT GREEN, undebugged (output/offline-write-ab-full, A_unflagged + B_flagged banked with run records): offline-write verify FAIL image Δ2687px (n=174) line Δ88 shape Δ11 (keyed by bridged saved kindIndex — Full has hides mid-collection, so possibly mis-pairing); pass-2 badgeUnresolved 0→84 A vs B (badge raise scans the PLANNED frame — independent off-plan evidence); 30 specs on 26 slides missed the patch (AppleScript fallback ran); gate crashed at write_run_record(B) on int fallbackSpecs keys so the id-based compare never ran. Timing win is real: pass 1 20:12 (A) vs 10:40 (B) on 154 slides. NEXT: fix the round-trip, run the compare Keynote-free with --reuse-a --reuse-b --pass2-bar parity, then debug from the per-slide lines (bridge, masked/group scaling, the 30 misses, badge plates); missedSpecs with a healthy fallback should likely be WARN. DEFAULT FLIP still ON HOLD: patch at output/offline-write-ab-full/piece2-default-flip.patch, apply only on Full GREEN. The old plan's item (1) re-bank of the single-slide write_gate_ab kit was dropped by decision (the whole-deck gate supersedes it; stale sidecars are now refused by commit stamp)."
+    content: "TRANCHE 1 (W1). SHIPPED ec20f4b/a8b27ac/5577e27 (OBED_OFFLINE_WRITE off|on|verify, default OFF = byte-identical production; deck-level patcher, streaming in-place rewrite, reconcile_counts refuse gate, AS fallback, read-back verify, scripts/offline_write_ab.py). The 'pass-2 0.48× group shrink' was an ORACLE ARTIFACT (banked specs_slide9.json + A_prime predate 8a8ef7a); the offline write itself is correct and survives pass 2. 2026-09-04 evening: GOLD BASELINE A/B KIT built and run — `remap` on main 869a28f vs this branch f083a67, PRODUCTION DEFAULT PATH (offline write OFF) — NO regression: geometry 0.00px on all 19 Gold slides, styles identical; the only diff between runs is Keynote's own drawablesZOrder scrambling (see w-zorder-patch). So the branch is safe to sit on at default OFF. Separately, opt-in mode (`on`) has a SEVERE REGRESSION, now root-caused: the IWA patcher writes correct frames but leaves Keynote's render-derived fields stale — shape pathsource naturalSize for non-bezier sources (`_find_bezier` only knows bezierPathSource), masked images (originalSize + mask naturalSize never written, displacement parked in the mask), text naturalSize never written, group children inheriting all of it. Content renders ÷4 inside otherwise-correct frames: 587 stale objects on the 12 offline Gold slides, 0 on the AppleScript ones. `verify_offline_frames` is structurally blind to this (compares the bytes it just wrote; skips masked/groups/text) — this also explains badgeUnresolved (10 Gold / 84 Full: stale-naturalSize plates + globes with a 467px anchor drift); the badge probe is correct and must stay as-is. So 'Map deck gate GREEN' in the tranche-1 handover was luck of object classes, not a clean gate. FIX SCOPE (2/1/2 planning, feature branch, in progress): universal path-natural writer (scalar corner constant, editable-bezier nodes rescaled per production); hard-miss on any unwritable field → AppleScript fallback for that object; masked media REFUSE for now; groups refuse on any unwritable descendant; text width naturalSize written (height stays informational); a spec-independent consistency audit (naturalSize==size, mask naturalSize==mask size, originalSize==size, mask offset within frame, 2% tol) that fails the run. TO CLEAR: (1) SUPERSEDED — see below, the whole-deck gate replaced the single-slide re-bank plan; (2) re-run offline_write_ab.py with a HEALTHY A (Accessibility granted; gate must hard-fail on an unhealthy A: pass-2 done/skipped counts, dedup counts), plan-as-oracle for exact classes, identity matching, group children bucketed separately, groups compared as a SET; (3) default-flip bar = gate GREEN on both gold decks with real patches AND one end-to-end `on` run placement-identical to a scripted run, now including the consistency audit. FLIP STAYS ON HOLD. The Full-deck A/B bank under output/offline-write-ab-full/ was deleted with output/ (owner); on 2026-09-07 the owner restored Full_Report_Card_Wall.key and the Full_Report_Card_CG.key reference, while Base_CG_Assets.key remains available, so a fresh ~1h-plus whole-deck bank is runnable. Design points that stand: deleteHides stays in pass 1 and the patcher bridges kindIndex (never both); reuse slides stay fully in Keynote; the JXA attrs pass stays in pass 1; mapReadback assertion moves to the verify. Payoff: replaces the ~100ms/command AS geometry phase (~100–155s Map, multi-minute Full) with seconds. UPDATE 2026-09-04 (fe44f6b) — the gate was hardened and earned its keep: 49cbc7e whole-deck gate (Accessibility pre-flight, clean-pass-2 bars, identity matching by drawable id — output ids == source ids on every non-reuse slide — plan-as-oracle for the exact classes via _spec_box, run records with digests, --mode on|verify, --no-validate); 36e2d81 REAL patcher defect found by the gate and fixed (iwa_write._text_fields wrote size_h onto an autosize text box whose stored h==0.0 is the sentinel; B's slide-8 text became a fixed 43pt frame); 6ac80d8 every bucket gates at doubled per-side budgets (measured Map: line 0.95 group 1.43 child:image 1.83); 3ca6385 refuses open Keynote docs + closes own stray decks; 08d2e2b --pass2-bar parity; 94df47f bulk-tier errors loud+durable (bulkErrors rides the cache) + gate quits Keynote between runs. MAP DECK GREEN in verify AND on modes (output/offline-write-ab-v2, -on; identity 100%, plan oracle B exact 0.00px, A ≤0.49 = AppleScript integer rounding). FULL DECK NOT GREEN, undebugged (output/offline-write-ab-full, A_unflagged + B_flagged banked with run records): offline-write verify FAIL image Δ2687px (n=174) line Δ88 shape Δ11 (keyed by bridged saved kindIndex — Full has hides mid-collection, so possibly mis-pairing); pass-2 badgeUnresolved 0→84 A vs B (badge raise scans the PLANNED frame — independent off-plan evidence); 30 specs on 26 slides missed the patch (AppleScript fallback ran); gate crashed at write_run_record(B) on int fallbackSpecs keys so the id-based compare never ran. Timing win is real: pass 1 20:12 (A) vs 10:40 (B) on 154 slides. NEXT: fix the round-trip, run the compare Keynote-free with --reuse-a --reuse-b --pass2-bar parity, then debug from the per-slide lines (bridge, masked/group scaling, the 30 misses, badge plates); missedSpecs with a healthy fallback should likely be WARN. DEFAULT FLIP still ON HOLD: patch at output/offline-write-ab-full/piece2-default-flip.patch, apply only on Full GREEN. The old plan's item (1) re-bank of the single-slide write_gate_ab kit was dropped by decision (the whole-deck gate supersedes it; stale sidecars are now refused by commit stamp)."
     status: pending
   - id: r-nested-bulk-probe
     content: "TRANCHE 1 (R1) — DONE 2026-09-04, PROBE ANSWER = NO. `scripts/probe_nested_bulk.py` (d4663ed, 99b2e09; 74 tests) ran live on an APFS clone of the GW deck (2 locked objects + 1 empty text box added, 15 skipped slides, zero-item slide 1, 2 movies) and on a Map clone. Correctness criteria 1-4 PASS on both: outer length == slide count with skipped slides in position, values identical to bulk_geometry.js for 4 kinds × 3 props, 113 (GW) / 12 (Map) empty collections returned `[]` in position, text placeholder tails within slack. Failure semantics (6): a per-element failure inside `<x> of every text item of every slide` is SUBSTITUTED (`missing value` in position, all 63 per-slide lengths preserved, 127/226 elements) — never a silent partial; an invalid property (`object text of every movie`) raises for the WHOLE event (-1728); `count of characters of object text of every … of every slide` collapses to ONE integer; `properties of every image` fails outright (-10000). Speed (5) FAILS: GW nested 48.8s vs bulk 66.9s warm (1.37×), Map nested 50.1s vs bulk 36.3s (0.73× — SLOWER); JXA `doc.slides.textItems.position()` 46s and omits kinds. Per-read seconds show the cost is PER OBJECT-PROPERTY inside Keynote (GW images ≈70ms/prop/object, Map images ≈33ms, text ≈9ms), not per Apple Event — the overhead-dominated hypothesis is refuted, so `r-bulk-counts-plan` (skip empty-collection events) would save only a few seconds too; both are closed. Findings + raw sidecars: output/nested-bulk-probe/findings-*.json. The bulk tier stays as is; the read-side minutes now come only from R2 (fewer reads), not faster reads."
@@ -35,28 +35,34 @@ todos:
       identical, NO cache write on either side, and the ONLY census difference is 2 trailing
       zero-rect empty placeholder text items legacy reports and the two-tier read omits (the
       documented reconcile [0,2] placeholder-tail class; 246/246 real items exact-equal on the
-      86-name roster slide, runs+colors included); (a) STILL OPEN — the whole-deck field-parity A/B
-      needs the legacy full-JXA inspect of a 2.4GB _CG.key, which the 16GB-machine rule forbids here
-      (the banked Gold builds never validated for the same reason): run it on a bigger machine per
-      the checklist at output/handover-2026-09-07/plan/r2-readback-plan.md §4+§6 (group
-      children/childCount is the one JXA-only field → hard gate; the placeholder-tail class above is
-      the expected benign census diff). The scripts/write_gate_ab.py re-run (AM-10(c) per-kind ORDER)
-      is BLOCKED on this machine too: its reusable banks were deleted with output/ and the Map wall
-      deck is not on this disk — required before W1 resumes, not before using R2 (AM-2 already forces
-      legacy under offline-write verify). Accepted residual: a deck
+      86-name roster slide, runs+colors included); (a) CLOSED 2026-09-07 in a monitored owner-acked
+      hands-off window — the whole-deck field-parity A/B passed on APFS copies of all three checklist
+      Gold banks (main, reuse-builds2, preadd) plus the newer r2-round output. Every deck: childCount
+      hard gate 0, scalars/slides exact, zero blocking item differences after the specified rounding,
+      zero kindIndex divergence, exact validate flags, matching 19-PNG basename sets/export state,
+      and exactly 38 benign legacy-only zero-rect placeholders (2 per slide). Timings legacy→two-tier:
+      main 130.7→52.5s, reuse-builds2 134.7→55.6s, preadd 136.7→54.6s, r2-round
+      139.3→54.7s. Evidence and comparator:
+      output/handover-2026-09-07/full-ab/. The first pre-Accessibility attempt timed out -1712 and
+      was closed without saving; memory monitoring stayed recoverable, and the successful serial runs
+      ended with Keynote clean. The R2 parity work does not gate W1. For W1, the old single-slide
+      `scripts/write_gate_ab.py` Map bank remains absent but is superseded by the whole-deck
+      `scripts/offline_write_ab.py` gate. The owner restored `Full_Report_Card_Wall.key` and the
+      `Full_Report_Card_CG.key` reference on 2026-09-07; with the existing `Base_CG_Assets.key`
+      template, a fresh full-deck A/B bank is now runnable. Accepted residual: a deck
       where inspect_items marks EVERY slide unreadable promotes arm C to a whole-deck merge, and a
       failure there runs a ranged + a whole-deck legacy pair (fails safe; b50d22b crashed instead).
-      Payoff (756s → ~290s report-class) is still a PROJECTION — measure it in the A/B. Next:
-      r-propose-two-tier only after the A/B exists."
-    status: pending
+      Gold-deck readback payoff is now measured at 2.4–2.6×; the old 756s→~290s report-class figure
+      remains a projection until a report deck is available. Next: r-propose-two-tier is unblocked."
+    status: completed
   - id: r-propose-two-tier
-    content: "TRANCHE 2 (R2b), after r-readback-two-tier's A/B exists. The resize PROPOSE source read is still full JXA (_run_resize_propose → inspect_keynote at web/app.py ~1468, not acquire_wall_payload): a new deck's first propose pays ~12.6 min although apply reads two-tier. Same consumer audit plus deck_slide_digests parity (pairings/framings key on digests of ALL slides), propose_framings/planner parity, and cache the two-tier propose payload under the digest so propose→apply→re-propose reuse it (cross-serve is then deliberate — verify once). Payoff: first propose 12.6 → ~3 min. Risk MEDIUM (fingerprint churn; worst case a one-time pairing re-align)."
+    content: "TRANCHE 2 (R2b), after r-readback-two-tier's FULL-DECK field-parity A/B exists. The resize PROPOSE source read is still full JXA (_run_resize_propose → inspect_keynote in web/app.py, not acquire_wall_payload): a new deck's first propose pays the full legacy read although apply reads two-tier. Same consumer audit plus deck_slide_digests parity (pairings/framings key on digests of ALL slides), propose_framings/planner parity, and cache the two-tier propose payload under the digest so propose→apply→re-propose reuse it (cross-serve is then deliberate — verify once). The old 12.6→~3 min figure is a projection, not a measured result. Risk MEDIUM (fingerprint churn; worst case a one-time pairing re-align)."
     status: pending
   - id: w-zorder-patch
     content: "TRANCHE 2 (W2). Offline drawablesZOrder+ownedDrawables reorder (patch BOTH identically) at the W1 hook, LAST per slide, replacing pass 2's GUI Bring-to-Front raises (obedRaiseSlide + the badge raise) and the resizer's Accessibility dependency. PROBE LIVE PASS 99771bf (2026-09-02): Keynote 15.3.1 honours a patched order on open, a re-save keeps it, the render changes; permute within the target ids' slots (a fresh deck carries 3 placeholder drawables). Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation: ~0.55s/raise × N GUI clicks + Accessibility + run-to-run group-index churn. 2026-09-04 evidence this is now COSTING content, not just speed: the gold-baseline A/B kit (w-offline-write-stabilise) ran the identical `remap` twice (main vs branch, same default path) and got two different renders purely from Keynote's own drawablesZOrder scrambling on save/open — banner text hidden on Gold slides 3/4/5/8/9 in one run, 'Global Missions' clipped to 'Glob' on slides 11-17 in the other. Same deck, same code, different z-order outcome each Keynote pass. Raises the priority of this item independent of the read-speed payoff. Must run after pass 2's font sizing (or recompute stat indices), and the read-back compares reordered kinds AS A SET. Gated on W1 stable. Risk MEDIUM. 2026-09-05, offline z-order reads of the banked gold decks: the pass-2 GUI raise arranged 0 of 227 reported objects on the `main` run (all 19 slides byte-identical to the source order) and 91 on the `branch-verify2` run, with identical 'front=' counters. frontRaised counts System-Events clicks, not arrangements. W2 also removes an unverifiable counter."
     status: pending
   - id: r-cache-quick-wins
-    content: "R0 leftovers, Keynote-free, independent: (1) r-propose-from-cache — a ranged propose discards the cached full payload it holds (cached_payload for numbering, then a fresh ranged JXA read that never caches); subset the digest-verified full payload instead; A/B a subsetted propose vs a fresh ranged one on a warmed gold deck. (2) r-acquire-cache-read — acquire_wall_payload (remap_keynote.py ~145-215) never consults the digest cache, so every apply pays the bulk tier (51.8s Map / 283.7s Full) even with a byte-current cached payload; add a cached_payload consult, subject to the cross-serve provenance check (`reader` field). (3) r-digest-sidecar — deck_digest SHA-256 of the GB deck is paid several times per cycle (~6s each on 6.8GB); sidecar under the CACHE ROOT keyed (path, size, mtime_ns), single-file case only. (4) r-misc-cleanups remainders: (1) remove the doomed JXA exportImages attempt in inspect_keynote.js (never produced PNGs; measure its cost first); (5) export_applescript uses the disproven doc-bind (`open POSIX file` with no close-by-name) — align with close-by-name → open → document 1; (2) checker-side export fold into the bulk_geometry session; legacy inspect_keynote cache-hit full re-read on JSON-present/PNGs-evicted (~274s case)."
+    content: "R0 leftovers, Keynote-free except for explicit measurement/live parity gates: (1) r-propose-from-cache — CODE-COMPLETE + KEYNOTE-FREE VERIFIED 2026-09-07 under 1/1/1; complete digest-current jxa/offline caches now serve ranged proposals without a wall JXA read, while the subset plans and full context preserves digests/decisions/numbering/skips/thumbnails. Review caught and fixed skip-aware navigator overflow plus coercion of malformed numeric cache fields; final independent review APPROVE. LIVE EVIDENCE STILL PENDING: warmed-Gold cached-vs-fresh A/B and scripts/e2e_run_parity.py both open Keynote. (2) r-acquire-cache-read — CODE-COMPLETE + KEYNOTE-FREE VERIFIED 2026-09-07 under 1/1/1; acquire_wall_payload now serves complete digest-current caches (on: jxa/offline, off: jxa), keeps full-deck context for ranged Apply, prevents rejected-cache leakage through legacy fallback, stamps fresh two-tier payloads offline, warns on cached bulkErrors, and keys group-child attachment to the actual reader. Independent review APPROVE. (3) r-digest-sidecar — CODE-COMPLETE + KEYNOTE-FREE VERIFIED 2026-09-07 under 1/1/1; regular-file deck digests now use a strict, path-keyed, atomically written sidecar with device/inode/ctime safety guards while package decks retain the old content walk. Independent review APPROVE. On the 6,771,226,182-byte Full deck, cold hashing took 3.97205s and the warm median was 0.1197ms with identical SHA-256 results; this proves about 3.97s saved per avoided hash, not the old speculative 30–60s whole-cycle claim. Combined gate after R0.1–R0.3: 1,248 Python tests passed, 20 skipped, eight known host-only checks deselected; all pure-JavaScript harnesses passed. (4) r-misc-cleanups remainders: remove the doomed JXA exportImages attempt in inspect_keynote.js after measuring its cost; align export_applescript with close-by-name → open → document 1; fold checker-side export into the bulk_geometry session; stop the legacy cache-hit full re-read when JSON exists but preview PNGs were evicted (~274s observed case)."
     status: pending
   - id: r-reuse-photo-placement
     content: "BUG BACKLOG (B). Reuse is KEPT (measured +39% on contiguous map series). Part (A) DONE in bf0fbe7 on branch fix/reuse-builds-side-panels: no (0,0) yank ever occurs (`ItemTransform.as_dict` always emits x/y; `applySpec` returns before any write when spec.x is null) — the real defect was a spec-less reuse add being silently skipped (not even counted as missed) and riding the paste at its wall coordinate; fixed by giving such adds a canvas-scaled rect and counting them as misses if still absent. Part (B) FRAMING COVER-FALLBACK OFF-FRAME on dense infographic slides (124/125-class, pairQuality=0) still open — reuse-INDEPENDENT (identical off-frame counts on/off); a framing item touching all slides, own workstream. Once W1 removes the AS-geometry bottleneck, dropping reuse becomes cheap — revisit then."
@@ -182,7 +188,7 @@ todos:
     content: "BUG BACKLOG (B), residual from map-label-classification-fix (ii), needs its own audit. The off-slide branch (map_remap.py:2350-2354) DELETES parked off-canvas objects (e.g. 'CHC Kuching' parked at wall (4681,1678)) instead of keeping them parked like the human does (parked at (1813,1678) in the ideal). 14 parked objects on the Gold deck, mostly one parked card group."
     status: pending
   - id: card-border-source-ref-floor-fix
-    content: "BUG (fixed, verification in progress), off main worktree, branch fix/card-border-source-ref-floor, commit 94d2969. `restore_card_stroke_widths` applied the card classifier (white+solid, ≥10 refs) to the OUTPUT side only; the Full wall's stray 3-ref 5pt white style 17682825 (two big images, slides 26/57) shared the colour+pattern key with the real 83-ref card style, tripping a '1 output / 2 source' refusal and leaving the Full deck with no white card borders at all. Fix: `iwa_write.match_card_stroke_styles()` now applies a per-key SOURCE floor `max(2, out_refs // 8)` (output refs run ~3.2× inflated by donor copies at patch time, e.g. 83→269, so a flat floor of 10 would wrongly refuse small decks); refusals now dump every candidate, successes note what the floor set aside. Residual: output card refs 10-31 still refuse on the Full wall (floor caps at ≤3) — needs its own follow-up. Full-deck live confirmation was running as of 2026-09-04 evening; status here to be updated once it lands."
+    content: "BUG (code fixed and merged), commit 94d2969. `restore_card_stroke_widths` applied the card classifier (white+solid, ≥10 refs) to the OUTPUT side only; the Full wall's stray 3-ref 5pt white style 17682825 (two big images, slides 26/57) shared the colour+pattern key with the real 83-ref card style, tripping a '1 output / 2 source' refusal and leaving the Full deck with no white card borders at all. Fix: `iwa_write.match_card_stroke_styles()` now applies a per-key SOURCE floor `max(2, out_refs // 8)` (output refs run ~3.2× inflated by donor copies at patch time, e.g. 83→269, so a flat floor of 10 would wrongly refuse small decks); refusals dump every candidate, successes note what the floor set aside. Residual: output card refs 10-31 still refuse on the Full wall (floor caps at ≤3) and need a follow-up. No final Full-deck live-verification result was recorded; do not describe it as still running."
     status: pending
   - id: propose-pins-flag
     content: "FEATURE. Surface pins-paired (pairQuality) per template tile in the propose UI so a '0-pin' slide is flagged, not trusted. Image-similarity scores can invert the geometric fit on bespoke slides (Map slide 9: template 4 scored 0.69 but paired 0 → vetoed at remap; template 13 scored 0.06 but paired 34 at the right 0.483 scale)."
@@ -219,9 +225,9 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
 - **Probe before trusting.** Any "Keynote can't do X" is probed in AppleScript first; verify a
   batch-op probe by COUNTING affected objects, never by timing a try-wrapped call. Don't
   inherit "can't" comments (the "JXA cannot scale a group" lore cost a session).
-- **2/1/2 workflow** for non-trivial items: planners sonnet + opus agree the plan → ONE fresh
-  sonnet implements → reviewers sonnet + opus (planners reusable) verify; implementers never
-  review their own work. Trivial one-liners and docs skip it.
+- **1/1/1 workflow** for this continuation, selected by the owner on 2026-09-07: one planner →
+  one fresh implementer → one independent reviewer. The implementer does not review their own
+  work. Historical 2/1/2 citations below describe completed work and stay unchanged.
 - **Never run Keynote concurrently.** One deck warm at a time; agents offline during a live
   read/write. Keynote here is "Keynote Creator Studio.app" = Keynote 15.3.1. Close-by-name →
   open → `document 1`; `with timeout of 3600`. Fast probe: APFS-clone (`cp -c`), mutate, read,
@@ -232,7 +238,188 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
   2026-09-04), never re-date cited SHAs; no PRs unless asked. Housekeeping at every landing:
   todo status here, SKILL, memory.
 
-## Current state (2026-09-03, branch `fix/checker-followups`)
+### Memory safety: what the "16GB rule" actually means
+
+This is not a blanket ban on Keynote work and not a Codex permission. It is a narrow caution born
+from one observed failure: a legacy full-JXA inspection of a multi-gigabyte report deck drove
+Keynote to roughly 80GB of memory on this 16GB Mac and destabilised the following read. Safe work
+already performed on this machine includes offline IWA reads, scoped/ranged Keynote reads, ordinary
+Gold remaps, preview exports, and the two-tier bulk reader. Only a **full-deck legacy JXA inspect of
+a multi-gigabyte deck** gets the high-memory treatment: explicit owner acknowledgement, a copy of
+the banked deck, one clean Keynote process, no concurrent automation, one deck at a time, and active
+memory-pressure monitoring. Stop if pressure climbs or Keynote stops responding. A larger-memory
+Mac is preferred, not mandatory policy. Historical reviews retain their original stronger wording.
+
+## Current state (2026-09-07, `main` after PR #54)
+
+- R2 validated-resize readback is merged (`b50d22b`, `7bb0f52`). The scoped A/B on Gold slides 2
+  and 12 passed for scalars, slide shape, flags, runs and colours; the only census difference was
+  the documented pair of trailing zero-rect placeholder text items returned only by legacy JXA.
+- The full-deck R2 field-parity A/B passed on copies of the three checklist Gold banks plus the
+  newer r2-round output. All hard fields, flags, preview/export state and per-kind order passed;
+  only the documented two empty legacy placeholders per slide differed. R2b propose caching is
+  now unblocked.
+- The restored Full Wall deck and existing Base CG template were used for a fresh whole-deck W1
+  `scripts/offline_write_ab.py` run. The restored Full CG deck is a reference output, not the
+  `--template` argument. The gate completed RED; its A/B decks and run records are reusable for
+  diagnosis without Keynote. See “W1 fresh full-deck gate evidence” below.
+- The literal `scripts/write_gate_ab.py` is the older one-slide Map harness. Its bank and Map wall
+  input remain absent, but the active plan already superseded it with the whole-deck gate; do not
+  mislabel that absence as a W1 input blocker or as a blanket RAM prohibition.
+- R0.1–R0.3 are code-complete, independently reviewed and Keynote-free verified. Next R0 item:
+  the reviewed-but-not-yet-approved R0.4 misc cleanup slice.
+- W2 z-order patch stays gated on W1. Offline write remains opt-in/default OFF.
+
+### R0.1 execution plan — `r-propose-from-cache` (code-complete, reviewed)
+
+- A ranged proposal may reuse a cached wall payload only when the digest-current cache declares
+  `reader: jxa` or `reader: offline`, `slideCount` equals the slide array length, and the slides
+  cover document positions `1..slideCount` in order. A missing, partial, reader-less, unknown or
+  malformed cache keeps the existing single ranged-JXA fallback and document-position warning.
+- Treat the cache as two views: a requested-slide subset for recipe/framing planning, and the full
+  payload for navigator conversion, saved-decision reuse, wall digests, skipped-slide context and
+  preview-to-slide mapping. Never renumber subset slides and never mutate the cached object.
+- Extend `propose_framings` with an explicit full-wall context. Planning and returned pages use the
+  subset; thumbnail mapping, `wallDigests`, `skippedSlides` and `numberingNote` use the complete
+  deck. Page indices remain absolute (`slide number - 1`), so Apply and saved framing decisions do
+  not change meaning.
+- Deterministic tests cover both accepted readers, skipped-slide range conversion, absolute page
+  and decision indices, full digest order, thumbnail mapping, cache immutability, malformed-cache
+  fallback and out-of-range rejection. Run the focused dashboard/framing/preview suites, then the
+  full Python and JavaScript suites.
+- Keynote-free code/tests are the landing gate for this item. The warmed-Gold cached-vs-fresh A/B
+  and `scripts/e2e_run_parity.py` both open Keynote; record them as pending live evidence for the
+  next explicit hands-off window rather than claiming they ran here.
+- Implemented in `web/app.py` and `framing.py`, with focused dashboard/framing regressions. The
+  independent review initially rejected skip-aware navigator overflow and permissive numeric
+  coercion; both were fixed and the re-review approved. Final local gate: 1,223 canonical Python
+  tests passed, 20 skipped, eight host-only compiler/font checks deselected; all pure-JavaScript
+  harnesses passed. No Keynote process was opened.
+
+### R0.2 execution plan — `r-acquire-cache-read` (code-complete, reviewed)
+
+- Move R0.1's strict full-payload validator into `inspect.py` for shared use. It continues to
+  require a known reader, exact integer `slideCount`, and contiguous integer `number`/`index`
+  fields; booleans, strings, floats, partial arrays and unknown readers remain invalid.
+- `acquire_wall_payload(mode="on")` accepts complete digest-current `jxa` and `offline` caches;
+  `mode="off"` accepts only `jxa`. Return the complete deck even for a ranged Apply because roster
+  runs and navigator/skipped context cross slide boundaries; the existing planner/writer already
+  limits mutations with `slide_range`.
+- A rejected cache must not leak back through a legacy fallback: all legacy calls in that
+  acquisition use `use_cache=False` after a rejected hit. With no cache present, retain the current
+  cache-populating behavior. Fresh two-tier payloads are stamped `reader: offline`.
+- Serve cached offline payloads without their stripped `_offline` sidecar. Preserve `bulkErrors`
+  as a loud warning, but do not invent new fallback work from the diagnostic. Log the accepted
+  reader and that the source Keynote read was skipped.
+- Downstream group-child attachment follows `wall["reader"]`, not the requested mode: attach for
+  offline geometry, skip for live JXA geometry, and retain the old mode-based behavior only for
+  explicitly injected reader-less payloads used by compatible callers/tests.
+- Keynote-free tests cover both readers/modes, malformed and rejected caches, fallback cache
+  bypass, two-tier reader stamping, `bulkErrors`, full-deck ranged returns, logging and group-child
+  attachment. Run the focused acquisition/readback/offline-write suites, then the canonical Python
+  suite and all pure-JavaScript harnesses.
+- Implemented in `inspect.py`, `remap_keynote.py`, `web/app.py` and focused regressions. One fresh
+  Terra implementer completed the change; the independent reviewer approved with no blockers.
+  Final gate: 1,233 canonical Python tests passed, 20 skipped, eight host-only compiler/font checks
+  deselected; all eight pure-JavaScript harnesses passed. No Keynote process was opened.
+
+### R0.3 — `r-digest-sidecar` (completed 2026-09-07)
+
+- Keep `deck_digest(path) -> str` and the content-only SHA-256 result unchanged. Only regular-file
+  decks use the sidecar; package-directory `.key` decks retain the existing sorted-tree hash and
+  never read or write one.
+- Store one versioned record per resolved path under `cache_root()/deck_digest/`. The requested
+  primary key is resolved path + size + `mtime_ns`; also require device, inode and `ctime_ns` as
+  safety guards so same-size copies/overwrites that preserve mtime cannot serve a stale digest.
+- Accept only strict integer metadata and a 64-character lowercase SHA-256. Corrupt, stale,
+  malformed or wrong-version records are ordinary misses and are atomically replaced after a
+  stable fresh hash; cache I/O failures never make digesting fail.
+- Stat before and after streaming. Write a sidecar only when the opened file and final path retain
+  the same identity throughout; a concurrent deck change returns the freshly computed digest but
+  does not cache it. Writes use a same-directory unique temporary file, flush + fsync, mode `0600`
+  and `os.replace`; no lock is needed because duplicate cold hashes are safe and records rebuild.
+- Tests cover cold/warm behavior, exact SHA-256 parity, ordinary edits, restored-mtime in-place
+  rewrites, atomic replacement, copied paths, symlink convergence, package decks, corrupt records,
+  mid-hash changes, cache-I/O failures, concurrent writers, permissions and cache-root isolation.
+- Keynote-free measurement on the existing 6.8GB regular-file Full deck: one cold hash and at least
+  three warm calls, identical digests, warm median under 100ms and at least 20× faster than cold.
+  Report the measured cycle saving; do not retain temporary measurement sidecars outside the
+  configured cache root.
+- Implemented in `baseline.py` with focused coverage in `test_baseline.py` by one fresh Terra
+  implementer after one planner; one independent reviewer returned APPROVE. The final focused
+  suite passed 26 tests across 20 repeated runs. The combined repository gate passed 1,248 Python
+  tests, 20 skipped and eight known host-only checks deselected; all pure-JavaScript harnesses and
+  the diff/YAML checks passed.
+- Measurement on the 6,771,226,182-byte Full deck used an isolated temporary cache: cold
+  3.97205s; warm 0.3818/0.1197/0.1056ms, median 0.1197ms; all four calls returned
+  `abf291d12e8e4ef1fff0947fe8036c200cfe4c00b49d8972c2261676a7a2d265`. This proves roughly
+  3.97s saved per avoided digest call. Whole-cycle savings remain unmeasured.
+
+### R0.4 execution plan — `r-misc-cleanups` (awaiting owner review)
+
+- Treat the four residuals as one 1/1/1 slice with three ordered checkpoints because the checker
+  export fold depends on the repaired document binding. One implementer owns the whole slice and
+  one independent reviewer reviews the combined behavior.
+- **Checkpoint 0, measure before editing:** on an APFS copy, time `Keynote.export(...)` and
+  `doc.export(...)` separately and compare their direct/recursive PNG sets with the established
+  AppleScript exporter. Bank a before-change checker run. If either JXA form unexpectedly produces
+  the complete preview set on Keynote 15.3.1, stop for owner review instead of deleting it.
+- **Checkpoint 1, export correctness and legacy cache-only repair:** align standalone
+  `export_applescript` with bundle-id target, exact-name close, open, `document 1` binding,
+  name/path verification, one-hour timeout, PNG export and close-without-saving cleanup. Add an
+  internal already-open form for the later handoff. Remove the disproven JXA export attempts while
+  preserving payload shape. Port the checker's export-only cache-hit behavior to legacy
+  `inspect_keynote`: cached JSON returns immediately without previews, returns with a complete
+  preview set, or runs only AppleScript export for missing/partial previews; it never performs a
+  fresh JXA inspect in that branch. Preserve cache metadata, skipped-slide accounting and stale
+  export-error clearing; do not change cache version or reader cross-serving.
+- **Checkpoint 2, fold checker export into the bulk session:** keep public `bulk_geometry()` and
+  existing callers close-by-default. An explicit checker-only `keepOpen` handoff leaves the deck
+  open after geometry, immediately exports it through the verified already-open AppleScript form,
+  and always closes it. Export failure remains separate from geometry success, is surfaced once,
+  and does not trigger a duplicate standalone attempt. If the production bulk closure is never
+  reached, retain standalone export as the fallback. Keep read/export timings non-overlapping and
+  guarantee cleanup on JSON/export errors.
+- Tests cover generated-script ordering/guards/cleanup, absence of `exportDir` from the legacy JXA
+  plan, every legacy cache/preview state including all-skipped, proof that export-only hits never
+  call JXA, checker folded/fallback/error paths, timing, unchanged bulk diagnostics, and default
+  close behavior for other callers. Run focused suites, the canonical Python suite and all JS
+  harnesses.
+- Live gates on copies: post-change checker A/B against the banked before run (payload parity after
+  metadata removal, preview basename/pixel parity, one deck open instead of two, measured wall-time
+  delta); a legacy cached-payload/evicted-preview export-only hit (`_cached:true`, no JXA timing,
+  complete previews); the required `scripts/e2e_run_parity.py`; final zero-open-document check and
+  original-digest confirmation. Update this plan and the checker plan with measured results; add
+  only durable verified handoff/export rules to the skill.
+
+### W1 fresh full-deck gate evidence — RED 2026-09-07
+
+- Ran `scripts/offline_write_ab.py` on the restored `Full_Report_Card_Wall.key` with the existing
+  `Base_CG_Assets.key` template, `--mode verify --no-validate --pass2-bar parity`. The restored
+  `Full_Report_Card_CG.key` is a reference output and was not mutated or used as the template.
+  Accessibility passed after the owner enabled it; the first preflight attempt had aborted before
+  opening a deck. Keynote ran serially, quit cleanly between A and B, ended document-clean, and
+  memory stayed recoverable (observed 33–56% free).
+- Fresh reusable evidence is under `output/handover-2026-09-07/write-gate-full/`: 5.3GB
+  `A_unflagged.key` + run record, 5.4GB `B_flagged.key` + run record, and `gate.log`. A ran
+  15:54:30–16:34:47 (~40m17s); B ran 16:34:49–17:09:39 (~34m50s). Reuse these banks for the
+  next diagnosis; do not pay Keynote again until a fix needs a new live gate.
+- The surgical writer's local checks passed strongly: 147 slides patched, no refused slide,
+  value-clean, naturalSize/originalSize/mask consistency PASS, and live verify image/movie/shape
+  max delta 0.00px. It applied 3,200 specs, but 689 missed specs across 124 slides fell back safely
+  to AppleScript; that fallback load is too high for the intended performance payoff.
+- The whole gate is RED. Pass 2 diverged materially: A→B done 312→379, skipped 78→11, sized
+  323→409, dedupDeleted 57→198, dedupShortfall 141→0, sigFallback 41→108, unresolved 67→0.
+  Thus B is locally cleaner, but not equivalent to A. All compared slides retained 100% drawable-id
+  population parity; nevertheless the gating identity geometry failed on 12 slides
+  (43, 51–54, 56, 106, 113, 119, 131–132, 144), with a maximum 6.12px child-image delta.
+  Separate plan-oracle failures also exist on both sides, including large common group residuals,
+  so diagnose oracle validity independently from the A/B identity deltas.
+- The final log line incorrectly says parity tolerated A's unresolved/dedup shortfall “because
+  A==B” after the preceding RED lines prove A!=B. Fix that summary text during diagnosis; it did
+  not affect the RED exit status. Offline write remains opt-in/default OFF and W2 remains gated.
+
+## Historical state log
 
 - **Pipeline:** two-tier offline source read (`OBED_OFFLINE_READ` default ON: IWA for
   everything + one bulk Keynote read of group/image/text frames) → pass 1 in Keynote (canvas
@@ -298,22 +485,22 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
   vs preadd: geometry 0.00px on all 19 slides, font census differs ONLY 'CHC Sitiawan' slides 3/4
   (35→40pt, the label fix, live-confirmed), previews 17/19 byte-identical (DIFF only 003/004), all
   preadd acceptance lines reproduced (roster 11-12/13, the two known build WARNINGs, applied
-  830/missed 0); RANGED READBACK A/B closed caveat (b) — see the R2 item. STILL DEFERRED (needs a
-  bigger machine): the whole-deck field-parity A/B (16GB rule forbids full-JXA inspect of the 2.4GB
-  _CG decks here) and the write_gate_ab re-run (banks deleted, Map deck not on this disk). The
+  830/missed 0); RANGED READBACK A/B closed caveat (b) — see the R2 item. The whole-deck R2
+  field-parity A/B subsequently passed on all three checklist Gold banks plus r2-round. Later on
+  2026-09-07 the owner restored the Full Wall and Full CG reference decks and a fresh whole-deck
+  `offline_write_ab.py` run completed RED with the existing Base CG template. Both A/B decks and
+  run records are banked for Keynote-free diagnosis; the superseded one-slide Map
+  `write_gate_ab.py` bank remains absent. The
   pack-lists latent Gold flip stays latent: this build ran with no preview cache and geometry is
   byte-stable.
 
 ## Order of work
 
-1. **Current fixes:** batch 1 (F, E, A, C, B1) → one live Map remap → batch 2 (card template
-   size + caption step-down + grid reflow).
-2. **Tranche 1:** W1 stabilise (re-bank the oracle, healthy-A gate, default-flip bar);
-   R1 nested-bulk probe (probe only; `r-bulk-counts-plan` only if it fails).
-3. **Tranche 2 — the immediate optimization TODO:** R2 `r-readback-two-tier` →
-   `r-propose-two-tier`; W2 `w-zorder-patch` (stroke restore already lands in batch 1).
-4. **Then:** R0 quick wins, bug backlog B (reuse yank / framing fallback, constellation cluster
-   affine, builds follow source), feature backlog.
+1. **Unblocked now:** finish the R0 misc cleanup slice; R0.1–R0.3 are complete.
+2. **Also unblocked by the passed R2 A/B:** R2b `r-propose-two-tier`.
+3. **W1 bank rebuilt, RED:** diagnose the reusable full-report A/B bank Keynote-free; only run
+   Keynote again after a reviewed fix. W2 remains gated on W1 stabilisation/default-flip.
+4. **Then:** remaining bug backlog, constellation cluster affine, and feature backlog.
 
 ### Tranche map
 
@@ -321,10 +508,10 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
 |---|---|---|---|
 | W0.1–W0.4 | tmp-path fix, skipped-slide bulk skip, z-order probe, stroke probe | probes only | DONE (2ac04db, 695199d, 99771bf, c4dc5e5) |
 | Fixes | output-bugs batch 1 → batch 2 | one live remap each | both DONE + live-verified (batch 2: 0ad68b0, 0cdcd2b, 753acef) |
-| Fixes (off-main) | `map-label-classification-fix` (cbde0a7), `card-border-source-ref-floor-fix` (94d2969) | one live remap each | map-label DONE + live-verified; card-border DONE, Full-deck live confirmation running |
+| Fixes | `map-label-classification-fix` (cbde0a7), `card-border-source-ref-floor-fix` (94d2969) | one live remap each | both merged; map-label live-verified; final Full-deck card-border verification outcome was not recorded |
 | **W1** | `w-offline-write-stabilise` | gate on both gold decks | gate hardened + patcher fix; Map GREEN (verify+on); Full NOT GREEN, undebugged; flip on hold (patch banked) |
 | **R1** | `r-nested-bulk-probe` | yes | DONE 2026-09-04 — correct+safe but NOT faster (object-bound); closed with `r-bulk-counts-plan` |
-| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | readback CODE-COMPLETE (b50d22b+7bb0f52, fix/resizer-backlog-r2); A/B + write-gate re-run deferred to a Keynote window; propose after the A/B |
+| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | readback complete; ranged + four whole-deck Gold A/Bs passed; R2b unblocked; write-gate re-run separately blocked by deleted inputs |
 | **W2** | `w-zorder-patch` (stroke prod folded into batch 1 C) | yes | W1 stable |
 | R0 | `r-cache-quick-wins` | no (A/B on warmed decks) | anytime, Keynote-free |
 | B | reuse yank / framing fallback, cluster affine, builds | yes | independent |
@@ -361,8 +548,9 @@ any nested-bulk rewrite must preserve it.
   deck) + preview PNG diffs for geometry/style comparison; Keynote is only needed for the two
   remaps themselves and one preview export of the human ideal. Caught the z-order
   nondeterminism (see w-zorder-patch) that a same-code same-deck re-run would otherwise hide.
-  Rule learned the hard way: never `inspect_keynote`/`inspect_gold` these decks on the 16GB
-  machine, and the paste phase of pass 1 must be hands-off — a lost-paste run reads "Card-border
+  Rule learned the hard way: treat full-deck legacy `inspect_keynote`/`inspect_gold` of these
+  multi-gigabyte decks as a monitored high-memory operation, and keep the paste phase of pass 1
+  hands-off — a lost-paste run reads "Card-border
   stroke: … (12 refs)" instead of 269.
 
 ## Read track — what stands after the reviews
