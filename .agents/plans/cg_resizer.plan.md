@@ -29,12 +29,21 @@ todos:
       raised ONLY when an actual legacy inspect_keynote call failed — a merge-step failure escapes
       plain and falls back (b50d22b's arm-C re-labeling crashed a validated resize with zero legacy
       runs; the opus review caught it, fixed in 7bb0f52 with mutant-killing tests). Caveats: (c)(f)
-      closed in code; (b) closed in code, one ranged A/B run still owed; (a) NOT closed — the
-      field-parity A/B on ≥1 real _CG.key per gold family is an UNEXECUTED checklist at
-      output/handover-2026-09-07/plan/r2-readback-plan.md §4+§6 (group children/childCount is the one
-      JXA-only field → hard A/B gate; int-vs-float rounding rule spec'd; Gold decks need the owner's
-      explicit hands-off ack). ALSO REQUIRED after the A/B: one scripts/write_gate_ab.py re-run (its
-      build_reported seed recounts per-kind ORDER, AM-10(c) unmeasured). Accepted residual: a deck
+      closed in code; (b) CLOSED 2026-09-07 in the owner-acked hands-off window — ranged A/B on the
+      r2-round Gold _CG deck, slides 2 and 12 (results + script:
+      output/handover-2026-09-07/ranged-ab/): scalars, returned-slide shape and validate flags
+      identical, NO cache write on either side, and the ONLY census difference is 2 trailing
+      zero-rect empty placeholder text items legacy reports and the two-tier read omits (the
+      documented reconcile [0,2] placeholder-tail class; 246/246 real items exact-equal on the
+      86-name roster slide, runs+colors included); (a) STILL OPEN — the whole-deck field-parity A/B
+      needs the legacy full-JXA inspect of a 2.4GB _CG.key, which the 16GB-machine rule forbids here
+      (the banked Gold builds never validated for the same reason): run it on a bigger machine per
+      the checklist at output/handover-2026-09-07/plan/r2-readback-plan.md §4+§6 (group
+      children/childCount is the one JXA-only field → hard gate; the placeholder-tail class above is
+      the expected benign census diff). The scripts/write_gate_ab.py re-run (AM-10(c) per-kind ORDER)
+      is BLOCKED on this machine too: its reusable banks were deleted with output/ and the Map wall
+      deck is not on this disk — required before W1 resumes, not before using R2 (AM-2 already forces
+      legacy under offline-write verify). Accepted residual: a deck
       where inspect_items marks EVERY slide unreadable promotes arm C to a whole-deck merge, and a
       failure there runs a ranged + a whole-deck legacy pair (fails safe; b50d22b crashed instead).
       Payoff (756s → ~290s report-class) is still a PROJECTION — measure it in the A/B. Next:
@@ -163,8 +172,9 @@ todos:
       (slides 3/4) were wrong; slides 8/9 were right by luck (source 35). Fix: unpaired list/other text
       predicts with the affine it rides (`size_ratio=aff.s`, 0.5 with no affine) — translate-only map
       s=1.0 predicts 40 → picks the 40pt swatch; verified offline against the preadd bank's real
-      palette. Offline unit + integration tests only (integration pins the call site; fails on parent);
-      confirm on the next live Gold build. Note the prompt-era assumption 'template has no label
+      palette. Offline unit + integration tests (integration pins the call site; fails on parent);
+      LIVE-CONFIRMED 2026-09-07 on the r2-round Gold build: font census vs preadd differs ONLY
+      'CHC Sitiawan' slides 3/4 at 40pt, previews diff only on 003/004, geometry 0.00px. Note the prompt-era assumption 'template has no label
       swatch' was FALSE — both map tiles carry label swatches at exactly the ideal sizes. The missing
       'CHC Kuching' on output 3/4 is the separate map-label-offslide-parked-delete residual."
     status: completed
@@ -281,12 +291,18 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
   obed-edom-wt-resizer-backlog, 5 commits, not pushed, no PR):** `pack-lists-gate-widen` DONE
   (dcae6a7 + blocker fix b6039ef), `map-label-text-sizing` DONE (e74e5fa, measured two-swatch
   tie-break root cause), R2 `r-readback-two-tier` CODE-COMPLETE (b50d22b + 7bb0f52) — each 2/1/2
-  reviewed, suite 1153/78, zero Keynote opened. All round documents (plans, vets, reviews,
-  diagnosis, implementation reports) under `output/handover-2026-09-07/`. DEFERRED to one
-  owner-acked hands-off Keynote window: the R2 field-parity + ranged A/B (checklist in
-  r2-readback-plan.md §4+§6), one write_gate_ab re-run, and a Gold build to confirm the 40pt
-  labels and watch the pack-lists latent Gold flip (a previews cache appearing switches Gold
-  11-12 to the measured packer).
+  reviewed, suite 1153/78, zero Keynote opened during the code round. All round documents (plans,
+  vets, reviews, diagnosis, implementation reports) under `output/handover-2026-09-07/`. The
+  owner-acked hands-off Keynote window then ran the same day (10:03-10:25): PRODUCTION GOLD BUILD
+  `output/gold-baseline/r2-round/` (880s, EXIT=0, single attempt, warm idle Keynote) — offline A/B
+  vs preadd: geometry 0.00px on all 19 slides, font census differs ONLY 'CHC Sitiawan' slides 3/4
+  (35→40pt, the label fix, live-confirmed), previews 17/19 byte-identical (DIFF only 003/004), all
+  preadd acceptance lines reproduced (roster 11-12/13, the two known build WARNINGs, applied
+  830/missed 0); RANGED READBACK A/B closed caveat (b) — see the R2 item. STILL DEFERRED (needs a
+  bigger machine): the whole-deck field-parity A/B (16GB rule forbids full-JXA inspect of the 2.4GB
+  _CG decks here) and the write_gate_ab re-run (banks deleted, Map deck not on this disk). The
+  pack-lists latent Gold flip stays latent: this build ran with no preview cache and geometry is
+  byte-stable.
 
 ## Order of work
 
