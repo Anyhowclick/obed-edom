@@ -1041,7 +1041,7 @@ def remap_keynote(
             f"Roster kept on slide(s) {kept}, dropped on {dropped} "
             "(a wall leftover behind newer content)."
         )
-    if keep_side_panels and recipe.get("listFontSize"):
+    if recipe.get("listFontSize") and (keep_side_panels or placements):
         if placements:
             crowded = [row for row in placements if row.get("overlap")]
             detail = f"{len(placements)} moved into empty space"
