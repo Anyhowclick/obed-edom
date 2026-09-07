@@ -1,12 +1,12 @@
 ---
 name: Cue palette and DSK generator
-overview: "Split out of cue_palette_and_outline_editor_ef103304.plan.md (2026-08-28) so that plan can focus on the CG resizer + its speed work. This holds the two dashboard/authoring features that are independent of the resizer: the cue-first palette (show the operator the layouts a template actually has and let them insert the cue that produces one) and the DSK generator (unchanged from the superseded plan, including its four corrections). Neither is started. The outline editor, image cues, stat-drift, and recipe-library stay in the resizer plan for now."
+overview: "Dashboard/authoring backlog independent of the CG resizer. The cue-first palette has a retained design below and is not started. The DSK-generator entry is intentionally marked for re-planning: its alleged 'four corrections' were never copied into this repository or recoverable from its plan history, so that phrase is not an implementable specification. The outline editor, image cues, stat-drift, and recipe-library remain in the resizer plan for now."
 todos:
   - id: cue-palette
     content: "Cue-first palette in the dashboard, inverting masters.yaml cue maps, with adjacency and context rules enforced. Pending — design below."
     status: pending
   - id: dsk-generator
-    content: "DSK generator, unchanged from the superseded plan including its four corrections. Pending — detail lives in the superseded plan; carry it forward when this is picked up."
+    content: "DSK generator. Pending RE-PLAN before implementation: the former plan's 'four corrections' are not present in this repository or its available plan history. Re-audit the current generator, templates, semantic cues and operator workflow; do not implement from this placeholder."
     status: pending
 ---
 
@@ -64,5 +64,11 @@ AppleScript's `master slide` is fine, which is why `keynote_jxa.js` stays unused
 
 ## DSK generator
 
-Unchanged from the superseded plan, including its four corrections. Detail was not
-duplicated here; pull it forward from the superseded plan when this is picked up.
+This item has no recoverable implementation specification. The earlier plan repeatedly referred
+to "four corrections" from an already-superseded document, but those corrections were never
+committed into the available plan history. Treat this section as backlog intent only. Before code:
+
+1. Audit the current DSK generation path, `masters.yaml`, template layouts and semantic-cue rules.
+2. Reconstruct requirements with the owner, explicitly recording any corrections and acceptance
+   examples in this file.
+3. Plan and review the implementation against the current code; do not infer the missing four.

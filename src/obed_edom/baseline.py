@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 import re
+import stat
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ INSPECT_VERSION = 4
 # Bump on template stat-size map shape change. Also `.k<version>` (AppleScript read).
 TEMPLATE_STAT_VERSION = 1
 DIGEST_LEN = 16
+DECK_DIGEST_SIDECAR_VERSION = 1
 
 
 CACHE_DIR_ENV = "OBED_EDOM_CACHE_DIR"
@@ -78,22 +81,144 @@ def wall_thumb_dir(
 
 def _hash_file(hasher: hashlib._Hash, path: Path, chunk: int = 1024 * 1024) -> None:
     with path.open("rb") as handle:
-        while True:
-            data = handle.read(chunk)
-            if not data:
-                return
-            hasher.update(data)
+        _hash_handle(hasher, handle, chunk)
+
+
+def _hash_handle(hasher: hashlib._Hash, handle, chunk: int = 1024 * 1024) -> None:
+    while True:
+        data = handle.read(chunk)
+        if not data:
+            return
+        hasher.update(data)
+
+
+def _digest_metadata(file_stat: os.stat_result) -> dict[str, int]:
+    return {
+        "size": file_stat.st_size,
+        "mtimeNs": file_stat.st_mtime_ns,
+        "device": file_stat.st_dev,
+        "inode": file_stat.st_ino,
+        "ctimeNs": file_stat.st_ctime_ns,
+    }
+
+
+def _same_digest_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    return _digest_metadata(left) == _digest_metadata(right)
+
+
+def _deck_digest_sidecar_path(path: Path) -> Path:
+    key = hashlib.sha256(os.fsencode(str(path))).hexdigest()
+    return cache_root() / "deck_digest" / f"{key}.json"
+
+
+def _is_strict_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _load_digest_sidecar(path: Path, file_stat: os.stat_result) -> str | None:
+    try:
+        sidecar = _deck_digest_sidecar_path(path)
+        record = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if (
+        not isinstance(record, dict)
+        or not _is_strict_int(record.get("version"))
+        or record["version"] != DECK_DIGEST_SIDECAR_VERSION
+    ):
+        return None
+    if record.get("path") != str(path):
+        return None
+    metadata = _digest_metadata(file_stat)
+    if any(
+        not _is_strict_int(record.get(key)) or record[key] != value
+        for key, value in metadata.items()
+    ):
+        return None
+    digest = record.get("digest")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None
+    return digest
+
+
+def _write_digest_sidecar(path: Path, file_stat: os.stat_result, digest: str) -> None:
+    temp_path: Path | None = None
+    try:
+        sidecar = _deck_digest_sidecar_path(path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_temp_path = tempfile.mkstemp(
+            prefix=f".{sidecar.name}.", suffix=".tmp", dir=sidecar.parent
+        )
+        temp_path = Path(raw_temp_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump(
+                {
+                    "version": DECK_DIGEST_SIDECAR_VERSION,
+                    "path": str(path),
+                    **_digest_metadata(file_stat),
+                    "digest": digest,
+                },
+                handle,
+                separators=(",", ":"),
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, sidecar)
+        temp_path = None
+    except OSError:
+        return
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _hash_regular_file(
+    path: Path, initial_stat: os.stat_result
+) -> tuple[str, bool, os.stat_result | None]:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        opened_before = os.fstat(fd)
+        hasher = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            _hash_handle(hasher, handle)
+        opened_after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
+        final_stat = path.stat()
+    except FileNotFoundError:
+        return hasher.hexdigest(), False, None
+    stable = (
+        _same_digest_metadata(initial_stat, opened_before)
+        and _same_digest_metadata(opened_before, opened_after)
+        and _same_digest_metadata(opened_after, final_stat)
+    )
+    return hasher.hexdigest(), stable, final_stat
 
 
 def deck_digest(path: Path | str) -> str:
     """SHA-256 of a .key file, or of a package directory walked in sorted order."""
-    path = Path(path).expanduser()
+    path = Path(path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(path)
+    file_stat = path.stat()
+    if stat.S_ISREG(file_stat.st_mode):
+        cached = _load_digest_sidecar(path, file_stat)
+        if cached is not None:
+            try:
+                if _same_digest_metadata(file_stat, path.stat()):
+                    return cached
+            except OSError:
+                pass
+        digest, stable, final_stat = _hash_regular_file(path, file_stat)
+        if stable and final_stat is not None:
+            _write_digest_sidecar(path, final_stat, digest)
+        return digest
     hasher = hashlib.sha256()
-    if path.is_file():
-        _hash_file(hasher, path)
-        return hasher.hexdigest()
     for child in sorted(p for p in path.rglob("*") if p.is_file()):
         rel = child.relative_to(path).as_posix().encode()
         hasher.update(rel)

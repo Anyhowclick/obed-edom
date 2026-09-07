@@ -1,7 +1,7 @@
 ---
 name: Checker offline geometry — deferred levers & dead-ends
 overview: >-
-  Single source of truth for the Sermon Checker's offline read. The FOUNDATION IS SHIPPED
+  Single source of truth for the shared two-tier offline read. The FOUNDATION IS SHIPPED
   (in git, not to redo): the checker reads a deck offline (IWA addressing + style + exact
   shape/line geometry) and splices a slim O(slides) bulk Keynote pass for the soft classes
   (group/image/movie/text), ~3.25x cold, accuracy-identical, with item-level fallback. The
@@ -12,7 +12,8 @@ overview: >-
   EDIT-LOOP project (slide-fingerprint SHIPPED → l5-bulk-cache → incremental-previews) —
   the ONLY thing that speeds a small-edit reload (cold reads already got
   their ~3.25x); (B) slim-bulk (shaper-wiring → slim-bulk, folding in l2b-group-frame) to
-  cut the cold bulk tier. See "Next up". Read the SKILL "Reading a .key offline (IWA)"
+  cut the cold bulk tier. The validated CG-resize readback also uses this reader as of
+  2026-09-07; resize propose still does not. See "Next up". Read the SKILL "Offline inspect / IWA"
   first. iwa_geometry is resizer-SHARED — changes land behind the gold-deck gate
   (tests/test_offline_inspect.py).
 todos:
@@ -151,11 +152,13 @@ isProject: false
 
 # Checker offline geometry — deferred levers & dead-ends
 
-Single source of truth for the checker's offline-geometry read. The build history (v1
+Single source of truth for the shared offline-geometry read. The build history (v1
 cold-inspect, the four low-risk follow-ups, L4 item-level fallback, L1, L2a) is shipped
 and lives in git; the Keynote probes (hash-probes, e2e-run-parity) are done (see "Probe
 results"); this file keeps only what is still open, and the measured dead-ends so they are
-not chased again. **Read the SKILL "Reading a `.key` offline (IWA)" first.**
+not chased again. Since 2026-09-07 the validated CG-resize readback also calls this reader;
+resize propose remains on legacy JXA and is tracked in `cg_resizer.plan.md`. **Read the SKILL
+"Offline inspect / IWA" first.**
 
 ## Next up (ordered)
 
@@ -181,8 +184,9 @@ implements → independent verify).
 - **Two-tier read.** `offline_wall_payload` (IWA addressing via `derive_kind_index`,
   per-run style, exact shape/line/plain-frame geometry) + `two_tier_wall_payload` splicing
   a slim O(slides) bulk Keynote read of `position`/`size` over the soft classes
-  (`BULK_KINDS = group/image/movie/text`). ~3.25x cold, accuracy-identical, checker-scoped
-  (other `inspect_keynote` callers untouched). `INSPECT_VERSION = 4`.
+  (`BULK_KINDS = group/image/movie/text`). ~3.25x cold on the measured checker decks. It is
+  used by the Sermon Checker and by validated CG-resize readback; source-propose and explicit
+  offline-write verification still use legacy JXA. `INSPECT_VERSION = 4`.
 - **Guards + fallback.** Count-guard (`iwa_kindindex.reconcile_counts`) + `reader`
   provenance; L4 item-level fallback re-reads only the tripping items, whole-slide
   `_merge_legacy_slides` on a count-mismatch/kindIndex<0 slide (the DSK17 net). Content

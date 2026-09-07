@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,182 @@ def test_range_past_the_last_slide_is_an_error_not_a_blank_screen():
     _assert_range_within_deck("deck.key", 9, frozenset({1, 9}))
     _assert_range_within_deck("deck.key", 9, None)
     _assert_range_within_deck("deck.key", 0, frozenset({124}))
+
+
+def _cached_wall(reader="jxa"):
+    return {
+        "reader": reader,
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slideCount": 3,
+        "slides": [
+            {"number": 1, "index": 0, "items": []},
+            {"number": 2, "index": 1, "skipped": True, "items": []},
+            {"number": 3, "index": 2, "items": []},
+        ],
+    }
+
+
+@pytest.mark.parametrize("reader", ["jxa", "offline"])
+def test_complete_cached_wall_payload_accepts_supported_readers(reader):
+    from obed_edom.web.app import _complete_cached_wall_payload
+
+    assert _complete_cached_wall_payload(_cached_wall(reader)) is True
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.pop("reader"),
+        lambda payload: payload.update(reader="other"),
+        lambda payload: payload.update(slideCount=2),
+        lambda payload: payload.update(slideCount="3"),
+        lambda payload: payload.update(slideCount=3.0),
+        lambda payload: payload.update(slideCount=True),
+        lambda payload: payload["slides"][1].update(number=3),
+        lambda payload: payload["slides"][1].update(number="2"),
+        lambda payload: payload["slides"][1].update(number=2.0),
+        lambda payload: payload["slides"][1].update(number=True),
+        lambda payload: payload["slides"][1].update(index="1"),
+        lambda payload: payload["slides"][1].update(index=1.0),
+        lambda payload: payload["slides"][1].update(index=True),
+        lambda payload: payload["slides"].pop(),
+    ],
+)
+def test_complete_cached_wall_payload_rejects_partial_or_malformed_payloads(mutate):
+    from obed_edom.web.app import _complete_cached_wall_payload
+
+    payload = _cached_wall()
+    mutate(payload)
+    assert _complete_cached_wall_payload(payload) is False
+
+
+def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    cached = _cached_wall("offline")
+    original = copy.deepcopy(cached)
+    seen = {"inspects": []}
+    logs = []
+
+    def fake_inspect(path, **kwargs):
+        seen["inspects"].append((Path(path), kwargs))
+        assert Path(path) == template
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
+
+    def fake_propose(_wall, _template, **kwargs):
+        seen["proposal"] = kwargs
+        return {
+            "wallDigests": ["d1", "d2", "d3"],
+            "templateDigest": "template",
+            "pages": [{"slide": 3, "index": 2, "noUsableFraming": False}],
+        }
+
+    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: cached)
+    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
+    monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": True})
+    monkeypatch.setattr(
+        app_mod,
+        "load_framings",
+        lambda *_args: {
+            "wallDigests": ["d1", "d2", "d3"],
+            "templateDigest": "template",
+            "decisions": [{"wallIndex": 2, "state": "pinned", "templateSlide": 9}],
+        },
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "deck_slide_digests",
+        lambda payload: [f"d{slide['number']}" for slide in payload["slides"]],
+    )
+    monkeypatch.setattr(app_mod, "deck_digest", lambda _path: "template")
+
+    result = app_mod._run_resize_propose(
+        type("Job", (), {"log": logs.append})(), wall, template, frozenset({2}), False
+    )
+
+    proposal = seen["proposal"]
+    assert [slide["number"] for slide in proposal["wall_payload"]["slides"]] == [3]
+    assert [slide["number"] for slide in proposal["full_wall_payload"]["slides"]] == [1, 2, 3]
+    assert proposal["wall_payload"]["slides"][0] is not proposal["full_wall_payload"]["slides"][2]
+    assert proposal["slide_range"] == frozenset({3})
+    assert seen["inspects"] == [(template, {})]
+    assert result["pages"][0]["index"] == 2
+    assert result["pages"][0]["decision"]["wallIndex"] == 2
+    assert result["pages"][0]["decision"]["templateSlide"] == 9
+    assert result["slideRange"] == [3]
+    assert result["slideRangeTyped"] == [2]
+    assert "Skip Slide" in result["numberingNote"]
+    assert cached == original
+
+
+def test_ranged_propose_falls_back_for_malformed_cache_and_rejects_valid_cache_overflow(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    logs = []
+    seen = {"inspects": []}
+    malformed = _cached_wall()
+    malformed["slides"].pop()
+
+    def fake_inspect(path, **kwargs):
+        seen["inspects"].append((Path(path), kwargs))
+        if Path(path) == wall:
+            return {"slideCount": 3, "slides": [{"number": 2, "items": []}]}
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
+
+    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: malformed)
+    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(
+        app_mod,
+        "propose_framings",
+        lambda *_args, **_kwargs: {"wallDigests": [], "templateDigest": "", "pages": []},
+    )
+    monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": False})
+
+    app_mod._run_resize_propose(
+        type("Job", (), {"log": logs.append})(), wall, template, frozenset({2}), False
+    )
+    assert seen["inspects"] == [(wall, {"slide_range": frozenset({2})}), (template, {})]
+    assert any("not been read in full" in line for line in logs)
+
+    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: _cached_wall())
+    with pytest.raises(RuntimeError, match="shows 2 slides"):
+        app_mod._run_resize_propose(
+            type("Job", (), {"log": logs.append})(), wall, template, frozenset({4}), False
+        )
+
+
+def test_ranged_propose_rejects_navigator_range_past_visible_slides(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: _cached_wall())
+    monkeypatch.setattr(
+        app_mod,
+        "inspect_keynote",
+        lambda *_args, **_kwargs: pytest.fail("valid cached range must reject before inspection"),
+    )
+
+    with pytest.raises(RuntimeError, match="shows 2 slides"):
+        app_mod._run_resize_propose(
+            type("Job", (), {"log": lambda _message: None})(),
+            wall,
+            template,
+            frozenset({3}),
+            False,
+        )
 
 
 def test_health_and_stubs():

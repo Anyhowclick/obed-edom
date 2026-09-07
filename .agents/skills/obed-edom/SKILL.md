@@ -288,6 +288,29 @@ group's LIVE frame and permanently freezes an autosize text child at its
 wrapped height. Groups holding an autosize text box are therefore written
 child-by-child (width only for the autosize child), never resized as a group.
 
+### Offline-write A/B gate
+
+`scripts/write_gate_ab.py` is the older one-slide, id-stable Map probe.
+`scripts/offline_write_ab.py` is the active whole-deck W1 gate. For the Full
+report, `Full_Report_Card_Wall.key` is `--source`, `Base_CG_Assets.key` is
+`--template`, and `Full_Report_Card_CG.key` is a reference output, not the
+template.
+
+Run the Full gate on copies with `--mode verify --no-validate`; use
+`--pass2-bar parity` only to expose and compare a known pre-existing pass-2
+problem. Require Accessibility, refuse any already-open Keynote document, run
+serially, and quit Keynote between A and B. This workflow is viable on the
+16GB host when guarded this way; the memory caution is not a blanket ban on
+full-deck work.
+
+The 2026-09-07 Full bank under
+`output/handover-2026-09-07/write-gate-full/` completed RED but is reusable:
+both A/B decks and run records are present, so diagnose and re-run comparisons
+Keynote-free before paying for another live gate. The surgical writer's own
+consistency and live geometry verify passed at 0.00px, but pass-2 parity and 12
+slides' identity geometry failed. Offline write therefore remains opt-in with
+the default OFF.
+
 ---
 
 ## Scoring and validation

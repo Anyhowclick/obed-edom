@@ -13,9 +13,19 @@ deck_slide_digests and fires photo-tilt. Keynote's app version is the other half
 of "the reader" (.k<version> tag). Untagged payloads were 14.5 and are no longer
 read.
 """
+import hashlib
+import json
+import os
+import stat
+import threading
 from pathlib import Path
 
+import pytest
+
+import obed_edom.baseline as baseline_mod
+
 from obed_edom.baseline import (
+    CACHE_DIR_ENV,
     deck_digest,
     deck_slide_digests,
     index_map,
@@ -26,6 +36,17 @@ from obed_edom.baseline import (
     save_pairing,
     slot_dict,
 )
+
+
+def _digest_sidecar(cache: Path, deck: Path) -> Path:
+    key = hashlib.sha256(os.fsencode(str(deck.resolve()))).hexdigest()
+    return cache / "deck_digest" / f"{key}.json"
+
+
+def _cache_root(monkeypatch, tmp_path: Path) -> Path:
+    cache = tmp_path / "cache"
+    monkeypatch.setenv(CACHE_DIR_ENV, str(cache))
+    return cache
 
 
 def test_deck_digest_file_and_package(tmp_path: Path):
@@ -46,6 +67,293 @@ def test_deck_digest_file_and_package(tmp_path: Path):
     assert deck_digest(pkg) == first
     (pkg / "Data" / "a.png").write_bytes(b"IMG")
     assert deck_digest(pkg) != first
+
+
+def test_deck_digest_file_sidecar_is_exact_warm_and_private(tmp_path: Path, monkeypatch):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    expected = hashlib.sha256(b"alpha").hexdigest()
+
+    assert deck_digest(deck) == expected
+    sidecar = _digest_sidecar(cache, deck)
+    record = json.loads(sidecar.read_text())
+    assert record["digest"] == expected
+    assert record["path"] == str(deck.resolve())
+    assert all(
+        isinstance(record[key], int) and not isinstance(record[key], bool)
+        for key in ("size", "mtimeNs", "device", "inode", "ctimeNs")
+    )
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+
+    monkeypatch.setattr(
+        baseline_mod,
+        "_hash_regular_file",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("warm hash")),
+    )
+    assert deck_digest(deck) == expected
+
+
+def test_deck_digest_sidecar_rejects_atomic_replacement_with_preserved_size_and_mtime(
+    tmp_path: Path, monkeypatch
+):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    before = deck.stat()
+    assert deck_digest(deck) == hashlib.sha256(b"alpha").hexdigest()
+    before_record = json.loads(_digest_sidecar(cache, deck).read_text())
+
+    replacement = tmp_path / "replacement.key"
+    replacement.write_bytes(b"bravo")
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, deck)
+    after = deck.stat()
+
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
+    assert deck_digest(deck) == hashlib.sha256(b"bravo").hexdigest()
+    after_record = json.loads(_digest_sidecar(cache, deck).read_text())
+    assert after_record["device"] == after.st_dev
+    assert after_record["inode"] == after.st_ino
+    assert after_record["ctimeNs"] == after.st_ctime_ns
+    assert after_record["inode"] != before_record["inode"]
+
+
+def test_deck_digest_sidecar_validates_every_identity_guard(tmp_path: Path, monkeypatch):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    expected = deck_digest(deck)
+    sidecar = _digest_sidecar(cache, deck)
+    original = json.loads(sidecar.read_text())
+
+    for key in ("device", "inode", "ctimeNs"):
+        corrupt = dict(original)
+        corrupt[key] += 1
+        sidecar.write_text(json.dumps(corrupt))
+        assert deck_digest(deck) == expected
+        assert json.loads(sidecar.read_text())[key] == original[key]
+
+
+def test_deck_digest_sidecar_is_per_resolved_path_and_symlink_converges(
+    tmp_path: Path, monkeypatch
+):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    copied = tmp_path / "copy.key"
+    deck.write_bytes(b"alpha")
+    copied.write_bytes(b"alpha")
+    link = tmp_path / "alias.key"
+    link.symlink_to(deck)
+
+    assert deck_digest(deck) == deck_digest(copied) == deck_digest(link)
+    assert _digest_sidecar(cache, deck).is_file()
+    assert _digest_sidecar(cache, copied).is_file()
+    assert len(list((cache / "deck_digest").glob("*.json"))) == 2
+
+
+def test_deck_digest_package_never_uses_sidecar(tmp_path: Path, monkeypatch):
+    cache = _cache_root(monkeypatch, tmp_path)
+    package = tmp_path / "deck.key"
+    package.mkdir()
+    (package / "Index").write_bytes(b"index")
+
+    assert deck_digest(package) == hashlib.sha256(b"Index\0index").hexdigest()
+    assert not (cache / "deck_digest").exists()
+
+
+def test_deck_digest_replaces_corrupt_sidecar_atomically(tmp_path: Path, monkeypatch):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    sidecar = _digest_sidecar(cache, deck)
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text('{"digest":"BAD"}')
+
+    expected = hashlib.sha256(b"alpha").hexdigest()
+    original_replace = baseline_mod.os.replace
+    replacements: list[tuple[Path, Path]] = []
+
+    def observe_replace(source, destination):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        replacements.append((source_path, destination_path))
+        assert source_path.parent == destination_path.parent
+        assert stat.S_IMODE(source_path.stat().st_mode) == 0o600
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(baseline_mod.os, "replace", observe_replace)
+    assert deck_digest(deck) == expected
+    assert json.loads(sidecar.read_text())["digest"] == expected
+    assert len(replacements) == 1
+    assert replacements[0][1] == sidecar
+    assert not list(sidecar.parent.glob(f".{sidecar.name}.*.tmp"))
+
+
+def test_deck_digest_rejects_non_strict_metadata_and_uppercase_digest(
+    tmp_path: Path, monkeypatch
+):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    expected = deck_digest(deck)
+    sidecar = _digest_sidecar(cache, deck)
+    record = json.loads(sidecar.read_text())
+    record["size"] = True
+    record["digest"] = expected.upper()
+    sidecar.write_text(json.dumps(record))
+
+    assert deck_digest(deck) == expected
+    refreshed = json.loads(sidecar.read_text())
+    assert refreshed["size"] == len(b"alpha")
+    assert refreshed["digest"] == expected
+
+
+def test_deck_digest_does_not_cache_mid_hash_change(tmp_path: Path, monkeypatch):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    original = baseline_mod._hash_handle
+
+    def change_after_read(hasher, handle, chunk=1024 * 1024):
+        original(hasher, handle, chunk)
+        deck.write_bytes(b"bravo")
+
+    monkeypatch.setattr(baseline_mod, "_hash_handle", change_after_read)
+    deck_digest(deck)
+    assert not _digest_sidecar(cache, deck).exists()
+
+
+def test_deck_digest_returns_uncached_digest_when_path_disappears_after_hash(
+    tmp_path: Path, monkeypatch
+):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    expected = hashlib.sha256(b"alpha").hexdigest()
+    original = baseline_mod._hash_handle
+
+    def remove_after_read(hasher, handle, chunk=1024 * 1024):
+        original(hasher, handle, chunk)
+        deck.unlink()
+
+    monkeypatch.setattr(baseline_mod, "_hash_handle", remove_after_read)
+    assert deck_digest(deck) == expected
+    assert not _digest_sidecar(cache, deck).exists()
+
+
+def test_deck_digest_propagates_final_stat_errors_other_than_disappearance(
+    tmp_path: Path, monkeypatch
+):
+    _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    original_hash = baseline_mod._hash_handle
+    original_stat = Path.stat
+
+    def deny_after_read(hasher, handle, chunk=1024 * 1024):
+        original_hash(hasher, handle, chunk)
+
+        def denied_stat(self, *args, **kwargs):
+            if self == deck:
+                raise PermissionError("denied")
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", denied_stat)
+
+    monkeypatch.setattr(baseline_mod, "_hash_handle", deny_after_read)
+    with pytest.raises(PermissionError, match="denied"):
+        deck_digest(deck)
+
+
+def test_deck_digest_cache_write_failure_is_harmless(tmp_path: Path, monkeypatch):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    expected = hashlib.sha256(b"alpha").hexdigest()
+
+    with monkeypatch.context() as cache_error:
+        cache_error.setattr(
+            baseline_mod.os,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(PermissionError("denied")),
+        )
+        assert deck_digest(deck) == expected
+    assert not _digest_sidecar(cache, deck).exists()
+
+
+def test_deck_digest_concurrent_cold_writers_leave_one_valid_sidecar(
+    tmp_path: Path, monkeypatch
+):
+    cache = _cache_root(monkeypatch, tmp_path)
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    expected = hashlib.sha256(b"alpha").hexdigest()
+    workers = 8
+    barrier = threading.Barrier(workers)
+    original_hash = baseline_mod._hash_regular_file
+
+    def overlap_hash(path, initial_stat):
+        barrier.wait(timeout=5)
+        return original_hash(path, initial_stat)
+
+    monkeypatch.setattr(baseline_mod, "_hash_regular_file", overlap_hash)
+    values: list[str] = []
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            values.append(deck_digest(deck))
+        except BaseException as exc:  # pragma: no cover - assertion reports the captured error
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker) for _ in range(workers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    assert values == [expected] * len(threads)
+    sidecar = _digest_sidecar(cache, deck)
+    assert json.loads(sidecar.read_text())["digest"] == expected
+    assert not list(sidecar.parent.glob(f".{sidecar.name}.*.tmp"))
+
+
+def test_deck_digest_sidecar_cache_roots_are_isolated(tmp_path: Path, monkeypatch):
+    root_a = tmp_path / "cache-a"
+    root_b = tmp_path / "cache-b"
+    deck = tmp_path / "deck.key"
+    deck.write_bytes(b"alpha")
+    monkeypatch.setenv(CACHE_DIR_ENV, str(root_a))
+    expected = deck_digest(deck)
+    sidecar_a = _digest_sidecar(root_a, deck)
+    assert sidecar_a.is_file()
+
+    calls = 0
+    original_hash = baseline_mod._hash_regular_file
+
+    def count_hash(path, initial_stat):
+        nonlocal calls
+        calls += 1
+        return original_hash(path, initial_stat)
+
+    monkeypatch.setattr(baseline_mod, "_hash_regular_file", count_hash)
+    monkeypatch.setenv(CACHE_DIR_ENV, str(root_b))
+    assert deck_digest(deck) == expected
+    assert calls == 1
+    sidecar_b = _digest_sidecar(root_b, deck)
+    assert sidecar_b.is_file()
+    assert sidecar_a != sidecar_b
+    assert len(list((root_a / "deck_digest").glob("*.json"))) == 1
+    assert len(list((root_b / "deck_digest").glob("*.json"))) == 1
+
+    monkeypatch.setenv(CACHE_DIR_ENV, str(root_a))
+    assert deck_digest(deck) == expected
+    assert calls == 1
 
 
 def test_deck_slide_digests_change_with_copy():

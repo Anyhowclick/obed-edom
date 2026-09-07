@@ -157,3 +157,88 @@ def test_side_content_whitelist_follows_its_page_and_maps_to_numbers(tmp_path: P
     assert reuse.decisions[3].keep_side_content is True
     assert reuse.side_content_slides() == {4}
     assert normalize_decision({"wallIndex": 5, "state": AUTO, "keepSideContent": True}).keep_side_content is True
+
+
+def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tmp_path, monkeypatch):
+    import obed_edom.baseline as baseline_mod
+    import obed_edom.framing as framing_mod
+    import obed_edom.map_remap as remap_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    full_wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": []},
+            {"number": 2, "skipped": True, "items": []},
+            {"number": 3, "items": []},
+        ],
+    }
+    subset = {**full_wall, "slides": [full_wall["slides"][2]]}
+    seen = {}
+
+    def fake_plan(payload, _recipe, **kwargs):
+        report = kwargs.get("framing_report")
+        if report is not None:
+            report.extend(
+                {
+                    "slide": slide["number"],
+                    "templateSlide": 1,
+                    "fitted": False,
+                }
+                for slide in payload["slides"]
+            )
+        return []
+
+    def fake_thumbs(deck, payload, **_kwargs):
+        if Path(deck) == wall:
+            seen["wall_thumb_payload"] = payload
+            return {slide["number"]: f"{slide['number']}.jpg" for slide in payload["slides"]}
+        return {}
+
+    monkeypatch.setattr(framing_mod, "build_preview_thumbs", fake_thumbs)
+    monkeypatch.setattr(baseline_mod, "deck_digest", lambda _path: "deck")
+    monkeypatch.setattr(
+        baseline_mod,
+        "deck_slide_digests",
+        lambda payload: [f"d{slide['number']}" for slide in payload["slides"]],
+    )
+    monkeypatch.setattr(baseline_mod, "wall_thumb_dir", lambda _digest: tmp_path / "thumbs")
+    monkeypatch.setattr(remap_mod, "learn_recipe", lambda *_args, **_kwargs: {"destWidth": 1920, "destHeight": 1080})
+    monkeypatch.setattr(remap_mod, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(remap_mod, "rank_framing_candidates", lambda *_args, **_kwargs: [{"templateSlide": 1}])
+    monkeypatch.setattr(remap_mod, "on_canvas_fraction", lambda *_args, **_kwargs: 1.0)
+    monkeypatch.setattr(remap_mod, "is_degenerate_scale", lambda *_args, **_kwargs: False)
+
+    result = framing_mod.propose_framings(
+        wall,
+        template,
+        slide_range=frozenset({3}),
+        wall_payload=subset,
+        full_wall_payload=full_wall,
+        template_payload={"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1}]},
+    )
+
+    assert [slide["number"] for slide in seen["wall_thumb_payload"]["slides"]] == [1, 2, 3]
+    assert result["wallDigests"] == ["d1", "d2", "d3"]
+    assert result["pages"] == [
+        {
+            "slide": 3,
+            "index": 2,
+            "thumb": "3.jpg",
+            "autoTransform": None,
+            "autoRects": [],
+            "autoTemplateSlide": 1,
+            "autoFellBack": False,
+            "needsAttention": False,
+            "noUsableFraming": False,
+            "candidates": [
+                {"templateSlide": 1, "wouldFallBack": False, "transform": None, "rects": []}
+            ],
+        }
+    ]
+    assert result["skippedSlides"] == [2]
+    assert "Skip Slide" in result["numberingNote"]

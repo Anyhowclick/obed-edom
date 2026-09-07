@@ -10,6 +10,7 @@ path, and that whichever the flag resolves to actually reaches the JXA plan.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +90,52 @@ def test_use_cache_false_exports_into_export_dir_not_the_digest_cache(tmp_path, 
     export_dir = tmp_path / "job_previews"
     inspect_keynote(key, export_dir=export_dir, use_cache=False)
     assert captured["plan"]["exportDir"] == str(export_dir.resolve())
+
+
+def test_successful_fallback_export_clears_stale_jxa_export_error(tmp_path, monkeypatch):
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    export_dir = tmp_path / "previews"
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"slideCount": 0, "slides": [], "exportError": "JXA export failed"}),
+            stderr="",
+        )
+
+    def fake_export(_key_path, dest):
+        Path(dest).mkdir(parents=True, exist_ok=True)
+        (Path(dest) / "slide-1.png").write_bytes(b"\x89PNG")
+        return None
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
+
+    out = inspect_keynote(key, export_dir=export_dir, use_cache=False)
+
+    assert out["exported"] is True
+    assert "exportError" not in out
+
+
+def test_failed_fallback_export_keeps_its_error(tmp_path, monkeypatch):
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"slideCount": 0, "slides": [], "exportError": "old error"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *_args: "fallback failed")
+
+    out = inspect_keynote(key, export_dir=tmp_path / "previews", use_cache=False)
+
+    assert out["exported"] is False
+    assert out["exportError"] == "fallback failed"
 
 
 if __name__ == "__main__":
