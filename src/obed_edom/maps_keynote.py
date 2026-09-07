@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -38,6 +38,10 @@ from obed_edom.paths import find_repo_root
 
 CG_WIDTH = 1920
 CG_HEIGHT = 1080
+DSK_WIDTH = 1920
+DSK_HEIGHT = 1080
+DSK_SCALE = 0.5
+DSK_Y = 540
 CG_ORIGIN_X = (WALL_WIDTH - CG_WIDTH) / 2.0  # 2880
 MAX_TEXTURE_SIZE = 8192
 TIMEOUT_SECONDS = 3600
@@ -108,27 +112,63 @@ def slide_includes_side_panels(slide: dict[str, Any]) -> bool:
 
 def slide_capture_size(slide: dict[str, Any]) -> tuple[int, int]:
     """Raster size for this slide. Off (default) is the 3840×1080 LED centre."""
+    if slide.get("_splitCg"):
+        return int(CG_WIDTH), int(CG_HEIGHT)
     if slide_includes_side_panels(slide):
         return int(WALL_WIDTH), int(WALL_HEIGHT)
     return int(CENTRE_WIDTH), int(WALL_HEIGHT)
 
 
 def slide_map_origin_x(slide: dict[str, Any]) -> int:
+    if slide.get("_splitCg"):
+        return 0
     return 0 if slide_includes_side_panels(slide) else int(CENTRE_ORIGIN_X)
+
+
+def hop_capture_size(from_slide: dict[str, Any], to_slide: dict[str, Any] | None = None) -> tuple[int, int]:
+    fw, fh = slide_capture_size(from_slide)
+    if not to_slide:
+        return fw, fh
+    tw, th = slide_capture_size(to_slide)
+    return max(fw, tw), max(fh, th)
+
+
+def hop_map_origin_x(width: int) -> int:
+    return 0 if int(width) >= int(WALL_WIDTH) else int(CENTRE_ORIGIN_X)
 
 
 def normalized_viewport(
     camera: dict[str, Any],
     width: float = WALL_WIDTH,
     height: float = WALL_HEIGHT,
+    bearing: float = 0.0,
 ) -> tuple[float, float, float, float]:
     zoom = float(camera.get("zoom") or 0)
     world = world_width(zoom)
     cx = (clamp_lon(float(camera.get("lon") or 0)) + 180.0) / 360.0
     cy = mercator_y(float(camera.get("lat") or 0))
+    cx, cy = rotated_mercator(cx, cy, bearing)
     nw = float(width) / world
     nh = float(height) / world
     return (cx - nw / 2.0, cy - nh / 2.0, cx + nw / 2.0, cy + nh / 2.0)
+
+
+def rotated_mercator(x: float, y: float, bearing: float) -> tuple[float, float]:
+    theta = math.radians(float(bearing) or 0.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    return cos_t * x + sin_t * y, -sin_t * x + cos_t * y
+
+
+def nearest_world_x(x: float, reference: float) -> float:
+    return x + round(reference - x)
+
+
+def unrotated_mercator(x: float, y: float, bearing: float) -> tuple[float, float]:
+    theta = math.radians(float(bearing) or 0.0)
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    return cos_t * x - sin_t * y, sin_t * x + cos_t * y
 
 
 def union_viewports(
@@ -158,7 +198,8 @@ def morph_plate_geom(
     canvas = list(widths) if widths is not None else [width] * len(cameras)
     if len(canvas) != len(cameras):
         canvas = [width] * len(cameras)
-    boxes = [normalized_viewport(cam, w, height) for cam, w in zip(cameras, canvas)]
+    bearing = float(cameras[0].get("bearing") or 0)
+    boxes = [normalized_viewport(cam, w, height, bearing) for cam, w in zip(cameras, canvas)]
     union = (
         min(box[0] for box in boxes),
         min(box[1] for box in boxes),
@@ -173,7 +214,8 @@ def morph_plate_geom(
         return None
     nx = (union[0] + union[2]) / 2.0
     ny = (union[1] + union[3]) / 2.0
-    capture = camera_dict(inverse_mercator_y(ny), nx * 360.0 - 180.0, z_plate, 0.0, 0.0)
+    nx, ny = unrotated_mercator(nx, ny, bearing)
+    capture = camera_dict(inverse_mercator_y(ny), nx * 360.0 - 180.0, z_plate, bearing, 0.0)
     return {
         "union": union,
         "zPlate": z_plate,
@@ -198,7 +240,8 @@ def plate_placement(
     union = plate["union"]
     z_plate = float(plate["zPlate"])
     world = world_width(z_plate)
-    cam = normalized_viewport(camera, width, height)
+    bearing = float((plate.get("captureCamera") or {}).get("bearing") or 0)
+    cam = normalized_viewport(camera, width, height, bearing)
     cam_w_plate = (cam[2] - cam[0]) * world
     scale = width / cam_w_plate if cam_w_plate else 1.0
     disp_w = float(plate["plateW"]) * scale
@@ -217,7 +260,12 @@ def project_into_plate(
     union = plate["union"]
     world = world_width(float(plate["zPlate"]))
     nx = (clamp_lon(lon) + 180.0) / 360.0
+    capture_lon = float((plate.get("captureCamera") or {}).get("lon") or 0)
+    reference_x = (clamp_lon(capture_lon) + 180.0) / 360.0
+    nx = nearest_world_x(nx, reference_x)
     ny = mercator_y(lat)
+    bearing = float((plate.get("captureCamera") or {}).get("bearing") or 0)
+    nx, ny = rotated_mercator(nx, ny, bearing)
     scale_x = placement["w"] / float(plate["plateW"]) if plate["plateW"] else 1.0
     scale_y = placement["h"] / float(plate["plateH"]) if plate["plateH"] else 1.0
     px = placement["x"] + (nx - union[0]) * world * scale_x
@@ -235,10 +283,15 @@ def project_into_camera(
 ) -> tuple[float, float]:
     zoom = float(camera.get("zoom") or 0)
     world = world_width(zoom)
-    px = (clamp_lon(lon) + 180.0) / 360.0 * world
+    nx = (clamp_lon(lon) + 180.0) / 360.0
+    camera_x = (clamp_lon(float(camera.get("lon") or 0)) + 180.0) / 360.0
+    px = nearest_world_x(nx, camera_x) * world
     py = mercator_y(lat) * world
-    cx = (clamp_lon(float(camera.get("lon") or 0)) + 180.0) / 360.0 * world
+    cx = camera_x * world
     cy = mercator_y(float(camera.get("lat") or 0)) * world
+    bearing = float(camera.get("bearing") or 0)
+    px, py = rotated_mercator(px, py, bearing)
+    cx, cy = rotated_mercator(cx, cy, bearing)
     return width / 2.0 + (px - cx), height / 2.0 + (py - cy)
 
 
@@ -292,7 +345,7 @@ def morph_runs(slides: list[dict[str, Any]], links: list[dict[str, Any]]) -> lis
 
 
 def coerce_link_kinds(slides: list[dict[str, Any]], links: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Disabled-but-checked morph must not stay morph when hop rules say otherwise."""
+    """Invalid Magic Move falls back; explicit Movie, Dissolve, and Cut are preserved."""
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     next_links: list[dict[str, Any]] = []
     for link in links:
@@ -301,12 +354,16 @@ def coerce_link_kinds(slides: list[dict[str, Any]], links: list[dict[str, Any]])
         from_slide, to_slide = by_id.get(start), by_id.get(end)
         if from_slide is not None and to_slide is not None:
             suggested = infer_hop_kind(from_slide, to_slide)
+            if isinstance(from_slide.get("cg"), dict) or isinstance(to_slide.get("cg"), dict):
+                from_cg = {**from_slide, **(from_slide.get("cg") or {})}
+                to_cg = {**to_slide, **(to_slide.get("cg") or {})}
+                cg_suggested = infer_hop_kind(from_cg, to_cg)
+                rank = {"morph": 0, "movie": 1, "cut": 2}
+                if rank[cg_suggested] > rank[suggested]:
+                    suggested = cg_suggested
             kind = str(item.get("kind") or "")
             if kind == "morph" and suggested != "morph":
                 item["kind"] = suggested
-                item.pop("plateId", None)
-            elif kind == "movie" and suggested == "cut":
-                item["kind"] = "cut"
                 item.pop("plateId", None)
         if str(item.get("kind") or "") != "movie":
             item.pop("easing", None)
@@ -365,8 +422,18 @@ def maps_export_plan(
     *,
     width: float = WALL_WIDTH,
     height: float = WALL_HEIGHT,
+    audience: str = "lw",
 ) -> dict[str, Any]:
     """Coerced links plus still/plate capture jobs for Keynote export."""
+    if audience == "cg":
+        slides = [
+            {**slide, **slide["cg"], "cgShiftX": 0, "cgShiftY": 0, "includeSidePanels": False, "_splitCg": True}
+            if isinstance(slide.get("cg"), dict)
+            else slide
+            for slide in slides
+        ]
+        width = CG_WIDTH
+        height = CG_HEIGHT
     links = coerce_link_kinds(slides, links)
     plates, links = assign_morph_plates(slides, links, width=width, height=height)
     covered: set[str] = set()
@@ -391,9 +458,14 @@ def maps_export_plan(
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
         first = next((slide for slide in slides if str(slide.get("id") or "") in (geom.get("slideIds") or [])), None)
+        output_id = f"{plate_id}-cg" if audience == "cg" else plate_id
+        if audience == "cg":
+            for link in links:
+                if link.get("plateId") == plate_id:
+                    link["plateId"] = output_id
         plate_list.append(
             {
-                "plateId": plate_id,
+                "plateId": output_id,
                 "plateW": int(math.ceil(float(geom["plateW"]))),
                 "plateH": int(math.ceil(float(geom["plateH"]))),
                 "camera": geom["captureCamera"],
@@ -401,7 +473,48 @@ def maps_export_plan(
                 "highlights": list((first or {}).get("highlights") or []),
             }
         )
-    return {"links": links, "stills": stills, "plates": plate_list, "plateGeoms": plates}
+    if audience == "cg":
+        plates = {f"{plate_id}-cg": geom for plate_id, geom in plates.items()}
+    return {"links": links, "stills": stills, "plates": plate_list, "plateGeoms": plates, "audience": audience}
+
+
+def cg_affected_slide_ids(slides: list[dict[str, Any]], links: list[dict[str, Any]]) -> set[str]:
+    affected = {str(slide.get("id") or "") for slide in slides if isinstance(slide.get("cg"), dict)}
+    morph_edges: dict[str, set[str]] = {}
+    for link in links:
+        if str(link.get("kind") or "") != "morph":
+            continue
+        start, end = _link_ends(link)
+        morph_edges.setdefault(start, set()).add(end)
+        morph_edges.setdefault(end, set()).add(start)
+    pending = list(affected)
+    while pending:
+        slide_id = pending.pop()
+        for neighbor in morph_edges.get(slide_id, set()):
+            if neighbor not in affected:
+                affected.add(neighbor)
+                pending.append(neighbor)
+    for link in links:
+        if str(link.get("kind") or "") != "movie":
+            continue
+        start, end = _link_ends(link)
+        if start in affected or end in affected:
+            affected.update((start, end))
+    return affected
+
+
+def split_cg_export_plan(slides: list[dict[str, Any]], links: list[dict[str, Any]]) -> dict[str, Any]:
+    affected = cg_affected_slide_ids(slides, links)
+    plan = maps_export_plan(slides, links, audience="cg")
+    plan["stills"] = [row for row in plan["stills"] if str(row.get("slideId") or "") in affected]
+    plan["plates"] = [
+        row for row in plan["plates"]
+        if any(str(sid) in affected for sid in (plan["plateGeoms"].get(str(row["plateId"])) or {}).get("slideIds") or [])
+    ]
+    keep = {str(row["plateId"]) for row in plan["plates"]}
+    plan["plateGeoms"] = {plate_id: geom for plate_id, geom in plan["plateGeoms"].items() if plate_id in keep}
+    plan["affectedSlideIds"] = sorted(affected)
+    return plan
 
 
 def find_pin_drop_wave(root: Path | None = None) -> Path | None:
@@ -440,10 +553,10 @@ def _outgoing(slide_id: str, links: list[dict[str, Any]]) -> dict[str, Any] | No
     return None
 
 
-def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | None = None) -> Path:
+def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | None = None, audience: str = "lw") -> Path:
     del preview_dir
     sid = str(slide.get("id") or "slide")
-    name = Path(f"{sid}.png").name
+    name = Path(f"{sid}{'_CG' if audience == 'cg' else ''}.png").name
     path = Path(output_dir) / "stills" / name
     if not path.is_file():
         raise FileNotFoundError(f"Missing export still {path}")
@@ -471,6 +584,21 @@ def _item(
     return row
 
 
+def dsk_item(item: dict[str, Any]) -> dict[str, Any]:
+    row = dict(item)
+    for key in ("w", "h"):
+        row[key] = whole(float(row[key]) * DSK_SCALE)
+    row["x"] = whole((float(row["x"]) - CENTRE_ORIGIN_X) * DSK_SCALE)
+    row["y"] = whole(float(row["y"]) * DSK_SCALE + DSK_Y)
+    if row.get("kind") == "text":
+        row["fontSize"] = float(row.get("fontSize") or 24) * DSK_SCALE
+    return row
+
+
+def dsk_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**op, "items": [dsk_item(item) for item in op["items"]]} for op in ops]
+
+
 def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
     kind = str(church.get("kind") or "dot")
     if kind == "dropPin" and movie is not None:
@@ -496,36 +624,82 @@ def _place_churches(
         lat = float(church.get("lat") or 0)
         lon = float(church.get("lon") or 0)
         if plate is not None and placement is not None:
-            cx, cy = project_into_plate(lat, lon, plate, placement)
+            base_x, base_y = project_into_plate(lat, lon, plate, placement)
+            copy_world = world_width(float(plate["zPlate"]))
+            scale_x = placement["w"] / float(plate["plateW"]) if plate["plateW"] else 1.0
+            scale_y = placement["h"] / float(plate["plateH"]) if plate["plateH"] else 1.0
+            bearing = float((plate.get("captureCamera") or {}).get("bearing") or 0)
+            theta = math.radians(bearing)
+            copy_dx = math.cos(theta) * copy_world * scale_x
+            copy_dy = -math.sin(theta) * copy_world * scale_y
         else:
-            cx, cy = project_into_camera(lat, lon, camera, width=capture_w)
-        cx += origin_x
+            base_x, base_y = project_into_camera(lat, lon, camera, width=capture_w)
+            copy_world = world_width(float(camera.get("zoom") or 0))
+            theta = math.radians(float(camera.get("bearing") or 0))
+            copy_dx = math.cos(theta) * copy_world
+            copy_dy = -math.sin(theta) * copy_world
         size = _pin_size(church, movie)
-        x = cx - size / 2.0
-        y = cy - size / 2.0
-        if wall:
-            x = avoid_straddle(x, size)
         color = parse_color(str(church.get("color") or "#c44a42"))
         kind = str(church.get("kind") or "dot")
-        if kind == "dropPin" and movie is not None:
-            items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
-        else:
-            items.append(_item("shape", x, y, size, size, color=color, shape="oval"))
+        static_drop = kind == "dropPin" and movie is None
         name = str(church.get("name") or "").strip()
-        if name:
-            nw = max(48, min(420, 11 * len(name)))
-            nx = x + size + 8
-            ny = y + (size - NAME_HEIGHT) / 2.0
-            if wall:
-                nx = avoid_straddle(nx, nw)
-            items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
         photo = church.get("photoPath")
-        if photo and Path(str(photo)).is_file():
-            px = x - PHOTO_SIZE - 8
-            py = y
+        copy_span = max(1.0, math.hypot(copy_dx, copy_dy))
+        copy_count = math.ceil((capture_w + WALL_HEIGHT) / copy_span) + 2
+        for copy_index in range(-copy_count, copy_count + 1):
+            cx = base_x + copy_index * copy_dx
+            cy = base_y + copy_index * copy_dy
+            if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
+                continue
+            x = cx + origin_x - size / 2.0
+            y = cy - size * 1.08 if static_drop else cy - size / 2.0
             if wall:
-                px = avoid_straddle(px, PHOTO_SIZE)
-            items.append(_item("image", px, py, PHOTO_SIZE, PHOTO_SIZE, path=str(Path(photo)), photo=True))
+                x = avoid_straddle(x, size)
+            if kind == "dropPin" and movie is not None:
+                items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
+            else:
+                if kind == "dropPin":
+                    tail_w = round(size * 0.46)
+                    tail_h = round(size * 0.4)
+                    items.append(
+                        _item(
+                            "shape",
+                            x + (size - tail_w) / 2.0,
+                            y + size * 0.68,
+                            tail_w,
+                            tail_h,
+                            color=color,
+                            shape="triangle",
+                            rotation=180,
+                        )
+                    )
+                items.append(_item("shape", x, y, size, size, color=color, shape="oval"))
+                if kind == "dropPin":
+                    inner = max(6, round(size * 0.36))
+                    items.append(
+                        _item(
+                            "shape",
+                            x + (size - inner) / 2.0,
+                            y + (size - inner) / 2.0,
+                            inner,
+                            inner,
+                            color=(65535, 65535, 65535),
+                            shape="oval",
+                        )
+                    )
+            if name and church.get("showLabel", True):
+                nw = max(48, min(420, 11 * len(name)))
+                nx = x + size + 8
+                ny = y + (size - NAME_HEIGHT) / 2.0
+                if wall:
+                    nx = avoid_straddle(nx, nw)
+                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
+            if photo and Path(str(photo)).is_file():
+                px = x - PHOTO_SIZE - 8
+                py = y
+                if wall:
+                    px = avoid_straddle(px, PHOTO_SIZE)
+                items.append(_item("image", px, py, PHOTO_SIZE, PHOTO_SIZE, path=str(Path(photo)), photo=True))
     return items
 
 
@@ -536,12 +710,15 @@ def _map_item(
     plate_path: Path | None,
     still: Path | None,
     bg_movie: Path | None = None,
+    dest_slide: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, int] | None]:
     camera = slide.get("camera") or {}
+    if bg_movie is not None:
+        cap_w, cap_h = hop_capture_size(slide, dest_slide)
+        ox = 0 if slide.get("_splitCg") and cap_w == CG_WIDTH else hop_map_origin_x(cap_w)
+        return _item("movie", ox, 0, cap_w, cap_h, path=str(bg_movie), map=True), None
     cap_w, cap_h = slide_capture_size(slide)
     ox = slide_map_origin_x(slide)
-    if bg_movie is not None:
-        return _item("movie", ox, 0, cap_w, cap_h, path=str(bg_movie), map=True), None
     if plate is not None and plate_path is not None:
         geom = plate_placement(camera, plate, width=cap_w, height=cap_h)
         return _item("image", geom["x"] + ox, geom["y"], geom["w"], geom["h"], path=str(plate_path), map=True), geom
@@ -570,8 +747,11 @@ def build_slide_items(
     movie: Path | None,
     wall: bool,
     bg_movie: Path | None = None,
+    dest_slide: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    mapped, placement = _map_item(slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie)
+    mapped, placement = _map_item(
+        slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
+    )
     items = [mapped]
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
@@ -588,8 +768,9 @@ def build_slide_items(
                 capture_w=cap_w,
             )
         )
-    if not wall:
-        origin = cg_crop_origin(slide)
+    oversized_cg_movie = bg_movie is not None and float(mapped["w"]) > CG_WIDTH
+    if not wall and (not slide.get("_splitCg") or oversized_cg_movie):
+        origin = cg_crop_origin(slide) if not slide.get("_splitCg") else (CG_ORIGIN_X, 0.0)
         items = _to_cg(items, origin)
     return items
 
@@ -626,35 +807,50 @@ def plan_deck(
     preview_dir: Path,
     movie: Path | None,
     wall: bool,
+    audience: str = "lw",
+    cg_affected: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     slide_plate: dict[str, str] = {}
     for plate_id, geom in plates.items():
         for sid in geom.get("slideIds") or []:
             slide_plate[str(sid)] = plate_id
     ops: list[dict[str, Any]] = []
+    by_id = {str(slide.get("id") or ""): slide for slide in slides}
     for index, slide in enumerate(slides):
         sid = str(slide.get("id") or "")
+        asset_audience = "cg" if audience == "cg" and (cg_affected is None or sid in cg_affected) else "lw"
         plate_id = slide_plate.get(sid)
         plate = plates.get(plate_id) if plate_id else None
         plate_path = _plate_path(plate_id, output_dir) if plate_id else None
         outgoing = _outgoing(sid, links)
+        dest_slide = by_id.get(str(outgoing.get("to") or "")) if outgoing else None
         bg_movie = None
         if outgoing and str(outgoing.get("kind") or "") == "movie":
-            candidate = movie_path(output_dir, sid)
+            candidate = movie_path(output_dir, sid, asset_audience)
             if candidate.exists():
                 bg_movie = candidate
                 plate_id = None
                 plate = None
                 plate_path = None
-        still = None if plate_id or bg_movie else _still_path(slide, output_dir, preview_dir)
+        still = None if plate_id or bg_movie else _still_path(slide, output_dir, preview_dir, asset_audience)
+        item_slide = slide
+        item_dest = dest_slide
+        if audience == "cg" and asset_audience == "cg" and bg_movie is not None:
+            item_slide = {**slide, "_splitCg": True, "cgShiftX": 0, "includeSidePanels": False}
+            item_dest = (
+                {**dest_slide, "_splitCg": True, "cgShiftX": 0, "includeSidePanels": False}
+                if dest_slide
+                else None
+            )
         items = build_slide_items(
-            slide,
+            item_slide,
             plate=plate,
             plate_path=plate_path,
             still=still,
             movie=movie,
             wall=wall,
             bg_movie=bg_movie,
+            dest_slide=item_dest,
         )
         prev_link = _outgoing(str(slides[index - 1].get("id") or ""), links) if index else None
         duplicate = bool(
@@ -722,19 +918,22 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
     x, y, w, h = item["x"], item["y"], item["w"], item["h"]
     if kind == "image":
         path = _as_escape(item["path"])
+        # Keynote 15 honours the {file:…} initializer; {file name:…} silently no-ops.
         return [
             f'        set imgFile to (POSIX file "{path}") as alias',
-            "        set img to make new image with properties {file name:imgFile}",
+            "        set img to make new image with properties {file:imgFile}",
             f"        set position of img to {{{x}, {y}}}",
             f"        set width of img to {w}",
             f"        set height of img to {h}",
         ]
     if kind == "movie":
         path = _as_escape(item["path"])
+        # `make new image with properties {file:<mov>}` yields a movie object in Keynote 15;
+        # `make new movie` no longer imports the file. Autoplay-on-appear still needs a manual check.
         if item.get("map"):
             return [
                 f'        set movFile to (POSIX file "{path}") as alias',
-                "        set mv to make new movie with properties {file name:movFile}",
+                "        set mv to make new image with properties {file:movFile}",
                 f"        set position of mv to {{{x}, {y}}}",
                 f"        set width of mv to {w}",
                 f"        set height of mv to {h}",
@@ -742,7 +941,7 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         return [
             "        try",
             f'          set movFile to (POSIX file "{path}") as alias',
-            "          set mv to make new movie with properties {file name:movFile}",
+            "          set mv to make new image with properties {file:movFile}",
             f"          set position of mv to {{{x}, {y}}}",
             f"          set width of mv to {w}",
             f"          set height of mv to {h}",
@@ -754,7 +953,7 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
     if kind == "shape":
         color = item.get("color") or (0xC4 * 257, 0x4A * 257, 0x42 * 257)
         shape = item.get("shape") or "oval"
-        return [
+        lines = [
             "        set shp to make new shape with properties "
             f"{{shape type:{shape}, position:{{{x}, {y}}}, width:{w}, height:{h}}}",
             "        try",
@@ -764,12 +963,20 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
             f"          set fill color of shp to {{{color[0]}, {color[1]}, {color[2]}}}",
             "        end try",
         ]
+        if item.get("rotation") is not None:
+            lines += [
+                "        try",
+                f"          set rotation of shp to {float(item['rotation'])}",
+                "        end try",
+            ]
+        return lines
     text = _as_escape(str(item.get("text") or ""))
+    font_size = float(item.get("fontSize") or 24)
     return [
         "        set txt to make new text item with properties "
         f'{{object text:"{text}", position:{{{x}, {y}}}, width:{w}, height:{h}}}',
         "        try",
-        "          set size of object text of txt to 24",
+        f"          set size of object text of txt to {font_size}",
         "        end try",
         "        try",
         "          set color of object text of txt to {65535, 65535, 65535}",
@@ -941,7 +1148,7 @@ def build_shared_plate_probe_script(
             "        delete every text item",
             "      end try",
             f'      set imgFile to (POSIX file "{img_s}") as alias',
-            "      set img to make new image with properties {file name:imgFile}",
+            "      set img to make new image with properties {file:imgFile}",
             "      set position of img to {0, 0}",
             f"      set width of img to {int(width)}",
             f"      set height of img to {int(height)}",
@@ -967,10 +1174,19 @@ def build_shared_plate_probe_script(
     )
 
 
-def run_osascript(script: str, *, script_path: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    if is_cancelled and is_cancelled():
+        raise RuntimeError("Export cancelled.")
+
+
+def run_osascript(
+    script: str, *, script_path: Path | None = None, is_cancelled: Callable[[], bool] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Execute AppleScript from a file (not stdin). Mock this in tests."""
+    _raise_if_cancelled(is_cancelled)
     subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
     time.sleep(0.4)
+    _raise_if_cancelled(is_cancelled)
     owned = script_path is None
     if script_path is None:
         handle = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
@@ -982,30 +1198,53 @@ def run_osascript(script: str, *, script_path: Path | None = None) -> subprocess
         script_path.parent.mkdir(parents=True, exist_ok=True)
         script_path.write_text(script, encoding="utf-8")
     try:
-        return subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            proc = subprocess.Popen(["osascript", str(script_path)], stdout=stdout, stderr=stderr)
+            while proc.poll() is None:
+                if is_cancelled and is_cancelled():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    raise RuntimeError("Export cancelled.")
+                time.sleep(0.05)
+            stdout.seek(0)
+            stderr.seek(0)
+            return subprocess.CompletedProcess(
+                proc.args,
+                proc.returncode,
+                stdout.read().decode("utf-8", "replace"),
+                stderr.read().decode("utf-8", "replace"),
+            )
     finally:
         if owned:
             script_path.unlink(missing_ok=True)
 
 
-def inspect_and_validate(path: Path) -> list[Any]:
+def inspect_and_validate(path: Path, *, is_cancelled: Callable[[], bool] | None = None) -> list[Any]:
     from obed_edom.inspect import inspect_keynote
     from obed_edom.validate import validate_inspect
 
-    payload = inspect_keynote(path, use_cache=False)
-    return validate_inspect(payload, location_prefix=path.name, use_ocr=False, check_passages=False)
+    _raise_if_cancelled(is_cancelled)
+    payload = inspect_keynote(path, use_cache=False, is_cancelled=is_cancelled)
+    _raise_if_cancelled(is_cancelled)
+    flags = validate_inspect(payload, location_prefix=path.name, use_ocr=False, check_passages=False)
+    _raise_if_cancelled(is_cancelled)
+    return flags
 
 
-def _inspect_dest(path: Path, job: Any) -> list[Any]:
+def _inspect_dest(path: Path, job: Any, *, is_cancelled: Callable[[], bool] | None = None) -> list[Any]:
     if not path.exists():
         return []
     try:
-        return inspect_and_validate(path)
+        return inspect_and_validate(path, is_cancelled=is_cancelled)
+    except RuntimeError as exc:
+        if str(exc) == "Export cancelled.":
+            raise
+        _log(job, f"validate {path.name} failed: {exc}")
+        return []
     except Exception as exc:
         _log(job, f"validate {path.name} failed: {exc}")
         return []
@@ -1023,11 +1262,13 @@ def _run_one_deck(
     *,
     width: int,
     height: int,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> str:
+    _raise_if_cancelled(is_cancelled)
     dest.parent.mkdir(parents=True, exist_ok=True)
     _remove_key(dest)
     script = build_deck_script(ops, dest, width=width, height=height)
-    proc = run_osascript(script)
+    proc = run_osascript(script, is_cancelled=is_cancelled)
     if proc.returncode != 0:
         debug = dest.with_suffix(".applescript")
         debug.write_text(script, encoding="utf-8")
@@ -1041,9 +1282,11 @@ def _run_one_deck(
     return script
 
 
-def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True) -> dict[str, Any]:
-    if not export_lw and not export_cg:
-        raise ValueError("At least one of exportLw or exportCg must be on")
+def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True, export_dsk: bool = False) -> dict[str, Any]:
+    if not export_lw and not export_cg and not export_dsk:
+        raise ValueError("At least one export target must be on")
+    is_cancelled = getattr(job, "cancelled", lambda: False)
+    _raise_if_cancelled(is_cancelled)
     result = dict(getattr(job, "result", None) or {})
     output_dir = Path(str(result.get("outputDir") or find_repo_root() / "output" / ".maps" / str(getattr(job, "id", "maps"))))
     preview_dir = Path(str(result.get("previewDir") or (output_dir / "previews")))
@@ -1056,11 +1299,14 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True)
     try:
         from obed_edom.maps_movie import encode_pending
 
-        slides = encode_pending(output_dir, slides, log=lambda m: _log(job, m))
+        slides = encode_pending(
+            output_dir, slides, log=lambda m: _log(job, m), links=links, is_cancelled=is_cancelled
+        )
     except (ImportError, AttributeError):
         pass
     else:
         result["slides"] = slides
+    _raise_if_cancelled(is_cancelled)
     plan = maps_export_plan(slides, links)
     plates = plan["plateGeoms"]
     links = plan["links"]
@@ -1075,24 +1321,59 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True)
         ops = plan_deck(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True
         )
-        _run_one_deck(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT)
+        _run_one_deck(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled)
         result["destPath"] = str(dest)
-        flags = _inspect_dest(dest, job)
+        _raise_if_cancelled(is_cancelled)
+        flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
+    if export_dsk:
+        dest_dsk = output_dir / f"{stem}_DSK.key"
+        _log(job, f"Exporting DSK deck {dest_dsk.name} (1920×1080)…")
+        ops_dsk = dsk_ops(plan_deck(slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True))
+        _run_one_deck(ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled)
+        result["destPathDsk"] = str(dest_dsk)
     if export_cg:
         dest_cg = output_dir / f"{stem}_CG.key"
         _log(job, f"Exporting CG deck {dest_cg.name} (1920×1080)…")
-        ops_cg = plan_deck(
-            slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False
-        )
-        _run_one_deck(ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT)
+        split_cg = any(isinstance(slide.get("cg"), dict) for slide in slides)
+        if split_cg:
+            cg_plan = split_cg_export_plan(slides, links)
+            cg_slides = [
+                {**slide, **slide["cg"], "_splitCg": True} if isinstance(slide.get("cg"), dict) else slide
+                for slide in slides
+            ]
+            affected = set(cg_plan["affectedSlideIds"])
+            cg_links = [
+                cg_link if _link_ends(cg_link)[0] in affected or _link_ends(cg_link)[1] in affected else lw_link
+                for lw_link, cg_link in zip(links, cg_plan["links"])
+            ]
+            cg_plates = {**plates, **cg_plan["plateGeoms"]}
+            try:
+                encode_pending(
+                    output_dir, cg_slides, log=lambda m: _log(job, m), links=cg_links,
+                    is_cancelled=is_cancelled, audience="cg"
+                )
+            except (ImportError, AttributeError):
+                pass
+            ops_cg = plan_deck(
+                cg_slides, cg_links, cg_plates, output_dir=output_dir, preview_dir=preview_dir,
+                movie=movie, wall=False, audience="cg", cg_affected=affected
+            )
+        else:
+            ops_cg = plan_deck(
+                slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False
+            )
+        _run_one_deck(ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled)
         result["destPathCg"] = str(dest_cg)
-        flags_cg = _inspect_dest(dest_cg, job)
+        _raise_if_cancelled(is_cancelled)
+        flags_cg = _inspect_dest(dest_cg, job, is_cancelled=is_cancelled)
     result["exportLw"] = bool(export_lw)
     result["exportCg"] = bool(export_cg)
+    result["exportDsk"] = bool(export_dsk)
     from obed_edom.validate import flag_dict
 
     if export_lw:
         result["flags"] = [flag_dict(flag) for flag in flags]
     if export_cg:
         result["flagsCg"] = [flag_dict(flag) for flag in flags_cg]
+    _raise_if_cancelled(is_cancelled)
     return result

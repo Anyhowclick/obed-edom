@@ -10,6 +10,7 @@ import {
   type FramingDecision,
 } from "../api";
 import { FileWell } from "../components/FileWell";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { FramingReview, type FramingProposal } from "../components/FramingReview";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
@@ -294,7 +295,7 @@ export function ResizeTab() {
           </div>
         </>
       )}
-      {(error || openError || rangeError) && <p className="err">{error || openError || rangeError}</p>}
+      <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}
       {job && <InspectResultView job={job} onOpen={setOpen} />}
       <Lightbox src={open} onClose={() => setOpen(null)} />

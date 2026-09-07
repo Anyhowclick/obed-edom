@@ -1,4 +1,5 @@
-import type { Map as MapLibreMap } from "maplibre-gl";
+import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
+import type { MapsChurch, MapsStyleId } from "./types";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -111,6 +112,127 @@ export async function ensureAdmin0Highlights(map: MapLibreMap, highlights: strin
       },
       before
     );
+  }
+  applyHighlights(map, highlights);
+}
+
+export function churchesGeo(
+  churches: MapsChurch[],
+  selectedPinId: string | null,
+  numberPins = false
+): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: churches.map((church, index) => ({
+      type: "Feature",
+      properties: {
+        id: church.id,
+        name: numberPins ? `${index + 1}. ${church.name}` : church.name,
+        showLabel: church.showLabel !== false,
+        color: church.color,
+        kind: church.kind,
+        pinImage: dropPinImageId(church.color),
+        sel: church.id === selectedPinId,
+      },
+      geometry: { type: "Point", coordinates: [church.lon, church.lat] },
+    })),
+  };
+}
+
+function dropPinImageId(color: string): string {
+  let hash = 2166136261;
+  for (const char of color.trim().toLowerCase()) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `church-drop-${hash >>> 0}`;
+}
+
+function dropPinImage(color: string): ImageData {
+  const canvas = document.createElement("canvas");
+  canvas.width = 48;
+  canvas.height = 60;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return new ImageData(48, 60);
+  ctx.beginPath();
+  ctx.moveTo(24, 58);
+  ctx.bezierCurveTo(20, 49, 7, 37, 7, 23);
+  ctx.bezierCurveTo(7, 11, 14, 3, 24, 3);
+  ctx.bezierCurveTo(34, 3, 41, 11, 41, 23);
+  ctx.bezierCurveTo(41, 37, 28, 49, 24, 58);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "#ffffff";
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(24, 22, 7, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+export function ensureDropPinImages(map: MapLibreMap, churches: MapsChurch[]) {
+  for (const church of churches) {
+    if (church.kind !== "dropPin") continue;
+    const id = dropPinImageId(church.color);
+    if (!map.hasImage(id)) map.addImage(id, dropPinImage(church.color), { pixelRatio: 2 });
+  }
+}
+
+export async function addOverlays(
+  map: MapLibreMap,
+  highlights: string[],
+  churches: MapsChurch[],
+  selectedPinId: string | null,
+  styleId: MapsStyleId,
+  numberPins: boolean
+) {
+  await ensureAdmin0Highlights(map, highlights, styleId);
+  ensureDropPinImages(map, churches);
+  const pins = churchesGeo(churches, selectedPinId, numberPins);
+  if (!map.getSource("churches")) {
+    map.addSource("churches", { type: "geojson", data: pins, promoteId: "id" });
+    map.addLayer({
+      id: "churches-dots",
+      type: "circle",
+      source: "churches",
+      filter: ["==", ["get", "kind"], "dot"],
+      paint: {
+        "circle-radius": 7,
+        "circle-color": ["get", "color"],
+        "circle-stroke-width": ["case", ["boolean", ["get", "sel"], false], 3, 1.5],
+        "circle-stroke-color": "#FFFFFF",
+      },
+    });
+    map.addLayer({
+      id: "churches-drops",
+      type: "symbol",
+      source: "churches",
+      filter: ["==", ["get", "kind"], "dropPin"],
+      layout: {
+        "icon-image": ["get", "pinImage"],
+        "icon-anchor": "bottom",
+        "icon-allow-overlap": true,
+        "icon-size": ["case", ["boolean", ["get", "sel"], false], 1.08, 1],
+      },
+    });
+    map.addLayer({
+      id: "churches-labels",
+      type: "symbol",
+      source: "churches",
+      filter: ["==", ["get", "showLabel"], true],
+      layout: {
+        "text-field": ["get", "name"],
+        "text-size": 12,
+        "text-offset": [0, 1.35],
+        "text-anchor": "top",
+      },
+      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": 1.2 },
+    });
+  } else {
+    (map.getSource("churches") as GeoJSONSource).setData(pins);
   }
   applyHighlights(map, highlights);
 }

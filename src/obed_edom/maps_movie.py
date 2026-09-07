@@ -6,7 +6,10 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
+from typing import Callable
 
 MOVIE_DIR = "movies"
 FRAMES_DIR = "frames"
@@ -22,16 +25,18 @@ def safe_slide_id(slide_id: str) -> str:
     return _SAFE_RE.sub("_", str(slide_id)).strip("_") or "slide"
 
 
-def movie_filename(slide_id: str) -> str:
-    return f"Map BG_{safe_slide_id(slide_id)}.mov"
+def movie_filename(slide_id: str, audience: str = "lw") -> str:
+    suffix = "_CG" if audience == "cg" else ""
+    return f"Map BG_{safe_slide_id(slide_id)}{suffix}.mov"
 
 
-def movie_path(output_dir: Path, slide_id: str) -> Path:
-    return Path(output_dir) / MOVIE_DIR / movie_filename(slide_id)
+def movie_path(output_dir: Path, slide_id: str, audience: str = "lw") -> Path:
+    return Path(output_dir) / MOVIE_DIR / movie_filename(slide_id, audience)
 
 
-def frames_dir(output_dir: Path, slide_id: str) -> Path:
-    return Path(output_dir) / FRAMES_DIR / safe_slide_id(slide_id)
+def frames_dir(output_dir: Path, slide_id: str, audience: str = "lw") -> Path:
+    suffix = "_cg" if audience == "cg" else ""
+    return Path(output_dir) / FRAMES_DIR / f"{safe_slide_id(slide_id)}{suffix}"
 
 
 def ffmpeg_exe() -> str | None:
@@ -43,8 +48,8 @@ def ffmpeg_exe() -> str | None:
         return shutil.which("ffmpeg")
 
 
-def write_frame(output_dir: Path, slide_id: str, index: int, body: bytes, content_type: str) -> Path:
-    folder = frames_dir(output_dir, slide_id)
+def write_frame(output_dir: Path, slide_id: str, index: int, body: bytes, content_type: str, audience: str = "lw") -> Path:
+    folder = frames_dir(output_dir, slide_id, audience)
     if index == 0 and folder.exists():
         shutil.rmtree(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -54,8 +59,8 @@ def write_frame(output_dir: Path, slide_id: str, index: int, body: bytes, conten
     return path
 
 
-def write_frames_meta(output_dir: Path, slide_id: str, *, fps: int, count: int) -> Path:
-    folder = frames_dir(output_dir, slide_id)
+def write_frames_meta(output_dir: Path, slide_id: str, *, fps: int, count: int, audience: str = "lw") -> Path:
+    folder = frames_dir(output_dir, slide_id, audience)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / "meta.json"
     path.write_text(json.dumps({"fps": fps, "count": count, "duration": count / fps}))
@@ -99,7 +104,33 @@ def _frame_pattern(frames: Path) -> str:
     return "%05d.jpg"
 
 
-def encode_fly_movie(frames: Path, dest: Path, *, fps: int, log=None) -> Path:
+def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    if is_cancelled and is_cancelled():
+        raise RuntimeError("Export cancelled.")
+
+
+def _run_ffmpeg(cmd: list[str], is_cancelled: Callable[[], bool] | None) -> subprocess.CompletedProcess[bytes]:
+    _raise_if_cancelled(is_cancelled)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+        while proc.poll() is None:
+            if is_cancelled and is_cancelled():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise RuntimeError("Export cancelled.")
+            time.sleep(0.05)
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, stdout.read(), stderr.read())
+
+
+def encode_fly_movie(
+    frames: Path, dest: Path, *, fps: int, log=None, is_cancelled: Callable[[], bool] | None = None
+) -> Path:
     exe = ffmpeg_exe()
     if not exe:
         raise RuntimeError("ffmpeg executable not found")
@@ -109,6 +140,7 @@ def encode_fly_movie(frames: Path, dest: Path, *, fps: int, log=None) -> Path:
     tmp_dest = dest.with_name(f".{dest.stem}.tmp{dest.suffix}")
     errors: list[str] = []
     for codec_args in _ENCODERS:
+        _raise_if_cancelled(is_cancelled)
         codec, extra_args = codec_args[0], codec_args[1:]
         cmd = [
             exe,
@@ -130,8 +162,10 @@ def encode_fly_movie(frames: Path, dest: Path, *, fps: int, log=None) -> Path:
             str(tmp_dest),
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=600)
+            proc = _run_ffmpeg(cmd, is_cancelled)
         except Exception as exc:
+            if str(exc) == "Export cancelled.":
+                raise
             errors.append(f"{codec_args[0]}: {exc}")
             if log:
                 log(f"encode failed with {codec_args[0]}: {exc}")
@@ -147,15 +181,42 @@ def encode_fly_movie(frames: Path, dest: Path, *, fps: int, log=None) -> Path:
     raise RuntimeError("All encoders failed:\n" + "\n".join(errors))
 
 
-def encode_pending(output_dir: Path, slides: list[dict], log=None) -> list[dict]:
+def encode_pending(
+    output_dir: Path,
+    slides: list[dict],
+    log=None,
+    *,
+    links: list[dict] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    audience: str = "lw",
+) -> list[dict]:
     output_dir = Path(output_dir)
+    _raise_if_cancelled(is_cancelled)
+    movie_from: set[str] | None = None
+    if links is not None:
+        movie_from = {
+            str(link.get("from") or "")
+            for link in links
+            if str(link.get("kind") or "") == "movie"
+        }
+        for slide in slides:
+            _raise_if_cancelled(is_cancelled)
+            sid = str(slide.get("id") or "")
+            if sid and sid not in movie_from:
+                shutil.rmtree(frames_dir(output_dir, sid, audience), ignore_errors=True)
     next_slides: list[dict] = []
     for slide in slides:
+        _raise_if_cancelled(is_cancelled)
         slide = dict(slide)
         sid = str(slide.get("id"))
-        frames = frames_dir(output_dir, sid)
+        if movie_from is not None and sid not in movie_from:
+            slide.pop("movieMov", None)
+            slide.pop("movieDuration", None)
+            next_slides.append(slide)
+            continue
+        frames = frames_dir(output_dir, sid, audience)
         meta_path = frames / "meta.json"
-        movie = movie_path(output_dir, sid)
+        movie = movie_path(output_dir, sid, audience)
         if not meta_path.exists():
             if not movie.exists():
                 slide.pop("movieMov", None)
@@ -172,8 +233,9 @@ def encode_pending(output_dir: Path, slides: list[dict], log=None) -> list[dict]
         indices = require_contiguous_frames(frames, expected_n)
         needs_encode = not movie.exists() or movie.stat().st_mtime < meta_path.stat().st_mtime
         if needs_encode:
-            encode_fly_movie(frames, movie, fps=fps, log=log)
-        slide["movieMov"] = movie_filename(sid)
+            encode_fly_movie(frames, movie, fps=fps, log=log, is_cancelled=is_cancelled)
+        _raise_if_cancelled(is_cancelled)
+        slide["movieMov"] = movie_filename(sid, audience)
         slide["movieDuration"] = len(indices) / fps
         next_slides.append(slide)
     return next_slides

@@ -101,6 +101,7 @@ class RelocateBody(BaseModel):
     rightPath: str | None = None
     destPath: str | None = None
     destPathCg: str | None = None
+    destPathDsk: str | None = None
 
 
 class DiffSlotsBody(BaseModel):
@@ -244,6 +245,7 @@ def create_app() -> FastAPI:
                 right_path=payload.rightPath,
                 dest_path=payload.destPath,
                 dest_path_cg=payload.destPathCg,
+                dest_path_dsk=payload.destPathDsk,
             )
         except FileNotFoundError as exc:
             raise HTTPException(400, str(exc)) from exc

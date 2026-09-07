@@ -1,11 +1,12 @@
 import { admin0Name } from "./overlays";
 import { STYLE_SWATCHES } from "./styles";
 import {
-  MORPH_MAX_BEARING,
+  MORPH_MAX_DBEARING,
   MORPH_MAX_DZOOM,
   MORPH_MAX_PITCH,
   MORPH_MAX_PLATE_PX,
   morphPlatePx,
+  bearingDelta,
   captureWidth,
   type MapsSlide,
 } from "./types";
@@ -30,7 +31,7 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const fromHi = [...from.highlights].map((h) => h.toUpperCase()).sort();
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort();
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
-  const bearing = Math.max(Math.abs(from.camera.bearing), Math.abs(to.camera.bearing));
+  const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
   const threeD = from.style === "buildings3d" || to.style === "buildings3d" || pitch > MORPH_MAX_PITCH;
   const plate = morphPlatePx(from.camera, to.camera, captureWidth(from), captureWidth(to));
@@ -65,17 +66,20 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
     },
     {
       id: "bearing",
-      label: "No rotation",
-      ok: bearing <= MORPH_MAX_BEARING,
-      detail: fmtDeg(bearing),
-      tip: "A shared plate cannot rotate. Right-drag / bearing needs Movie.",
+      label: "Same rotation",
+      ok: dBearing <= MORPH_MAX_DBEARING,
+      detail:
+        dBearing <= MORPH_MAX_DBEARING
+          ? fmtDeg(from.camera.bearing)
+          : `${fmtDeg(from.camera.bearing)} → ${fmtDeg(to.camera.bearing)} · Δ ${fmtDeg(dBearing)}`,
+      tip: "Both cameras may be rotated, but their bearings must match for one shared plate.",
     },
     {
       id: "zoom",
-      label: "Zoom Δ ≤ 1",
+      label: `Zoom Δ ≤ ${MORPH_MAX_DZOOM}`,
       ok: dZoom <= MORPH_MAX_DZOOM,
       detail: `Δ ${dZoom.toFixed(1)}`,
-      tip: "A zoom jump larger than 1 is too much for one Keynote plate.",
+      tip: `The authoring limit is Δ${MORPH_MAX_DZOOM}; the 8192px plate-size check may impose a lower limit for wider outputs.`,
     },
     {
       id: "plate",
@@ -96,7 +100,7 @@ function gateHint(gates: Gate[]): string {
   if (failed.every((gate) => gate.id === "plate")) {
     return "The two cameras do not fit on one 8192px plate — Export will use Movie.";
   }
-  return "Pitch, rotation, 3D, or a zoom jump needs a Movie fly.";
+  return "Pitch, a rotation change, 3D, or an oversized zoom jump needs a Movie fly.";
 }
 
 export function MorphGates({ from, to }: { from: MapsSlide; to: MapsSlide }) {

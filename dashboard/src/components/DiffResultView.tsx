@@ -8,6 +8,7 @@ import { OutlineStrip } from "./OutlineStrip";
 import { isPreviewVideo } from "./PreviewGrid";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
+import { ErrorNotice } from "./ErrorNotice";
 
 type Pair = {
   index: number;
@@ -331,7 +332,7 @@ export function DiffResultView({
     scroller.scrollTop += row.getBoundingClientRect().top - before;
   }, [split]);
 
-  if (job.status === "error") return <p className="err">{job.error}</p>;
+  if (job.status === "error") return <ErrorNotice message={job.error} />;
   if (!result || (job.status !== "done" && !checking)) return null;
 
   const phase = result.phase || "checked";

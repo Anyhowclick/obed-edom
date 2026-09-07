@@ -29,8 +29,19 @@ export type MapsChurch = {
   lon: number;
   kind: MapsPinKind;
   color: string;
+  showLabel?: boolean;
   icon?: MapsIconId;
   photoPath?: string;
+};
+
+export type MapsCgOverride = {
+  camera: MapsCamera;
+  style: MapsStyleId;
+  highlights: string[];
+  churches: MapsChurch[];
+  stillPng?: string;
+  movieMov?: string;
+  movieDuration?: number;
 };
 
 export type MapsSlide = {
@@ -44,7 +55,20 @@ export type MapsSlide = {
   cgShiftX: number;
   cgShiftY: number;
   includeSidePanels: boolean;
+  cg?: MapsCgOverride;
 };
+
+export type MapsAudience = "lw" | "cg";
+
+export function slideForAudience(slide: MapsSlide, audience: MapsAudience): MapsSlide {
+  if (audience !== "cg" || !slide.cg) return slide;
+  return { ...slide, ...slide.cg, cgShiftX: 0, cgShiftY: 0, includeSidePanels: false };
+}
+
+export function authoredSurfaceWidth(slide: MapsSlide, audience: MapsAudience): number {
+  if (audience === "cg" && slide.cg) return CG_W;
+  return captureWidth(slide);
+}
 
 export type MapsRoutePoint = { lat: number; lon: number };
 
@@ -69,6 +93,7 @@ export type MapsDocument = {
   crop: MapsCropId;
   exportLw: boolean;
   exportCg: boolean;
+  exportDsk: boolean;
   hiddenLayers: MapsLayerFilterId[];
   cachedCountries: string[];
   slides: MapsSlide[];
@@ -105,20 +130,21 @@ export const HOP_LABELS: Record<MapsHopKind, string> = {
 
 export const HOP_TIPS: Record<MapsHopKind, string> = {
   morph: "Keynote Magic Move on one oversized map plate — pan/zoom only.",
-  movie: "Keynote movie. Used for pitch, bearing, 3D, or a large zoom jump. Three phases: zoom out, move, zoom in.",
+  movie: "Keynote movie. Used for pitch, bearing changes, 3D, or a shared plate that is too large. Fly phases are optional.",
   dissolve: "Keynote Dissolve. Crossfade stills over the hop duration.",
   cut: "Instant cut. Used when the map style or region highlights change.",
 };
 
 export const MORPH_MAX_PITCH = 0.5;
-export const MORPH_MAX_BEARING = 0.5;
-export const MORPH_MAX_DZOOM = 1;
+export const MORPH_MAX_DBEARING = 0.05;
+export const MORPH_MAX_DZOOM = 2;
 export const MORPH_MAX_PLATE_PX = 8192;
 const TILE_SIZE = 512;
 export const WALL_W = 7680;
 export const WALL_H = 1080;
 export const CENTRE_W = 3840;
 export const CENTRE_ORIGIN_X = 1920;
+export const CG_W = 1920;
 
 export function captureWidth(slide: { includeSidePanels?: boolean }): number {
   return slide.includeSidePanels ? WALL_W : CENTRE_W;
@@ -132,13 +158,15 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
       const from = byId.get(link.from);
       const to = byId.get(link.to);
       if (!from || !to) return link;
-      const suggested = suggestedHopKind(from, to);
+      let suggested = suggestedHopKind(from, to);
+      if (from.cg || to.cg) {
+        const cgSuggested = suggestedHopKind(slideForAudience(from, "cg"), slideForAudience(to, "cg"));
+        const rank = (kind: MapsHopKind) => (kind === "cut" ? 2 : kind === "movie" ? 1 : 0);
+        if (rank(cgSuggested) > rank(suggested)) suggested = cgSuggested;
+      }
       let next: MapsLink = link;
       if (link.kind === "morph" && suggested !== "morph") {
         next = { ...link, kind: suggested };
-        delete next.plateId;
-      } else if (link.kind === "movie" && suggested === "cut") {
-        next = { ...link, kind: "cut" };
         delete next.plateId;
       }
       if (next.kind !== "movie") {
@@ -158,12 +186,16 @@ export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort().join(",");
   if (from.style !== to.style || fromHi !== toHi) return "cut";
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));
-  const bearing = Math.max(Math.abs(from.camera.bearing), Math.abs(to.camera.bearing));
+  const dBearing = bearingDelta(from.camera.bearing, to.camera.bearing);
   const dZoom = Math.abs(from.camera.zoom - to.camera.zoom);
-  if (from.style === "buildings3d" || to.style === "buildings3d" || pitch > MORPH_MAX_PITCH || bearing > MORPH_MAX_BEARING || dZoom > MORPH_MAX_DZOOM) {
+  if (from.style === "buildings3d" || to.style === "buildings3d" || pitch > MORPH_MAX_PITCH || dBearing > MORPH_MAX_DBEARING || dZoom > MORPH_MAX_DZOOM) {
     return "movie";
   }
   return "morph";
+}
+
+export function bearingDelta(from: number, to: number): number {
+  return Math.abs(((to - from + 540) % 360) - 180);
 }
 
 export function plateFitsMorph(from: MapsSlide, to: MapsSlide): boolean {
@@ -185,13 +217,21 @@ function mercatorY(lat: number): number {
   return 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
 }
 
-function wallViewport(camera: MapsCamera, width = WALL_W, height = WALL_H): { x0: number; y0: number; x1: number; y1: number } {
+function rotatedMercator(x: number, y: number, bearing: number): { x: number; y: number } {
+  const theta = (bearing * Math.PI) / 180;
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  return { x: cos * x + sin * y, y: -sin * x + cos * y };
+}
+
+function wallViewport(camera: MapsCamera, width = WALL_W, height = WALL_H, bearing = camera.bearing): { x0: number; y0: number; x1: number; y1: number } {
   const world = TILE_SIZE * 2 ** camera.zoom;
   const cx = (wrapLon(camera.lon) + 180) / 360;
   const cy = mercatorY(camera.lat);
+  const rotated = rotatedMercator(cx, cy, bearing);
   const nw = width / world;
   const nh = height / world;
-  return { x0: cx - nw / 2, y0: cy - nh / 2, x1: cx + nw / 2, y1: cy + nh / 2 };
+  return { x0: rotated.x - nw / 2, y0: rotated.y - nh / 2, x1: rotated.x + nw / 2, y1: rotated.y + nh / 2 };
 }
 
 /** Union plate at the deeper zoom, same math as Keynote `morph_plate_geom`. */
@@ -201,8 +241,9 @@ export function morphPlatePx(
   fromW = WALL_W,
   toW = WALL_W,
 ): { w: number; h: number } | null {
-  const a = wallViewport(from, fromW);
-  const b = wallViewport(to, toW);
+  const sharedBearing = from.bearing;
+  const a = wallViewport(from, fromW, WALL_H, sharedBearing);
+  const b = wallViewport(to, toW, WALL_H, sharedBearing);
   const world = TILE_SIZE * 2 ** Math.max(from.zoom, to.zoom);
   const w = (Math.max(a.x1, b.x1) - Math.min(a.x0, b.x0)) * world;
   const h = (Math.max(a.y1, b.y1) - Math.min(a.y0, b.y0)) * world;
@@ -222,8 +263,27 @@ export function clampCgShift(dx: number, dy: number): { cgShiftX: number; cgShif
 }
 
 export const MAX_LAT = 85.051129;
-/** `log2(7680 / 512)` — world at least as wide as the 7680 wall, so wrap does not tile. Preview MapLibre zoom is offset by `log2(cssWidth / 7680)` so the FW band matches export. */
-export const WORLD_MIN_ZOOM = Math.log2(7680 / 512);
+/**
+ * Wrap thresholds — not an OSM/MapLibre limit (tiles go to z0).
+ * One world is `512 * 2^z` px. Below the threshold for a capture width,
+ * `renderWorldCopies` tiles continents and pins. Warning only; zoom is not clamped to these.
+ */
+export const WORLD_MIN_ZOOM = Math.log2(WALL_W / 512);
+export const CENTRE_MIN_ZOOM = Math.log2(CENTRE_W / 512);
+export const CG_MIN_ZOOM = Math.log2(CG_W / 512);
+
+export function minZoomForView(): number {
+  return 0;
+}
+
+/** Which export crops would show more than one world copy at this authored zoom. */
+export function worldCopyWarning(zoom: number): string | null {
+  if (!Number.isFinite(zoom) || zoom >= WORLD_MIN_ZOOM) return null;
+  const tiled: string[] = ["FW"];
+  if (zoom < CENTRE_MIN_ZOOM) tiled.push("LW");
+  if (zoom < CG_MIN_ZOOM) tiled.push("CG");
+  return `World copies tile in ${tiled.join(" / ")}. Pins and orange countries will repeat.`;
+}
 
 /** Same wrap as `maps_geo.clamp_lon` — persist cameras in (−180, 180]. */
 export function wrapLon(lon: number): number {
@@ -233,8 +293,8 @@ export function wrapLon(lon: number): number {
   return next;
 }
 
-export function clampZoom(zoom: number): number {
-  return Math.max(WORLD_MIN_ZOOM, Math.min(22, zoom));
+export function clampZoom(zoom: number, minZoom = 0): number {
+  return Math.max(minZoom, Math.min(22, zoom));
 }
 
 export function nextSlideId(slides: MapsSlide[]): string {
@@ -275,6 +335,14 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     includeSidePanels: slide.includeSidePanels === true,
     highlights: slide.highlights || [],
     churches: slide.churches || [],
+    cg: slide.cg
+      ? {
+          ...slide.cg,
+          highlights: slide.cg.highlights || [],
+          churches: slide.cg.churches || [],
+          camera: { ...slide.cg.camera, zoom: clampZoom(slide.cg.camera.zoom), lon: wrapLon(slide.cg.camera.lon) },
+        }
+      : undefined,
     camera: {
       ...slide.camera,
       zoom: clampZoom(slide.camera.zoom),
@@ -296,6 +364,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     crop: (result.crop as MapsCropId) || "center+cg",
     exportLw: result.exportLw !== false,
     exportCg: result.exportCg !== false,
+    exportDsk: result.exportDsk === true,
     hiddenLayers: parseHiddenLayers(result.hiddenLayers),
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")

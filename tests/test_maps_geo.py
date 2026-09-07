@@ -1,5 +1,9 @@
 from obed_edom.maps_geo import (
+    CG_MIN_ZOOM,
+    CG_WIDTH,
     MAX_LAT,
+    SEA_OVERVIEW_BBOX,
+    WALL_HEIGHT,
     WORLD_MIN_ZOOM,
     camera_from_bbox,
     clamp_cg_shift,
@@ -9,6 +13,7 @@ from obed_edom.maps_geo import (
     geocode,
     geometry_bbox,
     infer_hop_kind,
+    mercator_y,
     parse_maps_query,
     sea_overview_camera,
     search_places,
@@ -29,14 +34,22 @@ def test_parse_at_and_google_url():
     assert abs(google["camera"]["lon"] - 103.8) < 1e-6
 
 
-def test_camera_from_bbox_never_below_world_min_zoom():
+def test_camera_from_bbox_can_zoom_below_wrap_floor():
     cam = camera_from_bbox({"west": -180, "south": -85, "east": 180, "north": 85}, 7680, 1080)
-    assert cam["zoom"] >= WORLD_MIN_ZOOM
+    assert cam["zoom"] < WORLD_MIN_ZOOM
+    assert cam["zoom"] >= 0
 
 
-def test_sea_seed_world_width_covers_wall():
+def test_sea_overview_fits_cg():
     cam = sea_overview_camera()
-    assert world_width(cam["zoom"]) >= 7680
+    world = world_width(cam["zoom"])
+    bbox = SEA_OVERVIEW_BBOX
+    span_y = abs(mercator_y(bbox["south"]) - mercator_y(bbox["north"]))
+    span_x = (bbox["east"] - bbox["west"]) / 360.0
+    assert span_y * world <= WALL_HEIGHT + 1e-6
+    assert span_x * world <= CG_WIDTH + 1e-6
+    assert cam["zoom"] < WORLD_MIN_ZOOM
+    assert cam["zoom"] >= CG_MIN_ZOOM
     assert 70 <= cam["lon"] <= 155
     assert -42 <= cam["lat"] <= 28
 
@@ -54,11 +67,21 @@ def test_lon_wraps_across_the_dateline():
     assert clamp_lon(-180) == -180
 
 
-def test_world_min_zoom_is_the_camera_floor():
-    assert clamp_zoom(0) == WORLD_MIN_ZOOM
-    assert clamp_zoom(2) == WORLD_MIN_ZOOM
+def test_clamp_zoom_allows_below_wrap_thresholds():
+    assert clamp_zoom(0) == 0
+    assert clamp_zoom(1) == 1
     assert clamp_zoom(8) == 8
     assert clamp_zoom(30) == 22
+    assert clamp_zoom(2, WORLD_MIN_ZOOM) == WORLD_MIN_ZOOM
+
+
+def test_world_bbox_height_contains_in_cg():
+    cam = camera_from_bbox({"west": -180, "south": -85, "east": 180, "north": 85}, 1920, 1080)
+    world = world_width(cam["zoom"])
+    span_y = abs(mercator_y(-85) - mercator_y(85))
+    assert span_y * world <= WALL_HEIGHT + 1e-6
+    assert cam["zoom"] < CG_MIN_ZOOM
+    assert world < 1920
 
 
 def test_toggle_adm0():
@@ -78,6 +101,16 @@ def test_infer_hop_kind_cut_on_style_or_highlights():
     assert infer_hop_kind(a, b) == "cut"
     c = {"style": "positron", "highlights": ["MMR"], "camera": {"zoom": 4, "pitch": 0, "bearing": 0}}
     assert infer_hop_kind(a, c) == "cut"
+
+
+def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
+    a = {"style": "positron", "highlights": [], "camera": {"zoom": 4, "pitch": 0, "bearing": 22}}
+    b = {"style": "positron", "highlights": [], "camera": {"zoom": 6, "pitch": 0, "bearing": 22}}
+    assert infer_hop_kind(a, b) == "morph"
+    b["camera"] = {**b["camera"], "bearing": 23}
+    assert infer_hop_kind(a, b) == "movie"
+    b["camera"] = {**b["camera"], "bearing": 22, "zoom": 6.1}
+    assert infer_hop_kind(a, b) == "movie"
 
 
 def test_kl_and_singapore_skip_nominatim(monkeypatch):

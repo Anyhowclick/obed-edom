@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { chooseFolder, chooseKeynote, relocateJob } from "../api";
 import { CheckResultView } from "../components/CheckResultView";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { DiffResultView } from "../components/DiffResultView";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { InspectResultView } from "../components/InspectResultView";
@@ -40,13 +41,25 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
       }
       if (feature === "maps") {
         const wall = await chooseKeynote("LED wall Map Keynote");
-        const result = (active.result || {}) as { exportCg?: boolean; destPathCg?: string };
+        const result = (active.result || {}) as {
+          exportCg?: boolean;
+          exportDsk?: boolean;
+          destPathCg?: string;
+          destPathDsk?: string;
+        };
         const needCg = result.exportCg !== false || Boolean(result.destPathCg);
-        const body: { destPath: string; destPathCg?: string } = { destPath: wall.path };
+        const needDsk = result.exportDsk === true || Boolean(result.destPathDsk);
+        const body: { destPath: string; destPathCg?: string; destPathDsk?: string } = { destPath: wall.path };
         if (needCg) {
           try {
             const cg = await chooseKeynote("CG Map Keynote");
             body.destPathCg = cg.path;
+          } catch {}
+        }
+        if (needDsk) {
+          try {
+            const dsk = await chooseKeynote("DSK Map Keynote");
+            body.destPathDsk = dsk.path;
           } catch {
             /* wall relocate still proceeds */
           }
@@ -81,7 +94,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         Finished runs appear here. They are pointers to files under output/ — if you rename or delete those
         files in Finder, the catalog stays until you Relocate or Delete.
       </p>
-      {(error || sessionError) && <p className="err">{error || sessionError}</p>}
+      <ErrorNotice message={error || sessionError} onDismiss={error ? () => setError(null) : undefined} />
       {jobs.length === 0 ? (
         <p className="note">No saved runs yet. Generate, compare, or validate from the other tabs.</p>
       ) : (
@@ -91,7 +104,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
             {active && (
               <>
                 {active.artifacts && !active.artifacts.ok && (
-                  <p className="err">Files missing: {active.artifacts.missing.join(", ")}</p>
+                  <ErrorNotice message={`Files missing: ${active.artifacts.missing.join(", ")}`} />
                 )}
                 {active.artifacts?.suggestedPath && (
                   <p className="note path-note">

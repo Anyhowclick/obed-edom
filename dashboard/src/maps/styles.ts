@@ -63,5 +63,5 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpec
       });
     styleCache.set(url, pending);
   }
-  return pending;
+  return pending.then((s) => structuredClone(s));
 }

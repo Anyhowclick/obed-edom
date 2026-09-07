@@ -27,6 +27,7 @@ class Job:
     result: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    _cancelled: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.feature:
@@ -35,6 +36,9 @@ class Job:
     def log(self, message: str) -> None:
         self.logs.append(message)
         self.updated_at = time.time()
+
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +75,7 @@ class JobRunner:
         self._jobs: dict[str, Job] = {}
         self._fns: dict[str, Callable[[Job], dict[str, Any]]] = {}
         self._queue: deque[str] = deque()
+        self._running: set[str] = set()
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._load_sessions()
@@ -94,14 +99,36 @@ class JobRunner:
             job = self._jobs.get(job_id)
             if not job:
                 return None
-            if job.status == "running":
+            if job_id in self._running or job.status == "running":
                 raise RuntimeError("Job is already running")
             job.status = "queued"
             job.error = None
+            job._cancelled.clear()
             job.updated_at = time.time()
             self._fns[job.id] = fn
             self._queue.append(job.id)
             self._cv.notify()
+        return job
+
+    def cancel(self, job_id: str) -> Job | None:
+        with self._cv:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            if job.status not in {"queued", "running"}:
+                return job
+            if job.cancelled():
+                return job
+            job._cancelled.set()
+            if job.status == "queued":
+                job.status = "error"
+                job.error = "Export cancelled."
+                job.log("Cancelled.")
+            else:
+                job.log("Cancelling.")
+            self._cv.notify_all()
+        if job.status == "error":
+            self.save(job)
         return job
 
     def list(self, kind: str | None = None, feature: str | None = None) -> list[Job]:
@@ -144,6 +171,7 @@ class JobRunner:
         right_path: str | None = None,
         dest_path: str | None = None,
         dest_path_cg: str | None = None,
+        dest_path_dsk: str | None = None,
     ) -> Job | None:
         job = self._jobs.get(job_id)
         if not job:
@@ -161,6 +189,8 @@ class JobRunner:
             result["destPath"] = str(Path(dest_path).expanduser())
         if dest_path_cg:
             result["destPathCg"] = str(Path(dest_path_cg).expanduser())
+        if dest_path_dsk:
+            result["destPathDsk"] = str(Path(dest_path_dsk).expanduser())
         return self.update_result(job_id, result)
 
     def delete(self, job_id: str, *, purge: bool = True) -> bool:
@@ -251,19 +281,36 @@ class JobRunner:
                 job_id = self._queue.popleft()
                 job = self._jobs.get(job_id)
                 fn = self._fns.pop(job_id, None)
+                if job and fn and not job.cancelled():
+                    self._running.add(job_id)
+                    job.status = "running"
+                    job.log("Started.")
+                else:
+                    job = None
             if not job or not fn:
                 continue
-            job.status = "running"
-            job.log("Started.")
+            result: dict[str, Any] | None = None
+            error: str | None = None
             try:
-                job.result = fn(job)
-                job.status = "done"
-                job.log("Finished.")
+                result = fn(job)
             except Exception as exc:  # noqa: BLE001
-                job.status = "error"
-                job.error = str(exc)
-                job.log(f"Error: {exc}")
-            job.updated_at = time.time()
+                error = str(exc)
+            finally:
+                with self._cv:
+                    if job.cancelled():
+                        job.status = "error"
+                        job.error = "Export cancelled."
+                        job.log("Cancelled.")
+                    elif error is not None:
+                        job.status = "error"
+                        job.error = error
+                        job.log(f"Error: {error}")
+                    else:
+                        job.result = result
+                        job.status = "done"
+                        job.log("Finished.")
+                    self._running.discard(job_id)
+                    job.updated_at = time.time()
             self.save(job)
 
 
@@ -296,6 +343,8 @@ def artifact_status(job: Job, output_root: Path) -> dict[str, Any]:
             checks.append(("Map Keynote", result.get("destPath")))
         if result.get("destPathCg"):
             checks.append(("CG Keynote", result.get("destPathCg")))
+        if result.get("destPathDsk"):
+            checks.append(("DSK Keynote", result.get("destPathDsk")))
     else:
         checks.append(("CG Keynote", result.get("destPath")))
     previews = result.get("previews") or {}

@@ -27,6 +27,17 @@ def test_safe_slide_id():
     assert safe_slide_id("s 1/../x") == "s_1_._.x" or "/" not in safe_slide_id("s 1/../x")
 
 
+def test_cg_movie_and_frame_paths_are_isolated(tmp_path):
+    from obed_edom.maps_movie import frames_dir, movie_filename, write_frame
+
+    assert movie_filename("s1") != movie_filename("s1", "cg")
+    assert frames_dir(tmp_path, "s1") != frames_dir(tmp_path, "s1", "cg")
+    lw = write_frame(tmp_path, "s1", 0, b"lw", "image/jpeg")
+    cg = write_frame(tmp_path, "s1", 0, b"cg", "image/jpeg", "cg")
+    assert lw.read_bytes() == b"lw"
+    assert cg.read_bytes() == b"cg"
+
+
 def test_encode_fly_movie(tmp_path):
     if ffmpeg_exe() is None:
         pytest.skip("ffmpeg not available")
@@ -53,6 +64,20 @@ def test_encode_pending_sets_movie_fields(tmp_path):
     assert movie_path(tmp_path, "s1").exists()
     assert "movieMov" not in s2
     assert "movieDuration" not in s2
+
+
+def test_encode_pending_passes_cancellation_to_encoder(tmp_path, monkeypatch):
+    frames = _make_frames(tmp_path, "s1", count=2)
+    (frames / "meta.json").write_text(json.dumps({"fps": 6, "count": 2}))
+
+    def cancelled_encoder(*_a, is_cancelled, **_k):
+        assert is_cancelled()
+        raise RuntimeError("Export cancelled.")
+
+    monkeypatch.setattr("obed_edom.maps_movie.encode_fly_movie", cancelled_encoder)
+    checks = iter((False, False, True))
+    with pytest.raises(RuntimeError, match="Export cancelled"):
+        encode_pending(tmp_path, [{"id": "s1"}], is_cancelled=lambda: next(checks))
 
 
 def test_encode_pending_skips_when_movie_newer_than_meta(tmp_path, monkeypatch):
@@ -106,3 +131,30 @@ def test_encode_pending_raises_when_meta_and_too_few_frames(tmp_path):
 def test_encode_pending_skips_without_meta(tmp_path):
     updated = encode_pending(tmp_path, [{"id": "s1", "movieMov": "Map BG_s1.mov"}])
     assert "movieMov" not in updated[0]
+
+
+def test_encode_pending_drops_frames_when_hop_not_movie(tmp_path):
+    frames = _make_frames(tmp_path, "s1")
+    (frames / "meta.json").write_text(json.dumps({"fps": 6, "count": 6, "duration": 1.0}))
+    slides = [{"id": "s1", "movieMov": "Map BG_s1.mov", "movieDuration": 1.0}, {"id": "s2"}]
+    links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 1.0}]
+    updated = encode_pending(tmp_path, slides, links=links)
+    assert not frames.exists()
+    assert "movieMov" not in updated[0]
+    assert "movieDuration" not in updated[0]
+
+
+@pytest.mark.parametrize(("audience", "other_audience"), [("lw", "cg"), ("cg", "lw")])
+def test_encode_pending_preserves_other_audience_frames(tmp_path, audience, other_audience):
+    current = frames_dir(tmp_path, "s1", audience)
+    current.mkdir(parents=True)
+    other = frames_dir(tmp_path, "s1", other_audience)
+    other.mkdir(parents=True)
+    (other / "sentinel").write_text("keep")
+
+    slides = [{"id": "s1"}, {"id": "s2"}]
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0}]
+    encode_pending(tmp_path, slides, links=links, audience=audience)
+
+    assert other.exists()
+    assert (other / "sentinel").read_text() == "keep"

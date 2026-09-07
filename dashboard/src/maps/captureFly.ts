@@ -1,9 +1,9 @@
 import { Map as MapLibreMap, MercatorCoordinate } from "maplibre-gl";
-import { createExportMap } from "./captureExport";
-import { stampOsmOnCanvas } from "./stampOsm";
+import { createExportMap, waitIdleForFrame } from "./captureExport";
+import { stampOsmCropOnCanvas, stampOsmOnCanvas } from "./stampOsm";
 import {
-  WORLD_MIN_ZOOM,
   type MapsCamera,
+  type MapsChurch,
   type MapsEasing,
   type MapsLayerFilterId,
   type MapsRoutePoint,
@@ -68,19 +68,19 @@ const WALL_W = 7680;
 const WALL_H = 1080;
 const CRUISE_PAD = 0.35;
 
-/** Zoom that fits the hop on the 7680×1080 wall, or the start/end zoom if the hop is already on-screen. */
-export function cruiseZoom(fromZ: number, toZ: number, distX: number, distY: number): number {
+/** Zoom that fits the hop on the capture wall, or the start/end zoom if the hop is already on-screen. */
+export function cruiseZoom(fromZ: number, toZ: number, distX: number, distY: number, width = WALL_W): number {
   let zFit = 22;
-  if (distX > 1e-9) zFit = Math.min(zFit, Math.log2(WALL_W / TILE / distX));
+  if (distX > 1e-9) zFit = Math.min(zFit, Math.log2(width / TILE / distX));
   if (distY > 1e-9) zFit = Math.min(zFit, Math.log2(WALL_H / TILE / distY));
-  return Math.max(WORLD_MIN_ZOOM, Math.min(fromZ, toZ, zFit - CRUISE_PAD));
+  return Math.max(0, Math.min(fromZ, toZ, zFit - CRUISE_PAD));
 }
 
-export function autoCruiseZoom(from: MapsCamera, to: MapsCamera): number {
+export function autoCruiseZoom(from: MapsCamera, to: MapsCamera, width = WALL_W): number {
   const a = mercatorOf(from);
   const b = mercatorOf(to);
   const bx = unwrapMercatorX(a.x, b.x);
-  return cruiseZoom(from.zoom, to.zoom, Math.abs(bx - a.x), Math.abs(b.y - a.y));
+  return cruiseZoom(from.zoom, to.zoom, Math.abs(bx - a.x), Math.abs(b.y - a.y), width);
 }
 
 export type HopInterp = {
@@ -90,31 +90,30 @@ export type HopInterp = {
   easeIn?: number;
   easeOut?: number;
   duration?: number;
+  width?: number;
 };
 
 export type HopPhases = { zoomOut: number; move: number; zoomIn: number };
 
 export function resolveHopPhases(interp: Pick<HopInterp, "duration" | "easeIn" | "easeOut">): HopPhases {
   const duration = Math.max(0.15, interp.duration ?? 1);
-  const minP = Math.min(0.05, duration / 6);
   let zoomOut = interp.easeIn != null && Number.isFinite(interp.easeIn) ? interp.easeIn : duration * 0.25;
   let zoomIn = interp.easeOut != null && Number.isFinite(interp.easeOut) ? interp.easeOut : duration * 0.25;
-  zoomOut = Math.max(minP, zoomOut);
-  zoomIn = Math.max(minP, zoomIn);
-  let move = duration - zoomOut - zoomIn;
-  if (move < minP) {
-    const scale = (duration - minP) / Math.max(minP, zoomOut + zoomIn);
+  zoomOut = Math.max(0, zoomOut);
+  zoomIn = Math.max(0, zoomIn);
+  if (zoomOut + zoomIn > duration) {
+    const scale = duration / (zoomOut + zoomIn);
     zoomOut *= scale;
     zoomIn *= scale;
-    move = minP;
   }
+  const move = Math.max(0, duration - zoomOut - zoomIn);
   return { zoomOut, move, zoomIn };
 }
 
-function hopFractions(interp: HopInterp): { inF: number; outF: number } {
+function hopFractions(interp: HopInterp): { inF: number; moveF: number; outF: number } {
   const phases = resolveHopPhases(interp);
   const duration = phases.zoomOut + phases.move + phases.zoomIn;
-  return { inF: phases.zoomOut / duration, outF: phases.zoomIn / duration };
+  return { inF: phases.zoomOut / duration, moveF: phases.move / duration, outF: phases.zoomIn / duration };
 }
 
 /** Zoom out, hold cruise, zoom in. `t` is linear 0–1 over the whole hop. */
@@ -141,18 +140,24 @@ export function easeAt(easing: MapsEasing, t: number): number {
 
 export function cameraAtHop(from: MapsCamera, to: MapsCamera, t: number, interp: HopInterp = {}): MapsCamera {
   const tClamped = Math.max(0, Math.min(1, t));
-  const { inF, outF } = hopFractions(interp);
+  const { inF, moveF, outF } = hopFractions(interp);
   const moveEnd = 1 - outF;
   const moveSpan = Math.max(1e-9, moveEnd - inF);
   let tPos = 0;
-  if (tClamped >= moveEnd) tPos = 1;
+  if (moveF <= 1e-9) tPos = easeAt(interp.easing || "ease-in-out", tClamped);
+  else if (tClamped >= moveEnd) tPos = 1;
   else if (tClamped > inF) tPos = easeAt(interp.easing || "ease-in-out", (tClamped - inF) / moveSpan);
   const zCruiseRaw = interp.flyZoom;
-  const zCruise =
+  let zCruise =
     zCruiseRaw != null && Number.isFinite(zCruiseRaw)
-      ? Math.max(WORLD_MIN_ZOOM, Math.min(22, zCruiseRaw))
-      : autoCruiseZoom(from, to);
-  const zoom = flyZoomAt(tClamped, from.zoom, to.zoom, zCruise, inF, outF);
+      ? Math.max(0, Math.min(22, zCruiseRaw))
+      : autoCruiseZoom(from, to, interp.width ?? WALL_W);
+  if (inF <= 1e-9) zCruise = from.zoom;
+  if (outF <= 1e-9) zCruise = to.zoom;
+  const zoom =
+    inF <= 1e-9 && outF <= 1e-9
+      ? from.zoom + (to.zoom - from.zoom) * easeAt(interp.easing || "ease-in-out", tClamped)
+      : flyZoomAt(tClamped, from.zoom, to.zoom, zCruise, inF, outF);
   const a = mercatorOf(from);
   const b = mercatorOf(to);
   const bx = unwrapMercatorX(a.x, b.x);
@@ -170,7 +175,13 @@ export function cameraAtHop(from: MapsCamera, to: MapsCamera, t: number, interp:
     pitch: pitchLine * (1 - 0.85 * flatten),
   };
   const route = interp.routePoints;
-  if (route && route.length >= 2) return cameraAlongRoute(cam, route, tPos);
+  if (route && route.length >= 2) {
+    return cameraAlongRoute(
+      cam,
+      [{ lat: from.lat, lon: from.lon }, ...route, { lat: to.lat, lon: to.lon }],
+      tPos
+    );
+  }
   return cam;
 }
 
@@ -198,37 +209,70 @@ export function cameraAlongRoute(base: MapsCamera, points: MapsRoutePoint[], t: 
   return base;
 }
 
-const TILE_WAIT_MS = 45000;
-const TILE_POLL_MS = 80;
+const FRAME_TILE_WAIT_MS = 45000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function jumpToCamera(map: MapLibreMap, cam: MapsCamera): void {
+  map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
 }
 
-async function waitIdleForFrame(map: MapLibreMap, timeoutMs = TILE_WAIT_MS): Promise<void> {
-  map.triggerRepaint();
-  const deadline = Date.now() + timeoutMs;
-  if (map.areTilesLoaded()) return;
-  while (Date.now() < deadline) {
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        const done = () => {
-          map.off("idle", done);
-          resolve();
-        };
-        map.once("idle", done);
-        window.setTimeout(() => {
-          map.off("idle", done);
-          resolve();
-        }, TILE_POLL_MS);
-      }),
-    ]);
-    if (map.areTilesLoaded()) return;
-    map.triggerRepaint();
-    await sleep(16);
+function unloadedTileCount(map: MapLibreMap): number | undefined {
+  try {
+    const style = map.style as unknown as {
+      sourceCaches?: Record<string, { _tiles?: Record<string, { state?: string }> }>;
+      _sourceCaches?: Record<string, { _tiles?: Record<string, { state?: string }> }>;
+    };
+    const caches = style.sourceCaches || style._sourceCaches;
+    if (!caches) return undefined;
+    let n = 0;
+    for (const cache of Object.values(caches)) {
+      const tiles = cache._tiles;
+      if (!tiles) continue;
+      for (const tile of Object.values(tiles)) {
+        if (tile.state !== "loaded" && tile.state !== "errored") n += 1;
+      }
+    }
+    return n;
+  } catch {
+    return undefined;
   }
-  if (map.areTilesLoaded()) return;
-  throw new Error("Map tiles did not finish loading before a fly frame was captured.");
+}
+
+function frameError(map: MapLibreMap, index: number, cam: MapsCamera, cause: unknown): Error {
+  const unloaded = unloadedTileCount(map);
+  const extra = unloaded != null ? ` unloaded=${unloaded}` : "";
+  const why = cause instanceof Error ? cause.message : String(cause);
+  return new Error(
+    `Fly frame ${index} at lat=${cam.lat.toFixed(4)} lon=${cam.lon.toFixed(4)} zoom=${cam.zoom.toFixed(2)}${extra}: ${why}`
+  );
+}
+
+async function waitFrameOrRetry(
+  map: MapLibreMap,
+  cam: MapsCamera,
+  index: number,
+  frameDeadline: number,
+  isCancelled?: () => boolean
+): Promise<void> {
+  const budget = () => frameDeadline - Date.now();
+  const waitOnce = async () => {
+    const left = budget();
+    if (left <= 0) throw new Error("frame tile-wait budget exhausted");
+    await waitIdleForFrame(map, left, isCancelled);
+  };
+  jumpToCamera(map, cam);
+  try {
+    await waitOnce();
+  } catch (err) {
+    if (isCancelled?.()) throw new Error("Export cancelled.");
+    if (budget() <= 0) throw frameError(map, index, cam, err);
+    jumpToCamera(map, cam);
+    try {
+      await waitOnce();
+    } catch (err2) {
+      if (isCancelled?.()) throw new Error("Export cancelled.");
+      throw frameError(map, index, cam, err2);
+    }
+  }
 }
 
 export async function captureFlyFrames(opts: {
@@ -239,6 +283,8 @@ export async function captureFlyFrames(opts: {
   styleId: MapsStyleId;
   highlights: string[];
   hiddenLayers?: MapsLayerFilterId[];
+  churches?: MapsChurch[];
+  numberPins?: boolean;
   duration: number;
   fps?: number;
   easing?: MapsEasing;
@@ -246,31 +292,76 @@ export async function captureFlyFrames(opts: {
   flyZoom?: number;
   easeIn?: number;
   easeOut?: number;
+  outputCrop?: {
+    width: number;
+    height: number;
+    fromX: number;
+    toX: number;
+    fromY?: number;
+    toY?: number;
+  };
+  isCancelled?: () => boolean;
   onFrame: (blob: Blob, index: number, count: number) => Promise<void>;
 }): Promise<number> {
-  const { width, height, from, to, styleId, highlights, hiddenLayers, duration, fps = 30, easing = "ease-in-out", routePoints, flyZoom, easeIn, easeOut, onFrame } = opts;
+  const {
+    width,
+    height,
+    from,
+    to,
+    styleId,
+    highlights,
+    hiddenLayers,
+    churches,
+    numberPins = false,
+    duration,
+    fps = 30,
+    easing = "ease-in-out",
+    routePoints,
+    flyZoom,
+    easeIn,
+    easeOut,
+    outputCrop,
+    isCancelled,
+    onFrame,
+  } = opts;
+  const cancelled = () => Boolean(isCancelled?.());
+  if (cancelled()) throw new Error("Export cancelled.");
   const count = Math.max(2, Math.round(duration * fps));
-  const { map, host } = await createExportMap({ width, height, camera: from, styleId, highlights, hiddenLayers });
+  const { map, host } = await createExportMap({
+    width,
+    height,
+    camera: from,
+    styleId,
+    highlights,
+    hiddenLayers,
+    churches,
+    numberPins,
+    isCancelled,
+  });
   try {
     const cameras: MapsCamera[] = [];
     for (let i = 0; i < count; i++) {
       const t = i / (count - 1);
-      cameras.push(cameraAtHop(from, to, t, { easing, routePoints, flyZoom, easeIn, easeOut, duration }));
+      cameras.push(cameraAtHop(from, to, t, { easing, routePoints, flyZoom, easeIn, easeOut, duration, width }));
     }
-    const stride = Math.max(1, Math.floor(count / 20));
-    for (let i = 0; i < count; i += stride) {
-      const cam = cameras[i];
-      map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
-      await waitIdleForFrame(map);
-    }
-    const last = cameras[cameras.length - 1];
-    map.jumpTo({ center: [last.lon, last.lat], zoom: last.zoom, bearing: last.bearing, pitch: last.pitch });
-    await waitIdleForFrame(map);
     for (let i = 0; i < count; i++) {
+      if (cancelled()) throw new Error("Export cancelled.");
       const cam = cameras[i];
-      map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
-      await waitIdleForFrame(map);
-      const blob = await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95);
+      await waitFrameOrRetry(map, cam, i, Date.now() + FRAME_TILE_WAIT_MS, isCancelled);
+      if (cancelled()) throw new Error("Export cancelled.");
+      const t = i / (count - 1);
+      const blob = outputCrop
+        ? await stampOsmCropOnCanvas(
+            map.getCanvas(),
+            outputCrop.fromX + (outputCrop.toX - outputCrop.fromX) * t,
+            (outputCrop.fromY || 0) + ((outputCrop.toY || 0) - (outputCrop.fromY || 0)) * t,
+            outputCrop.width,
+            outputCrop.height,
+            "image/jpeg",
+            0.95
+          )
+        : await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95);
+      if (cancelled()) throw new Error("Export cancelled.");
       await onFrame(blob, i, count);
     }
     return count;

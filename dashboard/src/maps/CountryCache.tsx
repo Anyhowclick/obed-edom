@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { clearMapsTileCache, mapsTileCacheStats } from "../api";
 import { loadAdmin0 } from "./overlays";
 
 export const PINNED_CACHE_COUNTRIES = ["PHL", "IND", "IDN", "MYS"] as const;
@@ -31,6 +32,28 @@ function IconGlobe() {
   );
 }
 
+function IconTrash() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M7 7h10M9.5 7V6a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 6v1M8 7l.7 12.5h6.6L16 7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function formatCacheBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 export function CountryCachePicker({
   selected,
   disabled,
@@ -43,6 +66,8 @@ export function CountryCachePicker({
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const [rows, setRows] = useState<CountryRow[]>([]);
+  const [cacheBytes, setCacheBytes] = useState<number | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
   const root = useRef<HTMLDivElement | null>(null);
   const picked = useMemo(() => new Set(selected.map((code) => code.toUpperCase())), [selected]);
 
@@ -61,6 +86,13 @@ export function CountryCachePicker({
       setRows(sortCacheCountries(next));
     });
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    void mapsTileCacheStats()
+      .then((stats) => setCacheBytes(stats.bytes))
+      .catch(() => setCacheBytes(null));
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -92,6 +124,20 @@ export function CountryCachePicker({
     onToggle(code, next);
   }
 
+  async function onClearCache() {
+    if (cacheBusy) return;
+    if (!window.confirm("Delete cached map tiles?")) return;
+    setCacheBusy(true);
+    try {
+      const stats = await clearMapsTileCache();
+      setCacheBytes(stats.bytes);
+    } catch {
+      /* keep last readout */
+    } finally {
+      setCacheBusy(false);
+    }
+  }
+
   return (
     <div className="maps-layers" ref={root}>
       <button
@@ -117,6 +163,19 @@ export function CountryCachePicker({
             disabled={disabled}
           />
           <p className="note maps-cache-hint">Pins PH · IN · ID · MY first. Checking a country prefetches its low-zoom tiles.</p>
+          <div className="maps-cache-usage">
+            <span className="note">{cacheBytes == null ? "Cache size unknown" : `Cache ${formatCacheBytes(cacheBytes)}`}</span>
+            <button
+              className="btn maps-delete maps-cache-delete"
+              type="button"
+              disabled={disabled || cacheBusy}
+              onClick={() => void onClearCache()}
+              title="Clear cache"
+              aria-label="Clear cache"
+            >
+              <IconTrash />
+            </button>
+          </div>
           {(q ? visible : [...pinned, ...rest]).length === 0 && <p className="note">No matches.</p>}
           {!q &&
             pinned.map((row) => (

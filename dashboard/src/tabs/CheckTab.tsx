@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { CheckResultView } from "../components/CheckResultView";
 import { FileWell } from "../components/FileWell";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useLayout } from "../nav";
 import type { Slot } from "../playlist";
@@ -233,7 +234,7 @@ export function CheckTab() {
           </button>
         </div>
       </div>
-      {(error || openError) && <p className="err">{error || openError}</p>}
+      <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title={overlayTitle} logs={logs} />}
       {job && (
         <CheckResultView

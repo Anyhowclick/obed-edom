@@ -1,39 +1,119 @@
 import "./maplibreWorker";
 import { Map as MapLibreMap } from "maplibre-gl";
 import { applyLayerFilters } from "./layers";
-import { ensureAdmin0Highlights, ensureLowZoomRaster } from "./overlays";
+import { addOverlays, ensureAdmin0Highlights, ensureLowZoomRaster } from "./overlays";
 import { stampOsm } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
-import { DEFAULT_HIDDEN_LAYERS, WORLD_MIN_ZOOM, type MapsCamera, type MapsLayerFilterId, type MapsStyleId } from "./types";
+import {
+  DEFAULT_HIDDEN_LAYERS,
+  type MapsCamera,
+  type MapsChurch,
+  type MapsLayerFilterId,
+  type MapsStyleId,
+} from "./types";
 
 const HARD_CAP = 8192;
+const TILE_WAIT_MS = 45000;
+
+let cachedMaxTex: number | undefined;
 
 function maxTextureSize(): number {
+  if (cachedMaxTex != null) return cachedMaxTex;
   const canvas = document.createElement("canvas");
   const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
   if (!gl) throw new Error("WebGL is unavailable; cannot capture export rasters.");
-  const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-  if (typeof max !== "number" || max < 1) throw new Error("GPU MAX_TEXTURE_SIZE is unknown.");
-  return max;
+  try {
+    const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (typeof max !== "number" || max < 1) throw new Error("GPU MAX_TEXTURE_SIZE is unknown.");
+    cachedMaxTex = max;
+    return max;
+  } finally {
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+  }
 }
 
-export function waitEvent(map: MapLibreMap, name: "load" | "idle", timeoutMs = 45000): Promise<void> {
+export function waitEvent(
+  map: MapLibreMap,
+  name: "load" | "idle",
+  timeoutMs = 45000,
+  isCancelled?: () => boolean
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(cancelTimer);
       map.off(name, onReady);
+      if (err) reject(err);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
       if (name === "idle" && map.areTilesLoaded()) {
-        resolve();
+        finish();
         return;
       }
-      reject(new Error(`MapLibre export map ${name} timed out.`));
+      finish(new Error(`MapLibre export map ${name} timed out.`));
     }, timeoutMs);
-    const onReady = () => {
-      clearTimeout(timer);
-      resolve();
-    };
+    const cancelTimer = setInterval(() => {
+      if (isCancelled?.()) finish(new Error("Export cancelled."));
+    }, 50);
+    const onReady = () => finish();
+    if (isCancelled?.()) {
+      finish(new Error("Export cancelled."));
+      return;
+    }
     map.once(name, onReady);
   });
+}
+
+function waitForRender(map: MapLibreMap, timeoutMs: number, isCancelled?: () => boolean): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onRender = () => finish();
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(cancelTimer);
+      map.off("render", onRender);
+      if (err) reject(err);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(new Error("MapLibre export map render timed out.")), timeoutMs);
+    const cancelTimer = setInterval(() => {
+      if (isCancelled?.()) finish(new Error("Export cancelled."));
+    }, 50);
+    if (isCancelled?.()) {
+      finish(new Error("Export cancelled."));
+      return;
+    }
+    map.once("render", onRender);
+  });
+}
+
+export async function waitIdleForFrame(
+  map: MapLibreMap,
+  timeoutMs = TILE_WAIT_MS,
+  isCancelled?: () => boolean
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const nextRender = () => waitForRender(map, Math.max(1, deadline - Date.now()), isCancelled);
+  map.triggerRepaint();
+  await nextRender(); // in-view tile set now reflects this camera
+  while (Date.now() < deadline) {
+    if (isCancelled?.()) throw new Error("Export cancelled.");
+    if (map.areTilesLoaded()) {
+      map.triggerRepaint();
+      await nextRender(); // guarantee a paint with those tiles
+      return;
+    }
+    map.triggerRepaint();
+    await nextRender();
+  }
+  throw new Error("Map tiles did not finish loading before a fly frame was captured.");
 }
 
 export type ExportMapOpts = {
@@ -43,10 +123,23 @@ export type ExportMapOpts = {
   styleId: MapsStyleId;
   highlights: string[];
   hiddenLayers?: MapsLayerFilterId[];
+  churches?: MapsChurch[];
+  numberPins?: boolean;
+  isCancelled?: () => boolean;
 };
 
 export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLibreMap; host: HTMLDivElement }> {
-  const { width, height, camera, styleId, highlights, hiddenLayers = DEFAULT_HIDDEN_LAYERS } = opts;
+  const {
+    width,
+    height,
+    camera,
+    styleId,
+    highlights,
+    hiddenLayers = DEFAULT_HIDDEN_LAYERS,
+    churches,
+    numberPins = false,
+    isCancelled,
+  } = opts;
   const tex = maxTextureSize();
   const cap = Math.min(tex, HARD_CAP);
   if (width > cap || height > cap) {
@@ -64,7 +157,8 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     bearing: camera.bearing,
     pitch: camera.pitch,
     renderWorldCopies: true,
-    minZoom: WORLD_MIN_ZOOM,
+    transformConstrain: (center, zoom) => ({ center, zoom: Math.max(0, Math.min(22, zoom)) }),
+    minZoom: 0,
     attributionControl: false,
     fadeDuration: 0,
     pixelRatio: 1,
@@ -74,12 +168,16 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     canvasContextAttributes: { preserveDrawingBuffer: true },
   });
   try {
-    await waitEvent(map, "load");
+    await waitEvent(map, "load", TILE_WAIT_MS, isCancelled);
     ensureLowZoomRaster(map, styleId);
     applyLayerFilters(map, hiddenLayers);
-    await ensureAdmin0Highlights(map, highlights, styleId);
+    if (churches) {
+      await addOverlays(map, highlights, churches, null, styleId, numberPins);
+    } else {
+      await ensureAdmin0Highlights(map, highlights, styleId);
+    }
     applyLayerFilters(map, hiddenLayers);
-    await waitEvent(map, "idle");
+    await waitIdleForFrame(map, undefined, isCancelled);
     return { map, host };
   } catch (err) {
     map.remove();

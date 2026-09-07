@@ -10,6 +10,7 @@ import {
   type Flag,
 } from "../api";
 import { FileWell } from "../components/FileWell";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useCurrentJob } from "../sessions";
@@ -116,7 +117,7 @@ export function DskTab() {
         </button>
       </div>
       {notice && <p className="note">{notice}</p>}
-      {(error || openError) && <p className="err">{error || openError}</p>}
+      <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Validating Keynote…" logs={logs} />}
       {job && <InspectResultView job={job} labelPrefix="LW" onOpen={setOpen} />}
       <Lightbox src={open} onClose={() => setOpen(null)} />

@@ -2,13 +2,26 @@ export function isPreviewVideo(nameOrUrl: string): boolean {
   return /\.mov(?:$|[?#])/i.test(nameOrUrl);
 }
 
-export function LoadingOverlay({ title, logs }: { title: string; logs: string[] }) {
+export function LoadingOverlay({
+  title,
+  logs,
+  onCancel,
+}: {
+  title: string;
+  logs: string[];
+  onCancel?: () => void;
+}) {
   return (
     <div className="overlay">
       <div className="overlay-card">
         <div className="spinner" />
         <h2 style={{ marginTop: 0 }}>{title}</h2>
         <div className="log">{logs.join("\n") || "Working…"}</div>
+        {onCancel ? (
+          <button className="btn secondary" type="button" onClick={onCancel}>
+            Cancel
+          </button>
+        ) : null}
       </div>
     </div>
   );

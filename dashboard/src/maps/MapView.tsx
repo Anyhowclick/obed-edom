@@ -5,13 +5,14 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { applyHighlights, ensureAdmin0Highlights, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
+import { addOverlays, applyHighlights, churchesGeo, ensureDropPinImages, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
 import {
-  WORLD_MIN_ZOOM,
   clampZoom,
+  minZoomForView,
   wrapLon,
+  worldCopyWarning,
   type MapsCamera,
   type MapsChurch,
   type MapsCropId,
@@ -22,68 +23,134 @@ import {
 } from "./types";
 
 const WALL_W = 7680;
+const WALL_HEIGHT = 1080;
 const FW_W = 1920;
 const CG_W = 1920;
 const CG_ORIGIN = 2880;
 const PIN_LAYERS = ["churches-dots", "churches-drops", "churches-labels"];
 const COUNTRY_PICK_MAX_ZOOM = 7;
+const ML_MIN_ZOOM = -2;
+const ML_PREVIEW_MIN_ZOOM = -8;
+const ML_MAX_ZOOM = 22;
 
-/** MapLibre zoom is relative to the preview CSS width; cameras are authored for 7680. */
-function previewZoomDelta(map: MapLibreMap): number {
-  const width = map.getContainer().clientWidth;
+function previewSurfaceRect(map: MapLibreMap, authoredWidth = WALL_W) {
+  const container = map.getContainer();
+  const frameWidth = container.clientWidth;
+  const frameHeight = container.clientHeight;
+  if (!frameWidth || !frameHeight) return { x: 0, y: 0, width: 0, height: 0 };
+  const width = Math.min(frameWidth, (frameHeight * authoredWidth) / WALL_HEIGHT);
+  const height = (width * WALL_HEIGHT) / authoredWidth;
+  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
+}
+
+function previewZoomDelta(map: MapLibreMap, authoredWidth = WALL_W): number {
+  const width = previewSurfaceRect(map, authoredWidth).width;
   if (!width) return 0;
-  return Math.log2(width / WALL_W);
+  return Math.log2(width / authoredWidth);
 }
 
-function authoredZoomOf(map: MapLibreMap, delta = previewZoomDelta(map)): number {
-  return clampZoom(map.getZoom() - delta);
+function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
+  if (!rect) {
+    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  }
+  const scaleX = canvas.width / canvas.clientWidth;
+  const scaleY = canvas.height / canvas.clientHeight;
+  const output = document.createElement("canvas");
+  output.width = Math.max(1, Math.round(rect.width * scaleX));
+  output.height = Math.max(1, Math.round(rect.height * scaleY));
+  const ctx = output.getContext("2d");
+  if (!ctx) return Promise.resolve(null);
+  ctx.drawImage(
+    canvas,
+    rect.x * scaleX,
+    rect.y * scaleY,
+    rect.width * scaleX,
+    rect.height * scaleY,
+    0,
+    0,
+    output.width,
+    output.height
+  );
+  return new Promise<Blob | null>((resolve) => output.toBlob(resolve, "image/png"));
 }
 
-function mapZoomOf(authored: number, delta: number): number {
-  return clampZoom(authored) + delta;
+function clampMapZoom(zoom: number): number {
+  return Math.max(ML_PREVIEW_MIN_ZOOM, Math.min(ML_MAX_ZOOM, zoom));
 }
 
-function readCamera(map: MapLibreMap, delta = previewZoomDelta(map)): MapsCamera {
+function authoredZoomOf(map: MapLibreMap, delta: number, minZoom: number, peggedAuthored?: number): number {
+  const fromMap = clampZoom(map.getZoom() - delta, minZoom);
+  if (peggedAuthored != null && map.getZoom() <= map.getMinZoom() + 1e-4) {
+    return Math.min(fromMap, peggedAuthored);
+  }
+  return fromMap;
+}
+
+function mapZoomOf(authored: number, delta: number, minZoom: number): number {
+  return clampMapZoom(clampZoom(authored, minZoom) + delta);
+}
+
+function readCamera(map: MapLibreMap, delta: number, minZoom: number, peggedAuthored?: number): MapsCamera {
   const center = map.getCenter();
   return {
     lat: center.lat,
     lon: wrapLon(center.lng),
-    zoom: authoredZoomOf(map, delta),
+    zoom: authoredZoomOf(map, delta, minZoom, peggedAuthored),
     bearing: map.getBearing(),
     pitch: map.getPitch(),
   };
 }
 
-function cameraView(map: MapLibreMap, camera: MapsCamera, delta = previewZoomDelta(map)) {
+function cameraView(_map: MapLibreMap, camera: MapsCamera, delta: number, minZoom: number) {
   return {
     center: [camera.lon, camera.lat] as [number, number],
-    zoom: mapZoomOf(camera.zoom, delta),
+    zoom: mapZoomOf(camera.zoom, delta, minZoom),
     bearing: camera.bearing,
     pitch: camera.pitch,
   };
 }
 
-function applyPreviewZoomLimits(map: MapLibreMap, delta = previewZoomDelta(map)): number {
-  map.setMinZoom(WORLD_MIN_ZOOM + delta);
-  map.setMaxZoom(22 + delta);
+function applyPreviewZoomLimits(map: MapLibreMap, minZoom: number, delta = previewZoomDelta(map)): number {
+  if (!map.getContainer().clientWidth) return delta;
+  const minZ = clampMapZoom(minZoom + delta);
+  const maxZ = Math.max(minZ, clampMapZoom(22 + delta));
+  try {
+    if (map.getMinZoom() !== minZ) {
+      if (minZ < ML_MIN_ZOOM) {
+        (map as unknown as { transform: { setMinZoom: (zoom: number) => void } }).transform.setMinZoom(minZ);
+      }
+      else map.setMinZoom(minZ);
+    }
+    if (map.getMaxZoom() !== maxZ) map.setMaxZoom(maxZ);
+  } catch (err) {
+    console.warn("maplibre zoom limits", err);
+  }
   return delta;
 }
 
 function recastPreviewCamera(
   map: MapLibreMap,
   deltaRef: { current: number },
-  suppress: { current: boolean }
+  suppress: { current: boolean },
+  minZoom: number,
+  authoredHint?: number,
+  authoredWidth = WALL_W
 ) {
   if (!map.getContainer().clientWidth) return;
-  const authored = readCamera(map, deltaRef.current);
-  map.resize();
-  const d = applyPreviewZoomLimits(map);
-  deltaRef.current = d;
-  suppress.current = true;
-  map.jumpTo(cameraView(map, authored, d));
-  map.once("moveend", () => {
+  try {
+    const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
+    map.resize();
+    const d = applyPreviewZoomLimits(map, minZoom, previewZoomDelta(map, authoredWidth));
+    deltaRef.current = d;
+    suppress.current = true;
+    map.jumpTo(cameraView(map, authored, d, minZoom));
+    map.once("moveend", () => {
+      suppress.current = false;
+    });
+  } catch (err) {
     suppress.current = false;
-  });
+    console.warn("maplibre recast", err);
+  }
 }
 
 export type MapViewHandle = {
@@ -99,10 +166,14 @@ export type MapViewHandle = {
     flyZoom?: number;
     easeIn?: number;
     easeOut?: number;
+    width?: number;
   }) => Promise<void>;
   stop: () => void;
   getCamera: () => MapsCamera | null;
+  getCgCamera: (cgShiftX: number) => MapsCamera | null;
   captureBlob: () => Promise<Blob | null>;
+  capturePreviewBlob: () => Promise<Blob | null>;
+  waitUntilIdle: (styleId?: MapsStyleId, timeoutMs?: number) => Promise<void>;
   resize: () => void;
 };
 
@@ -117,6 +188,7 @@ type Props = {
   exportCg: boolean;
   hiddenLayers: MapsLayerFilterId[];
   cgShiftX: number;
+  authoredWidth?: number;
   previewing: boolean;
   selectedPinId: string | null;
   onCameraCommit: (camera: MapsCamera) => void;
@@ -127,78 +199,6 @@ type Props = {
   onCgShift: (dx: number) => void;
   onPreviewAbort?: () => void;
 };
-
-function churchesGeo(churches: MapsChurch[], selectedPinId: string | null, numberPins = false): GeoJSON.FeatureCollection {
-  return {
-    type: "FeatureCollection",
-    features: churches.map((church, index) => ({
-      type: "Feature",
-      properties: {
-        id: church.id,
-        name: numberPins ? `${index + 1}. ${church.name}` : church.name,
-        color: church.color,
-        kind: church.kind,
-        sel: church.id === selectedPinId,
-      },
-      geometry: { type: "Point", coordinates: [church.lon, church.lat] },
-    })),
-  };
-}
-
-async function addOverlays(
-  map: MapLibreMap,
-  highlights: string[],
-  churches: MapsChurch[],
-  selectedPinId: string | null,
-  styleId: MapsStyleId,
-  numberPins: boolean
-) {
-  await ensureAdmin0Highlights(map, highlights, styleId);
-  const pins = churchesGeo(churches, selectedPinId, numberPins);
-  if (!map.getSource("churches")) {
-    map.addSource("churches", { type: "geojson", data: pins, promoteId: "id" });
-    map.addLayer({
-      id: "churches-dots",
-      type: "circle",
-      source: "churches",
-      paint: {
-        "circle-radius": ["case", ["==", ["get", "kind"], "dropPin"], 7, 5],
-        "circle-color": ["get", "color"],
-        "circle-stroke-width": ["case", ["boolean", ["get", "sel"], false], 3, 1.25],
-        "circle-stroke-color": ["case", ["boolean", ["get", "sel"], false], "#B8F64B", "#FFFFFF"],
-      },
-    });
-    map.addLayer({
-      id: "churches-drops",
-      type: "symbol",
-      source: "churches",
-      filter: ["==", ["get", "kind"], "dropPin"],
-      layout: {
-        "text-field": "▼",
-        "text-size": 11,
-        "text-offset": [0, 0.85],
-        "text-anchor": "top",
-        "text-allow-overlap": true,
-      },
-      paint: { "text-color": ["get", "color"], "text-halo-color": "#07070A", "text-halo-width": 1 },
-    });
-    map.addLayer({
-      id: "churches-labels",
-      type: "symbol",
-      source: "churches",
-      layout: {
-        "text-field": ["get", "name"],
-        "text-size": 12,
-        "text-offset": [0, 1.35],
-        "text-anchor": "top",
-      },
-      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": 1.2 },
-    });
-  } else {
-    (map.getSource("churches") as GeoJSONSource).setData(pins);
-  }
-  applyHighlights(map, highlights);
-}
 
 function pinIdFromEvent(event: MapMouseEvent, map: MapLibreMap): string {
   const layers = PIN_LAYERS.filter((id) => map.getLayer(id));
@@ -218,6 +218,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     exportCg,
     hiddenLayers,
     cgShiftX,
+    authoredWidth = WALL_W,
     previewing,
     selectedPinId,
     onCameraCommit,
@@ -234,6 +235,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const mapRef = useRef<MapLibreMap | null>(null);
   const suppress = useRef(false);
   const styleUrl = useRef(OPENFREEMAP_STYLES[styleId]);
+  const styleReady = useRef(false);
+  const overlayGeneration = useRef(0);
   const previewingRef = useRef(previewing);
   const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort });
   const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, numberPins });
@@ -243,6 +246,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const hopResolve = useRef<(() => void) | null>(null);
   const deltaRef = useRef(0);
   const cameraRef = useRef(camera);
+  const minZoomRef = useRef(minZoomForView());
+  const authoredWidthRef = useRef(authoredWidth);
   const [texWarn, setTexWarn] = useState<string | null>(null);
 
   function finishHop() {
@@ -258,6 +263,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
   previewingRef.current = previewing;
   cameraRef.current = camera;
+  minZoomRef.current = minZoomForView();
+  authoredWidthRef.current = authoredWidth;
   callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, numberPins };
 
@@ -266,7 +273,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const map = mapRef.current;
       if (!map) return;
       suppress.current = true;
-      map.jumpTo(cameraView(map, next));
+      map.jumpTo(cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current));
       map.once("moveend", () => {
         suppress.current = false;
       });
@@ -277,7 +284,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       return new Promise((resolve) => {
         suppress.current = true;
         // MapsTab passes milliseconds (duration * 1000); MapLibre easeTo is ms.
-        map.easeTo({ ...cameraView(map, next), duration: Math.max(0, durationMs) });
+        map.easeTo({ ...cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
@@ -289,14 +296,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (!map) return Promise.resolve();
       return new Promise((resolve) => {
         suppress.current = true;
-        map.flyTo({ ...cameraView(map, next), duration: Math.max(0, durationMs) });
+        map.flyTo({ ...cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
         });
       });
     },
-    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, flyZoom, easeIn, easeOut }) {
+    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, flyZoom, easeIn, easeOut, width }) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
       hopAbort.current = false;
@@ -310,10 +317,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             easeIn,
             easeOut,
             duration: durationMs / 1000,
+            width,
           });
           map.jumpTo({
             center: [cam.lon, cam.lat],
-            zoom: mapZoomOf(cam.zoom, deltaRef.current),
+            zoom: mapZoomOf(cam.zoom, deltaRef.current, minZoomRef.current),
             bearing: cam.bearing,
             pitch: cam.pitch,
           });
@@ -346,19 +354,76 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       mapRef.current?.stop();
     },
     getCamera() {
-      return mapRef.current ? readCamera(mapRef.current) : null;
+      const map = mapRef.current;
+      return map ? readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom) : null;
+    },
+    getCgCamera(cgShiftX) {
+      const map = mapRef.current;
+      if (!map) return null;
+      const current = readCamera(
+        map,
+        previewZoomDelta(map, authoredWidthRef.current),
+        minZoomRef.current,
+        cameraRef.current.zoom
+      );
+      const canvas = map.getCanvas();
+      const surface = previewSurfaceRect(map, authoredWidthRef.current);
+      const shifted = map.unproject([
+        canvas.clientWidth / 2 + (cgShiftX * surface.width) / authoredWidthRef.current,
+        canvas.clientHeight / 2,
+      ]);
+      return { ...current, lat: shifted.lat, lon: wrapLon(shifted.lng) };
     },
     captureBlob() {
       const map = mapRef.current;
       if (!map) return Promise.resolve(null);
+      return captureCanvas(map.getCanvas(), previewSurfaceRect(map, authoredWidthRef.current));
+    },
+    capturePreviewBlob() {
+      const map = mapRef.current;
+      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
+    },
+    waitUntilIdle(expectedStyleId, timeoutMs = 15000) {
+      const map = mapRef.current;
+      if (!map) return Promise.resolve();
+      const expectedUrl = expectedStyleId ? OPENFREEMAP_STYLES[expectedStyleId] : styleUrl.current;
       return new Promise((resolve) => {
-        map.getCanvas().toBlob((blob: Blob | null) => resolve(blob), "image/png");
+        let finished = false;
+        let timer = 0;
+        let poll = 0;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          window.clearTimeout(timer);
+          window.clearInterval(poll);
+          map.off("idle", check);
+          resolve();
+        };
+        const check = () => {
+          if (
+            mapRef.current !== map ||
+            (styleUrl.current === expectedUrl && styleReady.current && map.loaded() && map.areTilesLoaded())
+          ) {
+            finish();
+          }
+        };
+        map.on("idle", check);
+        poll = window.setInterval(check, 50);
+        timer = window.setTimeout(finish, Math.max(250, timeoutMs));
+        requestAnimationFrame(check);
       });
     },
     resize() {
       const map = mapRef.current;
       if (!map) return;
-      recastPreviewCamera(map, deltaRef, suppress);
+      recastPreviewCamera(
+        map,
+        deltaRef,
+        suppress,
+        minZoomRef.current,
+        cameraRef.current.zoom,
+        authoredWidthRef.current
+      );
     },
   }));
 
@@ -369,30 +434,39 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     let map: MapLibreMap | null = null;
     const recast = () => {
       if (!map) return;
-      recastPreviewCamera(map, deltaRef, suppress);
+      recastPreviewCamera(
+        map,
+        deltaRef,
+        suppress,
+        minZoomRef.current,
+        cameraRef.current.zoom,
+        authoredWidthRef.current
+      );
     };
     const ro = new ResizeObserver(() => recast());
     const onPointerUp = () => {
       if (!map || suppress.current || previewingRef.current) return;
-      callbacks.current.onCameraCommit(readCamera(map));
+      callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
     };
 
     void resolveOpenFreeMapStyle(styleId).then((style) => {
       if (cancelled) return;
-      const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / WALL_W) : 0;
+      const zMin = minZoomRef.current;
+      const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / authoredWidthRef.current) : 0;
       deltaRef.current = d0;
       map = new MapLibreMap({
         container: hostEl,
         style,
         center: [camera.lon, camera.lat],
-        zoom: mapZoomOf(camera.zoom, d0),
+        zoom: mapZoomOf(camera.zoom, d0, zMin),
         bearing: camera.bearing,
         pitch: camera.pitch,
         renderWorldCopies: true,
+        transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
         doubleClickZoom: false,
         boxZoom: false,
-        minZoom: WORLD_MIN_ZOOM + d0,
-        maxZoom: 22 + d0,
+        minZoom: ML_MIN_ZOOM,
+        maxZoom: ML_MAX_ZOOM,
         attributionControl: { compact: true },
         transformRequest: (url) => mapsTransformRequest(url),
         canvasContextAttributes: { preserveDrawingBuffer: true },
@@ -414,21 +488,29 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
       function paintOverlays() {
         if (!map) return;
-        ensureLowZoomRaster(map, overlay.current.styleId);
-        applyLayerFilters(map, overlay.current.hiddenLayers);
+        const currentMap = map;
+        const generation = ++overlayGeneration.current;
+        styleReady.current = false;
+        ensureLowZoomRaster(currentMap, overlay.current.styleId);
+        applyLayerFilters(currentMap, overlay.current.hiddenLayers);
         void addOverlays(
-          map,
+          currentMap,
           overlay.current.highlights,
           overlay.current.churches,
           overlay.current.selectedPinId,
           overlay.current.styleId,
           overlay.current.numberPins
-        );
+        ).then(() => {
+          if (mapRef.current === currentMap && overlayGeneration.current === generation) {
+            styleReady.current = true;
+            currentMap.triggerRepaint();
+          }
+        });
       }
 
       function commitCamera() {
         if (!map || suppress.current || previewingRef.current) return;
-        callbacks.current.onCameraCommit(readCamera(map));
+        callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
       }
 
       map.on("error", (event) => {
@@ -437,17 +519,23 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       });
       map.on("load", () => {
         probeTex();
-        map?.resize();
-        if (map) {
-          const d = applyPreviewZoomLimits(map);
-          deltaRef.current = d;
-          suppress.current = true;
-          map.jumpTo(cameraView(map, cameraRef.current, d));
-          map.once("moveend", () => {
-            suppress.current = false;
-          });
-          ensureLowZoomRaster(map, overlay.current.styleId);
-          applyLayerFilters(map, overlay.current.hiddenLayers);
+        try {
+          map?.resize();
+          if (map) {
+            const zMin = minZoomRef.current;
+            const d = applyPreviewZoomLimits(map, zMin, previewZoomDelta(map, authoredWidthRef.current));
+            deltaRef.current = d;
+            suppress.current = true;
+            map.jumpTo(cameraView(map, cameraRef.current, d, zMin));
+            map.once("moveend", () => {
+              suppress.current = false;
+            });
+            ensureLowZoomRaster(map, overlay.current.styleId);
+            applyLayerFilters(map, overlay.current.hiddenLayers);
+          }
+        } catch (err) {
+          suppress.current = false;
+          console.warn("maplibre load", err);
         }
         void loadAdmin0().then(() => {
           if (mapRef.current === map) paintOverlays();
@@ -480,7 +568,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           return;
         }
         callbacks.current.onSelectPin(null);
-        if (authoredZoomOf(map) >= COUNTRY_PICK_MAX_ZOOM) return;
+        if (authoredZoomOf(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
         if (!map.getLayer("admin0-fill")) return;
         const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
         const code = String(hits[0]?.properties?.ADM0_A3 || "");
@@ -515,6 +603,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const url = OPENFREEMAP_STYLES[styleId];
     if (styleUrl.current === url) return;
     styleUrl.current = url;
+    styleReady.current = false;
     void resolveOpenFreeMapStyle(styleId).then((style) => {
       if (mapRef.current !== map || styleUrl.current !== url) return;
       map.setStyle(style, { diff: false });
@@ -529,6 +618,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   useEffect(() => {
     const map = mapRef.current;
     if (!map?.getSource("churches")) return;
+    ensureDropPinImages(map, churches);
     (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins));
   }, [churches, selectedPinId, numberPins]);
 
@@ -541,8 +631,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    recastPreviewCamera(map, deltaRef, suppress);
-  }, [crop, sidePanels]);
+    recastPreviewCamera(
+      map,
+      deltaRef,
+      suppress,
+      minZoomRef.current,
+      cameraRef.current.zoom,
+      authoredWidthRef.current
+    );
+  }, [crop, authoredWidth]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -575,7 +672,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   function onCgPointerMove(event: React.PointerEvent<HTMLElement>) {
     const drag = cgDrag.current;
     if (!drag) return;
-    const dx = ((event.clientX - drag.x) * WALL_W) / drag.width;
+    const dx = ((event.clientX - drag.x) * authoredWidthRef.current) / drag.width;
     callbacks.current.onCgShift(drag.shift + dx);
   }
 
@@ -586,29 +683,37 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     cgDrag.current = null;
   }
 
-  const cgLeft = ((CG_ORIGIN + cgShiftX) / WALL_W) * 100;
-  const cgWidth = (CG_W / WALL_W) * 100;
-  const wing = (FW_W / WALL_W) * 100;
+  const wrapWarn = worldCopyWarning(camera.zoom);
+  const splitCg = authoredWidth <= CG_W;
+  const fullWall = sidePanels && !splitCg;
+  const surfaceWidth = splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
+  const surfaceOrigin = fullWall ? 0 : CG_ORIGIN - CG_W / 2;
+  const cgLeft = ((CG_ORIGIN + cgShiftX - surfaceOrigin) / surfaceWidth) * 100;
+  const cgWidth = (CG_W / surfaceWidth) * 100;
+  const surfaceClass = splitCg ? "surface-cg" : fullWall ? "show-fw" : "center-only";
 
   return (
-    <div className={`maps-map-frame ${sidePanels ? "show-fw" : "center-only"}`}>
+    <div
+      className={`maps-map-frame ${surfaceClass}`}
+      style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
+    >
       <div className="maps-map-host" ref={host} />
       <div className="maps-nav-margin top" />
       <div className="maps-nav-margin bottom" />
       <div className="maps-export-band">
         <div className="maps-crop-overlay">
-          {sidePanels ? (
+          {splitCg ? (
+            <div className="maps-crop-frame cg">
+              <span className="maps-crop-cg-label">CG</span>
+            </div>
+          ) : fullWall ? (
             <div className="maps-crop-frame fw">
               <span className="maps-crop-fw-label">FW</span>
             </div>
           ) : (
-            <>
-              <div className="maps-crop-wing left" style={{ width: `${wing}%` }} />
-              <div className="maps-crop-wing right" style={{ width: `${wing}%` }} />
-              <div className="maps-crop-frame center" style={{ left: `${wing}%`, width: `${100 - wing * 2}%` }} />
-            </>
+            <div className="maps-crop-frame center" style={{ inset: 0 }} />
           )}
-          {exportCg && (
+          {exportCg && !splitCg && (
             <div
               className="maps-crop-cg"
               style={{ left: `${cgLeft}%`, width: `${cgWidth}%` }}
@@ -622,6 +727,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           )}
         </div>
       </div>
+      {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}
     </div>
   );

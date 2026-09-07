@@ -31,7 +31,12 @@ WALL_WIDTH = 7680
 WALL_HEIGHT = 1080
 CENTRE_WIDTH = 3840
 CENTRE_ORIGIN_X = 1920
+CG_WIDTH = 1920
+# Wrap floors, not OSM: one world is 512 * 2^z px. Below the floor for a capture
+# width, world copies tile. FW 7680 ≈ 3.91; LW 3840 ≈ 2.91; CG 1920 ≈ 1.91.
 WORLD_MIN_ZOOM = math.log2(WALL_WIDTH / TILE_SIZE)
+CENTRE_MIN_ZOOM = math.log2(CENTRE_WIDTH / TILE_SIZE)
+CG_MIN_ZOOM = math.log2(CG_WIDTH / TILE_SIZE)
 MAX_LAT = 85.051129
 DEFAULT_POINT_ZOOM = 8
 
@@ -83,19 +88,30 @@ def clamp_lon(lon: float) -> float:
     return lon
 
 
-def clamp_zoom(zoom: float) -> float:
-    return max(WORLD_MIN_ZOOM, min(22.0, float(zoom)))
+def min_zoom_for_width(width: float) -> float:
+    return math.log2(max(float(width), 1.0) / TILE_SIZE)
+
+
+def clamp_zoom(zoom: float, min_zoom: float = 0.0) -> float:
+    return max(float(min_zoom), min(22.0, float(zoom)))
 
 
 def world_width(zoom: float) -> float:
     return TILE_SIZE * (2 ** float(zoom))
 
 
-def camera_dict(lat: float, lon: float, zoom: float, bearing: float = 0.0, pitch: float = 0.0) -> dict[str, float]:
+def camera_dict(
+    lat: float,
+    lon: float,
+    zoom: float,
+    bearing: float = 0.0,
+    pitch: float = 0.0,
+    min_zoom: float = 0.0,
+) -> dict[str, float]:
     return {
         "lat": clamp_lat(lat),
         "lon": clamp_lon(lon),
-        "zoom": clamp_zoom(zoom),
+        "zoom": clamp_zoom(zoom, min_zoom),
         "bearing": float(bearing),
         "pitch": float(pitch),
     }
@@ -119,7 +135,7 @@ def inverse_mercator_y(y: float) -> float:
 
 def camera_from_bbox(
     bbox: dict[str, float],
-    width: int = WALL_WIDTH,
+    width: int = CG_WIDTH,
     height: int = WALL_HEIGHT,
 ) -> dict[str, float]:
     west = float(bbox["west"])
@@ -128,14 +144,17 @@ def camera_from_bbox(
     north = float(bbox["north"])
     if east < west:
         east += 360.0
-    span = abs(mercator_y(south) - mercator_y(north))
-    if span <= 0:
-        z_height = WORLD_MIN_ZOOM
+    span_y = abs(mercator_y(south) - mercator_y(north))
+    span_x = abs(east - west) / 360.0
+    if span_y <= 0:
+        z_height = 22.0
     else:
-        z_height = math.log2(height / (TILE_SIZE * span))
-    # Height-contain, but never zoom below WORLD_MIN_ZOOM. The wall is 7680px;
-    # below that zoom a wrapped world tiles and pins/highlights repeat.
-    zoom = max(z_height, WORLD_MIN_ZOOM)
+        z_height = math.log2(height / (TILE_SIZE * span_y))
+    if span_x <= 0:
+        z_width = 22.0
+    else:
+        z_width = math.log2(width / (TILE_SIZE * span_x))
+    zoom = min(z_height, z_width)
     lon = clamp_lon((west + east) / 2.0)
     lat = inverse_mercator_y((mercator_y(north) + mercator_y(south)) / 2.0)
     return camera_dict(lat, lon, zoom)
@@ -180,15 +199,18 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     from_cam = from_slide.get("camera") or {}
     to_cam = to_slide.get("camera") or {}
     pitch = max(abs(float(from_cam.get("pitch") or 0)), abs(float(to_cam.get("pitch") or 0)))
-    bearing = max(abs(float(from_cam.get("bearing") or 0)), abs(float(to_cam.get("bearing") or 0)))
+    from_bearing = float(from_cam.get("bearing") or 0)
+    to_bearing = float(to_cam.get("bearing") or 0)
+    d_bearing = abs((to_bearing - from_bearing + 180.0) % 360.0 - 180.0)
     d_zoom = abs(float(from_cam.get("zoom") or 0) - float(to_cam.get("zoom") or 0))
-    if from_style == "buildings3d" or to_style == "buildings3d" or pitch > 0.5 or bearing > 0.5 or d_zoom > 1:
+    if from_style == "buildings3d" or to_style == "buildings3d" or pitch > 0.5 or d_bearing > 0.05 or d_zoom > 2:
         return "movie"
     return "morph"
 
 
 def sea_overview_camera() -> dict[str, float]:
-    return camera_from_bbox(SEA_OVERVIEW_BBOX, WALL_WIDTH, WALL_HEIGHT)
+    """Frame SEA inside the 1920×1080 CG window (centre+cg crop)."""
+    return camera_from_bbox(SEA_OVERVIEW_BBOX, CG_WIDTH, WALL_HEIGHT)
 
 
 def load_admin0() -> dict[str, Any]:

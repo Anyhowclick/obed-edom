@@ -4,6 +4,7 @@ export function MapsResultView({ job, onOpen }: { job: Job; onOpen: (src: string
   const result = (job.result || {}) as {
     destPath?: string;
     destPathCg?: string;
+    destPathDsk?: string;
     previewFiles?: { maps?: string[] };
     slides?: { id: string; title: string; stillPng?: string }[];
   };
@@ -22,6 +23,14 @@ export function MapsResultView({ job, onOpen }: { job: Job; onOpen: (src: string
         <p className="note path-note">
           CG: {result.destPathCg}{" "}
           <button className="btn secondary" type="button" onClick={() => void reveal(result.destPathCg!)}>
+            Reveal
+          </button>
+        </p>
+      )}
+      {result.destPathDsk && (
+        <p className="note path-note">
+          DSK: {result.destPathDsk}{" "}
+          <button className="btn secondary" type="button" onClick={() => void reveal(result.destPathDsk!)}>
             Reveal
           </button>
         </p>

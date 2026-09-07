@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getSettings, putSettings, type Settings } from "../api";
+import { ErrorNotice } from "../components/ErrorNotice";
 
 export function SettingsTab() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -34,7 +35,7 @@ export function SettingsTab() {
         again. Turn either off, or raise the match threshold, if a re-export should always start
         fresh.
       </p>
-      {error && <p className="err">{error}</p>}
+      <ErrorNotice message={error} onDismiss={() => setError(null)} />
       {!settings ? (
         <p className="muted">Loading…</p>
       ) : (

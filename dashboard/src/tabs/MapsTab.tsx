@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   bootstrapMapsCsv,
+  bootstrapMapsPinsCsv,
+  downloadMapsSession,
   exportMaps,
+  cancelMapsExport,
   fetchMapsExportPlan,
   geocodeMaps,
   listJobs,
+  loadMapsSession,
   pollJob,
   postMapsFrame,
   postMapsPng,
@@ -14,6 +18,7 @@ import {
   startMaps,
   type Job,
 } from "../api";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { LoadingOverlay } from "../components/PreviewGrid";
 import { useRunNav } from "../nav";
 import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
@@ -34,15 +39,20 @@ import {
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
-  WORLD_MIN_ZOOM,
+  authoredSurfaceWidth,
   captureWidth,
+  slideForAudience,
   clampCgShift,
+  clampZoom,
   coerceHopKinds,
   documentFromResult,
+  minZoomForView,
+  worldCopyWarning,
   nextPinId,
   nextSlideId,
   suggestedHopKind,
   type MapsCamera,
+  type MapsAudience,
   type MapsChurch,
   type MapsDocument,
   type MapsEasing,
@@ -55,8 +65,8 @@ import {
 } from "../maps/types";
 
 const HOP_TIPS: Record<MapsHopKind, string> = {
-  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, no 3D, zoom change ≤ 1. Region highlights must match; panning off-screen is fine.",
-  movie: "Movie: rendered fly when pitch, bearing, 3D buildings, or a zoom jump > 1. Three phases: zoom out, move, zoom in.",
+  morph: "Magic Move: Keynote pan/zoom of a shared plate. Same map style, same bearing, no 3D, zoom change ≤ 2. Region highlights must match; panning off-screen is fine.",
+  movie: "Movie: rendered fly when pitch, bearing changes, 3D buildings, or the shared plate is too large. Use any combination of zoom out, move, and zoom in.",
   dissolve: "Dissolve: Keynote crossfade of the two stills, using the duration below.",
   cut: "Cut: instant switch. No Keynote transition.",
 };
@@ -118,6 +128,16 @@ function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
     id,
     churches: [],
     stillPng: undefined,
+    cg: slide.cg
+      ? {
+          ...slide.cg,
+          camera: { ...slide.cg.camera },
+          highlights: [...slide.cg.highlights],
+          churches: [],
+          stillPng: undefined,
+          movieMov: undefined,
+        }
+      : undefined,
     cgShiftX: slide.cgShiftX,
     cgShiftY: 0,
     includeSidePanels: slide.includeSidePanels === true,
@@ -135,22 +155,35 @@ export function MapsTab() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeAudience, setActiveAudience] = useState<MapsAudience>("lw");
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
+  const [selectedPins, setSelectedPins] = useState<string[]>([]);
+  const [renamingSlide, setRenamingSlide] = useState<{ id: string; title: string } | null>(null);
   const [inspTab, setInspTab] = useState<InspectorTab>("properties");
   const [previewing, setPreviewing] = useState(false);
+  const [previewView, setPreviewView] = useState<MapsSlide | null>(null);
+  const [dissolveFrame, setDissolveFrame] = useState<{ url: string; fading: boolean; duration: number } | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [sessionBusy, setSessionBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const mapRef = useRef<MapViewHandle | null>(null);
   const jobRef = useRef<Job | null>(null);
   const docRef = useRef<MapsDocument | null>(null);
   const activeRef = useRef<string | null>(null);
+  const activeAudienceRef = useRef<MapsAudience>("lw");
   const previewingRef = useRef(false);
   const exportingRef = useRef(false);
   const previewAbort = useRef(false);
+  const previewRun = useRef(0);
+  const exportAbort = useRef(false);
   const saveTimer = useRef<number | null>(null);
+  const saveInFlight = useRef<Promise<Job> | null>(null);
+  const cachePrefetches = useRef<Set<Promise<void>>>(new Set());
   const csvInput = useRef<HTMLInputElement | null>(null);
-  const csvMode = useRef<"append" | "replace">("append");
+  const csvMode = useRef<"append" | "replace" | "pins">("append");
+  const sessionInput = useRef<HTMLInputElement | null>(null);
   const savedCamera = useRef<MapsCamera | null>(null);
+  const dissolveUrl = useRef<string | null>(null);
   const [navW, setNavW] = useState(() => {
     const raw = Number(window.localStorage.getItem("obed-edom.maps.navW"));
     return Number.isFinite(raw) && raw >= 160 ? Math.min(420, raw) : 220;
@@ -160,6 +193,8 @@ export function MapsTab() {
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
   const [layersOpen, setLayersOpen] = useState(false);
   const layersRef = useRef<HTMLDivElement | null>(null);
+  const [deckActionsOpen, setDeckActionsOpen] = useState(false);
+  const deckActionsRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
 
   useEffect(() => {
@@ -170,10 +205,21 @@ export function MapsTab() {
   jobRef.current = job;
   docRef.current = doc;
   activeRef.current = activeId;
+  activeAudienceRef.current = activeAudience;
   previewingRef.current = previewing;
 
   const slides = doc?.slides || [];
   const active = slides.find((s) => s.id === activeId) || slides[0] || null;
+  const activeView = active ? slideForAudience(active, activeAudience) : null;
+  const renderedView = previewView || activeView;
+  const renderedAuthoredWidth = previewView
+    ? authoredSurfaceWidth(previewView, activeAudience)
+    : activeAudience === "cg" && active?.cg
+      ? 1920
+      : sidePanels
+        ? 7680
+        : 3840;
+  const renderedSidePanels = previewView ? previewView.includeSidePanels === true : sidePanels;
   const activeIndex = active ? slides.findIndex((s) => s.id === active.id) : -1;
   const outgoing = useMemo(() => {
     if (!doc || !active || activeIndex < 0 || activeIndex >= slides.length - 1) return null;
@@ -215,8 +261,20 @@ export function MapsTab() {
   }, [slides, activeId]);
 
   useEffect(() => {
+    if (activeAudience === "cg" && !active?.cg) {
+      activeAudienceRef.current = "lw";
+      setActiveAudience("lw");
+    }
+  }, [active, activeAudience]);
+
+  useEffect(() => {
+    setSelectedPins([]);
+  }, [activeId, activeAudience]);
+
+  useEffect(() => {
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      if (dissolveUrl.current) URL.revokeObjectURL(dissolveUrl.current);
       void flushAndSave(true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -224,7 +282,7 @@ export function MapsTab() {
 
   useEffect(() => {
     mapRef.current?.resize();
-  }, [sidePanels, inspectorOpen, navW]);
+  }, [inspectorOpen, navW]);
 
   useEffect(() => {
     if (!layersOpen) return;
@@ -242,7 +300,23 @@ export function MapsTab() {
     };
   }, [layersOpen]);
 
-  const locked = job?.status === "queued" || job?.status === "running" || previewing || exporting;
+  useEffect(() => {
+    if (!deckActionsOpen) return;
+    function onDoc(event: PointerEvent) {
+      if (deckActionsRef.current && !deckActionsRef.current.contains(event.target as Node)) setDeckActionsOpen(false);
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setDeckActionsOpen(false);
+    }
+    document.addEventListener("pointerdown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [deckActionsOpen]);
+
+  const locked = job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy;
 
   function onNavResizeStart(event: React.PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -303,15 +377,36 @@ export function MapsTab() {
     const run = () => {
       saveTimer.current = null;
       if (jobRef.current?.id !== scheduledId) return;
-      void saveMapsState(scheduledId, coerceHopKinds(docRef.current || next))
+      const request = saveMapsState(scheduledId, coerceHopKinds(docRef.current || next));
+      saveInFlight.current = request;
+      void request
         .then((updated) => {
           if (jobRef.current?.id !== scheduledId) return;
           mergeServerMeta(updated);
         })
-        .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+        .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+        .finally(() => {
+          if (saveInFlight.current === request) saveInFlight.current = null;
+        });
     };
     if (immediate) run();
     else saveTimer.current = window.setTimeout(run, 500);
+  }
+
+  async function persistCurrentState() {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (saveInFlight.current) await saveInFlight.current;
+    const currentJob = jobRef.current;
+    if (!currentJob || !docRef.current) return;
+    const slideId = activeRef.current;
+    if (slideId) writeCameraInto(slideId);
+    const current = docRef.current;
+    if (!current) return;
+    const updated = await saveMapsState(currentJob.id, coerceHopKinds(current));
+    mergeServerMeta(updated);
   }
 
   function writeCameraInto(slideId: string): MapsDocument | null {
@@ -319,24 +414,32 @@ export function MapsTab() {
     if (!current) return null;
     const cam = mapRef.current?.getCamera();
     if (!cam) return current;
-    const slidesNext = current.slides.map((slide) => (slide.id === slideId ? { ...slide, camera: cam } : slide));
+    const slidesNext = current.slides.map((slide) => {
+      if (slide.id !== slideId) return slide;
+      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera: cam } } : { ...slide, camera: cam };
+    });
     return applyLocalDoc({ ...current, slides: slidesNext }) ?? current;
   }
 
   async function captureThumb(slideId: string) {
     const currentJob = jobRef.current;
     if (!currentJob) return;
+    const audience = activeAudienceRef.current;
     const blob = await mapRef.current?.captureBlob();
     if (!blob) return;
     const stamped = await stampOsm(blob);
-    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId });
-    const still = (updated.result?.slides as Array<{ id?: string; stillPng?: string }> | undefined)?.find((s) => s.id === slideId)?.stillPng;
+    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience });
+    const stored = (updated.result?.slides as Array<{ id?: string; stillPng?: string; cg?: { stillPng?: string } }> | undefined)?.find((s) => s.id === slideId);
+    const still = audience === "cg" ? stored?.cg?.stillPng : stored?.stillPng;
     const local = docRef.current;
     if (!local || !still) return;
     const files = (updated.result?.previewFiles as { maps?: string[] } | undefined) || {};
     const next = {
       ...local,
-      slides: local.slides.map((slide) => (slide.id === slideId ? { ...slide, stillPng: still } : slide)),
+      slides: local.slides.map((slide) => {
+        if (slide.id !== slideId) return slide;
+        return audience === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, stillPng: still } } : { ...slide, stillPng: still };
+      }),
     };
     docRef.current = next;
     setJob({
@@ -354,8 +457,11 @@ export function MapsTab() {
     if (next && jobRef.current) scheduleSave(next, immediate);
   }
 
-  async function selectSlide(nextId: string, opts?: { flush?: boolean }) {
-    if (nextId === activeRef.current) return;
+  async function selectSlide(nextId: string, opts?: { flush?: boolean; audience?: MapsAudience }) {
+    const target = docRef.current?.slides.find((slide) => slide.id === nextId);
+    const requestedAudience = opts?.audience ?? activeAudienceRef.current;
+    const nextAudience: MapsAudience = requestedAudience === "cg" && target?.cg ? "cg" : "lw";
+    if (nextId === activeRef.current && nextAudience === activeAudienceRef.current) return;
     if (previewingRef.current) stopPreview(true);
     const prev = activeRef.current;
     if (prev && opts?.flush !== false) {
@@ -363,32 +469,45 @@ export function MapsTab() {
       await captureThumb(prev);
       if (next && jobRef.current) scheduleSave(docRef.current || next, true);
     }
+    activeRef.current = nextId;
+    activeAudienceRef.current = nextAudience;
     setActiveId(nextId);
+    setActiveAudience(nextAudience);
     setSelectedPin(null);
-    const slide = docRef.current?.slides.find((s) => s.id === nextId);
-    if (slide) mapRef.current?.jumpTo(slide.camera);
+    setSelectedPins([]);
+    if (target) mapRef.current?.jumpTo(slideForAudience(target, nextAudience).camera);
   }
 
   async function createDeck() {
     setError(null);
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    clearOpenRun();
-    const created = await startMaps();
-    setJob(created);
-    const done = await pollJob(created.id, (tick) => {
-      setLogs(tick.logs);
-      setJob(tick);
-    });
-    setJob(done);
-    const next = documentFromResult(done.result);
-    setActiveId(next?.slides[0]?.id || null);
+    try {
+      await persistCurrentState();
+      clearOpenRun();
+      setSelectedPin(null);
+      setSelectedPins([]);
+      setRenamingSlide(null);
+      const created = await startMaps();
+      setJob(created);
+      const done = await pollJob(created.id, (tick) => {
+        setLogs(tick.logs);
+        setJob(tick);
+      });
+      setJob(done);
+      const next = documentFromResult(done.result);
+      setActiveId(next?.slides[0]?.id || null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function onCameraCommit(camera: MapsCamera) {
     const current = docRef.current;
     const id = activeRef.current;
     if (!current || !id || previewingRef.current) return;
-    const slidesNext = current.slides.map((slide) => (slide.id === id ? { ...slide, camera } : slide));
+    const slidesNext = current.slides.map((slide) => {
+      if (slide.id !== id) return slide;
+      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera } } : { ...slide, camera };
+    });
     patchDoc({ ...current, slides: slidesNext });
   }
 
@@ -398,13 +517,51 @@ export function MapsTab() {
     if (!current || !id) return;
     patchDoc({
       ...current,
-      slides: current.slides.map((slide) => (slide.id === id ? { ...slide, ...partial } : slide)),
+      slides: current.slides.map((slide) => {
+        if (slide.id !== id) return slide;
+        if (activeAudienceRef.current === "cg" && slide.cg) {
+          const { cg, cgShiftX, cgShiftY, includeSidePanels, id: _id, title, ...render } = partial;
+          return { ...slide, ...(title === undefined ? {} : { title }), cg: { ...slide.cg, ...render } };
+        }
+        return { ...slide, ...partial };
+      }),
     });
+  }
+
+  function splitCg() {
+    if (!active) return;
+    const source = slideForAudience(active, "lw");
+    const camera = mapRef.current?.getCgCamera(active.cgShiftX) || { ...source.camera };
+    updateActive({
+      cg: {
+        camera,
+        style: source.style,
+        highlights: [...source.highlights],
+        churches: source.churches.map((church) => ({ ...church })),
+      },
+    });
+    activeAudienceRef.current = "cg";
+    setActiveAudience("cg");
+    requestAnimationFrame(() => mapRef.current?.jumpTo(camera));
+  }
+
+  function mergeCg() {
+    if (!active) return;
+    const current = docRef.current;
+    if (!current) return;
+    patchDoc({ ...current, slides: current.slides.map((slide) => (slide.id === active.id ? { ...slide, cg: undefined } : slide)) });
+    activeAudienceRef.current = "lw";
+    setActiveAudience("lw");
+    requestAnimationFrame(() => mapRef.current?.jumpTo(active.camera));
   }
 
   function setDeckStyle(style: MapsStyleId) {
     const current = docRef.current;
     if (!current) return;
+    if (activeAudienceRef.current === "cg" && active?.cg) {
+      updateActive({ style });
+      return;
+    }
     patchDoc({
       ...current,
       defaultStyle: style,
@@ -429,13 +586,17 @@ export function MapsTab() {
     patchDoc({ ...current, cachedCountries: nextSelected });
     const adding = nextSelected.some((item) => item.toUpperCase() === code.toUpperCase());
     if (!adding) return;
-    void prefetchMapsTiles({ countries: [code], maxzoom: 8 })
+    const prefetch: Promise<void> = prefetchMapsTiles({ countries: [code], maxzoom: 8 })
       .then((stats) => {
         setLogs((prev) => [...prev, `Cached ${code}: ${stats.cached + stats.fetched} tiles.`]);
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        cachePrefetches.current.delete(prefetch);
       });
+    cachePrefetches.current.add(prefetch);
   }
 
   function addSlide() {
@@ -481,8 +642,14 @@ export function MapsTab() {
     const links = restitch(slidesNext, current.links);
     const fallback = slidesNext[Math.max(0, activeIndex - 1)] || slidesNext[0];
     patchDoc({ ...current, slides: slidesNext, links });
+    const audience: MapsAudience = activeAudienceRef.current === "cg" && fallback.cg ? "cg" : "lw";
+    activeRef.current = fallback.id;
+    activeAudienceRef.current = audience;
     setActiveId(fallback.id);
-    mapRef.current?.jumpTo(fallback.camera);
+    setActiveAudience(audience);
+    setSelectedPin(null);
+    setSelectedPins([]);
+    mapRef.current?.jumpTo(slideForAudience(fallback, audience).camera);
   }
 
   function setHop(partial: Partial<MapsLink>, opts?: { dropRoute?: boolean; resetFly?: boolean; dropFlyZoom?: boolean }) {
@@ -516,6 +683,74 @@ export function MapsTab() {
     setInspTab("properties");
   }
 
+  function beginSlideRename(slide: MapsSlide) {
+    if (!locked) setRenamingSlide({ id: slide.id, title: slide.title });
+  }
+
+  function commitSlideRename() {
+    const pending = renamingSlide;
+    setRenamingSlide(null);
+    if (!pending || locked) return;
+    const nextTitle = pending.title.trim();
+    if (!nextTitle) return;
+    const current = docRef.current;
+    if (!current) return;
+    const existing = current.slides.find((slide) => slide.id === pending.id);
+    if (!existing || existing.title === nextTitle) return;
+    patchDoc({ ...current, slides: current.slides.map((slide) => (slide.id === pending.id ? { ...slide, title: nextTitle } : slide)) });
+  }
+
+  function slideTitleControl(slide: MapsSlide) {
+    if (renamingSlide?.id === slide.id) {
+      return (
+        <input
+          className="maps-thumb-title-input"
+          value={renamingSlide.title}
+          aria-label={`Slide title for ${slide.title}`}
+          autoFocus
+          disabled={locked}
+          onChange={(event) => setRenamingSlide((pending) => (pending?.id === slide.id ? { ...pending, title: event.target.value } : pending))}
+          onBlur={commitSlideRename}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") setRenamingSlide(null);
+          }}
+        />
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="maps-thumb-label maps-thumb-title"
+        disabled={locked}
+        title="Rename slide"
+        aria-label={`Rename slide ${slide.title}`}
+        onClick={() => beginSlideRename(slide)}
+      >
+        {slide.title}
+      </button>
+    );
+  }
+
+  function togglePinSelection(id: string, checked: boolean) {
+    setSelectedPins((ids) => (checked ? [...new Set([...ids, id])] : ids.filter((item) => item !== id)));
+  }
+
+  function updateSelectedPins(partial: Partial<MapsChurch>) {
+    if (!activeView || selectedPins.length === 0) return;
+    const selected = new Set(selectedPins);
+    updateActive({ churches: activeView.churches.map((church) => (selected.has(church.id) ? { ...church, ...partial } : church)) });
+  }
+
+  function deleteSelectedPins() {
+    if (!activeView || selectedPins.length === 0 || locked) return;
+    if (!window.confirm(`Remove ${selectedPins.length} selected pin${selectedPins.length === 1 ? "" : "s"}?`)) return;
+    const selected = new Set(selectedPins);
+    updateActive({ churches: activeView.churches.filter((church) => !selected.has(church.id)) });
+    if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
+    setSelectedPins([]);
+  }
+
   async function search() {
     const q = query.trim();
     if (!q) return;
@@ -529,26 +764,79 @@ export function MapsTab() {
     }
   }
 
+  function clearDissolveFrame(ownerUrl?: string) {
+    if (ownerUrl && dissolveUrl.current !== ownerUrl) {
+      URL.revokeObjectURL(ownerUrl);
+      return;
+    }
+    if (dissolveUrl.current) URL.revokeObjectURL(dissolveUrl.current);
+    dissolveUrl.current = null;
+    setDissolveFrame(null);
+  }
+
+  async function applyPreviewView(view: MapsSlide, run = previewRun.current) {
+    setPreviewView(view);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    if (previewAbort.current || previewRun.current !== run) return;
+    mapRef.current?.jumpTo(view.camera);
+    await new Promise((resolve) => window.setTimeout(resolve, 75));
+    if (!previewAbort.current && previewRun.current === run) await mapRef.current?.waitUntilIdle(view.style);
+    if (activeAudienceRef.current !== "cg" || view.cg || previewAbort.current || previewRun.current !== run) return;
+    const camera = mapRef.current?.getCgCamera(view.cgShiftX);
+    if (!camera) return;
+    setPreviewView({
+      ...view,
+      camera,
+      cg: { camera, style: view.style, highlights: view.highlights, churches: view.churches },
+    });
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    if (previewAbort.current || previewRun.current !== run) return;
+    mapRef.current?.jumpTo(camera);
+    await new Promise((resolve) => window.setTimeout(resolve, 75));
+    if (!previewAbort.current && previewRun.current === run) await mapRef.current?.waitUntilIdle(view.style);
+  }
+
   async function previewLink(link: MapsLink, from: MapsSlide, to: MapsSlide) {
-    if (link.kind === "cut" || link.kind === "dissolve") {
-      await new Promise((r) => setTimeout(r, link.duration * 1000));
-      if (!previewAbort.current) mapRef.current?.jumpTo(to.camera);
+    const run = previewRun.current;
+    const audience = activeAudienceRef.current;
+    const fromView = slideForAudience(from, audience);
+    const toView = slideForAudience(to, audience);
+    if (link.kind === "cut") {
+      await applyPreviewView(toView, run);
+      return;
+    }
+    if (link.kind === "dissolve") {
+      const blob = await mapRef.current?.capturePreviewBlob();
+      if (!blob || previewAbort.current || previewRun.current !== run) return;
+      clearDissolveFrame();
+      const url = URL.createObjectURL(blob);
+      dissolveUrl.current = url;
+      setDissolveFrame({ url, fading: false, duration: link.duration });
+      await applyPreviewView(toView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      setDissolveFrame({ url, fading: true, duration: link.duration });
+      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, link.duration * 1000)));
+      clearDissolveFrame(url);
       return;
     }
     if (link.kind === "movie") {
       await mapRef.current?.animateHop({
-        from: from.camera,
-        to: to.camera,
+        from: fromView.camera,
+        to: toView.camera,
         durationMs: link.duration * 1000,
         easing: link.easing,
         routePoints: link.route?.points,
         flyZoom: link.flyZoom,
         easeIn: link.easeIn,
         easeOut: link.easeOut,
+        width: Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience)),
       });
+      if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
       return;
     }
-    await mapRef.current?.easeTo(to.camera, link.duration * 1000);
+    await mapRef.current?.easeTo(toView.camera, link.duration * 1000);
+    if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
   }
 
   async function playHop(fromIndex: number, restore: boolean) {
@@ -558,6 +846,7 @@ export function MapsTab() {
     const to = current.slides[fromIndex + 1];
     const link = linkBetween(current.links, from.id, to.id);
     if (!link) return;
+    previewRun.current += 1;
     previewAbort.current = false;
     savedCamera.current = mapRef.current?.getCamera() || from.camera;
     setPreviewing(true);
@@ -568,9 +857,12 @@ export function MapsTab() {
   }
 
   function stopPreview(restore: boolean) {
+    previewRun.current += 1;
     previewAbort.current = true;
     mapRef.current?.stop();
     setPreviewing(false);
+    setPreviewView(null);
+    clearDissolveFrame();
     if (restore && savedCamera.current) mapRef.current?.jumpTo(savedCamera.current);
     savedCamera.current = null;
   }
@@ -578,6 +870,7 @@ export function MapsTab() {
   async function playFromHere() {
     const current = docRef.current;
     if (!current || activeIndex < 0 || exportingRef.current) return;
+    previewRun.current += 1;
     previewAbort.current = false;
     savedCamera.current = mapRef.current?.getCamera() || current.slides[activeIndex].camera;
     setPreviewing(true);
@@ -593,14 +886,23 @@ export function MapsTab() {
     setPreviewing(false);
     savedCamera.current = null;
     const last = current.slides[current.slides.length - 1];
-    await selectSlide(last.id, { flush: false });
+    setPreviewView(null);
+    await selectSlide(last.id, { flush: false, audience: activeAudienceRef.current });
   }
 
-  async function onCsv(file: File, replace: boolean) {
+  async function onCsv(file: File, mode: "append" | "replace" | "pins") {
     if (!job) return;
     setError(null);
+    if (mode !== "append") {
+      setSelectedPin(null);
+      setSelectedPins([]);
+      setRenamingSlide(null);
+    }
     try {
-      const started = await bootstrapMapsCsv(job.id, file, replace);
+      await persistCurrentState();
+      const started = mode === "pins" && active
+        ? await bootstrapMapsPinsCsv(job.id, file, active.id, activeAudience)
+        : await bootstrapMapsCsv(job.id, file, mode === "replace");
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
         setLogs(tick.logs);
@@ -612,27 +914,107 @@ export function MapsTab() {
     }
   }
 
+  async function saveSession() {
+    const currentJob = jobRef.current;
+    if (!currentJob || sessionBusy) return;
+    setError(null);
+    setSessionBusy(true);
+    try {
+      await Promise.all([...cachePrefetches.current]);
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (saveInFlight.current) await saveInFlight.current;
+      const slideId = activeRef.current;
+      if (slideId) {
+        writeCameraInto(slideId);
+        await captureThumb(slideId);
+      }
+      const current = docRef.current;
+      if (current) {
+        const updated = await saveMapsState(currentJob.id, coerceHopKinds(current));
+        mergeServerMeta(updated);
+      }
+      const { blob, filename } = await downloadMapsSession(currentJob.id);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function loadSession(file: File) {
+    if (sessionBusy) return;
+    setError(null);
+    setSessionBusy(true);
+    try {
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (saveInFlight.current) await saveInFlight.current;
+      let target = jobRef.current;
+      if (!target) {
+        const started = await startMaps();
+        target = await pollJob(started.id, (tick) => setJob(tick));
+      }
+      const loaded = await loadMapsSession(target.id, file);
+      const next = documentFromResult(loaded.result);
+      const firstId = next?.slides[0]?.id || null;
+      setJob(loaded);
+      if (next) docRef.current = next;
+      activeRef.current = firstId;
+      activeAudienceRef.current = "lw";
+      setActiveId(firstId);
+      setActiveAudience("lw");
+      setSelectedPin(null);
+      setSelectedPins([]);
+      setRenamingSlide(null);
+      setPreviewView(null);
+      if (firstId && next) requestAnimationFrame(() => mapRef.current?.jumpTo(next.slides[0].camera));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
   async function onExport() {
     if (exportingRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
     if (currentJob.status === "queued" || currentJob.status === "running") return;
     if (previewingRef.current) stopPreview(true);
+    exportAbort.current = false;
     exportingRef.current = true;
     setExporting(true);
     setError(null);
     setLogs((prev) => [...prev, "Exporting maps…"]);
+    const throwIfCancelled = () => {
+      if (exportAbort.current) throw new Error("Export cancelled.");
+    };
     try {
       await flushAndSave(true);
+      throwIfCancelled();
       const id = jobRef.current?.id;
       if (!id) throw new Error("Maps job is gone");
       const plan = await fetchMapsExportPlan(id);
+      throwIfCancelled();
       const local = docRef.current;
       if (!local) throw new Error("Maps document is not loaded");
       const next = coerceHopKinds({ ...local, links: plan.links as MapsLink[] });
       applyLocalDoc(next);
       await saveMapsState(id, next).then((updated) => mergeServerMeta(updated));
+      throwIfCancelled();
       for (const still of plan.stills) {
+        throwIfCancelled();
         const blob = await captureExportRaster({
           width: still.width || 3840,
           height: still.height || 1080,
@@ -640,10 +1022,13 @@ export function MapsTab() {
           styleId: still.style as MapsSlide["style"],
           highlights: still.highlights,
           hiddenLayers: local.hiddenLayers,
+          isCancelled: () => exportAbort.current,
         });
+        throwIfCancelled();
         await postMapsPng(id, blob, { kind: "still", slideId: still.slideId });
       }
       for (const plate of plan.plates) {
+        throwIfCancelled();
         const blob = await captureExportRaster({
           width: plate.plateW,
           height: plate.plateH,
@@ -651,16 +1036,49 @@ export function MapsTab() {
           styleId: plate.style as MapsSlide["style"],
           highlights: plate.highlights,
           hiddenLayers: local.hiddenLayers,
+          isCancelled: () => exportAbort.current,
         });
+        throwIfCancelled();
         await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId });
+      }
+      if (plan.cg) {
+        for (const still of plan.cg.stills) {
+          throwIfCancelled();
+          const blob = await captureExportRaster({
+            width: still.width || 1920,
+            height: still.height || 1080,
+            camera: still.camera,
+            styleId: still.style as MapsSlide["style"],
+            highlights: still.highlights,
+            hiddenLayers: local.hiddenLayers,
+            isCancelled: () => exportAbort.current,
+          });
+          throwIfCancelled();
+          await postMapsPng(id, blob, { kind: "still", slideId: still.slideId, audience: "cg" });
+        }
+        for (const plate of plan.cg.plates) {
+          throwIfCancelled();
+          const blob = await captureExportRaster({
+            width: plate.plateW,
+            height: plate.plateH,
+            camera: plate.camera,
+            styleId: plate.style as MapsSlide["style"],
+            highlights: plate.highlights,
+            hiddenLayers: local.hiddenLayers,
+            isCancelled: () => exportAbort.current,
+          });
+          throwIfCancelled();
+          await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" });
+        }
       }
       const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
       for (const link of docRef.current?.links || []) {
         if (link.kind !== "movie") continue;
+        throwIfCancelled();
         const from = slidesById.get(link.from);
         const to = slidesById.get(link.to);
         if (!from || !to) continue;
-        const width = captureWidth(from);
+        const width = Math.max(captureWidth(from), captureWidth(to));
         const height = 1080;
         const fps = 30;
         const count = Math.max(2, Math.round(link.duration * fps));
@@ -672,15 +1090,19 @@ export function MapsTab() {
             easeIn: link.easeIn,
             easeOut: link.easeOut,
             duration: link.duration,
+            width,
           })
         );
         setLogs((prev) => [...prev, `Prefetching tiles for ${from.id} → ${to.id}…`]);
         try {
+          throwIfCancelled();
           const stats = await prefetchMapsTiles({ cameras, width, height, maxzoom: 14 });
           setLogs((prev) => [...prev, `Cached ${stats.cached + stats.fetched} / ${stats.tiles} tiles (${stats.failed} failed).`]);
         } catch (err) {
+          if (exportAbort.current) throw err;
           setLogs((prev) => [...prev, `Tile prefetch skipped: ${err instanceof Error ? err.message : String(err)}`]);
         }
+        throwIfCancelled();
         setLogs((prev) => [...prev, `Rendering movie ${from.id} → ${to.id}…`]);
         await captureFlyFrames({
           width,
@@ -690,6 +1112,8 @@ export function MapsTab() {
           styleId: from.style,
           highlights: from.highlights,
           hiddenLayers: local.hiddenLayers,
+          churches: from.churches,
+          numberPins: true,
           duration: link.duration,
           fps: 30,
           easing: link.easing,
@@ -697,20 +1121,107 @@ export function MapsTab() {
           flyZoom: link.flyZoom,
           easeIn: link.easeIn,
           easeOut: link.easeOut,
-          onFrame: (blob, i, n) => postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 }).then(() => undefined),
+          isCancelled: () => exportAbort.current,
+          onFrame: async (blob, i, n) => {
+            if (exportAbort.current) throw new Error("Export cancelled.");
+            await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
+          },
         });
       }
+      if (plan.cg) {
+        const affected = new Set(plan.cg.affectedSlideIds || []);
+        const cgLinks = plan.cg.links as MapsLink[];
+        for (const link of cgLinks) {
+          if (link.kind !== "movie" || (!affected.has(link.from) && !affected.has(link.to))) continue;
+          throwIfCancelled();
+          const baseFrom = slidesById.get(link.from);
+          const baseTo = slidesById.get(link.to);
+          if (!baseFrom || !baseTo) continue;
+          const from = slideForAudience(baseFrom, "cg");
+          const to = slideForAudience(baseTo, "cg");
+          const width = Math.max(
+            authoredSurfaceWidth(baseFrom, "cg"),
+            authoredSurfaceWidth(baseTo, "cg")
+          );
+          const cropFromX = (width - 1920) / 2 + (baseFrom.cg ? 0 : baseFrom.cgShiftX);
+          const cropToX = (width - 1920) / 2 + (baseTo.cg ? 0 : baseTo.cgShiftX);
+          const fps = 30;
+          const count = Math.max(2, Math.round(link.duration * fps));
+          const cameras = Array.from({ length: count }, (_, i) =>
+            cameraAtHop(from.camera, to.camera, i / (count - 1), {
+              easing: link.easing,
+              routePoints: link.route?.points,
+              flyZoom: link.flyZoom,
+              easeIn: link.easeIn,
+              easeOut: link.easeOut,
+              duration: link.duration,
+              width,
+            })
+          );
+          try {
+            await prefetchMapsTiles({ cameras, width, height: 1080, maxzoom: 14 });
+          } catch (err) {
+            if (exportAbort.current) throw err;
+          }
+          throwIfCancelled();
+          await captureFlyFrames({
+            width,
+            height: 1080,
+            from: from.camera,
+            to: to.camera,
+            styleId: from.style,
+            highlights: from.highlights,
+            hiddenLayers: local.hiddenLayers,
+            churches: from.churches,
+            numberPins: true,
+            duration: link.duration,
+            fps,
+            easing: link.easing,
+            routePoints: link.route?.points,
+            flyZoom: link.flyZoom,
+            easeIn: link.easeIn,
+            easeOut: link.easeOut,
+            outputCrop: {
+              width: 1920,
+              height: 1080,
+              fromX: cropFromX,
+              toX: cropToX,
+            },
+            isCancelled: () => exportAbort.current,
+            onFrame: async (blob, i, n) => {
+              if (exportAbort.current) throw new Error("Export cancelled.");
+              await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
+            },
+          });
+        }
+      }
+      throwIfCancelled();
       const latest = docRef.current;
-      const started = await exportMaps(id, { exportLw: latest?.exportLw, exportCg: latest?.exportCg });
+      const started = await exportMaps(id, {
+        exportLw: latest?.exportLw,
+        exportCg: latest?.exportCg,
+        exportDsk: latest?.exportDsk,
+      });
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
         setLogs(tick.logs);
         setJob(tick);
-      });
+      }, () => exportAbort.current, () => cancelMapsExport(started.id));
       setJob(done);
-      if (done.status === "error") setError(done.error || "Export failed");
+      if (done.status === "error") {
+        if (exportAbort.current && done.error === "Export cancelled.") {
+          setLogs((prev) => [...prev, "Export cancelled."]);
+        } else {
+          setError(done.error || "Export failed");
+        }
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (exportAbort.current || msg === "Export cancelled.") {
+        setLogs((prev) => [...prev, "Export cancelled."]);
+      } else {
+        setError(msg);
+      }
     } finally {
       exportingRef.current = false;
       setExporting(false);
@@ -719,28 +1230,61 @@ export function MapsTab() {
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape" && previewingRef.current) stopPreview(true);
+      if (event.key !== "Escape") return;
+      if (previewingRef.current) stopPreview(true);
+      if (exportingRef.current) exportAbort.current = true;
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      exportAbort.current = true;
+    };
   }, []);
 
-  const pin = active?.churches.find((c) => c.id === selectedPin) || null;
+  const pin = activeView?.churches.find((c) => c.id === selectedPin) || null;
   const nextSlide = outgoing && activeIndex >= 0 ? slides[activeIndex + 1] : null;
+  const nextView = nextSlide ? slideForAudience(nextSlide, activeAudience) : null;
   const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
   const morphOk = suggested === "morph";
-  const movieOk = suggested !== "cut";
-  const cruiseAuto = active && nextSlide ? autoCruiseZoom(active.camera, nextSlide.camera) : WORLD_MIN_ZOOM;
+  const cruiseAuto =
+    activeView && nextView
+      ? autoCruiseZoom(
+          activeView.camera,
+          nextView.camera,
+          Math.max(authoredSurfaceWidth(active!, activeAudience), authoredSurfaceWidth(nextSlide!, activeAudience))
+        )
+      : 0;
+  const zoomFloor = minZoomForView();
+  const wrapWarn = activeView ? worldCopyWarning(activeView.camera.zoom) : null;
 
   if (!job) {
     return (
       <div>
         <h1>Maps</h1>
         <p className="lede">Author LED-wall cameras, then export Keynote stills. Nothing is created until you start a deck.</p>
-        {(error || openError) && <p className="err">{error || openError}</p>}
-        <button className="btn" type="button" onClick={() => void createDeck()}>
+        <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
+        <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
           New map deck
         </button>
+        <button
+          className="btn secondary"
+          type="button"
+          disabled={sessionBusy}
+          onClick={() => sessionInput.current?.click()}
+        >
+          Load map session + cache…
+        </button>
+        <input
+          ref={sessionInput}
+          type="file"
+          accept=".obedmaps,.zip,application/zip"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) void loadSession(file);
+          }}
+        />
       </div>
     );
   }
@@ -749,32 +1293,82 @@ export function MapsTab() {
     <div className="maps-tab">
       <div className="maps-chrome">
       <div className="maps-toolbar">
-        <button className="btn secondary" type="button" onClick={() => void createDeck()} disabled={locked}>
-          New map deck
-        </button>
-        <button
-          className="btn secondary"
-          type="button"
-          onClick={() => {
-            csvMode.current = "append";
-            csvInput.current?.click();
-          }}
-          disabled={locked}
-        >
-          New slides from CSV…
-        </button>
-        <button
-          className="btn secondary"
-          type="button"
-          disabled={locked}
-          onClick={() => {
-            if (!window.confirm("Replace the whole deck from a CSV? Existing slides will be discarded.")) return;
-            csvMode.current = "replace";
-            csvInput.current?.click();
-          }}
-        >
-          Replace deck from CSV…
-        </button>
+        <div className="maps-deck-actions" ref={deckActionsRef}>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={locked}
+            aria-expanded={deckActionsOpen}
+            aria-haspopup="true"
+            onClick={() => setDeckActionsOpen((open) => !open)}
+          >
+            Deck…
+          </button>
+          {deckActionsOpen && (
+            <div className="maps-deck-actions-menu" role="group" aria-label="Deck actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeckActionsOpen(false);
+                  void createDeck();
+                }}
+              >
+                New map deck
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeckActionsOpen(false);
+                  csvMode.current = "append";
+                  csvInput.current?.click();
+                }}
+              >
+                Add slides from CSV…
+              </button>
+              <button
+                type="button"
+                disabled={!active}
+                onClick={() => {
+                  setDeckActionsOpen(false);
+                  csvMode.current = "pins";
+                  csvInput.current?.click();
+                }}
+              >
+                Add pins to this view from CSV…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!window.confirm("Replace the whole deck from a CSV? Existing slides will be discarded.")) return;
+                  setDeckActionsOpen(false);
+                  csvMode.current = "replace";
+                  csvInput.current?.click();
+                }}
+              >
+                Replace deck from CSV…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeckActionsOpen(false);
+                  void saveSession();
+                }}
+              >
+                Save session + cache…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!window.confirm("Load a saved map session? The current deck will be replaced; cached tiles from the session will be added to this cache.")) return;
+                  setDeckActionsOpen(false);
+                  sessionInput.current?.click();
+                }}
+              >
+                Load session + cache…
+              </button>
+            </div>
+          )}
+        </div>
         <input
           ref={csvInput}
           type="file"
@@ -783,9 +1377,20 @@ export function MapsTab() {
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            const replace = csvMode.current === "replace";
+            const mode = csvMode.current;
             csvMode.current = "append";
-            if (file) void onCsv(file, replace);
+            if (file) void onCsv(file, mode);
+          }}
+        />
+        <input
+          ref={sessionInput}
+          type="file"
+          accept=".obedmaps,.zip,application/zip"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) void loadSession(file);
           }}
         />
         <form
@@ -807,6 +1412,7 @@ export function MapsTab() {
           type="button"
           aria-pressed={sidePanels}
           title="Show the full 7680×1080 wall instead of the centre"
+          disabled={activeAudience === "cg" || locked}
           onClick={() => setSidePanels(!sidePanels)}
         >
           {sidePanels ? "Center wall only" : "Show side panels"}
@@ -830,7 +1436,7 @@ export function MapsTab() {
               key={swatch.id}
               type="button"
               title={swatch.label}
-              className={`maps-swatch${(doc?.defaultStyle || active?.style) === swatch.id ? " active" : ""}`}
+              className={`maps-swatch${(activeView?.style || doc?.defaultStyle) === swatch.id ? " active" : ""}`}
               style={{ background: swatch.color }}
               disabled={locked}
               onClick={() => setDeckStyle(swatch.id)}
@@ -876,8 +1482,8 @@ export function MapsTab() {
         />
       </div>
       </div>
-      {(error || openError) && <p className="err">{error || openError}</p>}
-      {job.error && <p className="err">{job.error}</p>}
+      <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
+      <ErrorNotice message={job.error} />
 
       <div
         className="maps-stage"
@@ -888,24 +1494,67 @@ export function MapsTab() {
             const next = slides[index + 1];
             const hop = next ? linkBetween(doc?.links || [], slide.id, next.id) : null;
             const src = slide.stillPng && job.id ? previewUrl(job.id, "maps", slide.stillPng) : "";
+            const cgSrc = slide.cg?.stillPng && job.id ? previewUrl(job.id, "maps", slide.cg.stillPng) : "";
             return (
               <div key={slide.id}>
-                <button
-                  type="button"
-                  className={`maps-thumb${slide.id === active?.id ? " active" : ""}${slide.includeSidePanels ? " fw" : " lw"}`}
-                  disabled={locked}
-                  title={slide.includeSidePanels ? "Full wall render (side panels)" : "Centre wall (LW)"}
-                  onClick={() => void selectSlide(slide.id)}
-                >
-                  {src ? <img src={`${src}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">{slide.title}</span>}
-                  <span className="maps-thumb-label">{slide.title}</span>
-                </button>
+                {slide.cg ? (
+                  <div className="maps-thumb-card">
+                    <div className="maps-thumb-pair">
+                      <button
+                        type="button"
+                        className={`maps-thumb maps-thumb-half${slide.id === active?.id && activeAudience === "lw" ? " active" : ""}`}
+                        disabled={locked}
+                        title={sidePanels || slide.includeSidePanels ? "Full wall (FW)" : "LED wall (LW)"}
+                        onClick={() => void selectSlide(slide.id, { audience: "lw" })}
+                      >
+                        {src ? <img src={`${src}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>}
+                        <span className="maps-thumb-view-label">{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`maps-thumb maps-thumb-half${slide.id === active?.id && activeAudience === "cg" ? " active" : ""}`}
+                        disabled={locked}
+                        title="Independent CG"
+                        onClick={() => void selectSlide(slide.id, { audience: "cg" })}
+                      >
+                        {cgSrc ? <img src={`${cgSrc}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">CG</span>}
+                        <span className="maps-thumb-view-label">CG</span>
+                      </button>
+                    </div>
+                    {slideTitleControl(slide)}
+                  </div>
+                ) : (
+                  <div className="maps-thumb-card">
+                    <button
+                      type="button"
+                      className={`maps-thumb${slide.id === active?.id ? " active" : ""}${slide.includeSidePanels ? " fw" : " lw"}`}
+                      disabled={locked}
+                      title={slide.includeSidePanels ? "Full wall render (side panels)" : "Centre wall (LW)"}
+                      onClick={() => void selectSlide(slide.id, { audience: "lw" })}
+                    >
+                      {src ? <img src={`${src}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">{slide.title}</span>}
+                    </button>
+                    {slideTitleControl(slide)}
+                  </div>
+                )}
                 {hop && (
                   <div className="maps-gutter">
                     <span className="maps-gutter-line" />
-                    <span className="maps-gutter-kind" title={HOP_TIPS[hop.kind]}>
+                    <button
+                      type="button"
+                      className="maps-gutter-kind"
+                      disabled={locked}
+                      title={`${HOP_TIPS[hop.kind]} Open animation settings.`}
+                      aria-label={`Open ${HOP_LABELS[hop.kind]} animation for ${slide.title}`}
+                      onClick={() => {
+                        setSelectedPin(null);
+                        setSelectedPins([]);
+                        setInspTab("animation");
+                        void selectSlide(slide.id);
+                      }}
+                    >
                       {HOP_LABELS[hop.kind]}
-                    </span>
+                    </button>
                     {hop.kind !== "cut" && (
                       <button
                         type="button"
@@ -947,33 +1596,36 @@ export function MapsTab() {
             <>
               <MapView
                 ref={mapRef}
-                camera={active.camera}
-                styleId={active.style}
-                highlights={active.highlights}
-                churches={active.churches}
+                camera={renderedView?.camera || active.camera}
+                styleId={renderedView?.style || active.style}
+                highlights={renderedView?.highlights || active.highlights}
+                churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
-                sidePanels={sidePanels}
-                exportCg={doc?.exportCg !== false}
+                sidePanels={renderedSidePanels}
+                exportCg={doc?.exportCg !== false && !active.cg}
                 hiddenLayers={doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS}
-                cgShiftX={active.cgShiftX}
+                cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
+                authoredWidth={renderedAuthoredWidth}
                 previewing={previewing}
                 selectedPinId={selectedPin}
                 onCameraCommit={onCameraCommit}
                 onToggleCountry={(adm0) => {
-                  const has = active.highlights.includes(adm0);
-                  updateActive({ highlights: has ? active.highlights.filter((h) => h !== adm0) : [...active.highlights, adm0] });
+                  if (!activeView) return;
+                  const has = activeView.highlights.includes(adm0);
+                  updateActive({ highlights: has ? activeView.highlights.filter((h) => h !== adm0) : [...activeView.highlights, adm0] });
                 }}
                 onAddPin={(lat, lon) => {
+                  if (!activeView) return;
                   const church: MapsChurch = {
-                    id: nextPinId(active.churches),
+                    id: nextPinId(activeView.churches),
                     name: "Pin",
                     lat,
                     lon,
                     kind: "dropPin",
                     color: "#c44a42",
                   };
-                  updateActive({ churches: [...active.churches, church] });
+                  updateActive({ churches: [...activeView.churches, church] });
                   openPin(church.id);
                 }}
                 onSelectPin={(id) => {
@@ -981,26 +1633,36 @@ export function MapsTab() {
                   else setSelectedPin(null);
                 }}
                 onEditPin={(id) => {
-                  const church = active.churches.find((c) => c.id === id);
+                  if (!activeView) return;
+                  const church = activeView.churches.find((c) => c.id === id);
                   if (!church) return;
                   const name = window.prompt("Pin name", church.name);
                   if (name == null) return;
-                  updateActive({ churches: active.churches.map((c) => (c.id === id ? { ...c, name } : c)) });
+                  updateActive({ churches: activeView.churches.map((c) => (c.id === id ? { ...c, name } : c)) });
                 }}
                 onCgShift={(dx) => updateActive(clampCgShift(dx, 0))}
                 onPreviewAbort={() => stopPreview(true)}
               />
+              {dissolveFrame && (
+                <img
+                  className={`maps-dissolve-frame${dissolveFrame.fading ? " fading" : ""}`}
+                  src={dissolveFrame.url}
+                  alt=""
+                  style={{ transitionDuration: `${dissolveFrame.duration}s` }}
+                />
+              )}
               <label className="maps-zoom-slider">
                 <span>Zoom</span>
                 <input
                   type="range"
-                  min={WORLD_MIN_ZOOM}
+                  min={zoomFloor}
                   max={22}
                   step={0.1}
-                  value={Number.isFinite(active.camera.zoom) ? active.camera.zoom : WORLD_MIN_ZOOM}
+                  value={Number.isFinite(activeView?.camera.zoom) ? activeView!.camera.zoom : zoomFloor}
                   disabled={locked}
                   onChange={(event) => {
-                    const camera = { ...active.camera, zoom: Number(event.target.value) };
+                    if (!activeView) return;
+                    const camera = { ...activeView.camera, zoom: Number(event.target.value) };
                     updateActive({ camera });
                     mapRef.current?.jumpTo(camera);
                   }}
@@ -1024,8 +1686,8 @@ export function MapsTab() {
                 onClick={() => setInspTab(tab.id)}
               >
                 {tab.label}
-                {tab.id === "pins" && (active?.churches.length || 0) > 0 && (
-                  <span className="maps-insp-count">{active?.churches.length}</span>
+                {tab.id === "pins" && (activeView?.churches.length || 0) > 0 && (
+                  <span className="maps-insp-count">{activeView?.churches.length}</span>
                 )}
               </button>
             ))}
@@ -1044,7 +1706,7 @@ export function MapsTab() {
                       value={pin.name}
                       disabled={locked}
                       onChange={(event) =>
-                        updateActive({ churches: active.churches.map((c) => (c.id === pin.id ? { ...c, name: event.target.value } : c)) })
+                        updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, name: event.target.value } : c)) })
                       }
                     />
                   </label>
@@ -1055,7 +1717,7 @@ export function MapsTab() {
                       disabled={locked}
                       onChange={(event) =>
                         updateActive({
-                          churches: active.churches.map((c) => (c.id === pin.id ? { ...c, kind: event.target.value as MapsPinKind } : c)),
+                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, kind: event.target.value as MapsPinKind } : c)),
                         })
                       }
                     >
@@ -1070,17 +1732,29 @@ export function MapsTab() {
                       value={pin.color}
                       disabled={locked}
                       onChange={(event) =>
-                        updateActive({ churches: active.churches.map((c) => (c.id === pin.id ? { ...c, color: event.target.value } : c)) })
+                        updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, color: event.target.value } : c)) })
                       }
                     />
+                  </label>
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={pin.showLabel !== false}
+                      disabled={locked}
+                      onChange={(event) =>
+                        updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, showLabel: event.target.checked } : c)) })
+                      }
+                    />
+                    Show label on map
                   </label>
                   <button
                     className="btn secondary"
                     type="button"
                     disabled={locked}
                     onClick={() => {
-                      updateActive({ churches: active.churches.filter((c) => c.id !== pin.id) });
+                      updateActive({ churches: (activeView?.churches || []).filter((c) => c.id !== pin.id) });
                       setSelectedPin(null);
+                      setSelectedPins((ids) => ids.filter((id) => id !== pin.id));
                     }}
                   >
                     Remove pin
@@ -1089,6 +1763,34 @@ export function MapsTab() {
               )}
               {inspTab === "properties" && !pin && (
                 <>
+                  <div className="cap">Viewport</div>
+                  {active.cg ? (
+                    <div className="seg">
+                      <button
+                        type="button"
+                        className={activeAudience === "lw" ? "on" : ""}
+                        disabled={locked}
+                        onClick={() => void selectSlide(active.id, { audience: "lw" })}
+                      >
+                        {sidePanels || active.includeSidePanels ? "FW" : "LW"}
+                      </button>
+                      <button
+                        type="button"
+                        className={activeAudience === "cg" ? "on" : ""}
+                        disabled={locked}
+                        onClick={() => void selectSlide(active.id, { audience: "cg" })}
+                      >
+                        CG
+                      </button>
+                      <button type="button" disabled={locked} onClick={mergeCg}>
+                        Merge CG
+                      </button>
+                    </div>
+                  ) : (
+                    <button className="btn secondary" type="button" disabled={locked} onClick={splitCg}>
+                      Split CG viewport
+                    </button>
+                  )}
                   <div className="cap">Camera</div>
                   <label>
                     Title:
@@ -1096,14 +1798,15 @@ export function MapsTab() {
                   </label>
                   <AeScrub
                     label="Latitude"
-                    value={active.camera.lat}
+                    value={activeView?.camera.lat ?? 0}
                     min={-MAX_LAT}
                     max={MAX_LAT}
                     step={0.01}
                     digits={4}
                     disabled={locked}
                     onChange={(lat) => {
-                      const camera = { ...active.camera, lat };
+                      if (!activeView) return;
+                      const camera = { ...activeView.camera, lat };
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
@@ -1111,14 +1814,15 @@ export function MapsTab() {
                   />
                   <AeScrub
                     label="Longitude"
-                    value={active.camera.lon}
+                    value={activeView?.camera.lon ?? 0}
                     min={-180}
                     max={180}
                     step={0.01}
                     digits={4}
                     disabled={locked}
                     onChange={(lon) => {
-                      const camera = { ...active.camera, lon };
+                      if (!activeView) return;
+                      const camera = { ...activeView.camera, lon };
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
@@ -1126,29 +1830,32 @@ export function MapsTab() {
                   />
                   <AeScrub
                     label="Zoom"
-                    value={active.camera.zoom}
-                    min={WORLD_MIN_ZOOM}
+                    value={activeView?.camera.zoom ?? zoomFloor}
+                    min={zoomFloor}
                     max={22}
                     step={0.1}
                     slider
                     disabled={locked}
                     onChange={(zoom) => {
-                      const camera = { ...active.camera, zoom };
+                      if (!activeView) return;
+                      const camera = { ...activeView.camera, zoom: clampZoom(zoom, zoomFloor) };
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
                     onCommit={() => void flushAndSave(true)}
                   />
+                  {wrapWarn && <p className="maps-wrap-note">{wrapWarn}</p>}
                   <AeScrub
                     label="Pitch"
-                    value={active.camera.pitch}
+                    value={activeView?.camera.pitch ?? 0}
                     min={0}
                     max={60}
                     step={1}
                     digits={0}
                     disabled={locked}
                     onChange={(pitch) => {
-                      const camera = { ...active.camera, pitch };
+                      if (!activeView) return;
+                      const camera = { ...activeView.camera, pitch };
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
@@ -1156,44 +1863,49 @@ export function MapsTab() {
                   />
                   <AeScrub
                     label="Bearing"
-                    value={active.camera.bearing}
+                    value={activeView?.camera.bearing ?? 0}
                     min={-180}
                     max={180}
                     step={1}
                     digits={0}
                     disabled={locked}
                     onChange={(bearing) => {
-                      const camera = { ...active.camera, bearing };
+                      if (!activeView) return;
+                      const camera = { ...activeView.camera, bearing };
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
                     onCommit={() => void flushAndSave(true)}
                   />
-                  <AeScrub
-                    label="CG shift X"
-                    value={active.cgShiftX}
-                    min={-CG_SHIFT_MAX}
-                    max={CG_SHIFT_MAX}
-                    step={1}
-                    digits={0}
-                    disabled={locked || doc?.exportCg === false}
-                    onChange={(dx) => updateActive(clampCgShift(dx, 0))}
-                    onCommit={() => void flushAndSave(true)}
-                  />
-                  <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
-                    <input
-                      type="checkbox"
-                      checked={active.includeSidePanels === true}
-                      disabled={locked}
-                      onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
-                    />
-                    Include side panels for render
-                  </label>
-                  {active.highlights.length > 0 && (
+                  {activeAudience === "lw" && (
+                    <>
+                      <AeScrub
+                        label="CG shift X"
+                        value={active.cgShiftX}
+                        min={-CG_SHIFT_MAX}
+                        max={CG_SHIFT_MAX}
+                        step={1}
+                        digits={0}
+                        disabled={locked || doc?.exportCg === false}
+                        onChange={(dx) => updateActive(clampCgShift(dx, 0))}
+                        onCommit={() => void flushAndSave(true)}
+                      />
+                      <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
+                        <input
+                          type="checkbox"
+                          checked={active.includeSidePanels === true}
+                          disabled={locked}
+                          onChange={(event) => updateActive({ includeSidePanels: event.target.checked })}
+                        />
+                        Include side panels for render
+                      </label>
+                    </>
+                  )}
+                  {(activeView?.highlights.length || 0) > 0 && (
                     <div className="maps-hl">
                       <div className="cap">Orange countries</div>
                       <div className="maps-hl-list">
-                        {active.highlights.map((code) => (
+                        {(activeView?.highlights || []).map((code) => (
                           <button
                             key={`${code}-${namesTick}`}
                             className="maps-hl-chip"
@@ -1201,7 +1913,7 @@ export function MapsTab() {
                             disabled={locked}
                             title="Remove highlight"
                             onClick={() =>
-                              updateActive({ highlights: active.highlights.filter((item) => item !== code) })
+                              updateActive({ highlights: (activeView?.highlights || []).filter((item) => item !== code) })
                             }
                           >
                             {admin0Name(code)}
@@ -1215,23 +1927,42 @@ export function MapsTab() {
               )}
               {inspTab === "pins" && (
                 <>
-                  {active.churches.length === 0 ? (
+                  {(activeView?.churches.length || 0) === 0 ? (
                     <p className="note">Shift-click the map to add a pin. Double-click a pin to rename it.</p>
                   ) : (
-                    <div className="maps-pin-list">
-                      {active.churches.map((church) => (
-                        <button
-                          key={church.id}
-                          type="button"
-                          className={`maps-pin-row${selectedPin === church.id ? " active" : ""}`}
-                          disabled={locked}
-                          onClick={() => openPin(church.id)}
-                        >
-                          <span className="maps-pin-swatch" style={{ background: church.color }} />
-                          <span className="maps-pin-name">{church.name}</span>
+                    <>
+                      <div className="maps-pin-bulk" role="group" aria-label="Selected pins">
+                        <span className="note">{selectedPins.length ? `${selectedPins.length} selected` : "Select pins"}</span>
+                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })}>
+                          Show labels
                         </button>
-                      ))}
-                    </div>
+                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: false })}>
+                          Hide labels
+                        </button>
+                        <button className="btn maps-delete maps-pin-bulk-delete" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected pins" aria-label="Delete selected pins">
+                          <IconTrash />
+                        </button>
+                      </div>
+                      <div className="maps-pin-list">
+                        {(activeView?.churches || []).map((church) => (
+                          <div key={church.id} className={`maps-pin-row${selectedPin === church.id ? " active" : ""}`}>
+                            <label className="maps-pin-select" aria-label={`Select ${church.name}`}>
+                              <input
+                                type="checkbox"
+                                checked={selectedPins.includes(church.id)}
+                                disabled={locked}
+                                onChange={(event) => togglePinSelection(church.id, event.target.checked)}
+                              />
+                            </label>
+                            <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openPin(church.id)}>
+                              <span className="maps-pin-swatch" style={{ background: church.color }} />
+                              <span className="maps-pin-name">{church.name}</span>
+                              {church.showLabel === false && <span className="maps-pin-hidden">Hidden</span>}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </>
               )}
@@ -1246,13 +1977,13 @@ export function MapsTab() {
                       <input
                         type="radio"
                         checked={outgoing.kind === kind}
-                        disabled={locked || (kind === "morph" && !morphOk) || (kind === "movie" && !movieOk)}
+                        disabled={locked || (kind === "morph" && !morphOk)}
                         onChange={() => setHop({ kind, easing: kind === "movie" ? outgoing.easing : undefined })}
                       />
                       {HOP_LABELS[kind]}
                     </label>
                   ))}
-                  {nextSlide && <MorphGates from={active} to={nextSlide} />}
+                  {nextView && activeView && <MorphGates from={activeView} to={nextView} />}
                   <button
                     className="btn secondary"
                     type="button"
@@ -1309,7 +2040,7 @@ export function MapsTab() {
                       <AeScrub
                         label="Cruise zoom"
                         value={outgoing.flyZoom ?? cruiseAuto}
-                        min={WORLD_MIN_ZOOM}
+                        min={zoomFloor}
                         max={22}
                         step={0.1}
                         slider
@@ -1337,10 +2068,10 @@ export function MapsTab() {
                       <button
                         className="btn secondary"
                         type="button"
-                        disabled={locked || (active?.churches.length || 0) < 2}
+                        disabled={locked || (activeView?.churches.length || 0) < 2}
                         onClick={() =>
                           setHop({
-                            route: { points: (active?.churches || []).map((church) => ({ lat: church.lat, lon: church.lon })) },
+                            route: { points: (activeView?.churches || []).map((church) => ({ lat: church.lat, lon: church.lon })) },
                           })
                         }
                       >
@@ -1385,7 +2116,7 @@ export function MapsTab() {
                       onChange={(event) => {
                         if (!doc) return;
                         const exportLw = event.target.checked;
-                        const exportCg = exportLw ? doc.exportCg : true;
+                        const exportCg = !exportLw && !doc.exportCg && !doc.exportDsk ? true : doc.exportCg;
                         patchDoc({ ...doc, exportLw, exportCg });
                       }}
                     />
@@ -1399,15 +2130,34 @@ export function MapsTab() {
                       onChange={(event) => {
                         if (!doc) return;
                         const exportCg = event.target.checked;
-                        const exportLw = exportCg ? doc.exportLw : true;
+                        const exportLw = !exportCg && !doc.exportLw && !doc.exportDsk ? true : doc.exportLw;
                         patchDoc({ ...doc, exportLw, exportCg });
                       }}
                     />
                     CG (1920×1080)
                   </label>
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={doc?.exportDsk === true}
+                      disabled={locked}
+                      onChange={(event) => {
+                        if (!doc) return;
+                        const exportDsk = event.target.checked;
+                        const exportLw = !exportDsk && !doc.exportLw && !doc.exportCg ? true : doc.exportLw;
+                        patchDoc({ ...doc, exportLw, exportDsk });
+                      }}
+                    />
+                    DSK lower third (1920×1080)
+                  </label>
                   <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
                     Export
                   </button>
+                  {exporting ? (
+                    <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
+                      Cancel
+                    </button>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -1416,7 +2166,11 @@ export function MapsTab() {
         )}
       </div>
       {(exporting || job?.status === "queued" || job?.status === "running") && (
-        <LoadingOverlay title="Working…" logs={logs} />
+        <LoadingOverlay
+          title="Working…"
+          logs={logs}
+          onCancel={exporting ? () => { exportAbort.current = true; } : undefined}
+        />
       )}
     </div>
   );

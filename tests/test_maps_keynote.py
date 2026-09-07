@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 from PIL import Image
@@ -21,13 +22,18 @@ from obed_edom.maps_keynote import (
     build_slide_items,
     cg_crop_origin,
     coerce_link_kinds,
+    dsk_item,
     export_maps_job,
+    hop_capture_size,
     maps_export_plan,
     morph_plate_geom,
     plate_filename,
     plate_id_for,
     plate_placement,
     plan_deck,
+    project_into_camera,
+    project_into_plate,
+    split_cg_export_plan,
 )
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
@@ -95,6 +101,22 @@ def _write_plan_rasters(output_dir: Path, slides: list[dict], links: list[dict])
     return plan
 
 
+def test_dsk_item_scales_centre_wall_into_bottom_half():
+    assert dsk_item({"kind": "image", "x": 1920, "y": 0, "w": 3840, "h": 1080}) == {
+        "kind": "image",
+        "x": 0,
+        "y": 540,
+        "w": 1920,
+        "h": 540,
+    }
+
+
+def test_dsk_item_clips_full_wall_and_scales_pin_text():
+    assert dsk_item({"kind": "image", "x": 0, "y": 0, "w": 7680, "h": 1080})["x"] == -960
+    text = dsk_item({"kind": "text", "x": 2880, "y": 100, "w": 300, "h": 32})
+    assert text == {"kind": "text", "x": 480, "y": 590, "w": 150, "h": 16, "fontSize": 12}
+
+
 def _pan_camera(zoom: float, pixels_east: float, lat: float = 3.0, lon: float = 101.0) -> tuple[dict, dict]:
     dlon = pixels_east * 360.0 / world_width(zoom)
     return _camera(lat, lon, zoom), _camera(lat, lon + dlon, zoom)
@@ -133,6 +155,21 @@ def test_same_zoom_pan_offsets_shared_plate():
     place_b = plate_placement(b, geom)
     assert place_a["x"] == 0
     assert place_b["x"] == -1000
+
+
+def test_matching_rotation_uses_one_rotated_plate():
+    a, b = _pan_camera(8, 400)
+    a["bearing"] = 22
+    b["bearing"] = 22
+    geom = morph_plate_geom([a, b])
+    assert geom is not None
+    assert geom["captureCamera"]["bearing"] == 22
+    place_a = plate_placement(a, geom)
+    place_b = plate_placement(b, geom)
+    assert place_a["x"] != place_b["x"] or place_a["y"] != place_b["y"]
+    assert project_into_plate(a["lat"], a["lon"], geom, place_a) == pytest.approx(
+        (WALL_WIDTH / 2, WALL_HEIGHT / 2), abs=0.1
+    )
 
 
 def test_cg_shift_clamp_used():
@@ -235,6 +272,63 @@ def test_avoid_straddle_moves_off_joins():
     assert not (nudged < 1920 < nudged + 80)
 
 
+def test_hidden_pin_label_stays_in_state_but_is_not_exported(tmp_path: Path):
+    slide = _slide(
+        "s1",
+        _camera(3.0, 101.0, 8),
+        churches=[{"id": "c", "name": "Private label", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#c44a42", "showLabel": False}],
+    )
+    items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
+    shapes = [item for item in items if item["kind"] == "shape"]
+    assert len(shapes) == 3
+    assert any(item.get("shape") == "triangle" for item in shapes)
+    assert not [item for item in items if item["kind"] == "text" and item.get("text") == "Private label"]
+
+
+def test_static_drop_pin_tip_is_anchored_to_the_projected_location(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 8)
+    slide = _slide(
+        "s1",
+        camera,
+        churches=[{"id": "c", "name": "Anchor", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#ff8a00"}],
+    )
+    items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
+    triangle = next(item for item in items if item.get("shape") == "triangle")
+    projected_x, projected_y = project_into_camera(3.0, 101.0, camera)
+    assert abs((triangle["x"] + triangle["w"] / 2) - projected_x) <= 1
+    assert abs((triangle["y"] + triangle["h"]) - projected_y) <= 1
+
+
+def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
+    slide = _slide(
+        "s1",
+        _camera(3.0, 101.0, 8),
+        churches=[{"id": "c", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}],
+    )
+    items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
+    assert len([item for item in items if item["kind"] == "shape"]) == 1
+
+
+def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Path):
+    near_dateline = _slide(
+        "s1",
+        _camera(0.0, 179.0, 8),
+        churches=[{"id": "c", "name": "Dateline", "lat": 0.0, "lon": 181.0, "kind": "dot", "color": "#c44a42"}],
+    )
+    items = build_slide_items(near_dateline, plate=None, plate_path=None, still=_dummy_png(tmp_path / "dateline.png"), movie=None, wall=True)
+    pin = next(item for item in items if item["kind"] == "shape")
+    assert abs((pin["x"] + pin["w"] / 2) - WALL_WIDTH / 2) < 1000
+
+    overview = _slide(
+        "s2",
+        _camera(0.0, 0.0, 0),
+        includeSidePanels=True,
+        churches=[{"id": "c", "name": "World", "lat": 0.0, "lon": 0.0, "kind": "dot", "color": "#c44a42"}],
+    )
+    copies = build_slide_items(overview, plate=None, plate_path=None, still=_dummy_png(tmp_path / "world.png"), movie=None, wall=True)
+    assert len([item for item in copies if item["kind"] == "shape"]) >= 14
+
+
 def test_movie_without_video_is_still(monkeypatch, tmp_path: Path):
     scripts: list[str] = []
     monkeypatch.setattr(
@@ -265,6 +359,107 @@ def test_export_importable_and_osascript_is_mockable():
     assert callable(mod.run_osascript)
 
 
+def test_split_cg_plan_limits_assets_to_adjacent_transition_run():
+    slides = [_slide(f"s{i}", _camera(3.0, 100.0 + i, 8)) for i in range(1, 6)]
+    slides[1]["cg"] = {
+        "camera": _camera(3.0, 102.0, 8), "style": "positron", "highlights": [], "churches": []
+    }
+    links = [
+        {"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0},
+        {"from": "s2", "to": "s3", "kind": "movie", "duration": 1.0},
+        {"from": "s3", "to": "s4", "kind": "cut", "duration": 1.0},
+        {"from": "s4", "to": "s5", "kind": "cut", "duration": 1.0},
+    ]
+    plan = split_cg_export_plan(slides, links)
+    assert plan["affectedSlideIds"] == ["s1", "s2", "s3"]
+    assert {row["slideId"] for row in plan["stills"]} <= {"s1", "s2", "s3"}
+
+
+def test_run_osascript_terminates_when_cancelled(monkeypatch):
+    import obed_edom.maps_keynote as mod
+
+    class Proc:
+        args = ["osascript", "script.applescript"]
+        returncode = -15
+
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    proc = Proc()
+    checks = iter((False, False, True))
+    monkeypatch.setattr(mod.subprocess, "run", lambda *_a, **_k: None)
+    popen_args = {}
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *_a, **kwargs: popen_args.update(kwargs) or proc)
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    with pytest.raises(RuntimeError, match="Export cancelled"):
+        mod.run_osascript("return 1", is_cancelled=lambda: next(checks))
+    assert proc.terminated
+    assert popen_args["stdout"] is not subprocess.PIPE
+    assert popen_args["stderr"] is not subprocess.PIPE
+
+
+def test_inspect_and_validate_checks_cancellation_between_phases(monkeypatch, tmp_path: Path):
+    import obed_edom.maps_keynote as mod
+
+    monkeypatch.setattr("obed_edom.inspect.inspect_keynote", lambda *_a, **_k: {"slides": []})
+    monkeypatch.setattr("obed_edom.validate.validate_inspect", lambda *_a, **_k: [])
+    checks = iter((False, False, True))
+    with pytest.raises(RuntimeError, match="Export cancelled"):
+        mod.inspect_and_validate(tmp_path / "deck.key", is_cancelled=lambda: next(checks))
+
+
+def test_inspect_keynote_terminates_blocked_jxa_when_cancelled(monkeypatch, tmp_path: Path):
+    import obed_edom.inspect as inspect_mod
+
+    class Proc:
+        args = ["osascript", "-l", "JavaScript"]
+        returncode = -15
+
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    proc = Proc()
+    started = threading.Event()
+    cancelled = threading.Event()
+    monkeypatch.setattr(inspect_mod.subprocess, "Popen", lambda *_a, **_k: started.set() or proc)
+    result = []
+
+    def inspect():
+        try:
+            inspect_mod.inspect_keynote(key, use_cache=False, is_cancelled=cancelled.is_set)
+        except RuntimeError as exc:
+            result.append(str(exc))
+
+    thread = threading.Thread(target=inspect)
+    thread.start()
+    assert started.wait(1)
+    cancelled.set()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert proc.terminated
+    assert result == ["Export cancelled."]
+
+
 def test_probe_dry_run_prints_script(tmp_path: Path, capsys):
     code = probe_main(["--dry-run", "--out", str(tmp_path / "probe")])
     assert code == 0
@@ -281,7 +476,7 @@ def test_probe_dry_run_prints_script(tmp_path: Path, capsys):
     assert script_path.is_file()
     assert MAP_BG_RE.search(script)
     built = build_shared_plate_probe_script(dest, tmp_path / "probe" / "map BG_probe.png")
-    assert "file name:imgFile" in built
+    assert "file:imgFile" in built
     assert "set position of image 1 to" in built
     assert "set width of image 1 to" in built
 
@@ -350,6 +545,83 @@ def test_coerce_keeps_dissolve_on_style_mismatch():
     links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 0.8, "playWithoutClick": False}]
     next_links = coerce_link_kinds([a, b], links)
     assert next_links[0]["kind"] == "dissolve"
+
+
+def test_coerce_uses_strictest_cg_transition_requirement():
+    a = _slide("s1", _camera(3.0, 101.0, 8))
+    b = _slide("s2", _camera(3.0, 102.0, 8))
+    b["cg"] = {"camera": _camera(3.0, 102.0, 10.1), "style": "positron", "highlights": [], "churches": []}
+    movie = coerce_link_kinds([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}])[0]
+    assert movie["kind"] == "movie"
+    assert movie["duration"] == 1.7
+    b["cg"]["style"] = "dark"
+    cut = coerce_link_kinds([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7}])[0]
+    assert cut["kind"] == "cut"
+    dissolve = coerce_link_kinds([a, b], [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 1.7}])[0]
+    assert dissolve["kind"] == "dissolve"
+    assert dissolve["duration"] == 1.7
+
+
+def test_split_cg_plan_uses_direct_1920_still_capture():
+    slide = _slide("s1", _camera(3.0, 101.0, 8))
+    slide["cg"] = {"camera": _camera(3.0, 102.0, 8), "style": "positron", "highlights": [], "churches": []}
+    plan = split_cg_export_plan([slide], [])
+    assert plan["stills"][0]["width"] == 1920
+    assert plan["stills"][0]["height"] == 1080
+
+
+def test_plan_deck_mixed_cg_uses_namespaced_and_legacy_stills(tmp_path: Path):
+    s1 = _slide("s1", _camera(3.0, 101.0, 8))
+    s2 = _slide("s2", _camera(3.0, 102.0, 8))
+    s2["cg"] = {"camera": _camera(3.0, 103.0, 8), "style": "positron", "highlights": [], "churches": []}
+    s3 = _slide("s3", _camera(3.0, 104.0, 8))
+    for name in ("s1.png", "s2.png", "s3.png", "s2_CG.png"):
+        _dummy_png(tmp_path / "stills" / name)
+    cg_slides = [s1, {**s2, **s2["cg"], "_splitCg": True}, s3]
+    ops = plan_deck(cg_slides, [], {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=False, audience="cg", cg_affected={"s2"})
+    assert Path(ops[0]["items"][0]["path"]).name == "s1.png"
+    assert Path(ops[1]["items"][0]["path"]).name == "s2_CG.png"
+    assert (ops[1]["items"][0]["x"], ops[1]["items"][0]["w"]) == (0, 1920)
+    assert Path(ops[2]["items"][0]["path"]).name == "s3.png"
+
+
+def test_plan_deck_uses_cg_movie_for_affected_hop(tmp_path: Path):
+    s1 = _slide("s1", _camera(3.0, 101.0, 8))
+    s2 = _slide("s2", _camera(3.0, 102.0, 8))
+    s2["cg"] = {"camera": _camera(3.0, 103.0, 8), "style": "positron", "highlights": [], "churches": []}
+    for name in ("s1.png", "s2.png", "s2_CG.png"):
+        _dummy_png(tmp_path / "stills" / name)
+    movie_path(tmp_path, "s2").parent.mkdir(parents=True, exist_ok=True)
+    movie_path(tmp_path, "s2").write_bytes(b"lw")
+    movie_path(tmp_path, "s2", "cg").write_bytes(b"cg")
+    cg_s2 = {**s2, **s2["cg"], "_splitCg": True}
+    ops = plan_deck(
+        [s1, cg_s2], [{"from": "s2", "to": "s1", "kind": "movie", "duration": 1.0}], {},
+        output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=False, audience="cg", cg_affected={"s2"}
+    )
+    assert Path(ops[1]["items"][0]["path"]).name.endswith("_CG.mov")
+
+
+def test_split_cg_movie_is_direct_1920_in_both_directions(tmp_path: Path):
+    split = _slide("split", _camera(3.0, 101.0, 8), _splitCg=True, includeSidePanels=False)
+    legacy = _slide("legacy", _camera(3.0, 102.0, 8), cgShiftX=300, includeSidePanels=False)
+    for sid in ("split", "legacy"):
+        _dummy_png(tmp_path / "stills" / f"{sid}_CG.png")
+        movie_path(tmp_path, sid, "cg").parent.mkdir(parents=True, exist_ok=True)
+        movie_path(tmp_path, sid, "cg").write_bytes(b"cg")
+    link = lambda start, end: [{"from": start, "to": end, "kind": "movie", "duration": 1.0}]
+
+    split_to_legacy = plan_deck(
+        [split, legacy], link("split", "legacy"), {}, output_dir=tmp_path, preview_dir=tmp_path,
+        movie=None, wall=False, audience="cg", cg_affected={"split", "legacy"}
+    )[0]["items"][0]
+    legacy_to_split = plan_deck(
+        [legacy, split], link("legacy", "split"), {}, output_dir=tmp_path, preview_dir=tmp_path,
+        movie=None, wall=False, audience="cg", cg_affected={"split", "legacy"}
+    )[0]["items"][0]
+
+    assert (split_to_legacy["x"], split_to_legacy["w"]) == (0, 1920)
+    assert (legacy_to_split["x"], legacy_to_split["w"]) == (0, 1920)
 
 
 def test_oversized_morph_becomes_movie():
@@ -467,7 +739,7 @@ def test_plan_deck_movie_wins_over_ending_plate(tmp_path: Path):
     assert ops[1]["transition"]["delay"] == 2.0
 
 
-def test_coerce_movie_to_cut_on_style_mismatch():
+def test_coerce_preserves_explicit_movie_on_style_mismatch():
     a = _slide("s1", _camera(3.0, 101.0, 8), style="positron")
     b = _slide("s2", _camera(3.0, 102.0, 8), style="dark")
     links = [
@@ -484,11 +756,11 @@ def test_coerce_movie_to_cut_on_style_mismatch():
         }
     ]
     next_links = coerce_link_kinds([a, b], links)
-    assert next_links[0]["kind"] == "cut"
-    assert "easing" not in next_links[0]
-    assert "easeIn" not in next_links[0]
-    assert "easeOut" not in next_links[0]
-    assert "flyZoom" not in next_links[0]
+    assert next_links[0]["kind"] == "movie"
+    assert next_links[0]["easing"] == "ease-in-out"
+    assert next_links[0]["easeIn"] == 0.4
+    assert next_links[0]["easeOut"] == 0.3
+    assert next_links[0]["flyZoom"] == 5.0
 
 
 def test_plan_deck_movie_slide_omits_churches(tmp_path: Path):
@@ -531,7 +803,7 @@ def test_coerce_clears_route_when_not_movie():
         {
             "from": "s1",
             "to": "s2",
-            "kind": "movie",
+            "kind": "morph",
             "duration": 1.2,
             "playWithoutClick": False,
             "easing": "ease-in-out",
@@ -552,7 +824,7 @@ def test_build_deck_script_movie_backdrop_has_delay(tmp_path: Path):
     _dummy_png(tmp_path / "stills" / "s2.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
-    assert "make new movie" in script
+    assert "set mv to make new image with properties {file:movFile}" in script
     assert "transition delay:2.5" in script
 
 
@@ -576,3 +848,25 @@ def test_fw_still_fills_wall(tmp_path: Path):
     assert mapped["x"] == 0
     assert mapped["w"] == WALL_WIDTH
     assert mapped["h"] == WALL_HEIGHT
+
+
+def test_hop_capture_size_is_max_from_to():
+    a = _slide("s1", _camera(3.0, 101.0, 8))
+    b = _slide("s2", _camera(3.0, 102.0, 8), includeSidePanels=True)
+    assert hop_capture_size(a, b) == (WALL_WIDTH, WALL_HEIGHT)
+    assert hop_capture_size(b, a) == (WALL_WIDTH, WALL_HEIGHT)
+    assert hop_capture_size(a, a) == (CENTRE_WIDTH, WALL_HEIGHT)
+
+
+def test_plan_deck_movie_uses_max_capture_width(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0, 8), movieDuration=2.0)
+    b = _slide("s2", _camera(3.0, 102.0, 8), includeSidePanels=True)
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0, "playWithoutClick": False}]
+    mov = movie_path(tmp_path, "s1")
+    mov.parent.mkdir(parents=True, exist_ok=True)
+    mov.write_bytes(b"fake-mov")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    item = ops[0]["items"][0]
+    assert item["kind"] == "movie"
+    assert (item["x"], item["y"], item["w"], item["h"]) == (0, 0, WALL_WIDTH, WALL_HEIGHT)

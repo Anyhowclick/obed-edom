@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -34,6 +35,59 @@ def test_job_persists_and_reloads(tmp_path: Path):
     assert listed[0].id == job.id
     assert listed[0].result["stem"] == "Sermon_BC"
     assert reloaded.list(feature="diff") == []
+
+
+def test_cancel_running_job_keeps_cancelled_terminal_status(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    started = threading.Event()
+
+    def work(job: Job):
+        started.set()
+        while not job.cancelled():
+            time.sleep(0.01)
+        raise RuntimeError("interrupted")
+
+    job = runner.submit("maps", work, feature="maps")
+    assert started.wait(1)
+    cancelled = runner.cancel(job.id)
+    assert cancelled is job
+    done = _wait(runner, job.id)
+    assert done.status == "error"
+    assert done.error == "Export cancelled."
+    assert runner.cancel(job.id) is job
+
+
+def test_cancel_running_job_waits_for_worker_and_discards_result(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(_job: Job):
+        started.set()
+        assert release.wait(1)
+        return {"new": True}
+
+    job = runner.submit("maps", work, feature="maps")
+    job.result = {"old": True}
+    assert started.wait(1)
+    runner.cancel(job.id)
+    assert job.status == "running"
+    assert job.result == {"old": True}
+    release.set()
+    done = _wait(runner, job.id)
+    assert done.status == "error"
+    assert done.error == "Export cancelled."
+    assert done.result == {"old": True}
+
+
+def test_completion_wins_when_job_finishes_before_cancel(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    job = runner.submit("maps", lambda _job: {"complete": True}, feature="maps")
+    done = _wait(runner, job.id)
+    assert done.status == "done"
+    assert runner.cancel(job.id) is job
+    assert job.status == "done"
+    assert job.result == {"complete": True}
 
 
 def test_delete_purges_output_under_root(tmp_path: Path):
@@ -320,4 +374,3 @@ def test_artifact_status_maps_labels(tmp_path: Path):
         result={"destPath": str(map_key)},
     )
     assert "CG Keynote" not in artifact_status(resize_ok, output)["missing"]
-

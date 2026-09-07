@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 
@@ -41,7 +44,9 @@ DEFAULT_CAMERA_MAXZOOM = 14
 NE_MAXZOOM = 6
 MAX_PREFETCH_TILES = 8000
 FETCH_WORKERS = 8
-_SAFE_REL = re.compile(r"^[A-Za-z0-9._/-]+$")
+# Glyph fontstacks use spaces/commas; retina sprites use @2x. FastAPI may already
+# unquote %20, but leftover percent-escapes are still accepted after unquote().
+_SAFE_REL = re.compile(r"^[A-Za-z0-9._/@, %+\-]+$")
 _MEDIA = {
     ".pbf": "application/x-protobuf",
     ".json": "application/json",
@@ -60,7 +65,7 @@ def cache_root() -> Path:
 
 
 def normalize_rel(rest: str) -> str:
-    rel = (rest or "").strip().lstrip("/")
+    rel = unquote(rest or "").strip().lstrip("/")
     if not rel or not _SAFE_REL.match(rel):
         raise ValueError("Invalid tile path")
     parts = Path(rel).parts
@@ -95,7 +100,8 @@ def media_type_for(rel: str) -> str:
 
 
 def fetch_upstream(rel: str) -> bytes:
-    url = f"{UPSTREAM}/{normalize_rel(rel)}"
+    encoded = "/".join(quote(part, safe="") for part in normalize_rel(rel).split("/"))
+    url = f"{UPSTREAM}/{encoded}"
     resp = requests.get(url, timeout=45, headers={"User-Agent": TILE_UA}, allow_redirects=True)
     resp.raise_for_status()
     final = urlparse(resp.url)
@@ -110,7 +116,20 @@ def fetch_and_cache(rel: str, *, fetch=None) -> Path:
     if path.is_file():
         return path
     _ensure_parent_dir(path)
-    path.write_bytes(getter(rel))
+    data = getter(rel)
+    if path.is_file():
+        return path
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        if path.is_file():
+            return path
+        raise
     return path
 
 
@@ -192,12 +211,18 @@ def viewport_bbox(
     height: float,
     *,
     pad: float = 0.25,
+    bearing: float = 0.0,
 ) -> tuple[float, float, float, float]:
     world = world_width(zoom)
     cx = (clamp_lon(lon) + 180.0) / 360.0
     cy = mercator_y(lat)
-    nw = (float(width) / world) * (1.0 + pad)
-    nh = (float(height) / world) * (1.0 + pad)
+    theta = math.radians(float(bearing) or 0.0)
+    cos_t = abs(math.cos(theta))
+    sin_t = abs(math.sin(theta))
+    rot_w = abs(float(width) * cos_t) + abs(float(height) * sin_t)
+    rot_h = abs(float(width) * sin_t) + abs(float(height) * cos_t)
+    nw = (rot_w / world) * (1.0 + pad)
+    nh = (rot_h / world) * (1.0 + pad)
     west = (cx - nw / 2.0) * 360.0 - 180.0
     east = (cx + nw / 2.0) * 360.0 - 180.0
     north = inverse_mercator_y(cy - nh / 2.0)
@@ -216,9 +241,10 @@ def tiles_for_camera(
     lon = float(camera.get("lon") or 0)
     zoom = float(camera.get("zoom") or 0)
     pitch = abs(float(camera.get("pitch") or 0))
+    bearing = float(camera.get("bearing") or 0)
     pad = 0.3 + 0.6 * min(1.0, pitch / 60.0)
     z_hi = max(0, min(int(maxzoom), int(math.floor(zoom))))
-    west, south, east, north = viewport_bbox(lat, lon, zoom, width, height, pad=pad)
+    west, south, east, north = viewport_bbox(lat, lon, zoom, width, height, pad=pad, bearing=bearing)
     tiles: set[tuple[int, int, int]] = set()
     for z in range(max(0, z_hi - 2), z_hi + 1):
         tiles.update(tiles_for_bbox(west, south, east, north, z))
@@ -266,6 +292,26 @@ def rels_for_countries(codes: Iterable[str], *, maxzoom: int = DEFAULT_COUNTRY_M
     return planet_rels(tiles)
 
 
+def _subsample_even(items: list[Any], n: int) -> list[Any]:
+    if n >= len(items):
+        return items
+    if n <= 1:
+        return items[:1]
+    last = len(items) - 1
+    idxs = sorted({round(i * last / (n - 1)) for i in range(n)})
+    return [items[i] for i in idxs]
+
+
+def _cap_tiles(tiles: set[tuple[int, int, int]]) -> set[tuple[int, int, int]]:
+    if len(tiles) <= MAX_PREFETCH_TILES:
+        return tiles
+    ordered = sorted(tiles)
+    if MAX_PREFETCH_TILES <= 1:
+        return {ordered[0]}
+    count = len(ordered)
+    return {ordered[round(i * (count - 1) / (MAX_PREFETCH_TILES - 1))] for i in range(MAX_PREFETCH_TILES)}
+
+
 def rels_for_cameras(
     cameras: Iterable[dict[str, Any]],
     *,
@@ -273,14 +319,30 @@ def rels_for_cameras(
     height: float = WALL_HEIGHT,
     maxzoom: int = DEFAULT_CAMERA_MAXZOOM,
 ) -> list[str]:
-    tiles: set[tuple[int, int, int]] = set()
-    for camera in cameras:
-        tiles.update(tiles_for_camera(camera, width=width, height=height, maxzoom=maxzoom))
-        if len(tiles) >= MAX_PREFETCH_TILES:
-            break
-    if len(tiles) > MAX_PREFETCH_TILES:
-        tiles = set(sorted(tiles)[:MAX_PREFETCH_TILES])
-    return planet_rels(tiles)
+    cams = list(cameras)
+    if not cams:
+        return planet_rels([])
+
+    def tiles_for(subset: list[dict[str, Any]]) -> set[tuple[int, int, int]]:
+        tiles: set[tuple[int, int, int]] = set()
+        for camera in subset:
+            tiles.update(tiles_for_camera(camera, width=width, height=height, maxzoom=maxzoom))
+        return tiles
+
+    tiles = tiles_for(cams)
+    if len(tiles) > MAX_PREFETCH_TILES and len(cams) > 1:
+        lo, hi = 2, len(cams)
+        best_tiles = tiles_for(_subsample_even(cams, 2))
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = tiles_for(_subsample_even(cams, mid))
+            if len(candidate) <= MAX_PREFETCH_TILES:
+                best_tiles = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        tiles = best_tiles
+    return planet_rels(_cap_tiles(tiles))
 
 
 def prefetch_rels(rels: Iterable[str], *, fetch=None) -> dict[str, int]:
@@ -307,3 +369,21 @@ def prefetch_rels(rels: Iterable[str], *, fetch=None) -> dict[str, int]:
                 except Exception:
                     failed += 1
     return {"tiles": len(unique), "cached": cached, "fetched": fetched, "failed": failed}
+
+
+def cache_stats() -> dict[str, int]:
+    root = cache_root()
+    nbytes = 0
+    nfiles = 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            nfiles += 1
+            nbytes += path.stat().st_size
+    return {"bytes": nbytes, "files": nfiles}
+
+
+def clear_tile_cache() -> dict[str, int]:
+    root = cache_root()
+    shutil.rmtree(root, ignore_errors=True)
+    cache_root()
+    return cache_stats()

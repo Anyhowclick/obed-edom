@@ -1,10 +1,14 @@
 import json
+import shutil
 import time
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
-from obed_edom.maps_geo import WORLD_MIN_ZOOM
+from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM
 from obed_edom.web.app import RUNNER, app
 
 client = TestClient(app)
@@ -49,7 +53,8 @@ def test_post_maps_seeds_under_output_root_without_dest():
     assert result["slides"][0]["id"] == "s1"
     assert result["previewDir"].endswith("/previews")
     assert "/.maps/" in result["outputDir"].replace("\\", "/")
-    assert result["slides"][0]["camera"]["zoom"] >= WORLD_MIN_ZOOM
+    assert result["slides"][0]["camera"]["zoom"] >= CG_MIN_ZOOM
+    assert result["slides"][0]["camera"]["zoom"] < WORLD_MIN_ZOOM
 
 
 def test_state_409_while_running_and_patch_409():
@@ -62,6 +67,19 @@ def test_state_409_while_running_and_patch_409():
     stored.status = "done"
     patched = client.patch(f"/api/jobs/{job['id']}", json={"result": result_keep(job)})
     assert patched.status_code == 409
+
+
+def test_cancel_maps_export_is_idempotent_for_running_job():
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.status = "running"
+    first = client.post(f"/api/maps/{job['id']}/cancel")
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "running"
+    second = client.post(f"/api/maps/{job['id']}/cancel")
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "running"
 
 
 def test_state_and_frame_ok_after_error():
@@ -78,6 +96,21 @@ def test_state_and_frame_ok_after_error():
         headers={"content-type": "image/jpeg"},
     )
     assert framed.status_code == 200, framed.text
+
+
+def test_pin_label_visibility_round_trips_with_backward_compatible_default():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    slide["churches"] = [
+        {"id": "p1", "name": "Visible by default", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#ff8a00"},
+        {"id": "p2", "name": "Hidden", "lat": 4.0, "lon": 102.0, "kind": "dropPin", "color": "#c44a42", "showLabel": False},
+    ]
+    doc["slides"] = [slide]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    churches = saved.json()["result"]["slides"][0]["churches"]
+    assert [church["showLabel"] for church in churches] == [True, False]
 
 
 def result_keep(job):
@@ -337,6 +370,200 @@ def test_bootstrap_csv_queues_then_adds_slides(monkeypatch):
     assert len(ids) == 3
 
 
+def test_bootstrap_csv_replace_clears_prior_outputs(monkeypatch):
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    output_dir = Path(job["result"]["outputDir"])
+    stale_deck = output_dir / "old.key"
+    stale_preview = Path(job["result"]["previewDir"]) / "s1.png"
+    stale_deck.write_bytes(b"old deck")
+    stale_preview.write_bytes(b"old preview")
+    stored.result.update(
+        {
+            "destPath": str(stale_deck),
+            "flags": [{"message": "old validation"}],
+            "previewFiles": {"maps": ["s1.png"]},
+        }
+    )
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name\nSingapore\n", "replace": "true"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert "destPath" not in done["result"]
+    assert "flags" not in done["result"]
+    assert done["result"]["previewFiles"] == {"maps": []}
+    assert not stale_deck.exists()
+    assert not stale_preview.exists()
+
+
+def test_bootstrap_csv_can_add_pins_to_one_slide(monkeypatch):
+    job = _seed()
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name\nKuala Lumpur\nSingapore\n", "targetSlideId": "s1", "audience": "lw"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    pins = done["result"]["slides"][0]["churches"]
+    assert [pin["id"] for pin in pins] == ["p1", "p2"]
+    assert [pin["name"] for pin in pins] == ["Kuala Lumpur", "Singapore"]
+
+
+def test_maps_session_roundtrip_includes_preview_and_tile_cache(tmp_path, monkeypatch):
+    tile_root = tmp_path / "tile-cache"
+    tile_root.mkdir()
+    monkeypatch.setattr("obed_edom.web.maps.cache_root", lambda: tile_root)
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["title"] = "Portable session"
+    assert client.post(f"/api/maps/{job['id']}/state", json=doc).status_code == 200
+    assert client.post(f"/api/maps/{job['id']}/png?slideId=s1", content=b"preview").status_code == 200
+    tile = tile_root / "planet" / "0" / "0" / "0.pbf"
+    tile.parent.mkdir(parents=True)
+    tile.write_bytes(b"tile")
+
+    response = client.get(f"/api/maps/{job['id']}/session")
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        assert json.loads(archive.read("manifest.json"))["document"]["slides"][0]["title"] == "Portable session"
+        assert archive.read("previews/s1.png") == b"preview"
+        assert archive.read("tile-cache/planet/0/0/0.pbf") == b"tile"
+
+    tile.unlink()
+    doc["slides"][0]["title"] = "Changed"
+    client.post(f"/api/maps/{job['id']}/state", json=doc)
+    loaded = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("saved.obedmaps", response.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["result"]["slides"][0]["title"] == "Portable session"
+    assert loaded.json()["sessionImport"] == {"tiles": 1, "previews": 1}
+    assert tile.read_bytes() == b"tile"
+    preview = Path(loaded.json()["result"]["previewDir"]) / "s1.png"
+    assert preview.read_bytes() == b"preview"
+
+
+def test_maps_session_drops_movies_from_the_replaced_job(tmp_path, monkeypatch):
+    tile_root = tmp_path / "tile-cache"
+    tile_root.mkdir()
+    monkeypatch.setattr("obed_edom.web.maps.cache_root", lambda: tile_root)
+    job = _seed()
+    saved_doc = _doc(job)
+    saved_doc["slides"][0].update({"movieMov": "Map BG_s1.mov", "movieDuration": 1.5})
+    assert client.post(f"/api/maps/{job['id']}/state", json=saved_doc).status_code == 200
+    session = client.get(f"/api/maps/{job['id']}/session")
+    output_dir = Path(job["result"]["outputDir"])
+    stale_movie = output_dir / "movies" / "s1.mov"
+    stale_movie.parent.mkdir(parents=True, exist_ok=True)
+    stale_movie.write_bytes(b"old deck")
+    stale_deck = output_dir / "old.key"
+    stale_deck.write_bytes(b"old export")
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.result.update({"destPath": str(stale_deck), "flags": [{"message": "old validation"}]})
+
+    loaded = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("saved.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    slide = loaded.json()["result"]["slides"][0]
+    assert "movieMov" not in slide
+    assert "movieDuration" not in slide
+    assert "destPath" not in loaded.json()["result"]
+    assert "flags" not in loaded.json()["result"]
+    assert not stale_movie.exists()
+    assert not stale_deck.exists()
+
+
+def test_maps_session_rejects_traversal():
+    job = _seed()
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"format": "obed-edom-maps", "version": 1, "document": _doc(job)}))
+        archive.writestr("tile-cache/../../escape", b"no")
+    response = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("bad.obedmaps", buffer.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 400
+
+
+def test_maps_session_save_rejects_an_archive_that_load_would_reject(tmp_path, monkeypatch):
+    tile_root = tmp_path / "tile-cache"
+    tile_root.mkdir()
+    monkeypatch.setattr("obed_edom.web.maps.cache_root", lambda: tile_root)
+    monkeypatch.setattr("obed_edom.web.maps.SESSION_MAX_BYTES", 8)
+    (tile_root / "large.pbf").write_bytes(b"too large")
+    job = _seed()
+    response = client.get(f"/api/maps/{job['id']}/session")
+    assert response.status_code == 413
+
+
+def test_maps_session_rejects_invalid_tile_path_before_replacing_preview():
+    job = _seed()
+    assert client.post(f"/api/maps/{job['id']}/png?slideId=s1", content=b"existing").status_code == 200
+    preview = Path(job["result"]["previewDir"]) / "s1.png"
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"format": "obed-edom-maps", "version": 1, "document": _doc(job)}))
+        archive.writestr("tile-cache/not!allowed.pbf", b"no")
+    response = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("bad.obedmaps", buffer.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 400
+    assert preview.read_bytes() == b"existing"
+
+
+def test_maps_session_staging_failure_preserves_existing_assets(tmp_path, monkeypatch):
+    from obed_edom.web.maps import _read_session_archive
+
+    tile_root = tmp_path / "tile-cache"
+    tile_root.mkdir()
+    monkeypatch.setattr("obed_edom.web.maps.cache_root", lambda: tile_root)
+    job_public = _seed()
+    job = RUNNER.get(job_public["id"])
+    assert job is not None
+    preview = Path(job.result["previewDir"]) / "s1.png"
+    preview.write_bytes(b"existing preview")
+    existing_tile = tile_root / "existing.pbf"
+    existing_tile.write_bytes(b"existing tile")
+    stale_deck = Path(job.result["outputDir"]) / "existing.key"
+    stale_deck.write_bytes(b"existing deck")
+    job.result["destPath"] = str(stale_deck)
+    archive_raw = BytesIO()
+    with zipfile.ZipFile(archive_raw, "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"format": "obed-edom-maps", "version": 1, "document": _doc(job_public)}))
+        archive.writestr("previews/imported.png", b"new preview")
+        archive.writestr("tile-cache/new.pbf", b"new tile")
+    original_copy = shutil.copyfileobj
+    copies = 0
+
+    def fail_second_copy(src, dest, *args, **kwargs):
+        nonlocal copies
+        copies += 1
+        if copies == 2:
+            raise OSError("simulated destination failure")
+        return original_copy(src, dest, *args, **kwargs)
+
+    monkeypatch.setattr("obed_edom.web.maps.shutil.copyfileobj", fail_second_copy)
+    with pytest.raises(OSError, match="simulated destination failure"):
+        _read_session_archive(job, BytesIO(archive_raw.getvalue()))
+    assert preview.read_bytes() == b"existing preview"
+    assert existing_tile.read_bytes() == b"existing tile"
+    assert stale_deck.read_bytes() == b"existing deck"
+    assert not (tile_root / "new.pbf").exists()
+
+
 def test_export_requires_one_deck():
     job = _seed()
     res = client.post(
@@ -344,6 +571,15 @@ def test_export_requires_one_deck():
         json={"exportLw": False, "exportCg": False},
     )
     assert res.status_code == 400
+
+
+def test_state_allows_dsk_as_the_only_export_target():
+    job = _seed()
+    doc = _doc(job)
+    doc.update({"exportLw": False, "exportCg": False, "exportDsk": True})
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["exportDsk"] is True
 
 
 def test_png_still_and_plate_filenames():
@@ -365,6 +601,7 @@ def test_export_plan_coerces_oversized_morph():
     job = _seed()
     doc = _doc(job)
     s1 = dict(doc["slides"][0])
+    s1["includeSidePanels"] = True
     cam = dict(s1["camera"])
     s2 = dict(s1)
     s2["id"] = "s2"
@@ -468,3 +705,9 @@ def test_tile_proxy_and_prefetch_use_disk_cache(tmp_path, monkeypatch):
     body = prefetch.json()
     assert body["ok"] is True
     assert body["tiles"] > 0
+    stats = client.get("/api/maps/tile-cache")
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["bytes"] > 0
+    cleared = client.delete("/api/maps/tile-cache")
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["bytes"] == 0

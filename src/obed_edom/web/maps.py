@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from obed_edom.maps_geo import (
     GeocodeError,
@@ -24,11 +30,14 @@ from obed_edom.maps_geo import (
     parse_maps_query,
     sea_overview_camera,
 )
-from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_filename
+from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
 from obed_edom.maps_tiles import (
     DEFAULT_CAMERA_MAXZOOM,
     DEFAULT_COUNTRY_MAXZOOM,
     cache_country_rows,
+    cache_root,
+    cache_stats,
+    clear_tile_cache,
     fetch_and_cache,
     media_type_for,
     normalize_rel,
@@ -39,6 +48,10 @@ from obed_edom.maps_tiles import (
 from obed_edom.paths import output_root
 
 router = APIRouter(prefix="/api/maps", tags=["maps"])
+
+SESSION_VERSION = 1
+SESSION_MAX_FILES = 100_000
+SESSION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 DIR_KEYS = {"outputDir", "workDir", "previewDir", "stem", "previews", "previewFiles"}
 STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d")
@@ -76,8 +89,20 @@ class MapsChurch(BaseModel):
     lon: float
     kind: MapsPinKind
     color: str
+    showLabel: bool = True
     icon: MapsIconId | None = None
     photoPath: str | None = None
+
+
+class MapsCgOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    camera: MapsCamera
+    style: MapsStyleId
+    highlights: list[str] = Field(default_factory=list)
+    churches: list[MapsChurch] = Field(default_factory=list)
+    stillPng: str | None = None
+    movieMov: str | None = None
+    movieDuration: float | None = None
 
 
 class MapsSlide(BaseModel):
@@ -94,6 +119,7 @@ class MapsSlide(BaseModel):
     cgShiftX: float = 0
     cgShiftY: float = 0
     includeSidePanels: bool = False
+    cg: MapsCgOverride | None = None
 
     @field_validator("includeSidePanels", mode="before")
     @classmethod
@@ -156,6 +182,7 @@ class MapsDocument(BaseModel):
     crop: MapsCropId
     exportLw: bool = True
     exportCg: bool = True
+    exportDsk: bool = False
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: ["roadnames"])
     cachedCountries: list[str] = Field(default_factory=list)
 
@@ -185,15 +212,15 @@ class MapsDocument(BaseModel):
     slides: list[MapsSlide]
     links: list[MapsLink]
 
-    @field_validator("exportLw", "exportCg")
+    @field_validator("exportLw", "exportCg", "exportDsk")
     @classmethod
     def _bool(cls, value: bool) -> bool:
         return bool(value)
 
     @model_validator(mode="after")
     def _one_export(self) -> MapsDocument:
-        if not self.exportLw and not self.exportCg:
-            raise ValueError("At least one of exportLw or exportCg must be on")
+        if not self.exportLw and not self.exportCg and not self.exportDsk:
+            raise ValueError("At least one export target must be on")
         return self
 
 
@@ -210,6 +237,7 @@ class ExportBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     exportLw: bool | None = None
     exportCg: bool | None = None
+    exportDsk: bool | None = None
 
 
 def _job_or_404(job_id: str):
@@ -238,6 +266,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "crop": doc.crop,
         "exportLw": doc.exportLw,
         "exportCg": doc.exportCg,
+        "exportDsk": doc.exportDsk,
         "hiddenLayers": list(doc.hiddenLayers),
         "cachedCountries": list(doc.cachedCountries),
         "slides": [slide.model_dump() for slide in doc.slides],
@@ -252,6 +281,7 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "crop",
         "exportLw",
         "exportCg",
+        "exportDsk",
         "hiddenLayers",
         "cachedCountries",
         "slides",
@@ -262,8 +292,8 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         return MapsDocument.model_validate(body)
     except Exception as exc:
         message = str(exc)
-        if "exportLw" in message or "exportCg" in message or "at least one" in message.lower():
-            raise HTTPException(400, "At least one of exportLw or exportCg must be on") from exc
+        if "exportLw" in message or "exportCg" in message or "exportDsk" in message or "at least one" in message.lower():
+            raise HTTPException(400, "At least one export target must be on") from exc
         raise HTTPException(400, message) from exc
 
 
@@ -281,6 +311,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "previewFiles": {"maps": []},
         "exportLw": True,
         "exportCg": True,
+        "exportDsk": False,
         "defaultStyle": "positron",
         "crop": "center+cg",
         "hiddenLayers": ["roadnames"],
@@ -376,6 +407,8 @@ def _parse_csv(text: str) -> list[dict[str, str]]:
 
 def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
     result = dict(job.result or {})
+    if replace:
+        _clear_derived_maps_output(result)
     slides = [] if replace else list(result.get("slides") or [])
     links = [] if replace else list(result.get("links") or [])
     for row in _parse_csv(csv_text):
@@ -397,10 +430,226 @@ def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
     return result
 
 
-def _run_export(job, export_lw: bool, export_cg: bool) -> dict[str, Any]:
+def _next_pin_id(churches: list[dict[str, Any]]) -> str:
+    used = {str(church.get("id") or "") for church in churches}
+    index = 1
+    while f"p{index}" in used:
+        index += 1
+    return f"p{index}"
+
+
+def _run_pin_bootstrap(job, csv_text: str, slide_id: str, audience: str) -> dict[str, Any]:
+    result = dict(job.result or {})
+    slides = [dict(slide) for slide in (result.get("slides") or [])]
+    target = next((slide for slide in slides if str(slide.get("id") or "") == slide_id), None)
+    if target is None:
+        raise ValueError("Target slide is not in this deck")
+    view = dict(target.get("cg") or {}) if audience == "cg" and isinstance(target.get("cg"), dict) else target
+    churches = [dict(church) for church in (view.get("churches") or [])]
+    for row in _parse_csv(csv_text):
+        generated = _row_slide(row, "csv")["churches"][0]
+        churches.append({**generated, "id": _next_pin_id(churches)})
+    if view is target:
+        target["churches"] = churches
+    else:
+        target["cg"] = {**view, "churches": churches}
+    result["slides"] = slides
+    return result
+
+
+def _session_path(job) -> Path:
+    result = job.result or {}
+    output_dir = Path(str(result.get("outputDir") or ""))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{str(result.get('stem') or f'maps-{job.id}')}.obedmaps"
+
+
+def _clear_derived_maps_output(result: dict[str, Any], *, clear_preview: bool = True) -> Path:
+    output_dir = Path(str(result.get("outputDir") or ""))
+    preview_dir = Path(str(result.get("previewDir") or output_dir / "previews"))
+    output_root_resolved = output_dir.resolve()
+    for key in ("destPath", "destPathCg", "destPathDsk"):
+        raw = str(result.get(key) or "")
+        if raw:
+            derived = Path(raw)
+            try:
+                derived.resolve().relative_to(output_root_resolved)
+            except ValueError:
+                pass
+            else:
+                try:
+                    derived.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    for key in ("destPath", "destPathCg", "destPathDsk", "flags", "flagsCg", "flagsDsk"):
+        result.pop(key, None)
+    folders = [output_dir / "frames", output_dir / "movies", output_dir / "stills", output_dir / "plates"]
+    if clear_preview:
+        folders.append(preview_dir)
+    for folder in folders:
+        shutil.rmtree(folder, ignore_errors=True)
+    if clear_preview:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+    result["previewFiles"] = {"maps": []}
+    return preview_dir
+
+
+def _write_session_archive(job) -> Path:
+    result = dict(job.result or {})
+    doc = _parse_document(result)
+    path = _session_path(job)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    manifest = {
+        "format": "obed-edom-maps",
+        "version": SESSION_VERSION,
+        "document": _dump_document(doc),
+    }
+    preview_dir = Path(str(result.get("previewDir") or ""))
+    preview_names = {
+        Path(str(name)).name
+        for name in ((result.get("previewFiles") or {}).get("maps") or [])
+        if Path(str(name)).name == str(name)
+    }
+    entries: list[tuple[Path, str]] = []
+    for name in sorted(preview_names):
+        source = preview_dir / name
+        if source.is_file():
+            entries.append((source, f"previews/{name}"))
+    root = cache_root()
+    for source in sorted(root.rglob("*")):
+        if source.is_file() and not source.name.endswith(".tmp"):
+            entries.append((source, f"tile-cache/{source.relative_to(root).as_posix()}"))
+    total_bytes = len(json.dumps(manifest, indent=2).encode("utf-8")) + sum(source.stat().st_size for source, _ in entries)
+    if len(entries) + 1 > SESSION_MAX_FILES or total_bytes > SESSION_MAX_BYTES:
+        raise HTTPException(413, "Maps session is too large; clear or reduce the tile cache before saving")
+    with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, indent=2).encode("utf-8"))
+        for source, archive_name in entries:
+            archive.write(source, archive_name)
+    temp_path.replace(path)
+    return path
+
+
+def _valid_session_member(name: str) -> PurePosixPath:
+    member = PurePosixPath(name)
+    if member.is_absolute() or not member.parts or ".." in member.parts or "\\" in name:
+        raise HTTPException(400, "Invalid Maps session archive path")
+    return member
+
+
+def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
+    try:
+        archive = zipfile.ZipFile(source)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise HTTPException(400, "Invalid Maps session file") from exc
+    with archive:
+        files = [info for info in archive.infolist() if not info.is_dir()]
+        if len(files) > SESSION_MAX_FILES or sum(info.file_size for info in files) > SESSION_MAX_BYTES:
+            raise HTTPException(413, "Maps session is too large")
+        preview_entries: list[tuple[zipfile.ZipInfo, str]] = []
+        tile_entries: list[tuple[zipfile.ZipInfo, str]] = []
+        destinations: set[str] = set()
+        for info in files:
+            member = _valid_session_member(info.filename)
+            destination = member.as_posix()
+            if destination in destinations:
+                raise HTTPException(400, "Maps session has duplicate archive paths")
+            destinations.add(destination)
+            if len(member.parts) == 2 and member.parts[0] == "previews":
+                name = member.parts[1]
+                if Path(name).name != name:
+                    raise HTTPException(400, "Invalid Maps session preview path")
+                preview_entries.append((info, name))
+            elif member.parts[0] == "tile-cache" and len(member.parts) > 1:
+                try:
+                    rel = normalize_rel("/".join(member.parts[1:]))
+                except ValueError as exc:
+                    raise HTTPException(400, "Invalid Maps session tile path") from exc
+                tile_entries.append((info, rel))
+            elif destination != "manifest.json":
+                raise HTTPException(400, "Maps session contains an unknown archive path")
+        try:
+            manifest = json.loads(archive.read("manifest.json"))
+        except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "Maps session manifest is missing or invalid") from exc
+        if manifest.get("format") != "obed-edom-maps" or manifest.get("version") != SESSION_VERSION:
+            raise HTTPException(400, "Unsupported Maps session format")
+        doc = _parse_document(manifest.get("document") or {})
+        result = dict(job.result or {})
+        output_dir = Path(str(result.get("outputDir") or ""))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        preview_dir = Path(str(result.get("previewDir") or output_dir / "previews"))
+        tile_root = cache_root()
+        imported_previews = {name for _, name in preview_entries}
+        created_tiles: list[Path] = []
+        with tempfile.TemporaryDirectory(prefix=".session-import-", dir=output_dir) as staging_raw:
+            staging = Path(staging_raw)
+            staged_previews = staging / "previews"
+            staged_tiles = staging / "tile-cache"
+            staged_previews.mkdir()
+            try:
+                for info, name in preview_entries:
+                    with archive.open(info) as src, (staged_previews / name).open("wb") as dest:
+                        shutil.copyfileobj(src, dest)
+                for info, rel in tile_entries:
+                    staged = staged_tiles / rel
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as src, staged.open("wb") as dest:
+                        shutil.copyfileobj(src, dest)
+            except zipfile.BadZipFile as exc:
+                raise HTTPException(400, "Maps session archive is corrupt") from exc
+            try:
+                for _, rel in tile_entries:
+                    dest = tile_root / rel
+                    if dest.exists():
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    staged = staged_tiles / rel
+                    with tempfile.NamedTemporaryFile(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent, delete=False) as temp:
+                        temp_path = Path(temp.name)
+                    try:
+                        shutil.copyfile(staged, temp_path)
+                        temp_path.replace(dest)
+                    finally:
+                        temp_path.unlink(missing_ok=True)
+                    created_tiles.append(dest)
+            except Exception:
+                for created in created_tiles:
+                    created.unlink(missing_ok=True)
+                raise
+            previous_previews = staging / "previous-previews"
+            if preview_dir.exists():
+                preview_dir.replace(previous_previews)
+            try:
+                staged_previews.replace(preview_dir)
+            except Exception:
+                if previous_previews.exists():
+                    previous_previews.replace(preview_dir)
+                for created in created_tiles:
+                    created.unlink(missing_ok=True)
+                raise
+            _clear_derived_maps_output(result, clear_preview=False)
+    dumped = _dump_document(doc)
+    for slide in dumped["slides"]:
+        slide.pop("movieMov", None)
+        slide.pop("movieDuration", None)
+        if slide.get("stillPng") not in imported_previews:
+            slide.pop("stillPng", None)
+        if isinstance(slide.get("cg"), dict):
+            slide["cg"].pop("movieMov", None)
+            slide["cg"].pop("movieDuration", None)
+            if slide["cg"].get("stillPng") not in imported_previews:
+                slide["cg"].pop("stillPng", None)
+    dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
+    result.update(dumped)
+    result["previewFiles"] = {"maps": sorted(imported_previews)}
+    return result, {"tiles": len(tile_entries), "previews": len(imported_previews)}
+
+
+def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
-    return export_maps_job(job, export_lw=export_lw, export_cg=export_cg)
+    return export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk)
 
 
 @router.post("")
@@ -452,6 +701,54 @@ def prefetch_tiles(payload: TilePrefetchBody) -> dict[str, Any]:
     return stats
 
 
+@router.get("/tile-cache")
+def tile_cache_get() -> dict[str, int]:
+    return cache_stats()
+
+
+@router.delete("/tile-cache")
+def tile_cache_clear() -> dict[str, int]:
+    return clear_tile_cache()
+
+
+@router.get("/{job_id}/session")
+def save_session(job_id: str):
+    job = _job_or_404(job_id)
+    _require_idle(job)
+    path = _write_session_archive(job)
+    return FileResponse(path, media_type="application/zip", filename=path.name)
+
+
+@router.post("/{job_id}/session")
+async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
+    job = _job_or_404(job_id)
+    _require_idle(job)
+    previous_status = job.status
+    job.status = "running"
+
+    def import_uploaded() -> tuple[dict[str, Any], dict[str, int]]:
+        with tempfile.NamedTemporaryFile(suffix=".obedmaps") as uploaded:
+            shutil.copyfileobj(file.file, uploaded)
+            uploaded.flush()
+            return _read_session_archive(job, uploaded.name)
+
+    try:
+        result, imported = await run_in_threadpool(import_uploaded)
+    except Exception:
+        job.status = previous_status
+        raise
+    finally:
+        await file.close()
+    job.status = "done"
+    job.error = None
+    updated = _runner().update_result(job_id, result)
+    if not updated:
+        raise HTTPException(404, "Unknown maps job")
+    payload = _runner().public_dict(updated)
+    payload["sessionImport"] = imported
+    return payload
+
+
 @router.post("/{job_id}/state")
 def save_state(job_id: str, payload: dict[str, Any]) -> dict:
     job = _job_or_404(job_id)
@@ -463,6 +760,7 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
         "crop",
         "exportLw",
         "exportCg",
+        "exportDsk",
         "hiddenLayers",
         "cachedCountries",
         "slides",
@@ -489,6 +787,7 @@ async def post_png(
     slideId: str | None = Query(None),
     plateId: str | None = Query(None),
     kind: str = Query("thumb"),
+    audience: Literal["lw", "cg"] = Query("lw"),
 ) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
@@ -507,7 +806,8 @@ async def post_png(
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / plate_filename(safe_plate)
+        plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
+        path = folder / plate_filename(plate_name)
         path.write_bytes(body)
         return _runner().public_dict(job)
     if not slideId:
@@ -515,6 +815,8 @@ async def post_png(
     if slideId not in ids:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)
+    if audience == "cg":
+        safe = f"{Path(safe).stem}_CG{Path(safe).suffix}"
     if not safe.endswith(".png"):
         safe = f"{safe}.png"
     if kind == "still":
@@ -533,7 +835,10 @@ async def post_png(
     for slide in slides:
         item = dict(slide)
         if item.get("id") == slideId:
-            item["stillPng"] = safe
+            if audience == "cg" and isinstance(item.get("cg"), dict):
+                item["cg"] = {**item["cg"], "stillPng": safe}
+            else:
+                item["stillPng"] = safe
         next_slides.append(item)
     result["slides"] = next_slides
     files = dict(result.get("previewFiles") or {})
@@ -553,6 +858,7 @@ async def post_frame(
     index: int = Query(...),
     count: int = Query(...),
     fps: int = Query(30),
+    audience: Literal["lw", "cg"] = Query("lw"),
 ) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
@@ -574,8 +880,8 @@ async def post_frame(
     output_dir = Path(str(result.get("outputDir") or ""))
     from obed_edom.maps_movie import write_frame, write_frames_meta
 
-    write_frame(output_dir, slideId, index, body, content_type)
-    write_frames_meta(output_dir, slideId, fps=fps, count=count)
+    write_frame(output_dir, slideId, index, body, content_type, audience)
+    write_frames_meta(output_dir, slideId, fps=fps, count=count, audience=audience)
     return {"ok": True, "index": index, "count": count}
 
 
@@ -587,7 +893,14 @@ def export_plan(job_id: str) -> dict:
     slides = list(result.get("slides") or [])
     links = list(result.get("links") or [])
     plan = maps_export_plan(slides, links)
-    return {"links": plan["links"], "stills": plan["stills"], "plates": plan["plates"]}
+    payload = {"links": plan["links"], "stills": plan["stills"], "plates": plan["plates"]}
+    if any(isinstance(slide.get("cg"), dict) for slide in slides):
+        cg = split_cg_export_plan(slides, links)
+        payload["cg"] = {
+            "links": cg["links"], "stills": cg["stills"], "plates": cg["plates"],
+            "affectedSlideIds": cg["affectedSlideIds"],
+        }
+    return payload
 
 
 @router.post("/{job_id}/bootstrap-csv")
@@ -596,6 +909,8 @@ async def bootstrap_csv(
     file: UploadFile | None = File(None),
     csv_text: str | None = Form(None),
     replace: bool = Form(False),
+    targetSlideId: str | None = Form(None),
+    audience: Literal["lw", "cg"] = Form("lw"),
 ) -> dict:
     job = _job_or_404(job_id)
     if job.status == "running":
@@ -606,7 +921,13 @@ async def bootstrap_csv(
     if not text.strip():
         raise HTTPException(400, "CSV is empty")
     try:
-        updated = _runner().rerun(job_id, lambda j, raw=text, rep=replace: _run_bootstrap(j, raw, rep))
+        if targetSlideId:
+            updated = _runner().rerun(
+                job_id,
+                lambda j, raw=text, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, raw, sid, aud),
+            )
+        else:
+            updated = _runner().rerun(job_id, lambda j, raw=text, rep=replace: _run_bootstrap(j, raw, rep))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:
@@ -638,16 +959,28 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
     result = job.result or {}
     export_lw = result.get("exportLw", True) if payload is None or payload.exportLw is None else payload.exportLw
     export_cg = result.get("exportCg", True) if payload is None or payload.exportCg is None else payload.exportCg
-    if not export_lw and not export_cg:
-        raise HTTPException(400, "At least one of exportLw or exportCg must be on")
+    export_dsk = result.get("exportDsk", False) if payload is None or payload.exportDsk is None else payload.exportDsk
+    if not export_lw and not export_cg and not export_dsk:
+        raise HTTPException(400, "At least one export target must be on")
     try:
         from obed_edom import maps_keynote as _maps_keynote  # noqa: F401
     except ImportError as exc:
         raise HTTPException(501, "Maps Keynote export is not available yet") from exc
     try:
-        updated = _runner().rerun(job_id, lambda j, lw=export_lw, cg=export_cg: _run_export(j, lw, cg))
+        updated = _runner().rerun(job_id, lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk: _run_export(j, lw, cg, dsk))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:
         raise HTTPException(404, "Unknown maps job")
     return _runner().public_dict(updated)
+
+
+@router.post("/{job_id}/cancel")
+def cancel_maps_export(job_id: str) -> dict:
+    job = _job_or_404(job_id)
+    if job.feature != "maps":
+        raise HTTPException(404, "Unknown maps job")
+    cancelled = _runner().cancel(job_id)
+    if not cancelled:
+        raise HTTPException(404, "Unknown maps job")
+    return _runner().public_dict(cancelled)
