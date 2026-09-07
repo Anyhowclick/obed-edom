@@ -3408,6 +3408,11 @@ def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path,
         "inspect_keynote",
         lambda *a, **k: calls.append("inspect") or {"slides": []},
     )
+    monkeypatch.setattr(
+        remap_mod,
+        "inspect_keynote_checker",
+        lambda *a, **k: calls.append("checker") or {"slides": []},
+    )
 
     def fake_export(key_path, export_dir):
         calls.append("export")
@@ -3431,7 +3436,7 @@ def test_validation_off_exports_previews_without_reading_the_deck_back(tmp_path,
         tmp_path / "Wall.key", dest, template=tmp_path / "T.key",
         export_dir=previews, validate=True,
     )
-    assert calls == ["inspect"]
+    assert calls == ["checker"]
 
 
 def test_planned_rects_carry_the_wall_source_to_cut_from():

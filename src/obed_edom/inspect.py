@@ -82,6 +82,11 @@ def _truthy_cache(use_cache: bool | None, slide_range) -> bool:
     return bool(load_settings()["reusePreviews"])
 
 
+class LegacyInspectFailed(RuntimeError):
+    """Legacy JXA inspect already ran and failed inside the checker; a caller's own legacy
+    fallback must not retry it (a second ~12min Keynote session buys nothing)."""
+
+
 def inspect_keynote(
     key_path: Path | str,
     *,
@@ -441,13 +446,21 @@ def _merge_legacy_items(
     return sorted(unreadable_numbers)
 
 
-def _build_checker_offline(key_path: Path, bulk_geometry_fn: Any, *, log: Any = None) -> dict[str, Any]:
+def _build_checker_offline(
+    key_path: Path,
+    bulk_geometry_fn: Any,
+    *,
+    slide_range: Any = None,
+    log: Any = None,
+) -> dict[str, Any]:
     """Two-tier IWA + attach_runs; one decode. Raises ImportError without ``iwa``."""
     from obed_edom.iwa_runs import _load_deck, attach_runs  # noqa: PLC0415
     from obed_edom.offline_inspect import two_tier_wall_payload  # noqa: PLC0415
 
     deck = _load_deck(key_path)
-    payload = two_tier_wall_payload(key_path, bulk_geometry_fn=bulk_geometry_fn, deck=deck, log=log)
+    payload = two_tier_wall_payload(
+        key_path, bulk_geometry_fn=bulk_geometry_fn, slide_range=slide_range, deck=deck, log=log
+    )
     try:
         attach_runs(key_path, payload, deck=deck)
     except Exception:  # noqa: BLE001 — run-matching error leaves runs=[] / no groupedText
@@ -461,6 +474,7 @@ def inspect_keynote_checker(
     key_path: Path | str,
     *,
     export_dir: Path | str | None = None,
+    slide_range: tuple[int, int] | frozenset[int] | None = None,
     use_cache: bool | None = None,
     log: Any = None,
 ) -> dict[str, Any]:
@@ -471,7 +485,7 @@ def inspect_keynote_checker(
     if not key_path.exists():
         raise FileNotFoundError(f"Keynote not found: {key_path}")
     timing: dict[str, float] = {}
-    want_cache = _truthy_cache(use_cache, None)
+    want_cache = _truthy_cache(use_cache, slide_range)
     dest = Path(export_dir) if export_dir else None
 
     from obed_edom.baseline import (  # noqa: PLC0415
@@ -526,24 +540,50 @@ def inspect_keynote_checker(
 
     t_read = time.perf_counter()
     try:
-        payload = _build_checker_offline(key_path, bulk_geometry, log=log)
+        payload = _build_checker_offline(key_path, bulk_geometry, slide_range=slide_range, log=log)
     except Exception as exc:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
         if log is not None:
             log(f"WARN: offline checker build failed for {key_path.name} ({exc!r}) -- falling back to legacy JXA.")
-        return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
+        try:
+            return inspect_keynote(
+                key_path, export_dir=export_dir, slide_range=slide_range, use_cache=use_cache
+            )
+        except Exception as legacy_exc:
+            raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
     sidecar = payload.get("_offline") or {}
     fallback = sidecar.get("fallback") or []
     fallback_slides = sidecar.get("fallback_slides") or []
     if not sidecar.get("bulk_ok") and fallback_slides:
-        return inspect_keynote(key_path, export_dir=export_dir, use_cache=use_cache)
+        try:
+            return inspect_keynote(
+                key_path, export_dir=export_dir, slide_range=slide_range, use_cache=use_cache
+            )
+        except Exception as legacy_exc:
+            raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
     if fallback:
         item_entries, slide_numbers = _partition_fallback(fallback)
-        if item_entries:
-            _merge_legacy_items(payload, key_path, item_entries)
-        if slide_numbers:
-            from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
+        try:
+            if item_entries:
+                _merge_legacy_items(payload, key_path, item_entries)
+            if slide_numbers:
+                from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
 
-            _merge_legacy_slides(payload, key_path, slide_numbers)
+                _merge_legacy_slides(payload, key_path, slide_numbers)
+        except Exception as legacy_exc:
+            raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
+    if slide_range is not None:
+        from obed_edom.map_remap import wants_slide  # noqa: PLC0415
+
+        # Legacy ranged JXA returns ONLY the wanted slides, with deck-absolute
+        # index/number and a full-deck slideCount (inspect_keynote.js). Match that shape:
+        # out-of-range slides are never bulk-confirmed here (_finalize_two_tier filters
+        # fallback by slide_range), so leaving them in would hand validate_inspect a deck
+        # of unvouched offline frames the operator never asked about.
+        payload["slides"] = [
+            s
+            for s in (payload.get("slides") or [])
+            if wants_slide(int(s.get("number") or (int(s.get("index") or 0) + 1)), slide_range)
+        ]
     timing["read"] = time.perf_counter() - t_read
 
     payload["path"] = str(key_path)
@@ -571,7 +611,7 @@ def inspect_keynote_checker(
     payload["_timing"] = timing
     payload["_cached"] = False
     payload["_digest"] = digest
-    if want_cache and digest:
+    if want_cache and digest and not slide_range:
         json_path = inspect_cache_path(digest)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         stored = {key: value for key, value in payload.items() if not str(key).startswith("_")}
