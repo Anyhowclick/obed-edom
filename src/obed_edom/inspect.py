@@ -72,6 +72,18 @@ def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
     return err
 
 
+def _set_export_state(
+    payload: dict[str, Any], export_dir: Path, error: str | None = None, *, failed: bool = False
+) -> bool:
+    exported = bool(preview_pngs(export_dir))
+    payload["exported"] = exported
+    if exported:
+        payload.pop("exportError", None)
+    elif failed:
+        payload["exportError"] = error or payload.get("exportError") or ""
+    return exported
+
+
 def _truthy_cache(use_cache: bool | None, slide_range) -> bool:
     if slide_range:
         return False
@@ -124,7 +136,7 @@ def inspect_keynote(
             payload["_timing"] = timing
             if dest is not None:
                 payload["previewDir"] = str(png_dir)
-                payload["exported"] = bool(preview_pngs(png_dir))
+                _set_export_state(payload, png_dir)
             return payload
         if dest is not None:
             dest = png_dir
@@ -178,12 +190,10 @@ def inspect_keynote(
         t_export = time.perf_counter()
         pngs = preview_pngs(dest)
         if pngs:
-            payload["exported"] = True
+            _set_export_state(payload, dest)
         else:
             fallback_err = export_slide_images(key_path, dest)
-            payload["exported"] = bool(preview_pngs(dest))
-            if not payload["exported"]:
-                payload["exportError"] = fallback_err or payload.get("exportError") or ""
+            _set_export_state(payload, dest, fallback_err, failed=True)
         timing["export"] = time.perf_counter() - t_export
         payload["previewDir"] = str(dest.resolve())
     payload["_timing"] = timing
@@ -523,16 +533,14 @@ def inspect_keynote_checker(
                     cached["_timing"] = timing
                     if dest is not None:
                         cached["previewDir"] = str(png_dir)
-                        cached["exported"] = bool(preview_pngs(png_dir))
+                        _set_export_state(cached, png_dir)
                     return cached
                 png_dir.mkdir(parents=True, exist_ok=True)
                 t_export = time.perf_counter()
                 err = export_slide_images(key_path, png_dir)
                 cached["_cached"] = True
                 cached["_digest"] = digest
-                cached["exported"] = bool(preview_pngs(png_dir))
-                if not cached["exported"]:
-                    cached["exportError"] = err or cached.get("exportError") or ""
+                _set_export_state(cached, png_dir, err, failed=True)
                 cached["previewDir"] = str(png_dir)
                 timing["export"] = time.perf_counter() - t_export
                 cached["_timing"] = timing
@@ -603,9 +611,7 @@ def inspect_keynote_checker(
         err: str | None = None
         if not preview_pngs(export_target):
             err = export_slide_images(key_path, export_target)
-        payload["exported"] = bool(preview_pngs(export_target))
-        if not payload["exported"]:
-            payload["exportError"] = err or payload.get("exportError") or ""
+        _set_export_state(payload, export_target, err, failed=True)
         timing["export"] = time.perf_counter() - t_export
         payload["previewDir"] = str(export_target.resolve())
 
@@ -650,6 +656,26 @@ def cached_payload(key_path: Path | str) -> dict[str, Any] | None:
         return None
     payload["_cached"] = True
     return payload
+
+
+def complete_cached_wall_payload(payload: dict[str, Any] | None) -> bool:
+    """Whether a digest-current cache safely represents every document slide."""
+    if not isinstance(payload, dict) or payload.get("reader") not in {"jxa", "offline"}:
+        return False
+    slides = payload.get("slides")
+    if not isinstance(slides, list):
+        return False
+    slide_count = payload.get("slideCount")
+    if type(slide_count) is not int or slide_count != len(slides):
+        return False
+    for position, slide in enumerate(slides, start=1):
+        if not isinstance(slide, dict):
+            return False
+        if type(slide.get("number")) is not int or type(slide.get("index")) is not int:
+            return False
+        if slide["number"] != position or slide["index"] != position - 1:
+            return False
+    return True
 
 
 def preview_media_type(path: Path | str) -> str:

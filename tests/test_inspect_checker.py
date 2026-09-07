@@ -88,7 +88,7 @@ def test_cache_hit_export_only_skips_the_rebuild(deck, monkeypatch, tmp_path):
     _seed_cache(deck, {"reader": "offline", "slideCount": 2,
                        "slides": [{"index": 0, "number": 1, "items": []},
                                   {"index": 1, "number": 2, "items": []}],
-                       "sentinel": "CACHED"})
+                       "sentinel": "CACHED", "exportError": "old export failed"})
 
     def boom(*a, **k):  # pragma: no cover - must not run
         raise AssertionError("offline+bulk rebuild must not run when only export is needed")
@@ -118,6 +118,7 @@ def test_cache_hit_export_only_skips_the_rebuild(deck, monkeypatch, tmp_path):
     assert out["sentinel"] == "CACHED", "payload is the cache hit, not a rebuild"
     assert out["_cached"] is True
     assert out["exported"] is True
+    assert "exportError" not in out
     # Export lands in the digest-keyed preview cache dir (want_cache), served from there.
     assert out["previewDir"] == str(png_dir)
     assert len(inspect_mod.preview_pngs(png_dir)) == 2
@@ -132,7 +133,7 @@ def test_complete_preview_set_with_a_skipped_slide_is_a_hit(deck, monkeypatch, t
                        "slides": [{"index": 0, "number": 1, "items": []},
                                   {"index": 1, "number": 2, "items": [], "skipped": True},
                                   {"index": 2, "number": 3, "items": []}],
-                       "sentinel": "CACHED"})
+                       "sentinel": "CACHED", "exportError": "old export failed"})
     png_dir = preview_cache_dir(deck_digest(deck))
     png_dir.mkdir(parents=True, exist_ok=True)
     for n in (1, 3):  # only the 2 non-skipped slides have a PNG
@@ -148,6 +149,8 @@ def test_complete_preview_set_with_a_skipped_slide_is_a_hit(deck, monkeypatch, t
     assert out["_cached"] is True
     assert out["sentinel"] == "CACHED"
     assert out["previewDir"] == str(png_dir)
+    assert out["exported"] is True
+    assert "exportError" not in out
     assert "export" not in out["_timing"], "no re-export on a complete-set hit"
 
 

@@ -1260,6 +1260,21 @@ def test_offline_read_off_skips_attach_group_children(monkeypatch, tmp_path):
     )
     assert calls == [1]
 
+    calls.clear()
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload={**wall_payload, "reader": "jxa"}, template_payload=template_payload,
+        offline_read="on", log=lambda m: None,
+    )
+    assert calls == []
+
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload={**wall_payload, "reader": "offline"}, template_payload=template_payload,
+        offline_read="off", log=lambda m: None,
+    )
+    assert calls == [1]
+
 
 # --- R2: gate keys land + the gate logic that reads them -------------------------
 

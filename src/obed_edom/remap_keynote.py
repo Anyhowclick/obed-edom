@@ -13,6 +13,8 @@ from typing import Any
 from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import (
     LegacyInspectFailed,
+    cached_payload,
+    complete_cached_wall_payload,
     export_slide_images,
     inspect_keynote,
     inspect_keynote_checker,
@@ -129,12 +131,18 @@ def _specs_equivalent(off: list[dict], jxa: list[dict]) -> bool:
 
 
 def _merge_legacy_slides(
-    payload: dict[str, Any], source: Path, slide_numbers: list[int]
+    payload: dict[str, Any],
+    source: Path,
+    slide_numbers: list[int],
+    *,
+    use_cache: bool | None = None,
 ) -> None:
     """Replace the given slides' items in `payload` with one scoped legacy inspect."""
     if not slide_numbers:
         return
-    legacy = inspect_keynote(source, slide_range=frozenset(int(n) for n in slide_numbers))
+    legacy = inspect_keynote(
+        source, slide_range=frozenset(int(n) for n in slide_numbers), use_cache=use_cache
+    )
     by_number = {
         int(s.get("number") or (int(s.get("index") or 0) + 1)): s
         for s in legacy.get("slides") or []
@@ -160,8 +168,21 @@ def acquire_wall_payload(
 
     `on`: IWA + bulk geometry, with per-slide legacy fallback — never drop the whole deck unless tier 1 fails.
     """
+    cached = cached_payload(source)
+    allowed_readers = {"jxa", "offline"} if mode == "on" else {"jxa"}
+    rejected_cache = cached is not None
+    if complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers:
+        bulk_errors = cached.get("bulkErrors") or []
+        if bulk_errors:
+            say(f"WARN: cached {cached['reader']} read for {source.name} carries "
+                f"{len(bulk_errors)} bulk-geometry error(s) (see bulkErrors).")
+        say(f"Read {source.name} from cached {cached['reader']} payload — "
+            "skipped the Keynote source read.")
+        return cached
+
+    legacy_cache_arg = {"use_cache": False} if rejected_cache else {}
     if mode == "off":
-        return inspect_keynote(source, slide_range=slide_range)
+        return inspect_keynote(source, **legacy_cache_arg)
 
     try:
         from obed_edom.inspect import bulk_geometry  # noqa: PLC0415
@@ -170,12 +191,12 @@ def acquire_wall_payload(
         )
 
         offline = two_tier_wall_payload(
-            source, bulk_geometry_fn=bulk_geometry, slide_range=slide_range, log=say
+            source, bulk_geometry_fn=bulk_geometry, log=say
         )
     except Exception as exc:  # noqa: BLE001 — any tier-1 failure drops to legacy
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
             f"using Keynote inspect of {source.name}.")
-        return inspect_keynote(source, slide_range=slide_range)
+        return inspect_keynote(source, **legacy_cache_arg)
 
     sidecar = offline.get("_offline") or {}
     fallback_slides = sidecar.get("fallback_slides") or []
@@ -187,7 +208,7 @@ def acquire_wall_payload(
         say(f"Bulk geometry read of {source.name} unavailable and "
             f"{len(fallback_slides)} slide(s) need it {reasons}; "
             f"using Keynote inspect for the whole deck.")
-        return inspect_keynote(source, slide_range=slide_range)
+        return inspect_keynote(source, **legacy_cache_arg)
 
     if fallback_slides:
         from collections import Counter  # noqa: PLC0415
@@ -196,13 +217,16 @@ def acquire_wall_payload(
         say(f"Two-tier read of {source.name}: {sidecar.get('spliced', 0)} item(s) "
             f"bulk-confirmed; {len(fallback_slides)} slide(s) fall back to Keynote "
             f"inspect {reasons}: {fallback_slides}.")
-        _merge_legacy_slides(offline, source, fallback_slides)
+        _merge_legacy_slides(
+            offline, source, fallback_slides, use_cache=False if rejected_cache else None
+        )
 
     confirmed = "" if not fallback_slides else f" ({len(fallback_slides)} slide(s) via Keynote)"
     omitted = int(sidecar.get("skipped") or 0)
     skipped_note = "" if not omitted else f"; {omitted} Keynote-skipped slide(s) left to the offline tier"
     say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
+    offline["reader"] = "offline"
     return offline
 
 
@@ -820,15 +844,13 @@ def remap_keynote(
         deck = _load_deck(source)
         attach_group_child_text(source, wall, deck=deck)
         attach_group_captions(source, wall, deck=deck)
-        # child_src's offsets are computed against the group's STORED archive frame
-        # (gx, gy in _group_child_records); ItemTransform derives targets against
-        # self.src, which under OBED_OFFLINE_READ=on is the offline-composed group
-        # rect (same stored-frame space, or the child union — both fine) but under
-        # =off is Keynote's LIVE group frame. Stored != live union for a group whose
-        # children have already wrapped, so the two would be subtracted across
-        # different origins and displace every child. Attach only when the wall
-        # payload actually came from the offline reader.
-        if offline_read_mode(offline_read) == "on":
+        # Child offsets and offline-composed group frames share an archive coordinate
+        # space. Live JXA group frames may instead be child unions, so only attach for
+        # actual offline geometry. Reader-less injected payloads retain the old mode
+        # contract for compatible callers.
+        if wall.get("reader") == "offline" or (
+            "reader" not in wall and offline_read_mode(offline_read) == "on"
+        ):
             attach_group_children(source, wall, deck=deck)
     except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
         say(

@@ -329,6 +329,7 @@ def propose_framings(
     *,
     slide_range: Any = None,
     wall_payload: dict[str, Any] | None = None,
+    full_wall_payload: dict[str, Any] | None = None,
     template_payload: dict[str, Any] | None = None,
     keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
@@ -358,6 +359,7 @@ def propose_framings(
     wall_path = Path(wall).expanduser().resolve()
     template_path = Path(template).expanduser().resolve()
     wall_data = wall_payload if wall_payload is not None else inspect_keynote(wall_path)
+    full_wall_data = full_wall_payload if full_wall_payload is not None else wall_data
     template_data = (
         template_payload if template_payload is not None else inspect_keynote(template_path)
     )
@@ -379,7 +381,7 @@ def propose_framings(
         template=template_data,
         framing_report=report,
     )
-    thumbs = build_preview_thumbs(wall_path, wall_data, log=log)
+    thumbs = build_preview_thumbs(wall_path, full_wall_data, log=log)
     template_thumbs = build_preview_thumbs(template_path, template_data, log=log)
 
     by_number = {
@@ -465,7 +467,7 @@ def propose_framings(
     return {
         "wallPath": str(wall_path),
         "templatePath": str(template_path),
-        "wallDigests": deck_slide_digests(wall_data),
+        "wallDigests": deck_slide_digests(full_wall_data),
         "templateDigest": deck_digest(template_path),
         "wallThumbDir": str(wall_thumb_dir(deck_digest(wall_path))),
         "templateThumbDir": str(wall_thumb_dir(deck_digest(template_path))),
@@ -478,6 +480,6 @@ def propose_framings(
         "needAttention": attention,
         "noUsableFraming": stuck,
         # Document position ≠ navigator number when any slide is skipped.
-        "skippedSlides": skipped_positions(wall_data),
-        "numberingNote": navigator_numbering(wall_data),
+        "skippedSlides": skipped_positions(full_wall_data),
+        "numberingNote": navigator_numbering(full_wall_data),
     }

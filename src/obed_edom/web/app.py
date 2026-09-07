@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
@@ -44,6 +45,7 @@ from obed_edom.framing import (
 )
 from obed_edom.inspect import (
     cached_payload,
+    complete_cached_wall_payload,
     diff_work_dir,
     inspect_keynote,
     inspect_keynote_checker,
@@ -1207,6 +1209,25 @@ def _assert_range_within_deck(name: str, total: int, slide_range: Any) -> None:
     )
 
 
+def _complete_cached_wall_payload(payload: dict[str, Any] | None) -> bool:
+    """Compatibility wrapper for the shared cache completeness check."""
+    return complete_cached_wall_payload(payload)
+
+
+def _assert_range_within_navigator(name: str, payload: dict[str, Any], slide_range: Any) -> None:
+    if not slide_range:
+        return
+    total = sum(1 for slide in payload["slides"] if not slide.get("skipped"))
+    beyond = sorted(n for n in slide_range if n > total)
+    if not beyond:
+        return
+    plural = "s" if total != 1 else ""
+    raise RuntimeError(
+        f"{name} shows {total} slide{plural} in Keynote, but the range asks for slide "
+        f"{format_slide_range(frozenset(beyond))}. Check the deck or the slide range."
+    )
+
+
 def _run_resize_propose(
     job: Job,
     path: Path,
@@ -1218,16 +1239,18 @@ def _run_resize_propose(
 ) -> dict[str, Any]:
     typed = slide_range
     numbering = ""
+    full_wall: dict[str, Any] | None = None
     if slide_range:
         known = cached_payload(path)
-        if known is None:
+        if not _complete_cached_wall_payload(known):
             numbering = (
                 "This deck has not been read in full, so the range is taken as "
                 "document positions, counting any slides set to Skip Slide. "
                 "Propose once without a range to have Keynote's numbering used."
             )
         else:
-            _assert_range_within_deck(path.name, int(known.get("slideCount") or 0), slide_range)
+            full_wall = copy.deepcopy(known)
+            _assert_range_within_navigator(path.name, known, slide_range)
             slide_range = to_document_range(known, slide_range)
             numbering = navigator_numbering(known)
             if slide_range != expand_slide_range(typed):
@@ -1240,15 +1263,28 @@ def _run_resize_propose(
     job.log(f"Reading {path.name} and {template.name} to propose framings ({scope})…")
     if numbering:
         job.log(numbering)
-    wall = inspect_keynote(path, slide_range=slide_range)
+    if full_wall is None:
+        wall = inspect_keynote(path, slide_range=slide_range)
+    else:
+        wall = {
+            **full_wall,
+            "slides": copy.deepcopy(
+                [
+                    slide
+                    for slide in full_wall["slides"]
+                    if slide["number"] in (slide_range or frozenset())
+                ]
+            ),
+        }
     _assert_range_within_deck(path.name, int(wall.get("slideCount") or 0), slide_range)
     template_data = inspect_keynote(template)
+    full_context = full_wall if full_wall is not None else wall
     settings = load_settings()
     reuse = FramingReuse()
     if settings["reusePairings"]:
         record = load_framings(path, template)
         reuse = reuse_framings(
-            record, deck_slide_digests(wall), deck_digest(template)
+            record, deck_slide_digests(full_context), deck_digest(template)
         )
         if reuse.carried:
             job.log(
@@ -1266,6 +1302,7 @@ def _run_resize_propose(
         template,
         slide_range=slide_range,
         wall_payload=wall,
+        full_wall_payload=full_context,
         template_payload=template_data,
         keep_side_panels=keep_side_panels,
         side_content_slides=reuse.side_content_slides(),

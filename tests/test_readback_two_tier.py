@@ -355,6 +355,7 @@ def test_uncached_checker_exports_into_export_dir_not_digest_cache(deck, monkeyp
         return {
             "slideCount": 1,
             "slides": [{"index": 0, "number": 1, "items": []}],
+            "exportError": "old export failed",
             "_offline": {"bulk_ok": True, "fallback_slides": []},
         }
 
@@ -378,6 +379,7 @@ def test_uncached_checker_exports_into_export_dir_not_digest_cache(deck, monkeyp
     assert export_calls == [previews]
     assert previews.is_dir()
     assert out["exported"] is True
+    assert "exportError" not in out
     assert out["previewDir"] == str(previews.resolve())
     assert not preview_cache_dir(deck_digest(deck)).exists()
 
