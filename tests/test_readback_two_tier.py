@@ -97,6 +97,10 @@ def test_offline_read_off_env_uses_legacy(monkeypatch, tmp_path):
 
 
 def test_package_directory_dest_uses_legacy_with_log(monkeypatch, tmp_path):
+    """SHOULD-FIX-3: the package-directory arm must thread `slide_range` through to legacy
+    like every other arm of the ladder -- dropping it silently un-scopes a ranged validated
+    resize to a whole-deck legacy read (regression vs b6039ef, and exactly the harm AM-5
+    argues against)."""
     dest = tmp_path / "out.key"
     dest.mkdir()  # a package-directory save, not a zip
     monkeypatch.setattr(rk, "remap_keynote", _fake_remap())
@@ -113,11 +117,12 @@ def test_package_directory_dest_uses_legacy_with_log(monkeypatch, tmp_path):
 
     rk.remap_and_inspect(
         tmp_path / "wall.key", dest, template=tmp_path / "tpl.key",
-        validate=True, log=logged.append,
+        slide_range=frozenset({2}), validate=True, log=logged.append,
     )
 
     assert checker_calls == []
     assert legacy_calls
+    assert legacy_calls[0]["slide_range"] == frozenset({2})
     assert any("package directory" in m for m in logged)
 
 
@@ -142,6 +147,93 @@ def test_checker_raises_falls_back_to_legacy_with_warn(monkeypatch, tmp_path):
 
     assert legacy_calls  # readback never raises past the checker failure
     assert any("Two-tier readback failed" in m for m in logged)
+
+
+def test_readback_payload_reraises_legacy_inspect_failed_without_extra_legacy_calls(
+    monkeypatch, tmp_path,
+):
+    """BLOCKER-2(a): `LegacyInspectFailed` means legacy already ran and failed inside the
+    checker -- `_readback_payload` must re-raise it, not retry legacy a second time."""
+    dest = tmp_path / "out.key"
+
+    def boom_checker(*a, **k):
+        raise rk.LegacyInspectFailed("legacy already ran and failed")
+
+    monkeypatch.setattr(rk, "inspect_keynote_checker", boom_checker)
+    legacy_calls = []
+    monkeypatch.setattr(
+        rk, "inspect_keynote",
+        lambda *a, **k: legacy_calls.append(1) or _fake_legacy_payload(),
+    )
+
+    with pytest.raises(rk.LegacyInspectFailed):
+        rk._readback_payload(dest, None, None, None)
+
+    assert legacy_calls == []
+
+
+def test_readback_payload_plain_exception_falls_back_to_legacy_exactly_once(
+    monkeypatch, tmp_path,
+):
+    """BLOCKER-2(b): a plain (non-sentinel) exception out of the checker is the fail-safe
+    arm -- legacy must run exactly once and the readback must complete."""
+    dest = tmp_path / "out.key"
+
+    def boom_checker(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rk, "inspect_keynote_checker", boom_checker)
+    legacy_calls = []
+    legacy_payload = _fake_legacy_payload()
+    monkeypatch.setattr(
+        rk, "inspect_keynote",
+        lambda *a, **k: legacy_calls.append(1) or legacy_payload,
+    )
+
+    out = rk._readback_payload(dest, None, None, None)
+
+    assert legacy_calls == [1]
+    assert out is legacy_payload
+
+
+def test_arm_c_merge_failure_falls_back_to_legacy_once_not_reraised(monkeypatch, tmp_path):
+    """BLOCKER-2(c) / post-BLOCKER-1-fix: arm C's `_merge_legacy_items`/`_merge_legacy_slides`
+    calls are narrow reads, not a whole-deck legacy read, so a failure there (Keynote or
+    pure-Python) must escape `inspect_keynote_checker` as a plain exception -- never
+    relabelled `LegacyInspectFailed` -- so `_readback_payload`'s fail-safe still runs one
+    whole-deck legacy read and the resize completes. Fails on b50d22b's src: arm C wrapped
+    the merge calls in `LegacyInspectFailed`, which `_readback_payload` re-raises instead of
+    falling back."""
+    dest = tmp_path / "out.key"
+    dest.write_bytes(b"not a real keynote, just bytes to hash")
+
+    def spy_build(key_path, bulk_geometry_fn, **kwargs):
+        return {
+            "slideCount": 1,
+            "slides": [{"index": 0, "number": 1, "items": []}],
+            "_offline": {
+                "bulk_ok": True,
+                "fallback_slides": [],
+                "fallback": [{"slide": 1, "kind": "shape", "kindIndex": 0}],
+            },
+        }
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+    monkeypatch.setattr(
+        inspect_mod, "_merge_legacy_items",
+        lambda *a, **k: (_ for _ in ()).throw(TypeError("boom")),
+    )
+    legacy_calls = []
+    legacy_payload = _fake_legacy_payload()
+    monkeypatch.setattr(
+        rk, "inspect_keynote",
+        lambda *a, **k: legacy_calls.append(1) or legacy_payload,
+    )
+
+    out = rk._readback_payload(dest, None, None, None)
+
+    assert legacy_calls == [1]
+    assert out is legacy_payload
 
 
 def test_offline_write_verify_mode_forces_legacy_readback(monkeypatch, tmp_path):
@@ -208,7 +300,12 @@ def deck(tmp_path, monkeypatch) -> Path:
 
 
 def test_checker_ranged_subsets_slides_and_never_caches(deck, monkeypatch):
-    def spy_build(key_path, bulk_geometry_fn, **kwargs):
+    """NIT-1: `slide_range` must reach the offline builder as a named argument (not silently
+    dropped and swallowed by a `**kwargs` stub) -- that's what scopes the bulk Keynote read
+    itself, the ranged path's entire cost saving."""
+
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, log=None):
+        assert slide_range == frozenset({2})
         return {
             "slideCount": 3,
             "slides": [

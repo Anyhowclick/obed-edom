@@ -1408,8 +1408,8 @@ def _readback_payload(
     if dest.is_dir():
         if log:
             log(f"{dest.name} was saved as a package directory; offline read unavailable -- "
-                "using Keynote inspect (whole-deck legacy readback).")
-        return inspect_keynote(dest, export_dir=export_dir, use_cache=False)
+                "using Keynote inspect.")
+        return inspect_keynote(dest, export_dir=export_dir, slide_range=slide_range, use_cache=False)
     try:
         return inspect_keynote_checker(
             dest, export_dir=export_dir, slide_range=slide_range, use_cache=False, log=log

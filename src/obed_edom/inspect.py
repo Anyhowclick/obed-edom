@@ -562,15 +562,16 @@ def inspect_keynote_checker(
             raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
     if fallback:
         item_entries, slide_numbers = _partition_fallback(fallback)
-        try:
-            if item_entries:
-                _merge_legacy_items(payload, key_path, item_entries)
-            if slide_numbers:
-                from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
+        # Not wrapped in LegacyInspectFailed: these are narrow inspect_items/inspect_keynote
+        # reads, not the whole-deck legacy read the sentinel exists to dedupe against. A
+        # failure here (Keynote or pure-Python) must fall through as a plain exception so
+        # the caller's fail-safe still runs one whole-deck legacy read.
+        if item_entries:
+            _merge_legacy_items(payload, key_path, item_entries)
+        if slide_numbers:
+            from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
 
-                _merge_legacy_slides(payload, key_path, slide_numbers)
-        except Exception as legacy_exc:
-            raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
+            _merge_legacy_slides(payload, key_path, slide_numbers)
     if slide_range is not None:
         from obed_edom.map_remap import wants_slide  # noqa: PLC0415
 
