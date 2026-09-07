@@ -15,7 +15,30 @@ todos:
     content: "TRANCHE 1 (R1) — DONE 2026-09-04, PROBE ANSWER = NO. `scripts/probe_nested_bulk.py` (d4663ed, 99b2e09; 74 tests) ran live on an APFS clone of the GW deck (2 locked objects + 1 empty text box added, 15 skipped slides, zero-item slide 1, 2 movies) and on a Map clone. Correctness criteria 1-4 PASS on both: outer length == slide count with skipped slides in position, values identical to bulk_geometry.js for 4 kinds × 3 props, 113 (GW) / 12 (Map) empty collections returned `[]` in position, text placeholder tails within slack. Failure semantics (6): a per-element failure inside `<x> of every text item of every slide` is SUBSTITUTED (`missing value` in position, all 63 per-slide lengths preserved, 127/226 elements) — never a silent partial; an invalid property (`object text of every movie`) raises for the WHOLE event (-1728); `count of characters of object text of every … of every slide` collapses to ONE integer; `properties of every image` fails outright (-10000). Speed (5) FAILS: GW nested 48.8s vs bulk 66.9s warm (1.37×), Map nested 50.1s vs bulk 36.3s (0.73× — SLOWER); JXA `doc.slides.textItems.position()` 46s and omits kinds. Per-read seconds show the cost is PER OBJECT-PROPERTY inside Keynote (GW images ≈70ms/prop/object, Map images ≈33ms, text ≈9ms), not per Apple Event — the overhead-dominated hypothesis is refuted, so `r-bulk-counts-plan` (skip empty-collection events) would save only a few seconds too; both are closed. Findings + raw sidecars: output/nested-bulk-probe/findings-*.json. The bulk tier stays as is; the read-side minutes now come only from R2 (fewer reads), not faster reads."
     status: completed
   - id: r-readback-two-tier
-    content: "TRANCHE 2 (R2) — IMMEDIATE optimization TODO after tranche 1 + current fixes. Switch the resizer readback (remap_and_inspect(validate=True) → inspect_keynote(dest, export_dir, slide_range) at remap_keynote.py ~992; dashboard default validate=True) to the two-tier offline+bulk read. Gate MET (checker machinery shipped, e2e_run_parity green). Own caveats to close first: (a) accuracy evidence covers SOURCE decks — run a field-parity A/B on ≥1 real _CG.key per gold family (offline+bulk vs cached JXA readback, every validate-consumed field + validate_inspect flag parity; compare groups as a SET post-Bring-to-Front); (b) slide_range: a ranged extension must disable the cache like legacy; A/B one ranged run; (c) package-directory save → whole-deck legacy fallback (log it); (d) r-count-guard landed (done); (e) r-readback-nocache-fix landed (done); (f) keep use_cache=False when switching to the checker machinery (it hashes + cache-writes by default). Consumers on this path are only validate_inspect + scalar fields (field audit passed). Payoff: ~8 min per validated resize on report decks (756s → ~290s), ~3.5 min sermon-class. Risk MEDIUM. Files: inspect.py, remap_keynote.py, web/app.py. Sequence with W1 (both edit remap_keynote.py)."
+    content: "TRANCHE 2 (R2) — CODE-COMPLETE 2026-09-07 on branch fix/resizer-backlog-r2 (b50d22b + fix
+      round 7bb0f52), 2/1/2 (planners sonnet+opus AGREE-WITH-AMENDMENTS AM-1..14; fresh sonnet
+      implemented; reviewers sonnet APPROVE, opus REQUEST-CHANGES → fix round → re-verified CLEARED;
+      all docs under output/handover-2026-09-07/). The validated-resize readback now goes through a new
+      _readback_payload ladder (remap_keynote.py): offline-write verify mode forces LEGACY (AM-2 — so
+      verify_live_frames never self-confirms offline-composed shape/line frames; _splice_bulk_geometry
+      only overwrites BULK_KINDS) → OBED_OFFLINE_READ=off kill switch → package-dir dest → legacy
+      (range threaded) → inspect_keynote_checker(use_cache=False literal, slide_range threaded) with
+      fail-safe to ONE legacy read on any plain exception. inspect_keynote_checker gained slide_range
+      (ranged never caches even with use_cache=True; result subsetted to the legacy JXA shape AFTER
+      attach_runs + the legacy merges; slideCount stays full-deck); LegacyInspectFailed sentinel is
+      raised ONLY when an actual legacy inspect_keynote call failed — a merge-step failure escapes
+      plain and falls back (b50d22b's arm-C re-labeling crashed a validated resize with zero legacy
+      runs; the opus review caught it, fixed in 7bb0f52 with mutant-killing tests). Caveats: (c)(f)
+      closed in code; (b) closed in code, one ranged A/B run still owed; (a) NOT closed — the
+      field-parity A/B on ≥1 real _CG.key per gold family is an UNEXECUTED checklist at
+      output/handover-2026-09-07/plan/r2-readback-plan.md §4+§6 (group children/childCount is the one
+      JXA-only field → hard A/B gate; int-vs-float rounding rule spec'd; Gold decks need the owner's
+      explicit hands-off ack). ALSO REQUIRED after the A/B: one scripts/write_gate_ab.py re-run (its
+      build_reported seed recounts per-kind ORDER, AM-10(c) unmeasured). Accepted residual: a deck
+      where inspect_items marks EVERY slide unreadable promotes arm C to a whole-deck merge, and a
+      failure there runs a ranged + a whole-deck legacy pair (fails safe; b50d22b crashed instead).
+      Payoff (756s → ~290s report-class) is still a PROJECTION — measure it in the A/B. Next:
+      r-propose-two-tier only after the A/B exists."
     status: pending
   - id: r-propose-two-tier
     content: "TRANCHE 2 (R2b), after r-readback-two-tier's A/B exists. The resize PROPOSE source read is still full JXA (_run_resize_propose → inspect_keynote at web/app.py ~1468, not acquire_wall_payload): a new deck's first propose pays ~12.6 min although apply reads two-tier. Same consumer audit plus deck_slide_digests parity (pairings/framings key on digests of ALL slides), propose_framings/planner parity, and cache the two-tier propose payload under the digest so propose→apply→re-propose reuse it (cross-serve is then deliberate — verify once). Payoff: first propose 12.6 → ~3 min. Risk MEDIUM (fingerprint churn; worst case a one-time pairing re-align)."
@@ -48,8 +71,28 @@ todos:
     content: "DONE 2026-09-06 — read-side fix, offline unit tests only (the round-2 output deck was not banked, so no live Keynote step this round). `_autosize_rect` (`src/obed_edom/iwa_geometry.py:187`) assumed an autosize text box's stored y is always the visual CENTRE (`top = y − naturalSize.height/2`), true only for a `kFrameAlignMiddle` box. It now resolves `shapeProperties.verticalAlignment` up the style parent chain (`shape.super.style` → `TSWP.ShapeStyleArchive.shapeProperties`, then `super.super.parent` — the same archive shape as `iwa_text_shape._resolve_shape_padding`) and branches: `kFrameAlignTop` → `y`; `kFrameAlignBottom` → `y − nh`; middle, justify, unknown or absent → `y − nh/2` (behaviour unchanged). Enum `TSWP.ShapeStylePropertiesArchive.VerticalAlignmentType`: Top=0, Middle=1, Bottom=2, Justify=3; keynote-parser's `MessageToDict` emits the NAME, the int is accepted defensively. One caller (`_compose_record`, `iwa_geometry.py:372`); `compose_geometry`/`compose_deck_geometry` signatures unchanged. `iwa_write` is untouched — a stored-h==0.0 autosize box hard-misses to the AppleScript fallback (`iwa_write.py:594`) before `_text_fields` sees it. `compose_geometry` is now the visual truth for every anchor, so the offline frame-containment oracle no longer false-fails the D4-packed slide-11 columns at y≈−140: a 313-tall top-aligned column written at 16.5 composes back to 16.5. Tests pin the live-probed numbers (s11 'CHC Fu Chang' 173.0 stays 173.0, 'CHC Jiang Shou' 796.0; 'Global Missions' 97.5/61 → 67.0; s12 first name 643.0/26 → 630.0) plus the parent-chain hop, the absent-alignment default and the raw enum code. Measured on `output/gold-baseline/main/Gold_Wall_Input_CG.key`: 168 middle / 11 top of 179 autosize boxes, 0 unresolved. NEVER re-add write-side `±h/2` compensation for this (the reverted bug in 80cb442) — see SKILL 'Offline inspect'. Out of scope and deliberately untouched: `iwa_text_shape.compose_text_geometry`'s independent `geometry.flags` anchor model (measured on the same deck, flags and the anchor enum are uncorrelated: (flags=1,Middle)×93, (flags=3,Middle)×73, (flags=1,Top)×11, (flags=0,Middle)×2 — worth its own backlog item), and group-union handling of autosize children (zero-extent, dropped by `_is_real_box`)."
     status: completed
   - id: pack-lists-gate-widen
-    content: "BUG BACKLOG (B), deferred from review-B (`output/handover-2026-09-06/review-B/review.md`, deviation (2); see side-panels-positional). `_place_free_text` (`map_remap.py:3743-3792`) still picks targets via `_spec_key(t) in movable`, where `movable` is built from every `is_list_item` on the slide with no role or hide filter. Widening its gate from `slide_lists` to run unconditionally (as plan2 originally imagined) would move map labels `plan_slide_transforms` has just demoted to `role=\"other\"` and reposition side-panel roster boxes that were just hidden — a real regression, not just missing scope. Spec: change `targets = [t for t in transforms if _spec_key(t) in movable]` to also require `t.role == \"list\"`, widen both gates from `slide_lists` to the same `pack_lists` expression used at `plan_slide_transforms:4072`, and only then restore the unconditional `resolve_source_previews` (37dbb90 already re-gated it conditional as B2 pending this fix — un-revert it together with this change, not before)."
-    status: pending
+    content: "DONE 2026-09-07 — dcae6a7 + review fix b6039ef on branch fix/resizer-backlog-r2, reviewed
+      by sonnet+opus (output/handover-2026-09-07/review-pack-lists/), both REQUEST-CHANGES on ONE shared
+      blocker, fixed in b6039ef. Shipped per review-B deviation (2): `_place_free_text` targets only
+      role==list AND erases from the occupancy raster exactly the boxes it moves (one step past the
+      review's letter; both reviewers judged it necessary — erasing a demoted label's rendered pixels
+      would let packed text land on top of it); both gates widened from `slide_lists` to
+      `slide_packs = slide_lists or slide_keeps_centre_roster`; B2's preview resolution restored IN
+      SPIRIT not letter — new `preview_wanted_slides()` resolves without the whitelist but decodes only
+      whitelist ∪ roster-keep slides (∩ range), keeping flagless full-wall runs off the ~3.9GB decoded
+      preview set review-B measured. Opus measured on the banked Full-wall payload: flagless run 0 → 93
+      placements, all role=list both sides, overlap 0.0; the naive widen would have moved+erased 120
+      hidden boxes; parent even moved 198 non-list boxes on WHITELISTED runs (dropped-roster slide 124)
+      — a real pre-existing bug this fixes, so whitelisted runs are deliberately NOT byte-identical to
+      parent. The blocker: the operator report line was still gated on the deck-wide keep_side_panels
+      bool, silencing exactly the runs this item enables; now `if recipe.get(\"listFontSize\") and
+      (keep_side_panels or placements)`. RESIDUALS worth their own items: (1) LATENT GOLD FLIP — Gold
+      has no preview cache dir today, so Gold output is unchanged; the first framing review that
+      populates it silently switches Gold 11-12 to the measured packer un-Gold-verified — check on the
+      next Gold build; (2) bare --keep-side-panels still decodes all 155 previews (3.86GB); only 59
+      slides carry list content — cheap tightening; (3) 94/311 list boxes on whitelisted runs get
+      neither packer (pre-existing all-or-nothing hole, 0/93 on the widened path)."
+    status: completed
   - id: reuse-chain-preadd-duplicate
     content: "DONE 2026-09-06 evening — landed as 08a5130 on feat/reuse-preadd-duplicate (stacked on
       d31fedc alignment-aware _autosize_rect), pushed, owner merging. OPTIMIZATION (W), opened
@@ -111,8 +154,20 @@ todos:
     content: "BUG (fixed), off main, branch fix/map-label-classification, commit cbde0a7. `is_list_item` called any CHC/CHLI/CHEL text a roster list, and the unticked-list gate hid it by default (`loose` is True whenever there are no previews) — 23 single-line map labels on Gold slides 3/4/8/9 were deleted. Fix: `name_columns()`/`name_column_ids()` — a name column is now ≥3 same-left-edge rows (x tol 6, pitch 2.0×h) or a multi-line box; a lone label demotes to role=other before the hide gate (only when `include_lists` is False). Gold hide 491→468, everything else byte-identical; Full-deck sweep: 0 roster rows demoted, 134 labels newly kept across 58 slides. Live-verified (output/gold-baseline/labelfix/): labels land within 1px of the human ideal on slide 9; slide 8's offset is the human's own map shift, not error. `name_columns()` is the reusable primitive for the side-panel item (bug a, see builds-follow-source) — kept separate per owner decision."
     status: completed
   - id: map-label-text-sizing
-    content: "BUG BACKLOG (B), residual from map-label-classification-fix (i). The 23 recovered map labels on Gold slides 3/4 render at 35pt where source/ideal have 40pt — an ordinary-text-path sizing gap, not a classification gap. Own fix."
-    status: pending
+    content: "DONE 2026-09-07 — e74e5fa on branch fix/resizer-backlog-r2. Root cause MEASURED (not the
+      guessed 'sizing gap': diagnosis at output/handover-2026-09-07/label-sizing/diagnosis.md): the
+      demoted label correctly matches a template character swatch, but the template palette holds TWO
+      white Amplitude-Bold swatches — 40pt (Malaysia tile, slide 3) and 35pt (China tile, slide 4) —
+      and `match_character_style`'s colour tie broke on `predicted = wall × 0.5 = 20pt`, so 35 (penalty
+      15) always beat 40 (penalty 20). 40 × 0.875 ≈ 35 was coincidence. Only the Malaysia labels
+      (slides 3/4) were wrong; slides 8/9 were right by luck (source 35). Fix: unpaired list/other text
+      predicts with the affine it rides (`size_ratio=aff.s`, 0.5 with no affine) — translate-only map
+      s=1.0 predicts 40 → picks the 40pt swatch; verified offline against the preadd bank's real
+      palette. Offline unit + integration tests only (integration pins the call site; fails on parent);
+      confirm on the next live Gold build. Note the prompt-era assumption 'template has no label
+      swatch' was FALSE — both map tiles carry label swatches at exactly the ideal sizes. The missing
+      'CHC Kuching' on output 3/4 is the separate map-label-offslide-parked-delete residual."
+    status: completed
   - id: map-label-offslide-parked-delete
     content: "BUG BACKLOG (B), residual from map-label-classification-fix (ii), needs its own audit. The off-slide branch (map_remap.py:2350-2354) DELETES parked off-canvas objects (e.g. 'CHC Kuching' parked at wall (4681,1678)) instead of keeping them parked like the human does (parked at (1813,1678) in the ideal). 14 parked objects on the Gold deck, mostly one parked card group."
     status: pending
@@ -222,6 +277,16 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
   (`autosize-rect-alignment-fix`, DONE 2026-09-06, read-side only, offline tests). One follow-up
   from the round is still open: `pack-lists-gate-widen` (review-B deviation (2), deferred with a
   landing condition already met).
+- **2026-09-07, branch `fix/resizer-backlog-r2` off main c7c8510 (worktree
+  obed-edom-wt-resizer-backlog, 5 commits, not pushed, no PR):** `pack-lists-gate-widen` DONE
+  (dcae6a7 + blocker fix b6039ef), `map-label-text-sizing` DONE (e74e5fa, measured two-swatch
+  tie-break root cause), R2 `r-readback-two-tier` CODE-COMPLETE (b50d22b + 7bb0f52) — each 2/1/2
+  reviewed, suite 1153/78, zero Keynote opened. All round documents (plans, vets, reviews,
+  diagnosis, implementation reports) under `output/handover-2026-09-07/`. DEFERRED to one
+  owner-acked hands-off Keynote window: the R2 field-parity + ranged A/B (checklist in
+  r2-readback-plan.md §4+§6), one write_gate_ab re-run, and a Gold build to confirm the 40pt
+  labels and watch the pack-lists latent Gold flip (a previews cache appearing switches Gold
+  11-12 to the measured packer).
 
 ## Order of work
 
@@ -243,7 +308,7 @@ a new agent would otherwise rediscover. Cue palette + DSK generator: their own p
 | Fixes (off-main) | `map-label-classification-fix` (cbde0a7), `card-border-source-ref-floor-fix` (94d2969) | one live remap each | map-label DONE + live-verified; card-border DONE, Full-deck live confirmation running |
 | **W1** | `w-offline-write-stabilise` | gate on both gold decks | gate hardened + patcher fix; Map GREEN (verify+on); Full NOT GREEN, undebugged; flip on hold (patch banked) |
 | **R1** | `r-nested-bulk-probe` | yes | DONE 2026-09-04 — correct+safe but NOT faster (object-bound); closed with `r-bulk-counts-plan` |
-| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | own caveats (a)–(f); R0 is independent (cheap, anytime) |
+| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | readback CODE-COMPLETE (b50d22b+7bb0f52, fix/resizer-backlog-r2); A/B + write-gate re-run deferred to a Keynote window; propose after the A/B |
 | **W2** | `w-zorder-patch` (stroke prod folded into batch 1 C) | yes | W1 stable |
 | R0 | `r-cache-quick-wins` | no (A/B on warmed decks) | anytime, Keynote-free |
 | B | reuse yank / framing fallback, cluster affine, builds | yes | independent |
