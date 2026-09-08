@@ -43,7 +43,7 @@ def _capture_plan(monkeypatch):
     """Run inspect_keynote with osascript stubbed; return the plan dict it wrote."""
     captured: dict = {}
 
-    def fake_run(args, *a, **kw):
+    def fake_popen(args, *a, **kw):
         # inspect_keynote calls: ["osascript", "-l", "JavaScript", JS, plan_path]
         plan_path = args[-1]
         captured["plan"] = json.loads(open(plan_path, encoding="utf-8").read())
@@ -54,9 +54,10 @@ def _capture_plan(monkeypatch):
             "slideCount": 0,
             "slides": [],
         }
-        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        kw["stdout"].write(json.dumps(payload).encode())
+        return SimpleNamespace(args=args, returncode=0, poll=lambda: 0)
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod.subprocess, "Popen", fake_popen)
     return captured
 
 
@@ -109,7 +110,7 @@ def test_successful_fallback_export_clears_stale_jxa_export_error(tmp_path, monk
         (Path(dest) / "slide-1.png").write_bytes(b"\x89PNG")
         return None
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
     monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
 
     out = inspect_keynote(key, export_dir=export_dir, use_cache=False)
@@ -129,7 +130,7 @@ def test_failed_fallback_export_keeps_its_error(tmp_path, monkeypatch):
             stderr="",
         )
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
     monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *_args: "fallback failed")
 
     out = inspect_keynote(key, export_dir=tmp_path / "previews", use_cache=False)

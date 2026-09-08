@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { previewUrl, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
+import { ErrorNotice } from "./ErrorNotice";
 import { SHOW_INFO_KEY, useSessionToggle } from "../prefs";
 import { SlideFindings } from "./SlideFindings";
 import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
@@ -68,7 +69,7 @@ export function InspectResultView({
     if (name) onOpen(previewUrl(job.id, "lw", name));
   }
 
-  if (job.status === "error") return <p className="err">{job.error}</p>;
+  if (job.status === "error") return <ErrorNotice message={job.error} />;
 
   const rows =
     previewsOk && names.length

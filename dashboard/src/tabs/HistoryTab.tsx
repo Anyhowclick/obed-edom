@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { chooseFolder, chooseKeynote, relocateJob } from "../api";
 import { CheckResultView } from "../components/CheckResultView";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { DiffResultView } from "../components/DiffResultView";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { InspectResultView } from "../components/InspectResultView";
+import { MapsResultView } from "../components/MapsResultView";
 import { Lightbox } from "../components/PreviewGrid";
 import { SessionList } from "../components/SessionList";
 import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
@@ -37,6 +39,34 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         upsert(await relocateJob(active.id, { path: file.path }));
         return;
       }
+      if (feature === "maps") {
+        const wall = await chooseKeynote("LED wall Map Keynote");
+        const result = (active.result || {}) as {
+          exportCg?: boolean;
+          exportDsk?: boolean;
+          destPathCg?: string;
+          destPathDsk?: string;
+        };
+        const needCg = result.exportCg !== false || Boolean(result.destPathCg);
+        const needDsk = result.exportDsk === true || Boolean(result.destPathDsk);
+        const body: { destPath: string; destPathCg?: string; destPathDsk?: string } = { destPath: wall.path };
+        if (needCg) {
+          try {
+            const cg = await chooseKeynote("CG Map Keynote");
+            body.destPathCg = cg.path;
+          } catch {}
+        }
+        if (needDsk) {
+          try {
+            const dsk = await chooseKeynote("DSK Map Keynote");
+            body.destPathDsk = dsk.path;
+          } catch {
+            /* wall relocate still proceeds */
+          }
+        }
+        upsert(await relocateJob(active.id, body));
+        return;
+      }
       const left = await chooseKeynote("Left / LW Keynote");
       const right = await chooseKeynote("Right Keynote");
       upsert(await relocateJob(active.id, { leftPath: left.path, rightPath: right.path }));
@@ -64,7 +94,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         Finished runs appear here. They are pointers to files under output/ — if you rename or delete those
         files in Finder, the catalog stays until you Relocate or Delete.
       </p>
-      {(error || sessionError) && <p className="err">{error || sessionError}</p>}
+      <ErrorNotice message={error || sessionError} onDismiss={error ? () => setError(null) : undefined} />
       {jobs.length === 0 ? (
         <p className="note">No saved runs yet. Generate, compare, or validate from the other tabs.</p>
       ) : (
@@ -74,7 +104,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
             {active && (
               <>
                 {active.artifacts && !active.artifacts.ok && (
-                  <p className="err">Files missing: {active.artifacts.missing.join(", ")}</p>
+                  <ErrorNotice message={`Files missing: ${active.artifacts.missing.join(", ")}`} />
                 )}
                 {active.artifacts?.suggestedPath && (
                   <p className="note path-note">
@@ -87,7 +117,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                       {OPEN_IN_LABELS[feature]}
                     </button>
                   )}
-                  {active.artifacts?.suggestedPath && (
+                  {active.artifacts?.suggestedPath && feature !== "maps" && (
                     <button className="btn secondary" type="button" onClick={useSuggested}>
                       Use this folder
                     </button>
@@ -104,6 +134,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                 {feature === "check" && <CheckResultView job={active} onOpen={setOpen} />}
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
                 {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
+                {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} />}
               </>
             )}
           </div>

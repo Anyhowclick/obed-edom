@@ -426,7 +426,7 @@ def is_visible(item: dict, slide_w: float, slide_h: float) -> bool:
 
 def is_backdrop(item: dict, slide_w: float, slide_h: float) -> bool:
     """A full-canvas image or shape: the slide's background, not content on it."""
-    if (item.get("kind") or "") not in {"image", "shape"}:
+    if (item.get("kind") or "") not in {"image", "shape", "movie"}:
         return False
     w, h = _f(item.get("w")), _f(item.get("h"))
     if w <= 0 or h <= 0 or slide_w <= 0 or slide_h <= 0:

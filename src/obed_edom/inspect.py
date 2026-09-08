@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from obed_edom import keynote_app
 from obed_edom.map_remap import slides_for_plan
@@ -99,13 +99,46 @@ class LegacyInspectFailed(RuntimeError):
     fallback must not retry it (a second ~12min Keynote session buys nothing)."""
 
 
+def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    if is_cancelled and is_cancelled():
+        raise RuntimeError("Export cancelled.")
+
+
+def _run_jxa_inspect(
+    args: list[str], is_cancelled: Callable[[], bool] | None
+) -> subprocess.CompletedProcess[str]:
+    _raise_if_cancelled(is_cancelled)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(args, stdout=stdout, stderr=stderr)
+        while proc.poll() is None:
+            if is_cancelled and is_cancelled():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise RuntimeError("Export cancelled.")
+            time.sleep(0.05)
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(
+            proc.args,
+            proc.returncode,
+            stdout.read().decode("utf-8", "replace"),
+            stderr.read().decode("utf-8", "replace"),
+        )
+
+
 def inspect_keynote(
     key_path: Path | str,
     *,
     export_dir: Path | str | None = None,
     slide_range: tuple[int, int] | frozenset[int] | None = None,
     use_cache: bool | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    _raise_if_cancelled(is_cancelled)
     key_path = Path(key_path).expanduser().resolve()
     if not key_path.exists():
         raise FileNotFoundError(f"Keynote not found: {key_path}")
@@ -160,11 +193,8 @@ def inspect_keynote(
         plan_path = handle.name
     try:
         t_jxa = time.perf_counter()
-        proc = subprocess.run(
-            ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path],
-            capture_output=True,
-            text=True,
-            check=False,
+        proc = _run_jxa_inspect(
+            ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path], is_cancelled
         )
         timing["jxa"] = time.perf_counter() - t_jxa
     finally:

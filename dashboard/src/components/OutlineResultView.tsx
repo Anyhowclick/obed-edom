@@ -4,6 +4,7 @@ import type { OutlineCue, OutlineParagraph, OutlineResult } from "../outline";
 import { SHOW_INFO_KEY, useSessionToggle } from "../prefs";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
+import { ErrorNotice } from "./ErrorNotice";
 
 function segments(para: OutlineParagraph): { text: string; cue?: OutlineCue }[] {
   const cues = [...(para.cues || [])].sort((a, b) => a.start - b.start);
@@ -39,7 +40,7 @@ export function OutlineResultView({ job }: { job: Job }) {
     return { byParagraph: grouped, wide: rest };
   }, [flags]);
 
-  if (job.status === "error") return <p className="err">{job.error}</p>;
+  if (job.status === "error") return <ErrorNotice message={job.error} />;
   if (!result || job.status !== "done") return null;
 
   const paragraphs = (result.paragraphs || []).filter((p) => p.text.trim() || p.cues.length);

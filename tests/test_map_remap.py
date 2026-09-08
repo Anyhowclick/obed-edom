@@ -34,6 +34,7 @@ from obed_edom.map_remap import (
     cover_rect,
     classify_item,
     effective_wall_map_src,
+    is_backdrop,
     is_map_item,
     is_pin_item,
     item_center,
@@ -569,6 +570,15 @@ def test_classifies_pasted_map_art():
     assert is_pin_item(_item(kind="movie", fileName="PIN DROP WAVE-71712.mov", w=500, h=500))
     assert not is_pin_item(_item(kind="image", fileName="34. CHC Kotagiri-76091.JPG", w=800, h=600))
     assert not is_map_item(_item(kind="image", fileName="LED blank-1.png", w=7680, h=1080))
+
+
+def test_movie_backdrop_is_recognized():
+    """A full-bleed `Map BG_<slide>.mov` departing-Movie backdrop is the slide backdrop."""
+    movie = _item(kind="movie", fileName="Map BG_s2.mov", x=0, y=0, w=7680, h=1080)
+    assert is_backdrop(movie, 7680, 1080)
+    small = _item(kind="movie", fileName="Map BG_s2.mov", x=0, y=0, w=180, h=180)
+    assert not is_backdrop(small, 7680, 1080)
+    assert is_map_item(_item(kind="movie", fileName="Map BG_s2.mov", x=0, y=0, w=7680, h=1080))
 
 
 def test_caption_bearing_group_is_not_a_pin():

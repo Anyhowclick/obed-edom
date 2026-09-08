@@ -124,7 +124,7 @@ export async function deleteAllJobs(): Promise<number> {
 
 export async function relocateJob(
   id: string,
-  body: { folder?: string; path?: string; leftPath?: string; rightPath?: string }
+  body: { folder?: string; path?: string; leftPath?: string; rightPath?: string; destPath?: string; destPathCg?: string; destPathDsk?: string }
 ): Promise<Job> {
   const res = await fetch(`/api/jobs/${id}/relocate`, {
     method: "POST",
@@ -302,11 +302,243 @@ export function evidenceUrl(jobId: string, filename: string): string {
   return `/api/jobs/${jobId}/evidence/${encodeURIComponent(filename)}`;
 }
 
-export async function pollJob(id: string, onTick: (job: Job) => void): Promise<Job> {
+export async function pollJob(
+  id: string,
+  onTick: (job: Job) => void,
+  isCancelled?: () => boolean,
+  onCancel?: () => Promise<Job>
+): Promise<Job> {
+  let cancelSent = false;
+  const cancel = async (): Promise<Job | undefined> => {
+    if (!isCancelled?.()) return undefined;
+    if (!cancelSent) {
+      cancelSent = true;
+      try {
+        const job = await onCancel?.();
+        if (job && (job.status === "done" || job.status === "error")) {
+          onTick(job);
+          return job;
+        }
+      } catch {}
+    }
+    return undefined;
+  };
   for (;;) {
+    const cancelled = await cancel();
+    if (cancelled) return cancelled;
     const job = await getJob(id);
     onTick(job);
     if (job.status === "done" || job.status === "error") return job;
-    await new Promise((r) => setTimeout(r, 600));
+    for (let waited = 0; waited < 600; waited += 50) {
+      await new Promise((r) => setTimeout(r, 50));
+      const cancelled = await cancel();
+      if (cancelled) return cancelled;
+    }
   }
+}
+
+export async function startMaps(): Promise<Job> {
+  const res = await fetch("/api/maps", { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function saveMapsState(id: string, doc: Record<string, unknown>): Promise<Job> {
+  const res = await fetch(`/api/maps/${id}/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(doc),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function downloadMapsSession(id: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`/api/maps/${id}/session`);
+  if (!res.ok) throw new Error(await readError(res));
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  return { blob: await res.blob(), filename: match?.[1] || `maps-${id}.obedmaps` };
+}
+
+export async function loadMapsSession(id: string, file: File): Promise<Job> {
+  const body = new FormData();
+  body.set("file", file);
+  const res = await fetch(`/api/maps/${id}/session`, { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export type MapsPngKind = "thumb" | "still" | "plate";
+
+export type MapsExportPlan = {
+  links: Array<Record<string, unknown>>;
+  stills: Array<{
+    slideId: string;
+    style: string;
+    camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
+    highlights: string[];
+    hiddenLayers?: string[];
+    hillshade?: boolean;
+    width?: number;
+    height?: number;
+  }>;
+  plates: Array<{
+    plateId: string;
+    plateW: number;
+    plateH: number;
+    camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
+    style: string;
+    highlights: string[];
+    hiddenLayers?: string[];
+    hillshade?: boolean;
+  }>;
+  cg?: {
+    links: Array<Record<string, unknown>>;
+    stills: MapsExportPlan["stills"];
+    plates: MapsExportPlan["plates"];
+    affectedSlideIds?: string[];
+  };
+};
+
+export async function postMapsPng(
+  id: string,
+  blob: Blob,
+  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg" } = {}
+): Promise<Job> {
+  const params = new URLSearchParams();
+  if (opts.kind) params.set("kind", opts.kind);
+  if (opts.slideId) params.set("slideId", opts.slideId);
+  if (opts.plateId) params.set("plateId", opts.plateId);
+  if (opts.audience) params.set("audience", opts.audience);
+  const res = await fetch(`/api/maps/${id}/png?${params.toString()}`, {
+    method: "POST",
+    body: blob,
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function postMapsFrame(
+  id: string,
+  blob: Blob,
+  opts: { slideId: string; index: number; count: number; fps: number; audience?: "lw" | "cg" }
+): Promise<{ ok: true; index: number; count: number }> {
+  const params = new URLSearchParams();
+  params.set("slideId", opts.slideId);
+  params.set("index", String(opts.index));
+  params.set("count", String(opts.count));
+  params.set("fps", String(opts.fps));
+  if (opts.audience) params.set("audience", opts.audience);
+  const res = await fetch(`/api/maps/${id}/frame?${params.toString()}`, {
+    method: "POST",
+    body: blob,
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+type TileCacheBody = {
+  countries?: string[];
+  cameras?: Array<{ lat: number; lon: number; zoom: number; bearing?: number; pitch?: number }>;
+  maxzoom?: number;
+  width?: number;
+  height?: number;
+  terrain?: boolean;
+  rels?: string[];
+};
+
+export async function prefetchMapsTiles(
+  body: TileCacheBody
+): Promise<{ ok: boolean; tiles: number; cached: number; fetched: number; failed: number }> {
+  const res = await fetch("/api/maps/tile-cache/prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function planMapsTiles(body: TileCacheBody): Promise<{
+  ok: boolean;
+  rels: string[];
+  tiles: number;
+  cached: number;
+  capped: boolean;
+  cameras: number;
+  camerasUsed: number;
+}> {
+  const res = await fetch("/api/maps/tile-cache/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function mapsTileCacheStats(): Promise<{ bytes: number; files: number }> {
+  const res = await fetch("/api/maps/tile-cache");
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function clearMapsTileCache(): Promise<{ bytes: number; files: number }> {
+  const res = await fetch("/api/maps/tile-cache", { method: "DELETE" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function fetchMapsExportPlan(id: string): Promise<MapsExportPlan> {
+  const res = await fetch(`/api/maps/${id}/export-plan`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function geocodeMaps(
+  q: string
+): Promise<{
+  source: string;
+  label: string;
+  camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
+}> {
+  const res = await fetch(`/api/maps/geocode?q=${encodeURIComponent(q)}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function bootstrapMapsCsv(id: string, file: File, replace = false): Promise<Job> {
+  const body = new FormData();
+  body.set("file", file);
+  body.set("replace", replace ? "true" : "false");
+  const res = await fetch(`/api/maps/${id}/bootstrap-csv`, { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function bootstrapMapsPinsCsv(id: string, file: File, slideId: string, audience: "lw" | "cg"): Promise<Job> {
+  const body = new FormData();
+  body.set("file", file);
+  body.set("targetSlideId", slideId);
+  body.set("audience", audience);
+  const res = await fetch(`/api/maps/${id}/bootstrap-csv`, { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean }): Promise<Job> {
+  const res = await fetch(`/api/maps/${id}/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function cancelMapsExport(id: string): Promise<Job> {
+  const res = await fetch(`/api/maps/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }

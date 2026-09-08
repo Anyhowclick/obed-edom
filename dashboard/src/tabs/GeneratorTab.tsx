@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { chooseKeynote, generateDocx, pollJob, type ChosenFile } from "../api";
 import { FileWell } from "../components/FileWell";
+import { ErrorNotice } from "../components/ErrorNotice";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import {
@@ -119,7 +120,7 @@ export function GeneratorTab() {
           onError={setError}
         />
       </div>
-      {(error || openError) && <p className="err">{error || openError}</p>}
+      <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {(busy || running) && <LoadingOverlay title="Generating decks…" logs={logs} />}
       {job && <GenerateResultView job={job} onOpen={setOpen} />}
       <Lightbox src={open} onClose={() => setOpen(null)} />

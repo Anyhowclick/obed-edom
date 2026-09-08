@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -34,6 +35,59 @@ def test_job_persists_and_reloads(tmp_path: Path):
     assert listed[0].id == job.id
     assert listed[0].result["stem"] == "Sermon_BC"
     assert reloaded.list(feature="diff") == []
+
+
+def test_cancel_running_job_keeps_cancelled_terminal_status(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    started = threading.Event()
+
+    def work(job: Job):
+        started.set()
+        while not job.cancelled():
+            time.sleep(0.01)
+        raise RuntimeError("interrupted")
+
+    job = runner.submit("maps", work, feature="maps")
+    assert started.wait(1)
+    cancelled = runner.cancel(job.id)
+    assert cancelled is job
+    done = _wait(runner, job.id)
+    assert done.status == "error"
+    assert done.error == "Export cancelled."
+    assert runner.cancel(job.id) is job
+
+
+def test_cancel_running_job_waits_for_worker_and_discards_result(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(_job: Job):
+        started.set()
+        assert release.wait(1)
+        return {"new": True}
+
+    job = runner.submit("maps", work, feature="maps")
+    job.result = {"old": True}
+    assert started.wait(1)
+    runner.cancel(job.id)
+    assert job.status == "running"
+    assert job.result == {"old": True}
+    release.set()
+    done = _wait(runner, job.id)
+    assert done.status == "error"
+    assert done.error == "Export cancelled."
+    assert done.result == {"old": True}
+
+
+def test_completion_wins_when_job_finishes_before_cancel(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    job = runner.submit("maps", lambda _job: {"complete": True}, feature="maps")
+    done = _wait(runner, job.id)
+    assert done.status == "done"
+    assert runner.cancel(job.id) is job
+    assert job.status == "done"
+    assert job.result == {"complete": True}
 
 
 def test_delete_purges_output_under_root(tmp_path: Path):
@@ -200,3 +254,123 @@ def test_delete_all_skips_running(tmp_path: Path):
     assert runner.delete_all(purge=True) == 1
     assert runner.get("live") is not None
     assert runner.get(done.id) is None
+
+
+def test_list_maps_jobs(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    other = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    job = runner.submit("maps", lambda _j: {"stem": "maps-run"}, feature="maps")
+    _wait(runner, other.id)
+    done = _wait(runner, job.id)
+    assert done.status == "done"
+    listed = runner.list(feature="maps")
+    assert len(listed) == 1
+    assert listed[0].id == job.id
+    assert listed[0].result["stem"] == "maps-run"
+    assert {j.id for j in runner.list(feature="generate")} == {other.id}
+
+
+def test_purge_maps_dirs_not_geocode(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    work = output / ".maps" / "job1"
+    work.mkdir(parents=True)
+    (work / "preview.png").write_text("x")
+    geocode = output / ".geocode"
+    geocode.mkdir(parents=True)
+    marker = geocode / "kl.json"
+    marker.write_text("{}")
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit(
+        "maps",
+        lambda _j: {"stem": "maps-run", "outputDir": str(work)},
+        feature="maps",
+    )
+    _wait(runner, job.id)
+    assert runner.delete(job.id, purge=True)
+    assert not work.exists()
+    assert marker.is_file()
+    assert not (sessions / f"{job.id}.json").exists()
+
+
+def test_relocate_maps_dest_path(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    dest = output / "Map.key"
+    dest_cg = output / "Map_CG.key"
+    output.mkdir()
+    dest.write_text("k")
+    dest_cg.write_text("k")
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("maps", lambda _j: {"stem": "maps-run"}, feature="maps")
+    _wait(runner, job.id)
+    updated = runner.relocate(job.id, dest_path=str(dest), dest_path_cg=str(dest_cg))
+    assert updated is not None
+    assert updated.result["destPath"] == str(dest)
+    assert updated.result["destPathCg"] == str(dest_cg)
+
+
+def test_artifact_status_maps_labels(tmp_path: Path):
+    output = tmp_path / "output"
+    output.mkdir()
+    map_key = output / "Map.key"
+    cg_key = output / "Map_CG.key"
+    map_key.write_text("k")
+    cg_key.write_text("k")
+
+    maps_present = Job(
+        id="maps-ok",
+        kind="maps",
+        feature="maps",
+        status="done",
+        result={"destPath": str(map_key), "destPathCg": str(cg_key)},
+    )
+    present = artifact_status(maps_present, output)
+    assert present["ok"] is True
+    assert "Map Keynote" not in present["missing"]
+    assert "CG Keynote" not in present["missing"]
+
+    maps_absent = Job(
+        id="maps-gone",
+        kind="maps",
+        feature="maps",
+        status="done",
+        result={"outputDir": str(output / "missing"), "destPath": str(output / "gone.key")},
+    )
+    absent = artifact_status(maps_absent, output)
+    assert "output folder" in absent["missing"]
+    assert "Map Keynote" in absent["missing"]
+    assert "CG Keynote" not in absent["missing"]
+
+    maps_cg = Job(
+        id="maps-cg",
+        kind="maps",
+        feature="maps",
+        status="done",
+        result={"destPathCg": str(cg_key)},
+    )
+    cg_status = artifact_status(maps_cg, output)
+    assert cg_status["ok"] is True
+    assert "CG Keynote" not in cg_status["missing"]
+
+    resize_missing = Job(
+        id="resize-gone",
+        kind="resize",
+        feature="resize",
+        status="done",
+        result={"destPath": str(output / "gone_cg.key")},
+    )
+    resize_status = artifact_status(resize_missing, output)
+    assert "CG Keynote" in resize_status["missing"]
+    assert "Map Keynote" not in resize_status["missing"]
+
+    resize_ok = Job(
+        id="resize-ok",
+        kind="resize",
+        feature="resize",
+        status="done",
+        result={"destPath": str(map_key)},
+    )
+    assert "CG Keynote" not in artifact_status(resize_ok, output)["missing"]

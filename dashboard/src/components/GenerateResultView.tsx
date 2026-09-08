@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { previewUrl, reveal, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
+import { ErrorNotice } from "./ErrorNotice";
 import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
 
 const LW_PREVIEW_COLS = 2;
@@ -38,7 +39,7 @@ export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: st
     onOpen(previewUrl(job.id, target.deck, name));
   }
 
-  if (job.status === "error") return <p className="err">{job.error}</p>;
+  if (job.status === "error") return <ErrorNotice message={job.error} />;
   if (!result || job.status !== "done") return null;
 
   const hasLw = Boolean(result.lwKey) || (result.previewFiles?.lw || []).length > 0;
