@@ -438,15 +438,38 @@ export async function postMapsFrame(
   return res.json();
 }
 
-export async function prefetchMapsTiles(body: {
+type TileCacheBody = {
   countries?: string[];
   cameras?: Array<{ lat: number; lon: number; zoom: number; bearing?: number; pitch?: number }>;
   maxzoom?: number;
   width?: number;
   height?: number;
   terrain?: boolean;
-}): Promise<{ ok: boolean; tiles: number; cached: number; fetched: number; failed: number }> {
+  rels?: string[];
+};
+
+export async function prefetchMapsTiles(
+  body: TileCacheBody
+): Promise<{ ok: boolean; tiles: number; cached: number; fetched: number; failed: number }> {
   const res = await fetch("/api/maps/tile-cache/prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function planMapsTiles(body: TileCacheBody): Promise<{
+  ok: boolean;
+  rels: string[];
+  tiles: number;
+  cached: number;
+  capped: boolean;
+  cameras: number;
+  camerasUsed: number;
+}> {
+  const res = await fetch("/api/maps/tile-cache/plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

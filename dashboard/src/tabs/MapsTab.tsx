@@ -9,6 +9,7 @@ import {
   geocodeMaps,
   listJobs,
   loadMapsSession,
+  planMapsTiles,
   pollJob,
   postMapsFrame,
   postMapsPng,
@@ -19,7 +20,7 @@ import {
   type Job,
 } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { LoadingOverlay } from "../components/PreviewGrid";
+import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { useRunNav } from "../nav";
 import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { useCurrentJob } from "../sessions";
@@ -158,6 +159,12 @@ function linkBetween(links: MapsLink[], from: string, to: string): MapsLink | un
   return links.find((link) => link.from === from && link.to === to);
 }
 
+function formatEta(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 60) return `${total}s`;
+  return `${Math.floor(total / 60)}m ${total % 60}s`;
+}
+
 export function MapsTab() {
   const { openRun, clearOpenRun } = useRunNav();
   const { job: opened, error: openError } = useCurrentJob("maps");
@@ -176,6 +183,7 @@ export function MapsTab() {
   const [exporting, setExporting] = useState(false);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [progress, setProgress] = useState<OverlayProgress | null>(null);
   const mapRef = useRef<MapViewHandle | null>(null);
   const jobRef = useRef<Job | null>(null);
   const docRef = useRef<MapsDocument | null>(null);
@@ -1026,7 +1034,104 @@ export function MapsTab() {
       applyLocalDoc(next);
       await saveMapsState(id, next).then((updated) => mergeServerMeta(updated));
       throwIfCancelled();
-      for (const still of plan.stills) {
+
+      const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
+      const linkHasSlides = (link: MapsLink) => slidesById.has(link.from) && slidesById.has(link.to);
+      const lwMovieLinks = (docRef.current?.links || []).filter(
+        (link) => link.kind === "movie" && linkHasSlides(link)
+      );
+      const cgAffected = new Set(plan.cg?.affectedSlideIds || []);
+      const cgMovieLinks = plan.cg
+        ? (plan.cg.links as MapsLink[]).filter(
+            (link) =>
+              link.kind === "movie" &&
+              (cgAffected.has(link.from) || cgAffected.has(link.to)) &&
+              linkHasSlides(link)
+          )
+        : [];
+      const totalSteps =
+        plan.stills.length +
+        plan.plates.length +
+        (plan.cg?.stills.length || 0) +
+        (plan.cg?.plates.length || 0) +
+        lwMovieLinks.length +
+        cgMovieLinks.length;
+      let stepIndex = 0;
+      const setStepProgress = (phase: string, value: number, max: number, detail?: string, note?: string) => {
+        setProgress({ label: `Step ${stepIndex} / ${totalSteps} — ${phase}`, value, max, detail, note });
+      };
+
+      const batchPrefetch = async (opts: {
+        cameras: Array<{ lat: number; lon: number; zoom: number; bearing: number; pitch: number }>;
+        width: number;
+        height: number;
+        terrain: boolean;
+        phase: string;
+      }): Promise<void> => {
+        const tilePlan = await planMapsTiles({
+          cameras: opts.cameras,
+          width: opts.width,
+          height: opts.height,
+          maxzoom: 14,
+          terrain: opts.terrain,
+        });
+        let note: string | undefined;
+        if (tilePlan.capped) {
+          const cameraClause =
+            tilePlan.camerasUsed < tilePlan.cameras
+              ? `using ${tilePlan.camerasUsed} of ${tilePlan.cameras} cameras, `
+              : "";
+          note = `Tile budget capped for ${opts.phase}: ${cameraClause}${tilePlan.tiles} tiles.`;
+          setLogs((prev) => [...prev, note as string]);
+        }
+        let cached = 0;
+        let fetched = 0;
+        let failed = 0;
+        const total = tilePlan.tiles;
+        const tileTimes: number[] = [];
+        let lastAt = performance.now();
+        for (let i = 0; i < tilePlan.rels.length; i += 200) {
+          throwIfCancelled();
+          const batch = tilePlan.rels.slice(i, i + 200);
+          const stats = await prefetchMapsTiles({ rels: batch });
+          const now = performance.now();
+          tileTimes.push((now - lastAt) / Math.max(1, batch.length));
+          if (tileTimes.length > 8) tileTimes.shift();
+          lastAt = now;
+          cached += stats.cached;
+          fetched += stats.fetched;
+          failed += stats.failed;
+          const done = cached + fetched + failed;
+          let etaText: string | undefined;
+          if (tileTimes.length >= 3) {
+            const mean = tileTimes.reduce((a, b) => a + b, 0) / tileTimes.length;
+            etaText = formatEta((mean * Math.max(0, total - done)) / 1000);
+          }
+          const detail = `${cached} cached, ${fetched} fetched${failed ? `, ${failed} failed` : ""} of ${total} tiles${etaText ? ` · ETA ${etaText}` : ""}`;
+          setStepProgress(opts.phase, done, Math.max(1, total), detail, note);
+        }
+        setLogs((prev) => [...prev, `Cached ${cached + fetched} / ${total} tiles (${failed} failed).`]);
+      };
+
+      const makeFrameTracker = (phase: string) => {
+        const frameTimes: number[] = [];
+        let lastFrameAt = performance.now();
+        return (i: number, n: number) => {
+          const now = performance.now();
+          frameTimes.push(now - lastFrameAt);
+          if (frameTimes.length > 8) frameTimes.shift();
+          lastFrameAt = now;
+          let etaText: string | undefined;
+          if (frameTimes.length >= 3) {
+            const mean = frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length;
+            etaText = formatEta((mean * (n - (i + 1))) / 1000);
+          }
+          setStepProgress(phase, i + 1, n, etaText ? `${i + 1} / ${n} frames · ETA ${etaText}` : `${i + 1} / ${n} frames`);
+        };
+      };
+
+      for (let i = 0; i < plan.stills.length; i++) {
+        const still = plan.stills[i];
         throwIfCancelled();
         const blob = await captureExportRaster({
           width: still.width || 3840,
@@ -1040,8 +1145,11 @@ export function MapsTab() {
         });
         throwIfCancelled();
         await postMapsPng(id, blob, { kind: "still", slideId: still.slideId });
+        stepIndex += 1;
+        setStepProgress("Rendering stills", i + 1, plan.stills.length);
       }
-      for (const plate of plan.plates) {
+      for (let i = 0; i < plan.plates.length; i++) {
+        const plate = plan.plates[i];
         throwIfCancelled();
         const blob = await captureExportRaster({
           width: plate.plateW,
@@ -1055,9 +1163,12 @@ export function MapsTab() {
         });
         throwIfCancelled();
         await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId });
+        stepIndex += 1;
+        setStepProgress("Rendering plates", i + 1, plan.plates.length);
       }
       if (plan.cg) {
-        for (const still of plan.cg.stills) {
+        for (let i = 0; i < plan.cg.stills.length; i++) {
+          const still = plan.cg.stills[i];
           throwIfCancelled();
           const blob = await captureExportRaster({
             width: still.width || 1920,
@@ -1071,8 +1182,11 @@ export function MapsTab() {
           });
           throwIfCancelled();
           await postMapsPng(id, blob, { kind: "still", slideId: still.slideId, audience: "cg" });
+          stepIndex += 1;
+          setStepProgress("Rendering CG stills", i + 1, plan.cg.stills.length);
         }
-        for (const plate of plan.cg.plates) {
+        for (let i = 0; i < plan.cg.plates.length; i++) {
+          const plate = plan.cg.plates[i];
           throwIfCancelled();
           const blob = await captureExportRaster({
             width: plate.plateW,
@@ -1086,11 +1200,11 @@ export function MapsTab() {
           });
           throwIfCancelled();
           await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" });
+          stepIndex += 1;
+          setStepProgress("Rendering CG plates", i + 1, plan.cg.plates.length);
         }
       }
-      const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
-      for (const link of docRef.current?.links || []) {
-        if (link.kind !== "movie") continue;
+      for (const link of lwMovieLinks) {
         throwIfCancelled();
         const from = slidesById.get(link.from);
         const to = slidesById.get(link.to);
@@ -1110,17 +1224,25 @@ export function MapsTab() {
             width,
           })
         );
-        setLogs((prev) => [...prev, `Prefetching tiles for ${from.id} → ${to.id}…`]);
+        stepIndex += 1;
+        const hopLabel = `${from.id} → ${to.id}`;
+        setLogs((prev) => [...prev, `Prefetching tiles for ${hopLabel}…`]);
         try {
           throwIfCancelled();
-          const stats = await prefetchMapsTiles({ cameras, width, height, maxzoom: 14, terrain: from.hillshade === true });
-          setLogs((prev) => [...prev, `Cached ${stats.cached + stats.fetched} / ${stats.tiles} tiles (${stats.failed} failed).`]);
+          await batchPrefetch({
+            cameras,
+            width,
+            height,
+            terrain: from.hillshade === true,
+            phase: `Prefetching tiles (${hopLabel})`,
+          });
         } catch (err) {
           if (exportAbort.current) throw err;
           setLogs((prev) => [...prev, `Tile prefetch skipped: ${err instanceof Error ? err.message : String(err)}`]);
         }
         throwIfCancelled();
-        setLogs((prev) => [...prev, `Rendering movie ${from.id} → ${to.id}…`]);
+        setLogs((prev) => [...prev, `Rendering movie ${hopLabel}…`]);
+        const trackFrame = makeFrameTracker(`Rendering movie (${hopLabel})`);
         await captureFlyFrames({
           width,
           height,
@@ -1143,14 +1265,12 @@ export function MapsTab() {
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
             await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
+            trackFrame(i, n);
           },
         });
       }
       if (plan.cg) {
-        const affected = new Set(plan.cg.affectedSlideIds || []);
-        const cgLinks = plan.cg.links as MapsLink[];
-        for (const link of cgLinks) {
-          if (link.kind !== "movie" || (!affected.has(link.from) && !affected.has(link.to))) continue;
+        for (const link of cgMovieLinks) {
           throwIfCancelled();
           const baseFrom = slidesById.get(link.from);
           const baseTo = slidesById.get(link.to);
@@ -1176,12 +1296,24 @@ export function MapsTab() {
               width,
             })
           );
+          stepIndex += 1;
+          const hopLabel = `${baseFrom.id} → ${baseTo.id}`;
+          setLogs((prev) => [...prev, `Prefetching tiles for ${hopLabel} (CG)…`]);
           try {
-            await prefetchMapsTiles({ cameras, width, height: 1080, maxzoom: 14, terrain: from.hillshade === true });
+            throwIfCancelled();
+            await batchPrefetch({
+              cameras,
+              width,
+              height: 1080,
+              terrain: from.hillshade === true,
+              phase: `Prefetching CG tiles (${hopLabel})`,
+            });
           } catch (err) {
             if (exportAbort.current) throw err;
           }
           throwIfCancelled();
+          setLogs((prev) => [...prev, `Rendering movie ${hopLabel} (CG)…`]);
+          const trackFrame = makeFrameTracker(`Rendering CG movie (${hopLabel})`);
           await captureFlyFrames({
             width,
             height: 1080,
@@ -1210,11 +1342,13 @@ export function MapsTab() {
             onFrame: async (blob, i, n) => {
               if (exportAbort.current) throw new Error("Export cancelled.");
               await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
+              trackFrame(i, n);
             },
           });
         }
       }
       throwIfCancelled();
+      setProgress(null);
       const latest = docRef.current;
       const started = await exportMaps(id, {
         exportLw: latest?.exportLw,
@@ -1244,6 +1378,7 @@ export function MapsTab() {
     } finally {
       exportingRef.current = false;
       setExporting(false);
+      setProgress(null);
     }
   }
 
@@ -2234,6 +2369,7 @@ export function MapsTab() {
         <LoadingOverlay
           title="Working…"
           logs={logs}
+          progress={progress}
           onCancel={exporting ? () => { exportAbort.current = true; } : undefined}
         />
       )}

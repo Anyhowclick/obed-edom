@@ -14,6 +14,7 @@ import re
 import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote, unquote, urlparse
@@ -48,6 +49,8 @@ DEFAULT_CAMERA_MAXZOOM = 14
 NE_MAXZOOM = 6
 MAX_PREFETCH_TILES = 8000
 FETCH_WORKERS = 8
+TERRAIN_FETCH_WORKERS = 16
+MAX_PREFETCH_BATCH = 512
 # Glyph fontstacks use spaces/commas; retina sprites use @2x. FastAPI may already
 # unquote %20, but leftover percent-escapes are still accepted after unquote().
 _SAFE_REL = re.compile(r"^[A-Za-z0-9._/@, %+\-]+$")
@@ -350,17 +353,17 @@ def _cap_tiles(
     return {ordered[round(i * (count - 1) / (limit - 1))] for i in range(limit)}
 
 
-def rels_for_cameras(
+def camera_tile_plan(
     cameras: Iterable[dict[str, Any]],
     *,
     width: float = WALL_WIDTH,
     height: float = WALL_HEIGHT,
     maxzoom: int = DEFAULT_CAMERA_MAXZOOM,
     terrain: bool = False,
-) -> list[str]:
+) -> dict[str, Any]:
     cams = list(cameras)
     if not cams:
-        return planet_rels([])
+        return {"rels": planet_rels([]), "capped": False, "cameras": 0, "camerasUsed": 0}
 
     def tiles_for(subset: list[dict[str, Any]]) -> tuple[set[tuple[int, int, int]], set[tuple[int, int, int]]]:
         vector: set[tuple[int, int, int]] = set()
@@ -371,15 +374,20 @@ def rels_for_cameras(
                 dem.update(terrain_tiles_for_camera(camera, width=width, height=height))
         return vector, dem
 
+    cameras_used = len(cams)
     pair = tiles_for(cams)
     if len(pair[0]) + len(pair[1]) > MAX_PREFETCH_TILES and len(cams) > 1:
         lo, hi = 2, len(cams)
-        best_pair = tiles_for(_subsample_even(cams, 2))
+        initial_subset = _subsample_even(cams, 2)
+        best_pair = tiles_for(initial_subset)
+        cameras_used = len(initial_subset)
         while lo <= hi:
             mid = (lo + hi) // 2
-            candidate = tiles_for(_subsample_even(cams, mid))
+            subset = _subsample_even(cams, mid)
+            candidate = tiles_for(subset)
             if len(candidate[0]) + len(candidate[1]) <= MAX_PREFETCH_TILES:
                 best_pair = candidate
+                cameras_used = len(subset)
                 lo = mid + 1
             else:
                 hi = mid - 1
@@ -387,7 +395,20 @@ def rels_for_cameras(
     vector, dem = pair
     capped_vector = _cap_tiles(vector)
     capped_dem = _cap_tiles(dem, MAX_PREFETCH_TILES - len(capped_vector)) if dem else set()
-    return planet_rels(capped_vector) + terrain_rels(capped_dem)
+    capped = cameras_used < len(cams) or len(capped_vector) < len(vector) or len(capped_dem) < len(dem)
+    rels = planet_rels(capped_vector) + terrain_rels(capped_dem)
+    return {"rels": rels, "capped": capped, "cameras": len(cams), "camerasUsed": cameras_used}
+
+
+def rels_for_cameras(
+    cameras: Iterable[dict[str, Any]],
+    *,
+    width: float = WALL_WIDTH,
+    height: float = WALL_HEIGHT,
+    maxzoom: int = DEFAULT_CAMERA_MAXZOOM,
+    terrain: bool = False,
+) -> list[str]:
+    return camera_tile_plan(cameras, width=width, height=height, maxzoom=maxzoom, terrain=terrain)["rels"]
 
 
 def prefetch_rels(rels: Iterable[str], *, fetch=None) -> dict[str, int]:
@@ -404,9 +425,18 @@ def prefetch_rels(rels: Iterable[str], *, fetch=None) -> dict[str, int]:
         else:
             pending.append(rel)
     if pending:
-        workers = min(FETCH_WORKERS, len(pending))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(fetch_and_cache, rel, fetch=getter): rel for rel in pending}
+        terrain_group = [rel for rel in pending if rel.startswith(TERRAIN_PREFIX)]
+        other_group = [rel for rel in pending if not rel.startswith(TERRAIN_PREFIX)]
+        groups = [
+            (group, limit)
+            for group, limit in ((terrain_group, TERRAIN_FETCH_WORKERS), (other_group, FETCH_WORKERS))
+            if group
+        ]
+        with ExitStack() as stack:
+            futures: dict[Any, str] = {}
+            for group, limit in groups:
+                pool = stack.enter_context(ThreadPoolExecutor(max_workers=min(limit, len(group))))
+                futures.update({pool.submit(fetch_and_cache, rel, fetch=getter): rel for rel in group})
             for future in as_completed(futures):
                 try:
                     future.result()

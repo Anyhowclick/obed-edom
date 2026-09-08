@@ -808,3 +808,89 @@ def test_prefetch_terrain_flag_fetches_dem_tiles(tmp_path, monkeypatch):
     cleared = client.delete("/api/maps/tile-cache")
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["bytes"] == 0
+
+
+def test_tile_cache_plan_does_not_fetch_tiles(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+
+    calls: list[str] = []
+
+    def fake_fetch(rel: str) -> bytes:
+        calls.append(rel)
+        if rel == "planet":
+            return b'{"tiles":["https://tiles.openfreemap.org/planet/rev/{z}/{x}/{y}.pbf"]}'
+        raise AssertionError(f"unexpected fetch for {rel}")
+
+    monkeypatch.setattr("obed_edom.maps_tiles.fetch_upstream", fake_fetch)
+    res = client.post(
+        "/api/maps/tile-cache/plan",
+        json={
+            "cameras": [{"lat": 3.0, "lon": 101.0, "zoom": 4, "bearing": 0, "pitch": 0}],
+            "width": 3840,
+            "height": 1080,
+            "maxzoom": 4,
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["tiles"] > 0
+    assert len(body["rels"]) == body["tiles"]
+    assert body["cached"] == 0
+    assert calls == ["planet"]
+
+
+def test_tile_cache_plan_reports_capped_camera_subsample(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.MAX_PREFETCH_TILES", 40)
+    monkeypatch.setattr("obed_edom.maps_tiles.planet_tile_template", lambda **_: "planet/{z}/{x}/{y}.pbf")
+    cameras = [
+        {"lat": 0.0, "lon": float(i) * 8.0 - 80.0, "zoom": 10, "bearing": 0, "pitch": 0} for i in range(30)
+    ]
+    res = client.post(
+        "/api/maps/tile-cache/plan",
+        json={"cameras": cameras, "width": 3840, "height": 1080, "maxzoom": 10},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["capped"] is True
+    assert body["cameras"] == 30
+    assert body["camerasUsed"] < 30
+
+
+def test_tile_cache_prefetch_accepts_rel_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.fetch_upstream", lambda rel: b"pbf-bytes")
+    first = client.post("/api/maps/tile-cache/prefetch", json={"rels": ["planet/0/0/0.pbf"]})
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["fetched"] == 1
+    assert body["cached"] == 0
+    second = client.post("/api/maps/tile-cache/prefetch", json={"rels": ["planet/0/0/0.pbf"]})
+    assert second.status_code == 200, second.text
+    body2 = second.json()
+    assert body2["cached"] == 1
+    assert body2["fetched"] == 0
+
+
+def test_tile_cache_prefetch_rejects_bad_rel_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    traversal = client.post("/api/maps/tile-cache/prefetch", json={"rels": ["../secret"]})
+    assert traversal.status_code == 400
+
+    from obed_edom.maps_tiles import MAX_PREFETCH_BATCH
+
+    oversized = client.post(
+        "/api/maps/tile-cache/prefetch",
+        json={"rels": [f"planet/0/0/{i}.pbf" for i in range(MAX_PREFETCH_BATCH + 1)]},
+    )
+    assert oversized.status_code == 400
+
+    combined = client.post(
+        "/api/maps/tile-cache/prefetch",
+        json={
+            "rels": ["planet/0/0/0.pbf"],
+            "cameras": [{"lat": 0.0, "lon": 0.0, "zoom": 4, "bearing": 0, "pitch": 0}],
+        },
+    )
+    assert combined.status_code == 400

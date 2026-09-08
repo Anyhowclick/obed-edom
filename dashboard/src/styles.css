@@ -333,6 +333,41 @@ h3 {
   white-space: pre-wrap;
 }
 
+.progress {
+  margin: 4px 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+.progress-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: var(--radius-pill);
+  transition: width 0.2s var(--ease-spring);
+}
+.progress-detail {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-tertiary);
+}
+.progress-note {
+  font-size: 12px;
+  color: var(--status-warning);
+}
+
 .split {
   display: grid;
   grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);

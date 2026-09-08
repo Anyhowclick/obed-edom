@@ -2,20 +2,44 @@ export function isPreviewVideo(nameOrUrl: string): boolean {
   return /\.mov(?:$|[?#])/i.test(nameOrUrl);
 }
 
+export type OverlayProgress = {
+  label: string;
+  value: number;
+  max: number;
+  detail?: string;
+  note?: string;
+};
+
 export function LoadingOverlay({
   title,
   logs,
   onCancel,
+  progress,
 }: {
   title: string;
   logs: string[];
   onCancel?: () => void;
+  progress?: OverlayProgress | null;
 }) {
+  const pct = progress ? Math.min(100, Math.max(0, (progress.value / Math.max(1, progress.max)) * 100)) : 0;
   return (
     <div className="overlay">
       <div className="overlay-card">
         <div className="spinner" />
         <h2 style={{ marginTop: 0 }}>{title}</h2>
+        {progress ? (
+          <div className="progress">
+            <div className="progress-head">
+              <span>{progress.label}</span>
+              <span>{Math.round(pct)}%</span>
+            </div>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${pct}%` }} />
+            </div>
+            {progress.detail ? <div className="progress-detail">{progress.detail}</div> : null}
+            {progress.note ? <div className="progress-note">{progress.note}</div> : null}
+          </div>
+        ) : null}
         <div className="log">{logs.join("\n") || "Working…"}</div>
         {onCancel ? (
           <button className="btn secondary" type="button" onClick={onCancel}>

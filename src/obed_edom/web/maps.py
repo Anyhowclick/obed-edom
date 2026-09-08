@@ -35,9 +35,12 @@ from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_fi
 from obed_edom.maps_tiles import (
     DEFAULT_CAMERA_MAXZOOM,
     DEFAULT_COUNTRY_MAXZOOM,
+    MAX_PREFETCH_BATCH,
     cache_country_rows,
+    cache_path,
     cache_root,
     cache_stats,
+    camera_tile_plan,
     clear_tile_cache,
     fetch_and_cache,
     media_type_for,
@@ -237,6 +240,7 @@ class TilePrefetchBody(BaseModel):
     width: float = 7680
     height: float = 1080
     terrain: bool = False
+    rels: list[str] | None = None
 
 
 class ExportBody(BaseModel):
@@ -691,8 +695,57 @@ def get_cached_tile(rest: str):
     )
 
 
+@router.post("/tile-cache/plan")
+def plan_tiles(payload: TilePrefetchBody) -> dict[str, Any]:
+    if payload.rels is not None:
+        raise HTTPException(400, "rels is not supported for tile-cache/plan")
+    rels: list[str] = []
+    capped = False
+    cameras_total = 0
+    cameras_used = 0
+    if payload.countries:
+        z = DEFAULT_COUNTRY_MAXZOOM if payload.maxzoom is None else int(payload.maxzoom)
+        rels.extend(rels_for_countries(payload.countries, maxzoom=z))
+    if payload.cameras:
+        z = DEFAULT_CAMERA_MAXZOOM if payload.maxzoom is None else int(payload.maxzoom)
+        plan = camera_tile_plan(
+            [cam.model_dump() for cam in payload.cameras],
+            width=payload.width,
+            height=payload.height,
+            maxzoom=z,
+            terrain=payload.terrain,
+        )
+        rels.extend(plan["rels"])
+        capped = plan["capped"]
+        cameras_total = plan["cameras"]
+        cameras_used = plan["camerasUsed"]
+    unique = list(dict.fromkeys(normalize_rel(rel) for rel in rels))
+    cached = sum(1 for rel in unique if cache_path(rel).is_file())
+    return {
+        "ok": True,
+        "rels": unique,
+        "tiles": len(unique),
+        "cached": cached,
+        "capped": capped,
+        "cameras": cameras_total,
+        "camerasUsed": cameras_used,
+    }
+
+
 @router.post("/tile-cache/prefetch")
 def prefetch_tiles(payload: TilePrefetchBody) -> dict[str, Any]:
+    if payload.rels is not None:
+        if payload.countries or payload.cameras:
+            raise HTTPException(400, "rels cannot be combined with countries or cameras")
+        if len(payload.rels) > MAX_PREFETCH_BATCH:
+            raise HTTPException(400, f"rels batch cannot exceed {MAX_PREFETCH_BATCH}")
+        try:
+            batch = [normalize_rel(rel) for rel in payload.rels]
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid tile path") from exc
+        stats = prefetch_rels(batch)
+        stats["ok"] = True
+        return stats
     rels: list[str] = []
     if payload.countries:
         z = DEFAULT_COUNTRY_MAXZOOM if payload.maxzoom is None else int(payload.maxzoom)

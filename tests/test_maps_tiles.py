@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import threading
 import time
@@ -9,11 +10,14 @@ import time
 import pytest
 
 from obed_edom.maps_tiles import (
+    FETCH_WORKERS,
     PINNED_CACHE_COUNTRIES,
+    TERRAIN_FETCH_WORKERS,
     TERRAIN_MAXZOOM,
     cache_country_rows,
     cache_path,
     cache_stats,
+    camera_tile_plan,
     fetch_and_cache,
     fetch_upstream,
     media_type_for,
@@ -338,3 +342,71 @@ def test_fetch_and_cache_two_threads_same_missing_rel(tmp_path, monkeypatch):
         thread.join(timeout=5)
     assert results == [b"same-bytes", b"same-bytes"]
     assert cache_path("planet/1/0/0.pbf").read_bytes() == b"same-bytes"
+
+
+def test_camera_tile_plan_flags_cap_when_subsampled(monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.planet_tile_template", lambda **_: "planet/{z}/{x}/{y}.pbf")
+    monkeypatch.setattr("obed_edom.maps_tiles.MAX_PREFETCH_TILES", 40)
+    cameras = [
+        {"lat": 0.0, "lon": float(i) * 8.0 - 80.0, "zoom": 10, "bearing": 0, "pitch": 0} for i in range(30)
+    ]
+    plan = camera_tile_plan(cameras, width=3840, height=1080, maxzoom=10)
+    assert plan["capped"] is True
+    assert plan["cameras"] == 30
+    assert plan["camerasUsed"] < 30
+    assert plan["rels"] == rels_for_cameras(cameras, width=3840, height=1080, maxzoom=10)
+
+
+def test_camera_tile_plan_uncapped_uses_all_cameras(monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.planet_tile_template", lambda **_: "planet/{z}/{x}/{y}.pbf")
+    monkeypatch.setattr("obed_edom.maps_tiles.MAX_PREFETCH_TILES", 8000)
+    camera = {"lat": 3.0, "lon": 101.0, "zoom": 6, "bearing": 0, "pitch": 0}
+    uncapped = camera_tile_plan([camera], width=3840, height=1080, maxzoom=6)
+    assert uncapped["capped"] is False
+    assert uncapped["camerasUsed"] == uncapped["cameras"] == 1
+    assert uncapped["rels"] == rels_for_cameras([camera], width=3840, height=1080, maxzoom=6)
+
+
+def test_camera_tile_plan_rels_are_pinned(monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.planet_tile_template", lambda **_: "planet/{z}/{x}/{y}.pbf")
+    camera = {"lat": 3.0, "lon": 101.0, "zoom": 6, "bearing": 0, "pitch": 0}
+    plan = camera_tile_plan([camera], width=3840, height=1080, maxzoom=6)
+    joined = "|".join(sorted(plan["rels"]))
+    assert len(plan["rels"]) == 106
+    assert hashlib.sha256(joined.encode()).hexdigest() == (
+        "33ecdb7b27bc8f3198a6e3e6cb29aab8188729446ac2523b2b80cc92a0c30ecf"
+    )
+
+
+def test_prefetch_rels_uses_larger_pool_for_terrain(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    barrier_parties = FETCH_WORKERS + 1
+    barrier = threading.Barrier(barrier_parties)
+    ofm_lock = threading.Lock()
+    ofm_active = 0
+    ofm_max = 0
+
+    def fetch(rel: str) -> bytes:
+        nonlocal ofm_active, ofm_max
+        if rel.startswith("terrarium/"):
+            # An 8-wide pool cannot get all `barrier_parties` terrain fetches
+            # running at once, so a too-small pool times out here.
+            barrier.wait(timeout=2)
+            return b"dem"
+        with ofm_lock:
+            ofm_active += 1
+            ofm_max = max(ofm_max, ofm_active)
+        time.sleep(0.05)
+        with ofm_lock:
+            ofm_active -= 1
+        return b"pbf"
+
+    terrain_rels_list = [f"terrarium/9/{i}/0.png" for i in range(barrier_parties)]
+    ofm_rels_list = [f"planet/9/{i}/0.pbf" for i in range(FETCH_WORKERS + 2)]
+
+    result = prefetch_rels(terrain_rels_list + ofm_rels_list, fetch=fetch)
+    assert result["failed"] == 0
+    assert result["fetched"] == len(terrain_rels_list) + len(ofm_rels_list)
+    assert TERRAIN_FETCH_WORKERS > FETCH_WORKERS
+    assert ofm_max > 1
+    assert ofm_max <= FETCH_WORKERS
