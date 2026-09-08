@@ -2173,12 +2173,22 @@ def test_coincident_dup_is_hidden_not_dropped_from_plan():
     assert len(groups) == 2 and all(t.role == "hide" and t.opacity == 0.0 for t in groups)
 
 
-def test_coincident_twin_is_hidden_even_when_it_carries_a_build():
-    """Gold slide 13's two stat-group twins (e.g. `{"183", group[2]}` at the exact
-    same rect) both carry authored builds (bc-zoom-big / KLNSparkle), but un-hiding
-    the twin gives pass 2 two identical-signature stat groups it cannot resolve
-    (12 unresolved groups, 8 dedup shortfalls) -- so the twin stays hidden and its
-    build is reported as a loud shortfall instead (the trade this round makes)."""
+def test_coincident_twin_carrying_a_build_is_kept_not_hidden():
+    """REPLACES test_coincident_twin_is_hidden_even_when_it_carries_a_build. This exemption
+    shipped once (4cadd15) and was reverted a day later (4654602) because the un-hidden
+    twin gave stat-finalize two identical-signature stat groups it could not resolve (12
+    unresolved, 8 dedup shortfalls -- reproduced fresh, offline, against today's real wall
+    deck in output/handover-2026-09-07/w1-diagnosis/plan-sparkle-hide.md Sec.2). That
+    collision is fixed downstream by a tri-state allowFallback in keynote.py's
+    obedResolveGroup (claim an interchangeable twin pair in order instead of refusing) and
+    by a narrow wrong-survivor waiver in map_remap.py's reuse dedup (Sec.3, Change B/C) --
+    both keyed on the SAME coincident_build_twin_sigs() this hide exemption uses, so they
+    cannot drift apart. With that in place the exemption can land: a coincident twin
+    carrying its OWN build (slide 124 / Gold slide 13's `183\\nCHC Churches` pair --
+    bc-zoom-big base + KLNSparkle twin; deck census: 3 coincident firings total, 2 of them
+    build-carrying, Sec.3 "Why the rule") is a legitimate build-only copy, not a
+    magic-move leftover, and must be kept -- do not re-revert this without re-reading
+    Sec.0/2 of the plan above."""
     def slide_with(builds):
         return {
             "number": 1,
@@ -2197,7 +2207,7 @@ def test_coincident_twin_is_hidden_even_when_it_carries_a_build():
     out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
     groups = {t.kind_index: t for t in out if t.kind == "group"}
     assert groups[0].role != "hide"
-    assert groups[1].role == "hide"
+    assert groups[1].role == "hide"  # no build: still a magic-move leftover, hidden as before
 
     slide2 = slide_with([{"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 1}])
     wall2 = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide2]}
@@ -2205,7 +2215,220 @@ def test_coincident_twin_is_hidden_even_when_it_carries_a_build():
     out2 = plan_slide_transforms(slide2, recipe2, wall_size=(7680, 1080))
     groups2 = {t.kind_index: t for t in out2 if t.kind == "group"}
     assert groups2[0].role != "hide"
-    assert groups2[1].role == "hide"  # still hidden: the build cannot be re-pointed onto it
+    assert groups2[1].role != "hide"  # carries its own build: spared
+    assert groups2[1].opacity != 0.0
+
+
+def test_coincident_text_twin_carrying_a_build_is_still_hidden():
+    """Review nit: coincident_build_twin_sigs only maps spared GROUP items (its groupChildText
+    lookup has no text-item equivalent), so a build-carrying coincident TEXT twin would be
+    un-hidden by the build exemption while producing no twin sig -- neither Change B's `twin`
+    flag nor Change C's waiver would cover it, and two coincident texts share an output rect so
+    remove_refs' delete-by-rect has nothing left to disambiguate. coincident_duplicate_ids
+    therefore restricts the exemption to kind == "group"; a coincident text twin stays hidden
+    exactly as before builds were ever considered. The group twin on the same slide is
+    unaffected."""
+    from obed_edom.map_remap import coincident_duplicate_ids
+
+    items = [
+        _item(kind="text", kindIndex=0, text="Same Label", x=100, y=100, w=200, h=50),
+        _item(kind="text", kindIndex=1, text="Same Label", x=101, y=100, w=200, h=50),  # coincident text twin
+        _item(kind="group", kindIndex=2, x=1993, y=365, w=111, h=78, childCount=2),
+        _item(kind="group", kindIndex=3, x=1994, y=365, w=111, h=78, childCount=2),  # coincident group twin
+    ]
+    build_keys = {("text", 1), ("group", 3)}
+    dup = coincident_duplicate_ids(items, build_keys)
+    assert id(items[1]) in dup  # text twin: hidden even though it carries a build
+    assert id(items[3]) not in dup  # group twin: spared, as before
+
+
+def test_slide_124_sparkle_twins_survive_the_plan():
+    """Pinned to the real slide-124 objects (offline-measured against the real
+    Full_Report_Card_Wall.key -- plan-sparkle-hide.md Sec.0/3): two coincident twin
+    pairs, each a KLNSparkle-carrying copy alongside its bc-zoom-big base. Source build
+    ids for traceability only (not part of the payload contract, not asserted on):
+    20312966 (ki=5 KLNSparkle) / 20439552 (ki=7 KLNSparkle)."""
+    from obed_edom.map_remap import coincident_duplicate_ids
+
+    slide = {
+        "number": 124,
+        "items": [
+            _item(kind="image", fileName="Building.png", x=1920, y=-126, w=3840, h=1250),
+            _item(kind="group", kindIndex=0, x=1993, y=365, w=111, h=78, childCount=2),
+            _item(kind="group", kindIndex=5, x=1993, y=365, w=111, h=78, childCount=2),  # KLNSparkle twin
+            _item(kind="group", kindIndex=6, x=2672, y=389, w=414, h=342, childCount=2),
+            _item(kind="group", kindIndex=7, x=2671, y=389, w=414, h=342, childCount=2),  # KLNSparkle twin
+        ],
+        "groupChildText": {
+            0: "183\nCHC Churches", 5: "183\nCHC Churches",
+            6: "Total Churches\n269", 7: "Total Churches\n269",
+        },
+        "builds": [
+            {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 0},
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 5},
+            {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 6},
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 7},
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    groups = {t.kind_index: t for t in out if t.kind == "group"}
+    assert all(groups[ki].role != "hide" for ki in (0, 5, 6, 7))
+
+    # coincident_duplicate_ids with no build_keys (its own contract, unchanged) still
+    # flags exactly the two twins -- the exemption lives at the call site / helper, not here.
+    ki5 = next(it for it in slide["items"] if it.get("kindIndex") == 5)
+    ki7 = next(it for it in slide["items"] if it.get("kindIndex") == 7)
+    assert coincident_duplicate_ids(slide["items"]) == {id(ki5), id(ki7)}
+
+
+def test_slide_19_panel_ghost_stays_hidden_without_a_build():
+    """The exemption is a skip of ONE hide reason, not an exemption from hiding: a
+    side-panel ghost with no build never reaches the exemption (no build_keys entry),
+    and even a side-panel ghost that DID carry a build would still be caught by the
+    side-panel rule that runs after the coincident check (plan-sparkle-hide.md Sec.3,
+    "Does slide 19's ghost have to keep being hidden")."""
+    def slide_with(builds):
+        return {
+            "number": 19,
+            "items": [
+                _item(kind="image", fileName="Building.png", x=1920, y=-126, w=3840, h=1250),
+                _item(kind="group", kindIndex=0, x=5770, y=-174, w=1923, h=1317, childCount=5),
+                _item(kind="group", kindIndex=1, x=5771, y=-174, w=1923, h=1317, childCount=5),  # coincident dup
+            ],
+            "builds": builds,
+        }
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    slide = slide_with([])
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    recipe = learn_recipe(wall, template)
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    groups = {t.kind_index: t for t in out if t.kind == "group"}
+    assert groups[1].role == "hide"
+
+    slide2 = slide_with([{"effect": "apple:dissolve", "animationType": "In", "kind": "group", "kindIndex": 1}])
+    wall2 = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide2]}
+    recipe2 = learn_recipe(wall2, template)
+    out2 = plan_slide_transforms(slide2, recipe2, wall_size=(7680, 1080))
+    groups2 = {t.kind_index: t for t in out2 if t.kind == "group"}
+    # spared by the coincident check, but still hidden -- is_side_panel_item catches it
+    assert groups2[1].role == "hide"
+    assert groups2[1].opacity == 0.0
+
+
+def test_coincident_build_twin_sigs_names_only_the_spared_copies():
+    from obed_edom.map_remap import coincident_build_twin_sigs
+
+    slide124 = {
+        "number": 124,
+        "items": [
+            _item(kind="group", kindIndex=0, x=1993, y=365, w=111, h=78, childCount=2),
+            _item(kind="group", kindIndex=5, x=1993, y=365, w=111, h=78, childCount=2),
+            _item(kind="group", kindIndex=6, x=2672, y=389, w=414, h=342, childCount=2),
+            _item(kind="group", kindIndex=7, x=2671, y=389, w=414, h=342, childCount=2),
+        ],
+        "groupChildText": {
+            0: "183\nCHC Churches", 5: "183\nCHC Churches",
+            6: "Total Churches\n269", 7: "Total Churches\n269",
+        },
+        "builds": [
+            {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 0},
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 5},
+            {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 6},
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 7},
+        ],
+    }
+    assert coincident_build_twin_sigs(slide124) == {"183\nCHC Churches", "Total Churches\n269"}
+
+    slide19 = {
+        "number": 19,
+        "items": [
+            _item(kind="group", kindIndex=0, x=5770, y=-174, w=1923, h=1317, childCount=5),
+            _item(kind="group", kindIndex=1, x=5771, y=-174, w=1923, h=1317, childCount=5),
+        ],
+        "groupChildText": {0: "side\npanel", 1: "side\npanel"},
+        "builds": [],
+    }
+    assert coincident_build_twin_sigs(slide19) == set()
+
+    slide_no_builds_key = {
+        "number": 1,
+        "items": [
+            _item(kind="group", kindIndex=0, x=100, y=100, w=50, h=50, childCount=2),
+            _item(kind="group", kindIndex=1, x=100, y=100, w=50, h=50, childCount=2),
+        ],
+        "groupChildText": {0: "x", 1: "x"},
+    }
+    assert coincident_build_twin_sigs(slide_no_builds_key) == set()
+
+
+def test_coincident_group_twin_with_mismatched_child_sig_is_spared_but_not_waived():
+    """Review nit: the coincidence predicate matches groups on childCount alone, but the
+    waiver keys on childSig (groupChildText). Two coincident groups can share a childCount
+    without being interchangeable copies, so coincident_build_twin_sigs must only add a sig
+    when the spared copy's own childSig equals its anchor's -- otherwise the waiver would
+    cover a sig whose live copy is not truly interchangeable, the highest-risk edit in the
+    change. Change A itself stays purely geometric and unaffected: the build-carrying copy
+    is still spared from the coincident hide even though the sigs differ."""
+    from obed_edom.map_remap import coincident_build_twin_sigs, coincident_duplicate_ids
+
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kind="group", kindIndex=0, x=100, y=100, w=200, h=200, childCount=2),
+            _item(kind="group", kindIndex=1, x=101, y=100, w=200, h=200, childCount=2),  # same childCount, different childSig
+        ],
+        "groupChildText": {0: "Alpha", 1: "Bravo"},
+        "builds": [
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 1},
+        ],
+    }
+    build_keys = {("group", 1)}
+    dup = coincident_duplicate_ids(slide["items"], build_keys)
+    assert id(slide["items"][1]) not in dup  # still spared -- Change A is geometric, unchanged
+
+    assert coincident_build_twin_sigs(slide) == set()  # neither sig enters the sig_less waiver
+
+
+def test_child_resize_row_flags_a_build_twin_set():
+    slide = {
+        "number": 124,
+        "items": [
+            _item(kind="image", fileName="Building.png", x=1920, y=-126, w=3840, h=1250),
+            _item(kind="group", kindIndex=0, x=1993, y=365, w=111, h=78, childCount=2),
+            _item(kind="group", kindIndex=5, x=1993, y=365, w=111, h=78, childCount=2),
+            _item(kind="group", kindIndex=6, x=2672, y=389, w=414, h=342, childCount=2),
+            _item(kind="group", kindIndex=7, x=2671, y=389, w=414, h=342, childCount=2),
+            _item(kind="group", kindIndex=8, x=3200, y=100, w=200, h=200, childCount=2),
+        ],
+        "groupChildText": {
+            0: "183\nCHC Churches", 5: "183\nCHC Churches",
+            6: "Total Churches\n269", 7: "Total Churches\n269",
+            8: "86\nAffiliate",
+        },
+        "builds": [
+            {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 0},
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 5},
+            {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 6},
+            {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 7},
+        ],
+    }
+    wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [slide]}
+    template = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    recipe = learn_recipe(wall, template)
+    report: list[dict] = []
+    plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    by_ki = {r["groupIndex"] - 1: r for r in report}
+    # Both members of a twin PAIR get flagged -- the flag is keyed by shared childSig,
+    # so it cannot single out only the spared copy (plan-sparkle-hide.md Sec.3 risk #6).
+    assert by_ki[0]["twin"] is True
+    assert by_ki[5]["twin"] is True
+    assert by_ki[6]["twin"] is True
+    assert by_ki[7]["twin"] is True
+    assert "twin" not in by_ki[8]
 
 
 def test_side_panel_content_is_dropped_when_side_content_is_not_kept():
@@ -4429,11 +4652,12 @@ def test_reuse_no_groupremove_key_when_no_group_removes():
 # --- R2 amendments (v2): donor OUTPUT-state model, cross-chain stray accumulation ---
 
 
-def _reuse_chain(per_slide):
+def _reuse_chain(per_slide, builds_per_slide=None):
     """N-slide wall forcing the reuse chain n<-(n-1): 1 map + 40 shared pins, plus an
     accumulating anchor per slide (slide n carries anchors 0..n-2) so each slide shares
     strictly more with its immediate predecessor than any earlier slide. `per_slide` is
-    a list of (groups, groupChildText) — the caller-supplied groups for slides 1..N."""
+    a list of (groups, groupChildText) — the caller-supplied groups for slides 1..N.
+    `builds_per_slide`, if given, is a list of `slide["builds"]` lists, same length."""
     map_img = _item(kind="image", kindIndex=0, fileName="pasted-image.pdf", x=3052, y=-12, w=1248, h=771)
     pins = [_item(kind="shape", kindIndex=i, x=3563 + i * 13, y=255, w=11, h=11) for i in range(40)]
     base = [dict(map_img), *[dict(p) for p in pins]]
@@ -4441,7 +4665,12 @@ def _reuse_chain(per_slide):
     for idx, (groups, gct) in enumerate(per_slide):
         anchors = [_item(kind="shape", kindIndex=100 + j, x=9000 + j * 7, y=900, w=5, h=5) for j in range(idx)]
         slides.append(
-            {"number": idx + 1, "items": [*[dict(b) for b in base], *anchors, *groups], "groupChildText": gct}
+            {
+                "number": idx + 1,
+                "items": [*[dict(b) for b in base], *anchors, *groups],
+                "groupChildText": gct,
+                "builds": builds_per_slide[idx] if builds_per_slide else [],
+            }
         )
     return {"slides": slides}
 
@@ -4569,6 +4798,64 @@ def test_reuse_stray_outliving_keeper_downgrades_to_sig_less():
     assert len(grs) == 1
     assert "childSig" not in grs[0] and "expectedKeep" not in grs[0]
     assert grs[0]["kindIndex"] == 51  # the partitioned twin, emitted sig-less
+
+
+def test_reuse_inherited_build_twin_is_deduped_not_downgraded():
+    """Direct inverse of test_reuse_stray_outliving_keeper_downgrades_to_sig_less above:
+    here the leftover donor copy IS a coincident build twin (same rect as its base, not
+    139pt apart), so Change C's waiver (plan-sparkle-hide.md Sec.3) applies and the
+    downgrade must NOT happen -- the target gets a real, dedupable groupRemove instead
+    of a sig-less fail-loud ref."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    base = _grp(50, 4600, "twin")[0]
+    twin = _grp(51, 4600, "twin")[0]  # SAME rect as base -- coincident, not just same-sig
+    builds = [
+        {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 50},
+        {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 51},
+    ]
+    wall = _reuse_chain(
+        [
+            ([dict(base), dict(twin)], {50: "twin", 51: "twin"}),
+            ([dict(base)], {50: "twin"}),  # only the base's own rect persists
+        ],
+        builds_per_slide=[builds, []],
+    )
+    job = {j["slide"]: j for j in plan_slide_reuses(wall, [])}[2]
+    grs = job["groupRemove"]
+    assert len(grs) == 1
+    assert grs[0]["childSig"] == "twin" and grs[0]["expectedKeep"] == 1
+
+
+def test_reuse_build_twin_tolerance_propagates_down_the_chain():
+    """The most likely implementation slip: twin_sigs must mirror group_out and be
+    inherited through the chain (twin_sigs[number] = twin_sigs.get(from_n, set()) |
+    coincident_build_twin_sigs(slide)), not recomputed from the current slide alone.
+    Twins only appear on slide 1; slides 2 and 3 each carry a single copy, yet slide 3's
+    phantom stray -- the donor's pre-dedup output modeling rides a "None origin" entry
+    down the chain even after slide 2's own live copy is singular, Sec.3 "Group counts
+    model the donor's..." -- still needs the waiver two hops downstream."""
+    from obed_edom.map_remap import plan_slide_reuses
+
+    base = _grp(50, 4600, "twin")[0]
+    twin = _grp(51, 4600, "twin")[0]
+    builds = [
+        {"effect": "apple:bc-zoom-big", "animationType": "In", "kind": "group", "kindIndex": 50},
+        {"effect": "com.apple.iWork.Keynote.KLNSparkle", "animationType": "In", "kind": "group", "kindIndex": 51},
+    ]
+    wall = _reuse_chain(
+        [
+            ([dict(base), dict(twin)], {50: "twin", 51: "twin"}),
+            ([dict(base)], {50: "twin"}),
+            ([dict(base)], {50: "twin"}),
+        ],
+        builds_per_slide=[builds, [], []],
+    )
+    jobs = {j["slide"]: j for j in plan_slide_reuses(wall, [])}
+    assert jobs[3]["from"] == 2  # chained through slide 2, not straight from slide 1
+    grs = jobs[3]["groupRemove"]
+    assert len(grs) == 1
+    assert grs[0]["childSig"] == "twin" and grs[0]["expectedKeep"] == 1
 
 
 # --- D1/D2 (plan2 round 2): index-stale deletes, hidden-mutate donor leak -------

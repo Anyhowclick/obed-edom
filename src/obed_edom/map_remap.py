@@ -1735,11 +1735,14 @@ def sparkle_overlays(
 COINCIDENT_DUP_TOL = 4.0
 
 
-def coincident_duplicate_ids(items: list[dict]) -> set[int]:
-    """Magic-move leftover group/text copies at the same spot; images are never deduped (stacked map layers)."""
-    kept: list[tuple[str, Rect, str, int]] = []
-    dup: set[int] = set()
-    for item in items:
+def _coincident_dup_pairs(items: list[dict]) -> list[tuple[int, int, dict, dict]]:
+    """Internal: geometric coincidence match shared by coincident_duplicate_ids and
+    coincident_build_twin_sigs so the two can never disagree on which items coincide.
+    Yields (dup_fallback_i, anchor_fallback_i, anchor_item, dup_item) for each item
+    coinciding with an earlier kept item of the same kind/sig/rect."""
+    kept: list[tuple[str, Rect, str, int, dict]] = []
+    pairs: list[tuple[int, int, dict, dict]] = []
+    for fallback_i, item in enumerate(items):
         kind = str(item.get("kind") or "")
         if kind not in {"group", "text"}:
             continue
@@ -1749,7 +1752,7 @@ def coincident_duplicate_ids(items: list[dict]) -> set[int]:
             if kind == "text"
             else str(item.get("childCount") or len(item.get("children") or []))
         )
-        for k2, r2, s2, _ in kept:
+        for k2, r2, s2, anchor_fi, anchor in kept:
             if (
                 k2 == kind
                 and s2 == sig
@@ -1758,11 +1761,56 @@ def coincident_duplicate_ids(items: list[dict]) -> set[int]:
                 and abs(rect.w - r2.w) <= COINCIDENT_DUP_TOL
                 and abs(rect.h - r2.h) <= COINCIDENT_DUP_TOL
             ):
-                dup.add(id(item))
+                pairs.append((fallback_i, anchor_fi, anchor, item))
                 break
         else:
-            kept.append((kind, rect, sig, id(item)))
+            kept.append((kind, rect, sig, fallback_i, item))
+    return pairs
+
+
+def coincident_duplicate_ids(
+    items: list[dict], build_keys: set[tuple[str, int]] | None = None
+) -> set[int]:
+    """Magic-move leftover group/text copies at the same spot; images are never deduped (stacked map layers).
+    A GROUP item whose ``(kind, kindIndex)`` is in ``build_keys`` carries its own authored build and is
+    exempted from the hide -- it is a legitimate build-only twin, not a magic-move leftover. Text twins
+    are never exempted: two coincident text items share an output rect, so nothing downstream could tell
+    them apart if one were left un-hidden (see output/handover-2026-09-07/w1-diagnosis/plan-sparkle-hide.md)."""
+    build_keys = build_keys or set()
+    dup: set[int] = set()
+    for fallback_i, _anchor_fi, _anchor, item in _coincident_dup_pairs(items):
+        kind = str(item.get("kind") or "")
+        kind_index = _item_kind_index(item, _item_index(item, fallback_i))
+        if kind != "group" or (kind, kind_index) not in build_keys:
+            dup.add(id(item))
     return dup
+
+
+def coincident_build_twin_sigs(slide: dict) -> set[str]:
+    """Group child-text signatures whose coincident copy was spared for its build (see Change A
+    in plan-sparkle-hide.md). Shared by the hide exemption and the reuse dedup waiver so the two
+    cannot drift apart. Only counted when the spared copy's own childSig matches its anchor's --
+    two coincident groups with equal childCount but different childSig are not interchangeable,
+    and must not waive the wrong-survivor guard for either sig."""
+    items = slide.get("items") or []
+    build_keys = {
+        (str(b.get("kind") or ""), int(b.get("kindIndex") or 0)) for b in (slide.get("builds") or [])
+    }
+    if not build_keys:
+        return set()
+    gct = {int(k): v for k, v in (slide.get("groupChildText") or {}).items()}
+    out: set[str] = set()
+    for fallback_i, anchor_fi, anchor, item in _coincident_dup_pairs(items):
+        if str(item.get("kind") or "") != "group":
+            continue
+        kind_index = _item_kind_index(item, _item_index(item, fallback_i))
+        if ("group", kind_index) not in build_keys:
+            continue
+        anchor_ki = _item_kind_index(anchor, _item_index(anchor, anchor_fi))
+        sig = gct.get(kind_index)
+        if sig is not None and sig == gct.get(anchor_ki):
+            out.add(sig)
+    return out
 
 
 def badge_members(slide: dict, title: dict) -> list[dict]:
@@ -2420,7 +2468,11 @@ def plan_slide_transforms(
     card_captions: dict[tuple[str, int], str] = {}
     list_count = sum(1 for it in slide.get("items") or [] if is_list_item(it))
     name_col_ids = name_column_ids(slide.get("items") or [])
-    coincident_dups = coincident_duplicate_ids(slide.get("items") or [])
+    coincident_dups = coincident_duplicate_ids(
+        slide.get("items") or [],
+        {(str(b.get("kind") or ""), int(b.get("kindIndex") or 0)) for b in (slide.get("builds") or [])},
+    )
+    twin_sigs = coincident_build_twin_sigs(slide)
     for fallback_i, item in enumerate(slide.get("items") or []):
         if is_placeholder_text(item) or is_duplicate_item(item):
             continue
@@ -2738,6 +2790,8 @@ def plan_slide_transforms(
                 }
                 if caption_refusal:
                     row["captionRefusal"] = caption_refusal
+                if _sig is not None and _sig in twin_sigs:
+                    row["twin"] = True
                 child_resize_report.append(row)
         start = end = None
         if role == "line" or item.get("start") or item.get("end"):
@@ -3180,6 +3234,10 @@ def plan_slide_reuses(
 
     # Per planned slide: ordered (childSig, origin) list of its pre-dedup JXA group output.
     group_out: dict[int, list[tuple[str, tuple[str, int] | None]]] = {}
+    # Per planned slide: child-text sigs whose coincident copy was spared for its build --
+    # mirrors group_out (inherited down the chain) so the sig_less guard below can waive
+    # its wrong-survivor check for exactly these sigs (Change C, plan-sparkle-hide.md).
+    twin_sigs: dict[int, set[str]] = {}
 
     def _record_nonreuse(num: int, sl: dict) -> None:
         smap = {_spec_key(t): t for t in (by_slide.get(num) or [])}
@@ -3196,6 +3254,7 @@ def plan_slide_reuses(
             if str(it.get("kind") or "") == "group"
         )
         group_out[num] = [(gct[ki], ("group", ki)) for ki in kis if ki in gct and ki not in hidden]
+        twin_sigs[num] = coincident_build_twin_sigs(sl)
 
     def _build_multiset_by_key(slide_builds: list[dict] | None) -> dict[tuple[str, int], Counter]:
         out: dict[tuple[str, int], Counter] = {}
@@ -3409,6 +3468,7 @@ def plan_slide_reuses(
         ]
         out_state += [(target_gct[key[1]], key) for key in pasted_keys if key[1] in target_gct]
         group_out[number] = out_state
+        twin_sigs[number] = twin_sigs.get(from_n, set()) | coincident_build_twin_sigs(slide)
         keep_counts: dict[str, int] = {}
         for key in [*(k for k in persist_map.values() if k not in hide_keys), *pasted_keys]:
             sig = target_gct.get(key[1])
@@ -3434,7 +3494,7 @@ def plan_slide_reuses(
             if count <= keep or keep == 0 or sig in sig_less:
                 continue
             survivors = [origin for s, origin in out_state if s == sig][-keep:]
-            if any(origin is None for origin in survivors):
+            if sig not in twin_sigs[number] and any(origin is None for origin in survivors):
                 sig_less.add(sig)
         group_removes: list[dict[str, Any]] = []
         removed_by_sig: dict[str, list[dict]] = {}

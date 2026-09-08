@@ -1231,6 +1231,50 @@ def test_finalize_allow_fallback_gated_by_duplicate_childsig():
     assert 'my obedStatJob(9, _sigs, 12, {"CHC"}, 0.483, 1, 0.0)' in script
 
 
+def test_finalize_twin_jobs_claim_in_order():
+    """plan-sparkle-hide.md Change B: two jobs sharing a sig, BOTH flagged `twin`
+    (a coincident build-twin pair, map_remap's row["twin"]), emit allowFallback=2
+    instead of refusing -- this is the blast-radius-limited widening the plan chose
+    over keying on general (s, captionPt) interchangeability."""
+    jobs = [
+        {"slide": 124, "groupIndex": 6, "childSig": "twinSig", "s": 0.1267, "twin": True},
+        {"slide": 124, "groupIndex": 8, "childSig": "twinSig", "s": 0.1267, "twin": True},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert 'my obedStatJob(124, _sigs, 6, {"twinSig"}, 0.1267, 2, 0.0)' in script
+    assert 'my obedStatJob(124, _sigs, 8, {"twinSig"}, 0.1267, 2, 0.0)' in script
+
+
+def test_finalize_mixed_twin_and_untagged_same_sig_refuses():
+    """The flag must be unanimous -- one row tagged twin and one plain row sharing the
+    same (slide, sig) both refuse (allowFallback=0), same as today with no twin at all."""
+    jobs = [
+        {"slide": 9, "groupIndex": 6, "childSig": "twinSig", "s": 0.1267, "twin": True},
+        {"slide": 9, "groupIndex": 8, "childSig": "twinSig", "s": 0.1267},
+    ]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert 'my obedStatJob(9, _sigs, 6, {"twinSig"}, 0.1267, 0, 0.0)' in script
+    assert 'my obedStatJob(9, _sigs, 8, {"twinSig"}, 0.1267, 0, 0.0)' in script
+
+
+def test_finalize_twin_branch_precedes_the_single_hit_branch():
+    """`allowFallback is not 0` is true for 2 as well as 1 -- the twin branch must come
+    first in obedResolveGroup or a 2 silently degrades to the single-hit fallback."""
+    jobs = [{"slide": 1, "groupIndex": 0, "childSig": "s", "s": 1.0}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    assert script.index("allowFallback is 2") < script.index("allowFallback is not 0")
+
+
+def test_finalize_twin_claims_are_recorded():
+    jobs = [{"slide": 1, "groupIndex": 0, "childSig": "s", "s": 1.0}]
+    script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {})
+    start = script.index("allowFallback is 2")
+    branch = script[start : script.index("end if", start)]
+    assert "set end of claimed to _w" in branch
+    assert "sigFallbacks to sigFallbacks + 1" in branch
+    assert "sigTwin(s=" in branch
+
+
 def test_finalize_reuse_voids_group_index_in_call():
     transforms = [_hide(2, 0)]
     child_resize = [{"slide": 2, "groupIndex": 4, "childSig": "unique-sig"}]
