@@ -133,6 +133,47 @@ def test_plan_build_patch_reports_a_missing_slide_without_crashing():
     assert report == {"slide": 5, "kept": 0, "dropped": 0, "retimed": False, "missing": True}
 
 
+def test_plan_build_patch_keeps_a_sparkle_that_arrives_with_the_paste():
+    """plan-sparkle-hide.md Sec.1: once a coincident build-twin is planned as a paste
+    (map_remap.coincident_duplicate_ids's build exemption), its build key is distinct
+    from the base copy's (different effect, same identity) -- both survive with no
+    build-creation capability needed. If the paste never carries the twin (output has
+    only the base copy), no KLNSparkle is invented for it."""
+    identity = ("group", "183\nCHC Churches")
+    src = {
+        1: {
+            "builds": [
+                _build("s1", "apple:bc-zoom-big", kind="group", kind_index=0, identity=identity),
+                _build("s2", "com.apple.iWork.Keynote.KLNSparkle", kind="group", kind_index=5, identity=identity),
+            ],
+            "transition": None,
+        }
+    }
+    out_both = {
+        1: {
+            "slideId": "sid1",
+            # scrambled vs. source order -- ordering must come from the source, not the paste
+            "builds": [
+                _build("o2", "com.apple.iWork.Keynote.KLNSparkle", kind="group", kind_index=5, identity=identity),
+                _build("o1", "apple:bc-zoom-big", kind="group", kind_index=0, identity=identity),
+            ],
+            "transition": None,
+        }
+    }
+    plan = plan_build_patch(src, out_both, [1])["plans"]["sid1"]
+    assert plan["builds"] == ["o1", "o2"]  # both kept, source order
+
+    out_base_only = {
+        1: {
+            "slideId": "sid1",
+            "builds": [_build("o1", "apple:bc-zoom-big", kind="group", kind_index=0, identity=identity)],
+            "transition": None,
+        }
+    }
+    plan2 = plan_build_patch(src, out_base_only, [1])["plans"]["sid1"]
+    assert plan2["builds"] == ["o1"]  # no KLNSparkle invented for the missing paste
+
+
 def test_verify_builds_flags_surplus_and_shortfall_separately():
     src = {
         1: {

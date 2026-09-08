@@ -467,6 +467,129 @@ test("removeShortfallOf: empty remove list yields an empty record", function () 
   assert.deepStrictEqual(m.removeShortfallOf([], {}), {});
 });
 
+// addShortfallOf is the add-side mirror of removeShortfallOf: it gates the post-paste
+// `delete slide to+1` on a per-kind DEFICIT between `job.add`'s histogram and the
+// measured before/after collection-count delta on `copy`. Surplus is recorded but
+// never fails the gate (a strip ref deleteRefs could not resolve rides the paste as
+// a harmless doubling, not data loss). An unreadable (-1) collection count is
+// "unmeasured": for a kind this job did NOT add, that is harmless and cannot
+// manufacture a shortfall; for a kind this job DID add (named in `expected`), the
+// paste against it can never be verified either way, so it blocks `ok`
+// (`unmeasuredNamed`) — unresolved, not a pass.
+
+test("addShortfallOf: a paste that delivered the full add histogram reports ok with no shortfall", function () {
+  const add = [];
+  for (let i = 0; i < 45; i++) add.push({ kind: "group" });
+  const report = m.addShortfallOf(add, { groups: 12 }, { groups: 57 });
+  assert.strictEqual(report.ok, true);
+  assert.deepStrictEqual(report.shortfall, {});
+  assert.deepStrictEqual(report.surplus, {});
+  assert.strictEqual(report.pasted.group, 45);
+});
+
+test("addShortfallOf: the slide-125 stale paste (expect group 45, got group 6 + line 1) is NOT ok and names the group shortfall", function () {
+  const add = [];
+  for (let i = 0; i < 45; i++) add.push({ kind: "group" });
+  const report = m.addShortfallOf(add, { groups: 0, lines: 0 }, { groups: 6, lines: 1 });
+  assert.strictEqual(report.ok, false);
+  assert.deepStrictEqual(report.expected, { group: 45 });
+  assert.deepStrictEqual(report.shortfall, { group: 39 });
+  assert.deepStrictEqual(report.surplus, { line: 1 });
+});
+
+test("addShortfallOf: a zero delta on every kind reports the whole add as shortfall", function () {
+  const add = [];
+  for (let i = 0; i < 45; i++) add.push({ kind: "group" });
+  const before = { groups: 12 };
+  const report = m.addShortfallOf(add, before, before);
+  assert.strictEqual(report.ok, false);
+  assert.deepStrictEqual(report.shortfall, { group: 45 });
+});
+
+test("addShortfallOf: surplus alone is recorded but stays ok — an over-full paste is never data loss", function () {
+  const add = [{ kind: "group" }, { kind: "group" }, { kind: "group" }, { kind: "group" }, { kind: "group" }, { kind: "group" }, { kind: "line" }];
+  const report = m.addShortfallOf(add, { groups: 0, lines: 0 }, { groups: 7, lines: 1 });
+  assert.strictEqual(report.ok, true);
+  assert.deepStrictEqual(report.surplus, { group: 1 });
+  assert.deepStrictEqual(report.shortfall, {});
+});
+
+test("addShortfallOf: an unreadable collection count (-1) for a kind named in `expected` blocks the gate — unresolved, not a pass", function () {
+  const add = [];
+  for (let i = 0; i < 45; i++) add.push({ kind: "group" });
+  const report = m.addShortfallOf(add, { groups: -1 }, { groups: -1 });
+  assert.ok(report.unmeasured.indexOf("group") >= 0);
+  assert.strictEqual(report.unmeasuredNamed, true);
+  assert.deepStrictEqual(report.shortfall, {});
+  assert.strictEqual(report.ok, false);
+});
+
+test("addShortfallOf: an unreadable collection count (-1) for a kind NOT named in `expected` still allows ok:true", function () {
+  const add = [];
+  for (let i = 0; i < 6; i++) add.push({ kind: "group" });
+  const report = m.addShortfallOf(add, { groups: 0, images: -1 }, { groups: 6, images: -1 });
+  assert.ok(report.unmeasured.indexOf("image") >= 0);
+  assert.strictEqual(report.unmeasuredNamed, false);
+  assert.deepStrictEqual(report.shortfall, {});
+  assert.strictEqual(report.ok, true);
+});
+
+// B2 fix: collectionCounts must actually produce -1 for a wholly-unreadable
+// collection, not silently fold it into 0 (indistinguishable from "genuinely
+// empty"). collectionNamed only returns null when BOTH access forms throw, so
+// the getter below must throw on both the call form and the property-read form.
+test("collectionCounts: a collection whose reads all throw is reported -1, not 0", function () {
+  const slide = {};
+  Object.defineProperty(slide, "groups", {
+    get: function () {
+      throw new Error("AE: element not readable");
+    },
+  });
+  const counts = m.collectionCounts(slide);
+  assert.strictEqual(counts.groups, -1);
+});
+
+test("collectionCounts: a genuinely empty collection reads 0, not -1", function () {
+  const slide = { groups: function () { return []; } };
+  const counts = m.collectionCounts(slide);
+  assert.strictEqual(counts.groups, 0);
+});
+
+test("countOrUnreadable: a null collection is -1", function () {
+  assert.strictEqual(m.countOrUnreadable(null), -1);
+});
+
+test("countOrUnreadable: a collection whose length read throws is -1", function () {
+  const col = {};
+  Object.defineProperty(col, "length", {
+    get: function () {
+      throw new Error("AE: not readable");
+    },
+  });
+  assert.strictEqual(m.countOrUnreadable(col), -1);
+});
+
+test("countOrUnreadable: a non-numeric length is -1", function () {
+  assert.strictEqual(m.countOrUnreadable({ length: "many" }), -1);
+});
+
+test("countOrUnreadable: a genuinely empty collection is 0", function () {
+  assert.strictEqual(m.countOrUnreadable([]), 0);
+});
+
+test("addShortfallOf: add specs whose kind has no Keynote collection are excluded from the expectation", function () {
+  const add = [{ kind: "item" }];
+  const report = m.addShortfallOf(add, {}, { shapes: 3 });
+  assert.deepStrictEqual(report.expected, {});
+  assert.strictEqual(report.ok, true);
+});
+
+test("addShortfallOf: an empty add list yields ok with an empty expectation", function () {
+  const report = m.addShortfallOf([], {}, {});
+  assert.deepStrictEqual(report.expected, {});
+  assert.strictEqual(report.ok, true);
+});
+
 // --- C1: match-then-delete-once, on the JXA-faithful fake -----------------------
 
 test("deleteRefs (geom): six ascending refs delete six objects, not every other one", function () {

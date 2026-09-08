@@ -883,6 +883,13 @@ def _stat_job_handlers() -> list[str]:
         "      end if",
         "    end repeat",
         "  end if",
+        "  if (allowFallback is 2) and ((count of _hits) > 0) then",
+        "    set sigFallbacks to sigFallbacks + 1",
+        '    set report to report & " sigTwin(s=" & slideNo & ",gi=" & gi & ")"',
+        "    set _w to item 1 of _hits",
+        "    set end of claimed to _w",
+        "    return _w",
+        "  end if",
         "  if (allowFallback is not 0) and ((count of _hits) = 1) then",
         "    set sigFallbacks to sigFallbacks + 1",
         '    set report to report & " sigFallback(s=" & slideNo & ",gi=" & gi & ")"',
@@ -1268,9 +1275,12 @@ def _build_stat_finalize_script(
     if font_skips:
         lines += [f"  set skipJobs to skipJobs + {font_skips}"]
     sig_counts: dict[tuple[int, str], int] = {}
+    sig_twin_counts: dict[tuple[int, str], int] = {}
     for job in font_jobs:
         key = (int(job["slide"]), str(job["childSig"]))
         sig_counts[key] = sig_counts.get(key, 0) + 1
+        if job.get("twin"):
+            sig_twin_counts[key] = sig_twin_counts.get(key, 0) + 1
     font_by_slide: dict[int, list[tuple[int, str, float, int, float]]] = {}
     for job in font_jobs:
         slide = int(job["slide"])
@@ -1280,7 +1290,15 @@ def _build_stat_finalize_script(
         # `else if s > 0` guard unreachable; a missing key still defaults to no scaling.
         s_raw = job.get("s")
         s = float(s_raw) if s_raw is not None else 1.0
-        allow_fallback = 0 if sig_counts[(slide, childsig)] > 1 else 1
+        key = (slide, childsig)
+        # allowFallback: 1 = unique sig, fall back to the one unclaimed hit. 0 = several
+        # jobs sharing a sig, none/some flagged `twin` -- refuse (today's behaviour). 2 =
+        # several jobs, ALL flagged `twin` (coincident build-only copies, plan-sparkle-hide.md)
+        # -- claim in order instead of refusing.
+        if sig_counts[key] > 1:
+            allow_fallback = 2 if sig_twin_counts.get(key, 0) == sig_counts[key] else 0
+        else:
+            allow_fallback = 1
         pt = float(job.get("captionPt") or 0.0)
         font_by_slide.setdefault(slide, []).append((gi, childsig, s, allow_fallback, pt))
     for slide in sorted(font_by_slide):
