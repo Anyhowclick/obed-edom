@@ -36,7 +36,6 @@ import { stampOsm } from "../maps/stampOsm";
 import { STYLE_SWATCHES } from "../maps/styles";
 import {
   CG_SHIFT_MAX,
-  DEFAULT_HIDDEN_LAYERS,
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
@@ -53,6 +52,7 @@ import {
   worldCopyWarning,
   nextPinId,
   nextSlideId,
+  slideHiddenLayers,
   suggestedHopKind,
   type MapsCamera,
   type MapsAudience,
@@ -231,7 +231,7 @@ export function MapsTab() {
   const slides = doc?.slides || [];
   const active = slides.find((s) => s.id === activeId) || slides[0] || null;
   const activeView = active ? slideForAudience(active, activeAudience) : null;
-  const activeHiddenLayers = activeView?.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS;
+  const activeHiddenLayers = slideHiddenLayers(activeView);
   const activeHillshade = activeView?.hillshade === true;
   const renderedView = previewView || activeView;
   const renderedAuthoredWidth = previewView
@@ -595,7 +595,7 @@ export function MapsTab() {
   function matchHopAppearance() {
     if (!nextView) return;
     updateActive({
-      hiddenLayers: [...(nextView.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)],
+      hiddenLayers: [...slideHiddenLayers(nextView)],
       hillshade: nextView.hillshade === true,
     });
   }
@@ -1139,7 +1139,7 @@ export function MapsTab() {
           camera: still.camera,
           styleId: still.style as MapsSlide["style"],
           highlights: still.highlights,
-          hiddenLayers: (still.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+          hiddenLayers: slideHiddenLayers(still),
           hillshade: (still.hillshade as boolean | undefined) === true,
           isCancelled: () => exportAbort.current,
         });
@@ -1157,7 +1157,7 @@ export function MapsTab() {
           camera: plate.camera,
           styleId: plate.style as MapsSlide["style"],
           highlights: plate.highlights,
-          hiddenLayers: (plate.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+          hiddenLayers: slideHiddenLayers(plate),
           hillshade: (plate.hillshade as boolean | undefined) === true,
           isCancelled: () => exportAbort.current,
         });
@@ -1176,7 +1176,7 @@ export function MapsTab() {
             camera: still.camera,
             styleId: still.style as MapsSlide["style"],
             highlights: still.highlights,
-            hiddenLayers: (still.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+            hiddenLayers: slideHiddenLayers(still),
             hillshade: (still.hillshade as boolean | undefined) === true,
             isCancelled: () => exportAbort.current,
           });
@@ -1194,7 +1194,7 @@ export function MapsTab() {
             camera: plate.camera,
             styleId: plate.style as MapsSlide["style"],
             highlights: plate.highlights,
-            hiddenLayers: (plate.hiddenLayers as MapsLayerFilterId[] | undefined) ?? DEFAULT_HIDDEN_LAYERS,
+            hiddenLayers: slideHiddenLayers(plate),
             hillshade: (plate.hillshade as boolean | undefined) === true,
             isCancelled: () => exportAbort.current,
           });
@@ -1250,7 +1250,7 @@ export function MapsTab() {
           to: to.camera,
           styleId: from.style,
           highlights: from.highlights,
-          hiddenLayers: from.hiddenLayers ?? local.hiddenLayers,
+          hiddenLayers: slideHiddenLayers(from),
           hillshade: from.hillshade === true,
           churches: from.churches,
           numberPins: true,
@@ -1321,7 +1321,7 @@ export function MapsTab() {
             to: to.camera,
             styleId: from.style,
             highlights: from.highlights,
-            hiddenLayers: from.hiddenLayers ?? local.hiddenLayers,
+            hiddenLayers: slideHiddenLayers(from),
             hillshade: from.hillshade === true,
             churches: from.churches,
             numberPins: true,
@@ -1794,7 +1794,7 @@ export function MapsTab() {
                 crop={doc?.crop || "center+cg"}
                 sidePanels={renderedSidePanels}
                 exportCg={doc?.exportCg !== false && !active.cg}
-                hiddenLayers={renderedView?.hiddenLayers ?? doc?.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS}
+                hiddenLayers={slideHiddenLayers(renderedView)}
                 hillshade={renderedView?.hillshade === true}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
                 authoredWidth={renderedAuthoredWidth}

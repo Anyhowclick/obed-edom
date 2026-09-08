@@ -6,7 +6,6 @@ import { stampOsm } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
 import {
-  DEFAULT_HIDDEN_LAYERS,
   type MapsCamera,
   type MapsChurch,
   type MapsLayerFilterId,
@@ -122,7 +121,7 @@ export type ExportMapOpts = {
   camera: MapsCamera;
   styleId: MapsStyleId;
   highlights: string[];
-  hiddenLayers?: MapsLayerFilterId[];
+  hiddenLayers: MapsLayerFilterId[];
   hillshade?: boolean;
   churches?: MapsChurch[];
   numberPins?: boolean;
@@ -136,7 +135,7 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     camera,
     styleId,
     highlights,
-    hiddenLayers = DEFAULT_HIDDEN_LAYERS,
+    hiddenLayers,
     hillshade = false,
     churches,
     numberPins = false,

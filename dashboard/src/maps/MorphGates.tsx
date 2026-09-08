@@ -1,7 +1,6 @@
 import { admin0Name } from "./overlays";
 import { STYLE_SWATCHES } from "./styles";
 import {
-  DEFAULT_HIDDEN_LAYERS,
   LAYER_FILTERS,
   MORPH_MAX_DBEARING,
   MORPH_MAX_DZOOM,
@@ -11,6 +10,7 @@ import {
   morphPlatePx,
   bearingDelta,
   captureWidth,
+  slideHiddenLayers,
   type MapsLayerFilterId,
   type MapsSlide,
 } from "./types";
@@ -40,8 +40,8 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
   const mismatch = new Set(appearanceMismatch(from, to));
   const fromHi = [...from.highlights].map((h) => h.toUpperCase()).sort();
   const toHi = [...to.highlights].map((h) => h.toUpperCase()).sort();
-  const fromLayers = [...(from.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
-  const toLayers = [...(to.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort();
+  const fromLayers = slideHiddenLayers(from).sort();
+  const toLayers = slideHiddenLayers(to).sort();
   const fromRelief = from.hillshade === true;
   const toRelief = to.hillshade === true;
   const pitch = Math.max(Math.abs(from.camera.pitch), Math.abs(to.camera.pitch));

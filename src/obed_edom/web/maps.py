@@ -26,6 +26,7 @@ from obed_edom.maps_geo import (
     geocode,
     geometry_bbox,
     infer_hop_kind,
+    inherit_hidden_layers,
     load_admin0,
     load_places,
     parse_maps_query,
@@ -193,6 +194,11 @@ class MapsDocument(BaseModel):
     exportDsk: bool = False
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _inherit_hidden_layers(cls, data: object) -> object:
+        return inherit_hidden_layers(data) if isinstance(data, dict) else data
 
     @field_validator("hiddenLayers", mode="before")
     @classmethod
@@ -397,7 +403,7 @@ def _row_slide(row: dict[str, str], slide_id: str, hidden_layers: list[str] | No
         "camera": camera,
         "highlights": [],
         "churches": [church],
-        "hiddenLayers": hidden_layers or list(DEFAULT_HIDDEN_LAYERS),
+        "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS) if hidden_layers is None else list(hidden_layers),
         "hillshade": False,
         "cgShiftX": 0,
         "cgShiftY": 0,
@@ -420,12 +426,13 @@ def _parse_csv(text: str) -> list[dict[str, str]]:
 
 
 def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
-    result = dict(job.result or {})
+    result = inherit_hidden_layers(dict(job.result or {}))
     if replace:
         _clear_derived_maps_output(result)
     slides = [] if replace else list(result.get("slides") or [])
     links = [] if replace else list(result.get("links") or [])
-    hidden_layers = result.get("hiddenLayers") or list(DEFAULT_HIDDEN_LAYERS)
+    stored_hidden_layers = result.get("hiddenLayers")
+    hidden_layers = list(DEFAULT_HIDDEN_LAYERS) if stored_hidden_layers is None else stored_hidden_layers
     for row in _parse_csv(csv_text):
         slide = _row_slide(row, _next_slide_id(slides), hidden_layers)
         if slides:
@@ -954,7 +961,7 @@ async def post_frame(
 def export_plan(job_id: str) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
-    result = job.result or {}
+    result = inherit_hidden_layers(dict(job.result or {}))
     slides = list(result.get("slides") or [])
     links = list(result.get("links") or [])
     plan = maps_export_plan(slides, links)

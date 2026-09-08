@@ -44,6 +44,31 @@ SEA_OVERVIEW_BBOX = {"west": 70.0, "south": -42.0, "east": 155.0, "north": 28.0}
 
 DEFAULT_HIDDEN_LAYERS: tuple[str, ...] = ("roadnames", "arrows")
 
+
+def slide_hidden_layers(slide: dict[str, Any]) -> list[str]:
+    hidden = slide.get("hiddenLayers")
+    return list(DEFAULT_HIDDEN_LAYERS) if hidden is None else list(hidden)
+
+
+def inherit_hidden_layers(doc: dict[str, Any]) -> dict[str, Any]:
+    """Deck hiddenLayers is the pre-per-slide default; resolve it onto slides once."""
+    slides = doc.get("slides")
+    if not isinstance(slides, list):
+        return doc
+    deck = doc.get("hiddenLayers")
+    if not isinstance(deck, list):
+        deck = list(DEFAULT_HIDDEN_LAYERS)
+    return {
+        **doc,
+        "slides": [
+            {**slide, "hiddenLayers": list(deck)}
+            if isinstance(slide, dict) and slide.get("hiddenLayers") is None
+            else slide
+            for slide in slides
+        ],
+    }
+
+
 _PLACE_ALIASES = {
     "kl": "kuala lumpur",
 }
@@ -196,10 +221,8 @@ def infer_hop_kind(from_slide: dict[str, Any], to_slide: dict[str, Any]) -> str:
     to_style = str(to_slide.get("style") or "")
     from_hi = sorted(str(h).upper() for h in (from_slide.get("highlights") or []))
     to_hi = sorted(str(h).upper() for h in (to_slide.get("highlights") or []))
-    from_hidden = from_slide.get("hiddenLayers")
-    to_hidden = to_slide.get("hiddenLayers")
-    from_layers = sorted(from_hidden if from_hidden is not None else list(DEFAULT_HIDDEN_LAYERS))
-    to_layers = sorted(to_hidden if to_hidden is not None else list(DEFAULT_HIDDEN_LAYERS))
+    from_layers = sorted(slide_hidden_layers(from_slide))
+    to_layers = sorted(slide_hidden_layers(to_slide))
     from_hillshade = bool(from_slide.get("hillshade"))
     to_hillshade = bool(to_slide.get("hillshade"))
     if from_style != to_style or from_hi != to_hi or from_layers != to_layers or from_hillshade != to_hillshade:
