@@ -51,12 +51,16 @@ z-order raises silently no-op without it), a Keynote-open-documents pre-flight
 (:func:`keynote_open_documents` -- ABORTS if anything is already open; a stray document
 left by a swallowed close is what made a real run inherit the previous run's B_flagged
 and blow memory on the two-tier read), pass-2 (stat-finalize) health on run A --
-aborting before B ever starts -- then a stolen-interaction check (:func:`card_border_refs`
-+ :func:`stolen_interaction_reasons`, D1): an arm whose card-border media-style ref
-count falls below ``CARD_REF_FLOOR`` of the SOURCE deck's is DAMAGED and hard-fails,
-naming the cause (a stolen GUI focus/clipboard interaction during pass 1's reuse paste)
-and the remedy (re-run on an untouched machine). A's check ABORTS before B ever starts
-(exit 6); B's check cannot abort B (already paid for) but folds into ``gate_ok`` so a
+aborting before B ever starts -- then a card-border damage check (:func:`card_border_refs`
++ :func:`card_border_damage_reasons`): an arm whose card-border media-style ref count falls
+below ``CARD_REF_FLOOR`` of the SOURCE deck's has LOST card images and hard-fails. The ref
+count is the OBSERVATION only and attributes no cause -- D1 read the 2026-09-07 shortfall as
+a stolen GUI interaction and D6 disproved that (a second run on an untouched machine
+reproduced the same 43 refs and character-identical stat-finalize integers; the real cause
+was the load-sensitive ``applyReuse`` paste no-op fixed in ``f76e8d3``), so the RED line
+names that mechanism as the known mechanism (D6) with where to check it, and points at
+diagnosis, never at a re-run first. A's check ABORTS before B ever starts (exit 6); B's
+check cannot abort B (already paid for) but folds into ``gate_ok`` so a
 damaged B can no longer report GREEN. Then A/B pass-2 parity and plan parity. Each fresh
 run (A and B) is followed by the SAME open-documents check, WARNing loudly and closing
 only that run's own deck if Keynote left it open (never anyone else's). Plan parity
@@ -372,28 +376,34 @@ def plan_parity(
     return reasons
 
 
-# An output card-border ref count below this fraction of the SOURCE's is the
-# stolen-interaction signature (D1): a healthy arm dedups back to the source count
-# (measured 83 == 83); the damaged arm measured 43/83 = 0.518. The floor sits roughly
-# midway, tolerating a legitimate reuse-chain deviation of up to a quarter of all card
-# images -- nothing in the reuse plan comes close (D1 §2: population byte-identical
-# outside the documented slide-125 void).
+# An output card-border ref count below this fraction of the SOURCE's is card-image LOSS:
+# a healthy arm dedups back to the source count (83 == 83 on arm B, and again on the
+# 2026-09-08 production run); the damaged 2026-09-07 arm A measured 43/83 = 0.518. The floor
+# sits roughly midway, tolerating a legitimate reuse-chain deviation of up to a quarter of
+# all card images -- nothing in the reuse plan comes close (D1 §2: population byte-identical
+# outside the slide-125 void D6 root-caused).
 CARD_REF_FLOOR = 0.75
 
 
-def stolen_interaction_reasons(
+def card_border_damage_reasons(
     label: str, out_refs: int | None, src_refs: int | None,
     child_resize: dict[str, Any] | None,
 ) -> list[str]:
     """RED reason(s) for one arm's card-border media style having lost refs against the
-    SOURCE deck -- the end-state signature of a stolen GUI focus/clipboard interaction
-    during pass 1's reuse paste (``remap_keynote.js:applyReuse``'s unverified
-    Cmd-A/Cmd-C/Cmd-V, which throws no exception on a no-op). Empty when not applicable
-    (``src_refs`` falsy -- the source deck has no single unambiguous card-border style,
-    same rule ``iwa_write.match_card_stroke_styles`` applies) or when ``out_refs`` is
-    within ``CARD_REF_FLOOR`` of ``src_refs``. Only a SHORTFALL hard-fails -- a surplus
-    (stranded donor copies) is a dedup shortfall, already covered by ``PASS2_ZERO_KEYS``
-    and by :func:`pass2_bar_line`'s honest parity line, not a second gate here.
+    SOURCE deck -- a MEASURED shortfall of card images, reported with no cause attached.
+    The known mechanism is D6's: ``remap_keynote.js:applyReuse``'s Cmd-A/Cmd-C/Cmd-V burst
+    silently no-ops under Keynote load and the following ``delete slide`` destroys the slide
+    holding the cards. ``f76e8d3`` made that delete conditional on a measured per-kind paste
+    delta and halts the run on a deficit, so a shortfall that still reaches this gate is
+    either a pre-``f76e8d3`` deck, the documented open hole (a stale paste whose per-kind
+    histogram DOMINATES the expectation -- equal counts cannot tell the right objects from
+    the wrong ones), or a different mechanism; the message says so rather than picking one.
+    Empty when not applicable (``src_refs`` falsy -- the source deck has no single
+    unambiguous card-border style, same rule ``iwa_write.match_card_stroke_styles`` applies)
+    or when ``out_refs`` is within ``CARD_REF_FLOOR`` of ``src_refs``. Only a SHORTFALL
+    hard-fails -- a surplus (stranded donor copies) is a dedup shortfall, already covered by
+    ``PASS2_ZERO_KEYS`` and by :func:`pass2_bar_line`'s honest parity line, not a second gate
+    here.
     """
     if not src_refs:
         return []
@@ -409,16 +419,22 @@ def stolen_interaction_reasons(
         return [
             f"{label}: the output deck no longer carries an unambiguous card-border "
             f"style (source has {src_refs}){corroboration} — this can be either a "
-            "shortfall (stolen-interaction damage) or a surplus of stranded donor "
-            "copies creating a second selectable style; the two look identical here. "
+            "shortfall (lost card images) or a surplus of stranded donor copies "
+            "creating a second selectable style; the two look identical here. "
             "REMEDY: inspect the deck's media styles; do not assume the machine is at fault."
         ]
     ratio = out_refs / src_refs
     return [
         f"{label}: card-border refs {out_refs} vs source {src_refs} (ratio {ratio:.3f}, "
-        f"floor {CARD_REF_FLOOR}){corroboration} — a stolen GUI focus/clipboard "
-        "interaction during pass 1's reuse paste is the known cause. REMEDY: re-run "
-        "this arm on an untouched machine; do NOT debug the code first."
+        f"floor {CARD_REF_FLOOR}){corroboration} — the arm is MISSING card images and is not "
+        "gradeable. This count is the observation; it does NOT establish a cause. Known "
+        "mechanism (D6): a pass-1 reuse paste silently no-ops and the slide holding the cards "
+        "is then deleted — f76e8d3 halts the run on that path, so a shortfall arriving here "
+        "means the deck predates f76e8d3, or a stale paste's per-kind histogram dominated the "
+        "expectation (the documented open hole: equal counts cannot tell the right objects "
+        "from the wrong ones), or the loss has another cause. DIAGNOSE before re-running: "
+        "search this run's log for 'FATAL reuse slide' and 'WARNING reuse slide', then census "
+        "cards per slide in this deck against the source."
     ]
 
 
@@ -443,13 +459,13 @@ def card_border_refs(deck: Path | str) -> int | None:
 def _card_border_refs_or_none(label: str, deck: Path | str) -> tuple[int | None, bool]:
     """``card_border_refs``, but a read failure WARNs and returns ``(None, False)``
     instead of propagating -- an exception here must never abort an otherwise-healthy
-    gate, nor silently masquerade as :func:`stolen_interaction_reasons`'s "lost its
+    gate, nor silently masquerade as :func:`card_border_damage_reasons`'s "lost its
     unambiguous style" case. ``ok`` False means the caller must skip the check."""
     try:
         return card_border_refs(deck), True
     except Exception as exc:  # noqa: BLE001 — optional iwa extra; never abort on a read failure
         _log(f"WARN: {label}: could not read card-border refs ({type(exc).__name__}: {exc}); "
-             "skipping the stolen-interaction check.")
+             "skipping the card-border damage check.")
         return None, False
 
 
@@ -459,7 +475,7 @@ def damage_check_line(
 ) -> str:
     """The ``<label> damage check: ...`` status line, mirroring :func:`pass2_health`'s
     positive line -- without it ``gate.log`` jumps straight from pass-2 health to the
-    compare with no way to tell whether the stolen-interaction check ran and passed, was
+    compare with no way to tell whether the card-border damage check ran and passed, was
     SKIPPED (a read failure, already WARNed by :func:`_card_border_refs_or_none`), or was
     NOT APPLICABLE (the source has no unambiguous card-border style). "" when ``damage``
     is non-empty -- the RED line(s) already say it."""
@@ -1279,7 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
     src_refs, src_ok = _card_border_refs_or_none("source", args.source)
     out_refs_a, a_refs_ok = _card_border_refs_or_none("A", a_deck)
     damage_a = (
-        stolen_interaction_reasons("A", out_refs_a, src_refs, child_resize_a)
+        card_border_damage_reasons("A", out_refs_a, src_refs, child_resize_a)
         if src_ok and a_refs_ok else []
     )
     line_a = damage_check_line("A", src_ok=src_ok, refs_ok=a_refs_ok, src_refs=src_refs,
@@ -1289,7 +1305,8 @@ def main(argv: list[str] | None = None) -> int:
     for r in damage_a:
         _log(f"RED: {r}")
     if damage_a:
-        _log("ABORT: run A is DAMAGED — see RED lines above. B never ran.")
+        _log("ABORT: run A is DAMAGED — see RED lines above. B never ran; diagnose the loss "
+             "before paying for another run.")
         return 6
 
     # `compared_slides` depends only on A's plan (transforms/reuses) — compute it once,
@@ -1372,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out_refs_b, b_refs_ok = _card_border_refs_or_none("B", b_deck)
     damage_b = (
-        stolen_interaction_reasons("B", out_refs_b, src_refs, child_resize_b)
+        card_border_damage_reasons("B", out_refs_b, src_refs, child_resize_b)
         if src_ok and b_refs_ok else []
     )
     line_b = damage_check_line("B", src_ok=src_ok, refs_ok=b_refs_ok, src_refs=src_refs,
