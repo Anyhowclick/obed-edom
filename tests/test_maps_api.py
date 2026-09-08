@@ -1,14 +1,17 @@
 import json
 import shutil
+import subprocess
 import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from PIL import Image
 import pytest
 
 from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM
+from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
 
 client = TestClient(app)
@@ -286,6 +289,113 @@ def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
     assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows"]
     assert result["slides"][1]["hiddenLayers"] == ["pois"]
     assert result["links"][0]["kind"] == "cut"
+
+
+def test_deck_hidden_layers_inherited_onto_unset_slides():
+    job = _seed()
+    doc = _doc(job)
+    doc["hiddenLayers"] = ["pois", "shields"]
+    slide = dict(doc["slides"][0])
+    slide.pop("hiddenLayers", None)
+    doc["slides"] = [slide]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["slides"][0]["hiddenLayers"] == ["pois", "shields"]
+
+
+def test_export_plan_still_matches_deck_hidden_layers():
+    job = _seed()
+    doc = _doc(job)
+    doc["hiddenLayers"] = ["pois", "shields"]
+    slide = dict(doc["slides"][0])
+    slide.pop("hiddenLayers", None)
+    doc["slides"] = [slide]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    # /state normalises hiddenLayers onto slides on the way in, which leaves
+    # nothing for /export-plan to inherit. Force the stored slide back to
+    # un-normalised, modelling a legacy session restored from disk verbatim.
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.result["slides"][0]["hiddenLayers"] = None
+    plan = client.get(f"/api/maps/{job['id']}/export-plan")
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["stills"][0]["hiddenLayers"] == ["pois", "shields"]
+
+
+def test_export_maps_job_inherits_deck_hidden_layers_for_legacy_document(monkeypatch):
+    job = _seed()
+    doc = _doc(job)
+    doc["hiddenLayers"] = ["pois", "shields"]
+    slide = dict(doc["slides"][0])
+    slide.pop("hiddenLayers", None)
+    doc["slides"] = [slide]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    # Legacy shape: JobRunner._load_sessions restores job.result verbatim, so a
+    # session saved before per-slide hiddenLayers existed comes back with None.
+    stored.result["slides"][0]["hiddenLayers"] = None
+
+    route_plan = client.get(f"/api/maps/{job['id']}/export-plan")
+    assert route_plan.status_code == 200, route_plan.text
+
+    output_dir = Path(stored.result["outputDir"])
+    (output_dir / "stills").mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (16, 16), (20, 30, 40)).save(output_dir / "stills" / "s1.png", "PNG")
+
+    real_export_plan = maps_export_plan
+    captured_slides: list[list[dict]] = []
+
+    def spy(slides, links, **kwargs):
+        captured_slides.append([dict(s) for s in slides])
+        return real_export_plan(slides, links, **kwargs)
+
+    monkeypatch.setattr("obed_edom.maps_keynote.maps_export_plan", spy)
+    monkeypatch.setattr(
+        "obed_edom.maps_keynote.run_osascript",
+        lambda script, **_k: subprocess.CompletedProcess(["osascript"], 0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+
+    result = export_maps_job(stored, export_lw=True, export_cg=False)
+
+    assert result.get("destPath", "").endswith(".key")
+    assert captured_slides, "export_maps_job did not call maps_export_plan"
+    assert captured_slides[0][0]["hiddenLayers"] == ["pois", "shields"]
+    assert captured_slides[0][0]["hiddenLayers"] == route_plan.json()["stills"][0]["hiddenLayers"]
+
+
+def test_explicit_empty_slide_layers_survive_a_deck_value():
+    job = _seed()
+    doc = _doc(job)
+    doc["hiddenLayers"] = ["pois"]
+    slide = dict(doc["slides"][0])
+    slide["hiddenLayers"] = []
+    doc["slides"] = [slide]
+    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["slides"][0]["hiddenLayers"] == []
+
+
+def test_bootstrap_csv_preserves_empty_deck_layers(monkeypatch):
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.result["hiddenLayers"] = []
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name\nSingapore\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert new_slide["hiddenLayers"] == []
 
 
 def test_slide_hillshade_roundtrip_and_demotes_morph():

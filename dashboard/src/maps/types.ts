@@ -131,6 +131,10 @@ export function parseHiddenLayers(raw: unknown): MapsLayerFilterId[] {
   return raw.filter((item): item is MapsLayerFilterId => typeof item === "string" && LAYER_FILTER_IDS.has(item as MapsLayerFilterId));
 }
 
+export function slideHiddenLayers(source: { hiddenLayers?: unknown } | null | undefined): MapsLayerFilterId[] {
+  return parseHiddenLayers(source?.hiddenLayers);
+}
+
 export const HOP_LABELS: Record<MapsHopKind, string> = {
   morph: "Magic Move",
   movie: "Movie",
@@ -198,7 +202,7 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
   if (from.style !== to.style) out.push("style");
   const hi = (s: MapsSlide) => [...s.highlights].map((h) => h.toUpperCase()).sort().join(",");
   if (hi(from) !== hi(to)) out.push("highlights");
-  const layers = (s: MapsSlide) => [...(s.hiddenLayers ?? DEFAULT_HIDDEN_LAYERS)].sort().join(",");
+  const layers = (s: MapsSlide) => slideHiddenLayers(s).sort().join(",");
   if (layers(from) !== layers(to)) out.push("hiddenLayers");
   if ((from.hillshade === true) !== (to.hillshade === true)) out.push("hillshade");
   return out;

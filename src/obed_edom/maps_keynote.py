@@ -21,15 +21,16 @@ from obed_edom import keynote_app
 from obed_edom.maps_geo import (
     CENTRE_ORIGIN_X,
     CENTRE_WIDTH,
-    DEFAULT_HIDDEN_LAYERS,
     WALL_HEIGHT,
     WALL_WIDTH,
     camera_dict,
     clamp_cg_shift,
     clamp_lon,
     infer_hop_kind,
+    inherit_hidden_layers,
     inverse_mercator_y,
     mercator_y,
+    slide_hidden_layers,
     world_width,
 )
 from obed_edom.maps_movie import movie_path
@@ -452,14 +453,13 @@ def maps_export_plan(
         if not sid or sid in covered:
             continue
         cap_w, cap_h = slide_capture_size(slide)
-        hidden_layers = slide.get("hiddenLayers")
         stills.append(
             {
                 "slideId": sid,
                 "style": slide.get("style") or "positron",
                 "camera": slide.get("camera") or {},
                 "highlights": list(slide.get("highlights") or []),
-                "hiddenLayers": list(hidden_layers if hidden_layers is not None else DEFAULT_HIDDEN_LAYERS),
+                "hiddenLayers": slide_hidden_layers(slide),
                 "hillshade": bool(slide.get("hillshade")),
                 "width": cap_w,
                 "height": cap_h,
@@ -473,7 +473,6 @@ def maps_export_plan(
             for link in links:
                 if link.get("plateId") == plate_id:
                     link["plateId"] = output_id
-        first_hidden_layers = (first or {}).get("hiddenLayers")
         plate_list.append(
             {
                 "plateId": output_id,
@@ -482,7 +481,7 @@ def maps_export_plan(
                 "camera": geom["captureCamera"],
                 "style": (first or {}).get("style") or "positron",
                 "highlights": list((first or {}).get("highlights") or []),
-                "hiddenLayers": list(first_hidden_layers if first_hidden_layers is not None else DEFAULT_HIDDEN_LAYERS),
+                "hiddenLayers": slide_hidden_layers(first or {}),
                 "hillshade": bool((first or {}).get("hillshade")),
             }
         )
@@ -1300,7 +1299,7 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         raise ValueError("At least one export target must be on")
     is_cancelled = getattr(job, "cancelled", lambda: False)
     _raise_if_cancelled(is_cancelled)
-    result = dict(getattr(job, "result", None) or {})
+    result = inherit_hidden_layers(dict(getattr(job, "result", None) or {}))
     output_dir = Path(str(result.get("outputDir") or find_repo_root() / "output" / ".maps" / str(getattr(job, "id", "maps"))))
     preview_dir = Path(str(result.get("previewDir") or (output_dir / "previews")))
     output_dir.mkdir(parents=True, exist_ok=True)

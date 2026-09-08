@@ -282,7 +282,7 @@ export async function captureFlyFrames(opts: {
   to: MapsCamera;
   styleId: MapsStyleId;
   highlights: string[];
-  hiddenLayers?: MapsLayerFilterId[];
+  hiddenLayers: MapsLayerFilterId[];
   hillshade?: boolean;
   churches?: MapsChurch[];
   numberPins?: boolean;

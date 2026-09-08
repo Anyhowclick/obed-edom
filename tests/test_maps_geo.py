@@ -1,6 +1,7 @@
 from obed_edom.maps_geo import (
     CG_MIN_ZOOM,
     CG_WIDTH,
+    DEFAULT_HIDDEN_LAYERS,
     MAX_LAT,
     SEA_OVERVIEW_BBOX,
     WALL_HEIGHT,
@@ -13,10 +14,12 @@ from obed_edom.maps_geo import (
     geocode,
     geometry_bbox,
     infer_hop_kind,
+    inherit_hidden_layers,
     mercator_y,
     parse_maps_query,
     sea_overview_camera,
     search_places,
+    slide_hidden_layers,
     toggle_adm0,
     world_width,
 )
@@ -136,6 +139,36 @@ def test_infer_hop_kind_allows_matching_rotation_and_zoom_delta_two():
     assert infer_hop_kind(a, b) == "movie"
     b["camera"] = {**b["camera"], "bearing": 22, "zoom": 6.1}
     assert infer_hop_kind(a, b) == "movie"
+
+
+def test_slide_hidden_layers():
+    assert slide_hidden_layers({"hiddenLayers": None}) == list(DEFAULT_HIDDEN_LAYERS)
+    assert slide_hidden_layers({}) == list(DEFAULT_HIDDEN_LAYERS)
+    assert slide_hidden_layers({"hiddenLayers": []}) == []
+    source = ["pois", "shields"]
+    slide = {"hiddenLayers": source}
+    result = slide_hidden_layers(slide)
+    assert result == source
+    assert result is not source
+
+
+def test_inherit_hidden_layers():
+    no_deck = {"slides": [{"id": "s1", "hiddenLayers": None}]}
+    assert inherit_hidden_layers(no_deck)["slides"][0]["hiddenLayers"] == list(DEFAULT_HIDDEN_LAYERS)
+
+    empty_deck = {"hiddenLayers": [], "slides": [{"id": "s1", "hiddenLayers": None}]}
+    assert inherit_hidden_layers(empty_deck)["slides"][0]["hiddenLayers"] == []
+
+    explicit_slide = {"hiddenLayers": ["pois"], "slides": [{"id": "s1", "hiddenLayers": ["shields"]}]}
+    assert inherit_hidden_layers(explicit_slide)["slides"][0]["hiddenLayers"] == ["shields"]
+
+    no_slides = {"hiddenLayers": ["pois"]}
+    assert inherit_hidden_layers(no_slides) == no_slides
+
+    original = {"hiddenLayers": ["pois"], "slides": [{"id": "s1", "hiddenLayers": None}]}
+    snapshot = {"hiddenLayers": ["pois"], "slides": [{"id": "s1", "hiddenLayers": None}]}
+    inherit_hidden_layers(original)
+    assert original == snapshot
 
 
 def test_kl_and_singapore_skip_nominatim(monkeypatch):
