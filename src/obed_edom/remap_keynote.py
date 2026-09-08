@@ -1375,10 +1375,14 @@ def remap_keynote(
         badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
         badge_moved = child_resize_result.get("badgeMoved") or 0
         badge_front_dead = child_resize_result.get("badgeFrontDead") or 0
+        raise_moved = child_resize_result.get("raiseMoved") or 0
+        raise_dead = child_resize_result.get("raiseDead") or 0
+        raise_unknown = child_resize_result.get("raiseUnknown") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
                 f"the template, {front} object(s) brought to front"
+                f", {raise_moved} stat raise(s) landed"
                 + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
@@ -1412,6 +1416,13 @@ def remap_keynote(
                     "was raised in full or not at all is NOT guaranteed, but later slides keep "
                     "their source stacking. Grant Accessibility to the launching process and "
                     "re-run if a badge is buried."
+                )
+            if raise_dead or raise_unknown:
+                say(
+                    f"WARNING stat-finalize: {raise_dead} stat group(s) did not move on "
+                    f"Bring to Front ({raise_unknown} abandoned mid-slide) — those groups "
+                    "stay buried; the remaining raises on the affected slide(s) were "
+                    "skipped rather than guessed."
                 )
             if badge_raises:
                 detail = child_resize_result.get("detail") or ""

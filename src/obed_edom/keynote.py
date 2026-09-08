@@ -797,6 +797,9 @@ _STAT_ACCUMULATORS = (
     "badgeUnresolved",
     "badgeMoved",
     "badgeFrontDead",
+    "raiseMoved",
+    "raiseDead",
+    "raiseUnknown",
 )
 
 # Position always matches; w/h only match where the live frame isn't Keynote's own
@@ -814,7 +817,9 @@ def _as_fixed(value: float) -> str:
 
 
 def _stat_job_handlers() -> list[str]:
-    """Index verified by content; descending raise relies on Bring-to-Front append semantics."""
+    """Index verified by content; ascending raise, decrement gated on a verified landing.
+    Depends on obedBadgeFind/obedKindCount/obedTopReal, defined later in this list --
+    fine at runtime since AppleScript hoists handlers."""
     lines = [
         "on obedSlideSigs(slideNo)",
         "  global theDoc",
@@ -927,27 +932,68 @@ def _stat_job_handlers() -> list[str]:
         "    end try",
         "  end tell",
         "end obedStatJob",
+        # Ascending raise order (Bring to Front appends, so final stacking equals raise
+        # sequence). Addressing is by decrement arithmetic gated on a verified landing --
+        # duplicate signatures on this deck rule out re-resolving each target instead.
+        # A slide is abandoned (unknown branch) rather than guessed once the arithmetic's
+        # input (the liveness probe) stops confirming what happened.
         "on obedRaiseSlide(slideNo)",
-        "  global theDoc, raiseTargets",
+        "  global theDoc, raiseTargets, raiseMoved, raiseDead, raiseUnknown, report",
         "  set _rem to {}",
         "  repeat with _e in raiseTargets",
         "    set _r to contents of _e",
         "    if (sl of _r) is slideNo then set end of _rem to (idx of _r)",
         "  end repeat",
+        "  if (count of _rem) is 0 then return",
+        "  set _top to my obedTopReal(slideNo, \"group\", my obedKindCount(slideNo, \"group\"))",
         "  repeat while (count of _rem) > 0",
-        "    set _mx to item 1 of _rem",
+        "    set _mn to item 1 of _rem",
         "    repeat with _k from 2 to count of _rem",
-        "      if (item _k of _rem) > _mx then set _mx to item _k of _rem",
+        "      if (item _k of _rem) < _mn then set _mn to item _k of _rem",
         "    end repeat",
-        "    " + _keynote_tell(),
-        "      set selection of theDoc to {group _mx of slide slideNo of theDoc}",
-        "    end tell",
+        "    set _f to my obedGroupFrame(slideNo, _mn)",
+        "    set _found to false",
+        "    if _f is not missing value then",
+        "      " + _keynote_tell(),
+        "        try",
+        "          set selection of theDoc to {group _mn of slide slideNo of theDoc}",
+        "          set _found to true",
+        "        end try",
+        "      end tell",
+        "    end if",
+        "    if not _found then",
+        "      if raiseUnknown is 0 then",
+        '        set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
+        "      end if",
+        "      set raiseUnknown to raiseUnknown + (count of _rem)",
+        "      return",
+        "    end if",
         "    my obedFront()",
-        "    set _new to {}",
-        "    repeat with _k from 1 to count of _rem",
-        "      if (item _k of _rem) is not _mx then set end of _new to item _k of _rem",
-        "    end repeat",
-        "    set _rem to _new",
+        "    set _at to my obedBadgeFind(slideNo, \"group\", _top, fx of _f, fy of _f, fw of _f, fh of _f, true, true, false)",
+        "    if _at is _top then",
+        "      set raiseMoved to raiseMoved + 1",
+        "      set _new to {}",
+        "      repeat with _k from 1 to count of _rem",
+        "        if (item _k of _rem) is not _mn then set end of _new to (item _k of _rem) - 1",
+        "      end repeat",
+        "      set _rem to _new",
+        "    else if _at is _mn then",
+        "      if raiseDead is 0 then",
+        '        set report to report & " raiseDead(s=" & slideNo & ",idx=" & _mn & ")"',
+        "      end if",
+        "      set raiseDead to raiseDead + 1",
+        "      set _new to {}",
+        "      repeat with _k from 1 to count of _rem",
+        "        if (item _k of _rem) is not _mn then set end of _new to (item _k of _rem)",
+        "      end repeat",
+        "      set _rem to _new",
+        "    else",
+        "      if raiseUnknown is 0 then",
+        '        set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
+        "      end if",
+        "      set raiseUnknown to raiseUnknown + (count of _rem)",
+        "      return",
+        "    end if",
         "  end repeat",
         "end obedRaiseSlide",
         "on obedWithinTol(a, b, tol)",
@@ -1095,6 +1141,19 @@ def _stat_job_handlers() -> list[str]:
         "  end repeat",
         "  return _top",
         "end obedTopReal",
+        "on obedGroupFrame(slideNo, idx)",
+        "  global theDoc",
+        "  set _f to missing value",
+        "  " + _keynote_tell(),
+        "    try",
+        "      tell slide slideNo of theDoc",
+        "        set _p to position of group idx",
+        "        set _f to {fx:(item 1 of _p), fy:(item 2 of _p), fw:(width of group idx), fh:(height of group idx)}",
+        "      end tell",
+        "    end try",
+        "  end tell",
+        "  return _f",
+        "end obedGroupFrame",
         "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
         "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, report",
         "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, badgeFrontDead is 0)",
@@ -1256,6 +1315,9 @@ def _build_stat_finalize_script(
         f"  set badgeUnresolved to {badge_missing_frame}",
         "  set badgeMoved to 0",
         "  set badgeFrontDead to 0",
+        "  set raiseMoved to 0",
+        "  set raiseDead to 0",
+        "  set raiseUnknown to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1312,7 +1374,9 @@ def _build_stat_finalize_script(
                 f"  my obedStatJob({slide}, _sigs, {gi}, {sig_lit}, {float(s)}, {allow_fallback}, {pt})"
             ]
     lines += ["  save theDoc"]
-    # Z-order: raise recorded targets per slide, highest index first (Bring to Front appends).
+    # Z-order: raise recorded targets per slide, lowest index first (Bring to Front appends,
+    # so ascending raise order reproduces source stacking); each raise is verified before its
+    # index arithmetic is applied to the rest.
     lines += ['  set frontRaised to 0', '  set frontErr to ""']
     for slide in sorted(font_by_slide):
         lines += [f"  my obedRaiseSlide({slide})"]
@@ -1358,7 +1422,8 @@ def _build_stat_finalize_script(
         '& frontErr & " exported=" & exported & " sigFallback=" & sigFallbacks '
         '& " unresolved=" & unresolved & " badgeFallback=" & badgeFallbacks '
         '& " badgeUnresolved=" & badgeUnresolved & " badgeMoved=" & badgeMoved '
-        '& " badgeFrontDead=" & badgeFrontDead & " detail=" & report',
+        '& " badgeFrontDead=" & badgeFrontDead & " raiseMoved=" & raiseMoved '
+        '& " raiseDead=" & raiseDead & " raiseUnknown=" & raiseUnknown & " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1435,6 +1500,9 @@ def _run_stat_finalize(
         "badgeUnresolved": _num("badgeUnresolved"),
         "badgeMoved": _num("badgeMoved"),
         "badgeFrontDead": _num("badgeFrontDead"),
+        "raiseMoved": _num("raiseMoved"),
+        "raiseDead": _num("raiseDead"),
+        "raiseUnknown": _num("raiseUnknown"),
         "detail": raw.split("detail=", 1)[1].strip() if "detail=" in raw else "",
         "exported": exported,
         "previewFiles": preview_files,
