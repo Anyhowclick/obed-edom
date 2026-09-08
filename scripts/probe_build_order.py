@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Premise probe for ``w1-build-order-nondeterminism`` (D7): does Keynote's own
+"""SUPERSEDED by D8 (``output/handover-2026-09-08/build-order/D8-build-chunks.md``):
+``buildChunks``, not ``builds``, is Keynote's render timeline. This script's
+default census reports the D7 metric (the ``builds`` array's key sequence), which
+D8 showed is not what renders; ``WITNESS_SLIDE`` 36's ``AFTER_ORDER`` constant is
+the PRE-FIX expectation (what a builds-index-ordered patch produces), not the
+correct one. Left as historical/diagnostic tooling, not retargeted.
+
+Premise probe for ``w1-build-order-nondeterminism`` (D7): does Keynote's own
 RENDERING actually follow a patched ``KN.SlideArchive.builds`` array on a
 NON-reuse slide? All 19 positive controls in D7 are reuse targets — this has
 never been checked on a slide the writer never touches.

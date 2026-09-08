@@ -389,8 +389,10 @@ def attach_group_child_text(
 
 def attach_slide_builds(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
     """Attach slide['builds'] = [{"effect","animationType","kind","kindIndex"}, ...],
-    source order. Read-only, mirrors attach_group_child_text's shape. Delegates the
-    IWA extraction to iwa_builds.deck_builds (single source of truth), converting its
+    in deck_builds' record order (the slide's own ``builds`` array order, NOT reveal
+    order -- every consumer treats this as a set/multiset). Read-only, mirrors
+    attach_group_child_text's shape. Delegates the IWA extraction to
+    iwa_builds.deck_builds (single source of truth), converting its
     1-based slide number keying to this payload's 0-based slide index."""
     from obed_edom.iwa_builds import deck_builds  # noqa: PLC0415
 

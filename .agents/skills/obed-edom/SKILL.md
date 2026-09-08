@@ -459,7 +459,9 @@ Load-bearing rules:
   geometry and every other slide byte-identical (probed live 2026-09-05); orphaned
   `Build`/`BuildChunk` archives may be left behind unreferenced and are harmless. The
   patcher self-checks by archive id and header before writing and refuses rather than
-  guess.
+  guess. `buildChunks` is the render timeline and `builds` an unordered owning set
+  Keynote permutes on save, so never read `builds` order as reveal order (measured:
+  chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
 
 ---
 

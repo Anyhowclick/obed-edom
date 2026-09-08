@@ -473,6 +473,40 @@ def _build_multi_chunk_deck(path):
     return path
 
 
+def _build_disagreeing_order_deck(path):
+    """One slide, two builds A(900)/B(901) each targeting a distinct text box: the
+    slide's own ``builds`` field lists [A, B] but its own ``buildChunks`` lists
+    [chunkB(911), chunkA(910)] -- the D8 disagreement, minimal. chunkB is the
+    referent chain head; chunkA is not. Called identically for both source and
+    dest (same ids), so the render order (buildChunks) is the only signal that
+    can distinguish a correct patch from the pre-D8 defect of copying the source's
+    raw builds-array order."""
+    text220 = _arch(220, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 221}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)})
+    storage221 = _arch(221, "TSWP.StorageArchive", {"text": ["Hello"]})
+    text320 = _arch(320, "TSWP.ShapeInfoArchive", {"isTextBox": True, "ownedStorage": {"identifier": 321}, "super": _shape_super(700, 374, 200, 60, nw=200, nh=60)})
+    storage321 = _arch(321, "TSWP.StorageArchive", {"text": ["World"]})
+    build900 = _arch(900, "KN.BuildArchive", {"drawable": {"identifier": 220}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:dissolve"), "chunkIdSeed": 1})
+    build901 = _arch(901, "KN.BuildArchive", {"drawable": {"identifier": 320}, "delivery": "All at Once", "duration": 0.0, "attributes": _build_effect("apple:wipe-iris"), "chunkIdSeed": 1})
+    chunk_a = _arch(910, "KN.BuildChunkArchive", {"build": {"identifier": 900}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": False, "buildChunkIdentifier": {"buildId": {"lower": "1", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "1", "upper": "1"}})
+    chunk_b = _arch(911, "KN.BuildChunkArchive", {"build": {"identifier": 901}, "delay": 0.0, "duration": 0.5, "automatic": True, "referent": True, "buildChunkIdentifier": {"buildId": {"lower": "2", "upper": "1"}, "buildChunkId": 1}, "buildId": {"lower": "2", "upper": "1"}})
+    slide100 = _arch(100, "KN.SlideArchive", {
+        "drawablesZOrder": [{"identifier": 220}, {"identifier": 320}],
+        "builds": [{"identifier": 900}, {"identifier": 901}],
+        "buildChunks": [{"identifier": 911}, {"identifier": 910}],
+    })
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr(
+            "Index/Slide-100.iwa",
+            _member([slide100, text220, storage221, text320, storage321, build900, build901, chunk_a, chunk_b]),
+        )
+    path.write_bytes(buf.getvalue())
+    return path
+
+
 def _build_orphan_chunk_deck(path):
     """One slide, one build with TWO chunk archives referencing it, but the slide's
     OWN buildChunks names only one -- the other is an orphan that must be DROPPED,
@@ -1842,8 +1876,8 @@ def test_patch_slide_builds_refuses_a_transition_holding_a_reference(tmp_path):
 def test_patch_slide_builds_reorders_kept_builds_into_source_order(tmp_path):
     deck = _build_builds_deck(tmp_path / "builds.key")
     # An arbitrary (non-output, non-sorted) order: the write must preserve exactly
-    # what it is given -- ordering the survivors by source index is plan_build_patch's
-    # job (tested directly, no deck needed, in test_iwa_builds.py).
+    # what it is given -- ordering the survivors by source chunk order is
+    # plan_build_patch's job (tested directly, no deck needed, in test_iwa_builds.py).
     result = patch_slide_builds(
         deck,
         {"100": {"builds": ["902", "900", "901"], "buildChunks": ["912", "910", "911"], "transition": None}},
@@ -1995,6 +2029,20 @@ def test_deck_builds_drops_a_chunk_not_listed_in_the_slides_own_buildchunks(tmp_
     assert by_number[1]["builds"][0]["chunkIds"] == ["950"]
 
 
+def test_deck_builds_exposes_each_builds_chunk_positions_and_referents(tmp_path):
+    """D8: the slide's own buildChunks order (911 then 910) is the render
+    timeline, not the builds array's own order (900 then 901). Build A(900)
+    owns chunk 910, at position 1, non-referent; build B(901) owns chunk 911,
+    at position 0, the chain head."""
+    deck = _build_disagreeing_order_deck(tmp_path / "order.key")
+    by_number = deck_builds(deck)
+    by_id = {b["buildId"]: b for b in by_number[1]["builds"]}
+    assert by_id["900"]["chunkOrder"] == [1]
+    assert by_id["900"]["chunkReferent"] == [False]
+    assert by_id["901"]["chunkOrder"] == [0]
+    assert by_id["901"]["chunkReferent"] == [True]
+
+
 # --------------------------------------------------------------------------
 # restore_source_builds (remap_keynote.py): the production entry point.
 # --------------------------------------------------------------------------
@@ -2012,7 +2060,7 @@ def test_restore_source_builds_with_no_reuse_slides_is_a_noop_that_still_verifie
     messages = []
     result = restore_source_builds(dest, source, set(), messages.append)
     assert result == {
-        "skipped": False, "kept": 0, "dropped": 0, "retimed": 0, "report": [], "shortfalls": [],
+        "skipped": False, "kept": 0, "dropped": 0, "retimed": 0, "report": [], "shortfalls": [], "order": [],
     }
     objects, _id_to_file, _file_ids = _load_deck(dest)
     assert objects["100"]["builds"] == [{"identifier": "900"}, {"identifier": "901"}, {"identifier": "902"}]
@@ -2045,3 +2093,131 @@ def test_restore_source_builds_excludes_a_skipped_transition_from_the_raise(tmp_
     result = restore_source_builds(dest, source, {1}, messages.append)
     assert result["skipped"] is False
     assert any("WARNING builds: slide 1 transition not restored (source has none)" in m for m in messages)
+
+
+def test_restore_source_builds_writes_the_sources_chunk_order_not_its_builds_order(tmp_path):
+    """The end-to-end proof of D8's fix: source's own ``builds`` field is
+    [A(900), B(901)], but its ``buildChunks`` says B is the chain head. The
+    written output must follow buildChunks, not builds."""
+    dest = _build_disagreeing_order_deck(tmp_path / "dest.key")
+    source = _build_disagreeing_order_deck(tmp_path / "source.key")
+    messages = []
+    result = restore_source_builds(dest, source, {1}, messages.append)
+    assert result["skipped"] is False
+    objects, _id_to_file, _file_ids = _load_deck(dest)
+    assert objects["100"]["buildChunks"] == [{"identifier": "911"}, {"identifier": "910"}]
+    assert objects["100"]["builds"] == [{"identifier": "901"}, {"identifier": "900"}]
+    # NOT the source's own builds-array order [900, 901] -- writing that order
+    # verbatim was the shipped defect (plan_build_patch ordered by builds index
+    # instead of the source's own chunk position).
+    assert objects["100"]["builds"] != [{"identifier": "900"}, {"identifier": "901"}]
+    assert any("reveal order follows the source's buildChunks" in m for m in messages)
+
+
+def test_restore_source_builds_raises_when_a_patched_slides_order_comes_back_wrong(tmp_path, monkeypatch):
+    """Simulate the pre-D8 defect directly: plan_build_patch returns a plan
+    ordered by the source's builds-array index (900 then 901) instead of its
+    chunk order (901 then 900). The read-back order check in verify_builds must
+    catch this and raise -- the mutant-killing test for D3."""
+    dest = _build_disagreeing_order_deck(tmp_path / "dest.key")
+    source = _build_disagreeing_order_deck(tmp_path / "source.key")
+    out_by_number = iwa_builds.deck_builds(dest)
+    slide_id = out_by_number[1]["slideId"]
+
+    def fake_plan_build_patch(src_by_number, out_by_number_, slides):
+        return {
+            "plans": {
+                slide_id: {"builds": ["900", "901"], "buildChunks": ["910", "911"], "transition": None},
+            },
+            "report": [{"slide": 1, "kept": 2, "dropped": 0, "retimed": False}],
+        }
+
+    monkeypatch.setattr(iwa_builds, "plan_build_patch", fake_plan_build_patch)
+    messages = []
+    with pytest.raises(RuntimeError, match="wrong reveal order"):
+        restore_source_builds(dest, source, {1}, messages.append)
+
+
+def test_restore_source_builds_warns_but_does_not_raise_on_an_unpatched_slides_order(tmp_path, monkeypatch):
+    """Gate-integrity nit F2: verify_builds' ``"order"`` entries are compared
+    against ``slides`` (the reuse targets actually patched this run) -- an entry
+    on a slide OUTSIDE that set means the deck was already reordered before this
+    run touched it, so it is only ever WARNed, never raised. This is the central
+    design constraint the plan calls out: dropping the ``if o["slide"] in slides``
+    filter would turn the gate into exactly what it warns against -- aborting a
+    run over a deck that was already broken."""
+    dest = _build_disagreeing_order_deck(tmp_path / "dest.key")
+    source = _build_disagreeing_order_deck(tmp_path / "source.key")
+
+    def fake_verify_builds(src_by_number, out_by_number, slides=None):
+        return {
+            "surplus": [],
+            "missing": [],
+            "transitions": [],
+            "order": [
+                {
+                    "slide": 2,
+                    "at": 0,
+                    "source": ("apple:dissolve", "In", ("text", "A")),
+                    "output": ("apple:wipe-iris", "In", ("image", "B")),
+                }
+            ],
+        }
+
+    monkeypatch.setattr(iwa_builds, "verify_builds", fake_verify_builds)
+    messages = []
+    result = restore_source_builds(dest, source, {1}, messages.append)
+    assert result["skipped"] is False
+    assert any("WARNING builds: slide 2 reveal order differs from source at position 0." in m for m in messages)
+
+
+def test_restore_source_builds_warns_the_operator_of_a_headless_chain(tmp_path, monkeypatch):
+    """Gate-integrity nit F3: the plan's ``report[i]["chainHeadless"]`` cause is
+    never surfaced to the operator without this WARN loop -- the report key alone
+    is not enough. Fabricated report (``"survivors"``); the fabricated plan itself
+    is the deck's own genuinely correct order, so nothing here raises."""
+    dest = _build_disagreeing_order_deck(tmp_path / "dest.key")
+    source = _build_disagreeing_order_deck(tmp_path / "source.key")
+    out_by_number = iwa_builds.deck_builds(dest)
+    slide_id = out_by_number[1]["slideId"]
+    real_plan_build_patch = iwa_builds.plan_build_patch
+
+    def fake_plan_build_patch(src_by_number, out_by_number_, slides):
+        result = real_plan_build_patch(src_by_number, out_by_number_, slides)
+        result["report"][0]["chainHeadless"] = "survivors"
+        return result
+
+    monkeypatch.setattr(iwa_builds, "plan_build_patch", fake_plan_build_patch)
+    messages = []
+    result = restore_source_builds(dest, source, {1}, messages.append)
+    assert result["skipped"] is False
+    assert any(
+        "WARNING builds: slide 1 starts mid-chain (the source's first build is not on the output "
+        "slide, so nothing anchors the timing chain)." in m
+        for m in messages
+    )
+
+
+def test_restore_source_builds_warns_the_operator_of_an_ambiguous_pairing(tmp_path, monkeypatch):
+    """Gate-integrity nit F3: the plan's ``report[i]["ambiguousPairs"]`` count is
+    never surfaced to the operator without this WARN loop -- the report key alone
+    is not enough. Fabricated report; the fabricated plan itself is the deck's own
+    genuinely correct order, so nothing here raises."""
+    dest = _build_disagreeing_order_deck(tmp_path / "dest.key")
+    source = _build_disagreeing_order_deck(tmp_path / "source.key")
+    real_plan_build_patch = iwa_builds.plan_build_patch
+
+    def fake_plan_build_patch(src_by_number, out_by_number_, slides):
+        result = real_plan_build_patch(src_by_number, out_by_number_, slides)
+        result["report"][0]["ambiguousPairs"] = 2
+        return result
+
+    monkeypatch.setattr(iwa_builds, "plan_build_patch", fake_plan_build_patch)
+    messages = []
+    result = restore_source_builds(dest, source, {1}, messages.append)
+    assert result["skipped"] is False
+    assert any(
+        "WARNING builds: slide 1 has 2 build pair(s) the source cannot disambiguate; the pairing "
+        "within them is arbitrary." in m
+        for m in messages
+    )
