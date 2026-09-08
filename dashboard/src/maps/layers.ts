@@ -39,6 +39,7 @@ export function filterForLayer(layer: LayerBits): MapsLayerFilterId | null {
 export function applyLayerFilters(map: MapLibreMap, hidden: readonly MapsLayerFilterId[]): void {
   const hide = new Set(hidden);
   const style = map.getStyle();
+  if (!style) return;
   for (const layer of style.layers || []) {
     if (SKIP.has(layer.id) || layer.id.startsWith("churches-")) continue;
     const match = filterForLayer(bits(layer));

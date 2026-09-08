@@ -35,9 +35,11 @@ export async function loadAdmin0(): Promise<Admin0 | null> {
 /** Positron/Bright/Dark/Fiord ship the NE raster source but no layer; Liberty shows land at SEA zoom because it does. */
 export function ensureLowZoomRaster(map: MapLibreMap, styleId?: string): void {
   if (!map.getSource("ne2_shaded")) return;
-  if (map.getStyle().layers?.some((layer) => layer.type === "raster")) return;
+  const style = map.getStyle();
+  if (!style) return;
+  if (style.layers?.some((layer) => layer.type === "raster")) return;
   if (map.getLayer("ne2-shaded-fallback")) return;
-  const before = map.getStyle().layers?.find((layer) => layer.type !== "background")?.id;
+  const before = style.layers?.find((layer) => layer.type !== "background")?.id;
   const dark = styleId === "dark" || styleId === "fiord";
   map.addLayer(
     {
@@ -82,7 +84,8 @@ export function applyHighlights(map: MapLibreMap, highlights: string[]) {
 }
 
 function firstSymbolId(map: MapLibreMap): string | undefined {
-  return map.getStyle().layers?.find((layer) => layer.type === "symbol")?.id;
+  const style = map.getStyle();
+  return style?.layers?.find((layer) => layer.type === "symbol")?.id;
 }
 
 export async function ensureAdmin0Highlights(map: MapLibreMap, highlights: string[], styleId?: string): Promise<void> {
