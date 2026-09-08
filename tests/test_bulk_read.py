@@ -110,7 +110,7 @@ def test_successful_fallback_export_clears_stale_jxa_export_error(tmp_path, monk
         (Path(dest) / "slide-1.png").write_bytes(b"\x89PNG")
         return None
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
     monkeypatch.setattr(inspect_mod, "export_slide_images", fake_export)
 
     out = inspect_keynote(key, export_dir=export_dir, use_cache=False)
@@ -130,7 +130,7 @@ def test_failed_fallback_export_keeps_its_error(tmp_path, monkeypatch):
             stderr="",
         )
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
     monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *_args: "fallback failed")
 
     out = inspect_keynote(key, export_dir=tmp_path / "previews", use_cache=False)
