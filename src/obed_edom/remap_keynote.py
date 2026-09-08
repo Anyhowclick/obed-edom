@@ -1202,6 +1202,20 @@ def remap_keynote(
     missed = int(jxa.get("missed") or 0)
     if jxa.get("collections"):
         say(f"Keynote collections: {jxa.get('collections')}")
+    add_fail = jxa.get("addFailure")
+    if add_fail:
+        say(
+            f"FATAL reuse slide {add_fail.get('slide')}: the add-delta paste was not verified — "
+            f"expected {add_fail.get('expected')}, pasted {add_fail.get('pasted')}, "
+            f"shortfall {add_fail.get('shortfall')} after {add_fail.get('attempts')} attempt(s); "
+            f"gates={add_fail.get('gates')}; original slide after strip={add_fail.get('origAfterStrip')}."
+        )
+        raise RuntimeError(
+            f"Keynote reuse slide {add_fail.get('slide')} could not verify its pasted add-delta "
+            f"(expected {add_fail.get('expected')}, pasted {add_fail.get('pasted')}). The original "
+            "wall slide was left intact and the remapped copy was NOT saved — re-run. "
+            f"Detail: {add_fail}"
+        )
     if applied == 0:
         detail = ""
         if jxa.get("collections"):
@@ -1213,6 +1227,8 @@ def remap_keynote(
             f" Planned {len(transforms)} transform(s), missed {missed}.{detail}"
         )
     say(f"Applied {applied}, missed {missed}.")
+    for reason in jxa.get("missReasons") or []:
+        say(f"WARNING remap: {reason}")
     for entry in jxa.get("removeShortfalls") or []:
         slide_no = entry.get("slide")
         short = {
@@ -1228,6 +1244,15 @@ def remap_keynote(
             say(
                 f"WARNING reuse slide {slide_no}: only removed {detail} on the donor "
                 "copy — a stranded donor object survived (doubling) until it is deduped."
+            )
+    for entry in jxa.get("addReports") or []:
+        rep = entry.get("report") or {}
+        if int(rep.get("attempts") or 1) > 1 or rep.get("surplus") or rep.get("unmeasured") or rep.get("shortfall"):
+            say(
+                f"WARNING reuse slide {entry.get('slide')}: add-delta paste took "
+                f"{rep.get('attempts')} attempt(s); expected {rep.get('expected')}, "
+                f"pasted {rep.get('pasted')}, surplus {rep.get('surplus')}, "
+                f"unmeasured {rep.get('unmeasured')}."
             )
     if jxa.get("cloned"):
         say(f"Duplicated {jxa.get('cloned')} remapped slide(s) instead of re-placing the map and dots.")
@@ -1381,6 +1406,7 @@ def remap_keynote(
         "height": jxa.get("height"),
         "collections": jxa.get("collections"),
         "removeShortfalls": jxa.get("removeShortfalls") or [],
+        "addReports": jxa.get("addReports") or [],
         "slideRange": slides_for_plan(slide_range),
         "skippedSlides": jxa.get("skippedSlides"),
         "layouts": jxa.get("layouts"),
