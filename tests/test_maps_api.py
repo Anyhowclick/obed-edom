@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 import pytest
 
-from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM
+from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM, camera_dict
 from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
 
@@ -396,6 +396,28 @@ def test_bootstrap_csv_preserves_empty_deck_layers(monkeypatch):
     assert done["status"] == "done", done.get("error")
     new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
     assert new_slide["hiddenLayers"] == []
+
+
+def test_bootstrap_csv_infers_hop_kind_against_deck_resolved_legacy_slide(monkeypatch):
+    """Legacy stored deck: deck hiddenLayers != DEFAULT, slides[0].hiddenLayers is None (as
+    JobRunner._load_sessions would restore it verbatim). The new CSV slide is deck-resolved by
+    _row_slide; s1 must be resolved the same way before infer_hop_kind compares them."""
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    camera = camera_dict(1.3521, 103.8198, 8)
+    stored.result["hiddenLayers"] = ["pois"]
+    stored.result["slides"][0]["camera"] = camera
+    stored.result["slides"][0]["hiddenLayers"] = None
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nSingapore,1.3521,103.8198\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert done["result"]["links"][0]["kind"] == "morph"
 
 
 def test_slide_hillshade_roundtrip_and_demotes_morph():

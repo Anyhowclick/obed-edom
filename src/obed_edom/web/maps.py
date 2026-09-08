@@ -426,7 +426,7 @@ def _parse_csv(text: str) -> list[dict[str, str]]:
 
 
 def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
-    result = dict(job.result or {})
+    result = inherit_hidden_layers(dict(job.result or {}))
     if replace:
         _clear_derived_maps_output(result)
     slides = [] if replace else list(result.get("slides") or [])
