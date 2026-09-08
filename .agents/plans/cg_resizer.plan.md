@@ -59,7 +59,7 @@ todos:
     content: "TRANCHE 2 (R2b), after r-readback-two-tier's FULL-DECK field-parity A/B exists. The resize PROPOSE source read is still full JXA (_run_resize_propose → inspect_keynote in web/app.py, not acquire_wall_payload): a new deck's first propose pays the full legacy read although apply reads two-tier. Same consumer audit plus deck_slide_digests parity (pairings/framings key on digests of ALL slides), propose_framings/planner parity, and cache the two-tier propose payload under the digest so propose→apply→re-propose reuse it (cross-serve is then deliberate — verify once). The old 12.6→~3 min figure is a projection, not a measured result. Risk MEDIUM (fingerprint churn; worst case a one-time pairing re-align)."
     status: pending
   - id: w-zorder-patch
-    content: "TRANCHE 2 (W2). Offline drawablesZOrder+ownedDrawables reorder (patch BOTH identically) at the W1 hook, LAST per slide, replacing pass 2's GUI Bring-to-Front raises (obedRaiseSlide + the badge raise) and the resizer's Accessibility dependency. PROBE LIVE PASS 99771bf (2026-09-02): Keynote 15.3.1 honours a patched order on open, a re-save keeps it, the render changes; permute within the target ids' slots (a fresh deck carries 3 placeholder drawables). Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation: ~0.55s/raise × N GUI clicks + Accessibility + run-to-run group-index churn. 2026-09-04 evidence this is now COSTING content, not just speed: the gold-baseline A/B kit (w-offline-write-stabilise) ran the identical `remap` twice (main vs branch, same default path) and got two different renders purely from Keynote's own drawablesZOrder scrambling on save/open — banner text hidden on Gold slides 3/4/5/8/9 in one run, 'Global Missions' clipped to 'Glob' on slides 11-17 in the other. Same deck, same code, different z-order outcome each Keynote pass. Raises the priority of this item independent of the read-speed payoff. Must run after pass 2's font sizing (or recompute stat indices), and the read-back compares reordered kinds AS A SET. Gated on W1 stable. Risk MEDIUM. 2026-09-05, offline z-order reads of the banked gold decks: the pass-2 GUI raise arranged 0 of 227 reported objects on the `main` run (all 19 slides byte-identical to the source order) and 91 on the `branch-verify2` run, with identical 'front=' counters. frontRaised counts System-Events clicks, not arrangements. W2 also removes an unverifiable counter."
+    content: "TRANCHE 2 (W2). Offline drawablesZOrder+ownedDrawables reorder (patch BOTH identically) at the W1 hook, LAST per slide, replacing pass 2's GUI Bring-to-Front raises (obedRaiseSlide + the badge raise) and the resizer's Accessibility dependency. PROBE LIVE PASS 99771bf (2026-09-02): Keynote 15.3.1 honours a patched order on open, a re-save keeps it, the render changes; permute within the target ids' slots (a fresh deck carries 3 placeholder drawables). Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation: ~0.55s/raise × N GUI clicks + Accessibility + run-to-run group-index churn. 2026-09-04 evidence this is now COSTING content, not just speed: the gold-baseline A/B kit (w-offline-write-stabilise) ran the identical `remap` twice (main vs branch, same default path) and got two different renders purely from Keynote's own drawablesZOrder scrambling on save/open — banner text hidden on Gold slides 3/4/5/8/9 in one run, 'Global Missions' clipped to 'Glob' on slides 11-17 in the other. Same deck, same code, different z-order outcome each Keynote pass. Raises the priority of this item independent of the read-speed payoff. Must run after pass 2's font sizing (or recompute stat indices), and the read-back compares reordered kinds AS A SET. Gated on W1 stable. Risk MEDIUM. 2026-09-05, offline z-order reads of the banked gold decks: the pass-2 GUI raise arranged 0 of 227 reported objects on the `main` run (all 19 slides byte-identical to the source order) and 91 on the `branch-verify2` run, with identical 'front=' counters. frontRaised counts System-Events clicks, not arrangements. W2 also removes an unverifiable counter. D7 (2026-09-08, offline) measured build order and z-order as DISSOCIABLE arrays sharing only one upstream trigger (Keynote's non-deterministic slide-archive re-serialisation on save): 7 slides scramble builds with z-order perfectly intact, 3 scramble z-order with builds perfectly intact, and build-position/z-index Kendall tau is -0.016 output vs +0.058 source null control — so W2's own plan must NOT assume its z-order write also fixes build order (see w1-build-order-nondeterminism), and the build-order patch (`restore_source_builds`) must keep running LAST, after any future W2 z-order write, for the same reason it works today."
     status: pending
   - id: w1-build-order-nondeterminism
     content: "BUG BACKLOG (B), NEW 2026-09-08, found by the `fix/w1-gate-integrity` round's
@@ -74,10 +74,40 @@ todos:
       So build order is NON-DETERMINISTIC run-to-run, and today's three W1 fixes (31625d1,
       f76e8d3, e987a46) are not implicated — this bug pre-dates them. Slide 124 itself is
       order-identical to source in the confirming run, so the sparkle plan's twin z-order risk
-      (`plan-sparkle-hide.md`) is not the mechanism. HYPOTHESIS, NOT MEASURED: the build write
-      follows the output deck's own `drawablesZOrder`/object order rather than the source's build
-      sequence, and Keynote rescrambles `drawablesZOrder` on every save/open — likely shares a root
-      cause with the parked `w-zorder-patch` (W2) item; diagnose the two together. Affected slides
+      (`plan-sparkle-hide.md`) is not the mechanism. D7 (2026-09-08, offline, Keynote-free;
+      `output/handover-2026-09-08/build-order/D7-build-order.md`) REFUTES the z-order hypothesis
+      and MEASURES the real mechanism: it is SCOPE, not z-order. `plan_build_patch`'s source-index
+      ordering survives the IWA write perfectly and nothing downstream re-derives order from
+      `drawablesZOrder` — the ordering is simply never applied to the affected slides, because
+      `plan_build_patch` runs only on the reuse set {123-128} (independently confirmed: source
+      builds on 123-128 sum to exactly 86, matching the run's logged `86 kept`), and the
+      intersection of {123-128} with the 34 affected slides is EMPTY. Positive control: 19 of 19
+      build-bearing reuse slides across 5 decks are order-exact against source (0 in the
+      `reordered` class) because `restore_source_builds` is the LAST thing `remap_keynote` does,
+      so no Keynote save follows it — while in the same V0908 deck 34 of 61 unpatched
+      build-bearing slides are scrambled. z-order is refuted as the mechanism: Kendall tau between
+      build position and drawable z-index is -0.016 on the output vs +0.058 on the source null
+      control, and the two arrays dissociate in both directions (7 slides scramble builds with
+      z-order intact: 57, 75, 78, 94, 130, 147, 148; 3 scramble z-order with builds intact: 4, 109,
+      110). `KN.BuildArchive` has no ordinal field, so the array IS the sequence carrier and this
+      is not cosmetic; the only agent that can be rewriting it is Keynote's own save. FIX SCOPING
+      ASSESSED, NOT IMPLEMENTED: widening `slides` at `remap_keynote.py:1396` from `reuse_slides`
+      to the whole deck gives 0 cross-member build/chunk objects, 0 droppable orphan chunks, a
+      simulated deck-wide plan of `kept=986, dropped=0, retimed=0`, and makes 34/34 affected
+      slides source-exact; write cost is flat (`_rewrite_members` streams the zip once). One
+      residual risk: of 39 duplicate-key groups in the source, slide 103's 5-member
+      `apple:dropbuild` group splits on `eventTrigger` (0 vs 1) and `plan_build_patch` pairs
+      same-key builds with a bare `zip()`, which could swap an on-click build with an automatic
+      one — remedy is adding `eventTrigger` to `iwa_builds._key_of`. VERDICT: do NOT fold into the
+      parked `w-zorder-patch` (W2) item (see that item's own cross-reference) — they share one
+      upstream trigger (Keynote re-serialising slide-archive reference arrays on save) but are
+      MEASURED DISSOCIABLE arrays with different sources of truth (builds COPY a sequence that
+      already exists in the source; W2 must COMPUTE a stacking), the build machinery already
+      ships and is 19-for-19, and W2 is unbuilt and gated on 'W1 stable' — folding blocks a cheap
+      correctness win behind a parked optimisation. NOT SETTLEABLE OFFLINE: which pass introduces
+      the scramble (no intermediate deck banked); whether Keynote honours a patched order on a
+      non-reuse slide (all 19 controls are reuse targets); that the owner's visual symptom is
+      exactly this permutation — each needs a live run. Affected slides
       in the 2026-09-08 confirming run: 5, 9, 17, 26, 36, 37, 42, 43, 47, 51, 55, 57, 59, 60, 61,
       64, 70, 71, 75, 78, 94, 96, 101, 102, 103, 106, 117, 118, 130, 131, 133, 146, 147, 148."
     status: pending
@@ -589,8 +619,10 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
    PR; it is a follow-up on `fix/w1-damage-check-reattribution`. W2
    remains gated on W1 stabilisation/default-flip.
 4. **New backlog item from this round:** `w1-build-order-nondeterminism` (build sequence wrong on
-   ~30 slides, pre-existing, not caused by the three fixes above) — diagnose alongside
-   `w-zorder-patch`, a plausible shared root.
+   ~30 slides, pre-existing, not caused by the three fixes above) — D7 diagnosed it offline
+   (2026-09-08): the mechanism is `plan_build_patch` scope, not z-order (the z-order hypothesis is
+   refuted), and it does NOT fold into `w-zorder-patch` (measured dissociable arrays). Fix is
+   scoped, not implemented.
 5. **Then:** remaining bug backlog, constellation cluster affine, and feature backlog.
 
 ### Tranche map
@@ -601,7 +633,7 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
 | Fixes | output-bugs batch 1 → batch 2 | one live remap each | both DONE + live-verified (batch 2: 0ad68b0, 0cdcd2b, 753acef) |
 | Fixes | `map-label-classification-fix` (cbde0a7), `card-border-source-ref-floor-fix` (94d2969) | one live remap each | both merged; map-label live-verified; final Full-deck card-border verification outcome was not recorded |
 | **W1** | `w-offline-write-stabilise` | gate on both gold decks + one confirming production remap | gate hardened + patcher fix; Map GREEN (verify+on); Full whole-deck gate went RED 2026-09-07, diagnosed (D1-D6); branch `fix/w1-gate-integrity` fixed + live-verified the reuse-paste card loss (f76e8d3) and the sparkle-twin drop (e987a46) on a real production remap, merged as PR #57 (`cd67e2e`); follow-up branch `fix/w1-damage-check-reattribution` re-attributed `31625d1`'s damage check to the measured card-image shortfall (D1's "stolen GUI interaction" verdict is disproven; detection and abort kept); default flip stays on hold |
-| B (branch) | `w1-build-order-nondeterminism`, spun off `fix/w1-gate-integrity`'s live-run comparison | none (offline census only so far) | NEW 2026-09-08; build sequence wrong on ~30 slides, pre-existing and non-deterministic run-to-run (control: two runs of the same broken code disagree with each other); likely shares a root with `w-zorder-patch` |
+| B (branch) | `w1-build-order-nondeterminism`, spun off `fix/w1-gate-integrity`'s live-run comparison | none (D7 offline diagnosis, Keynote-free) | NEW 2026-09-08; build sequence wrong on ~30 slides, pre-existing and non-deterministic run-to-run (control: two runs of the same broken code disagree with each other); D7 (2026-09-08) diagnosed the mechanism offline — `plan_build_patch` scope, not z-order (z-order hypothesis REFUTED, tau -0.016 output vs +0.058 source null control); measured DISSOCIABLE from `w-zorder-patch`, does NOT fold into W2; fix scoped, not implemented |
 | **R1** | `r-nested-bulk-probe` | yes | DONE 2026-09-04 — correct+safe but NOT faster (object-bound); closed with `r-bulk-counts-plan` |
 | **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | readback complete; ranged + four whole-deck Gold A/Bs passed; R2b unblocked; write-gate re-run separately blocked by deleted inputs |
 | **W2** | `w-zorder-patch` (stroke prod folded into batch 1 C) | yes | W1 stable |
