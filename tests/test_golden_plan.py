@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("keynote_parser")
 
+from scripts import golden_plan  # noqa: E402
 from scripts.golden_plan import (  # noqa: E402
     ENV_PINS,
     FONT_ENV_UNAVAILABLE,
@@ -153,6 +154,9 @@ def _gate(deck_name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     golden = _skip_ladder(deck_name)
     _pin_env(monkeypatch)
     wall, tmpl, plan, planner_env = capture_plan(DECKS / deck_name, TEMPLATE)
+    problems = validate_planner_env(planner_env)
+    if problems:
+        pytest.fail("live planner env malformed: " + "; ".join(problems))
     _check_planner_env(golden, planner_env)
     _check_plan(deck_name, golden, wall, tmpl, plan, tmp_path)
 
@@ -189,6 +193,18 @@ def test_validate_planner_env_rejects_malformed() -> None:
         assert validate_planner_env(golden["plannerEnv"]) == []
 
 
+def test_gate_fails_on_malformed_live_planner_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    deck_name = "Gold_Wall_Input.key"
+    _skip_ladder(deck_name)
+
+    def _malformed_planner_env(wall: dict) -> dict:
+        return {"osBuild": "25G83", "faces": "typo"}
+
+    monkeypatch.setattr(golden_plan, "planner_env", _malformed_planner_env)
+    with pytest.raises(pytest.fail.Exception, match="faces"):
+        _gate(deck_name, monkeypatch, tmp_path)
+
+
 @pytest.mark.xfail(
     strict=False,
     reason="propose plans on the UN-enriched payload (framing.py:376-377 never runs the "
@@ -202,6 +218,9 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
 
     _pin_env(monkeypatch)
     _wall, _tmpl, plan, planner_env = capture_plan(deck, TEMPLATE)
+    problems = validate_planner_env(planner_env)
+    if problems:
+        pytest.fail("live planner env malformed: " + "; ".join(problems))
     _check_planner_env(golden, planner_env)
 
     def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
