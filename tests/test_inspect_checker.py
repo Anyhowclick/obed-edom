@@ -91,14 +91,17 @@ def test_offline_cache_entry_without_runs_is_not_served_to_the_checker(deck, mon
     # which never attaches runs) is not checker-shaped -- it is not served; the cache
     # falls through to a real rebuild instead.
     _seed_cache(deck, {"reader": "offline", "slideCount": 1,
-                       "slides": [{"index": 0, "number": 1, "items": []}],
+                       "slides": [{"index": 0, "number": 1,
+                                   "items": [{"kind": "text", "text": "Hello"}]}],
                        "sentinel": "CACHED"})
 
     calls: dict = {"n": 0}
 
     def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
         calls["n"] += 1
-        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]}],
+        return {"slideCount": 1,
+                 "slides": [{"index": 0, "number": 1,
+                             "items": [{"kind": "text", "text": "Hello", "runs": []}]}],
                 "sentinel": "REBUILT"}
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
@@ -108,12 +111,61 @@ def test_offline_cache_entry_without_runs_is_not_served_to_the_checker(deck, mon
     assert out["reader"] == "offline"
 
 
+def test_mixed_cache_entry_with_runs_on_only_some_slides_is_rejected(deck, monkeypatch):
+    # Two-tier partial legacy fallback: slide 1's items carry runs (replaced via
+    # remap_keynote's legacy path), slide 2's text item does not (offline, never
+    # attach_runs'd). Coverage must be checked across every slide, not just any item.
+    _seed_cache(deck, {"reader": "offline", "slideCount": 2,
+                       "slides": [
+                           {"index": 0, "number": 1,
+                            "items": [{"kind": "text", "text": "Covered", "runs": []}]},
+                           {"index": 1, "number": 2,
+                            "items": [{"kind": "text", "text": "Uncovered"}]},
+                       ],
+                       "sentinel": "CACHED"})
+
+    calls: dict = {"n": 0}
+
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        calls["n"] += 1
+        return {"slideCount": 2,
+                 "slides": [
+                     {"index": 0, "number": 1,
+                      "items": [{"kind": "text", "text": "Covered", "runs": []}]},
+                     {"index": 1, "number": 2,
+                      "items": [{"kind": "text", "text": "Uncovered", "runs": []}]},
+                 ],
+                "sentinel": "REBUILT"}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+    out = inspect_mod.inspect_keynote_checker(deck, use_cache=True)
+    assert calls["n"] == 1, "a mixed-coverage offline cache entry must fall through to a rebuild"
+    assert out["sentinel"] == "REBUILT"
+    assert out["reader"] == "offline"
+
+
+def test_offline_cache_entry_with_no_text_items_is_served(deck, monkeypatch):
+    # No eligible text items at all (vacuous coverage) must still count as served.
+    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
+                       "slides": [{"index": 0, "number": 1, "items": []}],
+                       "sentinel": "CACHED"})
+
+    def boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("builder must not run when nothing is eligible for runs")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+    out = inspect_mod.inspect_keynote_checker(deck, use_cache=True)
+    assert out["sentinel"] == "CACHED"
+    assert out["_cached"] is True
+
+
 def test_rejected_cache_entry_never_reaches_the_legacy_reader_with_cache_on(deck, monkeypatch):
     # A runs-less offline entry is rejected and falls through to _build_checker_offline.
     # If that build then fails, the legacy JXA fallback must not be allowed to re-serve
     # the same rejected entry -- it must be called with use_cache=False.
     _seed_cache(deck, {"reader": "offline", "slideCount": 1,
-                       "slides": [{"index": 0, "number": 1, "items": []}],
+                       "slides": [{"index": 0, "number": 1,
+                                   "items": [{"kind": "text", "text": "Hello"}]}],
                        "sentinel": "CACHED"})
 
     def boom_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):

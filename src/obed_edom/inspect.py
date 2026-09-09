@@ -637,12 +637,20 @@ def _merge_legacy_items(
 
 
 def _payload_has_runs(payload: dict[str, Any]) -> bool:
-    """True when any item on any slide carries a ``runs`` key (checker-shaped)."""
+    """True when every eligible text item -- mirroring iwa_runs.attach_runs'
+    ``_match_runs_to_items`` matching criteria -- carries a ``runs`` key
+    (checker-shaped). A payload with no eligible text items counts as covered."""
     for slide in payload.get("slides") or []:
         for item in slide.get("items") or []:
-            if "runs" in item:
-                return True
-    return False
+            if is_duplicate_item(item):
+                continue
+            if (item.get("kind") or "text") not in {"text", "shape"}:
+                continue
+            if not (item.get("text") or "").strip():
+                continue
+            if "runs" not in item:
+                return False
+    return True
 
 
 def _build_checker_offline(
