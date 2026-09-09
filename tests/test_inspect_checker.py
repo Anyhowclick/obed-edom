@@ -108,6 +108,35 @@ def test_offline_cache_entry_without_runs_is_not_served_to_the_checker(deck, mon
     assert out["reader"] == "offline"
 
 
+def test_rejected_cache_entry_never_reaches_the_legacy_reader_with_cache_on(deck, monkeypatch):
+    # A runs-less offline entry is rejected and falls through to _build_checker_offline.
+    # If that build then fails, the legacy JXA fallback must not be allowed to re-serve
+    # the same rejected entry -- it must be called with use_cache=False.
+    _seed_cache(deck, {"reader": "offline", "slideCount": 1,
+                       "slides": [{"index": 0, "number": 1, "items": []}],
+                       "sentinel": "CACHED"})
+
+    def boom_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        raise RuntimeError("offline build failed")
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom_build)
+
+    calls: dict = {"n": 0}
+
+    def fake_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
+                      is_cancelled=None):
+        calls["n"] += 1
+        assert use_cache is False, "a rejected cache entry must not reach the legacy reader"
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "sentinel": "LEGACY", "reader": "jxa"}
+
+    monkeypatch.setattr(inspect_mod, "inspect_keynote", fake_inspect)
+
+    out = inspect_mod.inspect_keynote_checker(deck, use_cache=True)
+    assert calls["n"] == 1
+    assert out["sentinel"] == "LEGACY"
+
+
 def test_cache_hit_export_only_skips_the_rebuild(deck, monkeypatch, tmp_path):
     # Cached JSON present + preview dir empty + dest set: export ONLY, never rebuild.
     _seed_cache(deck, {"reader": "offline", "slideCount": 2,

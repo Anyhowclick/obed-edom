@@ -700,6 +700,7 @@ def inspect_keynote_checker(
 
     digest = ""
     png_dir: Path | None = None
+    rejected_cache = False
     if want_cache:
         t_hash = time.perf_counter()
         digest = deck_digest(key_path)
@@ -708,6 +709,7 @@ def inspect_keynote_checker(
         png_dir = preview_cache_dir(digest)
         if json_path.is_file():
             cached = json.loads(json_path.read_text(encoding="utf-8"))
+            rejected_cache = True
             # Shared digest cache: a JXA hit has no runs[]; serving it would skip attach_runs.
             # A runs-less offline entry (e.g. from two_tier_wall_payload, which never
             # attaches runs) is not checker-shaped either -- fall through and rebuild.
@@ -764,7 +766,8 @@ def inspect_keynote_checker(
                 log(f"WARN: offline checker build failed for {key_path.name} ({exc!r}) -- falling back to legacy JXA.")
             try:
                 return inspect_keynote(
-                    key_path, export_dir=export_dir, slide_range=slide_range, use_cache=use_cache
+                    key_path, export_dir=export_dir, slide_range=slide_range,
+                    use_cache=False if rejected_cache else use_cache,
                 )
             except Exception as legacy_exc:
                 raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
@@ -779,7 +782,8 @@ def inspect_keynote_checker(
             if not sidecar.get("bulk_ok") and fallback_slides:
                 try:
                     return inspect_keynote(
-                        key_path, export_dir=export_dir, slide_range=slide_range, use_cache=use_cache
+                        key_path, export_dir=export_dir, slide_range=slide_range,
+                        use_cache=False if rejected_cache else use_cache,
                     )
                 except Exception as legacy_exc:
                     raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
