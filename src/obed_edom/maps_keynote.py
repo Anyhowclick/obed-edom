@@ -447,6 +447,7 @@ def maps_export_plan(
     covered: set[str] = set()
     for geom in plates.values():
         covered.update(str(sid) for sid in (geom.get("slideIds") or []))
+    landing_targets = {str(to_slide.get("id") or "") for _link, _from_slide, to_slide in _qualifying_movie_landing_links(slides, links)}
     stills: list[dict[str, Any]] = []
     for slide in slides:
         sid = str(slide.get("id") or "")
@@ -468,6 +469,22 @@ def maps_export_plan(
         if slide.get("isolate") and highlights:
             row["stillPngCountry"] = f"{sid}{'_CG' if audience == 'cg' else ''}-country.png"
         stills.append(row)
+        if sid in landing_targets:
+            stills.append(
+                {
+                    "slideId": f"{sid}__landing",
+                    "style": slide.get("style") or "positron",
+                    "camera": slide.get("camera") or {},
+                    "highlights": [],
+                    "hiddenLayers": slide_hidden_layers(slide),
+                    "hillshade": bool(slide.get("hillshade")),
+                    "isolate": None,
+                    "width": cap_w,
+                    "height": cap_h,
+                    "synthetic": True,
+                    "_landingFor": sid,
+                }
+            )
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
         first = next((slide for slide in slides if str(slide.get("id") or "") in (geom.get("slideIds") or [])), None)
@@ -522,7 +539,9 @@ def cg_affected_slide_ids(slides: list[dict[str, Any]], links: list[dict[str, An
 def split_cg_export_plan(slides: list[dict[str, Any]], links: list[dict[str, Any]]) -> dict[str, Any]:
     affected = cg_affected_slide_ids(slides, links)
     plan = maps_export_plan(slides, links, audience="cg")
-    plan["stills"] = [row for row in plan["stills"] if str(row.get("slideId") or "") in affected]
+    plan["stills"] = [
+        row for row in plan["stills"] if str(row.get("_landingFor") or row.get("slideId") or "") in affected
+    ]
     plan["plates"] = [
         row for row in plan["plates"]
         if any(str(sid) in affected for sid in (plan["plateGeoms"].get(str(row["plateId"])) or {}).get("slideIds") or [])
@@ -559,6 +578,65 @@ def _remove_key(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     elif path.exists():
         path.unlink(missing_ok=True)
+
+
+def _qualifying_movie_landing_links(
+    slides: list[dict[str, Any]], links: list[dict[str, Any]]
+) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
+    """Movie links whose isolated+highlighted destination immediately follows its source."""
+    by_id = {str(slide.get("id") or ""): slide for slide in slides}
+    index_of = {str(slide.get("id") or ""): index for index, slide in enumerate(slides)}
+    out: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for link in links:
+        if str(link.get("kind") or "") != "movie":
+            continue
+        start, end = _link_ends(link)
+        from_slide, to_slide = by_id.get(start), by_id.get(end)
+        if not from_slide or not to_slide:
+            continue
+        if not to_slide.get("isolate") or not to_slide.get("highlights"):
+            continue
+        if index_of.get(end) != index_of.get(start, -2) + 1:
+            continue
+        out.append((link, from_slide, to_slide))
+    return out
+
+
+def isolate_landing_slides(
+    slides: list[dict[str, Any]], links: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Insert a synthetic plain-view landing slide before each isolated movie destination."""
+    landing_after: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
+    for link, from_slide, to_slide in _qualifying_movie_landing_links(slides, links):
+        to_id = str(to_slide.get("id") or "")
+        landing_slide = {**to_slide, "id": f"{to_id}__landing", "highlights": [], "isolate": None, "_landingFor": to_id}
+        landing_after[str(from_slide.get("id") or "")] = (landing_slide, link, to_id)
+    if not landing_after:
+        return slides, links
+    next_slides: list[dict[str, Any]] = []
+    next_links = list(links)
+    for slide in slides:
+        next_slides.append(slide)
+        landing = landing_after.get(str(slide.get("id") or ""))
+        if landing is None:
+            continue
+        landing_slide, link, to_id = landing
+        next_slides.append(landing_slide)
+        for index, existing in enumerate(next_links):
+            if existing is link:
+                next_links[index] = {**link, "to": landing_slide["id"]}
+                break
+        duration = float(link.get("duration") or 0) or 1.0
+        next_links.append(
+            {
+                "from": landing_slide["id"],
+                "to": to_id,
+                "kind": "dissolve",
+                "duration": duration,
+                "playWithoutClick": bool(link.get("playWithoutClick")),
+            }
+        )
+    return next_slides, next_links
 
 
 def _outgoing(slide_id: str, links: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -852,6 +930,7 @@ def plan_deck(
     audience: str = "lw",
     cg_affected: set[str] | None = None,
 ) -> list[dict[str, Any]]:
+    slides, links = isolate_landing_slides(slides, links)
     slide_plate: dict[str, str] = {}
     for plate_id, geom in plates.items():
         for sid in geom.get("slideIds") or []:
@@ -860,7 +939,8 @@ def plan_deck(
     by_id = {str(slide.get("id") or ""): slide for slide in slides}
     for index, slide in enumerate(slides):
         sid = str(slide.get("id") or "")
-        asset_audience = "cg" if audience == "cg" and (cg_affected is None or sid in cg_affected) else "lw"
+        cg_key = str(slide.get("_landingFor") or sid)
+        asset_audience = "cg" if audience == "cg" and (cg_affected is None or cg_key in cg_affected) else "lw"
         plate_id = slide_plate.get(sid)
         plate = plates.get(plate_id) if plate_id else None
         plate_path = _plate_path(plate_id, output_dir) if plate_id else None

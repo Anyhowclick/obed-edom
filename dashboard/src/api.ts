@@ -404,6 +404,7 @@ export type MapsExportPlan = {
     isolate?: unknown;
     width?: number;
     height?: number;
+    synthetic?: boolean;
   }>;
   plates: Array<{
     plateId: string;

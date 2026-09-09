@@ -238,9 +238,10 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
 }
 
 export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
-  if (appearanceMismatch(from, to).length > 0) return true;
-  if (!from.cg && !to.cg) return false;
-  return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(to, "cg")).length > 0;
+  const target: MapsSlide = to.isolate && to.highlights.length ? { ...to, highlights: [], isolate: undefined } : to;
+  if (appearanceMismatch(from, target).length > 0) return true;
+  if (!from.cg && !target.cg) return false;
+  return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(target, "cg")).length > 0;
 }
 
 export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
@@ -268,12 +269,6 @@ export function suggestedHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const kind = inferHopKind(from, to);
   if (kind === "morph" && !plateFitsMorph(from, to)) return "movie";
   return kind;
-}
-
-/** When the hop into an isolated slide is a Movie, the following hop out of it defaults to a 1 s Dissolve — the isolate mask needs a beat to read before the camera moves again. */
-export function isolateDissolveDefault(from: MapsSlide, incoming: MapsLink | undefined): { kind: MapsHopKind; duration: number } | null {
-  if (!from.isolate || incoming?.kind !== "movie") return null;
-  return { kind: "dissolve", duration: 1 };
 }
 
 function mercatorY(lat: number): number {

@@ -1024,3 +1024,68 @@ def test_plan_deck_magic_move_duplicate_skips_country_cutout(tmp_path: Path):
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert ops[1]["duplicate"] is True
     assert len(ops[1]["items"]) == 1
+
+
+def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
+    plan = maps_export_plan([a, b], links)
+    stills = {row["slideId"]: row for row in plan["stills"]}
+    assert set(stills) == {"s1", "s2", "s2__landing"}
+    landing = stills["s2__landing"]
+    assert landing["camera"] == b["camera"]
+    assert landing["highlights"] == []
+    assert landing["isolate"] is None
+    assert "stillPngCountry" not in landing
+    assert landing["_landingFor"] == "s2"
+
+
+def test_export_plan_no_landing_row_for_dissolve_or_no_highlights():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 1.0}]
+    plan = maps_export_plan([a, b], links)
+    assert {row["slideId"] for row in plan["stills"]} == {"s1", "s2"}
+
+    c = _slide("s3", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=[])
+    plan2 = maps_export_plan([a, c], [{"from": "s1", "to": "s3", "kind": "movie", "duration": 1.0}])
+    assert {row["slideId"] for row in plan2["stills"]} == {"s1", "s3"}
+
+
+def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0, 8), movieDuration=2.0)
+    b = _slide("s2", _camera(3.0, 102.0, 8), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
+    mov = movie_path(tmp_path, "s1")
+    mov.parent.mkdir(parents=True, exist_ok=True)
+    mov.write_bytes(b"fake-mov")
+    _dummy_png(tmp_path / "stills" / "s2__landing.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
+    assert ops[0]["transition"] == {"effect": None, "duration": 1.5, "automatic": True, "delay": 2.0}
+    assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
+    assert len([item for item in ops[2]["items"] if item.get("map")]) == 2
+
+
+def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert [op["id"] for op in ops] == ["s1", "s2"]
+
+
+def test_split_cg_export_plan_keeps_landing_still_for_affected_slide():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide(
+        "s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"],
+        cg={"style": "toner"},
+    )
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0}]
+    plan = split_cg_export_plan([a, b], links)
+    assert "s2__landing" in {row["slideId"] for row in plan["stills"]}

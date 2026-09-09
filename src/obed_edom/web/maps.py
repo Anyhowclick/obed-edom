@@ -1138,7 +1138,9 @@ async def post_png(
         return _runner().public_dict(job)
     if not slideId:
         raise HTTPException(400, "slideId is required")
-    if slideId not in ids:
+    landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
+    landing_ok = landing_base in ids and kind == "still" and variant != "country" if landing_base else False
+    if slideId not in ids and not landing_ok:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)
     if audience == "cg":

@@ -186,8 +186,16 @@ export function MovieAppearanceGate({
   disabled: boolean;
   onMatch: () => void;
 }) {
-  const rows = morphGateList(from, to).filter((gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "isolate" || gate.id === "layers") && !gate.ok);
-  if (!rows.length && !crossAudience) return null;
+  const landing = to.isolate && to.highlights.length ? ({ ...to, highlights: [], isolate: undefined } as MapsSlide) : null;
+  const rows = morphGateList(from, landing || to).filter((gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "isolate" || gate.id === "layers") && !gate.ok);
+  if (!rows.length && !crossAudience) {
+    if (!landing) return null;
+    return (
+      <div className="morph-gates" role="status" aria-label="Movie appearance">
+        <p className="morph-gates-hint">Lands on the plain view, then dissolves into the isolated view.</p>
+      </div>
+    );
+  }
   const showMatchButton = rows.some((gate) => gate.id === "layers");
   return (
     <div className="morph-gates warn" role="status" aria-label="Movie appearance mismatch">
@@ -221,6 +229,7 @@ export function MovieAppearanceGate({
       {crossAudience && (
         <p className="morph-gates-hint">The other audience also mismatches on this hop and must be fixed by switching audiences.</p>
       )}
+      {landing && <p className="morph-gates-hint">Lands on the plain view, then dissolves into the isolated view.</p>}
       {showMatchButton && (
         <button
           type="button"

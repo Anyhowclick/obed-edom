@@ -58,7 +58,6 @@ import {
   nextSlideId,
   slideHiddenLayers,
   suggestedHopKind,
-  isolateDissolveDefault,
   type MapsCamera,
   type MapsAudience,
   type MapsChurch,
@@ -713,14 +712,13 @@ export function MapsTab() {
       const from = nextSlides[i];
       const to = nextSlides[i + 1];
       const existing = prevLinks.find((link) => link.from === from.id && link.to === to.id);
-      const isolateDefault = existing ? null : isolateDissolveDefault(from, links[i - 1]);
-      const kind = isolateDefault?.kind ?? suggestedHopKind(from, to);
+      const kind = suggestedHopKind(from, to);
       links.push(
         existing || {
           from: from.id,
           to: to.id,
           kind,
-          duration: isolateDefault?.duration ?? 1.2,
+          duration: 1.2,
           playWithoutClick: false,
           ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
         }
@@ -1587,9 +1585,7 @@ export function MapsTab() {
     !!nextSlide &&
     (!!active.cg || !!nextSlide.cg) &&
     appearanceMismatch(slideForAudience(active, otherAudience), slideForAudience(nextSlide, otherAudience)).length > 0;
-  const incomingToActive = active && activeIndex > 0 ? linkBetween(doc?.links || [], slides[activeIndex - 1].id, active.id) : undefined;
-  const isolateDefault = active && nextSlide ? isolateDissolveDefault(active, incomingToActive) : null;
-  const suggested = outgoing && active && nextSlide ? (isolateDefault?.kind ?? suggestedHopKind(active, nextSlide)) : "morph";
+  const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
   const morphOk = suggested === "morph";
   const cruiseAuto =
     activeView && nextView
@@ -2449,7 +2445,6 @@ export function MapsTab() {
                         {
                           kind: suggested,
                           easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined,
-                          ...(isolateDefault ? { duration: isolateDefault.duration } : {}),
                         },
                         { dropRoute: true, resetFly: true }
                       )
