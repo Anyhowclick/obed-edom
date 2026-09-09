@@ -774,10 +774,7 @@ def inspect_keynote_checker(
                     raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
             if fallback:
                 item_entries, slide_numbers = _partition_fallback(fallback)
-                # Not wrapped in LegacyInspectFailed: these are narrow inspect_items/inspect_keynote
-                # reads, not the whole-deck legacy read the sentinel exists to dedupe against. A
-                # failure here (Keynote or pure-Python) must fall through as a plain exception so
-                # the caller's fail-safe still runs one whole-deck legacy read.
+                # Narrow reads, not the whole-deck legacy read; let failures fall through plain.
                 if item_entries:
                     _merge_legacy_items(payload, key_path, item_entries)
                 if slide_numbers:
