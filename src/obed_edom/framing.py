@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from obed_edom.baseline import index_map, pairing_path
+from obed_edom.map_remap import DEFAULT_CARD_STROKE
 
 FRAMING_VERSION = 1
 FRAMING_KIND = "framing"
@@ -289,6 +290,7 @@ def planned_rects(
     wall_size: tuple[float, float],
     keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
+    card_stroke: float = DEFAULT_CARD_STROKE,
 ) -> list[dict[str, Any]]:
     """Planned dest rects for this recipe. Do not pass a template (that re-learns the automatic pick)."""
     from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
@@ -301,6 +303,7 @@ def planned_rects(
         recipe,
         keep_side_panels=keep_side_panels,
         side_content_slides=side_content_slides,
+        card_stroke=card_stroke,
     ):
         dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
         rect = {
@@ -333,6 +336,7 @@ def propose_framings(
     template_payload: dict[str, Any] | None = None,
     keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
+    card_stroke: float = DEFAULT_CARD_STROKE,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Propose framings over cached inspect payloads. Nothing is copied or written."""
@@ -380,6 +384,7 @@ def propose_framings(
         slide_range=slide_range,
         template=template_data,
         framing_report=report,
+        card_stroke=card_stroke,
     )
     thumbs = build_preview_thumbs(wall_path, full_wall_data, log=log)
     template_thumbs = build_preview_thumbs(template_path, template_data, log=log)
@@ -428,6 +433,7 @@ def propose_framings(
                 wall_size=(wall_w, wall_h),
                 keep_side_panels=keep_side_panels,
                 side_content_slides=side_content_slides,
+                card_stroke=card_stroke,
             )
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")

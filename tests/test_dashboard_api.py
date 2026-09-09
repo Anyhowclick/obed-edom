@@ -83,8 +83,16 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
     template.write_text("template")
     cached = _cached_wall("offline")
     original = copy.deepcopy(cached)
-    seen = {"inspects": []}
+    seen = {"inspects": [], "acquires": [], "prepares": []}
     logs = []
+
+    def fake_acquire(source, *, slide_range, mode, say):
+        seen["acquires"].append((Path(source), slide_range))
+        return cached
+
+    def fake_prepare(source, wall_payload, template_path, template_data, say):
+        seen["prepares"].append(wall_payload is cached)
+        return 4.0
 
     def fake_inspect(path, **kwargs):
         seen["inspects"].append((Path(path), kwargs))
@@ -99,7 +107,8 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
             "pages": [{"slide": 3, "index": 2, "noUsableFraming": False}],
         }
 
-    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: cached)
+    monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
+    monkeypatch.setattr(app_mod, "prepare_wall_payload", fake_prepare)
     monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
     monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
     monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": True})
@@ -128,6 +137,9 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
     assert [slide["number"] for slide in proposal["full_wall_payload"]["slides"]] == [1, 2, 3]
     assert proposal["wall_payload"]["slides"][0] is not proposal["full_wall_payload"]["slides"][2]
     assert proposal["slide_range"] == frozenset({3})
+    assert proposal["card_stroke"] == 4.0
+    assert seen["acquires"] == [(wall, None)]
+    assert seen["prepares"] == [True]
     assert seen["inspects"] == [(template, {})]
     assert result["pages"][0]["index"] == 2
     assert result["pages"][0]["decision"]["wallIndex"] == 2
@@ -146,18 +158,18 @@ def test_ranged_propose_falls_back_for_malformed_cache_and_rejects_valid_cache_o
     wall.write_text("wall")
     template.write_text("template")
     logs = []
-    seen = {"inspects": []}
-    malformed = _cached_wall()
-    malformed["slides"].pop()
 
-    def fake_inspect(path, **kwargs):
-        seen["inspects"].append((Path(path), kwargs))
-        if Path(path) == wall:
-            return {"slideCount": 3, "slides": [{"number": 2, "items": []}]}
-        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
-
-    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: malformed)
-    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(
+        app_mod, "acquire_wall_payload", lambda source, *, slide_range, mode, say: _cached_wall()
+    )
+    monkeypatch.setattr(
+        app_mod, "inspect_keynote",
+        lambda path, **kwargs: {"slideWidth": 1920, "slideHeight": 1080, "slides": []},
+    )
+    monkeypatch.setattr(
+        app_mod, "prepare_wall_payload",
+        lambda source, wall_payload, template_path, template_data, say: 3.0,
+    )
     monkeypatch.setattr(
         app_mod,
         "propose_framings",
@@ -165,13 +177,8 @@ def test_ranged_propose_falls_back_for_malformed_cache_and_rejects_valid_cache_o
     )
     monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": False})
 
-    app_mod._run_resize_propose(
-        type("Job", (), {"log": logs.append})(), wall, template, frozenset({2}), False
-    )
-    assert seen["inspects"] == [(wall, {"slide_range": frozenset({2})}), (template, {})]
-    assert any("not been read in full" in line for line in logs)
-
-    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: _cached_wall())
+    # _cached_wall() shows 2 visible slides (slide 2 is Skip Slide); a range past that
+    # must reject against the navigator count before any template read.
     with pytest.raises(RuntimeError, match="shows 2 slides"):
         app_mod._run_resize_propose(
             type("Job", (), {"log": logs.append})(), wall, template, frozenset({4}), False
@@ -185,16 +192,24 @@ def test_ranged_propose_rejects_navigator_range_past_visible_slides(tmp_path, mo
     template = tmp_path / "Base_CG_Assets.key"
     wall.write_text("wall")
     template.write_text("template")
-    monkeypatch.setattr(app_mod, "cached_payload", lambda _path: _cached_wall())
+    monkeypatch.setattr(
+        app_mod, "acquire_wall_payload", lambda source, *, slide_range, mode, say: _cached_wall()
+    )
     monkeypatch.setattr(
         app_mod,
         "inspect_keynote",
-        lambda *_args, **_kwargs: pytest.fail("valid cached range must reject before inspection"),
+        lambda *_args, **_kwargs: pytest.fail("valid navigator range must reject before the template read"),
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "prepare_wall_payload",
+        lambda *_args, **_kwargs: pytest.fail("valid navigator range must reject before enrichment"),
     )
 
+    logs: list[str] = []
     with pytest.raises(RuntimeError, match="shows 2 slides"):
         app_mod._run_resize_propose(
-            type("Job", (), {"log": lambda _message: None})(),
+            type("Job", (), {"log": logs.append})(),
             wall,
             template,
             frozenset({3}),
@@ -451,7 +466,7 @@ def test_validate_keynote_records_whether_the_wall_is_final(tmp_path):
         app_mod._run_inspect = original
 
 
-def test_resize_asks_for_framings_before_remapping(tmp_path):
+def test_resize_asks_for_framings_before_remapping(tmp_path, monkeypatch):
     """Resize stops at proposals, and applying carries the confirmed framing.
 
     Also guards the original regression this test was written for: a blank range
@@ -468,8 +483,14 @@ def test_resize_asks_for_framings_before_remapping(tmp_path):
         seen["framing_overrides"] = kwargs.get("framing_overrides")
         return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
 
-    def fake_inspect(path, **kwargs):
+    def fake_acquire(source, *, slide_range, mode, say):
         return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_prepare(source, wall_payload, template_path, template_data, say):
+        return 3.0
+
+    def fake_inspect(path, **kwargs):
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
 
     def fake_propose(wall, template, **kwargs):
         return {
@@ -496,44 +517,42 @@ def test_resize_asks_for_framings_before_remapping(tmp_path):
             "noUsableFraming": [],
         }
 
-    originals = (app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings)
-    app_mod.remap_and_inspect = fake_remap
-    app_mod.inspect_keynote = fake_inspect
-    app_mod.propose_framings = fake_propose
-    try:
-        client = TestClient(app)
-        deck = tmp_path / "Wall.key"
-        deck.write_text("placeholder")
-        template = tmp_path / "Base_CG_Assets.key"
-        template.write_text("placeholder")
-        started = client.post(
-            "/api/resize",
-            data={"path": str(deck), "template_path": str(template), "export": "false"},
-        )
-        assert started.status_code == 200
-        job_id = started.json()["id"]
-        job = _wait(client, job_id)
-        assert job["status"] == "done", job.get("error")
-        # Phase one only proposes: nothing was remapped.
-        assert job["result"]["phase"] == "framing"
-        assert "slide_range" not in seen
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
+    monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
+    monkeypatch.setattr(app_mod, "prepare_wall_payload", fake_prepare)
+    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
+    client = TestClient(app)
+    deck = tmp_path / "Wall.key"
+    deck.write_text("placeholder")
+    template = tmp_path / "Base_CG_Assets.key"
+    template.write_text("placeholder")
+    started = client.post(
+        "/api/resize",
+        data={"path": str(deck), "template_path": str(template), "export": "false"},
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    # Phase one only proposes: nothing was remapped.
+    assert job["result"]["phase"] == "framing"
+    assert "slide_range" not in seen
 
-        confirmed = client.post(
-            f"/api/resize/{job_id}/apply",
-            json={"decisions": [{"wallIndex": 0, "state": "pinned", "templateSlide": 5}]},
-        )
-        assert confirmed.status_code == 200
-        job = _wait(client, job_id)
-        assert job["status"] == "done", job.get("error")
-        assert job["result"]["phase"] == "resized"
-        assert seen["slide_range"] is None
-        assert seen["framing_overrides"] == {1: 5}
-        assert any("every slide" in line for line in job["logs"])
-    finally:
-        app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals
+    confirmed = client.post(
+        f"/api/resize/{job_id}/apply",
+        json={"decisions": [{"wallIndex": 0, "state": "pinned", "templateSlide": 5}]},
+    )
+    assert confirmed.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert job["result"]["phase"] == "resized"
+    assert seen["slide_range"] is None
+    assert seen["framing_overrides"] == {1: 5}
+    assert any("every slide" in line for line in job["logs"])
 
 
-def test_side_content_whitelist_and_undo_round_trip(tmp_path):
+def test_side_content_whitelist_and_undo_round_trip(tmp_path, monkeypatch):
     """Whitelisting a page keeps its side content on Apply, and un-whitelisting it
     (which drops it from the submitted set) actually reverts — the stale decision on
     the in-memory page must be cleared, or Apply keeps reading the old whitelist."""
@@ -545,8 +564,14 @@ def test_side_content_whitelist_and_undo_round_trip(tmp_path):
         seen["side_content_slides"] = kwargs.get("side_content_slides")
         return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
 
-    def fake_inspect(path, **kwargs):
+    def fake_acquire(source, *, slide_range, mode, say):
         return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_prepare(source, wall_payload, template_path, template_data, say):
+        return 3.0
+
+    def fake_inspect(path, **kwargs):
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
 
     def fake_propose(wall, template, **kwargs):
         return {
@@ -566,38 +591,36 @@ def test_side_content_whitelist_and_undo_round_trip(tmp_path):
             "noUsableFraming": [],
         }
 
-    originals = (app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings)
-    app_mod.remap_and_inspect = fake_remap
-    app_mod.inspect_keynote = fake_inspect
-    app_mod.propose_framings = fake_propose
-    try:
-        client = TestClient(app)
-        deck = tmp_path / "Wall.key"
-        deck.write_text("placeholder")
-        template = tmp_path / "Base_CG_Assets.key"
-        template.write_text("placeholder")
-        started = client.post(
-            "/api/resize",
-            data={"path": str(deck), "template_path": str(template), "export": "false"},
-        )
-        job_id = started.json()["id"]
-        _wait(client, job_id)
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
+    monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
+    monkeypatch.setattr(app_mod, "prepare_wall_payload", fake_prepare)
+    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
+    client = TestClient(app)
+    deck = tmp_path / "Wall.key"
+    deck.write_text("placeholder")
+    template = tmp_path / "Base_CG_Assets.key"
+    template.write_text("placeholder")
+    started = client.post(
+        "/api/resize",
+        data={"path": str(deck), "template_path": str(template), "export": "false"},
+    )
+    job_id = started.json()["id"]
+    _wait(client, job_id)
 
-        # Whitelist the auto page, then apply: its side content is kept.
-        client.post(
-            f"/api/resize/{job_id}/apply",
-            json={"decisions": [{"wallIndex": 0, "state": "auto", "keepSideContent": True}]},
-        )
-        _wait(client, job_id)
-        assert seen["side_content_slides"] == {1}
+    # Whitelist the auto page, then apply: its side content is kept.
+    client.post(
+        f"/api/resize/{job_id}/apply",
+        json={"decisions": [{"wallIndex": 0, "state": "auto", "keepSideContent": True}]},
+    )
+    _wait(client, job_id)
+    assert seen["side_content_slides"] == {1}
 
-        # Un-whitelist: the page is back on the default, so collect() omits it and the
-        # submitted set is empty. Apply must now drop the side content again.
-        client.post(f"/api/resize/{job_id}/apply", json={"decisions": []})
-        _wait(client, job_id)
-        assert seen["side_content_slides"] == set()
-    finally:
-        app_mod.remap_and_inspect, app_mod.inspect_keynote, app_mod.propose_framings = originals
+    # Un-whitelist: the page is back on the default, so collect() omits it and the
+    # submitted set is empty. Apply must now drop the side content again.
+    client.post(f"/api/resize/{job_id}/apply", json={"decisions": []})
+    _wait(client, job_id)
+    assert seen["side_content_slides"] == set()
 
 
 def test_side_content_slides_reads_whitelisted_pages():
