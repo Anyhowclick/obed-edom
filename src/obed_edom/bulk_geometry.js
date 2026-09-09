@@ -203,10 +203,21 @@ function run(argv) {
   Keynote.includeStandardAdditions = true;
 
   var doc, slides;
+  function closeDoc() {
+    try {
+      Keynote.close(doc, { saving: "no" });
+    } catch (e3) {
+      try {
+        doc.close({ saving: "no" });
+      } catch (e4) {}
+    }
+  }
+
   try {
     doc = Keynote.open(Path(plan.path));
     slides = doc.slides();
   } catch (eOpen) {
+    if (doc) closeDoc();
     var openMsg = String(eOpen);
     if (!openMsg) openMsg = "Keynote.open/doc.slides() failed with no message";
     return JSON.stringify({ path: plan.path, error: openMsg });
@@ -227,18 +238,20 @@ function run(argv) {
   }
 
   const geometry = {};
-  for (let s = 0; s < indices.length; s++) {
-    const i = indices[s];
-    geometry[i] = slideGeom(slides[i], i);
+  try {
+    for (let s = 0; s < indices.length; s++) {
+      const i = indices[s];
+      geometry[i] = slideGeom(slides[i], i);
+    }
+  } catch (eGeom) {
+    closeDoc();
+    var geomMsg = String(eGeom);
+    if (!geomMsg) geomMsg = "Bulk geometry read failed with no message";
+    return JSON.stringify({ path: plan.path, error: geomMsg });
   }
 
-  try {
-    Keynote.close(doc, { saving: "no" });
-  } catch (e3) {
-    try {
-      doc.close({ saving: "no" });
-    } catch (e4) {}
-  }
+  const keepOpen = !!plan.keepOpen;
+  if (!keepOpen) closeDoc();
 
   return JSON.stringify({
     path: plan.path,
@@ -248,6 +261,7 @@ function run(argv) {
     errorCount: errorCount,
     notes: notes,
     noteCount: noteCount,
+    keptOpen: keepOpen,
   });
 }
 
@@ -263,5 +277,6 @@ if (typeof module !== "undefined" && module.exports) {
     getNotes: function () { return notes; },
     getNoteCount: function () { return noteCount; },
     resetErrors: function () { errors = []; errorCount = 0; notes = []; noteCount = 0; },
+    run: run,
   };
 }
