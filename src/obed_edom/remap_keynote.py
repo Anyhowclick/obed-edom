@@ -809,7 +809,7 @@ def _say_chunked_detail(
     chunks = [parts[i : i + _DETAIL_LOG_CAP] for i in range(0, len(parts), _DETAIL_LOG_CAP)]
     total = len(chunks)
     for i, chunk in enumerate(chunks, start=1):
-        prefix = f"{label} ({i}/{total}): " if total > 1 else f"{label}: "
+        prefix = f"{label}: ({i}/{total}) " if total > 1 else f"{label}: "
         line = prefix + " ".join(chunk)
         if i == total:
             line += trailing_note

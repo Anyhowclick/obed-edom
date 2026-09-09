@@ -1664,6 +1664,22 @@ def test_parse_detail_tokens_ignores_token_shaped_text_inside_an_error_message()
     assert tokens["raiseDead"] == ["s=106,idx=15"]
 
 
+def test_parse_detail_tokens_boundaries():
+    """An unbalanced outer token stops the scan with nothing emitted; a name glued to
+    a preceding letter is its own (longer) token, not a phantom match on a suffix; and
+    text inside an already-consumed token's args is never rescanned for nested tokens."""
+    unbalanced = "skip(font,s=4,err=-1728:oops raiseDead(s=1,idx=1)"
+    assert _parse_detail_tokens(unbalanced) == {}
+
+    glued = "xraiseDead(s=1,idx=1)"
+    tokens = _parse_detail_tokens(glued)
+    assert tokens == {"xraiseDead": ["s=1,idx=1"]}
+    assert "raiseDead" not in tokens
+
+    wrapped = "(raiseDead(s=1,idx=1))"
+    assert _parse_detail_tokens(wrapped) == {}
+
+
 def test_run_stat_finalize_exposes_front_err_and_tokens(monkeypatch, tmp_path):
     """End-to-end through _run_stat_finalize's own raw-string parsing, with
     subprocess.run stubbed so no Keynote/osascript actually runs."""
@@ -1815,3 +1831,34 @@ def test_say_stat_finalize_detail_caps_sig_fallback():
 
     truncated = [line for line in resolve_lines if line.endswith("(+70 more)")]
     assert len(truncated) == 1
+
+
+def test_say_stat_finalize_detail_chunks_keep_the_prefix():
+    """Multi-chunk raise logs must keep the exact greppable `Stat raise detail: `
+    prefix on every line, with the `(i/n)` chunk marker placed after it."""
+    from obed_edom.remap_keynote import _say_stat_finalize_detail
+
+    raise_dead = [f"s={i},idx=1" for i in range(95)]
+    raise_unknown = ["s=999,idx=1"]
+    tokens = {"raiseDead": raise_dead, "raiseUnknown": raise_unknown}
+    lines: list[str] = []
+    _say_stat_finalize_detail({"tokens": tokens, "frontErr": "", "detail": ""}, None, lines.append)
+
+    raise_lines = [line for line in lines if line.startswith("Stat raise detail: ")]
+    assert len(raise_lines) == 3
+    for line in raise_lines:
+        body = line[len("Stat raise detail: ") :]
+        assert body.split(" ", 1)[0] in ("(1/3)", "(2/3)", "(3/3)")
+
+    for marker in ("(1/3)", "(2/3)", "(3/3)"):
+        assert any(line.startswith(f"Stat raise detail: {marker} ") for line in raise_lines)
+
+    seen: list[str] = []
+    for line in raise_lines:
+        seen.extend(re.findall(r"raise(?:Dead|Unknown)\(s=\d+,idx=1\)", line))
+    expected = [f"raiseDead(s={i},idx=1)" for i in range(95)] + ["raiseUnknown(s=999,idx=1)"]
+    assert sorted(seen) == sorted(expected)
+    assert len(seen) == 96
+
+    for line in raise_lines:
+        assert len(re.findall(r"raise(?:Dead|Unknown)\(", line)) <= 40
