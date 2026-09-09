@@ -5,21 +5,39 @@ import { FileWell } from "../components/FileWell";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { WatercolourResultView } from "../components/WatercolourResultView";
 import { useCurrentJob } from "../sessions";
+import { floodFill } from "../watercolour/floodFill";
+import { sobelMagnitude, snapToEdge } from "../watercolour/edges";
 
 type MaskSpec = {
   transparent: boolean;
   rect?: [number, number, number, number];
   foreground?: [number, number][];
   background?: [number, number][];
+  keepMask?: string;
+  removeMask?: string;
+  maskSize?: [number, number];
 };
 
-type MaskMode = "rect" | "foreground" | "background";
+type MaskMode = "rect" | "pen" | "magnetic" | "wand";
+type Polarity = "keep" | "remove";
 
 const MASK_STATUS: Record<MaskMode, string> = {
   rect: "Drag to box the landmark",
-  foreground: "Click to keep",
-  background: "Click to remove",
+  pen: "Click to place points",
+  magnetic: "Move along an edge",
+  wand: "Click a colour to select it",
 };
+
+const MASK_HINT: Record<MaskMode, string> = {
+  rect: "Drag a box around the landmark. Everything outside the box is removed.",
+  pen: "Click to place points around an area, click the first point to close. Keep/Remove decides what the area does.",
+  magnetic: "Move along an edge; points snap to it. Click to pin a point, click the first point to close.",
+  wand: "Click a colour to select it. Tolerance widens the match.",
+};
+
+const WORKING_MAX_SIDE = 640;
+const CLOSE_RADIUS_PX = 8;
+const AUTO_ANCHOR_STEP = 6;
 
 function rectOf(drag: { start: [number, number]; now: [number, number] }): [number, number, number, number] {
   return [
@@ -30,26 +48,116 @@ function rectOf(drag: { start: [number, number]; now: [number, number] }): [numb
   ];
 }
 
+function encodeMask(mask: Uint8Array, w: number, h: number): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  const image = ctx.createImageData(w, h);
+  for (let i = 0; i < mask.length; i++) {
+    const value = mask[i] ? 255 : 0;
+    image.data[i * 4] = value;
+    image.data[i * 4 + 1] = value;
+    image.data[i * 4 + 2] = value;
+    image.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+}
+
+function overlayDataUrl(keep: Uint8Array, remove: Uint8Array, w: number, h: number): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  const image = ctx.createImageData(w, h);
+  for (let i = 0; i < keep.length; i++) {
+    const offset = i * 4;
+    if (keep[i]) {
+      image.data[offset] = 60; image.data[offset + 1] = 200; image.data[offset + 2] = 120; image.data[offset + 3] = 90;
+    } else if (remove[i]) {
+      image.data[offset] = 220; image.data[offset + 1] = 60; image.data[offset + 2] = 60; image.data[offset + 3] = 90;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
 function MaskEditor({
   file,
   spec,
   mode,
+  polarity,
+  tolerance,
+  magnifierOn,
+  compareOn,
+  cutoutUrl,
   onChange,
 }: {
   file: File;
   spec: MaskSpec;
   mode: MaskMode;
+  polarity: Polarity;
+  tolerance: number;
+  magnifierOn: boolean;
+  compareOn: boolean;
+  cutoutUrl: string;
   onChange: (next: MaskSpec) => void;
 }) {
   const [url, setUrl] = useState("");
   const [size, setSize] = useState<[number, number]>([1, 1]);
   const [drag, setDrag] = useState<{ start: [number, number]; now: [number, number] } | null>(null);
+  const [path, setPath] = useState<[number, number][] | null>(null);
+  const [cursor, setCursor] = useState<[number, number] | null>(null);
+  const [hardAnchors, setHardAnchors] = useState<boolean[]>([]);
+  const [travel, setTravel] = useState(0);
+  const [hover, setHover] = useState<[number, number] | null>(null);
+  const [split, setSplit] = useState(50);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const workingRef = useRef<{ ww: number; wh: number; data: Uint8ClampedArray } | null>(null);
+  const gradRef = useRef<Float32Array | null>(null);
+  const keepRef = useRef<Uint8Array | null>(null);
+  const removeRef = useRef<Uint8Array | null>(null);
+  const [overlayUrl, setOverlayUrl] = useState("");
+  const encodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const next = URL.createObjectURL(file);
     setUrl(next);
+    workingRef.current = null;
+    gradRef.current = null;
+    keepRef.current = null;
+    removeRef.current = null;
+    setOverlayUrl("");
     return () => URL.revokeObjectURL(next);
   }, [file]);
+
+  function ensureWorking(img: HTMLImageElement): { ww: number; wh: number; data: Uint8ClampedArray } {
+    if (workingRef.current) return workingRef.current;
+    const scale = Math.min(1, WORKING_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+    const ww = Math.max(1, Math.round(img.naturalWidth * scale));
+    const wh = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = ww;
+    canvas.height = wh;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(img, 0, 0, ww, wh);
+    const data = ctx.getImageData(0, 0, ww, wh).data;
+    const working = { ww, wh, data: new Uint8ClampedArray(data) };
+    workingRef.current = working;
+    if (!keepRef.current || keepRef.current.length !== ww * wh) keepRef.current = new Uint8Array(ww * wh);
+    if (!removeRef.current || removeRef.current.length !== ww * wh) removeRef.current = new Uint8Array(ww * wh);
+    return working;
+  }
+
+  function ensureGrad(): Float32Array {
+    if (gradRef.current) return gradRef.current;
+    const working = workingRef.current;
+    if (!working) return new Float32Array(0);
+    const grad = sobelMagnitude(working.data, working.ww, working.wh);
+    gradRef.current = grad;
+    return grad;
+  }
 
   function point(event: React.PointerEvent<HTMLImageElement>): [number, number] {
     const box = event.currentTarget.getBoundingClientRect();
@@ -59,32 +167,195 @@ function MaskEditor({
     ];
   }
 
+  function toWorking([x, y]: [number, number]): [number, number] {
+    const working = workingRef.current;
+    if (!working) return [x, y];
+    return [(x / size[0]) * working.ww, (y / size[1]) * working.wh];
+  }
+
+  function scheduleSerialise() {
+    if (encodeTimer.current) clearTimeout(encodeTimer.current);
+    encodeTimer.current = setTimeout(() => {
+      const working = workingRef.current;
+      const keep = keepRef.current;
+      const remove = removeRef.current;
+      if (!working || !keep || !remove) return;
+      onChange({
+        ...spec,
+        transparent: true,
+        keepMask: encodeMask(keep, working.ww, working.wh),
+        removeMask: encodeMask(remove, working.ww, working.wh),
+        maskSize: [working.ww, working.wh],
+      });
+      setOverlayUrl(overlayDataUrl(keep, remove, working.ww, working.wh));
+    }, 150);
+  }
+
+  function applyRegion(region: Uint8Array) {
+    const keep = keepRef.current;
+    const remove = removeRef.current;
+    if (!keep || !remove) return;
+    const target = polarity === "keep" ? keep : remove;
+    const other = polarity === "keep" ? remove : keep;
+    for (let i = 0; i < region.length; i++) {
+      if (region[i]) {
+        target[i] = 1;
+        other[i] = 0;
+      }
+    }
+    scheduleSerialise();
+  }
+
+  function rasterisePath(closed: [number, number][]) {
+    const working = workingRef.current;
+    if (!working || closed.length < 3) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = working.ww;
+    canvas.height = working.wh;
+    const ctx = canvas.getContext("2d")!;
+    ctx.beginPath();
+    ctx.moveTo(closed[0][0], closed[0][1]);
+    for (const [px, py] of closed.slice(1)) ctx.lineTo(px, py);
+    ctx.closePath();
+    ctx.fillStyle = "#fff";
+    ctx.fill("nonzero");
+    const data = ctx.getImageData(0, 0, working.ww, working.wh).data;
+    const region = new Uint8Array(working.ww * working.wh);
+    for (let i = 0; i < region.length; i++) region[i] = data[i * 4 + 3] > 127 ? 1 : 0;
+    applyRegion(region);
+  }
+
+  function closePath() {
+    if (path && path.length >= 3) rasterisePath(path);
+    setPath(null);
+    setCursor(null);
+    setHardAnchors([]);
+    setTravel(0);
+  }
+
+  function cancelPath() {
+    setPath(null);
+    setCursor(null);
+    setHardAnchors([]);
+    setTravel(0);
+  }
+
+  function popVertex() {
+    setPath((current) => {
+      if (!current || current.length === 0) return current;
+      if (mode !== "magnetic") return current.slice(0, -1);
+      let cut = current.length - 1;
+      while (cut > 0 && !hardAnchors[cut]) cut--;
+      return current.slice(0, cut);
+    });
+    setHardAnchors((anchors) => {
+      if (anchors.length === 0) return anchors;
+      let cut = anchors.length - 1;
+      while (cut > 0 && !anchors[cut]) cut--;
+      return anchors.slice(0, cut);
+    });
+  }
+
+  function nearFirst(p: [number, number]): boolean {
+    if (!path || path.length < 3) return false;
+    const working = workingRef.current;
+    if (!working) return false;
+    const dx = ((p[0] - path[0][0]) / working.ww) * size[0];
+    const dy = ((p[1] - path[0][1]) / working.wh) * size[1];
+    return Math.hypot(dx, dy) <= CLOSE_RADIUS_PX;
+  }
+
   const liveRect = drag ? rectOf(drag) : spec.rect;
+  const keepPx = keepRef.current ? keepRef.current.reduce((sum, v) => sum + v, 0) : 0;
+  const removePx = removeRef.current ? removeRef.current.reduce((sum, v) => sum + v, 0) : 0;
 
   return (
     <figure className="wash-tile">
-      <div className="wash-mask">
+      <div
+        className="wash-mask"
+        ref={rootRef}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (mode !== "pen" && mode !== "magnetic") return;
+          if (event.key === "Enter") closePath();
+          else if (event.key === "Escape") cancelPath();
+          else if (event.key === "Backspace") popVertex();
+        }}
+      >
         <img
           src={url}
           alt="Landmark mask source"
           draggable={false}
-          onLoad={(event) => setSize([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight])}
+          onLoad={(event) => {
+            setSize([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight]);
+            ensureWorking(event.currentTarget);
+          }}
           onPointerDown={(event) => {
-            if (event.button !== 0) return;
+            if (event.button !== 0 || compareOn) return;
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
-            if (mode === "rect") setDrag({ start: point(event), now: point(event) });
+            rootRef.current?.focus();
+            if (mode === "rect") {
+              setDrag({ start: point(event), now: point(event) });
+              return;
+            }
+            if (mode === "wand") {
+              const working = ensureWorking(event.currentTarget);
+              const [wx, wy] = toWorking(point(event));
+              const region = floodFill(working.data, working.ww, working.wh, Math.round(wx), Math.round(wy), tolerance);
+              applyRegion(region);
+              return;
+            }
+            const p = point(event);
+            const wp = toWorking(p);
+            if (mode === "pen" || mode === "magnetic") {
+              if (nearFirst(p)) {
+                closePath();
+                return;
+              }
+              setPath((current) => [...(current || []), wp]);
+              setHardAnchors((current) => [...current, true]);
+              setTravel(0);
+            }
           }}
           onPointerMove={(event) => {
-            if (drag) setDrag({ ...drag, now: point(event) });
+            if (compareOn) return;
+            const p = point(event);
+            setHover(p);
+            if (drag) {
+              setDrag({ ...drag, now: p });
+              return;
+            }
+            if ((mode === "pen" || mode === "magnetic") && path) {
+              const wp = toWorking(p);
+              setCursor(wp);
+              if (mode === "magnetic" && path.length > 0) {
+                const last = path[path.length - 1];
+                const step = Math.hypot(wp[0] - last[0], wp[1] - last[1]);
+                const nextTravel = travel + step;
+                if (nextTravel >= AUTO_ANCHOR_STEP) {
+                  const working = workingRef.current;
+                  if (working) {
+                    const grad = ensureGrad();
+                    const [sx, sy] = snapToEdge(grad, working.ww, working.wh, wp[0], wp[1], 8);
+                    setPath((current) => [...(current || []), [sx, sy]]);
+                    setHardAnchors((current) => [...current, false]);
+                    setTravel(0);
+                    return;
+                  }
+                }
+                setTravel(nextTravel);
+              }
+            }
           }}
-          onPointerUp={(event) => {
+          onPointerLeave={() => setHover(null)}
+          onDoubleClick={() => {
+            if (mode === "pen" || mode === "magnetic") closePath();
+          }}
+          onPointerUp={() => {
             if (mode === "rect" && drag) {
               const [minX, minY, w, h] = rectOf(drag);
               if (w >= 4 && h >= 4) onChange({ ...spec, transparent: true, rect: [minX, minY, w, h] });
-            } else if (mode !== "rect") {
-              const next = point(event);
-              onChange({ ...spec, [mode]: [...(spec[mode] || []), next] });
             }
             setDrag(null);
           }}
@@ -100,23 +371,76 @@ function MaskEditor({
             }}
           />
         )}
-        {(spec.foreground || []).map((pt, index) => (
+        {overlayUrl && <img className="wash-wand-overlay" src={overlayUrl} alt="" />}
+        {(mode === "pen" || mode === "magnetic") && path && workingRef.current && (
+          <svg className="wash-pen-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <polyline
+              className={`pen-line ${polarity}`}
+              vectorEffect="non-scaling-stroke"
+              fill="none"
+              points={path
+                .map(([px, py]) => `${(px / workingRef.current!.ww) * 100},${(py / workingRef.current!.wh) * 100}`)
+                .join(" ")}
+            />
+            {cursor && (
+              <line
+                className={`pen-line ${polarity}`}
+                vectorEffect="non-scaling-stroke"
+                x1={(path[path.length - 1][0] / workingRef.current.ww) * 100}
+                y1={(path[path.length - 1][1] / workingRef.current.wh) * 100}
+                x2={(cursor[0] / workingRef.current.ww) * 100}
+                y2={(cursor[1] / workingRef.current.wh) * 100}
+              />
+            )}
+            {path.map(([px, py], index) => (
+              <circle
+                key={index}
+                className={`pen-vertex ${polarity}`}
+                cx={(px / workingRef.current!.ww) * 100}
+                cy={(py / workingRef.current!.wh) * 100}
+                r={index === 0 ? 1.6 : 0.9}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+          </svg>
+        )}
+        {compareOn && cutoutUrl && (
+          <>
+            <img className="wash-compare-shot" src={cutoutUrl} alt="Cut-out preview" style={{ clipPath: `inset(0 0 0 ${split}%)` }} />
+            <div
+              className="wash-compare-handle"
+              style={{ left: `${split}%` }}
+              onPointerDown={(event) => {
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={(event) => {
+                if (event.buttons !== 1) return;
+                const box = rootRef.current!.getBoundingClientRect();
+                setSplit(Math.min(100, Math.max(0, ((event.clientX - box.left) / box.width) * 100)));
+              }}
+            />
+          </>
+        )}
+        {magnifierOn && hover && !compareOn && (
           <div
-            key={`fg-${index}`}
-            className="wash-mask-dot keep"
-            style={{ left: `${(pt[0] / size[0]) * 100}%`, top: `${(pt[1] / size[1]) * 100}%` }}
+            className="wash-loupe"
+            style={{
+              left: `${(hover[0] / size[0]) * 100}%`,
+              top: `${(hover[1] / size[1]) * 100}%`,
+              backgroundImage: `url(${url})`,
+              backgroundSize: `${size[0] * 3}px ${size[1] * 3}px`,
+              backgroundPosition: `${-(hover[0] * 3 - 60)}px ${-(hover[1] * 3 - 60)}px`,
+            }}
           />
-        ))}
-        {(spec.background || []).map((pt, index) => (
-          <div
-            key={`bg-${index}`}
-            className="wash-mask-dot remove"
-            style={{ left: `${(pt[0] / size[0]) * 100}%`, top: `${(pt[1] / size[1]) * 100}%` }}
-          />
-        ))}
+        )}
       </div>
       <figcaption className="wash-cap">Photo · {file.name}</figcaption>
       <p className="wash-mask-status">{MASK_STATUS[mode]}</p>
+      {(keepPx > 0 || removePx > 0) && (
+        <small className="wash-hint" style={{ padding: "0 8px 8px", display: "block" }}>
+          {keepPx} keep px · {removePx} remove px
+        </small>
+      )}
     </figure>
   );
 }
@@ -233,29 +557,6 @@ function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; fi
   );
 }
 
-function CutoutPreview({ wash, ink, file, spec }: { wash: number; ink: number; file: File; spec: MaskSpec }) {
-  const mask = JSON.stringify(spec);
-  const { url, busy, error } = usePreviewImage({ wash, ink, file, mask }, Boolean(spec.rect), 250);
-
-  return (
-    <figure className="wash-tile">
-      {spec.rect && url ? (
-        <img src={url} alt="Landmark cut-out preview" className={`wash-shot alpha${busy ? " busy" : ""}`} />
-      ) : (
-        <div className="wash-preview-empty">Draw the landmark box to see the cut-out.</div>
-      )}
-      <figcaption className="wash-cap">Cut-out · {file.name}</figcaption>
-      {error && <small className="wash-hint">{error}</small>}
-    </figure>
-  );
-}
-
-const MASK_HINT: Record<MaskMode, string> = {
-  rect: "Drag a box around the landmark. Everything outside the box is removed.",
-  foreground: "Click parts inside the box that were wrongly cut away.",
-  background: "Click parts that should be transparent.",
-};
-
 function LandmarkMask({
   files,
   index,
@@ -276,12 +577,32 @@ function LandmarkMask({
   ink: number;
 }) {
   const [mode, setMode] = useState<MaskMode>("rect");
-  const keep = (spec.foreground || []).length;
-  const remove = (spec.background || []).length;
+  const [polarity, setPolarity] = useState<Polarity>("keep");
+  const [magnifierOn, setMagnifierOn] = useState(mode !== "rect");
+  const [compareOn, setCompareOn] = useState(false);
+  const [tolerance, setTolerance] = useState(24);
+
+  const mask = JSON.stringify(spec);
+  const { url: cutoutUrl, busy, error } = usePreviewImage({ wash, ink, file: files[index], mask }, Boolean(spec.rect), 250);
+
+  function selectMode(next: MaskMode) {
+    setMode(next);
+    setMagnifierOn(next !== "rect");
+  }
 
   return (
     <div className="wash-look">
-      <MaskEditor file={files[index]} spec={spec} mode={mode} onChange={onChange} />
+      <MaskEditor
+        file={files[index]}
+        spec={spec}
+        mode={mode}
+        polarity={polarity}
+        tolerance={tolerance}
+        magnifierOn={magnifierOn}
+        compareOn={compareOn}
+        cutoutUrl={cutoutUrl}
+        onChange={onChange}
+      />
       <div className="wash-look-col">
         {files.length > 1 && (
           <label className="wash-card">
@@ -295,41 +616,75 @@ function LandmarkMask({
             </select>
           </label>
         )}
-        <div className="wash-card">
-          <span className="wash-card-title">Mask tools</span>
+        <div className="maps-stylebar">
+          <button className={`btn secondary toggle${mode === "rect" ? " on" : ""}`} type="button" onClick={() => selectMode("rect")}>
+            Landmark box
+          </button>
+          <button className={`btn secondary toggle${mode === "pen" ? " on" : ""}`} type="button" onClick={() => selectMode("pen")}>
+            Pen
+          </button>
+          <button className={`btn secondary toggle${mode === "magnetic" ? " on" : ""}`} type="button" onClick={() => selectMode("magnetic")}>
+            Magnetic pen
+          </button>
+          <button className={`btn secondary toggle${mode === "wand" ? " on" : ""}`} type="button" onClick={() => selectMode("wand")}>
+            Wand
+          </button>
+          <button
+            className={`btn secondary toggle${magnifierOn ? " on" : ""}`}
+            type="button"
+            onClick={() => setMagnifierOn((current) => !current)}
+          >
+            Magnifier
+          </button>
+          <button
+            className={`btn secondary toggle${compareOn ? " on" : ""}`}
+            type="button"
+            onClick={() => setCompareOn((current) => !current)}
+          >
+            Compare
+          </button>
+          <button className="btn secondary" type="button" onClick={onReset}>
+            Reset
+          </button>
+        </div>
+        {(mode === "pen" || mode === "magnetic" || mode === "wand") && (
           <div className="maps-stylebar">
-            <button className={`btn secondary toggle${mode === "rect" ? " on" : ""}`} type="button" onClick={() => setMode("rect")}>
-              Landmark box
-            </button>
-            <button
-              className={`btn secondary toggle${mode === "foreground" ? " on" : ""}`}
-              type="button"
-              onClick={() => setMode("foreground")}
-            >
+            <button className={`btn secondary toggle${polarity === "keep" ? " on" : ""}`} type="button" onClick={() => setPolarity("keep")}>
               Keep
             </button>
-            <button
-              className={`btn secondary toggle${mode === "background" ? " on" : ""}`}
-              type="button"
-              onClick={() => setMode("background")}
-            >
+            <button className={`btn secondary toggle${polarity === "remove" ? " on" : ""}`} type="button" onClick={() => setPolarity("remove")}>
               Remove
             </button>
-            <button className="btn secondary" type="button" onClick={onReset}>
-              Reset
-            </button>
           </div>
-          <small className="wash-hint">{MASK_HINT[mode]}</small>
-          {keep + remove > 0 && (
-            <small className="wash-hint">
-              {keep} keep · {remove} remove points
-            </small>
-          )}
-        </div>
+        )}
+        {mode === "wand" && (
+          <div className="wash-card">
+            <label className="ae-scrub has-slider wash-num">
+              <span>Tolerance:</span>
+              <input
+                type="range"
+                className="ae-scrub-slider"
+                min="0"
+                max="100"
+                step="1"
+                value={tolerance}
+                onChange={(event) => setTolerance(Number(event.target.value))}
+              />
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="1"
+                value={tolerance}
+                onChange={(event) => setTolerance(Math.min(100, Math.max(0, Number(event.target.value) || 0)))}
+              />
+            </label>
+          </div>
+        )}
         <div className="wash-card">
-          <span className="wash-card-title">Cut-out preview</span>
-          <CutoutPreview wash={wash} ink={ink} file={files[index]} spec={spec} />
-          <small className="wash-hint">This is what Add to map will place on the slide.</small>
+          <small className="wash-hint">{MASK_HINT[mode]}</small>
+          {error && <small className="wash-hint">{error}</small>}
+          {busy && <small className="wash-hint">Rendering cut-out…</small>}
         </div>
       </div>
     </div>
@@ -435,7 +790,9 @@ export function WatercolourTab() {
       </div>
       {transparent && files.length > 0 && (
         <>
-          <h2>Landmark mask</h2>
+          <div className="history-head">
+            <h2>Landmark mask</h2>
+          </div>
           <LandmarkMask
             files={files}
             index={activeIndex}

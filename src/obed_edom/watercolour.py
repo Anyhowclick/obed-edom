@@ -186,7 +186,15 @@ def _feather_mask(mask: np.ndarray, amount: float = 1.5) -> np.ndarray:
     return cv2.GaussianBlur(mask, (0, 0), amount)
 
 
-def grabcut_mask(image: Image.Image, rect: tuple[float, float, float, float], *, foreground: list[tuple[float, float]] | None = None, background: list[tuple[float, float]] | None = None) -> Image.Image:
+def grabcut_mask(
+    image: Image.Image,
+    rect: tuple[float, float, float, float],
+    *,
+    foreground: list[tuple[float, float]] | None = None,
+    background: list[tuple[float, float]] | None = None,
+    keep_mask: Image.Image | None = None,
+    remove_mask: Image.Image | None = None,
+) -> Image.Image:
     x, y, width, height = rect
     if not all(math.isfinite(v) for v in rect) or width <= 0 or height <= 0:
         raise WatercolourError("Foreground rectangle must be finite and non-empty")
@@ -204,7 +212,13 @@ def grabcut_mask(image: Image.Image, rect: tuple[float, float, float, float], *,
             if not (math.isfinite(px) and math.isfinite(py) and 0 <= px < image.width and 0 <= py < image.height):
                 raise WatercolourError("Mask correction point is outside the image")
             cv2.circle(mask, (round(px), round(py)), 6, kind, -1)
-    if foreground or background:
+    for painted, kind in ((remove_mask, cv2.GC_BGD), (keep_mask, cv2.GC_FGD)):
+        if painted is None:
+            continue
+        resized = painted.resize(image.size, Image.NEAREST)
+        flag = np.asarray(resized.convert("L")) > 127
+        mask[flag] = kind
+    if foreground or background or keep_mask is not None or remove_mask is not None:
         cv2.grabCut(rgb, mask, None, model_bg, model_fg, 3, cv2.GC_INIT_WITH_MASK)
     alpha = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
     return Image.fromarray(_feather_mask(alpha), "L")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import json
 import math
@@ -44,6 +46,36 @@ def _read_limited(upload: UploadFile) -> bytes:
         chunks.append(chunk)
 
 
+MASK_FIELD_MAX_BYTES = 1024 * 1024
+MASK_FIELD_MAX_PIXELS = 4 * 1024 * 1024
+
+
+def _decode_mask_field(spec: dict[str, Any], key: str) -> Image.Image | None:
+    value = spec.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WatercolourError("Mask settings are invalid")
+    try:
+        payload = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise WatercolourError("Mask settings are invalid") from exc
+    if len(payload) > MASK_FIELD_MAX_BYTES:
+        raise WatercolourError("Mask settings are invalid")
+    try:
+        buffer = io.BytesIO(payload)
+        probe = Image.open(buffer)
+        probe.verify()
+        buffer.seek(0)
+        mask = Image.open(buffer)
+        mask.load()
+    except Exception as exc:
+        raise WatercolourError("Mask settings are invalid") from exc
+    if mask.width * mask.height > MASK_FIELD_MAX_PIXELS:
+        raise WatercolourError("Mask settings are invalid")
+    return mask.convert("L")
+
+
 def _mask_for(image, spec: dict[str, Any] | None):
     if not spec or not spec.get("transparent"):
         return None
@@ -54,7 +86,16 @@ def _mask_for(image, spec: dict[str, Any] | None):
         raise WatercolourError("Transparent landmark output needs a foreground rectangle")
     foreground = spec.get("foreground") if isinstance(spec.get("foreground"), list) else []
     background = spec.get("background") if isinstance(spec.get("background"), list) else []
-    return grabcut_mask(image, tuple(float(value) for value in rect), foreground=foreground, background=background)
+    keep_mask = _decode_mask_field(spec, "keepMask")
+    remove_mask = _decode_mask_field(spec, "removeMask")
+    return grabcut_mask(
+        image,
+        tuple(float(value) for value in rect),
+        foreground=foreground,
+        background=background,
+        keep_mask=keep_mask,
+        remove_mask=remove_mask,
+    )
 
 
 def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int]) -> dict[str, Any] | None:
@@ -73,6 +114,12 @@ def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int
         "foreground": [scale_point(point) for point in (spec.get("foreground") or [])],
         "background": [scale_point(point) for point in (spec.get("background") or [])],
     }
+    if spec.get("keepMask") is not None:
+        scaled["keepMask"] = spec.get("keepMask")
+    if spec.get("removeMask") is not None:
+        scaled["removeMask"] = spec.get("removeMask")
+    if spec.get("maskSize") is not None:
+        scaled["maskSize"] = spec.get("maskSize")
     rect = spec.get("rect")
     if rect is not None:
         if not isinstance(rect, list) or len(rect) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect):
@@ -118,8 +165,8 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
 async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42), masks: str = Form("{}")) -> dict:
     if not files or len(files) > MAX_BATCH_FILES:
         raise HTTPException(400, f"Choose between one and {MAX_BATCH_FILES} photos")
-    if len(masks.encode("utf-8")) > 256 * 1024:
-        raise HTTPException(413, "Mask settings exceed the 256 KB limit")
+    if len(masks.encode("utf-8")) > 2 * 1024 * 1024:
+        raise HTTPException(413, "Mask settings exceed the 2 MB limit")
     try:
         mask_specs = json.loads(masks)
     except json.JSONDecodeError as exc:
@@ -191,8 +238,8 @@ async def watercolour_preview_upload(
         image = decode_image(raw)
     except WatercolourError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if len(mask.encode("utf-8")) > 256 * 1024:
-        raise HTTPException(413, "Mask settings exceed the 256 KB limit")
+    if len(mask.encode("utf-8")) > 2 * 1024 * 1024:
+        raise HTTPException(413, "Mask settings exceed the 2 MB limit")
     try:
         spec = json.loads(mask)
     except json.JSONDecodeError as exc:

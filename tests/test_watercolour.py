@@ -144,6 +144,74 @@ def test_preview_cuts_out_the_landmark_rect():
     assert (alpha == 0).any() and (alpha == 255).any()
 
 
+def _mask_png(box, size=(400, 300)):
+    mask = Image.new('L', size, 0)
+    x0, y0, x1, y1 = box
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            mask.putpixel((x, y), 255)
+    out = BytesIO(); mask.save(out, 'PNG'); import base64; return base64.b64encode(out.getvalue()).decode('ascii')
+
+
+def test_preview_keep_mask_forces_opaque_centre():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    response = client.post(
+        '/api/watercolour/preview',
+        files={'file': ('landmark.png', _landmark_png(), 'image/png')},
+        data={'mask': json.dumps({
+            'transparent': True,
+            'rect': [110, 66, 178, 166],
+            'keepMask': _mask_png((180, 130, 220, 170)),
+            'maskSize': [400, 300],
+        })},
+    )
+    assert response.status_code == 200, response.text
+    image = Image.open(BytesIO(response.content)).convert('RGBA')
+    factor = image.width / 400
+    cx, cy = round(200 * factor), round(150 * factor)
+    assert image.getpixel((cx, cy))[3] == 255
+
+
+def test_preview_remove_mask_clears_pixels():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    response = client.post(
+        '/api/watercolour/preview',
+        files={'file': ('landmark.png', _landmark_png(), 'image/png')},
+        data={'mask': json.dumps({
+            'transparent': True,
+            'rect': [110, 66, 178, 166],
+            'removeMask': _mask_png((130, 90, 260, 200)),
+            'maskSize': [400, 300],
+        })},
+    )
+    assert response.status_code == 200, response.text
+    image = Image.open(BytesIO(response.content)).convert('RGBA')
+    factor = image.width / 400
+    cx, cy = round(200 * factor), round(150 * factor)
+    assert image.getpixel((cx, cy))[3] == 0
+
+
+def test_preview_rejects_malformed_mask_png():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    response = client.post(
+        '/api/watercolour/preview',
+        files={'file': ('landmark.png', _landmark_png(), 'image/png')},
+        data={'mask': json.dumps({
+            'transparent': True,
+            'rect': [110, 66, 178, 166],
+            'keepMask': 'not-base64!!',
+        })},
+    )
+    assert response.status_code == 400
+    assert 'invalid' in response.text.lower()
+
+
 def test_preview_rejects_transparent_without_a_rect():
     from obed_edom.web.app import app
     from fastapi.testclient import TestClient
