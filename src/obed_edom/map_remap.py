@@ -122,7 +122,7 @@ class ItemTransform:
     # uniform scale about the group's LIVE frame — after setSlideSize that frame is the
     # union of a word-wrapped autosize child (measured 278x88 -> 69x261 on Gold slide 2),
     # and the resize freezes the child wrapped permanently. Source-deck rects; the targets
-    # are derived in as_dict so they survive _pack_left_groups moving x/y afterwards.
+    # are derived in as_dict so they survive _pack_list_transforms moving x/y afterwards.
     child_src: list[dict[str, Any]] | None = None
 
     def _child_payload(self) -> list[dict[str, Any]] | None:
@@ -648,36 +648,6 @@ def pack_columns_from_right(
             placed[i] = Rect(max(margin - w * 0.15, col_left), y, w, h)
             y += h + gap
         col_left -= gap
-    return placed
-
-
-def pack_columns_from_left(
-    boxes: list[Rect],
-    dest_w: float,
-    dest_h: float,
-    *,
-    gap: float = 10.0,
-    margin: float = 16.0,
-) -> list[Rect]:
-    """Stack left-edge columns; a new column must clear the widest box in the previous one."""
-    if not boxes:
-        return []
-    top = margin
-    bottom = max(margin + 8.0, dest_h - margin)
-    placed: list[Rect] = []
-    col_left = margin
-    col_max_w = 0.0
-    y = top
-    for box in boxes:
-        w = max(8.0, box.w)
-        h = max(8.0, box.h)
-        if placed and y + h > bottom + 0.5:
-            col_left = col_left + col_max_w + gap
-            y = top
-            col_max_w = 0.0
-        placed.append(Rect(col_left, y, w, h))
-        col_max_w = max(col_max_w, w)
-        y += h + gap
     return placed
 
 
@@ -2126,20 +2096,6 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
         lists[idx].h = rect.h
 
 
-def _pack_left_groups(groups: list["ItemTransform"], recipe: dict[str, Any]) -> None:
-    """Re-place left-column groups parked at x=16. Group width does not scale children, so only move."""
-    if len(groups) < 2:
-        return
-    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
-    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
-    order = sorted(range(len(groups)), key=lambda i: (groups[i].src.y, groups[i].src.x))
-    boxes = [Rect(groups[i].x, groups[i].y, groups[i].w, groups[i].h) for i in order]
-    placed = pack_columns_from_left(boxes, dest_w, dest_h)
-    for idx, rect in zip(order, placed, strict=True):
-        groups[idx].x = rect.x
-        groups[idx].y = rect.y
-
-
 # FIT_MAX_DELTA_FRACTION: max body nudge back on-screen, so it stays near where it was placed.
 FIT_MAX_DELTA_FRACTION = 0.10
 FIT_MARGIN = 8.0
@@ -2413,7 +2369,6 @@ def plan_slide_transforms(
     from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
 
     out: list[ItemTransform] = []
-    left_groups: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     group_child_text: dict[int, str] = slide.get("groupChildText") or {}
     group_caption: dict[int, dict[str, Any]] = slide.get("groupCaption") or {}
@@ -2439,7 +2394,6 @@ def plan_slide_transforms(
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
-        parked_left = False
         # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts back on-frame.
         if id(item) in coincident_dups:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
@@ -2811,11 +2765,8 @@ def plan_slide_transforms(
                 child_src=child_src,
             )
         )
-        if parked_left:
-            left_groups.append(out[-1])
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    _pack_left_groups(left_groups, recipe)
     if card_keys:
         grid_cards = [t for t in out if (t.kind, t.kind_index) in card_keys]
         grid_obstacles = [
