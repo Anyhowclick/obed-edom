@@ -309,6 +309,64 @@ def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
     assert len([item for item in items if item["kind"] == "shape"]) == 1
 
 
+def _landmark_church(**extra) -> dict:
+    row = {
+        "id": "lm",
+        "name": "Landmark",
+        "lat": 3.0,
+        "lon": 101.0,
+        "kind": "landmark",
+        "color": "#c44a42",
+        "assetId": "asset1",
+        "size": 100,
+    }
+    row.update(extra)
+    return row
+
+
+def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    reveal_mov = tmp_path / "reveal" / "s1-lm.mov"
+    reveal_mov.parent.mkdir(parents=True, exist_ok=True)
+    reveal_mov.write_bytes(b"mov")
+
+    without_reveal = _slide("s1", camera, churches=[_landmark_church()])
+    still = _dummy_png(tmp_path / "s1.png")
+    baseline = build_slide_items(
+        without_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root
+    )
+    image_item = next(item for item in baseline if item.get("landmark"))
+    assert image_item["kind"] == "image"
+
+    with_reveal = _slide("s1", camera, churches=[_landmark_church(revealMov=str(reveal_mov))])
+    revealed = build_slide_items(
+        with_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root
+    )
+    movie_item = next(item for item in revealed if item.get("landmark"))
+    assert movie_item["kind"] == "movie"
+    assert movie_item["path"] == str(reveal_mov)
+    for key in ("x", "y", "w", "h"):
+        assert movie_item[key] == image_item[key]
+
+
+def test_landmark_reveal_suppressed_on_duplicate_slide(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    reveal_mov = tmp_path / "reveal" / "s1-lm.mov"
+    reveal_mov.parent.mkdir(parents=True, exist_ok=True)
+    reveal_mov.write_bytes(b"mov")
+    camera = _camera(3.0, 101.0, 8)
+    slide = _slide("s1", camera, churches=[_landmark_church(revealMov=str(reveal_mov))])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root, allow_reveal=False
+    )
+    landmark_item = next(item for item in items if item.get("landmark"))
+    assert landmark_item["kind"] == "image"
+
+
 def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Path):
     near_dateline = _slide(
         "s1",

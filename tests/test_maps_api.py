@@ -798,6 +798,48 @@ def test_landmark_assets_are_owned_referenced_and_session_portable():
         assert archive.read(f"assets/{asset['id']}.png")
 
 
+def test_reveal_accepted_on_landmark_rejected_elsewhere():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "reveal": {"kind": "brush", "duration": 1.2},
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["churches"][0]["reveal"]["duration"] == 1.2
+
+    doc["slides"][0]["churches"][0]["kind"] = "dot"
+    doc["slides"][0]["churches"][0].pop("assetId")
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
+def test_reveal_duration_out_of_range_rejected():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "reveal": {"kind": "brush", "duration": 10},
+        }
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
 def test_church_size_allows_up_to_4000_and_rejects_above():
     job = _seed()
     doc = _doc(job)

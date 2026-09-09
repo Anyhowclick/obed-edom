@@ -2214,6 +2214,45 @@ export function MapsTab() {
                   </label>
                   <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
+                  {pin.kind === "landmark" && (
+                    <>
+                      <label className="maps-check">
+                        <input
+                          type="checkbox"
+                          checked={!!pin.reveal}
+                          disabled={locked}
+                          onChange={(event) =>
+                            updateActive({
+                              churches: (activeView?.churches || []).map((c) =>
+                                c.id === pin.id ? { ...c, reveal: event.target.checked ? { kind: "brush", duration: 1.2 } : undefined } : c
+                              ),
+                            })
+                          }
+                        />{" "}
+                        Paint-on reveal
+                      </label>
+                      {pin.reveal && (
+                        <label>
+                          Reveal duration (s)
+                          <input
+                            type="number"
+                            min="0.3"
+                            max="5"
+                            step="0.1"
+                            value={pin.reveal.duration}
+                            disabled={locked}
+                            onChange={(event) =>
+                              updateActive({
+                                churches: (activeView?.churches || []).map((c) =>
+                                  c.id === pin.id ? { ...c, reveal: { kind: "brush", duration: Number(event.target.value) } } : c
+                                ),
+                              })
+                            }
+                          />
+                        </label>
+                      )}
+                    </>
+                  )}
                   <label className="maps-check"><input type="checkbox" checked={pin.showLabel !== false} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
                   <label>
                     Colour:
@@ -2548,6 +2587,7 @@ export function MapsTab() {
                             <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openPin(church.id)}>
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
+                              {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
                               {church.showLabel === false && <span className="maps-pin-hidden">Hidden</span>}
                             </button>
                           </div>

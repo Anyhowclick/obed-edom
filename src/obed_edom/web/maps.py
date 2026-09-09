@@ -117,6 +117,12 @@ class MapsIsolate(BaseModel):
     strength: float = Field(default=0.6, ge=0, le=1)
 
 
+class MapsReveal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["brush"] = "brush"
+    duration: float = Field(default=1.2, ge=0.3, le=5)
+
+
 class MapsChurch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -134,6 +140,7 @@ class MapsChurch(BaseModel):
     assetHeight: int | None = Field(default=None, ge=1, le=10000)
     size: float | None = Field(default=None, ge=1, le=4000)
     opacity: float | None = Field(default=None, ge=0, le=1)
+    reveal: MapsReveal | None = None
 
 
 class MapsAsset(BaseModel):
@@ -406,6 +413,8 @@ def _validate_asset_document(doc: MapsDocument, result: dict[str, Any]) -> MapsD
                     raise HTTPException(400, "Legacy external photo paths are not supported; upload an owned Maps asset")
                 if church.kind == "landmark" and not church.assetId:
                     raise HTTPException(400, "Landmark objects require an uploaded Maps asset")
+                if church.reveal and church.kind != "landmark":
+                    raise HTTPException(400, "Paint-on reveal is only available for landmark objects")
     available = {asset.id: asset for asset in (MapsAsset.model_validate(row) for row in result.get("assets") or [])}
     referenced = _referenced_asset_ids(doc)
     if referenced - set(available):

@@ -720,6 +720,7 @@ def _place_churches(
     origin_x: float = 0,
     capture_w: float = WALL_WIDTH,
     asset_root: Path | None = None,
+    allow_reveal: bool = True,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for church in churches:
@@ -765,16 +766,20 @@ def _place_churches(
                 with Image.open(landmark) as image:
                     height = size * image.height / max(1, image.width)
                     opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
-                    if opacity < 1:
-                        faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
-                        if not faded.exists():
-                            rgba = image.convert("RGBA")
-                            rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
-                            rgba.save(faded, "PNG")
-                        landmark = faded
-                item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
-                item["opacity"] = float(church.get("opacity") if church.get("opacity") is not None else 1)
-                items.append(item)
+                    reveal_mov = church.get("revealMov") if allow_reveal else None
+                    if reveal_mov:
+                        items.append(_item("movie", x, cy - height, size, height, path=str(reveal_mov), landmark=True))
+                    else:
+                        if opacity < 1:
+                            faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
+                            if not faded.exists():
+                                rgba = image.convert("RGBA")
+                                rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
+                                rgba.save(faded, "PNG")
+                            landmark = faded
+                        item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
+                        item["opacity"] = opacity
+                        items.append(item)
             elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
             else:
@@ -865,6 +870,7 @@ def build_slide_items(
     dest_slide: dict[str, Any] | None = None,
     asset_root: Path | None = None,
     country_still: Path | None = None,
+    allow_reveal: bool = True,
 ) -> list[dict[str, Any]]:
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
@@ -886,6 +892,7 @@ def build_slide_items(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                allow_reveal=allow_reveal,
             )
         )
     oversized_cg_movie = bg_movie is not None and float(mapped["w"]) > CG_WIDTH
@@ -989,6 +996,7 @@ def plan_deck(
             dest_slide=item_dest,
             asset_root=output_dir / "assets",
             country_still=country_still,
+            allow_reveal=not duplicate,
         )
         ops.append(
             {
@@ -1411,6 +1419,47 @@ def _run_one_deck(
     return script
 
 
+def _render_reveals(
+    output_dir: Path,
+    slides: list[dict[str, Any]],
+    links: list[dict[str, Any]],
+    log: Callable[[str], None],
+    is_cancelled: Callable[[], bool] | None,
+) -> None:
+    from obed_edom.maps_reveal import render_reveal, reveal_path, reveal_seed
+
+    asset_root = output_dir / "assets"
+    for slide in slides:
+        sid = str(slide.get("id") or "")
+        outgoing = _outgoing(sid, links)
+        if outgoing and str(outgoing.get("kind") or "") == "movie":
+            continue
+        for view in (slide, slide.get("cg")):
+            if not isinstance(view, dict):
+                continue
+            for church in view.get("churches") or []:
+                reveal = church.get("reveal")
+                if str(church.get("kind") or "") != "landmark" or not reveal:
+                    continue
+                asset_id = str(church.get("assetId") or "")
+                asset = asset_root / f"{asset_id}.png"
+                if not asset_id or not asset.is_file():
+                    continue
+                dest = reveal_path(output_dir, sid, str(church.get("id") or ""))
+                if not dest.exists() or dest.stat().st_mtime < asset.stat().st_mtime:
+                    _raise_if_cancelled(is_cancelled)
+                    log(f"Rendering paint-on reveal for {church.get('name') or asset_id}…")
+                    render_reveal(
+                        asset,
+                        dest,
+                        duration=float(reveal.get("duration") or 1.2),
+                        seed=reveal_seed(str(church.get("id") or "")),
+                        opacity=float(church.get("opacity") if church.get("opacity") is not None else 1),
+                        is_cancelled=is_cancelled,
+                    )
+                church["revealMov"] = str(dest)
+
+
 def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True, export_dsk: bool = False) -> dict[str, Any]:
     if not export_lw and not export_cg and not export_dsk:
         raise ValueError("At least one export target must be on")
@@ -1432,6 +1481,13 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
             output_dir, slides, log=lambda m: _log(job, m), links=links, is_cancelled=is_cancelled
         )
     except (ImportError, AttributeError):
+        pass
+    else:
+        result["slides"] = slides
+    _raise_if_cancelled(is_cancelled)
+    try:
+        _render_reveals(output_dir, slides, links, lambda m: _log(job, m), is_cancelled)
+    except ImportError:
         pass
     else:
         result["slides"] = slides

@@ -45,6 +45,7 @@ export type MapsChurch = {
   assetHeight?: number;
   size?: number;
   opacity?: number;
+  reveal?: { kind: "brush"; duration: number };
 };
 
 export type MapsCgOverride = {
