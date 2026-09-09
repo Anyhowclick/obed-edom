@@ -18,6 +18,10 @@
  "goldenVersion": 1,
  "inspectVersion": 4,
  "planSha256": "82d2c545febbe53b11fe6e5ddd3703b207524ebe0e8089d0c3c577932b1ae16f",
+ "plannerEnv": {
+  "fontEnv": "FONT_ENV_UNAVAILABLE",
+  "osBuild": "26.6.2"
+ },
  "previews": "none",
  "reuses": [
   {
