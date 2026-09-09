@@ -19,13 +19,16 @@ import {
   startMaps,
   uploadMapsAsset,
   MapsStateConflictError,
+  addWatercolourToMap,
+  watercolourImageUrl,
   type Job,
 } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
+import { type Item as WcItem } from "../components/WatercolourResultView";
 import { useRunNav } from "../nav";
 import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
-import { useCurrentJob } from "../sessions";
+import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
@@ -56,6 +59,8 @@ import {
   worldCopyWarning,
   nextPinId,
   nextSlideId,
+  reorderSlides,
+  restitchLinks,
   slideHiddenLayers,
   suggestedHopKind,
   type MapsCamera,
@@ -107,6 +112,22 @@ function IconTrash() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function IconArrowUp() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 5v14M12 5l-6 6M12 5l6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconArrowDown() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 19V5M12 19l-6-6M12 19l6-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -228,6 +249,11 @@ export function MapsTab() {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
+  const moveSlideRef = useRef<(delta: number) => void>(() => undefined);
+  const [landmarkPicker, setLandmarkPicker] = useState(false);
+  const [wcGridOpen, setWcGridOpen] = useState(false);
+  const landmarkPickerRef = useRef<HTMLDivElement | null>(null);
+  const [wcJobs, setWcJobs] = useState<Job[]>([]);
 
   useEffect(() => {
     void loadAdmin0().then(() => setNamesTick((n) => n + 1));
@@ -391,6 +417,22 @@ export function MapsTab() {
       document.removeEventListener("keydown", onKey);
     };
   }, [layersOpen]);
+
+  useEffect(() => {
+    if (!landmarkPicker) return;
+    function onDoc(event: PointerEvent) {
+      if (landmarkPickerRef.current && !landmarkPickerRef.current.contains(event.target as Node)) setLandmarkPicker(false);
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setLandmarkPicker(false);
+    }
+    document.addEventListener("pointerdown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [landmarkPicker]);
 
   useEffect(() => {
     if (!addMenuOpen && !sessionMenuOpen) return;
@@ -707,25 +749,18 @@ export function MapsTab() {
   }
 
   function restitch(nextSlides: MapsSlide[], prevLinks: MapsLink[]): MapsLink[] {
-    const links: MapsLink[] = [];
-    for (let i = 0; i < nextSlides.length - 1; i++) {
-      const from = nextSlides[i];
-      const to = nextSlides[i + 1];
-      const existing = prevLinks.find((link) => link.from === from.id && link.to === to.id);
-      const kind = suggestedHopKind(from, to);
-      links.push(
-        existing || {
-          from: from.id,
-          to: to.id,
-          kind,
-          duration: 1.2,
-          playWithoutClick: false,
-          ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
-        }
-      );
-    }
-    return links;
+    return restitchLinks(nextSlides, prevLinks);
   }
+
+  function moveSlide(delta: number) {
+    const current = docRef.current;
+    if (!current || !active || locked) return;
+    const next = reorderSlides(current, active.id, delta);
+    if (next === current) return;
+    patchDoc(next);
+    fireAndForgetSave();
+  }
+  moveSlideRef.current = moveSlide;
 
   function removeSlide() {
     const current = docRef.current;
@@ -903,6 +938,47 @@ export function MapsTab() {
       updateActive({ churches: [...targetView.churches, landmark] });
       setSelectedPin(landmark.id);
       setInspTab("pins");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function loadWcJobs() {
+    return listJobs("watercolour")
+      .then((jobs) => setWcJobs(jobs.filter((candidate) => candidate.status === "done")))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }
+
+  const wcOptions = useMemo(() => {
+    const options: { job: Job; item: WcItem }[] = [];
+    for (const wcJob of wcJobs) {
+      const items = (wcJob.result?.items as WcItem[] | undefined) || [];
+      for (const item of items) {
+        if (item.status === "done" && item.transparent === true) options.push({ job: wcJob, item });
+      }
+    }
+    return options;
+  }, [wcJobs]);
+
+  async function addLandmarkFromWatercolour(wcJobId: string, itemId: string) {
+    if (!job || !active || locked || activeAudience !== "lw") return;
+    const targetJobId = job.id;
+    const targetSlideId = active.id;
+    const before = new Set((activeView?.churches || []).map((c) => c.id));
+    try {
+      await flushAndSave(true);
+      if (jobRef.current?.id !== targetJobId) return;
+      const updated = await addWatercolourToMap(wcJobId, itemId, targetJobId, targetSlideId);
+      if (jobRef.current?.id !== targetJobId) return;
+      reconcileServerJob(updated);
+      const target = docRef.current?.slides.find((slide) => slide.id === targetSlideId);
+      const targetView = target ? slideForAudience(target, "lw") : null;
+      const newChurch = targetView?.churches.find((c) => !before.has(c.id));
+      if (newChurch) {
+        setSelectedPin(newChurch.id);
+        setInspTab("pins");
+      }
+      setLandmarkPicker(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1565,9 +1641,17 @@ export function MapsTab() {
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
-      if (previewingRef.current) stopPreview(true);
-      if (exportingRef.current) exportAbort.current = true;
+      if (event.key === "Escape") {
+        if (previewingRef.current) stopPreview(true);
+        if (exportingRef.current) exportAbort.current = true;
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && (event.key === "[" || event.key === "]")) {
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+        event.preventDefault();
+        moveSlideRef.current(event.key === "[" ? -1 : 1);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => {
@@ -1953,6 +2037,12 @@ export function MapsTab() {
           <div className="maps-nav-actions">
             <button className="btn secondary" type="button" onClick={addSlide} disabled={locked}>
               +
+            </button>
+            <button className="btn secondary maps-nav-move" type="button" onClick={() => moveSlide(-1)} disabled={locked || !active || activeIndex <= 0} title="Move slide up" aria-label="Move slide up">
+              <IconArrowUp />
+            </button>
+            <button className="btn secondary maps-nav-move" type="button" onClick={() => moveSlide(1)} disabled={locked || !active || activeIndex >= slides.length - 1} title="Move slide down" aria-label="Move slide down">
+              <IconArrowDown />
             </button>
             <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />
@@ -2363,9 +2453,67 @@ export function MapsTab() {
                       if (file) void addLandmark(file);
                     }}
                   />
-                  <button className="btn secondary" type="button" disabled={locked} onClick={() => landmarkInput.current?.click()}>
-                    Add transparent landmark
-                  </button>
+                  <div className="style-picker" ref={landmarkPickerRef}>
+                    <button
+                      className="btn secondary style-picker-trigger"
+                      type="button"
+                      aria-haspopup="true"
+                      aria-expanded={landmarkPicker}
+                      disabled={locked}
+                      onClick={() => {
+                        if (landmarkPicker) {
+                          setLandmarkPicker(false);
+                          return;
+                        }
+                        setWcGridOpen(false);
+                        setLandmarkPicker(true);
+                        void loadWcJobs();
+                      }}
+                    >
+                      Add transparent landmark ▾
+                    </button>
+                    {landmarkPicker && (
+                      <div className="style-picker-pop maps-landmark-pop">
+                        <button
+                          className="btn secondary"
+                          type="button"
+                          onClick={() => {
+                            setLandmarkPicker(false);
+                            landmarkInput.current?.click();
+                          }}
+                        >
+                          From a file…
+                        </button>
+                        {activeAudience === "cg" ? (
+                          <p className="note">Watercolour landmarks are LW-only.</p>
+                        ) : (
+                          <>
+                            <button className="btn secondary" type="button" onClick={() => setWcGridOpen(!wcGridOpen)}>
+                              From a watercolour batch…
+                            </button>
+                            {wcGridOpen && (
+                              wcOptions.length ? (
+                                <div className="style-picker-grid maps-landmark-grid">
+                                  {wcOptions.map(({ job: wcJob, item }) => (
+                                    <div
+                                      key={`${wcJob.id}:${item.id}`}
+                                      className="style-picker-tile maps-landmark-tile"
+                                      onClick={() => void addLandmarkFromWatercolour(wcJob.id, item.id)}
+                                    >
+                                      <img src={watercolourImageUrl(wcJob.id, item.id, "result")} alt="" />
+                                      <span>{item.name} · {jobLabel(wcJob)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="note">No transparent watercolour landmarks yet.</p>
+                              )
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   {(activeView?.churches.length || 0) === 0 ? (
                     <p className="note">Shift-click the map to add a pin, or add a transparent landmark.</p>
                   ) : (

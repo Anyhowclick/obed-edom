@@ -71,6 +71,8 @@ export type MapsSlide = {
   hillshade?: boolean;
   isolate?: MapsIsolate;
   stillPng?: string;
+  movieMov?: string;
+  movieDuration?: number;
   cgShiftX: number;
   cgShiftY: number;
   includeSidePanels: boolean;
@@ -274,6 +276,54 @@ export function suggestedHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const kind = inferHopKind(from, to);
   if (kind === "morph" && !plateFitsMorph(from, to)) return "movie";
   return kind;
+}
+
+export function restitchLinks(nextSlides: MapsSlide[], prevLinks: MapsLink[]): MapsLink[] {
+  const links: MapsLink[] = [];
+  for (let i = 0; i < nextSlides.length - 1; i++) {
+    const from = nextSlides[i];
+    const to = nextSlides[i + 1];
+    const existing = prevLinks.find((link) => link.from === from.id && link.to === to.id);
+    const kind = suggestedHopKind(from, to);
+    links.push(
+      existing || {
+        from: from.id,
+        to: to.id,
+        kind,
+        duration: 1.2,
+        playWithoutClick: false,
+        ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
+      }
+    );
+  }
+  return links;
+}
+
+function clearMovieFields(slide: MapsSlide): MapsSlide {
+  const next: MapsSlide = { ...slide };
+  delete next.movieMov;
+  delete next.movieDuration;
+  if (next.cg) {
+    next.cg = { ...next.cg };
+    delete next.cg.movieMov;
+    delete next.cg.movieDuration;
+  }
+  return next;
+}
+
+/** Swap the slide at `id` with its neighbour `delta` away, restitch links, and drop stale movie renders on the affected outgoing hops. Returns `doc` unchanged if the move is out of range. */
+export function reorderSlides(doc: MapsDocument, id: string, delta: number): MapsDocument {
+  const index = doc.slides.findIndex((s) => s.id === id);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= doc.slides.length) return doc;
+  const slides = [...doc.slides];
+  [slides[index], slides[target]] = [slides[target], slides[index]];
+  const clearIds = new Set([slides[index].id, slides[target].id]);
+  const predecessor = slides[Math.min(index, target) - 1];
+  if (predecessor) clearIds.add(predecessor.id);
+  const nextSlides = slides.map((slide) => (clearIds.has(slide.id) ? clearMovieFields(slide) : slide));
+  const links = restitchLinks(nextSlides, doc.links);
+  return { ...doc, slides: nextSlides, links };
 }
 
 function mercatorY(lat: number): number {

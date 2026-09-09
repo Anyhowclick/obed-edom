@@ -627,9 +627,10 @@ export async function cancelWatercolour(id: string): Promise<Job> {
   return res.json();
 }
 
-export async function addWatercolourToMap(jobId: string, itemId: string, mapsJobId: string, slideId: string): Promise<void> {
+export async function addWatercolourToMap(jobId: string, itemId: string, mapsJobId: string, slideId: string): Promise<Job> {
   const res = await fetch(`/api/watercolour/${jobId}/items/${itemId}/add-to-map/${mapsJobId}/${slideId}`, { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 export function watercolourImageUrl(jobId: string, itemId: string, kind: "original" | "result"): string {
