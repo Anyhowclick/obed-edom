@@ -13,12 +13,14 @@ from typing import Any
 from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import (
     LegacyInspectFailed,
+    _truthy_cache,
     cached_payload,
     complete_cached_wall_payload,
     export_slide_images,
     inspect_keynote,
     inspect_keynote_checker,
     preview_pngs,
+    store_inspect_payload,
 )
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
@@ -227,6 +229,11 @@ def acquire_wall_payload(
     say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
     offline["reader"] = "offline"
+    if _truthy_cache(None, None):
+        try:
+            store_inspect_payload(source, offline)
+        except OSError as exc:
+            say(f"Could not cache the two-tier read of {source.name} ({type(exc).__name__}: {exc}).")
     return offline
 
 

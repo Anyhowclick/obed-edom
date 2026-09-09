@@ -876,6 +876,18 @@ def cached_payload(key_path: Path | str) -> dict[str, Any] | None:
     return payload
 
 
+def store_inspect_payload(key_path: Path | str, payload: dict[str, Any], digest: str = "") -> None:
+    """Write a full-deck payload to the shared digest cache, minus `_`-prefixed keys."""
+    from obed_edom.baseline import deck_digest, inspect_cache_path  # noqa: PLC0415
+
+    if not digest:
+        digest = deck_digest(key_path)
+    stored = {key: value for key, value in payload.items() if not str(key).startswith("_")}
+    json_path = inspect_cache_path(digest)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(stored), encoding="utf-8")
+
+
 def complete_cached_wall_payload(payload: dict[str, Any] | None) -> bool:
     """Whether a digest-current cache safely represents every document slide."""
     if not isinstance(payload, dict) or payload.get("reader") not in {"jxa", "offline"}:

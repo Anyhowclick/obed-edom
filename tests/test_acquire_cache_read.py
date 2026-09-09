@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from obed_edom import remap_keynote as rk
+from obed_edom.baseline import CACHE_DIR_ENV
 
 
 def _cached_wall(reader: str = "jxa") -> dict:
@@ -89,6 +90,7 @@ def test_rejected_cache_bypasses_cache_after_two_tier_failure(monkeypatch, tmp_p
 
 
 def test_fresh_two_tier_read_is_full_deck_and_stamped_offline(monkeypatch, tmp_path):
+    monkeypatch.setenv(CACHE_DIR_ENV, str(tmp_path / "cache"))
     source = tmp_path / "wall.key"
     source.touch()
     seen: dict = {}
@@ -112,6 +114,7 @@ def test_fresh_two_tier_read_is_full_deck_and_stamped_offline(monkeypatch, tmp_p
 
 
 def test_rejected_cache_bypasses_cache_on_partial_two_tier_fallback(monkeypatch, tmp_path):
+    monkeypatch.setenv(CACHE_DIR_ENV, str(tmp_path / "cache"))
     source = tmp_path / "wall.key"
     source.touch()
     calls: list[dict] = []
