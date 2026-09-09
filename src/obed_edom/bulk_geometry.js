@@ -226,14 +226,7 @@ function run(argv) {
     for (let i = start; i < end; i++) indices.push(i);
   }
 
-  const geometry = {};
-  for (let s = 0; s < indices.length; s++) {
-    const i = indices[s];
-    geometry[i] = slideGeom(slides[i], i);
-  }
-
-  const keepOpen = !!plan.keepOpen;
-  if (!keepOpen) {
+  function closeDoc() {
     try {
       Keynote.close(doc, { saving: "no" });
     } catch (e3) {
@@ -242,6 +235,22 @@ function run(argv) {
       } catch (e4) {}
     }
   }
+
+  const geometry = {};
+  try {
+    for (let s = 0; s < indices.length; s++) {
+      const i = indices[s];
+      geometry[i] = slideGeom(slides[i], i);
+    }
+  } catch (eGeom) {
+    closeDoc();
+    var geomMsg = String(eGeom);
+    if (!geomMsg) geomMsg = "Bulk geometry read failed with no message";
+    return JSON.stringify({ path: plan.path, error: geomMsg });
+  }
+
+  const keepOpen = !!plan.keepOpen;
+  if (!keepOpen) closeDoc();
 
   return JSON.stringify({
     path: plan.path,

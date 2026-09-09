@@ -10,6 +10,7 @@ The tool is 15.x only, so there is deliberately no fallback to another build.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from obed_edom import keynote_app
@@ -89,29 +90,126 @@ def test_export_applescript_ordering_guards_and_cleanup(tmp_path: Path):
         'close (every document whose name is "Sermon.key") saving no'
     )
     open_at = script.index("open theFile")
-    bind_at = script.index("set theDoc to document 1")
-    guard_at = script.index("name of theDoc does not start with")
+    bind_at = script.index('set theDocs to (every document whose name is "Sermon" '
+                            'or name is "Sermon.key")')
+    count_guard_at = script.index("if (count of theDocs) is 0 then error")
+    item_bind_at = script.index("set theDoc to item 1 of theDocs")
     export_at = script.index("export theDoc to exportFolder as slide images")
+    on_error_at = script.index("on error errMsg number errNum")
     close_doc_at = script.rindex("close theDoc saving no")
 
-    assert close_by_name < close_by_name_key < open_at < bind_at < guard_at < export_at
-    assert export_at < close_doc_at
+    assert close_by_name < close_by_name_key < open_at < bind_at
+    assert bind_at < count_guard_at < item_bind_at < export_at < on_error_at < close_doc_at
     assert "with timeout of 3600 seconds" in script
     assert "activate" in script
+    assert "document 1" not in script
+
+
+def test_export_applescript_closes_by_name_and_reraises_on_export_error(tmp_path: Path):
+    script = export_applescript(tmp_path / "Sermon.key", tmp_path / "out")
+    on_error_at = script.index("on error errMsg number errNum")
+    error_close = script.index('close (every document whose name is "Sermon") saving no',
+                                on_error_at)
+    reraise_at = script.index("error errMsg number errNum", error_close)
+    assert on_error_at < error_close < reraise_at
 
 
 def test_export_open_applescript_has_no_close_by_name_or_open(tmp_path: Path):
     from obed_edom.inspect import _export_open_applescript
 
     script = _export_open_applescript(tmp_path / "Sermon.key", tmp_path / "out")
-    assert "close (every document whose name is" not in script
     assert "open theFile" not in script
-    bind_at = script.index("set theDoc to document 1")
-    guard_at = script.index("name of theDoc does not start with")
+    assert "document 1" not in script
+    bind_at = script.index('set theDocs to (every document whose name is "Sermon" '
+                            'or name is "Sermon.key")')
+    count_guard_at = script.index("if (count of theDocs) is 0 then error")
+    item_bind_at = script.index("set theDoc to item 1 of theDocs")
     export_at = script.index("export theDoc to exportFolder as slide images")
+    on_error_at = script.index("on error errMsg number errNum")
     close_doc_at = script.rindex("close theDoc saving no")
-    assert bind_at < guard_at < export_at < close_doc_at
+    assert bind_at < count_guard_at < item_bind_at < export_at < on_error_at < close_doc_at
     assert "with timeout of 3600 seconds" in script
+
+
+def test_close_document_by_name_runs_osascript_with_both_name_forms(tmp_path: Path, monkeypatch):
+    from obed_edom import inspect as inspect_mod
+
+    captured: dict = {}
+
+    def fake_run(args, **kwargs):
+        script_path = Path(args[-1])
+        captured["script"] = script_path.read_text(encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    inspect_mod._close_document_by_name(tmp_path / "Sermon.key")
+    script = captured["script"]
+    assert 'name is "Sermon"' in script
+    assert 'name is "Sermon.key"' in script
+    assert "saving no" in script
+
+
+# --- BLOCKER 4: a non-zero osascript exit always wins, even with stale PNGs -------
+
+
+def test_run_applescript_export_nonzero_exit_wins_over_stale_pngs(tmp_path, monkeypatch):
+    from obed_edom import inspect as inspect_mod
+
+    export_dir = tmp_path / "out"
+    export_dir.mkdir()
+    (export_dir / "stale.png").write_bytes(b"\x89PNG")
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="export bound wrong document")
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    err = inspect_mod._run_applescript_export("script text", export_dir)
+    assert err == "Preview export failed: export bound wrong document"
+
+
+def test_run_applescript_export_expected_count_mismatch_is_an_error(tmp_path, monkeypatch):
+    from obed_edom import inspect as inspect_mod
+
+    export_dir = tmp_path / "out"
+    export_dir.mkdir()
+    (export_dir / "slide-1.png").write_bytes(b"\x89PNG")
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    err = inspect_mod._run_applescript_export("script text", export_dir, expected=2)
+    assert err == "Preview export wrote 1 of 2 PNGs"
+
+
+def test_run_applescript_export_expected_count_match_succeeds(tmp_path, monkeypatch):
+    from obed_edom import inspect as inspect_mod
+
+    export_dir = tmp_path / "out"
+    export_dir.mkdir()
+    (export_dir / "slide-1.png").write_bytes(b"\x89PNG")
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    assert inspect_mod._run_applescript_export("script text", export_dir, expected=1) is None
+
+
+def test_set_export_state_explicit_error_wins_over_stale_pngs(tmp_path):
+    from obed_edom import inspect as inspect_mod
+
+    export_dir = tmp_path / "out"
+    export_dir.mkdir()
+    (export_dir / "stale.png").write_bytes(b"\x89PNG")
+
+    payload: dict = {}
+    exported = inspect_mod._set_export_state(
+        payload, export_dir, "Preview export failed: boom", failed=True
+    )
+    assert exported is False
+    assert payload["exported"] is False
+    assert payload["exportError"] == "Preview export failed: boom"
 
 
 def test_cache_is_partitioned_by_app_version(tmp_path: Path):

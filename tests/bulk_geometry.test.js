@@ -318,4 +318,32 @@ test("run(): default (no keepOpen) closes and reports keptOpen false", function 
   }
 });
 
+test("run(): an exception during the geometry loop closes the doc and returns an error, even with keepOpen", function () {
+  let closeCalled = false;
+  // A slide access that throws directly (bypassing collectionGeom's own per-collection
+  // try/catch entirely) is what an uncaught geometry-loop failure looks like.
+  const throwingSlides = new Proxy([{}], {
+    get: function (target, prop) {
+      if (prop === "0") throw new Error("slide access boom");
+      return target[prop];
+    },
+  });
+  const fakeDoc = { slides: function () { return throwingSlides; } };
+  const fakeApp = {
+    includeStandardAdditions: false,
+    open: function () { return fakeDoc; },
+    close: function () { closeCalled = true; },
+  };
+  stubJXAGlobals(fakeApp);
+  try {
+    withPlanFile({ path: "/tmp/deck.key", bundleId: "com.apple.Keynote", keepOpen: true }, function (planPath) {
+      const out = JSON.parse(m.run([planPath]));
+      assert.strictEqual(closeCalled, true, "an exception after open must still close");
+      assert.ok(out.error, "the failure must be reported, not swallowed");
+    });
+  } finally {
+    unstubJXAGlobals();
+  }
+});
+
 console.log("\n" + passed + " passing");

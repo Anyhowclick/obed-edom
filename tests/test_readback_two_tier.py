@@ -375,7 +375,7 @@ def test_uncached_checker_exports_into_export_dir_not_digest_cache(deck, monkeyp
 
     export_calls: list[Path] = []
 
-    def fake_export(key_path, export_dir):
+    def fake_export(key_path, export_dir, **kwargs):
         export_calls.append(Path(export_dir))
         Path(export_dir).mkdir(parents=True, exist_ok=True)
         (Path(export_dir) / "slide.001.png").write_bytes(b"\x89PNG")

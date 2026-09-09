@@ -196,7 +196,7 @@ def test_legacy_cache_hit_export_only_skips_jxa(cached_deck, monkeypatch, tmp_pa
                                       "sentinel": "CACHED", "exportError": "old export failed"})
     _boom_jxa(monkeypatch)
 
-    def fake_export(_key_path, export_dir):
+    def fake_export(_key_path, export_dir, **kwargs):
         export_dir = Path(export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
         for n in (1, 2):
@@ -261,7 +261,7 @@ def test_legacy_partial_set_on_a_skipped_deck_still_re_exports(cached_deck, monk
     _boom_jxa(monkeypatch)
     filled = {"calls": 0}
 
-    def fake_export(_key_path, export_dir):
+    def fake_export(_key_path, export_dir, **kwargs):
         filled["calls"] += 1
         (Path(export_dir) / "slide-3.png").write_bytes(b"\x89PNG")
         return None
@@ -310,7 +310,7 @@ def test_legacy_partial_preview_set_is_not_served_as_a_hit(cached_deck, monkeypa
     _boom_jxa(monkeypatch)
     filled = {"calls": 0}
 
-    def fake_export(_key_path, export_dir):
+    def fake_export(_key_path, export_dir, **kwargs):
         filled["calls"] += 1
         (Path(export_dir) / "slide-2.png").write_bytes(b"\x89PNG")
         return None
@@ -370,7 +370,7 @@ def test_bulk_geometry_default_call_carries_no_keep_open(tmp_path, monkeypatch):
     inspect_mod.bulk_geometry(key)
 
     assert "keepOpen" not in captured["plan"]
-    assert inspect_mod.LAST_BULK_KEPT_OPEN is False
+    assert inspect_mod.LAST_BULK_KEPT_OPEN is None
 
 
 def test_bulk_geometry_keep_open_true_sets_plan_and_last_kept_open(tmp_path, monkeypatch):
@@ -381,7 +381,7 @@ def test_bulk_geometry_keep_open_true_sets_plan_and_last_kept_open(tmp_path, mon
     inspect_mod.bulk_geometry(key, keep_open=True)
 
     assert captured["plan"]["keepOpen"] is True
-    assert inspect_mod.LAST_BULK_KEPT_OPEN is True
+    assert inspect_mod.LAST_BULK_KEPT_OPEN == str(key.resolve())
 
 
 def test_bulk_geometry_resets_last_kept_open_every_call(tmp_path, monkeypatch):
@@ -390,11 +390,50 @@ def test_bulk_geometry_resets_last_kept_open_every_call(tmp_path, monkeypatch):
 
     _capture_bulk_plan(monkeypatch, kept_open=True)
     inspect_mod.bulk_geometry(key, keep_open=True)
-    assert inspect_mod.LAST_BULK_KEPT_OPEN is True
+    assert inspect_mod.LAST_BULK_KEPT_OPEN == str(key.resolve())
 
     _capture_bulk_plan(monkeypatch, kept_open=False)
     inspect_mod.bulk_geometry(key)
-    assert inspect_mod.LAST_BULK_KEPT_OPEN is False
+    assert inspect_mod.LAST_BULK_KEPT_OPEN is None
+
+
+def test_bulk_geometry_keep_open_closes_by_name_on_invalid_json(tmp_path, monkeypatch):
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    closed: list[Path] = []
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="not json", stderr="")
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
+    )
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        inspect_mod.bulk_geometry(key, keep_open=True)
+
+    assert closed == [key.resolve()]
+    assert inspect_mod.LAST_BULK_KEPT_OPEN is None
+
+
+def test_bulk_geometry_default_no_close_by_name_on_invalid_json(tmp_path, monkeypatch):
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    closed: list[Path] = []
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="not json", stderr="")
+
+    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
+    )
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        inspect_mod.bulk_geometry(key)
+
+    assert closed == []
 
 
 if __name__ == "__main__":
