@@ -90,8 +90,11 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
         seen["acquires"].append((Path(source), slide_range))
         return cached
 
-    def fake_inspect(path, **kwargs):
-        seen["inspects"].append((Path(path), kwargs))
+    def fake_inspect(path, *, export_dir=None, slide_range=None, use_cache=None, is_cancelled=None):
+        seen["inspects"].append((Path(path), {
+            "export_dir": export_dir, "slide_range": slide_range,
+            "use_cache": use_cache, "is_cancelled": is_cancelled,
+        }))
         assert Path(path) == template
         return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
 
@@ -133,7 +136,9 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
     assert proposal["wall_payload"]["slides"][0] is not proposal["full_wall_payload"]["slides"][2]
     assert proposal["slide_range"] == frozenset({3})
     assert seen["acquires"] == [(wall, None)]
-    assert seen["inspects"] == [(template, {})]
+    assert seen["inspects"] == [(template, {
+        "export_dir": None, "slide_range": None, "use_cache": None, "is_cancelled": None,
+    })]
     assert result["pages"][0]["index"] == 2
     assert result["pages"][0]["decision"]["wallIndex"] == 2
     assert result["pages"][0]["decision"]["templateSlide"] == 9
@@ -157,7 +162,9 @@ def test_ranged_propose_falls_back_for_malformed_cache_and_rejects_valid_cache_o
     )
     monkeypatch.setattr(
         app_mod, "inspect_keynote",
-        lambda path, **kwargs: {"slideWidth": 1920, "slideHeight": 1080, "slides": []},
+        lambda path, *, export_dir=None, slide_range=None, use_cache=None, is_cancelled=None: {
+            "slideWidth": 1920, "slideHeight": 1080, "slides": []
+        },
     )
     monkeypatch.setattr(
         app_mod,

@@ -23,10 +23,11 @@ from obed_edom.framing import (
     _transform_of,
     load_framings,
     normalize_decision,
+    planned_rects,
     reuse_framings,
     save_framings,
 )
-from obed_edom.map_remap import frame_affine
+from obed_edom.map_remap import ItemTransform, frame_affine
 
 WALL = "/tmp/Wall.key"
 TEMPLATE = "/tmp/Base_CG_Assets.key"
@@ -322,3 +323,24 @@ def test_transform_of_uses_the_planner_frame_affine():
     assert _transform_of(recipe) == expected
     # The old precedence (groups[0] first) would have returned this instead.
     assert expected != {"s": 5.0, "tx": 999.0, "ty": 999.0}
+
+
+def test_planned_rects_rounds_the_serialized_apply_coordinate(monkeypatch):
+    """82.5049 -> as_dict rounds to 82.5 (matching apply's transform dict) -> round(82.5)
+    is 82 under banker's rounding. Rounding the raw float directly would also give 82
+    here, but the point is planned_rects must go through as_dict's 2-decimal value,
+    not the raw one, to stay in lockstep with apply for every boundary case."""
+    spec = ItemTransform(
+        slide_number=1, item_index=0, kind="text",
+        x=82.5049, y=10.0, w=100.0, h=50.0, role="other",
+    )
+    assert spec.as_dict()["x"] == 82.5
+    assert round(spec.as_dict()["x"]) == 82
+
+    from obed_edom import map_remap as map_remap_mod
+    monkeypatch.setattr(map_remap_mod, "plan_payload_transforms", lambda *a, **k: [spec])
+
+    rects = planned_rects(
+        {"index": 0, "number": 1, "items": []}, {}, wall_size=(1920, 1080)
+    )
+    assert rects[0]["x"] == round(spec.as_dict()["x"]) == 82

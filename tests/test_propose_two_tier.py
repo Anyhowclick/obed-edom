@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -89,7 +90,9 @@ def test_ranged_propose_slices_the_acquired_full_payload_and_uses_navigator_numb
     )
     monkeypatch.setattr(
         app_mod, "inspect_keynote",
-        lambda key_path, **kwargs: {"slideWidth": 1920, "slideHeight": 1080, "slides": []},
+        lambda key_path, *, export_dir=None, slide_range=None, use_cache=None, is_cancelled=None: {
+            "slideWidth": 1920, "slideHeight": 1080, "slides": []
+        },
     )
     monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
     monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": False})
@@ -287,31 +290,30 @@ def test_propose_framings_rects_equal_the_apply_plan_for_every_slide(tmp_path, m
         log=lambda _m: None,
     )
 
-    mismatches: list[int] = []
+    diffs: list[dict[str, Any]] = []
     for page in proposal["pages"]:
         n = int(page["slide"])
-        propose_tuples = sorted(
-            (r["role"], r["kind"], r["x"], r["y"], r["w"], r["h"])
-            for r in page.get("autoRects") or []
-            if r["role"] in _AUTO_RECT_ROLES
-        )
-        apply_tuples = sorted(apply_by_slide.get(n, []))
-        if apply_tuples != propose_tuples:
-            mismatches.append(n)
+        propose_by_role_kind: dict[tuple, tuple] = {}
+        for r in page.get("autoRects") or []:
+            if r["role"] not in _AUTO_RECT_ROLES:
+                continue
+            propose_by_role_kind[(r["role"], r["kind"])] = (r["x"], r["y"], r["w"], r["h"])
+        apply_by_role_kind: dict[tuple, tuple] = {
+            (role, kind): (x, y, w, h) for role, kind, x, y, w, h in apply_by_slide.get(n, [])
+        }
+        for key in sorted(set(propose_by_role_kind) | set(apply_by_role_kind)):
+            role, kind = key
+            propose_rect = propose_by_role_kind.get(key)
+            apply_rect = apply_by_role_kind.get(key)
+            if propose_rect == apply_rect:
+                continue
+            for coord, idx in (("x", 0), ("y", 1), ("w", 2), ("h", 3)):
+                apply_v = apply_rect[idx] if apply_rect is not None else None
+                propose_v = propose_rect[idx] if propose_rect is not None else None
+                if apply_v != propose_v:
+                    diffs.append({
+                        "slide": n, "role": role, "kind": kind, "coordinate": coord,
+                        "apply": apply_v, "propose": propose_v,
+                    })
 
-    if mismatches:
-        first = mismatches[0]
-        pytest.xfail(
-            f"{len(mismatches)} of {len(proposal['pages'])} slide(s) differ from the apply "
-            f"plan (first: slide {first}). Measured cause: not the cardSample/prev_affine "
-            "carry candidates named in the R2b plan -- every observed diff is a single "
-            "coordinate landing within ~0.005pt of a whole-point boundary (e.g. slide 7's "
-            "'other/text' y is 82.5 in the apply plan's 2-decimal-rounded output). "
-            "map_remap.plan_payload_transforms (apply) and framing.planned_rects (propose) "
-            "are two independently implemented geometry pipelines; apply keeps 2-decimal "
-            "precision while propose rounds straight to the whole point for the UI preview, "
-            "so a coordinate whose true sub-thousandths value sits on either side of X.5 can "
-            "round to adjacent integers between the two paths. Out of thousands of rect "
-            "coordinates across 155 slides, 7 slides carry at least one such boundary case."
-        )
-    assert mismatches == []
+    assert diffs == [], f"{len(diffs)} coordinate diff(s) across {len(proposal['pages'])} slides: {diffs}"
