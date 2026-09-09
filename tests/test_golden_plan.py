@@ -4,6 +4,7 @@ See `scripts/golden_plan.py` for the capture mechanism and canonicalisation."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,8 @@ TEMPLATE = DECKS / "Base_CG_Assets.key"
 assert TEMPLATE == SCRIPT_TEMPLATE
 
 ROLE_SET = {"map", "list", "pin", "title", "other"}
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _pin_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,6 +76,23 @@ def _skip_ladder(deck_name: str) -> dict:
         if actual != expected:
             pytest.fail(f"golden fixture schema drift: {field} expected {expected!r}, got {actual!r}")
 
+    for field in ("sourceDigest", "templateDigest"):
+        value = golden.get(field)
+        if not isinstance(value, str) or not _HEX64.fullmatch(value):
+            pytest.fail(f"golden fixture schema drift: {field} expected a 64-char lowercase hex digest, got {value!r}")
+
+    planner_env = golden.get("plannerEnv")
+    if not isinstance(planner_env, dict):
+        pytest.fail(f"golden fixture schema drift: plannerEnv expected a mapping, got {planner_env!r}")
+    os_build = planner_env.get("osBuild")
+    if not isinstance(os_build, str) or not os_build:
+        pytest.fail(f"golden fixture schema drift: plannerEnv.osBuild expected a non-empty str, got {os_build!r}")
+    faces = planner_env.get("faces")
+    if not ((isinstance(faces, str) and faces) or (isinstance(faces, dict) and faces)):
+        pytest.fail(
+            f"golden fixture schema drift: plannerEnv.faces expected a non-empty str or mapping, got {faces!r}"
+        )
+
     source_digest = baseline.deck_digest(deck)
     template_digest = baseline.deck_digest(TEMPLATE)
     if source_digest != golden["sourceDigest"] or template_digest != golden["templateDigest"]:
@@ -85,13 +105,24 @@ def _skip_ladder(deck_name: str) -> dict:
 
 
 def _check_planner_env(golden: dict, actual_env: dict) -> None:
-    """A different machine (OS build or installed/resolved fonts) is a missing
-    input, not a bug: skip naming the differing component."""
+    """A different machine (OS build or installed/resolved caption faces) is a
+    missing input, not a bug: skip naming the differing component (a single
+    differing face names that face, not the whole `faces` mapping)."""
     golden_env = golden["plannerEnv"]
-    for component in ("osBuild", "fontEnv"):
-        if golden_env.get(component) != actual_env.get(component):
+    if golden_env.get("osBuild") != actual_env.get("osBuild"):
+        pytest.skip(
+            f"planner env drift (osBuild): {golden_env.get('osBuild')!r} vs {actual_env.get('osBuild')!r}"
+        )
+    golden_faces = golden_env.get("faces")
+    actual_faces = actual_env.get("faces")
+    if golden_faces == actual_faces:
+        return
+    if not isinstance(golden_faces, dict) or not isinstance(actual_faces, dict):
+        pytest.skip(f"planner env drift (faces): {golden_faces!r} vs {actual_faces!r}")
+    for face in sorted(set(golden_faces) | set(actual_faces)):
+        if golden_faces.get(face) != actual_faces.get(face):
             pytest.skip(
-                f"planner env drift ({component}): {golden_env.get(component)!r} vs {actual_env.get(component)!r}"
+                f"planner env drift (faces[{face}]): {golden_faces.get(face)!r} vs {actual_faces.get(face)!r}"
             )
 
 

@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections import Counter
 from contextlib import contextmanager
@@ -125,31 +126,77 @@ def _pinned_env():
                 os.environ[name] = value
 
 
-def planner_env(objects: dict[str, dict]) -> dict[str, str]:
-    """OS build + resolved font env for the SOURCE deck's objects: the hidden
-    inputs of `map_remap.caption_point_size` (AppKit/TextKit text measurement
-    via `iwa_text_shape._ns_font`). Imports `slide_fingerprint`'s private
-    helpers rather than duplicating them."""
-    from obed_edom.slide_fingerprint import _compute_font_env, _os_build  # noqa: PLC0415 (optional extra)
+_FACES_UNAVAILABLE = "FONT_ENV_UNAVAILABLE"
 
-    return {"osBuild": _os_build(), "fontEnv": _compute_font_env(objects)}
+
+def _os_build() -> str:
+    """The actual macOS build (`sw_vers -buildVersion`), not `platform.mac_ver`'s
+    product version: a supplemental build can share a product version while
+    resolving fonts differently."""
+    return subprocess.run(
+        ["sw_vers", "-buildVersion"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _caption_faces(wall: dict[str, Any]) -> list[tuple[str, bool, bool]]:
+    """Every `(font, bold, italic)` triple `map_remap.caption_point_size` actually
+    measures, read from the SOURCE wall's `groupCaption` records (attached in place
+    by `iwa_runs.attach_group_captions` during `remap_keynote`'s enrichment)."""
+    faces: set[tuple[str, bool, bool]] = set()
+    for slide in wall.get("slides") or []:
+        for cap in (slide.get("groupCaption") or {}).values():
+            font = cap.get("font")
+            if font:
+                faces.add((font, bool(cap.get("bold")), bool(cap.get("italic"))))
+    return sorted(faces)
+
+
+def _resolve_faces(faces: list[tuple[str, bool, bool]]) -> dict[str, str] | str:
+    """Resolved PostScript name + family per face via `iwa_text_shape._ns_font`
+    at a fixed 12pt, keyed `"<font>|<bold>|<italic>"` for JSON stability. Mirrors
+    `slide_fingerprint._compute_font_env`'s bridge-availability probe."""
+    try:
+        from AppKit import NSFont  # noqa: F401,PLC0415 (bridge probe)
+
+        from obed_edom.iwa_text_shape import _ns_font  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — no bridge -> stable sentinel, never raise
+        return _FACES_UNAVAILABLE
+
+    out: dict[str, str] = {}
+    for font, bold, italic in faces:
+        key = f"{font}|{bold}|{italic}"
+        try:
+            resolved, missing, _trait_bad = _ns_font(font, 12.0, bold=bold, italic=italic)
+        except Exception:  # noqa: BLE001 — a single bad font must not sink the env
+            out[key] = "missing"
+            continue
+        out[key] = "missing" if missing else f"{resolved.fontName()}|{resolved.familyName()}"
+    return out
+
+
+def planner_env(wall: dict[str, Any]) -> dict[str, Any]:
+    """OS build + resolved caption faces for the SOURCE wall: the hidden inputs of
+    `map_remap.caption_point_size` (AppKit/TextKit text measurement via
+    `iwa_text_shape._ns_font`). Must be called after enrichment, since `faces`
+    reads the `groupCaption` records `remap_keynote` attaches in place."""
+    return {"osBuild": _os_build(), "faces": _resolve_faces(_caption_faces(wall))}
 
 
 def capture_plan(
     source: Path, template: Path
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Wall + template payloads (offline, mutated in place by the enrichment
-    preamble), the captured apply plan, and the source deck's `planner_env`.
-    Never opens Keynote: `_keynote_free` is applied around the one
-    `remap_keynote()` call, which must raise `_PlanCaptured` at `_run_jxa` --
-    a normal return means the stub was bypassed."""
+    preamble), the captured apply plan, and the source wall's `planner_env`
+    (computed after enrichment, since `faces` fingerprints the attached
+    `groupCaption` records). Never opens Keynote: `_keynote_free` is applied
+    around the one `remap_keynote()` call, which must raise `_PlanCaptured` at
+    `_run_jxa` -- a normal return means the stub was bypassed."""
     from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415 (optional extra)
 
     source_deck = _load_deck(source)
     wall = offline_wall_payload(source, deck=source_deck)
     tmpl = offline_wall_payload(template)
     assert "reader" not in wall
-    env = planner_env(source_deck[0])
     out: dict[str, Any] = {}
     dest = Path(tempfile.gettempdir()) / "golden-plan-never-written.key"
     with _keynote_free():
@@ -167,6 +214,7 @@ def capture_plan(
             pass
         else:
             raise RuntimeError("plan capture did not reach _run_jxa")
+    env = planner_env(wall)
     return wall, tmpl, out, env
 
 
@@ -279,7 +327,7 @@ def build_golden(
     wall: dict[str, Any],
     tmpl: dict[str, Any],
     plan: dict[str, Any],
-    planner_env_: dict[str, str],
+    planner_env_: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "goldenVersion": GOLDEN_VERSION,
