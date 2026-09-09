@@ -213,17 +213,14 @@ def test_propose_rects_equal_the_apply_plan_for_every_slide():
     """Real-deck parity gate for invariant 2 (R2b plan): same slide, same recipe, same
     enriched payload, no previews -> propose's rects equal apply's.
 
-    ``plan_payload_transforms``'s own fallback branch (map_remap.py ~4134) carries
-    ``characterStyles``/``listFontSize``/``listSample``/``cardSamples`` from the
-    pre-fit recipe onto a ``fit_to_frame_recipe`` result; ``propose_framings`` /
-    ``planned_rects`` do not -- a pre-existing gap, unrelated to the two-tier read or
-    to card_stroke threading, and out of R2b's scope (Non-goals: no change to
-    plan_payload_transforms semantics or the propose->apply hand-off). Reproduced here
-    on the propose side only so this gate isolates what R2b actually promises, exactly
-    as ``previews=None`` on both sides isolates free-text-with-previews. Confirmed by
-    measurement: without this carry, 7 of 155 Full-wall slides mismatch, every one a
-    fallback (fit-to-frame) slide carrying card/list/character-style context; with it,
-    0 of 155 mismatch.
+    ``plan_payload_transforms``'s fallback branch (map_remap.py) and ``propose_framings``'s
+    fallback branch (framing.py) both carry ``characterStyles``/``listFontSize``/
+    ``listSample``/``cardSamples`` from the pre-fit recipe onto a ``fit_to_frame_recipe``
+    result via the shared ``carry_fit_context`` helper, so this gate calls the real
+    production helper rather than reimplementing the carry. Confirmed by measurement:
+    without the carry, 7 of 155 Full-wall slides mismatch, every one a fallback
+    (fit-to-frame) slide carrying card/list/character-style context; with it, 0 of 155
+    mismatch.
     """
     pytest.importorskip("keynote_parser")
     from obed_edom.baseline import inspect_cache_path
@@ -232,6 +229,7 @@ def test_propose_rects_equal_the_apply_plan_for_every_slide():
         CG_HEIGHT,
         CG_WIDTH,
         MIN_ON_CANVAS_FRACTION,
+        carry_fit_context,
         fit_to_frame_recipe,
         is_degenerate_scale,
         learn_recipe,
@@ -257,7 +255,6 @@ def test_propose_rects_equal_the_apply_plan_for_every_slide():
     recipe = recipe_for(wall, template)
     wall_w = float(wall["slideWidth"])
     wall_h = float(wall["slideHeight"])
-    fallback_carry = ("characterStyles", "listFontSize", "listSample", "cardSamples")
 
     def dropped(t) -> bool:
         return t.role == "hide" or (t.opacity is not None and t.opacity <= 0.0)
@@ -292,10 +289,7 @@ def test_propose_rects_equal_the_apply_plan_for_every_slide():
                 float(propose_recipe.get("destHeight") or CG_HEIGHT),
             )
             if fitted:
-                for carry in fallback_carry:
-                    if propose_recipe.get(carry) is not None:
-                        fitted[carry] = propose_recipe[carry]
-                shown = fitted
+                shown = carry_fit_context(fitted, propose_recipe)
         propose_rects = planned_rects(
             slide, shown, wall_size=(wall_w, wall_h), card_stroke=card_stroke
         )

@@ -246,6 +246,63 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
     assert "Skip Slide" in result["numberingNote"]
 
 
+def test_fallback_candidate_carries_text_and_card_context_onto_the_fit_recipe(tmp_path, monkeypatch):
+    import obed_edom.baseline as baseline_mod
+    import obed_edom.framing as framing_mod
+    import obed_edom.map_remap as remap_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    full_wall = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    trial_recipe = {
+        "destWidth": 1920, "destHeight": 1080,
+        "listFontSize": 42, "cardSamples": [{"w": 1}],
+    }
+    captured: dict = {}
+
+    def fake_plan(payload, _recipe, **kwargs):
+        report = kwargs.get("framing_report")
+        if report is not None:
+            report.append({"slide": 1, "templateSlide": 1, "fitted": True})
+        return []
+
+    def fake_planned_rects(_slide, recipe, **_kwargs):
+        captured["recipe"] = recipe
+        return []
+
+    monkeypatch.setattr(baseline_mod, "deck_digest", lambda _path: "deck")
+    monkeypatch.setattr(baseline_mod, "deck_slide_digests", lambda _payload: ["d1"])
+    monkeypatch.setattr(baseline_mod, "wall_thumb_dir", lambda _digest: tmp_path / "thumbs")
+    monkeypatch.setattr(framing_mod, "build_preview_thumbs", lambda *_a, **_k: {})
+    monkeypatch.setattr(framing_mod, "planned_rects", fake_planned_rects)
+    monkeypatch.setattr(remap_mod, "learn_recipe", lambda *_a, **_k: dict(trial_recipe))
+    monkeypatch.setattr(remap_mod, "plan_payload_transforms", fake_plan)
+    monkeypatch.setattr(remap_mod, "rank_framing_candidates", lambda *_a, **_k: [{"templateSlide": 1}])
+    monkeypatch.setattr(remap_mod, "on_canvas_fraction", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(remap_mod, "is_degenerate_scale", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        remap_mod,
+        "fit_to_frame_recipe",
+        lambda *_a, **_k: {
+            "mapSrc": {"x": 0, "y": 0, "w": 10, "h": 10},
+            "mapDst": {"x": 0, "y": 0, "w": 20, "h": 20},
+        },
+    )
+
+    framing_mod.propose_framings(
+        wall,
+        template,
+        wall_payload=full_wall,
+        full_wall_payload=full_wall,
+        template_payload={"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1}]},
+    )
+
+    assert captured["recipe"].get("listFontSize") == 42
+    assert captured["recipe"].get("cardSamples") == [{"w": 1}]
+
+
 def test_transform_of_uses_the_planner_frame_affine():
     recipe = {
         "mapSrc": {"x": 0, "y": 0, "w": 100, "h": 50},

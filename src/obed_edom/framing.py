@@ -321,6 +321,7 @@ def propose_framings(
         CG_HEIGHT,
         CG_WIDTH,
         MIN_ON_CANVAS_FRACTION,
+        carry_fit_context,
         fit_to_frame_recipe,
         is_degenerate_scale,
         learn_recipe,
@@ -400,7 +401,7 @@ def propose_framings(
                     float(trial.get("destHeight") or CG_HEIGHT),
                 )
                 if fitted:
-                    shown = fitted
+                    shown = carry_fit_context(fitted, trial)
             candidate["transform"] = _transform_of(shown)
             candidate["rects"] = planned_rects(
                 slide,
