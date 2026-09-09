@@ -429,7 +429,7 @@ def test_autosize_text_x_exact_and_flagged_soft():
 
 
 @pytest.mark.parametrize(("alignment", "stored_y", "nh", "expect_top"), [
-    # Live-probed on the 2026-09-06 Gold build (output/handover-2026-09-06/anchor-diagnosis).
+    # Live-probed on the 2026-09-06 Gold build (output/bank/2026-09-06/anchor-diagnosis).
     ("kFrameAlignTop", 173.0, 313.0, 173.0),     # s11 "CHC Fu Chang" column (old model: 16.5)
     ("kFrameAlignTop", 796.0, 313.0, 796.0),     # s11 "CHC Jiang Shou" column (old model: 639.5)
     ("kFrameAlignMiddle", 97.5, 61.0, 67.0),     # s11 "Global Missions" (old memory model: 97)

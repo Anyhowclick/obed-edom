@@ -1699,7 +1699,7 @@ def coincident_duplicate_ids(
     A GROUP item whose ``(kind, kindIndex)`` is in ``build_keys`` carries its own authored build and is
     exempted from the hide -- it is a legitimate build-only twin, not a magic-move leftover. Text twins
     are never exempted: two coincident text items share an output rect, so nothing downstream could tell
-    them apart if one were left un-hidden (see output/handover-2026-09-07/w1-diagnosis/plan-sparkle-hide.md)."""
+    them apart if one were left un-hidden (see output/bank/2026-09-07/w1-diagnosis/plan-sparkle-hide.md)."""
     build_keys = build_keys or set()
     dup: set[int] = set()
     for fallback_i, _anchor_fi, _anchor, item in _coincident_dup_pairs(items):

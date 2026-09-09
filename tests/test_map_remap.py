@@ -2178,7 +2178,7 @@ def test_coincident_twin_carrying_a_build_is_kept_not_hidden():
     shipped once (4cadd15) and was reverted a day later (4654602) because the un-hidden
     twin gave stat-finalize two identical-signature stat groups it could not resolve (12
     unresolved, 8 dedup shortfalls -- reproduced fresh, offline, against today's real wall
-    deck in output/handover-2026-09-07/w1-diagnosis/plan-sparkle-hide.md Sec.2). That
+    deck in output/bank/2026-09-07/w1-diagnosis/plan-sparkle-hide.md Sec.2). That
     collision is fixed downstream by a tri-state allowFallback in keynote.py's
     obedResolveGroup (claim an interchangeable twin pair in order instead of refusing) and
     by a narrow wrong-survivor waiver in map_remap.py's reuse dedup (Sec.3, Change B/C) --

@@ -306,7 +306,7 @@ After any planner/driver change, also run `scripts/golden_plan.py` — a
 Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote`.
 
 The 2026-09-07 Full bank under
-`output/handover-2026-09-07/write-gate-full/` completed RED but is reusable:
+`output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
 both A/B decks and run records are present, so diagnose and re-run comparisons
 Keynote-free before paying for another live gate. The surgical writer's own
 consistency and live geometry verify passed at 0.00px, but pass-2 parity and 12
@@ -399,7 +399,7 @@ change affine fitting.
 
 For AUTOSIZE text, Keynote's AppleScript/JXA `position` (read AND write) is always the
 object's VISUAL TOP-LEFT — for every anchor, verified live 2026-09-06 (see
-`output/handover-2026-09-06/anchor-diagnosis/diagnosis.md`). What varies is the IWA
+`output/bank/2026-09-06/anchor-diagnosis/diagnosis.md`). What varies is the IWA
 STORED y: it is the visual top for a `kFrameAlignTop` autosize text box, the visual
 CENTRE for a `kFrameAlignMiddle` one, and the visual BOTTOM for a `kFrameAlignBottom`
 one. The anchor lives at `shapeProperties.verticalAlignment` on the box's own style
