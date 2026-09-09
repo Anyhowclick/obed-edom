@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 import pytest
 
-from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM, camera_dict
+from obed_edom.maps_geo import camera_dict
 from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
 
@@ -67,8 +67,14 @@ def test_post_maps_seeds_under_output_root_without_dest():
     assert result["slides"][0]["id"] == "s1"
     assert result["previewDir"].endswith("/previews")
     assert "/.maps/" in result["outputDir"].replace("\\", "/")
-    assert result["slides"][0]["camera"]["zoom"] >= CG_MIN_ZOOM
-    assert result["slides"][0]["camera"]["zoom"] < WORLD_MIN_ZOOM
+    assert result["slides"][0]["title"] == "Downtown Singapore"
+    assert result["slides"][0]["camera"] == {
+        "lat": 1.2894,
+        "lon": 103.8596,
+        "zoom": 16.7,
+        "pitch": 0,
+        "bearing": 52,
+    }
 
 
 def test_state_409_while_running_and_patch_409():
@@ -942,7 +948,7 @@ def test_export_plan_small_morph_has_plate_camera():
     plate = payload["plates"][0]
     assert plate["plateW"] >= 3840
     assert plate["plateH"] >= 1080
-    assert plate["camera"]["bearing"] == 0
+    assert plate["camera"]["bearing"] == cam["bearing"]
     assert plate["camera"]["pitch"] == 0
     assert set(plate["camera"]) >= {"lat", "lon", "zoom", "bearing", "pitch"}
 

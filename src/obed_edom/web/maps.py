@@ -35,7 +35,6 @@ from obed_edom.maps_geo import (
     load_admin0,
     load_places,
     parse_maps_query,
-    sea_overview_camera,
 )
 from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
 from obed_edom.maps_tiles import (
@@ -471,7 +470,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
     root = output_root() / ".maps" / job_id
     preview = root / "previews"
     preview.mkdir(parents=True, exist_ok=True)
-    camera = sea_overview_camera()
+    camera = {"lat": 1.2894, "lon": 103.8596, "zoom": 16.7, "pitch": 0, "bearing": 52}
     return {
         "stem": f"maps-{job_id}",
         "outputDir": str(root),
@@ -491,7 +490,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "slides": [
             {
                 "id": "s1",
-                "title": "Southeast Asia",
+                "title": "Downtown Singapore",
                 "style": "positron",
                 "camera": camera,
                 "highlights": [],

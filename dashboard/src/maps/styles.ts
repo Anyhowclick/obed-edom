@@ -3,6 +3,7 @@ import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type M
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./stampOsm";
 import { withLowZoomBoundaries } from "./tonerBoundaries";
+import { thinLineWidths } from "./tonerLines";
 import { buildWatercolourStyle } from "./watercolourStyle";
 import tonerStyleUrl from "./vendor/maptiler-toner-8688fbd.json?url";
 
@@ -45,6 +46,8 @@ export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[]
   { id: "watercolour", label: "Watercolour", color: "#f1e5cb" },
 ];
 
+const TONER_LINES_WIDTH_FACTOR = 0.55;
+
 const styleCache = new Map<string, Promise<StyleSpecification>>();
 let tonerDocument: Promise<StyleSpecification> | null = null;
 
@@ -70,7 +73,13 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
   next.sources = { openmaptiles: { ...structuredClone(vector), attribution: "© OpenStreetMap contributors · © MapTiler" } };
   next.glyphs = base.glyphs;
   delete next.sprite;
-  next.layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset).filter((layer) => {
+  let layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset);
+  if (styleId === "toner-lines") {
+    const nonBoundary = layers.filter((layer) => !layer.id.startsWith("boundary"));
+    const boundary = layers.filter((layer) => layer.id.startsWith("boundary"));
+    layers = [...thinLineWidths(nonBoundary, TONER_LINES_WIDTH_FACTOR), ...boundary];
+  }
+  next.layers = layers.filter((layer) => {
     if (styleId === "toner-background") return layer.type === "background" || layer.type === "fill";
     if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";
     return true;

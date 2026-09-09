@@ -87,7 +87,43 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
       assert.ok(lineIds.has(id), `toner-lines is missing ${id}`);
       assert.ok(!backgroundIds.has(id), `toner-background unexpectedly has ${id}`);
     }
+
+    const byId = (layers, id) => layers.find((layer) => layer.id === id);
+    const vendorPrimary = byId(vendor.layers, "road_primary");
+    const linesPrimary = byId(lines.layers, "road_primary");
+    assert.deepEqual(
+      linesPrimary.paint["line-width"].stops,
+      vendorPrimary.paint["line-width"].stops.map(([z, w]) => [z, w * 0.55]),
+    );
+    for (const id of boundaryIds) {
+      assert.deepEqual(byId(lines.layers, id).paint["line-width"], byId(full.layers, id).paint["line-width"]);
+    }
+    for (const style of [full, background]) {
+      for (const layer of style.layers) {
+        if (layer.type !== "line") continue;
+        const vendorLayer = byId(vendor.layers, layer.id);
+        if (!vendorLayer || !vendorLayer.paint) continue;
+        assert.deepEqual(layer.paint["line-width"], vendorLayer.paint["line-width"]);
+      }
+    }
   } finally { global.fetch = oldFetch; }
+});
+
+test("thinLineWidths scales non-boundary line widths across all paint shapes", () => {
+  const { thinLineWidths } = require(path.join(out, "tonerLines.js"));
+  const layers = [
+    { id: "a", type: "line", paint: { "line-width": 4 } },
+    { id: "b", type: "line", paint: { "line-width": { base: 1.3, stops: [[5, 1], [14, 5]] } } },
+    { id: "c", type: "line", paint: { "line-width": ["interpolate", ["linear"], ["zoom"], 5, 1, 14, 5] } },
+    { id: "d", type: "line", paint: {} },
+    { id: "e", type: "fill", paint: { "fill-color": "#000" } },
+  ];
+  const scaled = thinLineWidths(layers, 0.55);
+  assert.equal(scaled[0].paint["line-width"], 4 * 0.55);
+  assert.deepEqual(scaled[1].paint["line-width"], { base: 1.3, stops: [[5, 0.55], [14, 2.75]] });
+  assert.deepEqual(scaled[2].paint["line-width"], ["*", 0.55, ["interpolate", ["linear"], ["zoom"], 5, 1, 14, 5]]);
+  assert.equal(scaled[3].paint["line-width"], 0.55);
+  assert.deepEqual(scaled[4], layers[4]);
 });
 
 test("withLowZoomBoundaries re-gates only the three toner boundary layers, weights stay vendored", () => {
