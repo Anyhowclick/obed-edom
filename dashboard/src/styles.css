@@ -2739,8 +2739,10 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .wash-shot.alpha, .wash-mask { background: repeating-conic-gradient(#2a2a33 0 25%, #1a1a22 0 50%) 50% / 18px 18px; }
 .wash-cap { padding: 6px 8px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wash-tile .row-acts { margin: 0; padding: 0 8px 8px; }
+.wash-mask-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
 .wash-look { display: grid; grid-template-columns: minmax(0, 460px) minmax(280px, 1fr); gap: 16px; align-items: start; margin-bottom: 8px; }
 .wash-look-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.wash-look-col .wash-tile { max-width: 460px; align-self: start; }
 .wash-card { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: var(--border-glass); border-radius: var(--radius-md); background: var(--bg-surface-glass); }
 .wash-card-head { margin: 0; }
 .wash-card-title { font-size: 13px; font-weight: 600; color: var(--ink-primary); }

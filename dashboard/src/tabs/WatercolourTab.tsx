@@ -788,172 +788,179 @@ function LandmarkMask({
   const file = files[index];
 
   return (
-    <div className="wash-look" tabIndex={-1}>
-      <MaskEditor
-        key={`${file.name}-${file.size}-${resetGeneration}-${editGeneration}`}
-        file={file}
-        spec={spec}
-        mode={mode}
-        polarity={polarity}
-        tolerance={tolerance}
-        magnifierOn={magnifierOn}
-        compareOn={compareOn}
-        cutoutUrl={cutoutUrl}
-        onChange={handleCommit}
-      />
-      <div className="wash-look-col">
-        {files.length > 1 && (
-          <label className="wash-card">
-            <span className="wash-card-title">Photo</span>
-            <select value={index} onChange={(event) => onIndex(Number(event.target.value))}>
-              {files.map((file, fileIndex) => (
-                <option key={`${file.name}-${fileIndex}`} value={fileIndex}>
-                  {file.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        <div className="maps-stylebar">
-          <button
-            className={`btn secondary icon-btn toggle${mode === "rect" ? " on" : ""}`}
-            type="button"
-            title="Landmark box — drag a rectangle"
-            aria-label="Landmark box"
-            onClick={() => selectMode("rect")}
-          >
-            {TOOL_ICONS.rect}
-          </button>
-          <button
-            className={`btn secondary icon-btn toggle${mode === "pen" ? " on" : ""}`}
-            type="button"
-            title="Pen — click points, click the first to close"
-            aria-label="Pen"
-            onClick={() => selectMode("pen")}
-          >
-            {TOOL_ICONS.pen}
-          </button>
-          <button
-            className={`btn secondary icon-btn toggle${mode === "magnetic" ? " on" : ""}`}
-            type="button"
-            title="Magnetic pen — snaps points to edges"
-            aria-label="Magnetic pen"
-            onClick={() => selectMode("magnetic")}
-          >
-            {TOOL_ICONS.magnetic}
-          </button>
-          <button
-            className={`btn secondary icon-btn toggle${mode === "wand" ? " on" : ""}`}
-            type="button"
-            title="Wand — click to select by colour"
-            aria-label="Wand"
-            onClick={() => selectMode("wand")}
-          >
-            {TOOL_ICONS.wand}
-          </button>
-          <button
-            className={`btn secondary icon-btn toggle${magnifierOn ? " on" : ""}`}
-            type="button"
-            title="Magnifier — click to toggle, or hold Option to peek while off"
-            aria-label="Magnifier"
-            onClick={() => setMagnifierOn((current) => !current)}
-          >
-            {TOOL_ICONS.magnifier}
-          </button>
-          <button
-            className={`btn secondary icon-btn toggle${compareOn ? " on" : ""}`}
-            type="button"
-            title="Compare"
-            aria-label="Compare"
-            onClick={() => setCompareOn((current) => !current)}
-          >
-            {TOOL_ICONS.compare}
-          </button>
-          <button
-            className="btn secondary icon-btn"
-            type="button"
-            title="Undo"
-            aria-label="Undo"
-            disabled={!canUndo(history)}
-            onClick={handleUndo}
-          >
-            {TOOL_ICONS.undo}
-          </button>
-          <button
-            className="btn secondary icon-btn"
-            type="button"
-            title="Redo"
-            aria-label="Redo"
-            disabled={!canRedo(history)}
-            onClick={handleRedo}
-          >
-            {TOOL_ICONS.redo}
-          </button>
-          <button className="btn secondary icon-btn" type="button" title="Reset" aria-label="Reset" onClick={handleReset}>
-            {TOOL_ICONS.reset}
-          </button>
-        </div>
-        {(mode === "pen" || mode === "magnetic" || mode === "wand") && (
+    <>
+      <div className="history-head">
+        <h2>Landmark mask</h2>
+        <div className="wash-mask-tools">
           <div className="maps-stylebar">
             <button
-              className={`btn secondary icon-btn toggle${polarity === "keep" ? " on" : ""}`}
+              className={`btn secondary icon-btn toggle${mode === "rect" ? " on" : ""}`}
               type="button"
-              title="Keep — the traced area is kept"
-              aria-label="Keep"
-              onClick={() => setPolarity("keep")}
+              title="Landmark box — drag a rectangle"
+              aria-label="Landmark box"
+              onClick={() => selectMode("rect")}
             >
-              {TOOL_ICONS.keep}
+              {TOOL_ICONS.rect}
             </button>
             <button
-              className={`btn secondary icon-btn toggle${polarity === "remove" ? " on" : ""}`}
+              className={`btn secondary icon-btn toggle${mode === "pen" ? " on" : ""}`}
               type="button"
-              title="Remove — the traced area is cut away"
-              aria-label="Remove"
-              onClick={() => setPolarity("remove")}
+              title="Pen — click points, click the first to close"
+              aria-label="Pen"
+              onClick={() => selectMode("pen")}
             >
-              {TOOL_ICONS.remove}
+              {TOOL_ICONS.pen}
+            </button>
+            <button
+              className={`btn secondary icon-btn toggle${mode === "magnetic" ? " on" : ""}`}
+              type="button"
+              title="Magnetic pen — snaps points to edges"
+              aria-label="Magnetic pen"
+              onClick={() => selectMode("magnetic")}
+            >
+              {TOOL_ICONS.magnetic}
+            </button>
+            <button
+              className={`btn secondary icon-btn toggle${mode === "wand" ? " on" : ""}`}
+              type="button"
+              title="Wand — click to select by colour"
+              aria-label="Wand"
+              onClick={() => selectMode("wand")}
+            >
+              {TOOL_ICONS.wand}
+            </button>
+            <button
+              className={`btn secondary icon-btn toggle${magnifierOn ? " on" : ""}`}
+              type="button"
+              title="Magnifier — click to toggle, or hold Option to peek while off"
+              aria-label="Magnifier"
+              onClick={() => setMagnifierOn((current) => !current)}
+            >
+              {TOOL_ICONS.magnifier}
+            </button>
+            <button
+              className={`btn secondary icon-btn toggle${compareOn ? " on" : ""}`}
+              type="button"
+              title="Compare"
+              aria-label="Compare"
+              onClick={() => setCompareOn((current) => !current)}
+            >
+              {TOOL_ICONS.compare}
+            </button>
+            <button
+              className="btn secondary icon-btn"
+              type="button"
+              title="Undo"
+              aria-label="Undo"
+              disabled={!canUndo(history)}
+              onClick={handleUndo}
+            >
+              {TOOL_ICONS.undo}
+            </button>
+            <button
+              className="btn secondary icon-btn"
+              type="button"
+              title="Redo"
+              aria-label="Redo"
+              disabled={!canRedo(history)}
+              onClick={handleRedo}
+            >
+              {TOOL_ICONS.redo}
+            </button>
+            <button className="btn secondary icon-btn" type="button" title="Reset" aria-label="Reset" onClick={handleReset}>
+              {TOOL_ICONS.reset}
             </button>
           </div>
-        )}
-        {mode === "wand" && (
-          <div className="wash-card">
-            <label className="ae-scrub has-slider wash-num">
-              <span>Tolerance:</span>
-              <input
-                type="range"
-                className="ae-scrub-slider"
-                min="0"
-                max="100"
-                step="1"
-                value={tolerance}
-                onChange={(event) => setTolerance(Number(event.target.value))}
-              />
-              <input
-                type="number"
-                min="0"
-                max="100"
-                step="1"
-                value={tolerance}
-                onChange={(event) => setTolerance(Math.min(100, Math.max(0, Number(event.target.value) || 0)))}
-              />
-            </label>
-          </div>
-        )}
-        <figure className="wash-tile">
-          {cutoutUrl ? (
-            <img className="wash-shot alpha" src={cutoutUrl} alt="Cut-out preview" />
-          ) : (
-            <div className="wash-preview-empty">{busy ? "Rendering cut-out…" : "Draw a box to preview"}</div>
+          {(mode === "pen" || mode === "magnetic" || mode === "wand") && (
+            <div className="maps-stylebar">
+              <button
+                className={`btn secondary icon-btn toggle${polarity === "keep" ? " on" : ""}`}
+                type="button"
+                title="Keep — the traced area is kept"
+                aria-label="Keep"
+                onClick={() => setPolarity("keep")}
+              >
+                {TOOL_ICONS.keep}
+              </button>
+              <button
+                className={`btn secondary icon-btn toggle${polarity === "remove" ? " on" : ""}`}
+                type="button"
+                title="Remove — the traced area is cut away"
+                aria-label="Remove"
+                onClick={() => setPolarity("remove")}
+              >
+                {TOOL_ICONS.remove}
+              </button>
+            </div>
           )}
-          <figcaption className="wash-cap">Cut-out preview</figcaption>
-        </figure>
-        <div className="wash-card">
-          <small className="wash-hint">{MASK_HINT[mode]}</small>
-          {error && <small className="wash-hint">{error}</small>}
-          <small className="wash-hint">Hold Option to peek with the magnifier while it is off.</small>
         </div>
       </div>
-    </div>
+      <div className="wash-look" tabIndex={-1}>
+        <MaskEditor
+          key={`${file.name}-${file.size}-${resetGeneration}-${editGeneration}`}
+          file={file}
+          spec={spec}
+          mode={mode}
+          polarity={polarity}
+          tolerance={tolerance}
+          magnifierOn={magnifierOn}
+          compareOn={compareOn}
+          cutoutUrl={cutoutUrl}
+          onChange={handleCommit}
+        />
+        <div className="wash-look-col">
+          {files.length > 1 && (
+            <label className="wash-card">
+              <span className="wash-card-title">Photo</span>
+              <select value={index} onChange={(event) => onIndex(Number(event.target.value))}>
+                {files.map((file, fileIndex) => (
+                  <option key={`${file.name}-${fileIndex}`} value={fileIndex}>
+                    {file.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {mode === "wand" && (
+            <div className="wash-card">
+              <label className="ae-scrub has-slider wash-num">
+                <span>Tolerance:</span>
+                <input
+                  type="range"
+                  className="ae-scrub-slider"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={tolerance}
+                  onChange={(event) => setTolerance(Number(event.target.value))}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={tolerance}
+                  onChange={(event) => setTolerance(Math.min(100, Math.max(0, Number(event.target.value) || 0)))}
+                />
+              </label>
+            </div>
+          )}
+          <figure className="wash-tile">
+            {cutoutUrl ? (
+              <img className="wash-shot alpha" src={cutoutUrl} alt="Cut-out preview" />
+            ) : (
+              <div className="wash-preview-empty">{busy ? "Rendering cut-out…" : "Draw a box to preview"}</div>
+            )}
+            <figcaption className="wash-cap">Cut-out preview</figcaption>
+          </figure>
+          <div className="wash-card">
+            <small className="wash-hint">{MASK_HINT[mode]}</small>
+            {error && <small className="wash-hint">{error}</small>}
+            <small className="wash-hint">Hold Option to peek with the magnifier while it is off.</small>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1056,21 +1063,16 @@ export function WatercolourTab() {
         </div>
       </div>
       {transparent && files.length > 0 && (
-        <>
-          <div className="history-head">
-            <h2>Landmark mask</h2>
-          </div>
-          <LandmarkMask
-            files={files}
-            index={activeIndex}
-            onIndex={setMaskFile}
-            spec={masks[String(activeIndex)] || { transparent: true }}
-            onChange={(next) => setMasks((current) => ({ ...current, [String(activeIndex)]: next }))}
-            onReset={() => resetMask(activeIndex)}
-            wash={wash}
-            ink={ink}
-          />
-        </>
+        <LandmarkMask
+          files={files}
+          index={activeIndex}
+          onIndex={setMaskFile}
+          spec={masks[String(activeIndex)] || { transparent: true }}
+          onChange={(next) => setMasks((current) => ({ ...current, [String(activeIndex)]: next }))}
+          onReset={() => resetMask(activeIndex)}
+          wash={wash}
+          ink={ink}
+        />
       )}
 
       <div className="actions">
