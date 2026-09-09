@@ -46,6 +46,16 @@ def _doc(job):
     }
 
 
+def _save(job, document):
+    latest = client.get(f"/api/jobs/{job['id']}")
+    assert latest.status_code == 200, latest.text
+    revision = int(latest.json()["result"].get("stateRevision") or 0)
+    return client.post(
+        f"/api/maps/{job['id']}/state",
+        json={"expectedRevision": revision, "document": document},
+    )
+
+
 def test_post_maps_seeds_under_output_root_without_dest():
     job = _seed()
     result = job["result"]
@@ -66,7 +76,7 @@ def test_state_409_while_running_and_patch_409():
     stored = RUNNER.get(job["id"])
     assert stored is not None
     stored.status = "running"
-    res = client.post(f"/api/maps/{job['id']}/state", json=_doc(job))
+    res = _save(job, _doc(job))
     assert res.status_code == 409
     stored.status = "done"
     patched = client.patch(f"/api/jobs/{job['id']}", json={"result": result_keep(job)})
@@ -92,7 +102,7 @@ def test_state_and_frame_ok_after_error():
     assert stored is not None
     stored.status = "error"
     stored.error = "encode failed"
-    saved = client.post(f"/api/maps/{job['id']}/state", json=_doc(job))
+    saved = _save(job, _doc(job))
     assert saved.status_code == 200, saved.text
     framed = client.post(
         f"/api/maps/{job['id']}/frame?slideId=s1&index=0&count=2&fps=30",
@@ -111,7 +121,7 @@ def test_pin_label_visibility_round_trips_with_backward_compatible_default():
         {"id": "p2", "name": "Hidden", "lat": 4.0, "lon": 102.0, "kind": "dropPin", "color": "#c44a42", "showLabel": False},
     ]
     doc["slides"] = [slide]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     churches = saved.json()["result"]["slides"][0]["churches"]
     assert [church["showLabel"] for church in churches] == [True, False]
@@ -140,7 +150,7 @@ def test_easing_stripped_unless_movie():
             "easing": "ease-in-out",
         }
     ]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     links = saved.json()["result"]["links"]
     assert "easing" not in links[0]
@@ -167,7 +177,7 @@ def test_fly_opts_stripped_unless_movie():
             "flyZoom": 5.0,
         }
     ]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     links = saved.json()["result"]["links"]
     assert "easeIn" not in links[0]
@@ -197,7 +207,7 @@ def test_movie_fly_opts_roundtrip():
             "flyZoom": 6.2,
         }
     ]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     link = saved.json()["result"]["links"][0]
     assert link["kind"] == "movie"
@@ -225,7 +235,7 @@ def test_dissolve_roundtrip():
             "easing": "ease-in-out",
         }
     ]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     link = saved.json()["result"]["links"][0]
     assert link["kind"] == "dissolve"
@@ -254,15 +264,15 @@ def test_route_roundtrip_and_rejects_extra_keys():
             "route": {"points": [{"lat": 1.3, "lon": 103.8}, {"lat": 3.1, "lon": 101.7}]},
         }
     ]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     route = saved.json()["result"]["links"][0]["route"]
     assert route == {"points": [{"lat": 1.3, "lon": 103.8}, {"lat": 3.1, "lon": 101.7}]}
     doc["links"][0]["route"] = {"points": [{"lat": 1.3, "lon": 103.8}, {"lat": 3.1, "lon": 101.7}], "extra": True}
-    bad = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    bad = _save(job, doc)
     assert bad.status_code == 400
     doc["links"][0]["route"] = {"points": [{"lat": 1.3, "lon": 103.8}]}
-    short = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    short = _save(job, doc)
     assert short.status_code == 400
 
 
@@ -270,7 +280,7 @@ def test_hidden_layers_roundtrip():
     job = _seed()
     doc = _doc(job)
     doc["hiddenLayers"] = ["pois", "shields"]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     assert saved.json()["result"]["hiddenLayers"] == ["pois", "shields"]
 
@@ -283,7 +293,7 @@ def test_per_slide_hidden_layers_roundtrip_and_demotes_morph():
     slide2["hiddenLayers"] = ["pois"]
     doc["slides"].append(slide2)
     doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["slides"][0]["hiddenLayers"] == ["roadnames", "arrows"]
@@ -298,7 +308,7 @@ def test_deck_hidden_layers_inherited_onto_unset_slides():
     slide = dict(doc["slides"][0])
     slide.pop("hiddenLayers", None)
     doc["slides"] = [slide]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["slides"][0]["hiddenLayers"] == ["pois", "shields"]
@@ -311,7 +321,7 @@ def test_export_plan_still_matches_deck_hidden_layers():
     slide = dict(doc["slides"][0])
     slide.pop("hiddenLayers", None)
     doc["slides"] = [slide]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     # /state normalises hiddenLayers onto slides on the way in, which leaves
     # nothing for /export-plan to inherit. Force the stored slide back to
@@ -331,7 +341,7 @@ def test_export_maps_job_inherits_deck_hidden_layers_for_legacy_document(monkeyp
     slide = dict(doc["slides"][0])
     slide.pop("hiddenLayers", None)
     doc["slides"] = [slide]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     stored = RUNNER.get(job["id"])
     assert stored is not None
@@ -375,7 +385,7 @@ def test_explicit_empty_slide_layers_survive_a_deck_value():
     slide = dict(doc["slides"][0])
     slide["hiddenLayers"] = []
     doc["slides"] = [slide]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["slides"][0]["hiddenLayers"] == []
@@ -429,7 +439,7 @@ def test_slide_hillshade_roundtrip_and_demotes_morph():
     slide2["hillshade"] = True
     doc["slides"].append(slide2)
     doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["slides"][0]["hillshade"] is False
@@ -446,7 +456,7 @@ def test_manual_movie_survives_state_save_on_appearance_mismatch():
     slide2["hillshade"] = True
     doc["slides"].append(slide2)
     doc["links"] = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.2, "playWithoutClick": False}]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["links"][0]["kind"] == "movie"
@@ -604,7 +614,7 @@ def test_maps_session_roundtrip_includes_preview_and_tile_cache(tmp_path, monkey
     job = _seed()
     doc = _doc(job)
     doc["slides"][0]["title"] = "Portable session"
-    assert client.post(f"/api/maps/{job['id']}/state", json=doc).status_code == 200
+    assert _save(job, doc).status_code == 200
     assert client.post(f"/api/maps/{job['id']}/png?slideId=s1", content=b"preview").status_code == 200
     tile = tile_root / "planet" / "0" / "0" / "0.pbf"
     tile.parent.mkdir(parents=True)
@@ -619,7 +629,7 @@ def test_maps_session_roundtrip_includes_preview_and_tile_cache(tmp_path, monkey
 
     tile.unlink()
     doc["slides"][0]["title"] = "Changed"
-    client.post(f"/api/maps/{job['id']}/state", json=doc)
+    _save(job, doc)
     loaded = client.post(
         f"/api/maps/{job['id']}/session",
         files={"file": ("saved.obedmaps", response.content, "application/zip")},
@@ -639,7 +649,7 @@ def test_maps_session_drops_movies_from_the_replaced_job(tmp_path, monkeypatch):
     job = _seed()
     saved_doc = _doc(job)
     saved_doc["slides"][0].update({"movieMov": "Map BG_s1.mov", "movieDuration": 1.5})
-    assert client.post(f"/api/maps/{job['id']}/state", json=saved_doc).status_code == 200
+    assert _save(job, saved_doc).status_code == 200
     session = client.get(f"/api/maps/{job['id']}/session")
     output_dir = Path(job["result"]["outputDir"])
     stale_movie = output_dir / "movies" / "s1.mov"
@@ -745,6 +755,75 @@ def test_maps_session_staging_failure_preserves_existing_assets(tmp_path, monkey
     assert not (tile_root / "new.pbf").exists()
 
 
+def _landmark_png() -> bytes:
+    image = Image.new("RGBA", (40, 20), (180, 80, 40, 180))
+    data = BytesIO()
+    image.save(data, "PNG")
+    return data.getvalue()
+
+
+def test_landmark_assets_are_owned_referenced_and_session_portable():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    upload_payload = uploaded.json()
+    asset = upload_payload["asset"]
+    assert isinstance(upload_payload["stateRevision"], int)
+    assert upload_payload["document"]["assets"] == [asset]
+    doc = _doc(job)
+    doc["assets"] = [{"id": "forged", "version": "a" * 8, "width": 1, "height": 1}]
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "assetVersion": asset["version"], "assetWidth": asset["width"], "assetHeight": asset["height"], "size": 180,
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["assets"] == [asset]
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+    with zipfile.ZipFile(BytesIO(session.content)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["document"]["assets"] == [asset]
+        assert archive.read(f"assets/{asset['id']}.png")
+
+
+def test_state_rejects_legacy_external_photo_path_and_unknown_asset():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {"id": "p1", "name": "Unsafe", "lat": 3, "lon": 101, "kind": "dot", "color": "#c44a42", "photoPath": "/etc/passwd"}
+    ]
+    response = _save(job, doc)
+    assert response.status_code == 400
+    doc["slides"][0]["churches"][0].pop("photoPath")
+    doc["slides"][0]["churches"][0]["kind"] = "landmark"
+    doc["slides"][0]["churches"][0]["assetId"] = "missing"
+    response = _save(job, doc)
+    assert response.status_code == 400
+
+
+def test_session_omits_asset_after_its_last_landmark_is_deleted():
+    job = _seed()
+    asset = client.post(f"/api/maps/{job['id']}/assets", files={"file": ("church.png", _landmark_png(), "image/png")}).json()["asset"]
+    doc = _doc(job)
+    slide = doc["slides"][0]
+    slide["churches"] = [{"id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42", "assetId": asset["id"]}]
+    assert _save(job, doc).status_code == 200
+    slide["churches"] = []
+    assert _save(job, doc).status_code == 200
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+    with zipfile.ZipFile(BytesIO(session.content)) as archive:
+        document = json.loads(archive.read("manifest.json"))["document"]
+        assert document["assets"] == []
+        assert not [name for name in archive.namelist() if name.startswith("assets/")]
+
+
 def test_export_requires_one_deck():
     job = _seed()
     res = client.post(
@@ -758,9 +837,39 @@ def test_state_allows_dsk_as_the_only_export_target():
     job = _seed()
     doc = _doc(job)
     doc.update({"exportLw": False, "exportCg": False, "exportDsk": True})
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     assert saved.json()["result"]["exportDsk"] is True
+
+
+def test_state_revision_rejects_stale_document_save():
+    job = _seed()
+    doc = _doc(job)
+    first = client.post(f"/api/maps/{job['id']}/state", json={"expectedRevision": 0, "document": doc})
+    assert first.status_code == 200, first.text
+    stale = client.post(f"/api/maps/{job['id']}/state", json={"expectedRevision": 0, "document": doc})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["stateRevision"] == 1
+
+
+def test_state_requires_a_revision_envelope():
+    job = _seed()
+    response = client.post(f"/api/maps/{job['id']}/state", json=_doc(job))
+    assert response.status_code == 400
+    assert "envelope" in response.json()["detail"]
+
+
+def test_state_rejects_duplicate_object_ids_and_invalid_links():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {"id": "p1", "name": "One", "lat": 1, "lon": 2, "kind": "dot", "color": "#fff"},
+        {"id": "p1", "name": "Two", "lat": 3, "lon": 4, "kind": "dot", "color": "#fff"},
+    ]
+    assert _save(job, doc).status_code == 400
+    doc["slides"][0]["churches"] = []
+    doc["links"] = [{"from": "s1", "to": "missing", "kind": "cut", "duration": 1, "playWithoutClick": False}]
+    assert _save(job, doc).status_code == 400
 
 
 def test_png_still_and_plate_filenames():
@@ -790,7 +899,7 @@ def test_export_plan_coerces_oversized_morph():
     s2["camera"] = {**cam, "lon": cam["lon"] + 80}
     doc["slides"] = [s1, s2]
     doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     plan = client.get(f"/api/maps/{job['id']}/export-plan")
     assert plan.status_code == 200, plan.text
@@ -813,7 +922,7 @@ def test_export_plan_small_morph_has_plate_camera():
     s2["camera"] = {**cam, "lon": cam["lon"] + 0.02}
     doc["slides"] = [s1, s2]
     doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     plan = client.get(f"/api/maps/{job['id']}/export-plan")
     assert plan.status_code == 200, plan.text
@@ -837,7 +946,7 @@ def test_include_side_panels_and_cached_countries_roundtrip():
     slide["includeSidePanels"] = True
     doc["slides"] = [slide]
     doc["cachedCountries"] = ["phl", "ind"]
-    saved = client.post(f"/api/maps/{job['id']}/state", json=doc)
+    saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     result = saved.json()["result"]
     assert result["slides"][0]["includeSidePanels"] is True

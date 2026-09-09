@@ -618,8 +618,10 @@ def create_app() -> FastAPI:
         return RUNNER.public_dict(updated)
 
     from obed_edom.web.maps import router as maps_router
+    from obed_edom.web.watercolour import router as watercolour_router
 
     app.include_router(maps_router)
+    app.include_router(watercolour_router)
 
     if DASHBOARD_DIST.is_dir():
         app.mount("/", StaticFiles(directory=str(DASHBOARD_DIST), html=True), name="ui")

@@ -630,6 +630,7 @@ def _place_churches(
     movie: Path | None,
     origin_x: float = 0,
     capture_w: float = WALL_WIDTH,
+    asset_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for church in churches:
@@ -650,12 +651,16 @@ def _place_churches(
             theta = math.radians(float(camera.get("bearing") or 0))
             copy_dx = math.cos(theta) * copy_world
             copy_dy = -math.sin(theta) * copy_world
-        size = _pin_size(church, movie)
+        size = int(church.get("size") or _pin_size(church, movie))
         color = parse_color(str(church.get("color") or "#c44a42"))
         kind = str(church.get("kind") or "dot")
+        asset_id = str(church.get("assetId") or "")
+        landmark = asset_root / f"{asset_id}.png" if asset_root and asset_id else None
+        if kind == "landmark" and (movie is not None or landmark is None or not landmark.is_file()):
+            continue
         static_drop = kind == "dropPin" and movie is None
         name = str(church.get("name") or "").strip()
-        photo = church.get("photoPath")
+        photo = None
         copy_span = max(1.0, math.hypot(copy_dx, copy_dy))
         copy_count = math.ceil((capture_w + WALL_HEIGHT) / copy_span) + 2
         for copy_index in range(-copy_count, copy_count + 1):
@@ -664,10 +669,24 @@ def _place_churches(
             if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
                 continue
             x = cx + origin_x - size / 2.0
-            y = cy - size * 1.08 if static_drop else cy - size / 2.0
+            y = cy - size if kind == "landmark" else cy - size * 1.08 if static_drop else cy - size / 2.0
             if wall:
                 x = avoid_straddle(x, size)
-            if kind == "dropPin" and movie is not None:
+            if kind == "landmark":
+                with Image.open(landmark) as image:
+                    height = size * image.height / max(1, image.width)
+                    opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
+                    if opacity < 1:
+                        faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
+                        if not faded.exists():
+                            rgba = image.convert("RGBA")
+                            rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
+                            rgba.save(faded, "PNG")
+                        landmark = faded
+                item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
+                item["opacity"] = float(church.get("opacity") if church.get("opacity") is not None else 1)
+                items.append(item)
+            elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
             else:
                 if kind == "dropPin":
@@ -706,12 +725,6 @@ def _place_churches(
                 if wall:
                     nx = avoid_straddle(nx, nw)
                 items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
-            if photo and Path(str(photo)).is_file():
-                px = x - PHOTO_SIZE - 8
-                py = y
-                if wall:
-                    px = avoid_straddle(px, PHOTO_SIZE)
-                items.append(_item("image", px, py, PHOTO_SIZE, PHOTO_SIZE, path=str(Path(photo)), photo=True))
     return items
 
 
@@ -723,6 +736,7 @@ def _map_item(
     still: Path | None,
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
+    asset_root: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, int] | None]:
     camera = slide.get("camera") or {}
     if bg_movie is not None:
@@ -760,6 +774,7 @@ def build_slide_items(
     wall: bool,
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
+    asset_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
@@ -778,6 +793,7 @@ def build_slide_items(
                 movie=movie,
                 origin_x=origin_x,
                 capture_w=cap_w,
+                asset_root=asset_root,
             )
         )
     oversized_cg_movie = bg_movie is not None and float(mapped["w"]) > CG_WIDTH
@@ -863,6 +879,7 @@ def plan_deck(
             wall=wall,
             bg_movie=bg_movie,
             dest_slide=item_dest,
+            asset_root=output_dir / "assets",
         )
         prev_link = _outgoing(str(slides[index - 1].get("id") or ""), links) if index else None
         duplicate = bool(
