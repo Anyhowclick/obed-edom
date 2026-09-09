@@ -12,8 +12,11 @@ pytest.importorskip("keynote_parser")
 
 from scripts.golden_plan import (  # noqa: E402
     ENV_PINS,
+    GOLDEN_VERSION,
+    PREVIEWS_NONE,
     TEMPLATE as SCRIPT_TEMPLATE,
     WALL_DECKS,
+    WALL_PAYLOAD_SOURCE,
     canonical,
     capture_plan,
     enrichment_markers,
@@ -43,15 +46,32 @@ def _pin_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _skip_ladder(deck_name: str) -> dict:
-    """Skip (never fail) on a missing deck/template/golden or a digest/version
-    drift, naming the regeneration command; returns the loaded golden fixture."""
+    """Skip on a missing deck/template/golden or a deck/template digest drift
+    (a missing input), naming the regeneration command. Fail on any other
+    provenance drift (schema/version/config): a mis-described golden is a bug,
+    not a missing input. Returns the loaded golden fixture."""
     deck = DECKS / deck_name
-    if not deck.exists() or not TEMPLATE.exists():
-        pytest.skip("local gold deck only")
+    if not deck.exists():
+        pytest.skip(f"deck missing: {deck}")
+    if not TEMPLATE.exists():
+        pytest.skip(f"template missing: {TEMPLATE}")
     golden_file = golden_path(deck_name)
     if not golden_file.exists():
         pytest.skip(f"golden fixture missing: {golden_file}")
     golden = json.loads(golden_file.read_text())
+
+    for field, expected in (
+        ("goldenVersion", GOLDEN_VERSION),
+        ("deck", deck_name),
+        ("template", TEMPLATE.name),
+        ("wallPayloadSource", WALL_PAYLOAD_SOURCE),
+        ("previews", PREVIEWS_NONE),
+        ("env", ENV_PINS),
+        ("inspectVersion", baseline.INSPECT_VERSION),
+    ):
+        actual = golden.get(field, "<missing>")
+        if actual != expected:
+            pytest.fail(f"golden fixture schema drift: {field} expected {expected!r}, got {actual!r}")
 
     source_digest = baseline.deck_digest(deck)
     template_digest = baseline.deck_digest(TEMPLATE)
@@ -61,36 +81,55 @@ def _skip_ladder(deck_name: str) -> dict:
             f"template {template_digest} vs {golden['templateDigest']}); regenerate with "
             f"scripts/golden_plan.py update --deck {deck_name}"
         )
-    if baseline.INSPECT_VERSION != golden["inspectVersion"]:
-        pytest.skip(f"INSPECT_VERSION drift ({baseline.INSPECT_VERSION} vs {golden['inspectVersion']})")
     return golden
+
+
+def _check_planner_env(golden: dict, actual_env: dict) -> None:
+    """A different machine (OS build or installed/resolved fonts) is a missing
+    input, not a bug: skip naming the differing component."""
+    golden_env = golden["plannerEnv"]
+    for component in ("osBuild", "fontEnv"):
+        if golden_env.get(component) != actual_env.get(component):
+            pytest.skip(
+                f"planner env drift ({component}): {golden_env.get(component)!r} vs {actual_env.get(component)!r}"
+            )
+
+
+def _check_plan(deck_name: str, golden: dict, wall: dict, tmpl: dict, plan: dict, tmp_path: Path) -> None:
+    """One diagnostic helper for marker (enrichment), totals and hash
+    discrepancies: always writes `actual-plan.json`, prints the summary diff
+    (totals/enrichment first) and the capture command for a transform-level
+    diff against the pre-refactor revision."""
+    actual_enrichment = enrichment_markers(wall, tmpl)
+    actual = {**summarize(plan), "enrichment": actual_enrichment}
+    actual_sha = plan_hash(plan)
+    markers_match = actual_enrichment == golden["enrichment"]
+    totals_match = actual["totals"] == golden["totals"]
+    hash_match = actual_sha == golden["planSha256"]
+    if markers_match and totals_match and hash_match:
+        return
+
+    actual_path = tmp_path / "actual-plan.json"
+    actual_path.write_text(canonical(plan))
+    diff_lines = summary_diff(golden, actual) or [
+        "summary is identical; a field the summary does not project moved "
+        "(an x/y, a font, an asGeom body byte)"
+    ]
+    header = f"golden plan mismatch for {deck_name}: sha {golden['planSha256']} != {actual_sha}"
+    footer = (
+        f"actual canonical plan written to {actual_path}; for a transform-level diff, capture the "
+        f"pre-refactor revision with .venv/bin/python scripts/golden_plan.py capture --deck {deck_name} "
+        f"--out /tmp/before.json and diff it against {actual_path}"
+    )
+    pytest.fail("\n".join([header, *diff_lines[:20], footer]))
 
 
 def _gate(deck_name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     golden = _skip_ladder(deck_name)
     _pin_env(monkeypatch)
-    wall, tmpl, plan = capture_plan(DECKS / deck_name, TEMPLATE)
-
-    assert enrichment_markers(wall, tmpl) == golden["enrichment"]
-    assert summarize(plan)["totals"] == golden["totals"]
-
-    actual_sha = plan_hash(plan)
-    if actual_sha != golden["planSha256"]:
-        actual_path = tmp_path / "actual-plan.json"
-        actual_path.write_text(canonical(plan))
-        print(f"actual canonical plan written to {actual_path}")
-        actual = {**summarize(plan), "enrichment": enrichment_markers(wall, tmpl)}
-        diff_lines = summary_diff(golden, actual) or [
-            "summary is identical; a field the summary does not project moved "
-            "(an x/y, a font, an asGeom body byte)"
-        ]
-        header = f"golden plan sha mismatch for {deck_name}: {golden['planSha256']} != {actual_sha}"
-        footer = (
-            "for a transform-level diff, capture the pre-refactor revision with "
-            f".venv/bin/python scripts/golden_plan.py capture --deck {deck_name} --out /tmp/before.json "
-            f"and diff it against {actual_path}"
-        )
-        assert actual_sha == golden["planSha256"], "\n".join([header, *diff_lines[:20], footer])
+    wall, tmpl, plan, planner_env = capture_plan(DECKS / deck_name, TEMPLATE)
+    _check_planner_env(golden, planner_env)
+    _check_plan(deck_name, golden, wall, tmpl, plan, tmp_path)
 
 
 def test_golden_apply_plan_gold_wall_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -109,11 +148,12 @@ def test_golden_apply_plan_full_report_card_wall(monkeypatch: pytest.MonkeyPatch
 )
 def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPatch) -> None:
     deck_name = "Full_Report_Card_Wall.key"
-    _skip_ladder(deck_name)
+    golden = _skip_ladder(deck_name)
     deck = DECKS / deck_name
 
     _pin_env(monkeypatch)
-    _wall, _tmpl, plan = capture_plan(deck, TEMPLATE)
+    _wall, _tmpl, plan, planner_env = capture_plan(deck, TEMPLATE)
+    _check_planner_env(golden, planner_env)
 
     def _no_thumbs(deck: Path, payload: dict, *, log=None) -> dict[int, str]:
         return {}

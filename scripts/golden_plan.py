@@ -12,7 +12,8 @@ is the byte-for-byte baseline `tests/test_golden_plan.py` gates against.
         --out /tmp/before.json
 
 `update` rewrites the committed golden and prints the before/after `planSha256`
-plus a summary diff, for a deliberate re-baseline to be reviewable. `capture`
+plus a summary diff, for a deliberate re-baseline to be reviewable; it refuses a
+deck/template digest change unless `--accept-input-drift` is passed. `capture`
 writes the full canonical plan (a few MB) so a hash mismatch can be diffed at the
 transform level against a capture from the pre-refactor revision.
 """
@@ -35,6 +36,10 @@ from obed_edom.offline_inspect import offline_wall_payload
 DECKS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
 TEMPLATE = DECKS / "Base_CG_Assets.key"
 WALL_DECKS = ("Gold_Wall_Input.key", "Full_Report_Card_Wall.key")
+
+GOLDEN_VERSION = 1
+WALL_PAYLOAD_SOURCE = "offline_wall_payload"
+PREVIEWS_NONE = "none"
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "golden-plan"
 
@@ -120,14 +125,31 @@ def _pinned_env():
                 os.environ[name] = value
 
 
-def capture_plan(source: Path, template: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def planner_env(objects: dict[str, dict]) -> dict[str, str]:
+    """OS build + resolved font env for the SOURCE deck's objects: the hidden
+    inputs of `map_remap.caption_point_size` (AppKit/TextKit text measurement
+    via `iwa_text_shape._ns_font`). Imports `slide_fingerprint`'s private
+    helpers rather than duplicating them."""
+    from obed_edom.slide_fingerprint import _compute_font_env, _os_build  # noqa: PLC0415 (optional extra)
+
+    return {"osBuild": _os_build(), "fontEnv": _compute_font_env(objects)}
+
+
+def capture_plan(
+    source: Path, template: Path
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
     """Wall + template payloads (offline, mutated in place by the enrichment
-    preamble) and the captured apply plan. Never opens Keynote: `_keynote_free`
-    is applied around the one `remap_keynote()` call, which must raise
-    `_PlanCaptured` at `_run_jxa` -- a normal return means the stub was bypassed."""
-    wall = offline_wall_payload(source)
+    preamble), the captured apply plan, and the source deck's `planner_env`.
+    Never opens Keynote: `_keynote_free` is applied around the one
+    `remap_keynote()` call, which must raise `_PlanCaptured` at `_run_jxa` --
+    a normal return means the stub was bypassed."""
+    from obed_edom.iwa_runs import _load_deck  # noqa: PLC0415 (optional extra)
+
+    source_deck = _load_deck(source)
+    wall = offline_wall_payload(source, deck=source_deck)
     tmpl = offline_wall_payload(template)
     assert "reader" not in wall
+    env = planner_env(source_deck[0])
     out: dict[str, Any] = {}
     dest = Path(tempfile.gettempdir()) / "golden-plan-never-written.key"
     with _keynote_free():
@@ -145,7 +167,7 @@ def capture_plan(source: Path, template: Path) -> tuple[dict[str, Any], dict[str
             pass
         else:
             raise RuntimeError("plan capture did not reach _run_jxa")
-    return wall, tmpl, out
+    return wall, tmpl, out, env
 
 
 def _round_floats(value: Any) -> Any:
@@ -252,18 +274,24 @@ def summarize(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_golden(
-    source: Path, template: Path, wall: dict[str, Any], tmpl: dict[str, Any], plan: dict[str, Any]
+    source: Path,
+    template: Path,
+    wall: dict[str, Any],
+    tmpl: dict[str, Any],
+    plan: dict[str, Any],
+    planner_env_: dict[str, str],
 ) -> dict[str, Any]:
     return {
-        "goldenVersion": 1,
+        "goldenVersion": GOLDEN_VERSION,
         "deck": source.name,
         "template": template.name,
         "sourceDigest": baseline.deck_digest(source),
         "templateDigest": baseline.deck_digest(template),
         "inspectVersion": baseline.INSPECT_VERSION,
-        "wallPayloadSource": "offline_wall_payload",
-        "previews": "none",
+        "wallPayloadSource": WALL_PAYLOAD_SOURCE,
+        "previews": PREVIEWS_NONE,
         "env": dict(ENV_PINS),
+        "plannerEnv": planner_env_,
         "enrichment": enrichment_markers(wall, tmpl),
         "planSha256": plan_hash(plan),
         **summarize(plan),
@@ -306,7 +334,7 @@ def _do_capture(args: argparse.Namespace) -> None:
     deck = DECKS / args.deck
     template = Path(args.template) if args.template else TEMPLATE
     with _pinned_env():
-        _wall, _tmpl, plan = capture_plan(deck, template)
+        _wall, _tmpl, plan, _env = capture_plan(deck, template)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(canonical(plan))
     print(f"wrote {args.out} ({args.out.stat().st_size} bytes), plan sha {plan_hash(plan)}")
@@ -315,15 +343,30 @@ def _do_capture(args: argparse.Namespace) -> None:
 def _do_update(args: argparse.Namespace) -> None:
     deck = DECKS / args.deck
     template = Path(args.template) if args.template else TEMPLATE
-    with _pinned_env():
-        wall, tmpl, plan = capture_plan(deck, template)
-    golden = build_golden(deck, template, wall, tmpl, plan)
     path = golden_path(args.deck)
-    if path.exists():
-        old = json.loads(path.read_text())
+    old = json.loads(path.read_text()) if path.exists() else None
+    source_digest = baseline.deck_digest(deck)
+    template_digest = baseline.deck_digest(template)
+    if old is not None:
+        print(f"source digest {old.get('sourceDigest')} -> {source_digest}")
+        print(f"template digest {old.get('templateDigest')} -> {template_digest}")
+        drifted = old.get("sourceDigest") != source_digest or old.get("templateDigest") != template_digest
+        if drifted and not args.accept_input_drift:
+            raise SystemExit(
+                "input digest drift vs the committed golden; pass --accept-input-drift to "
+                "re-bank against the new deck/template bytes"
+            )
+    with _pinned_env():
+        wall, tmpl, plan, planner_env_ = capture_plan(deck, template)
+    golden = build_golden(deck, template, wall, tmpl, plan, planner_env_)
+    if old is not None:
         print(f"old plan sha {old.get('planSha256')}")
-        for line in summary_diff(old, golden):
-            print(f"  {line}")
+        diff_lines = summary_diff(old, golden)
+        if diff_lines:
+            for line in diff_lines:
+                print(f"  {line}")
+        elif old.get("planSha256") != golden["planSha256"]:
+            print("  projected summary unchanged; hash differs (a field the summary does not project moved)")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(golden, sort_keys=True, indent=1) + "\n")
     totals = golden["totals"]
@@ -350,6 +393,11 @@ def main(argv: list[str] | None = None) -> int:
 
     upd = sub.add_parser("update", help="rewrite the committed golden fixture")
     _common(upd)
+    upd.add_argument(
+        "--accept-input-drift",
+        action="store_true",
+        help="allow re-banking when the deck/template digest differs from the committed golden",
+    )
 
     args = ap.parse_args(argv)
     if args.command == "capture":
