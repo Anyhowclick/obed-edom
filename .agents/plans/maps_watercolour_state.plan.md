@@ -6,8 +6,8 @@ todos:
     content: Owner runs the QA list below (Keynote checks especially); nothing here is owner-verified
     status: pending
   - id: review2
-    content: Second Codex review of 6c4c62f...HEAD was still running at handover — collect its verdict and triage
-    status: pending
+    content: "Done: round 2 (on 0644d97) returned REQUEST-CHANGES with 8 findings; 7 fixed in 290d4f7, finding 2 rejected on purpose (country cut-out stays plain, no orange)."
+    status: done
   - id: backlog
     content: Pick the next bounded package from "Open backlog" and plan it before touching code
     status: pending
@@ -59,13 +59,21 @@ Branch `codex/maps-watercolour-objects`, HEAD `0644d97`, PR **#63**. Workspace `
 ### Preview canvas = export band
 - `f1aaabf` the MapLibre canvas is now the export band itself (`.maps-map-band`, `previewHostRect`), so pitched preview and export frame identically — `MapView.tsx`, `types.ts`, `styles.css`, `overlays.ts` (`icon-ignore-placement`), `tests/preview-host-rect.test.cjs`.
 
+### Codex review-2 fixes / reveal / reorder / nav margins
+- `290d4f7` review-2 fixes: reveal paths export-only + per-audience fingerprint; ffmpeg output to files; raster upload caps + magic check + atomic write; landing id suffix reserved; mask flush/undo-per-photo/hydration guard; CG frame yields pointer events to objects.
+- `a0518b8` drag-and-drop slide reorder — `moveSlideTo` in `maps/types.ts`; arrow buttons removed, Cmd-[ / Cmd-] kept.
+- `627cd66` AppleScript movie fallback now places the landmark still — the `shape type` record was failing whole exports.
+- `69c8da6` stroke-based paint-on reveal + "Reveal as slide movie" — background movie built from the still plus the reveal (`render_slide_reveal_movie`).
+- `0aa585e` Strokes control (default 4, fewer = broader strokes), reveal render ~12× faster (≈3 s per 1600 px landmark), nav margins restored via `compensatedFov` in `maps/types.ts` (full-frame canvas, fov widened so the band projects like the export), style thumbnails recaptured at downtown SG z16.7 bearing 52, deck default reverted to the SEA overview.
+
 ## Known limits / assumptions
 
 - **Province tile floor.** `admin_level` 4 geometry starts at map z1; nothing renders provinces below it. Preview runs `previewZoomDelta` below authored, so low-zoom previews stay silent about provinces even though the 7680 export shows them.
 - **Export hairlines.** Vendored line weights are screen-scale, so authored z2-3 exports draw 1-1.2 px borders on the wall. The real fix is parked **option 2b** in [maps_toner_lowzoom.plan.md](maps_toner_lowzoom.plan.md) (render the export through the preview camera at pixelRatio 7.68).
-- **Keynote autoplay is not scriptable.** Reveal movies and drop-pin wave movies are emitted as plain movie items; whether they start automatically depends on Document ▸ Movies / build order. Owner must check.
+- **Keynote autoplay is not scriptable.** Movies start on slide arrival unless "Start movie on click" is set; whether that applies depends on Document ▸ Movies / build order. Owner must check.
 - **Landmark picker is LW-only** — the server appends to `slide["churches"]` with no audience parameter; the watercolour choice is disabled in CG.
-- **Style thumbnails are inconsistent**: Positron and Liberty were captured at z20, the rest at ≈18.5. No 3D/pitch-45 capture exists.
+- **Reveal cache is fingerprinted** on asset, duration, opacity, strokes, seed, audience, algo v3.
+- **Slide ids ending `__landing` are rejected.**
 - **Blur isolate not built** — only `mode: "darken"`; `"erase"` is migrated to darken on load, any other mode 400s.
 - **Wand / pen are not a live-wire.** Magnetic pen is gradient snap of auto-anchors (Photoshop magnetic lasso approximately); a Dijkstra live-wire was explicitly out of scope.
 - **Mid-render cancellation deferred** (first review, finding 8): Watercolour cancellation is only checked between files, so one 24 MP GrabCut/render runs to completion while the job shows `running`.
@@ -77,8 +85,11 @@ Nothing below has been owner-verified; the implementer was barred from Keynote.
 1. Watercolour: ink slider at its extreme, and the darken look overall — does it read as intended?
 2. Keynote: cut-out still stacking, the synthetic landing slide sequence (plain → 1 s dissolve → isolated), and the paint-on reveal (does it autoplay?). Check the `_CG.key` too.
 3. Pitched preview vs export: same roads framed, landmark base at the same fraction of frame height; pitch 0 unchanged; FW / centre-only / CG-split alignment; window resize with no drift.
-4. Slide reorder: ▲/▼ and Cmd-[ / Cmd-], gates and gutter badges recompute, order survives reload, movies re-render for the new pairs.
+4. Slide reorder: drag-and-drop and Cmd-[ / Cmd-], gates and gutter badges recompute, order survives reload, movies re-render for the new pairs.
 5. Objects: drag-to-move without hijacking pan, corner resize past the old 600 cap, slider/number agreement, and Keynote size matching preview.
+6. Stroke look: default 4 strokes vs more strokes, does the reveal read as intended.
+7. Reveal-as-slide-movie playback in Keynote.
+8. Fov-compensated preview vs export on a pitched slide.
 
 ## Open backlog
 
@@ -94,7 +105,7 @@ Nothing below has been owner-verified; the implementer was barred from Keynote.
 
 ## Pointers
 
-- **PR #63** carries this branch. First review: verdict REQUEST-CHANGES, 11 findings, all addressed in `6c4c62f`; report and the posted comment are in the session scratchpad (`codex-review.md`, `pr-comment.md`). A second review of `6c4c62f...HEAD` was briefed (`codex-review2-brief.md`) but had not produced a verdict at handover — **collect it before merging**.
-- Shipped-plan details live in the session scratchpad as `mask-upgrades-plan.md`, `isolate-round2-plan.md`, `round3-plan.md`, `landing-plan.md`, `picker-reorder-plan.md`, `preview-band-plan.md`, `reveal-plan.md`.
+- **PR #63** carries this branch. First review: verdict REQUEST-CHANGES, 11 findings, all addressed in `6c4c62f`; report and the posted comment are in the session scratchpad (`codex-review.md`, `pr-comment.md`). Second review (on `0644d97`): verdict REQUEST-CHANGES, 8 findings, 7 fixed in `290d4f7`, finding 2 rejected on purpose (country cut-out stays plain, no orange); see `codex-review2.md` in the scratchpad and the PR review comments.
+- Shipped-plan details live in the session scratchpad as `mask-upgrades-plan.md`, `isolate-round2-plan.md`, `round3-plan.md`, `landing-plan.md`, `picker-reorder-plan.md`, `preview-band-plan.md`, `reveal-plan.md`, `reveal2-plan.md`.
 - Memory: `maps-p2-film-route`, `browser-pane-maplibre-hidden` (a hidden Browser pane freezes MapLibre's rAF — drive `map.resize()` via `javascript_tool`; never use port 8765).
 - Commands (dashboard needs the bundled Node): `PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`, then `npm run test:maps` and `npm run build` from `dashboard`. Python: `.venv/bin/python -m pytest tests/test_maps_api.py tests/test_maps_keynote.py tests/test_maps_reveal.py tests/test_watercolour.py -q`. Restart: `.venv/bin/python -m obed_edom dashboard --no-browser --port 8766`.
