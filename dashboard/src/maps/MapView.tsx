@@ -686,7 +686,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!map?.getSource("admin0")) return;
     applyHighlights(map, highlights);
-    applyIsolate(map, highlights, isolate, styleId);
+    applyIsolate(map, highlights, isolate);
   }, [highlights, isolate?.mode, isolate?.strength]);
 
   useEffect(() => {

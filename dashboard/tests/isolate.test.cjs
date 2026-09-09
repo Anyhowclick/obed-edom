@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/isolate.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { isolateMaskGeometry } = require(path.join(out, "isolate.js"));
+const { isolateMaskGeometry, countryClipRings } = require(path.join(out, "isolate.js"));
 
 const WORLD_RING = [[-180, -85.05], [180, -85.05], [180, 85.05], [-180, 85.05], [-180, -85.05]];
 
@@ -57,4 +57,23 @@ test("MultiPolygon with a hole contributes all rings", () => {
 test("unmatched country code returns null", () => {
   const features = [polygon("USA", [[[0, 0], [1, 0], [1, 1], [0, 0]]])];
   assert.equal(isolateMaskGeometry(features, ["GBR"]), null);
+});
+
+test("countryClipRings has no world ring", () => {
+  const ring = [[0, 0], [1, 0], [1, 1], [0, 0]];
+  const features = [polygon("USA", [ring])];
+  assert.deepEqual(countryClipRings(features, ["usa"]), [ring]);
+});
+
+test("countryClipRings collects all rings of a MultiPolygon", () => {
+  const outerA = [[0, 0], [1, 0], [1, 1], [0, 0]];
+  const outerB = [[2, 2], [3, 2], [3, 3], [2, 2]];
+  const features = [multiPolygon("FRA", [[outerA], [outerB]])];
+  assert.deepEqual(countryClipRings(features, ["fra"]), [outerA, outerB]);
+});
+
+test("countryClipRings returns empty on no match", () => {
+  const features = [polygon("USA", [[[0, 0], [1, 0], [1, 1], [0, 0]]])];
+  assert.deepEqual(countryClipRings(features, ["GBR"]), []);
+  assert.deepEqual(countryClipRings(features, []), []);
 });

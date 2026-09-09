@@ -90,20 +90,18 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
 
     const byId = (layers, id) => layers.find((layer) => layer.id === id);
     const vendorPrimary = byId(vendor.layers, "road_primary");
-    const linesPrimary = byId(lines.layers, "road_primary");
-    assert.deepEqual(
-      linesPrimary.paint["line-width"].stops,
-      vendorPrimary.paint["line-width"].stops.map(([z, w]) => [z, w * 0.55]),
-    );
+    for (const style of [full, lines]) {
+      const primary = byId(style.layers, "road_primary");
+      assert.deepEqual(
+        primary.paint["line-width"].stops,
+        vendorPrimary.paint["line-width"].stops.map(([z, w]) => [z, w * 0.55]),
+      );
+    }
     for (const id of boundaryIds) {
       assert.deepEqual(byId(lines.layers, id).paint["line-width"], byId(full.layers, id).paint["line-width"]);
-    }
-    for (const style of [full, background]) {
-      for (const layer of style.layers) {
-        if (layer.type !== "line") continue;
-        const vendorLayer = byId(vendor.layers, layer.id);
-        if (!vendorLayer || !vendorLayer.paint) continue;
-        assert.deepEqual(layer.paint["line-width"], vendorLayer.paint["line-width"]);
+      const vendorBoundary = byId(vendor.layers, id);
+      if (vendorBoundary && vendorBoundary.paint) {
+        assert.deepEqual(byId(full.layers, id).paint["line-width"], vendorBoundary.paint["line-width"]);
       }
     }
   } finally { global.fetch = oldFetch; }

@@ -74,11 +74,9 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
   next.glyphs = base.glyphs;
   delete next.sprite;
   let layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset);
-  if (styleId === "toner-lines") {
-    const nonBoundary = layers.filter((layer) => !layer.id.startsWith("boundary"));
-    const boundary = layers.filter((layer) => layer.id.startsWith("boundary"));
-    layers = [...thinLineWidths(nonBoundary, TONER_LINES_WIDTH_FACTOR), ...boundary];
-  }
+  const nonBoundary = layers.filter((layer) => !layer.id.startsWith("boundary"));
+  const boundary = layers.filter((layer) => layer.id.startsWith("boundary"));
+  layers = [...thinLineWidths(nonBoundary, TONER_LINES_WIDTH_FACTOR), ...boundary];
   next.layers = layers.filter((layer) => {
     if (styleId === "toner-background") return layer.type === "background" || layer.type === "fill";
     if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";

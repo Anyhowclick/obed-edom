@@ -453,19 +453,21 @@ def maps_export_plan(
         if not sid or sid in covered:
             continue
         cap_w, cap_h = slide_capture_size(slide)
-        stills.append(
-            {
-                "slideId": sid,
-                "style": slide.get("style") or "positron",
-                "camera": slide.get("camera") or {},
-                "highlights": list(slide.get("highlights") or []),
-                "hiddenLayers": slide_hidden_layers(slide),
-                "hillshade": bool(slide.get("hillshade")),
-                "isolate": slide.get("isolate"),
-                "width": cap_w,
-                "height": cap_h,
-            }
-        )
+        highlights = list(slide.get("highlights") or [])
+        row = {
+            "slideId": sid,
+            "style": slide.get("style") or "positron",
+            "camera": slide.get("camera") or {},
+            "highlights": highlights,
+            "hiddenLayers": slide_hidden_layers(slide),
+            "hillshade": bool(slide.get("hillshade")),
+            "isolate": slide.get("isolate"),
+            "width": cap_w,
+            "height": cap_h,
+        }
+        if slide.get("isolate") and highlights:
+            row["stillPngCountry"] = f"{sid}{'_CG' if audience == 'cg' else ''}-country.png"
+        stills.append(row)
     plate_list: list[dict[str, Any]] = []
     for plate_id, geom in plates.items():
         first = next((slide for slide in slides if str(slide.get("id") or "") in (geom.get("slideIds") or [])), None)
@@ -575,6 +577,13 @@ def _still_path(slide: dict[str, Any], output_dir: Path, preview_dir: Path | Non
     if not path.is_file():
         raise FileNotFoundError(f"Missing export still {path}")
     return path
+
+
+def _country_still_path(slide: dict[str, Any], output_dir: Path, audience: str = "lw") -> Path | None:
+    sid = str(slide.get("id") or "slide")
+    name = Path(f"{sid}{'_CG' if audience == 'cg' else ''}-country.png").name
+    path = Path(output_dir) / "stills" / name
+    return path if path.is_file() else None
 
 
 def _plate_path(plate_id: str, output_dir: Path) -> Path:
@@ -777,11 +786,14 @@ def build_slide_items(
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
     asset_root: Path | None = None,
+    country_still: Path | None = None,
 ) -> list[dict[str, Any]]:
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
     )
     items = [mapped]
+    if country_still is not None and still is not None and slide.get("isolate") and slide.get("highlights"):
+        items.append(_item("image", mapped["x"], mapped["y"], mapped["w"], mapped["h"], path=str(country_still), map=True))
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
     if bg_movie is None:
@@ -872,6 +884,20 @@ def plan_deck(
                 if dest_slide
                 else None
             )
+        prev_link = _outgoing(str(slides[index - 1].get("id") or ""), links) if index else None
+        duplicate = bool(
+            index
+            and bg_movie is None
+            and prev_link
+            and str(prev_link.get("kind") or "") == "morph"
+            and prev_link.get("plateId")
+            and prev_link.get("plateId") == plate_id
+        )
+        country_still = (
+            _country_still_path(slide, output_dir, asset_audience)
+            if not duplicate and bg_movie is None and plate_id is None
+            else None
+        )
         items = build_slide_items(
             item_slide,
             plate=plate,
@@ -882,15 +908,7 @@ def plan_deck(
             bg_movie=bg_movie,
             dest_slide=item_dest,
             asset_root=output_dir / "assets",
-        )
-        prev_link = _outgoing(str(slides[index - 1].get("id") or ""), links) if index else None
-        duplicate = bool(
-            index
-            and bg_movie is None
-            and prev_link
-            and str(prev_link.get("kind") or "") == "morph"
-            and prev_link.get("plateId")
-            and prev_link.get("plateId") == plate_id
+            country_still=country_still,
         )
         ops.append(
             {

@@ -1162,9 +1162,18 @@ def test_isolate_rejects_unknown_mode():
 def test_isolate_round_trips_on_save():
     job = _seed()
     doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.35}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
+    fetched = client.get(f"/api/jobs/{job['id']}")
+    assert fetched.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
+
+
+def test_isolate_erase_mode_migrates_to_darken():
+    job = _seed()
+    doc = _doc(job)
     doc["slides"][0]["isolate"] = {"mode": "erase", "strength": 0.35}
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
-    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "erase", "strength": 0.35}
-    fetched = client.get(f"/api/jobs/{job['id']}")
-    assert fetched.json()["result"]["slides"][0]["isolate"] == {"mode": "erase", "strength": 0.35}
+    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}

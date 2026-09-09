@@ -113,7 +113,7 @@ class MapsCamera(BaseModel):
 
 class MapsIsolate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["darken", "erase"]
+    mode: Literal["darken"] = "darken"
     strength: float = Field(default=0.6, ge=0, le=1)
 
 
@@ -457,6 +457,12 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "links",
     )
     body = {key: cleaned[key] for key in keep if key in cleaned}
+    for slide in body.get("slides") or []:
+        if not isinstance(slide, dict):
+            continue
+        for isolate in (slide.get("isolate"), (slide.get("cg") or {}).get("isolate")):
+            if isinstance(isolate, dict) and isolate.get("mode") == "erase":
+                isolate["mode"] = "darken"
     try:
         return MapsDocument.model_validate(body)
     except Exception as exc:
@@ -1107,6 +1113,7 @@ async def post_png(
     plateId: str | None = Query(None),
     kind: str = Query("thumb"),
     audience: Literal["lw", "cg"] = Query("lw"),
+    variant: str | None = Query(None),
 ) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
@@ -1139,9 +1146,14 @@ async def post_png(
     if not safe.endswith(".png"):
         safe = f"{safe}.png"
     if kind == "still":
+        if variant is not None and variant != "country":
+            raise HTTPException(400, "variant must be country")
         folder = output_dir / "stills"
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / Path(safe).name).write_bytes(body)
+        name = Path(safe).name
+        if variant == "country":
+            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        (folder / name).write_bytes(body)
         return _runner().public_dict(job)
     folder = Path(str(result.get("previewDir") or ""))
     folder.mkdir(parents=True, exist_ok=True)

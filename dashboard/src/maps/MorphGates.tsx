@@ -32,7 +32,7 @@ function layersLabel(ids: MapsLayerFilterId[], relief: boolean): string {
 }
 
 function isolateLabel(s: MapsSlide): string {
-  return s.isolate ? `${s.isolate.mode} ${Math.round(s.isolate.strength * 100)}%` : "off";
+  return s.isolate ? `${Math.round(s.isolate.strength * 100)}%` : "off";
 }
 
 function fmtDeg(n: number): string {
@@ -81,7 +81,7 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
       label: "Same isolate",
       ok: !mismatch.has("isolate"),
       detail: isolateLabel(from) === isolateLabel(to) ? isolateLabel(from) : `${isolateLabel(from)} → ${isolateLabel(to)}`,
-      tip: "Isolate country (darken/erase) must match on both shots.",
+      tip: "Isolate country (darken) must match on both shots.",
     },
     {
       id: "layers",

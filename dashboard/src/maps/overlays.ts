@@ -1,6 +1,5 @@
 import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
-import { STYLE_SWATCHES } from "./styles";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 
 export type Admin0 = {
@@ -95,33 +94,19 @@ function firstSymbolId(map: MapLibreMap): string | undefined {
   return style?.layers?.find((layer) => layer.type === "symbol")?.id;
 }
 
-function backgroundColor(map: MapLibreMap, styleId?: string): string {
-  const style = map.getStyle();
-  const bgLayer = style?.layers?.find((layer) => layer.type === "background");
-  const color = (bgLayer as { paint?: { "background-color"?: unknown } } | undefined)?.paint?.["background-color"];
-  if (typeof color === "string") return color;
-  return STYLE_SWATCHES.find((item) => item.id === styleId)?.color || "#ffffff";
-}
-
-const isolateModeByMap = new WeakMap<MapLibreMap, MapsIsolate["mode"]>();
-
-export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: MapsIsolate | undefined, styleId?: string): void {
+export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: MapsIsolate | undefined): void {
   if (!map.getStyle()) return;
   const mask = isolate ? isolateMaskGeometry((admin0Cache?.features || []) as never, highlights) : null;
   if (!isolate || !mask) {
     if (map.getLayer("isolate-fill")) map.removeLayer("isolate-fill");
     if (map.getSource("isolate")) map.removeSource("isolate");
-    isolateModeByMap.delete(map);
     return;
   }
   const source = map.getSource("isolate") as GeoJSONSource | undefined;
-  if (source && isolateModeByMap.get(map) === isolate.mode) {
+  if (source) {
     source.setData(mask);
-    map.setPaintProperty("isolate-fill", "fill-color", isolate.mode === "darken" ? "#000000" : backgroundColor(map, styleId));
     map.setPaintProperty("isolate-fill", "fill-opacity", Math.max(0, Math.min(1, isolate.strength)));
   } else {
-    if (map.getLayer("isolate-fill")) map.removeLayer("isolate-fill");
-    if (map.getSource("isolate")) map.removeSource("isolate");
     map.addSource("isolate", { type: "geojson", data: mask });
     map.addLayer(
       {
@@ -129,14 +114,13 @@ export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: Ma
         type: "fill",
         source: "isolate",
         paint: {
-          "fill-color": isolate.mode === "darken" ? "#000000" : backgroundColor(map, styleId),
+          "fill-color": "#000000",
           "fill-opacity": Math.max(0, Math.min(1, isolate.strength)),
           "fill-antialias": false,
         },
       },
-      isolate.mode === "darken" ? firstSymbolId(map) : undefined
+      firstSymbolId(map)
     );
-    isolateModeByMap.set(map, isolate.mode);
   }
 }
 
@@ -181,7 +165,7 @@ export async function ensureAdmin0Highlights(
     );
   }
   applyHighlights(map, highlights);
-  applyIsolate(map, highlights, isolate, styleId);
+  applyIsolate(map, highlights, isolate);
 }
 
 export function churchesGeo(
@@ -364,5 +348,5 @@ export async function addOverlays(
     (map.getSource("churches") as GeoJSONSource).setData(pins);
   }
   applyHighlights(map, highlights);
-  applyIsolate(map, highlights, isolate, styleId);
+  applyIsolate(map, highlights, isolate);
 }

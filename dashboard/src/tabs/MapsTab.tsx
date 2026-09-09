@@ -27,7 +27,7 @@ import { useRunNav } from "../nav";
 import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
-import { captureExportRaster } from "../maps/captureExport";
+import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
@@ -45,6 +45,7 @@ import {
   appearanceMismatch,
   authoredSurfaceWidth,
   captureWidth,
+  showCgBand,
   slideForAudience,
   clampCgShift,
   clampZoom,
@@ -57,6 +58,7 @@ import {
   nextSlideId,
   slideHiddenLayers,
   suggestedHopKind,
+  isolateDissolveDefault,
   type MapsCamera,
   type MapsAudience,
   type MapsChurch,
@@ -711,14 +713,16 @@ export function MapsTab() {
       const from = nextSlides[i];
       const to = nextSlides[i + 1];
       const existing = prevLinks.find((link) => link.from === from.id && link.to === to.id);
+      const isolateDefault = existing ? null : isolateDissolveDefault(from, links[i - 1]);
+      const kind = isolateDefault?.kind ?? suggestedHopKind(from, to);
       links.push(
         existing || {
           from: from.id,
           to: to.id,
-          kind: suggestedHopKind(from, to),
-          duration: 1.2,
+          kind,
+          duration: isolateDefault?.duration ?? 1.2,
           playWithoutClick: false,
-          ...(suggestedHopKind(from, to) === "movie" ? { objectTransition: "fade" as const } : {}),
+          ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
         }
       );
     }
@@ -1276,7 +1280,7 @@ export function MapsTab() {
       for (let i = 0; i < plan.stills.length; i++) {
         const still = plan.stills[i];
         throwIfCancelled();
-        const blob = await captureExportRaster({
+        const exportOpts = {
           width: still.width || 3840,
           height: still.height || 1080,
           camera: still.camera,
@@ -1286,9 +1290,19 @@ export function MapsTab() {
           hillshade: (still.hillshade as boolean | undefined) === true,
           isolate: still.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
-        });
-        throwIfCancelled();
-        reconcileServerJob(await postMapsPng(id, blob, { kind: "still", slideId: still.slideId }));
+        };
+        if (still.isolate && still.highlights.length) {
+          const pair = await captureIsolatePair(exportOpts);
+          throwIfCancelled();
+          if (pair) {
+            reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId }));
+            reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, variant: "country" }));
+          }
+        } else {
+          const blob = await captureExportRaster(exportOpts);
+          throwIfCancelled();
+          reconcileServerJob(await postMapsPng(id, blob, { kind: "still", slideId: still.slideId }));
+        }
         stepIndex += 1;
         setStepProgress("Rendering stills", i + 1, plan.stills.length);
       }
@@ -1315,7 +1329,7 @@ export function MapsTab() {
         for (let i = 0; i < plan.cg.stills.length; i++) {
           const still = plan.cg.stills[i];
           throwIfCancelled();
-          const blob = await captureExportRaster({
+          const exportOpts = {
             width: still.width || 1920,
             height: still.height || 1080,
             camera: still.camera,
@@ -1325,9 +1339,19 @@ export function MapsTab() {
             hillshade: (still.hillshade as boolean | undefined) === true,
             isolate: still.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
-          });
-          throwIfCancelled();
-          reconcileServerJob(await postMapsPng(id, blob, { kind: "still", slideId: still.slideId, audience: "cg" }));
+          };
+          if (still.isolate && still.highlights.length) {
+            const pair = await captureIsolatePair(exportOpts);
+            throwIfCancelled();
+            if (pair) {
+              reconcileServerJob(await postMapsPng(id, pair.base, { kind: "still", slideId: still.slideId, audience: "cg" }));
+              reconcileServerJob(await postMapsPng(id, pair.country, { kind: "still", slideId: still.slideId, audience: "cg", variant: "country" }));
+            }
+          } else {
+            const blob = await captureExportRaster(exportOpts);
+            throwIfCancelled();
+            reconcileServerJob(await postMapsPng(id, blob, { kind: "still", slideId: still.slideId, audience: "cg" }));
+          }
           stepIndex += 1;
           setStepProgress("Rendering CG stills", i + 1, plan.cg.stills.length);
         }
@@ -1563,7 +1587,9 @@ export function MapsTab() {
     !!nextSlide &&
     (!!active.cg || !!nextSlide.cg) &&
     appearanceMismatch(slideForAudience(active, otherAudience), slideForAudience(nextSlide, otherAudience)).length > 0;
-  const suggested = outgoing && active && nextSlide ? suggestedHopKind(active, nextSlide) : "morph";
+  const incomingToActive = active && activeIndex > 0 ? linkBetween(doc?.links || [], slides[activeIndex - 1].id, active.id) : undefined;
+  const isolateDefault = active && nextSlide ? isolateDissolveDefault(active, incomingToActive) : null;
+  const suggested = outgoing && active && nextSlide ? (isolateDefault?.kind ?? suggestedHopKind(active, nextSlide)) : "morph";
   const morphOk = suggested === "morph";
   const cruiseAuto =
     activeView && nextView
@@ -1959,7 +1985,7 @@ export function MapsTab() {
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
                 sidePanels={renderedSidePanels}
-                exportCg={doc?.exportCg !== false && !active.cg}
+                exportCg={showCgBand(active)}
                 hiddenLayers={slideHiddenLayers(renderedView)}
                 hillshade={renderedView?.hillshade === true}
                 cgShiftX={activeAudience === "cg" ? 0 : active.cgShiftX}
@@ -2241,7 +2267,7 @@ export function MapsTab() {
                         max={CG_SHIFT_MAX}
                         step={1}
                         digits={0}
-                        disabled={locked || doc?.exportCg === false}
+                        disabled={locked}
                         onChange={(dx) => updateActive(clampCgShift(dx, 0))}
                         onCommit={() => fireAndForgetSave()}
                       />
@@ -2280,22 +2306,19 @@ export function MapsTab() {
                   )}
                   <div className="maps-hl">
                     <div className="cap">Isolate country</div>
-                    <label>
-                      Mode:
-                      <select
-                        value={activeView?.isolate?.mode || "off"}
+                    <label className="maps-check">
+                      <input
+                        type="checkbox"
+                        checked={!!activeView?.isolate}
                         disabled={locked}
                         onChange={(event) => {
-                          const value = event.target.value as "off" | "darken" | "erase";
+                          const checked = event.target.checked;
                           updateActive({
-                            isolate: value === "off" ? undefined : { mode: value, strength: activeView?.isolate?.strength ?? 0.6 },
+                            isolate: checked ? { mode: "darken", strength: activeView?.isolate?.strength ?? 0.6 } : undefined,
                           });
                         }}
-                      >
-                        <option value="off">Off</option>
-                        <option value="darken">Darken</option>
-                        <option value="erase">Erase</option>
-                      </select>
+                      />{" "}
+                      Isolate country
                     </label>
                     {activeView?.isolate && (
                       <AeScrub
@@ -2411,7 +2434,11 @@ export function MapsTab() {
                     disabled={locked}
                     onClick={() =>
                       setHop(
-                        { kind: suggested, easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined },
+                        {
+                          kind: suggested,
+                          easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined,
+                          ...(isolateDefault ? { duration: isolateDefault.duration } : {}),
+                        },
                         { dropRoute: true, resetFly: true }
                       )
                     }

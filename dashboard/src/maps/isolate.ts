@@ -18,22 +18,27 @@ function ringsOf(geometry: { type: string; coordinates: unknown } | null | undef
   return [];
 }
 
-export function isolateMaskGeometry(
-  features: Admin0Feature[],
-  highlights: string[]
-): GeoJSON.Feature | null {
+export function countryClipRings(features: Admin0Feature[], highlights: string[]): number[][][] {
   const wanted = new Set(highlights.map((h) => h.trim().toUpperCase()).filter(Boolean));
-  if (!wanted.size) return null;
-  const rings: number[][][] = [WORLD_RING];
+  if (!wanted.size) return [];
+  const rings: number[][][] = [];
   for (const feat of features) {
     const id = String(feat.properties?.ADM0_A3 || "").toUpperCase();
     if (!id || !wanted.has(id)) continue;
     rings.push(...ringsOf(feat.geometry));
   }
-  if (rings.length <= 1) return null;
+  return rings;
+}
+
+export function isolateMaskGeometry(
+  features: Admin0Feature[],
+  highlights: string[]
+): GeoJSON.Feature | null {
+  const rings = countryClipRings(features, highlights);
+  if (!rings.length) return null;
   return {
     type: "Feature",
     properties: {},
-    geometry: { type: "Polygon", coordinates: rings },
+    geometry: { type: "Polygon", coordinates: [WORLD_RING, ...rings] },
   };
 }

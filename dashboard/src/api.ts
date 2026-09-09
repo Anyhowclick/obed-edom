@@ -427,13 +427,14 @@ export type MapsExportPlan = {
 export async function postMapsPng(
   id: string,
   blob: Blob,
-  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg" } = {}
+  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg"; variant?: "country" } = {}
 ): Promise<Job> {
   const params = new URLSearchParams();
   if (opts.kind) params.set("kind", opts.kind);
   if (opts.slideId) params.set("slideId", opts.slideId);
   if (opts.plateId) params.set("plateId", opts.plateId);
   if (opts.audience) params.set("audience", opts.audience);
+  if (opts.variant) params.set("variant", opts.variant);
   const res = await fetch(`/api/maps/${id}/png?${params.toString()}`, {
     method: "POST",
     body: blob,

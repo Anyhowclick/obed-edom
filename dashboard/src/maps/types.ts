@@ -27,7 +27,7 @@ export type MapsCamera = {
   pitch: number;
 };
 
-export type MapsIsolate = { mode: "darken" | "erase"; strength: number };
+export type MapsIsolate = { mode: "darken"; strength: number };
 
 export type MapsChurch = {
   id: string;
@@ -184,6 +184,10 @@ export function captureWidth(slide: { includeSidePanels?: boolean }): number {
   return slide.includeSidePanels ? WALL_W : CENTRE_W;
 }
 
+export function showCgBand(slide: { cg?: unknown }): boolean {
+  return !slide.cg;
+}
+
 export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   const byId = new Map(doc.slides.map((slide) => [slide.id, slide]));
   return {
@@ -264,6 +268,12 @@ export function suggestedHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const kind = inferHopKind(from, to);
   if (kind === "morph" && !plateFitsMorph(from, to)) return "movie";
   return kind;
+}
+
+/** When the hop into an isolated slide is a Movie, the following hop out of it defaults to a 1 s Dissolve — the isolate mask needs a beat to read before the camera moves again. */
+export function isolateDissolveDefault(from: MapsSlide, incoming: MapsLink | undefined): { kind: MapsHopKind; duration: number } | null {
+  if (!from.isolate || incoming?.kind !== "movie") return null;
+  return { kind: "dissolve", duration: 1 };
 }
 
 function mercatorY(lat: number): number {
@@ -385,10 +395,10 @@ export function parseRoute(raw: unknown): MapsRoute | undefined {
 export function parseIsolate(raw: unknown): MapsIsolate | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const mode = (raw as { mode?: unknown }).mode;
-  if (mode !== "darken" && mode !== "erase") return undefined;
+  if (mode !== undefined && mode !== "darken" && mode !== "erase") return undefined;
   const strengthRaw = Number((raw as { strength?: unknown }).strength);
   const strength = Number.isFinite(strengthRaw) ? Math.max(0, Math.min(1, strengthRaw)) : 0.6;
-  return { mode, strength };
+  return { mode: "darken", strength };
 }
 
 function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {

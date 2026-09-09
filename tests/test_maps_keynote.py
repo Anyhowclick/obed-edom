@@ -979,3 +979,48 @@ def test_plan_deck_movie_uses_max_capture_width(tmp_path: Path):
     item = ops[0]["items"][0]
     assert item["kind"] == "movie"
     assert (item["x"], item["y"], item["w"], item["h"]) == (0, 0, WALL_WIDTH, WALL_HEIGHT)
+
+
+def test_export_plan_still_carries_country_cutout_when_isolated():
+    a = _slide("s1", _camera(3.0, 101.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", _camera(3.0, 102.0))
+    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0}])
+    stills = {row["slideId"]: row for row in plan["stills"]}
+    assert stills["s1"]["stillPngCountry"] == "s1-country.png"
+    assert "stillPngCountry" not in stills["s2"]
+
+
+def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s1-country.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    items = ops[0]["items"]
+    map_items = [item for item in items if item.get("map")]
+    assert len(map_items) == 2
+    assert Path(map_items[0]["path"]).name == "s1.png"
+    assert Path(map_items[1]["path"]).name == "s1-country.png"
+    assert (map_items[0]["x"], map_items[0]["y"], map_items[0]["w"], map_items[0]["h"]) == (
+        map_items[1]["x"],
+        map_items[1]["y"],
+        map_items[1]["w"],
+        map_items[1]["h"],
+    )
+    assert len([item for item in ops[1]["items"] if item.get("map")]) == 1
+
+
+def test_plan_deck_magic_move_duplicate_skips_country_cutout(tmp_path: Path):
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plates, links = assign_morph_plates([a, b], links)
+    _write_plan_rasters(tmp_path, [a, b], links)
+    _dummy_png(tmp_path / "stills" / "s1-country.png")
+    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert ops[1]["duplicate"] is True
+    assert len(ops[1]["items"]) == 1
