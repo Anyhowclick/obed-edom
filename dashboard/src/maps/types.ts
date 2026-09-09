@@ -59,6 +59,7 @@ export type MapsCgOverride = {
   stillPng?: string;
   movieMov?: string;
   movieDuration?: number;
+  revealMovie?: boolean;
 };
 
 export type MapsSlide = {
@@ -74,6 +75,7 @@ export type MapsSlide = {
   stillPng?: string;
   movieMov?: string;
   movieDuration?: number;
+  revealMovie?: boolean;
   cgShiftX: number;
   cgShiftY: number;
   includeSidePanels: boolean;

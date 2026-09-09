@@ -2707,6 +2707,17 @@ export function MapsTab() {
                     />
                     Play without a click
                   </label>
+                  {(activeView?.churches || []).some((c) => c.kind === "landmark" && c.reveal) && (
+                    <label className="maps-check">
+                      <input
+                        type="checkbox"
+                        checked={!!activeView?.revealMovie}
+                        disabled={locked}
+                        onChange={(event) => updateActive({ revealMovie: event.target.checked })}
+                      />
+                      Reveal as slide movie
+                    </label>
+                  )}
                   {outgoing.kind === "movie" && (
                     <>
                       {outgoing.easeIn != null || outgoing.easeOut != null || outgoing.flyZoom != null ? <>

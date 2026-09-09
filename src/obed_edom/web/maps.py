@@ -163,6 +163,7 @@ class MapsCgOverride(BaseModel):
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
+    revealMovie: bool = False
 
 
 class MapsSlide(BaseModel):
@@ -179,6 +180,7 @@ class MapsSlide(BaseModel):
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
+    revealMovie: bool = False
     cgShiftX: float = 0
     cgShiftY: float = 0
     includeSidePanels: bool = False
@@ -457,6 +459,8 @@ def _validate_asset_document(doc: MapsDocument, result: dict[str, Any]) -> MapsD
                     raise HTTPException(400, "Landmark objects require an uploaded Maps asset")
                 if church.reveal and church.kind != "landmark":
                     raise HTTPException(400, "Paint-on reveal is only available for landmark objects")
+            if view.revealMovie and not any(c.kind == "landmark" and c.reveal for c in view.churches):
+                raise HTTPException(400, "Reveal as slide movie needs a landmark with a paint-on reveal")
     available = {asset.id: asset for asset in (MapsAsset.model_validate(row) for row in result.get("assets") or [])}
     referenced = _referenced_asset_ids(doc)
     if referenced - set(available):

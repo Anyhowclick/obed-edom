@@ -10,6 +10,7 @@ from obed_edom.maps_movie import ffmpeg_exe
 from obed_edom.maps_reveal import (
     _run_ffmpeg_stdin,
     render_reveal,
+    render_slide_reveal_movie,
     reveal_fingerprint,
     reveal_frames,
     reveal_path,
@@ -50,16 +51,30 @@ def test_same_seed_is_deterministic_different_church_differs():
     assert not all(np.array_equal(fa, fo) for fa, fo in zip(a, other))
 
 
-def test_sweep_is_ground_up_bottom_left_to_top_right():
-    rgba = _rgba(w=40, h=40)
-    frames = list(reveal_frames(rgba, count=21, seed=reveal_seed("church-1")))
-    mid = frames[10]
-    bottom_left = mid[30:40, 0:10, 3].astype(float).mean()
-    top_right = mid[0:10, 30:40, 3].astype(float).mean()
-    assert bottom_left > top_right
-    bottom_row_alpha = mid[-1, :, 3].astype(float).mean()
-    top_row_alpha = mid[0, :, 3].astype(float).mean()
-    assert bottom_row_alpha > top_row_alpha
+def test_bottom_strokes_land_before_top():
+    rgba = _rgba(w=200, h=200)
+    frames = list(reveal_frames(rgba, count=45, seed=reveal_seed("church-1")))
+    frame = frames[round(0.4 * (len(frames) - 1))]
+    bottom_third = frame[130:200, :, 3].astype(float).mean()
+    top_third = frame[0:70, :, 3].astype(float).mean()
+    assert bottom_third > top_third
+
+
+def test_half_time_is_roughly_half_covered():
+    rgba = _rgba(w=200, h=200)
+    frames = list(reveal_frames(rgba, count=45, seed=reveal_seed("church-1")))
+    frame = frames[round(0.5 * (len(frames) - 1))]
+    coverage = frame[:, :, 3].astype(float).mean() / 255
+    assert 0.3 <= coverage <= 0.7
+
+
+def test_coverage_has_stroke_structure():
+    rgba = _rgba(w=200, h=200)
+    frames = list(reveal_frames(rgba, count=45, seed=reveal_seed("church-1")))
+    frame = frames[round(0.25 * (len(frames) - 1))]
+    row_means = frame[:, :, 3].astype(float).mean(axis=1)
+    assert (row_means < 5).any()
+    assert (row_means > 128).any()
 
 
 def test_long_side_downscaled_to_1600(tmp_path: Path, monkeypatch):
@@ -209,6 +224,32 @@ def test_encoder_cancellation_terminates_child_process():
 
     with pytest.raises(RuntimeError, match="cancelled"):
         _run_ffmpeg_stdin(script_cmd, frames(), is_cancelled)
+
+
+def test_slide_reveal_movie_composites_landmark_at_frame(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+
+    def fake_encode(frames, dest, *, fps, log=None, is_cancelled=None):
+        captured["last"] = sorted(frames.glob("*.png"))[-1]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.encode_fly_movie", fake_encode)
+    base = tmp_path / "base.png"
+    Image.new("RGBA", (200, 100), (10, 20, 30, 255)).save(base)
+    asset = tmp_path / "lm.png"
+    Image.new("RGBA", (30, 30), (200, 50, 50, 255)).save(asset)
+    dest = tmp_path / "out" / "movies" / "Map BG_s1-reveal.mov"
+    landmarks = [dict(asset=asset, x=40, y=20, w=30, h=30, duration=0.3, seed=1, opacity=1.0)]
+
+    render_slide_reveal_movie(
+        base, None, landmarks, dest, output_dir=tmp_path / "out", slide_id="s1", size=(200, 100), fps=10
+    )
+
+    last = np.array(Image.open(captured["last"]).convert("RGB"))
+    assert tuple(int(v) for v in last[35, 55]) == (200, 50, 50)
+    assert tuple(int(v) for v in last[10, 10]) == (10, 20, 30)
 
 
 def test_render_reveal_encodes_real_movie(tmp_path: Path):

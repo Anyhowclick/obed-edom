@@ -400,7 +400,7 @@ def test_render_reveals_returns_mapping_without_mutating_church(tmp_path: Path, 
     _dummy_png(output_dir / "assets" / "asset1.png")
     church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
     slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
-    reveals = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert reveals[("lw", "s1", "lm")].endswith(".mov")
     assert "revealMov" not in church
     assert "revealMov" not in slide["churches"][0]
@@ -423,13 +423,13 @@ def test_render_reveals_regenerates_when_duration_or_opacity_changes(tmp_path: P
     church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
     slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
 
-    reveals = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert len(calls) == 1
     dest = Path(reveals[("lw", "s1", "lm")])
     first_bytes = dest.read_bytes()
 
     # Unchanged inputs must reuse the cached movie.
-    reveals_again = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals_again, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert len(calls) == 1
     assert reveals_again[("lw", "s1", "lm")] == reveals[("lw", "s1", "lm")]
     assert dest.read_bytes() == first_bytes
@@ -459,8 +459,68 @@ def test_render_reveals_uses_separate_lw_and_cg_paths(tmp_path: Path, monkeypatc
         "s1", _camera(3.0, 101.0, 8), churches=[lw_church],
         cg={"camera": _camera(3.0, 101.0, 8), "style": "positron", "churches": [cg_church]},
     )
-    reveals = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert reveals[("lw", "s1", "lm")] != reveals[("cg", "s1", "lm")]
+
+
+def test_reveal_movie_slide_emits_bg_movie_and_no_still(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    landmark = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    dot = {"id": "d1", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}
+    slide = _slide("s1", camera, churches=[landmark, dot], revealMovie=True)
+    slide2 = _slide("s2", camera)
+    _dummy_png(output_dir / "stills" / "s2.png")
+    link = {"from": "s1", "to": "s2", "kind": "cut"}
+    reveal_movie = output_dir / "movies" / "Map BG_s1-reveal.mov"
+    reveal_movie.parent.mkdir(parents=True, exist_ok=True)
+    reveal_movie.write_bytes(b"mov")
+    ops = plan_deck(
+        [slide, slide2], [link], {}, output_dir=output_dir, preview_dir=output_dir / "previews", movie=None,
+        wall=True, reveals={}, reveal_movies={("lw", "s1"): str(reveal_movie)},
+    )
+    items = ops[0]["items"]
+    assert items[0] == {
+        "kind": "movie", "x": int(CENTRE_ORIGIN_X), "y": 0, "w": CENTRE_WIDTH, "h": WALL_HEIGHT,
+        "path": str(reveal_movie), "map": True,
+    }
+    assert not any(item.get("kind") == "image" and item.get("map") for item in items)
+    assert not any(item.get("landmark") for item in items)
+    assert any(item.get("kind") == "shape" for item in items)
+    assert any(item.get("kind") == "text" for item in items)
+
+
+def test_reveal_movie_skipped_when_slide_is_a_fly_source(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", camera, churches=[church], revealMovie=True)
+    slide2 = _slide("s2", camera)
+    link = {"from": "s1", "to": "s2", "kind": "movie"}
+    reveals, reveal_movies = _render_reveals(output_dir, [slide, slide2], [link], lambda _m: None, None)
+    assert reveal_movies == {}
+    assert reveals == {}
+
+
+def test_reveal_movie_transition_is_automatic_dissolve_after_duration(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    landmark = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", camera, churches=[landmark], revealMovie=True)
+    slide2 = _slide("s2", camera)
+    _dummy_png(output_dir / "stills" / "s2.png")
+    link = {"from": "s1", "to": "s2", "kind": "cut"}
+    reveal_movie = output_dir / "movies" / "Map BG_s1-reveal.mov"
+    reveal_movie.parent.mkdir(parents=True, exist_ok=True)
+    reveal_movie.write_bytes(b"mov")
+    ops = plan_deck(
+        [slide, slide2], [link], {}, output_dir=output_dir, preview_dir=output_dir / "previews", movie=None,
+        wall=True, reveals={}, reveal_movies={("lw", "s1"): str(reveal_movie)},
+    )
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 1.5}
 
 
 def test_export_maps_job_does_not_leak_reveal_mov_into_stored_document(tmp_path: Path, monkeypatch):

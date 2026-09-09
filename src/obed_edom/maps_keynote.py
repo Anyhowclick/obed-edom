@@ -465,6 +465,7 @@ def maps_export_plan(
             "isolate": slide.get("isolate"),
             "width": cap_w,
             "height": cap_h,
+            "revealMovie": bool(slide.get("revealMovie")),
         }
         if slide.get("isolate") and highlights:
             row["stillPngCountry"] = f"{sid}{'_CG' if audience == 'cg' else ''}-country.png"
@@ -724,9 +725,12 @@ def _place_churches(
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_audience: str = "lw",
     sid: str = "",
+    skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for church in churches:
+        if skip_landmarks and str(church.get("kind") or "") == "landmark":
+            continue
         lat = float(church.get("lat") or 0)
         lon = float(church.get("lon") or 0)
         if plate is not None and placement is not None:
@@ -889,6 +893,7 @@ def build_slide_items(
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_audience: str = "lw",
     sid: str = "",
+    skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
@@ -898,7 +903,7 @@ def build_slide_items(
         items.append(_item("image", mapped["x"], mapped["y"], mapped["w"], mapped["h"], path=str(country_still), map=True))
     cap_w, _cap_h = slide_capture_size(slide)
     origin_x = slide_map_origin_x(slide)
-    if bg_movie is None:
+    if bg_movie is None or skip_landmarks:
         items.extend(
             _place_churches(
                 list(slide.get("churches") or []),
@@ -914,6 +919,7 @@ def build_slide_items(
                 reveals=reveals,
                 reveal_audience=reveal_audience,
                 sid=sid,
+                skip_landmarks=skip_landmarks,
             )
         )
     oversized_cg_movie = bg_movie is not None and float(mapped["w"]) > CG_WIDTH
@@ -958,6 +964,7 @@ def plan_deck(
     audience: str = "lw",
     cg_affected: set[str] | None = None,
     reveals: dict[tuple[str, str, str], str] | None = None,
+    reveal_movies: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
     slides, links = isolate_landing_slides(slides, links)
     slide_plate: dict[str, str] = {}
@@ -983,6 +990,15 @@ def plan_deck(
                 plate_id = None
                 plate = None
                 plate_path = None
+        reveal_bg = False
+        if bg_movie is None and reveal_movies:
+            reveal_candidate = reveal_movies.get((asset_audience, cg_key))
+            if reveal_candidate:
+                bg_movie = Path(reveal_candidate)
+                reveal_bg = True
+                plate_id = None
+                plate = None
+                plate_path = None
         still = None if plate_id or bg_movie else _still_path(slide, output_dir, preview_dir, asset_audience)
         item_slide = slide
         item_dest = dest_slide
@@ -993,6 +1009,15 @@ def plan_deck(
                 if dest_slide
                 else None
             )
+        if reveal_bg:
+            item_dest = None
+            reveal_view = item_slide if item_slide.get("_splitCg") else slide
+            durations = [
+                float((church.get("reveal") or {}).get("duration") or 1.2)
+                for church in (reveal_view.get("churches") or [])
+                if str(church.get("kind") or "") == "landmark" and church.get("reveal")
+            ]
+            item_slide = {**item_slide, "movieDuration": (max(durations) if durations else 1.2) + 0.3}
         prev_link = _outgoing(str(slides[index - 1].get("id") or ""), links) if index else None
         duplicate = bool(
             index
@@ -1022,13 +1047,14 @@ def plan_deck(
             reveals=reveals,
             reveal_audience="cg" if item_slide.get("_splitCg") else "lw",
             sid=cg_key,
+            skip_landmarks=reveal_bg,
         )
         ops.append(
             {
                 "id": sid,
                 "duplicate": duplicate,
                 "items": items,
-                "transition": _transition_for(outgoing, slide, bg_movie=bg_movie is not None),
+                "transition": _transition_for(outgoing, item_slide, bg_movie=bg_movie is not None),
             }
         )
     return ops
@@ -1459,19 +1485,32 @@ def _render_reveals(
     links: list[dict[str, Any]],
     log: Callable[[str], None],
     is_cancelled: Callable[[], bool] | None,
-) -> dict[tuple[str, str, str], str]:
+) -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
     """Render paint-on reveal movies without mutating the job's stored slides/churches.
 
-    Returns an export-only mapping keyed (audience, slideId, churchId) -> movie path.
+    Returns (reveals, reveal_movies): reveals is keyed (audience, slideId, churchId) -> movie path,
+    used for per-landmark reveal items; reveal_movies is keyed (audience, slideId) -> movie path,
+    used for the "Reveal as slide movie" bg movie.
     """
-    from obed_edom.maps_reveal import render_reveal, reveal_fingerprint, reveal_path, reveal_seed, reveal_stale
+    from obed_edom.maps_reveal import (
+        render_reveal,
+        render_slide_reveal_movie,
+        reveal_fingerprint,
+        reveal_movie_fingerprint,
+        reveal_movie_path,
+        reveal_path,
+        reveal_seed,
+        reveal_stale,
+    )
 
     asset_root = output_dir / "assets"
     reveals: dict[tuple[str, str, str], str] = {}
+    reveal_movies: dict[tuple[str, str], str] = {}
     for slide in slides:
         sid = str(slide.get("id") or "")
         outgoing = _outgoing(sid, links)
-        if outgoing and str(outgoing.get("kind") or "") == "movie":
+        is_fly_source = bool(outgoing and str(outgoing.get("kind") or "") == "movie")
+        if is_fly_source:
             continue
         for audience, view in (("lw", slide), ("cg", slide.get("cg"))):
             if not isinstance(view, dict):
@@ -1510,7 +1549,78 @@ def _render_reveals(
                         is_cancelled=is_cancelled,
                     )
                 reveals[(audience, sid, church_id)] = str(dest)
-    return reveals
+            if not view.get("revealMovie"):
+                continue
+            landmark_churches = [
+                church
+                for church in (view.get("churches") or [])
+                if str(church.get("kind") or "") == "landmark" and church.get("reveal")
+            ]
+            if not landmark_churches:
+                continue
+            item_slide = {**_cg_view(slide), "_splitCg": True} if audience == "cg" else slide
+            try:
+                still = _still_path(item_slide, output_dir, audience=audience)
+            except FileNotFoundError:
+                continue
+            country_still = _country_still_path(item_slide, output_dir, audience)
+            cap_w, cap_h = slide_capture_size(item_slide)
+            origin_x = slide_map_origin_x(item_slide)
+            geometry_items = _place_churches(
+                landmark_churches,
+                plate=None,
+                placement=None,
+                camera=item_slide.get("camera") or {},
+                wall=(audience == "lw"),
+                movie=None,
+                origin_x=origin_x,
+                capture_w=cap_w,
+                asset_root=asset_root,
+                allow_reveal=False,
+                sid=sid,
+            )
+            landmark_items = [item for item in geometry_items if item.get("landmark")]
+            if len(landmark_items) != len(landmark_churches):
+                continue
+            landmarks: list[dict[str, Any]] = []
+            for church, item in zip(landmark_churches, landmark_items):
+                asset_path = item.get("fallback") or item.get("path")
+                if not asset_path:
+                    continue
+                reveal = church.get("reveal") or {}
+                landmarks.append(
+                    dict(
+                        asset=Path(str(asset_path)),
+                        x=item["x"] - origin_x,
+                        y=item["y"],
+                        w=item["w"],
+                        h=item["h"],
+                        duration=float(reveal.get("duration") or 1.2),
+                        seed=reveal_seed(str(church.get("id") or "")),
+                        opacity=float(church.get("opacity") if church.get("opacity") is not None else 1),
+                    )
+                )
+            if not landmarks:
+                continue
+            movie_dest = reveal_movie_path(output_dir, sid, audience)
+            fingerprint = reveal_movie_fingerprint(still, landmarks)
+            if reveal_stale(movie_dest, fingerprint):
+                _raise_if_cancelled(is_cancelled)
+                log(f"Rendering reveal slide movie for {sid}…")
+                render_slide_reveal_movie(
+                    still,
+                    country_still,
+                    landmarks,
+                    movie_dest,
+                    output_dir=output_dir,
+                    slide_id=sid,
+                    audience=audience,
+                    size=(cap_w, cap_h),
+                    fingerprint=fingerprint,
+                    is_cancelled=is_cancelled,
+                )
+            reveal_movies[(audience, sid)] = str(movie_dest)
+    return reveals, reveal_movies
 
 
 def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True, export_dsk: bool = False) -> dict[str, Any]:
@@ -1539,8 +1649,9 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         result["slides"] = slides
     _raise_if_cancelled(is_cancelled)
     reveals: dict[tuple[str, str, str], str] = {}
+    reveal_movies: dict[tuple[str, str], str] = {}
     try:
-        reveals = _render_reveals(output_dir, slides, links, lambda m: _log(job, m), is_cancelled)
+        reveals, reveal_movies = _render_reveals(output_dir, slides, links, lambda m: _log(job, m), is_cancelled)
     except ImportError:
         pass
     _raise_if_cancelled(is_cancelled)
@@ -1557,7 +1668,7 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")
         ops = plan_deck(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
-            reveals=reveals,
+            reveals=reveals, reveal_movies=reveal_movies,
         )
         _run_one_deck(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled)
         result["destPath"] = str(dest)
@@ -1569,7 +1680,7 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         ops_dsk = dsk_ops(
             plan_deck(
                 slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
-                reveals=reveals,
+                reveals=reveals, reveal_movies=reveal_movies,
             )
         )
         _run_one_deck(ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled)
@@ -1600,11 +1711,12 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
             ops_cg = plan_deck(
                 cg_slides, cg_links, cg_plates, output_dir=output_dir, preview_dir=preview_dir,
                 movie=movie, wall=False, audience="cg", cg_affected=affected, reveals=reveals,
+                reveal_movies=reveal_movies,
             )
         else:
             ops_cg = plan_deck(
                 slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False,
-                reveals=reveals,
+                reveals=reveals, reveal_movies=reveal_movies,
             )
         _run_one_deck(ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled)
         result["destPathCg"] = str(dest_cg)

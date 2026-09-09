@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import shutil
 import subprocess
 import tempfile
 import time
@@ -13,12 +14,15 @@ from typing import Callable, Iterator
 import numpy as np
 from PIL import Image
 
-from obed_edom.maps_movie import ffmpeg_exe, safe_slide_id
-from obed_edom.watercolour import _noise, _norm, _strokes
+from obed_edom.maps_movie import MOVIE_DIR, encode_fly_movie, ffmpeg_exe, frames_dir, safe_slide_id
+from obed_edom.watercolour import _blur
 
 MAX_LONG_SIDE = 1600
 REVEAL_DIR = "reveal"
-REVEAL_ALGO_VERSION = 1
+REVEAL_ALGO_VERSION = 2
+STROKE_SPAN = 0.18
+STROKE_EDGE = 0.06
+STROKE_SAMPLES = 96
 
 
 def reveal_path(output_dir: Path, slide_id: str, church_id: str, audience: str = "lw") -> Path:
@@ -56,27 +60,103 @@ def _smoothstep(a: np.ndarray) -> np.ndarray:
     return a * a * (3 - 2 * a)
 
 
-def _progress_field(shape: tuple[int, int], rng: np.random.Generator) -> np.ndarray:
+def _bezier_polyline(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+    u = np.linspace(0.0, 1.0, n)
+    pts = (1 - u)[:, None] ** 2 * p0 + 2 * (1 - u)[:, None] * u[:, None] * p1 + u[:, None] ** 2 * p2
+    seg_len = np.hypot(*np.diff(pts, axis=0).T)
+    arc = np.concatenate([[0.0], np.cumsum(seg_len)])
+    total = arc[-1] if arc[-1] > 0 else 1.0
+    return pts, (arc / total).astype(np.float32)
+
+
+def _plan_strokes(shape: tuple[int, int], alpha: np.ndarray, rng: np.random.Generator) -> list[dict]:
+    """Ground-up bezier brush strokes: each stroke's slab carries distance-to-curve and arc-position fields."""
     h, w = shape
-    y, x = np.mgrid[0:h, 0:w].astype(np.float32)
-    base = (x / max(1, w - 1) + (1 - y / max(1, h - 1))) / 2
-    blob = _norm(_noise(rng, shape, sigma=max(h, w) / 24))
-    bristle = _strokes(shape, rng, angles=(math.radians(35),), length=48, bias=0.2, scale=1.0)
-    field = np.clip(base * 0.78 + 0.14 * blob + 0.08 * bristle, 0, 1)
-    lo, hi = float(field.min()), float(field.max())
-    return (field - lo) / (hi - lo) if hi > lo else field
+    ys, xs = np.nonzero(alpha > 8)
+    if ys.size == 0:
+        x0, y0, x1, y1 = 0, 0, w - 1, h - 1
+    else:
+        x0, x1 = int(xs.min()), int(xs.max())
+        y0, y1 = int(ys.min()), int(ys.max())
+    bw = max(1, x1 - x0)
+    bh = max(1, y1 - y0)
+    short = min(bw, bh)
+    k = int(np.clip(round(math.sqrt(bw * bh) / 90), 10, 18))
+    wid = short * rng.uniform(0.12, 0.18)
+    feather = 0.015 * short
+    step = bh / k
+
+    raw = []
+    for i in range(k):
+        cy = y1 - (i + 0.5) * step + rng.uniform(-0.15, 0.15) * bh / k
+        p0 = np.array([x0 - 0.15 * bw, cy + rng.uniform(-0.06, 0.06) * bh], np.float32)
+        p2 = np.array([x1 + 0.15 * bw, cy + rng.uniform(-0.06, 0.06) * bh], np.float32)
+        if i % 2:
+            p0, p2 = p2, p0
+        p1 = (p0 + p2) / 2 + np.array([0.0, rng.uniform(-0.10, 0.10) * bh], np.float32)
+        raw.append((cy, p0, p1, p2))
+    raw.sort(key=lambda r: -r[0])
+
+    strokes = []
+    for idx, (cy, p0, p1, p2) in enumerate(raw):
+        row_lo = max(0, int(math.floor(cy - 1.2 * wid)))
+        row_hi = min(h, int(math.ceil(cy + 1.2 * wid)) + 1)
+        if row_hi <= row_lo:
+            continue
+        pts, arc_norm = _bezier_polyline(p0, p1, p2, STROKE_SAMPLES)
+        yy, xx = np.mgrid[row_lo:row_hi, 0:w].astype(np.float32)
+        dist = np.full(yy.shape, np.inf, np.float32)
+        arc = np.zeros(yy.shape, np.float32)
+        for s in range(len(pts) - 1):
+            a, b = pts[s], pts[s + 1]
+            ab = b - a
+            denom = float(ab[0] ** 2 + ab[1] ** 2) or 1e-6
+            t = np.clip(((xx - a[0]) * ab[0] + (yy - a[1]) * ab[1]) / denom, 0, 1)
+            d = np.hypot(xx - (a[0] + t * ab[0]), yy - (a[1] + t * ab[1]))
+            better = d < dist
+            dist = np.where(better, d, dist)
+            arc = np.where(better, arc_norm[s] + t * (arc_norm[s + 1] - arc_norm[s]), arc)
+        bristle_col = _blur(rng.random((row_hi - row_lo, 1)).astype(np.float32), 1.2)
+        lo, hi = float(bristle_col.min()), float(bristle_col.max())
+        bristle_col = (bristle_col - lo) / (hi - lo) if hi > lo else bristle_col
+        bristle = np.broadcast_to(0.82 + 0.18 * bristle_col, (row_hi - row_lo, w))
+        strokes.append(
+            dict(
+                row_slice=slice(row_lo, row_hi),
+                dist=dist,
+                arc=arc,
+                wid=wid,
+                feather=feather,
+                bristle=bristle,
+                t_start=idx * (1 - STROKE_SPAN) / max(1, k - 1),
+            )
+        )
+    return strokes
 
 
 def reveal_frames(rgba: np.ndarray, *, count: int, seed: int) -> Iterator[np.ndarray]:
     rng = np.random.default_rng(seed)
     h, w = rgba.shape[:2]
-    progress = _progress_field((h, w), rng)
     alpha = rgba[:, :, 3].astype(np.float32)
+    strokes = _plan_strokes((h, w), alpha, rng)
+    prev_total = np.zeros((h, w), np.float32)
     for i in range(count):
         t = i / max(1, count - 1)
-        a = np.clip((t * 1.15 - progress) / 0.15, 0, 1)
+        total = np.zeros((h, w), np.float32)
+        for st in strokes:
+            rs = st["row_slice"]
+            p = np.clip((t - st["t_start"]) / STROKE_SPAN, 0, 1)
+            cov = _smoothstep(np.clip((p - st["arc"]) / STROKE_EDGE, 0, 1))
+            cov = _blur(cov, st["feather"])
+            prof = np.clip((st["wid"] / 2 - st["dist"]) / st["feather"], 0, 1)
+            total[rs] += cov * prof * st["bristle"]
+        total = np.clip(total, 0, 1)
+        total = np.maximum(prev_total, total)
+        if i == count - 1:
+            total[:] = 1.0
+        prev_total = total
         frame = rgba.copy()
-        frame[:, :, 3] = np.round(alpha * _smoothstep(a)).astype(np.uint8)
+        frame[:, :, 3] = np.round(alpha * total).astype(np.uint8)
         yield frame
 
 
@@ -182,3 +262,100 @@ def render_reveal(
     if fingerprint is not None:
         _fingerprint_path(dest).write_text(fingerprint)
     return dest
+
+
+def reveal_movie_fingerprint(base_png: Path, landmarks: list[dict]) -> str:
+    stat = Path(base_png).stat()
+    geometry = tuple(
+        (
+            str(landmark["asset"]),
+            landmark["x"],
+            landmark["y"],
+            landmark["w"],
+            landmark["h"],
+            landmark["duration"],
+            landmark["seed"],
+            landmark.get("opacity", 1.0),
+        )
+        for landmark in landmarks
+    )
+    payload = "|".join(str(part) for part in (stat.st_mtime_ns, stat.st_size, geometry, REVEAL_ALGO_VERSION))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def reveal_movie_path(output_dir: Path, slide_id: str, audience: str = "lw") -> Path:
+    suffix = "_CG" if audience == "cg" else ""
+    return Path(output_dir) / MOVIE_DIR / f"Map BG_{safe_slide_id(slide_id)}-reveal{suffix}.mov"
+
+
+def render_slide_reveal_movie(
+    base_png: Path,
+    country_png: Path | None,
+    landmarks: list[dict],
+    dest: Path,
+    *,
+    output_dir: Path,
+    slide_id: str,
+    audience: str = "lw",
+    size: tuple[int, int],
+    fps: int = 30,
+    fingerprint: str | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> Path:
+    """Composite paint-on reveals for one or more landmarks onto the slide's base map, as an opaque bg movie."""
+    w, h = size
+    with Image.open(base_png) as image:
+        base = image.convert("RGBA")
+        if base.size != (w, h):
+            base = base.resize((w, h), Image.LANCZOS)
+    if country_png is not None and Path(country_png).is_file():
+        with Image.open(country_png) as image:
+            country = image.convert("RGBA")
+            if country.size != (w, h):
+                country = country.resize((w, h), Image.LANCZOS)
+            base = Image.alpha_composite(base, country)
+    base_rgb = np.array(base.convert("RGB"), np.uint8)
+
+    prepared = []
+    for landmark in landmarks:
+        with Image.open(landmark["asset"]) as image:
+            asset = image.convert("RGBA").resize((max(1, int(landmark["w"])), max(1, int(landmark["h"]))), Image.LANCZOS)
+        rgba = np.array(asset)
+        opacity = float(landmark.get("opacity", 1.0))
+        if opacity < 1:
+            rgba = rgba.copy()
+            rgba[:, :, 3] = np.round(rgba[:, :, 3].astype(np.float32) * opacity).astype(np.uint8)
+        count = max(2, round(float(landmark["duration"]) * fps))
+        frames = list(reveal_frames(rgba, count=count, seed=int(landmark["seed"])))
+        prepared.append(dict(x=int(landmark["x"]), y=int(landmark["y"]), frames=frames))
+
+    tail = round(0.3 * fps)
+    total = tail + (max((len(item["frames"]) for item in prepared)) if prepared else 2)
+    folder = frames_dir(output_dir, f"{slide_id}__reveal", audience)
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    for i in range(total):
+        canvas = base_rgb.copy()
+        for item in prepared:
+            _raise_frame_cancelled(is_cancelled)
+            frame = item["frames"][min(i, len(item["frames"]) - 1)]
+            x, y = item["x"], item["y"]
+            fh, fw = frame.shape[:2]
+            slab = canvas[y : y + fh, x : x + fw]
+            if slab.shape[:2] != (fh, fw):
+                continue
+            alpha = frame[:, :, 3:4].astype(np.float32) / 255.0
+            canvas[y : y + fh, x : x + fw] = np.round(
+                frame[:, :, :3].astype(np.float32) * alpha + slab.astype(np.float32) * (1 - alpha)
+            ).astype(np.uint8)
+        Image.fromarray(canvas, "RGB").save(folder / f"{i:05d}.png")
+    result = encode_fly_movie(folder, dest, fps=fps, is_cancelled=is_cancelled)
+    if fingerprint is not None:
+        _fingerprint_path(dest).write_text(fingerprint)
+    return result
+
+
+def _raise_frame_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
+    if is_cancelled and is_cancelled():
+        raise RuntimeError("Export cancelled.")
