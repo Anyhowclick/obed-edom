@@ -35,7 +35,7 @@ import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
-import { STYLE_SWATCHES } from "../maps/styles";
+import { StylePicker } from "../maps/StylePicker";
 import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
@@ -1762,15 +1762,11 @@ export function MapsTab() {
         <span className="note">{job.id}</span>
       </div>
       <div className="maps-stylebar">
-        <label className="maps-style-select">Style
-          <select
-            value={activeView?.style || doc?.defaultStyle || "positron"}
-            disabled={locked}
-            onChange={(event) => setSlideStyle(event.target.value as MapsStyleId)}
-          >
-            {STYLE_SWATCHES.map((style) => <option key={style.id} value={style.id}>{style.label}</option>)}
-          </select>
-        </label>
+        <StylePicker
+          value={activeView?.style || doc?.defaultStyle || "positron"}
+          disabled={locked}
+          onChange={setSlideStyle}
+        />
         <div className="maps-layers" ref={layersRef}>
           <button
             className={`btn secondary icon-btn maps-layers-btn${layersOpen || activeHiddenLayers.length ? " on" : ""}`}
