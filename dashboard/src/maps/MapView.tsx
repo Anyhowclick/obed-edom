@@ -7,6 +7,7 @@ import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { addOverlays, applyHighlights, applyHillshade, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt } from "./overlays";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
+import { applyBoundaryZoomOffset } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
 import {
@@ -148,6 +149,7 @@ function recastPreviewCamera(
     map.resize();
     const d = applyPreviewZoomLimits(map, minZoom, previewZoomDelta(map, authoredWidth));
     deltaRef.current = d;
+    applyBoundaryZoomOffset(map, d);
     suppress.current = true;
     map.jumpTo(cameraView(map, authored, d, minZoom));
     map.once("moveend", () => {
@@ -478,158 +480,161 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
     };
 
-    const createMap = (wantedStyle: MapsStyleId) => void resolveOpenFreeMapStyle(wantedStyle).then((style) => {
-      if (cancelled) return;
-      if (overlay.current.styleId !== wantedStyle) {
-        createMap(overlay.current.styleId);
-        return;
-      }
-      const zMin = minZoomRef.current;
+    const createMap = (wantedStyle: MapsStyleId) => {
       const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / authoredWidthRef.current) : 0;
-      deltaRef.current = d0;
-      map = new MapLibreMap({
-        container: hostEl,
-        style,
-        center: [camera.lon, camera.lat],
-        zoom: mapZoomOf(camera.zoom, d0, zMin),
-        bearing: camera.bearing,
-        pitch: camera.pitch,
-        renderWorldCopies: true,
-        transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
-        doubleClickZoom: false,
-        boxZoom: false,
-        minZoom: ML_MIN_ZOOM,
-        maxZoom: ML_MAX_ZOOM,
-        attributionControl: { compact: true },
-        transformRequest: (url) => mapsTransformRequest(url),
-        canvasContextAttributes: { preserveDrawingBuffer: true },
-      });
-      mapRef.current = map;
-      styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
-      styleIdentity.current = wantedStyle;
-
-      function probeTex() {
-        if (!map) return;
-        const gl = map.getCanvas().getContext("webgl2") || map.getCanvas().getContext("webgl");
-        if (!gl) return;
-        const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-        if (typeof max === "number" && max < WALL_W) {
-          const message = `GPU MAX_TEXTURE_SIZE is ${max}; 7680 plates will fail.`;
-          console.warn(message);
-          setTexWarn(message);
+      void resolveOpenFreeMapStyle(wantedStyle, d0).then((style) => {
+        if (cancelled) return;
+        if (overlay.current.styleId !== wantedStyle) {
+          createMap(overlay.current.styleId);
+          return;
         }
-      }
-
-      function paintOverlays() {
-        if (!map) return;
-        const currentMap = map;
-        const generation = ++overlayGeneration.current;
-        styleReady.current = false;
-        ensureLowZoomRaster(currentMap, overlay.current.styleId);
-        installPatterns(currentMap, stylePatterns(overlay.current.styleId));
-        applyLayerFilters(currentMap, overlay.current.hiddenLayers);
-        applyHillshade(currentMap, overlay.current.hillshade);
-        void addOverlays(
-          currentMap,
-          overlay.current.highlights,
-          overlay.current.churches,
-          overlay.current.selectedPinId,
-          overlay.current.styleId,
-          overlay.current.numberPins,
-          assetBaseUrl,
-          objectPreviewScale(currentMap, authoredWidthRef.current)
-        ).then(() => {
-          if (mapRef.current === currentMap && overlayGeneration.current === generation) {
-            styleReady.current = true;
-            currentMap.triggerRepaint();
-          }
+        const zMin = minZoomRef.current;
+        deltaRef.current = d0;
+        map = new MapLibreMap({
+          container: hostEl,
+          style,
+          center: [camera.lon, camera.lat],
+          zoom: mapZoomOf(camera.zoom, d0, zMin),
+          bearing: camera.bearing,
+          pitch: camera.pitch,
+          renderWorldCopies: true,
+          transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
+          doubleClickZoom: false,
+          boxZoom: false,
+          minZoom: ML_MIN_ZOOM,
+          maxZoom: ML_MAX_ZOOM,
+          attributionControl: { compact: true },
+          transformRequest: (url) => mapsTransformRequest(url),
+          canvasContextAttributes: { preserveDrawingBuffer: true },
         });
-      }
+        mapRef.current = map;
+        styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
+        styleIdentity.current = wantedStyle;
 
-      function commitCamera() {
-        if (!map || suppress.current || previewingRef.current) return;
-        callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
-      }
+        function probeTex() {
+          if (!map) return;
+          const gl = map.getCanvas().getContext("webgl2") || map.getCanvas().getContext("webgl");
+          if (!gl) return;
+          const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+          if (typeof max === "number" && max < WALL_W) {
+            const message = `GPU MAX_TEXTURE_SIZE is ${max}; 7680 plates will fail.`;
+            console.warn(message);
+            setTexWarn(message);
+          }
+        }
 
-      map.on("error", (event) => {
-        const message = event.error?.message || "MapLibre error";
-        console.warn("maplibre", message);
-      });
-      map.on("styleimagemissing", (event) => {
-        if (map) installPatternById(map, overlay.current.styleId, event.id);
-      });
-      map.on("load", () => {
-        probeTex();
-        try {
+        function paintOverlays() {
+          if (!map) return;
+          const currentMap = map;
+          const generation = ++overlayGeneration.current;
+          styleReady.current = false;
+          ensureLowZoomRaster(currentMap, overlay.current.styleId);
+          installPatterns(currentMap, stylePatterns(overlay.current.styleId));
+          applyLayerFilters(currentMap, overlay.current.hiddenLayers);
+          applyHillshade(currentMap, overlay.current.hillshade);
+          void addOverlays(
+            currentMap,
+            overlay.current.highlights,
+            overlay.current.churches,
+            overlay.current.selectedPinId,
+            overlay.current.styleId,
+            overlay.current.numberPins,
+            assetBaseUrl,
+            objectPreviewScale(currentMap, authoredWidthRef.current)
+          ).then(() => {
+            if (mapRef.current === currentMap && overlayGeneration.current === generation) {
+              styleReady.current = true;
+              currentMap.triggerRepaint();
+            }
+          });
+        }
+
+        function commitCamera() {
+          if (!map || suppress.current || previewingRef.current) return;
+          callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
+        }
+
+        map.on("error", (event) => {
+          const message = event.error?.message || "MapLibre error";
+          console.warn("maplibre", message);
+        });
+        map.on("styleimagemissing", (event) => {
+          if (map) installPatternById(map, overlay.current.styleId, event.id);
+        });
+        map.on("load", () => {
+          probeTex();
+          try {
+            map?.resize();
+            if (map) {
+              const zMin = minZoomRef.current;
+              const d = applyPreviewZoomLimits(map, zMin, previewZoomDelta(map, authoredWidthRef.current));
+              deltaRef.current = d;
+              applyBoundaryZoomOffset(map, d);
+              suppress.current = true;
+              map.jumpTo(cameraView(map, cameraRef.current, d, zMin));
+              map.once("moveend", () => {
+                suppress.current = false;
+              });
+              ensureLowZoomRaster(map, overlay.current.styleId);
+              installPatterns(map, stylePatterns(overlay.current.styleId));
+              applyLayerFilters(map, overlay.current.hiddenLayers);
+              applyHillshade(map, overlay.current.hillshade);
+            }
+          } catch (err) {
+            suppress.current = false;
+            console.warn("maplibre load", err);
+          }
+          void loadAdmin0().then(() => {
+            if (mapRef.current === map) paintOverlays();
+          });
+        });
+        map.on("style.load", () => {
           map?.resize();
           if (map) {
-            const zMin = minZoomRef.current;
-            const d = applyPreviewZoomLimits(map, zMin, previewZoomDelta(map, authoredWidthRef.current));
-            deltaRef.current = d;
-            suppress.current = true;
-            map.jumpTo(cameraView(map, cameraRef.current, d, zMin));
-            map.once("moveend", () => {
-              suppress.current = false;
-            });
             ensureLowZoomRaster(map, overlay.current.styleId);
             installPatterns(map, stylePatterns(overlay.current.styleId));
             applyLayerFilters(map, overlay.current.hiddenLayers);
             applyHillshade(map, overlay.current.hillshade);
           }
-        } catch (err) {
-          suppress.current = false;
-          console.warn("maplibre load", err);
-        }
-        void loadAdmin0().then(() => {
-          if (mapRef.current === map) paintOverlays();
+          void loadAdmin0().then(() => {
+            if (mapRef.current === map) paintOverlays();
+          });
         });
-      });
-      map.on("style.load", () => {
-        map?.resize();
-        if (map) {
-          ensureLowZoomRaster(map, overlay.current.styleId);
-          installPatterns(map, stylePatterns(overlay.current.styleId));
-          applyLayerFilters(map, overlay.current.hiddenLayers);
-          applyHillshade(map, overlay.current.hillshade);
-        }
-        void loadAdmin0().then(() => {
-          if (mapRef.current === map) paintOverlays();
+        map.on("moveend", commitCamera);
+        map.on("click", (event) => {
+          if (!map) return;
+          if (previewingRef.current) {
+            callbacks.current.onPreviewAbort?.();
+            return;
+          }
+          if (event.originalEvent.shiftKey) {
+            callbacks.current.onAddPin(event.lngLat.lat, event.lngLat.lng);
+            return;
+          }
+          const pin = pinIdFromEvent(event, map);
+          if (pin) {
+            callbacks.current.onSelectPin(pin);
+            return;
+          }
+          callbacks.current.onSelectPin(null);
+          if (authoredZoomOf(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
+          if (!map.getLayer("admin0-fill")) return;
+          const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
+          const code = String(hits[0]?.properties?.ADM0_A3 || "");
+          if (code) callbacks.current.onToggleCountry(code);
         });
+        map.on("dblclick", (event) => {
+          if (!map) return;
+          const pin = pinIdFromEvent(event, map);
+          if (pin) {
+            event.preventDefault();
+            callbacks.current.onEditPin(pin);
+          }
+        });
+        map.getCanvas().addEventListener("pointerup", onPointerUp);
+        ro.observe(hostEl);
       });
-      map.on("moveend", commitCamera);
-      map.on("click", (event) => {
-        if (!map) return;
-        if (previewingRef.current) {
-          callbacks.current.onPreviewAbort?.();
-          return;
-        }
-        if (event.originalEvent.shiftKey) {
-          callbacks.current.onAddPin(event.lngLat.lat, event.lngLat.lng);
-          return;
-        }
-        const pin = pinIdFromEvent(event, map);
-        if (pin) {
-          callbacks.current.onSelectPin(pin);
-          return;
-        }
-        callbacks.current.onSelectPin(null);
-        if (authoredZoomOf(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
-        if (!map.getLayer("admin0-fill")) return;
-        const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
-        const code = String(hits[0]?.properties?.ADM0_A3 || "");
-        if (code) callbacks.current.onToggleCountry(code);
-      });
-      map.on("dblclick", (event) => {
-        if (!map) return;
-        const pin = pinIdFromEvent(event, map);
-        if (pin) {
-          event.preventDefault();
-          callbacks.current.onEditPin(pin);
-        }
-      });
-      map.getCanvas().addEventListener("pointerup", onPointerUp);
-      ro.observe(hostEl);
-    });
+    };
     createMap(styleId);
 
     return () => {
@@ -651,11 +656,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     styleUrl.current = url;
     styleIdentity.current = styleId;
     styleReady.current = false;
-    void resolveOpenFreeMapStyle(styleId).then((style) => {
+    void resolveOpenFreeMapStyle(styleId, previewZoomDelta(map, authoredWidthRef.current)).then((style) => {
       if (mapRef.current !== map || styleIdentity.current !== styleId) return;
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
         map.resize();
+        applyBoundaryZoomOffset(map, previewZoomDelta(map, authoredWidthRef.current));
         ensureLowZoomRaster(map, styleId);
         applyLayerFilters(map, overlay.current.hiddenLayers);
         applyHillshade(map, overlay.current.hillshade);

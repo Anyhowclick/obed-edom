@@ -109,6 +109,10 @@ Two tests in [dashboard/tests/camera-flight.test.cjs](dashboard/tests/camera-fli
 - Widths and the `rgba(60,60,60,1)` / `[2,2]` dash are tuned by eye against the numbers above; they are two lines in `tonerBoundaries.ts` to retune.
 - Re-vendoring the Toner style must re-check the three layer ids and the z5 handover.
 
+## Update — provinces gated at authored zoom 4
+
+Provinces are now gated at authored zoom 4 instead of the tile floor: `boundary_state_z1-4` runs 4-5, `boundary_state` picks up at 5. The preview shifts both bands by `previewZoomDelta` (negative), applied at style load and re-applied on resize/style-switch via `applyBoundaryZoomOffset`'s `setLayerZoomRange` calls; export passes offset 0 since `camera.zoom` is already authored. Both bands are now solid: the low band is `rgba(80, 80, 80, 1)` at 1.2px, and the vendored `boundary_state` dash (`line-dasharray`) is dropped from the cloned paint. The layer id `boundary_state_z1-4` is retained even though its band is now 4-5, not the z1-4 the name suggests.
+
 ## Parked — option 2: make the preview honest for every style
 
 Not in scope. Recorded so it can be picked up.

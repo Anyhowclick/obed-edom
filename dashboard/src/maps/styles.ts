@@ -58,7 +58,7 @@ export function remapTonerFonts(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, remapTonerFonts(child)]));
 }
 
-async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-background" | "toner-lines">): Promise<StyleSpecification> {
+async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-background" | "toner-lines">, zoomOffset = 0): Promise<StyleSpecification> {
   if (!tonerDocument) {
     tonerDocument = fetch(tonerStyleUrl)
       .then((response) => response.ok ? response.json() as Promise<StyleSpecification> : Promise.reject(new Error(`Vendored Toner style failed (${response.status})`)));
@@ -70,7 +70,7 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
   next.sources = { openmaptiles: { ...structuredClone(vector), attribution: "© OpenStreetMap contributors · © MapTiler" } };
   next.glyphs = base.glyphs;
   delete next.sprite;
-  next.layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[]).filter((layer) => {
+  next.layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset).filter((layer) => {
     if (styleId === "toner-background") return layer.type === "background" || layer.type === "fill";
     if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";
     return true;
@@ -134,8 +134,8 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
 }
 
 /** Inline TileJSON `tiles` so MapLibre actually requests vector PBFs past the NE raster. */
-export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpecification> {
-  if (styleId === "toner" || styleId === "toner-background" || styleId === "toner-lines") return resolveTonerStyle(styleId);
+export function resolveOpenFreeMapStyle(styleId: MapsStyleId, zoomOffset = 0): Promise<StyleSpecification> {
+  if (styleId === "toner" || styleId === "toner-background" || styleId === "toner-lines") return resolveTonerStyle(styleId, zoomOffset);
   const url = OPENFREEMAP_STYLES[styleId];
   let pending = styleCache.get(url);
   if (!pending) {
