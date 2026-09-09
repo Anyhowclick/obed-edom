@@ -75,7 +75,6 @@ from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import (
     acquire_wall_payload,
     offline_read_mode,
-    prepare_wall_payload,
     remap_and_inspect,
 )
 from obed_edom.settings import load_settings, save_settings
@@ -1266,7 +1265,6 @@ def _run_resize_propose(
     if slide_range:
         _assert_range_within_navigator(path.name, full_wall, slide_range)
     template_data = inspect_keynote(template)
-    card_stroke = prepare_wall_payload(path, full_wall, template, template_data, job.log)
     numbering = ""
     if slide_range:
         slide_range = to_document_range(full_wall, slide_range)
@@ -1320,7 +1318,6 @@ def _run_resize_propose(
         template_payload=template_data,
         keep_side_panels=keep_side_panels,
         side_content_slides=reuse.side_content_slides(),
-        card_stroke=card_stroke,
         log=job.log,
     )
     decisions = {index: d.as_dict() for index, d in reuse.decisions.items()}

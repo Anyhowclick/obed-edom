@@ -336,6 +336,8 @@ def propose_framings(
         if log:
             log(message)
 
+    from obed_edom.remap_keynote import prepare_wall_payload  # noqa: PLC0415
+
     wall_path = Path(wall).expanduser().resolve()
     template_path = Path(template).expanduser().resolve()
     wall_data = wall_payload if wall_payload is not None else inspect_keynote(wall_path)
@@ -343,6 +345,7 @@ def propose_framings(
     template_data = (
         template_payload if template_payload is not None else inspect_keynote(template_path)
     )
+    card_stroke = prepare_wall_payload(wall_path, wall_data, template_path, template_data, say)
 
     wall_w = float(wall_data.get("slideWidth") or 7680)
     wall_h = float(wall_data.get("slideHeight") or 1080)
