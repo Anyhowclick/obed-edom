@@ -100,10 +100,10 @@ test("surviving link keeps its object and fields, disappeared pairs dropped, new
   const s1s3 = next.links.find((l) => l.from === "s1" && l.to === "s3");
   assert.ok(s1s3);
   assert.notEqual(s1s3.kind, "movie");
-  assert.equal(s1s3.duration, 1.2);
+  assert.equal(s1s3.duration, 1.0);
   const s3s2 = next.links.find((l) => l.from === "s3" && l.to === "s2");
   assert.ok(s3s2);
-  assert.equal(s3s2.duration, 1.2);
+  assert.equal(s3s2.duration, 1.0);
 });
 
 test("a link surviving under the same (from,to) keeps its exact object", () => {

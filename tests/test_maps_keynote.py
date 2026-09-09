@@ -765,7 +765,7 @@ def test_plan_deck_uses_backdrop_movie_when_present(tmp_path: Path):
     assert item["kind"] == "movie"
     assert (item["x"], item["y"], item["w"], item["h"]) == (CENTRE_ORIGIN_X, 0, CENTRE_WIDTH, WALL_HEIGHT)
     assert item["map"] is True
-    assert ops[0]["transition"] == {"effect": None, "duration": 1.0, "automatic": True, "delay": 2.5}
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.5}
 
 
 def test_plan_deck_backdrop_movie_cg_shift(tmp_path: Path):
@@ -1065,7 +1065,7 @@ def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(
     _dummy_png(tmp_path / "stills" / "s2-country.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
-    assert ops[0]["transition"] == {"effect": None, "duration": 1.5, "automatic": True, "delay": 2.0}
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.0}
     assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
     assert len([item for item in ops[2]["items"] if item.get("map")]) == 2
 

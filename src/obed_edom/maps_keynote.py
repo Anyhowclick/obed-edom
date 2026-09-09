@@ -910,7 +910,7 @@ def _transition_for(
         return {"effect": "magic_move", "duration": duration, "automatic": automatic}
     if bg_movie:
         delay = float((slide or {}).get("movieDuration") or duration)
-        return {"effect": None, "duration": duration, "automatic": True, "delay": delay}
+        return {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": delay}
     if kind == "dissolve":
         return {"effect": "dissolve", "duration": duration, "automatic": automatic}
     if automatic:

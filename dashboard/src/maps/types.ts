@@ -290,7 +290,7 @@ export function restitchLinks(nextSlides: MapsSlide[], prevLinks: MapsLink[]): M
         from: from.id,
         to: to.id,
         kind,
-        duration: 1.2,
+        duration: 1.0,
         playWithoutClick: false,
         ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
       }
