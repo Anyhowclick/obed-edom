@@ -440,3 +440,69 @@ def test_batch_rollback_removes_orphan_original_and_tmp_files():
     output_dir = Path(job['result']['outputDir'])
     assert not list(output_dir.rglob('*.tmp'))
 
+
+def test_patch_rejects_watercolour_jobs():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))])
+    assert response.status_code == 200, response.text
+    job_id=response.json()['id']
+    import time
+    for _ in range(80):
+        job=client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done','error'}: break
+        time.sleep(.03)
+    response=client.patch(f'/api/jobs/{job_id}', json={'result': {'resultDir': '/etc'}})
+    assert response.status_code == 400
+
+
+def test_result_file_rejects_paths_outside_job_root():
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.watercolour import _result_file
+    job = RUNNER.submit('watercolour', lambda job: {}, feature='watercolour')
+    job.status = 'done'
+    job.result = {
+        'resultDir': '/etc',
+        'originalDir': '/etc',
+        'items': [{'id': 'item-1', 'result': 'passwd', 'original': 'passwd'}],
+    }
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as excinfo:
+        _result_file(job.id, 'item-1', 'result')
+    assert excinfo.value.status_code == 404
+
+
+def test_submit_seeds_result_before_worker_runs():
+    import threading
+    from obed_edom.web.app import RUNNER
+    barrier = threading.Event()
+
+    def _blocked(job):
+        barrier.wait(2)
+        return {'items': []}
+
+    job = RUNNER.submit('watercolour', _blocked, feature='watercolour', result={'stagingDir': '/tmp/staged'})
+    try:
+        assert job.result == {'stagingDir': '/tmp/staged'}
+    finally:
+        barrier.set()
+
+
+def test_mask_field_rejects_oversized_dimensions_before_decompression():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    huge = Image.new('L', (5000, 5000), 255)
+    out = BytesIO(); huge.save(out, 'PNG'); import base64
+    encoded = base64.b64encode(out.getvalue()).decode('ascii')
+    assert len(out.getvalue()) < 1024 * 1024
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[110,66,178,166],'keepMask':encoded})},
+    )
+    assert response.status_code == 400
+    assert 'invalid' in response.text.lower()
+

@@ -49,3 +49,11 @@ test("End jumps to the last index", () => {
 test("an unrecognized key is a no-op", () => {
   assert.equal(nextGridIndex(4, "PageDown", COUNT, COLS), 4);
 });
+
+test("StylePicker uses roving DOM focus, not aria-activedescendant, on its listbox", () => {
+  const source = fs.readFileSync(path.join(root, "src/maps/StylePicker.tsx"), "utf8");
+  assert.doesNotMatch(source, /aria-activedescendant/);
+  assert.match(source, /role="listbox"/);
+  assert.match(source, /tabIndex=\{index === focusIndex \? 0 : -1\}/);
+  assert.match(source, /tileRefs\.current\[focusIndex\]\?\.focus\(\)/);
+});

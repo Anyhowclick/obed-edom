@@ -91,7 +91,6 @@ export function StylePicker({ value, disabled, onChange }: { value: MapsStyleId;
             className="style-picker-grid"
             role="listbox"
             aria-label="Map style"
-            aria-activedescendant={`style-picker-tile-${focused.id}`}
             onKeyDown={onGridKeyDown}
           >
             {STYLE_OPTIONS.map((option, index) => (

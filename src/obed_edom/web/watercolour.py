@@ -65,10 +65,14 @@ def _decode_mask_field(spec: dict[str, Any], key: str) -> Image.Image | None:
     try:
         buffer = io.BytesIO(payload)
         probe = Image.open(buffer)
+        if probe.width * probe.height > MASK_FIELD_MAX_PIXELS:
+            raise WatercolourError("Mask settings are invalid")
         probe.verify()
         buffer.seek(0)
         mask = Image.open(buffer)
         mask.load()
+    except WatercolourError:
+        raise
     except Exception as exc:
         raise WatercolourError("Mask settings are invalid") from exc
     if mask.width * mask.height > MASK_FIELD_MAX_PIXELS:
@@ -161,7 +165,7 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
     originals.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    job.result = {"outputDir": str(root), "originalDir": str(originals), "resultDir": str(results), "items": rows}
+    job.result = {**(job.result or {}), "outputDir": str(root), "originalDir": str(originals), "resultDir": str(results), "items": rows}
     try:
       for index, (name, path) in enumerate(staged):
         if job.cancelled():
@@ -218,8 +222,12 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
             path.write_bytes(payload)
             staged.append((Path(upload.filename or f"photo-{index + 1}").name, path))
         options = WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)
-        job = _runner().submit("watercolour", lambda job: _run_batch(job, staged, options, mask_specs), feature="watercolour")
-        job.result = {"stagingDir": str(staged_root)}
+        job = _runner().submit(
+            "watercolour",
+            lambda job: _run_batch(job, staged, options, mask_specs),
+            feature="watercolour",
+            result={"stagingDir": str(staged_root)},
+        )
     except Exception:
         shutil.rmtree(staged_root, ignore_errors=True)
         raise
@@ -320,6 +328,10 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
     return maps._mutate_document(maps_job_id, None, append)
 
 
+def _job_root(job_id: str) -> Path:
+    return (output_root() / ".watercolour" / job_id).resolve()
+
+
 def _result_file(job_id: str, item_id: str, key: str) -> Path:
     job = _runner().get(job_id)
     if not job or job.feature != "watercolour":
@@ -327,7 +339,13 @@ def _result_file(job_id: str, item_id: str, key: str) -> Path:
     row = next((item for item in (job.result or {}).get("items", []) if item.get("id") == item_id), None)
     if not row or not row.get(key):
         raise HTTPException(404, "Watercolour image is unavailable")
-    path = Path(str((job.result or {}).get("originalDir" if key == "original" else "resultDir") or "")) / str(row[key])
+    root = _job_root(job_id)
+    subdir = "originals" if key == "original" else "results"
+    path = (root / subdir / str(row[key])).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(404, "Watercolour image is unavailable") from None
     if not path.is_file():
         raise HTTPException(404, "Watercolour image is unavailable")
     return path
@@ -352,10 +370,10 @@ def watercolour_download(job_id: str):
     rows = [row for row in result.get("items", []) if row.get("status") == "done" and row.get("result")]
     if not rows:
         raise HTTPException(404, "No Watercolour results are available")
-    root = Path(str(result.get("outputDir") or ""))
+    root = _job_root(job_id)
     archive_path = root / "watercolour-results.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for row in rows:
             path = _result_file(job_id, str(row["id"]), "result")
-            archive.write(path, str(row["result"]))
+            archive.write(path, Path(str(row["result"])).name)
     return FileResponse(archive_path, media_type="application/zip", filename="watercolour-results.zip")

@@ -186,7 +186,7 @@ export function MovieAppearanceGate({
   disabled: boolean;
   onMatch: () => void;
 }) {
-  const rows = morphGateList(from, to).filter((gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "layers") && !gate.ok);
+  const rows = morphGateList(from, to).filter((gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "isolate" || gate.id === "layers") && !gate.ok);
   if (!rows.length && !crossAudience) return null;
   const showMatchButton = rows.some((gate) => gate.id === "layers");
   return (
@@ -216,7 +216,7 @@ export function MovieAppearanceGate({
       )}
       <p className="morph-gates-hint">
         The fly renders entirely in the source shot's appearance, so these differences pop at the cut to the next
-        slide. Style or highlight mismatches are not auto-copied — use "Reset hop" to re-suggest a hop kind instead.
+        slide. Style, highlight, or isolate mismatches are not auto-copied — use "Reset hop" to re-suggest a hop kind instead.
       </p>
       {crossAudience && (
         <p className="morph-gates-hint">The other audience also mismatches on this hop and must be fixed by switching audiences.</p>

@@ -347,6 +347,7 @@ export function MapsTab() {
     churches: activeView.churches,
     hiddenLayers: activeView.hiddenLayers,
     hillshade: activeView.hillshade,
+    isolate: activeView.isolate ? { mode: activeView.isolate.mode, strength: activeView.isolate.strength } : null,
     authoredWidth: renderedAuthoredWidth,
     crop: doc?.crop,
   }) : "";
@@ -365,7 +366,7 @@ export function MapsTab() {
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       if (dissolveUrl.current) URL.revokeObjectURL(dissolveUrl.current);
-      void flushAndSave(true);
+      fireAndForgetSave();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -546,7 +547,11 @@ export function MapsTab() {
     if (slide) await mapRef.current?.waitUntilIdle(slideForAudience(slide, activeAudienceRef.current).style);
     await captureThumb(id);
     if (next && jobRef.current) scheduleSave(next, immediate);
-    if (immediate) await saveQueue.current?.flush().catch(() => undefined);
+    if (immediate) await saveQueue.current?.flush();
+  }
+
+  function fireAndForgetSave() {
+    void flushAndSave(true).catch(() => undefined);
   }
 
   async function selectSlide(nextId: string, opts?: { flush?: boolean; audience?: MapsAudience }) {
@@ -694,7 +699,7 @@ export function MapsTab() {
     const next = { ...current, slides: slidesNext, links };
     patchDoc(next);
     void (async () => {
-      await flushAndSave(true);
+      await flushAndSave(true).catch(() => undefined);
       setActiveId(created.id);
       mapRef.current?.jumpTo(created.camera);
     })();
@@ -2019,7 +2024,7 @@ export function MapsTab() {
                     updateActive({ camera });
                     mapRef.current?.jumpTo(camera);
                   }}
-                  onPointerUp={() => void flushAndSave(true)}
+                  onPointerUp={() => fireAndForgetSave()}
                 />
               </label>
             </>
@@ -2160,7 +2165,7 @@ export function MapsTab() {
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
-                    onCommit={() => void flushAndSave(true)}
+                    onCommit={() => fireAndForgetSave()}
                   />
                   <AeScrub
                     label="Longitude"
@@ -2176,7 +2181,7 @@ export function MapsTab() {
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
-                    onCommit={() => void flushAndSave(true)}
+                    onCommit={() => fireAndForgetSave()}
                   />
                   <AeScrub
                     label="Zoom"
@@ -2192,7 +2197,7 @@ export function MapsTab() {
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
-                    onCommit={() => void flushAndSave(true)}
+                    onCommit={() => fireAndForgetSave()}
                   />
                   {wrapWarn && <p className="maps-wrap-note">{wrapWarn}</p>}
                   <AeScrub
@@ -2209,7 +2214,7 @@ export function MapsTab() {
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
-                    onCommit={() => void flushAndSave(true)}
+                    onCommit={() => fireAndForgetSave()}
                   />
                   <AeScrub
                     label="Bearing"
@@ -2225,7 +2230,7 @@ export function MapsTab() {
                       updateActive({ camera });
                       mapRef.current?.jumpTo(camera);
                     }}
-                    onCommit={() => void flushAndSave(true)}
+                    onCommit={() => fireAndForgetSave()}
                   />
                   {activeAudience === "lw" && (
                     <>
@@ -2238,7 +2243,7 @@ export function MapsTab() {
                         digits={0}
                         disabled={locked || doc?.exportCg === false}
                         onChange={(dx) => updateActive(clampCgShift(dx, 0))}
-                        onCommit={() => void flushAndSave(true)}
+                        onCommit={() => fireAndForgetSave()}
                       />
                       <label className="maps-check" title="Off (default) captures the 3840×1080 LED centre so Keynote side-panel art can show. On fills the 7680×1080 wall.">
                         <input
@@ -2303,7 +2308,7 @@ export function MapsTab() {
                         digits={2}
                         disabled={locked}
                         onChange={(strength) => updateActive({ isolate: { ...activeView.isolate!, strength } })}
-                        onCommit={() => void flushAndSave(true)}
+                        onCommit={() => fireAndForgetSave()}
                       />
                     )}
                     <p className="note">
@@ -2454,7 +2459,7 @@ export function MapsTab() {
                         easeOut={outgoing.easeOut}
                         disabled={locked}
                         onChange={(next) => setHop(next)}
-                        onCommit={() => void flushAndSave(true)}
+                        onCommit={() => fireAndForgetSave()}
                       />
                       <AeScrub
                         label="Cruise zoom"

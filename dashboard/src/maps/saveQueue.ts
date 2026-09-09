@@ -111,6 +111,10 @@ export class MapsSaveQueue {
       try {
         const acknowledged = await this.options.transport(copy(sent), requestBase.revision);
         if (epoch !== this.epoch) return;
+        if (this.base && acknowledged.revision < this.base.revision) {
+          this.dirty = true;
+          continue;
+        }
         const latest = this.options.document() || sent;
         if (!this.applyMerge(rebaseMapsDocument(sent, latest, acknowledged.document), acknowledged)) throw new MapsSaveBlockedError();
         retries = 0;

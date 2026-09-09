@@ -110,6 +110,7 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
 
   const countryLow = byId(next, "boundary_country_z0-4");
   assert.equal(countryLow.minzoom, 0);
+  assert.equal(countryLow.maxzoom, 5);
   assert.deepEqual({ ...countryLow, minzoom: vendorCountryLow.minzoom }, vendorCountryLow);
 
   const state = byId(next, "boundary_state");
@@ -121,7 +122,9 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
     vendorState
   );
 
-  assert.deepEqual(byId(next, "boundary_country_z5-"), vendorCountryHigh);
+  const countryHigh = byId(next, "boundary_country_z5-");
+  assert.equal(countryHigh.minzoom, 5);
+  assert.deepEqual({ ...countryHigh, minzoom: vendorCountryHigh.minzoom }, vendorCountryHigh);
 
   const nextIds = next.map((layer) => layer.id);
   const vendorIds = vendor.layers.map((layer) => layer.id);
@@ -132,14 +135,19 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   const preview = withLowZoomBoundaries(vendor.layers, previewOffset);
   const lowPreview = byId(preview, "boundary_state_z1-4");
   const statePreview = byId(preview, "boundary_state");
-  const countryPreview = byId(preview, "boundary_country_z0-4");
+  const countryLowPreview = byId(preview, "boundary_country_z0-4");
+  const countryHighPreview = byId(preview, "boundary_country_z5-");
   assert.ok(Math.abs(lowPreview.minzoom - 1.06) < 1e-9);
   assert.ok(Math.abs(lowPreview.maxzoom - 2.06) < 1e-9);
   assert.ok(Math.abs(statePreview.minzoom - 2.06) < 1e-9);
-  assert.equal(countryPreview.minzoom, 0);
+  assert.equal(countryLowPreview.minzoom, 0);
+  assert.ok(Math.abs(countryLowPreview.maxzoom - 2.06) < 1e-9);
+  assert.ok(Math.abs(countryHighPreview.minzoom - 2.06) < 1e-9);
 
   const clamped = withLowZoomBoundaries(vendor.layers, -6);
   assert.equal(byId(clamped, "boundary_state_z1-4").minzoom, 0);
   assert.equal(byId(clamped, "boundary_state_z1-4").maxzoom, 0);
   assert.equal(byId(clamped, "boundary_country_z0-4").minzoom, 0);
+  assert.equal(byId(clamped, "boundary_country_z0-4").maxzoom, 0);
+  assert.equal(byId(clamped, "boundary_country_z5-").minzoom, 0);
 });

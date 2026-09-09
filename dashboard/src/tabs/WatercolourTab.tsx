@@ -65,6 +65,25 @@ function encodeMask(mask: Uint8Array, w: number, h: number): string {
   return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
 }
 
+function decodeMaskInto(base64: string, ww: number, wh: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = ww;
+      canvas.height = wh;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0, ww, wh);
+      const data = ctx.getImageData(0, 0, ww, wh).data;
+      const buffer = new Uint8Array(ww * wh);
+      for (let i = 0; i < buffer.length; i++) buffer[i] = data[i * 4] > 127 ? 1 : 0;
+      resolve(buffer);
+    };
+    img.onerror = reject;
+    img.src = `data:image/png;base64,${base64}`;
+  });
+}
+
 function overlayDataUrl(keep: Uint8Array, remove: Uint8Array, w: number, h: number): string {
   const canvas = document.createElement("canvas");
   canvas.width = w;
@@ -129,7 +148,10 @@ function MaskEditor({
     keepRef.current = null;
     removeRef.current = null;
     setOverlayUrl("");
-    return () => URL.revokeObjectURL(next);
+    return () => {
+      URL.revokeObjectURL(next);
+      if (encodeTimer.current) clearTimeout(encodeTimer.current);
+    };
   }, [file]);
 
   function ensureWorking(img: HTMLImageElement): { ww: number; wh: number; data: Uint8ClampedArray } {
@@ -147,6 +169,19 @@ function MaskEditor({
     workingRef.current = working;
     if (!keepRef.current || keepRef.current.length !== ww * wh) keepRef.current = new Uint8Array(ww * wh);
     if (!removeRef.current || removeRef.current.length !== ww * wh) removeRef.current = new Uint8Array(ww * wh);
+    if (spec.keepMask || spec.removeMask) {
+      const keep = keepRef.current;
+      const remove = removeRef.current;
+      Promise.all([
+        spec.keepMask ? decodeMaskInto(spec.keepMask, ww, wh) : null,
+        spec.removeMask ? decodeMaskInto(spec.removeMask, ww, wh) : null,
+      ]).then(([decodedKeep, decodedRemove]) => {
+        if (workingRef.current !== working) return;
+        if (decodedKeep) keep.set(decodedKeep);
+        if (decodedRemove) remove.set(decodedRemove);
+        setOverlayUrl(overlayDataUrl(keep, remove, ww, wh));
+      });
+    }
     return working;
   }
 
@@ -641,6 +676,7 @@ function LandmarkMask({
   const [magnifierOn, setMagnifierOn] = useState(mode !== "rect");
   const [compareOn, setCompareOn] = useState(false);
   const [tolerance, setTolerance] = useState(24);
+  const [resetGeneration, setResetGeneration] = useState(0);
 
   const mask = JSON.stringify(spec);
   const { url: cutoutUrl, busy, error } = usePreviewImage({ wash, ink, file: files[index], mask }, Boolean(spec.rect), 250);
@@ -650,10 +686,18 @@ function LandmarkMask({
     setMagnifierOn(next !== "rect");
   }
 
+  function handleReset() {
+    setResetGeneration((current) => current + 1);
+    onReset();
+  }
+
+  const file = files[index];
+
   return (
     <div className="wash-look">
       <MaskEditor
-        file={files[index]}
+        key={`${file.name}-${file.size}-${resetGeneration}`}
+        file={file}
         spec={spec}
         mode={mode}
         polarity={polarity}
@@ -731,7 +775,7 @@ function LandmarkMask({
           >
             {TOOL_ICONS.compare}
           </button>
-          <button className="btn secondary icon-btn" type="button" title="Reset" aria-label="Reset" onClick={onReset}>
+          <button className="btn secondary icon-btn" type="button" title="Reset" aria-label="Reset" onClick={handleReset}>
             {TOOL_ICONS.reset}
           </button>
         </div>

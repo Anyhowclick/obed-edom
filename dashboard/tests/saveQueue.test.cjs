@@ -120,6 +120,41 @@ test("reset abandons the in-flight save so the next flush starts a fresh request
   assert.equal(calls[1].revision, 7);
 });
 
+test("an in-flight save's ack does not clobber a newer base set by a concurrent reconcile", async () => {
+  let live = doc("Local");
+  const calls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      calls.push({ sent, revision });
+      if (calls.length === 1) {
+        await gate;
+        return { document: sent, revision: 1 };
+      }
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.setAcknowledged({ document: doc("Local"), revision: 0 });
+  queue.markDirty();
+  const flushed = queue.flush();
+
+  const withAsset = doc("Local", [{ id: "p1", name: "uploaded", lat: 1, lon: 2, kind: "dot", color: "#fff" }]);
+  queue.reconcile({ document: withAsset, revision: 2 });
+  assert.equal(live.slides[0].churches[0]?.id, "p1");
+
+  release();
+  await flushed;
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].revision, 2, "the rebase after the stale ack must resend against the newer base");
+  assert.equal(live.slides[0].churches[0]?.id, "p1", "the revision-2 asset must survive the stale ack");
+});
+
 test("a stale acknowledgement cannot move the base revision backwards", async () => {
   let live = doc("Current");
   const calls = [];

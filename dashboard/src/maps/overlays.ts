@@ -117,6 +117,8 @@ export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: Ma
   const source = map.getSource("isolate") as GeoJSONSource | undefined;
   if (source && isolateModeByMap.get(map) === isolate.mode) {
     source.setData(mask);
+    map.setPaintProperty("isolate-fill", "fill-color", isolate.mode === "darken" ? "#000000" : backgroundColor(map, styleId));
+    map.setPaintProperty("isolate-fill", "fill-opacity", Math.max(0, Math.min(1, isolate.strength)));
   } else {
     if (map.getLayer("isolate-fill")) map.removeLayer("isolate-fill");
     if (map.getSource("isolate")) map.removeSource("isolate");

@@ -229,6 +229,8 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Unknown job")
         if existing.feature == "maps":
             raise HTTPException(409, "Maps jobs use POST /api/maps/{id}/state")
+        if existing.feature == "watercolour":
+            raise HTTPException(400, "Watercolour jobs cannot be patched directly")
         job = RUNNER.update_result(job_id, payload.result)
         if not job:
             raise HTTPException(404, "Unknown job")
