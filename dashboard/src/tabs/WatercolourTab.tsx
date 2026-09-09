@@ -7,6 +7,8 @@ import { WatercolourResultView } from "../components/WatercolourResultView";
 import { useCurrentJob } from "../sessions";
 import { floodFill } from "../watercolour/floodFill";
 import { sobelMagnitude, snapToEdge } from "../watercolour/edges";
+import { createHistory, push as pushHistory, undo as undoHistory, redo as redoHistory, canUndo, canRedo } from "../watercolour/history";
+import { loupeCorner } from "../watercolour/loupe";
 
 type MaskSpec = {
   transparent: boolean;
@@ -38,6 +40,26 @@ const MASK_HINT: Record<MaskMode, string> = {
 const WORKING_MAX_SIDE = 640;
 const CLOSE_RADIUS_PX = 8;
 const AUTO_ANCHOR_STEP = 6;
+
+const transcoded = new Map<File, File>();
+
+async function toSupported(file: File): Promise<File> {
+  if (/^image\/(png|jpe?g|webp)$/.test(file.type)) return file;
+  const cached = transcoded.get(file);
+  if (cached) return cached;
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bitmap, 0, 0);
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((result) => (result ? resolve(result) : reject(new Error("Could not convert image."))), "image/png");
+  });
+  const next = new File([blob], file.name.replace(/\.\w+$/, ".png"), { type: "image/png" });
+  transcoded.set(file, next);
+  return next;
+}
 
 function rectOf(drag: { start: [number, number]; now: [number, number] }): [number, number, number, number] {
   return [
@@ -132,6 +154,8 @@ function MaskEditor({
   const [travel, setTravel] = useState(0);
   const [hover, setHover] = useState<[number, number] | null>(null);
   const [split, setSplit] = useState(50);
+  const [altHeld, setAltHeld] = useState(false);
+  const [rect, setRect] = useState({ width: 1, height: 1 });
   const rootRef = useRef<HTMLDivElement | null>(null);
   const workingRef = useRef<{ ww: number; wh: number; data: Uint8ClampedArray } | null>(null);
   const gradRef = useRef<Float32Array | null>(null);
@@ -153,6 +177,14 @@ function MaskEditor({
       if (encodeTimer.current) clearTimeout(encodeTimer.current);
     };
   }, [file]);
+
+  useEffect(() => {
+    function clearAlt() {
+      setAltHeld(false);
+    }
+    window.addEventListener("blur", clearAlt);
+    return () => window.removeEventListener("blur", clearAlt);
+  }, []);
 
   function ensureWorking(img: HTMLImageElement): { ww: number; wh: number; data: Uint8ClampedArray } {
     if (workingRef.current) return workingRef.current;
@@ -311,11 +343,13 @@ function MaskEditor({
         ref={rootRef}
         tabIndex={0}
         onKeyDown={(event) => {
+          setAltHeld(event.altKey);
           if (mode !== "pen" && mode !== "magnetic") return;
           if (event.key === "Enter") closePath();
           else if (event.key === "Escape") cancelPath();
           else if (event.key === "Backspace") popVertex();
         }}
+        onKeyUp={(event) => setAltHeld(event.altKey)}
       >
         <img
           src={url}
@@ -323,6 +357,7 @@ function MaskEditor({
           draggable={false}
           onLoad={(event) => {
             setSize([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight]);
+            setRect(event.currentTarget.getBoundingClientRect());
             ensureWorking(event.currentTarget);
           }}
           onPointerDown={(event) => {
@@ -357,6 +392,7 @@ function MaskEditor({
             if (compareOn) return;
             const p = point(event);
             setHover(p);
+            setRect(event.currentTarget.getBoundingClientRect());
             if (drag) {
               setDrag({ ...drag, now: p });
               return;
@@ -456,15 +492,13 @@ function MaskEditor({
             />
           </>
         )}
-        {magnifierOn && hover && !compareOn && (
+        {(magnifierOn || altHeld) && hover && !compareOn && (
           <div
-            className="wash-loupe"
+            className={`wash-loupe ${loupeCorner(hover[0], hover[1], size[0], size[1])}`}
             style={{
-              left: `${(hover[0] / size[0]) * 100}%`,
-              top: `${(hover[1] / size[1]) * 100}%`,
               backgroundImage: `url(${url})`,
-              backgroundSize: `${size[0] * 3}px ${size[1] * 3}px`,
-              backgroundPosition: `${-(hover[0] * 3 - 60)}px ${-(hover[1] * 3 - 60)}px`,
+              backgroundSize: `${rect.width * 3}px ${rect.height * 3}px`,
+              backgroundPosition: `${-(hover[0] / size[0]) * rect.width * 3 + 80}px ${-(hover[1] / size[1]) * rect.height * 3 + 80}px`,
             }}
           />
         )}
@@ -578,14 +612,14 @@ function usePreviewImage(
 }
 
 function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; file?: File }) {
-  const { url, busy } = usePreviewImage({ wash, ink, file }, true, 150);
+  const { url, busy, error } = usePreviewImage({ wash, ink, file }, true, 150);
 
   return (
     <figure className="wash-tile wash-preview">
       {url ? (
         <img src={url} alt="Watercolour preview" className={`wash-shot${busy ? " busy" : ""}`} />
       ) : (
-        <div className="wash-preview-empty">Rendering preview…</div>
+        <div className="wash-preview-empty">{error || "Rendering preview…"}</div>
       )}
       <figcaption className="wash-cap">Preview · {file ? file.name : "sample photo"}</figcaption>
     </figure>
@@ -638,6 +672,18 @@ const TOOL_ICONS: Record<string, JSX.Element> = {
       <path d="M10.4 2.6 10.9 4.9 8.6 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  undo: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.5 8A4.5 4.5 0 1 0 5.2 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M5.6 2.6 5.1 4.9 7.4 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  redo: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M12.5 8A4.5 4.5 0 1 1 10.8 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M10.4 2.6 10.9 4.9 8.6 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
   keep: (
     <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
       <circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
@@ -673,30 +719,78 @@ function LandmarkMask({
 }) {
   const [mode, setMode] = useState<MaskMode>("rect");
   const [polarity, setPolarity] = useState<Polarity>("keep");
-  const [magnifierOn, setMagnifierOn] = useState(mode !== "rect");
+  const [magnifierOn, setMagnifierOn] = useState(false);
   const [compareOn, setCompareOn] = useState(false);
   const [tolerance, setTolerance] = useState(24);
   const [resetGeneration, setResetGeneration] = useState(0);
+  const [editGeneration, setEditGeneration] = useState(0);
+  const [history, setHistory] = useState(() => createHistory(spec));
 
   const mask = JSON.stringify(spec);
   const { url: cutoutUrl, busy, error } = usePreviewImage({ wash, ink, file: files[index], mask }, Boolean(spec.rect), 250);
 
   function selectMode(next: MaskMode) {
     setMode(next);
-    setMagnifierOn(next !== "rect");
+  }
+
+  function handleCommit(next: MaskSpec) {
+    onChange(next);
+    setHistory((current) => pushHistory(current, next));
   }
 
   function handleReset() {
     setResetGeneration((current) => current + 1);
+    setHistory((current) => pushHistory(current, { transparent: true }));
     onReset();
   }
+
+  function handleUndo() {
+    setHistory((current) => {
+      const next = undoHistory(current);
+      if (next !== current) {
+        onChange(next.present);
+        setEditGeneration((generation) => generation + 1);
+      }
+      return next;
+    });
+  }
+
+  function handleRedo() {
+    setHistory((current) => {
+      const next = redoHistory(current);
+      if (next !== current) {
+        onChange(next.present);
+        setEditGeneration((generation) => generation + 1);
+      }
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable)) return;
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) handleRedo();
+        else handleUndo();
+      } else if (key === "y") {
+        event.preventDefault();
+        handleRedo();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onChange]);
 
   const file = files[index];
 
   return (
-    <div className="wash-look">
+    <div className="wash-look" tabIndex={-1}>
       <MaskEditor
-        key={`${file.name}-${file.size}-${resetGeneration}`}
+        key={`${file.name}-${file.size}-${resetGeneration}-${editGeneration}`}
         file={file}
         spec={spec}
         mode={mode}
@@ -705,7 +799,7 @@ function LandmarkMask({
         magnifierOn={magnifierOn}
         compareOn={compareOn}
         cutoutUrl={cutoutUrl}
-        onChange={onChange}
+        onChange={handleCommit}
       />
       <div className="wash-look-col">
         {files.length > 1 && (
@@ -775,6 +869,26 @@ function LandmarkMask({
           >
             {TOOL_ICONS.compare}
           </button>
+          <button
+            className="btn secondary icon-btn"
+            type="button"
+            title="Undo"
+            aria-label="Undo"
+            disabled={!canUndo(history)}
+            onClick={handleUndo}
+          >
+            {TOOL_ICONS.undo}
+          </button>
+          <button
+            className="btn secondary icon-btn"
+            type="button"
+            title="Redo"
+            aria-label="Redo"
+            disabled={!canRedo(history)}
+            onClick={handleRedo}
+          >
+            {TOOL_ICONS.redo}
+          </button>
           <button className="btn secondary icon-btn" type="button" title="Reset" aria-label="Reset" onClick={handleReset}>
             {TOOL_ICONS.reset}
           </button>
@@ -825,10 +939,17 @@ function LandmarkMask({
             </label>
           </div>
         )}
+        <figure className="wash-tile">
+          {cutoutUrl ? (
+            <img className="wash-shot alpha" src={cutoutUrl} alt="Cut-out preview" />
+          ) : (
+            <div className="wash-preview-empty">{busy ? "Rendering cut-out…" : "Draw a box to preview"}</div>
+          )}
+          <figcaption className="wash-cap">Cut-out preview</figcaption>
+        </figure>
         <div className="wash-card">
           <small className="wash-hint">{MASK_HINT[mode]}</small>
           {error && <small className="wash-hint">{error}</small>}
-          {busy && <small className="wash-hint">Rendering cut-out…</small>}
         </div>
       </div>
     </div>
@@ -849,8 +970,9 @@ export function WatercolourTab() {
   const [open, setOpen] = useState<string | null>(null);
   const cancelRef = useRef(false);
 
-  function selectFiles(next: File[]) {
-    setFiles(next);
+  async function selectFiles(next: File[]) {
+    const resolved = await Promise.all(next.map(toSupported));
+    setFiles(resolved);
     setMasks({});
     setMaskFile(0);
   }
@@ -909,7 +1031,7 @@ export function WatercolourTab() {
         <FileWell
           label="Photos"
           hint="Drop photos here or choose files on this Mac"
-          accept="image/png,image/jpeg,image/webp"
+          accept="image/png,image/jpeg,image/webp,image/avif,image/heic"
           multiple
           onFiles={selectFiles}
           browseLabel="Choose on this Mac"
