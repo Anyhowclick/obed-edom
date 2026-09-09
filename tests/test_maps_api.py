@@ -798,6 +798,21 @@ def test_landmark_assets_are_owned_referenced_and_session_portable():
         assert archive.read(f"assets/{asset['id']}.png")
 
 
+def test_church_size_allows_up_to_4000_and_rejects_above():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {"id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "dot", "color": "#c44a42", "size": 3140}
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["churches"][0]["size"] == 3140
+
+    doc["slides"][0]["churches"][0]["size"] = 4001
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
 def test_state_rejects_legacy_external_photo_path_and_unknown_asset():
     job = _seed()
     doc = _doc(job)

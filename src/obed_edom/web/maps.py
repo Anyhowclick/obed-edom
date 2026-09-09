@@ -132,7 +132,7 @@ class MapsChurch(BaseModel):
     assetVersion: str | None = Field(default=None, pattern=r"^[a-f0-9]{8,64}$")
     assetWidth: int | None = Field(default=None, ge=1, le=10000)
     assetHeight: int | None = Field(default=None, ge=1, le=10000)
-    size: float | None = Field(default=None, ge=1, le=2000)
+    size: float | None = Field(default=None, ge=1, le=4000)
     opacity: float | None = Field(default=None, ge=0, le=1)
 
 
