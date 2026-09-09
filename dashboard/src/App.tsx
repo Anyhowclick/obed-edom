@@ -5,6 +5,7 @@ import { GeneratorTab } from "./tabs/GeneratorTab";
 import { HistoryTab } from "./tabs/HistoryTab";
 import { ResizeTab } from "./tabs/ResizeTab";
 import { SettingsTab } from "./tabs/SettingsTab";
+import { WatercolourTab } from "./tabs/WatercolourTab";
 import {
   LayoutContext,
   RunNavContext,
@@ -23,6 +24,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "dsk", label: "DSK Generator" },
   { id: "resize", label: "CG resizer" },
   { id: "maps", label: "Maps" },
+  { id: "watercolour", label: "Watercolour" },
   { id: "history", label: "History" },
   { id: "settings", label: "Settings" },
 ];
@@ -123,6 +125,7 @@ export function App() {
               </Suspense>
             </div>
           ) : null}
+          <div className={tab === "watercolour" ? "pane" : "pane off"}><WatercolourTab /></div>
           <div className={tab === "history" ? "pane" : "pane off"}>
             <HistoryTab active={tab === "history"} />
           </div>

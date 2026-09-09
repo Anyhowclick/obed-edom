@@ -2,6 +2,10 @@ import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./stampOsm";
+import { withLowZoomBoundaries } from "./tonerBoundaries";
+import { thinLineWidths } from "./tonerLines";
+import { buildWatercolourStyle } from "./watercolourStyle";
+import tonerStyleUrl from "./vendor/maptiler-toner-8688fbd.json?url";
 
 export const OPENFREEMAP_STYLES: Record<MapsStyleId, string> = {
   positron: "https://tiles.openfreemap.org/styles/positron",
@@ -10,7 +14,24 @@ export const OPENFREEMAP_STYLES: Record<MapsStyleId, string> = {
   dark: "https://tiles.openfreemap.org/styles/dark",
   fiord: "https://tiles.openfreemap.org/styles/fiord",
   buildings3d: "https://tiles.openfreemap.org/styles/liberty",
+  toner: "https://tiles.openfreemap.org/styles/positron",
+  "toner-background": "https://tiles.openfreemap.org/styles/positron",
+  "toner-lines": "https://tiles.openfreemap.org/styles/positron",
+  watercolour: "https://tiles.openfreemap.org/styles/positron",
 };
+
+export const MAP_STYLE_REGISTRY: { id: MapsStyleId; label: string; attribution: string }[] = [
+  { id: "positron", label: "Positron", attribution: "© OpenStreetMap contributors" },
+  { id: "liberty", label: "Liberty", attribution: "© OpenStreetMap contributors" },
+  { id: "bright", label: "Bright", attribution: "© OpenStreetMap contributors" },
+  { id: "dark", label: "Dark", attribution: "© OpenStreetMap contributors" },
+  { id: "fiord", label: "Fiord", attribution: "© OpenStreetMap contributors" },
+  { id: "buildings3d", label: "3D", attribution: "© OpenStreetMap contributors" },
+  { id: "toner", label: "Toner", attribution: "© OpenStreetMap contributors · © MapTiler" },
+  { id: "toner-background", label: "Toner background", attribution: "© OpenStreetMap contributors · © MapTiler" },
+  { id: "toner-lines", label: "Toner lines", attribution: "© OpenStreetMap contributors · © MapTiler" },
+  { id: "watercolour", label: "Watercolour", attribution: "© OpenStreetMap contributors" },
+];
 
 export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[] = [
   { id: "positron", label: "Positron", color: "#e8eef4" },
@@ -19,12 +40,53 @@ export const STYLE_SWATCHES: { id: MapsStyleId; label: string; color: string }[]
   { id: "dark", label: "Dark", color: "#2b3340" },
   { id: "fiord", label: "Fiord", color: "#3d4c5e" },
   { id: "buildings3d", label: "3D", color: "#c9b48a" },
+  { id: "toner", label: "Toner", color: "#f4f2ea" },
+  { id: "toner-background", label: "Toner background", color: "#ece9e2" },
+  { id: "toner-lines", label: "Toner lines", color: "#2f3130" },
+  { id: "watercolour", label: "Watercolour", color: "#f1e5cb" },
 ];
 
+const TONER_LINES_WIDTH_FACTOR = 0.55;
+
 const styleCache = new Map<string, Promise<StyleSpecification>>();
+let tonerDocument: Promise<StyleSpecification> | null = null;
+
+export function remapTonerFonts(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(remapTonerFonts);
+  if (!value || typeof value !== "object") {
+    if (value === "Noto Sans Bold Italic") return "Noto Sans Italic";
+    if (typeof value === "string" && value.startsWith("Nunito")) return value.includes("Regular") ? "Noto Sans Regular" : "Noto Sans Bold";
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, remapTonerFonts(child)]));
+}
+
+async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-background" | "toner-lines">, zoomOffset = 0): Promise<StyleSpecification> {
+  if (!tonerDocument) {
+    tonerDocument = fetch(tonerStyleUrl)
+      .then((response) => response.ok ? response.json() as Promise<StyleSpecification> : Promise.reject(new Error(`Vendored Toner style failed (${response.status})`)));
+  }
+  const [base, toner] = await Promise.all([resolveOpenFreeMapStyle("positron"), tonerDocument]);
+  const next = structuredClone(toner);
+  const vector = Object.values(base.sources).find((source) => source.type === "vector");
+  if (!vector) throw new Error("OpenFreeMap Positron has no vector source");
+  next.sources = { openmaptiles: { ...structuredClone(vector), attribution: "© OpenStreetMap contributors · © MapTiler" } };
+  next.glyphs = base.glyphs;
+  delete next.sprite;
+  let layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset);
+  const nonBoundary = layers.filter((layer) => !layer.id.startsWith("boundary"));
+  const boundary = layers.filter((layer) => layer.id.startsWith("boundary"));
+  layers = [...thinLineWidths(nonBoundary, TONER_LINES_WIDTH_FACTOR), ...boundary];
+  next.layers = layers.filter((layer) => {
+    if (styleId === "toner-background") return layer.type === "background" || layer.type === "fill";
+    if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";
+    return true;
+  });
+  return withHillshade(next, styleId);
+}
 
 /** Top-down relief only: no `setTerrain()`, no draping, no pitch. Both layers are spliced in
- * before the first water layer (so opaque water covers terrarium's ETOPO1 bathymetry), NE2 boost first so hillshade composites over it. */
+ * before the first water layer (so opaque water covers terrarium's ETOPO1 bathymetry; buildWatercolourStyle lifts its land fills above that anchor so relief is not occluded), NE2 boost first so hillshade composites over it. */
 function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSpecification {
   style.sources[HILLSHADE_SOURCE_ID] = {
     type: "raster-dem",
@@ -36,6 +98,11 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
     attribution: TERRAIN_ATTRIBUTION,
   };
   const dark = styleId === "dark" || styleId === "fiord";
+  const relief = styleId === "watercolour"
+    ? { exaggeration: 0.38, shadow: "#5B4636", highlight: "#FFFBF2", accent: "#7A6650" }
+    : dark
+      ? { exaggeration: 0.5, shadow: "#000000", highlight: "#7f93ad", accent: "#000814" }
+      : { exaggeration: 0.35, shadow: "#4a4033", highlight: "#ffffff", accent: "#6b5c46" };
   const layer: LayerSpecification = {
     id: HILLSHADE_LAYER_ID,
     type: "hillshade",
@@ -46,10 +113,10 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
       "hillshade-method": "igor",
       "hillshade-illumination-anchor": "map",
       "hillshade-illumination-direction": 335,
-      "hillshade-exaggeration": dark ? 0.5 : 0.35,
-      "hillshade-shadow-color": dark ? "#000000" : "#4a4033",
-      "hillshade-highlight-color": dark ? "#7f93ad" : "#ffffff",
-      "hillshade-accent-color": dark ? "#000814" : "#6b5c46",
+      "hillshade-exaggeration": relief.exaggeration,
+      "hillshade-shadow-color": relief.shadow,
+      "hillshade-highlight-color": relief.highlight,
+      "hillshade-accent-color": relief.accent,
     },
   };
   const anchor = (
@@ -74,7 +141,8 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
 }
 
 /** Inline TileJSON `tiles` so MapLibre actually requests vector PBFs past the NE raster. */
-export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpecification> {
+export function resolveOpenFreeMapStyle(styleId: MapsStyleId, zoomOffset = 0): Promise<StyleSpecification> {
+  if (styleId === "toner" || styleId === "toner-background" || styleId === "toner-lines") return resolveTonerStyle(styleId, zoomOffset);
   const url = OPENFREEMAP_STYLES[styleId];
   let pending = styleCache.get(url);
   if (!pending) {
@@ -114,5 +182,9 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId): Promise<StyleSpec
       });
     styleCache.set(url, pending);
   }
-  return pending.then((s) => withHillshade(structuredClone(s), styleId));
+  return pending.then((s) => {
+    let next = structuredClone(s);
+    if (styleId === "watercolour") next = buildWatercolourStyle(next).style as StyleSpecification;
+    return withHillshade(next, styleId);
+  });
 }

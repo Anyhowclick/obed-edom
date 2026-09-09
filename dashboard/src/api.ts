@@ -343,12 +343,33 @@ export async function startMaps(): Promise<Job> {
   return res.json();
 }
 
-export async function saveMapsState(id: string, doc: Record<string, unknown>): Promise<Job> {
+export type MapsStateConflict = {
+  stateRevision: number;
+  document: Record<string, unknown>;
+};
+
+export class MapsStateConflictError extends Error {
+  readonly conflict: MapsStateConflict;
+
+  constructor(conflict: MapsStateConflict) {
+    super("This map changed elsewhere.");
+    this.conflict = conflict;
+  }
+}
+
+export async function saveMapsState(id: string, doc: Record<string, unknown>, expectedRevision: number): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/state`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(doc),
+    body: JSON.stringify({ expectedRevision, document: doc }),
   });
+  if (res.status === 409) {
+    const data = await res.json().catch(() => null);
+    const detail = data?.detail;
+    if (detail && typeof detail === "object" && typeof detail.stateRevision === "number" && detail.document && typeof detail.document === "object") {
+      throw new MapsStateConflictError(detail as MapsStateConflict);
+    }
+  }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -380,8 +401,10 @@ export type MapsExportPlan = {
     highlights: string[];
     hiddenLayers?: string[];
     hillshade?: boolean;
+    isolate?: unknown;
     width?: number;
     height?: number;
+    synthetic?: boolean;
   }>;
   plates: Array<{
     plateId: string;
@@ -392,6 +415,7 @@ export type MapsExportPlan = {
     highlights: string[];
     hiddenLayers?: string[];
     hillshade?: boolean;
+    isolate?: unknown;
   }>;
   cg?: {
     links: Array<Record<string, unknown>>;
@@ -404,13 +428,14 @@ export type MapsExportPlan = {
 export async function postMapsPng(
   id: string,
   blob: Blob,
-  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg" } = {}
+  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg"; variant?: "country" } = {}
 ): Promise<Job> {
   const params = new URLSearchParams();
   if (opts.kind) params.set("kind", opts.kind);
   if (opts.slideId) params.set("slideId", opts.slideId);
   if (opts.plateId) params.set("plateId", opts.plateId);
   if (opts.audience) params.set("audience", opts.audience);
+  if (opts.variant) params.set("variant", opts.variant);
   const res = await fetch(`/api/maps/${id}/png?${params.toString()}`, {
     method: "POST",
     body: blob,
@@ -527,6 +552,26 @@ export async function bootstrapMapsPinsCsv(id: string, file: File, slideId: stri
   return res.json();
 }
 
+export type UploadedMapsAsset = {
+  asset: { id: string; version: string; width: number; height: number };
+  stateRevision: number;
+  document: Record<string, unknown>;
+};
+
+export async function uploadMapsAsset(id: string, file: File): Promise<UploadedMapsAsset> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch(`/api/maps/${encodeURIComponent(id)}/assets`, { method: "POST", body });
+  if (!response.ok) throw new Error(await response.text());
+  const data = await response.json();
+  const { asset, stateRevision, document } = data as Record<string, unknown>;
+  const { id: assetId, version, width, height } = (asset || {}) as Record<string, unknown>;
+  if (typeof assetId !== "string" || typeof version !== "string" || typeof width !== "number" || typeof height !== "number" || typeof stateRevision !== "number" || !document || typeof document !== "object") {
+    throw new Error("The uploaded landmark response was incomplete.");
+  }
+  return { asset: { id: assetId, version, width, height }, stateRevision, document: document as Record<string, unknown> };
+}
+
 export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean }): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/export`, {
     method: "POST",
@@ -541,4 +586,71 @@ export async function cancelMapsExport(id: string): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/cancel`, { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+export async function startWatercolour(
+  files: File[],
+  opts: { washSoftness: number; inkAmount: number; masks: Record<string, unknown> }
+): Promise<Job> {
+  const body = new FormData();
+  for (const file of files) body.append("files", file);
+  body.set("wash_softness", String(opts.washSoftness));
+  body.set("ink_amount", String(opts.inkAmount));
+  body.set("masks", JSON.stringify(opts.masks));
+  const res = await fetch("/api/watercolour", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function fetchWatercolourPreview(
+  opts: { washSoftness: number; inkAmount: number; file?: File; mask?: string },
+  signal: AbortSignal
+): Promise<Blob> {
+  let res: Response;
+  if (opts.file) {
+    const body = new FormData();
+    body.set("file", opts.file);
+    body.set("wash_softness", String(opts.washSoftness));
+    body.set("ink_amount", String(opts.inkAmount));
+    if (opts.mask) body.set("mask", opts.mask);
+    res = await fetch("/api/watercolour/preview", { method: "POST", body, signal });
+  } else {
+    res = await fetch(`/api/watercolour/preview?wash_softness=${opts.washSoftness}&ink_amount=${opts.inkAmount}`, { signal });
+  }
+  if (!res.ok) throw new Error(await readError(res));
+  return res.blob();
+}
+
+export async function cancelWatercolour(id: string): Promise<Job> {
+  const res = await fetch(`/api/watercolour/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function addWatercolourToMap(jobId: string, itemId: string, mapsJobId: string, slideId: string): Promise<Job> {
+  const res = await fetch(`/api/watercolour/${jobId}/items/${itemId}/add-to-map/${mapsJobId}/${slideId}`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function watercolourImageUrl(jobId: string, itemId: string, kind: "original" | "result"): string {
+  return `/api/watercolour/${jobId}/items/${itemId}/${kind}`;
+}
+
+export async function fetchWatercolourSpec(jobId: string, itemId: string): Promise<unknown> {
+  const res = await fetch(`/api/watercolour/${jobId}/items/${itemId}/spec`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.spec ?? null;
+}
+
+export async function fetchWatercolourOriginal(jobId: string, itemId: string, name: string): Promise<File> {
+  const res = await fetch(watercolourImageUrl(jobId, itemId, "original"));
+  if (!res.ok) throw new Error(await readError(res));
+  const blob = await res.blob();
+  return new File([blob], name, { type: blob.type || "image/png" });
+}
+
+export function watercolourDownloadUrl(jobId: string): string {
+  return `/api/watercolour/${jobId}/download`;
 }

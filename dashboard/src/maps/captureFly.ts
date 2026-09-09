@@ -1,10 +1,12 @@
 import { Map as MapLibreMap, MercatorCoordinate } from "maplibre-gl";
 import { createExportMap, waitIdleForFrame } from "./captureExport";
 import { stampOsmCropOnCanvas, stampOsmOnCanvas } from "./stampOsm";
+import { churchesGeo, movieObjectsAt } from "./overlays";
 import {
   type MapsCamera,
   type MapsChurch,
   type MapsEasing,
+  type MapsIsolate,
   type MapsLayerFilterId,
   type MapsRoutePoint,
   type MapsStyleId,
@@ -86,12 +88,17 @@ export function autoCruiseZoom(from: MapsCamera, to: MapsCamera, width = WALL_W)
 export type HopInterp = {
   easing?: MapsEasing;
   routePoints?: MapsRoutePoint[];
+  curve?: number;
   flyZoom?: number;
   easeIn?: number;
   easeOut?: number;
   duration?: number;
   width?: number;
 };
+
+const DEFAULT_CURVE = 1.42;
+const MIN_CURVE = 0.5;
+const MAX_CURVE = 3;
 
 export type HopPhases = { zoomOut: number; move: number; zoomIn: number };
 
@@ -138,8 +145,97 @@ export function easeAt(easing: MapsEasing, t: number): number {
   return (EASE_FNS[easing] || EASE_FNS["ease-in-out"])(t);
 }
 
+type MercatorPoint = { x: number; y: number };
+
+function routeMercator(from: MapsCamera, to: MapsCamera, route?: MapsRoutePoint[]): MercatorPoint[] {
+  const scale = TILE * 2 ** from.zoom;
+  const points = [{ lat: from.lat, lon: from.lon }, ...(route || []), { lat: to.lat, lon: to.lon }];
+  const out: MercatorPoint[] = [];
+  for (const point of points) {
+    const next = mercatorOf(point);
+    const previous = out[out.length - 1];
+    const rawX = previous ? unwrapMercatorX(previous.x / scale, next.x) : next.x;
+    const x = rawX * scale;
+    const y = next.y * scale;
+    if (!previous || Math.hypot(x - previous.x, y - previous.y) > 1e-6) out.push({ x, y });
+  }
+  return out.length > 1 ? out : [{ x: mercatorOf(from).x * scale, y: mercatorOf(from).y * scale }, { x: mercatorOf(to).x * scale, y: mercatorOf(to).y * scale }];
+}
+
+function routePointAt(points: MercatorPoint[], distance: number): MercatorPoint {
+  let left = Math.max(0, distance);
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length <= 1e-12) continue;
+    if (left <= length || i === points.length - 1) {
+      const t = Math.max(0, Math.min(1, left / length));
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    left -= length;
+  }
+  return points[points.length - 1];
+}
+
+export function hopDistancePx(from: MapsCamera, to: MapsCamera, routePoints?: MapsRoutePoint[]): number {
+  const points = routeMercator(from, to, routePoints);
+  return points.slice(1).reduce((total, point, index) => total + Math.hypot(point.x - points[index].x, point.y - points[index].y), 0);
+}
+
+function hasLegacyFlight(interp: HopInterp): boolean {
+  return interp.flyZoom != null || interp.easeIn != null || interp.easeOut != null;
+}
+
+function smoothFlight(from: MapsCamera, to: MapsCamera, t: number, interp: HopInterp): MapsCamera {
+  const progress = easeAt(interp.easing || "ease-in-out", t);
+  const points = routeMercator(from, to, interp.routePoints);
+  const distance = hopDistancePx(from, to, interp.routePoints);
+  const width = Math.max(1, interp.width ?? WALL_W);
+  const height = WALL_H;
+  const w0 = Math.max(width, height);
+  const w1 = Math.max(width, height) / 2 ** (to.zoom - from.zoom);
+  const rho = Math.max(MIN_CURVE, Math.min(MAX_CURVE, Number.isFinite(interp.curve) ? interp.curve! : DEFAULT_CURVE));
+  let position = progress;
+  let zoom = from.zoom + (to.zoom - from.zoom) * progress;
+  if (distance > 1e-9 && Number.isFinite(w0) && Number.isFinite(w1)) {
+    const rho2 = rho * rho;
+    const rho4 = rho2 * rho2;
+    const b0 = (w1 * w1 - w0 * w0 + rho4 * distance * distance) / (2 * w0 * rho2 * distance);
+    const b1 = (w1 * w1 - w0 * w0 - rho4 * distance * distance) / (2 * w1 * rho2 * distance);
+    const r0 = Math.log(Math.sqrt(b0 * b0 + 1) - b0);
+    const r1 = Math.log(Math.sqrt(b1 * b1 + 1) - b1);
+    const S = (r1 - r0) / rho;
+    if (Number.isFinite(S) && Math.abs(S) > 1e-9) {
+      const r = r0 + rho * S * progress;
+      const u = (w0 * (Math.cosh(r0) * Math.tanh(r) - Math.sinh(r0))) / rho2;
+      const w = Math.cosh(r0) / Math.cosh(r);
+      if (Number.isFinite(u) && Number.isFinite(w) && w > 0) {
+        position = Math.max(0, Math.min(1, u / distance));
+        zoom = from.zoom + Math.log2(w0 / (w0 * w));
+      }
+    }
+  }
+  const point = routePointAt(points, distance * position);
+  const scale = TILE * 2 ** from.zoom;
+  const merc = new MercatorCoordinate(wrapUnit(point.x / scale), point.y / scale, 0);
+  const lngLat = merc.toLngLat();
+  const minZoom = Math.min(from.zoom, to.zoom, zoom);
+  const flatten = Math.max(0, Math.min(1, (Math.min(from.zoom, to.zoom) - minZoom) / 2));
+  return {
+    lat: lngLat.lat,
+    lon: lngLat.lng,
+    zoom: Math.max(0, Math.min(22, zoom)),
+    bearing: shortestAngleLerp(from.bearing, to.bearing, position),
+    pitch: (from.pitch + (to.pitch - from.pitch) * position) * (1 - flatten * 0.5),
+  };
+}
+
 export function cameraAtHop(from: MapsCamera, to: MapsCamera, t: number, interp: HopInterp = {}): MapsCamera {
   const tClamped = Math.max(0, Math.min(1, t));
+  if (tClamped === 0) return { ...from };
+  if (tClamped === 1) return { ...to };
+  if (!hasLegacyFlight(interp)) return smoothFlight(from, to, tClamped, interp);
   const { inF, moveF, outF } = hopFractions(interp);
   const moveEnd = 1 - outF;
   const moveSpan = Math.max(1e-9, moveEnd - inF);
@@ -284,12 +380,17 @@ export async function captureFlyFrames(opts: {
   highlights: string[];
   hiddenLayers: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   churches?: MapsChurch[];
+  destinationChurches?: MapsChurch[];
+  objectTransition?: "fade" | "hold";
+  assetBaseUrl?: string;
   numberPins?: boolean;
   duration: number;
   fps?: number;
   easing?: MapsEasing;
   routePoints?: MapsRoutePoint[];
+  curve?: number;
   flyZoom?: number;
   easeIn?: number;
   easeOut?: number;
@@ -313,12 +414,17 @@ export async function captureFlyFrames(opts: {
     highlights,
     hiddenLayers,
     hillshade,
+    isolate,
     churches,
+    destinationChurches,
+    objectTransition,
+    assetBaseUrl,
     numberPins = false,
     duration,
     fps = 30,
     easing = "ease-in-out",
     routePoints,
+    curve,
     flyZoom,
     easeIn,
     easeOut,
@@ -337,22 +443,29 @@ export async function captureFlyFrames(opts: {
     highlights,
     hiddenLayers,
     hillshade,
-    churches,
+    isolate,
+    churches: destinationChurches ? [...(churches || []), ...destinationChurches] : churches,
     numberPins,
+    assetBaseUrl,
     isCancelled,
   });
   try {
     const cameras: MapsCamera[] = [];
     for (let i = 0; i < count; i++) {
       const t = i / (count - 1);
-      cameras.push(cameraAtHop(from, to, t, { easing, routePoints, flyZoom, easeIn, easeOut, duration, width }));
+      cameras.push(cameraAtHop(from, to, t, { easing, routePoints, curve, flyZoom, easeIn, easeOut, duration, width }));
     }
     for (let i = 0; i < count; i++) {
       if (cancelled()) throw new Error("Export cancelled.");
       const cam = cameras[i];
+      const t = i / (count - 1);
+      if (churches && map.getSource("churches")) {
+        const objects = destinationChurches ? movieObjectsAt(churches, destinationChurches, t, objectTransition) : churches;
+        (map.getSource("churches") as unknown as { setData(data: GeoJSON.FeatureCollection): void }).setData(churchesGeo(objects, null, numberPins));
+        map.triggerRepaint();
+      }
       await waitFrameOrRetry(map, cam, i, Date.now() + FRAME_TILE_WAIT_MS, isCancelled);
       if (cancelled()) throw new Error("Export cancelled.");
-      const t = i / (count - 1);
       const blob = outputCrop
         ? await stampOsmCropOnCanvas(
             map.getCanvas(),
@@ -362,9 +475,10 @@ export async function captureFlyFrames(opts: {
             outputCrop.height,
             "image/jpeg",
             0.95,
-            hillshade === true
+            hillshade === true,
+            styleId
           )
-        : await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95, hillshade === true);
+        : await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95, hillshade === true, styleId);
       if (cancelled()) throw new Error("Export cancelled.");
       await onFrame(blob, i, count);
     }

@@ -1,13 +1,16 @@
 import "./maplibreWorker";
 import { Map as MapLibreMap } from "maplibre-gl";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHillshade, ensureAdmin0Highlights, ensureLowZoomRaster } from "./overlays";
+import { addOverlays, applyHillshade, ensureAdmin0Highlights, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
+import { countryClipRings } from "./isolate";
 import { stampOsm } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
+import { installPatternById, installPatterns, stylePatterns } from "./watercolourStyle";
 import {
   type MapsCamera,
   type MapsChurch,
+  type MapsIsolate,
   type MapsLayerFilterId,
   type MapsStyleId,
 } from "./types";
@@ -123,8 +126,10 @@ export type ExportMapOpts = {
   highlights: string[];
   hiddenLayers: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   churches?: MapsChurch[];
   numberPins?: boolean;
+  assetBaseUrl?: string;
   isCancelled?: () => boolean;
 };
 
@@ -137,8 +142,10 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     highlights,
     hiddenLayers,
     hillshade = false,
+    isolate,
     churches,
     numberPins = false,
+    assetBaseUrl,
     isCancelled,
   } = opts;
   const tex = maxTextureSize();
@@ -168,15 +175,17 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     transformRequest: (url) => mapsTransformRequest(url),
     canvasContextAttributes: { preserveDrawingBuffer: true },
   });
+  map.on("styleimagemissing", (event) => installPatternById(map, styleId, event.id));
   try {
     await waitEvent(map, "load", TILE_WAIT_MS, isCancelled);
+    installPatterns(map, stylePatterns(styleId));
     ensureLowZoomRaster(map, styleId);
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
     if (churches) {
-      await addOverlays(map, highlights, churches, null, styleId, numberPins);
+      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl, 1, isolate);
     } else {
-      await ensureAdmin0Highlights(map, highlights, styleId);
+      await ensureAdmin0Highlights(map, highlights, styleId, isolate);
     }
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
@@ -189,20 +198,65 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
   }
 }
 
+function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    try {
+      canvas.toBlob((blob) => {
+        if (!blob) reject(new Error("Export canvas toBlob failed (CORS taint or empty)."));
+        else resolve(blob);
+      }, "image/png");
+    } catch {
+      reject(new Error("Map canvas is tainted (CORS). Cannot export."));
+    }
+  });
+}
+
 export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
   const { map, host } = await createExportMap(opts);
   try {
-    const raw = await new Promise<Blob>((resolve, reject) => {
-      try {
-        map.getCanvas().toBlob((blob) => {
-          if (!blob) reject(new Error("Export canvas toBlob failed (CORS taint or empty)."));
-          else resolve(blob);
-        }, "image/png");
-      } catch {
-        reject(new Error("Map canvas is tainted (CORS). Cannot export."));
-      }
-    });
-    return await stampOsm(raw, opts.hillshade === true);
+    const raw = await canvasToBlob(map.getCanvas());
+    return await stampOsm(raw, opts.hillshade === true, opts.styleId);
+  } finally {
+    map.remove();
+    host.remove();
+  }
+}
+
+/** Isolated slides render a second still: the highlighted country cut out of the darkened base,
+ * so Keynote can stack it above the mask with pins on top. Null when there is nothing to isolate. */
+export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: Blob; country: Blob } | null> {
+  if (!opts.isolate || !opts.highlights.length) return null;
+  const { map, host } = await createExportMap(opts);
+  try {
+    map.setPaintProperty("admin0-fill", "fill-opacity", 0);
+    map.setPaintProperty("admin0-line", "line-opacity", 0);
+    await waitIdleForFrame(map, undefined, opts.isCancelled);
+    const baseRaw = await canvasToBlob(map.getCanvas());
+    const base = await stampOsm(baseRaw, opts.hillshade === true, opts.styleId);
+
+    map.setLayoutProperty("isolate-fill", "visibility", "none");
+    await waitIdleForFrame(map, undefined, opts.isCancelled);
+
+    const admin0 = await loadAdmin0();
+    const rings = countryClipRings((admin0?.features || []) as never, opts.highlights);
+    const canvas = document.createElement("canvas");
+    canvas.width = opts.width;
+    canvas.height = opts.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("2D canvas context is unavailable for the isolate cut-out.");
+    ctx.beginPath();
+    for (const ring of rings) {
+      ring.forEach(([lon, lat], index) => {
+        const { x, y } = map.project([lon, lat]);
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.closePath();
+    }
+    ctx.clip();
+    ctx.drawImage(map.getCanvas(), 0, 0);
+    const country = await canvasToBlob(canvas);
+    return { base, country };
   } finally {
     map.remove();
     host.remove();

@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize" | "maps";
+export type FeatureId = "generate" | "diff" | "check" | "dsk" | "resize" | "maps" | "watercolour";
 export type TabId = FeatureId | "history" | "settings";
 
 export const FEATURE_LABELS: Record<FeatureId, string> = {
@@ -10,6 +10,7 @@ export const FEATURE_LABELS: Record<FeatureId, string> = {
   dsk: "DSK Generator",
   resize: "CG resizer",
   maps: "Maps",
+  watercolour: "Watercolour",
 };
 
 export const OPEN_IN_LABELS: Record<FeatureId, string> = {
@@ -19,6 +20,7 @@ export const OPEN_IN_LABELS: Record<FeatureId, string> = {
   dsk: "Open in DSK Generator",
   resize: "Open in CG resizer",
   maps: "Open in Maps",
+  watercolour: "Open in Watercolour",
 };
 
 type Nav = {
@@ -80,11 +82,12 @@ export const TAB_SHORT: Record<TabId, string> = {
   dsk: "DSK",
   resize: "CG",
   maps: "Map",
+  watercolour: "Wash",
   history: "Hist",
   settings: "Set",
 };
 
 export function asFeature(value: string | undefined): FeatureId | null {
-  if (value === "generate" || value === "diff" || value === "check" || value === "dsk" || value === "resize" || value === "maps") return value;
+  if (value === "generate" || value === "diff" || value === "check" || value === "dsk" || value === "resize" || value === "maps" || value === "watercolour") return value;
   return null;
 }

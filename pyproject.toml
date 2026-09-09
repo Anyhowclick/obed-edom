@@ -11,6 +11,8 @@ dependencies = [
     "python-docx>=1.1.0",
     "PyYAML>=6.0",
     "Pillow>=10.0",
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
     "python-dotenv>=1.0",
     "requests>=2.31",
     "reportlab>=4.0",
@@ -50,4 +52,7 @@ obed-edom = "obed_edom.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-obed_edom = ["*.yaml", "*.js", "data/ne/*"]
+obed_edom = ["*.yaml", "*.js", "data/ne/*", "data/*.jpg"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

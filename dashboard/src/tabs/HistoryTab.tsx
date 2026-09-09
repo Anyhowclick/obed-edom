@@ -8,6 +8,7 @@ import { InspectResultView } from "../components/InspectResultView";
 import { MapsResultView } from "../components/MapsResultView";
 import { Lightbox } from "../components/PreviewGrid";
 import { SessionList } from "../components/SessionList";
+import { WatercolourResultView } from "../components/WatercolourResultView";
 import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
 import { useJobSessions } from "../sessions";
 
@@ -122,7 +123,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                       Use this folder
                     </button>
                   )}
-                  {feature && (
+                  {feature && feature !== "watercolour" && (
                     <button className="btn secondary" type="button" onClick={relocate}>
                       Relocate…
                     </button>
@@ -135,6 +136,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
                 {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
                 {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} />}
+                {feature === "watercolour" && <WatercolourResultView job={active} onOpen={setOpen} onError={setError} />}
               </>
             )}
           </div>

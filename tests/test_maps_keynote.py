@@ -15,6 +15,7 @@ from obed_edom.maps_keynote import (
     PANEL_EDGES,
     WALL_HEIGHT,
     WALL_WIDTH,
+    _render_reveals,
     assign_morph_plates,
     avoid_straddle,
     build_deck_script,
@@ -307,6 +308,277 @@ def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
     )
     items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
     assert len([item for item in items if item["kind"] == "shape"]) == 1
+
+
+def _landmark_church(**extra) -> dict:
+    row = {
+        "id": "lm",
+        "name": "Landmark",
+        "lat": 3.0,
+        "lon": 101.0,
+        "kind": "landmark",
+        "color": "#c44a42",
+        "assetId": "asset1",
+        "size": 100,
+    }
+    row.update(extra)
+    return row
+
+
+def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    reveal_mov = tmp_path / "reveal" / "s1-lm.mov"
+    reveal_mov.parent.mkdir(parents=True, exist_ok=True)
+    reveal_mov.write_bytes(b"mov")
+
+    without_reveal = _slide("s1", camera, churches=[_landmark_church()])
+    still = _dummy_png(tmp_path / "s1.png")
+    baseline = build_slide_items(
+        without_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root
+    )
+    image_item = next(item for item in baseline if item.get("landmark"))
+    assert image_item["kind"] == "image"
+
+    with_reveal = _slide("s1", camera, churches=[_landmark_church()])
+    revealed = build_slide_items(
+        with_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
+    )
+    movie_item = next(item for item in revealed if item.get("landmark"))
+    assert movie_item["kind"] == "movie"
+    assert movie_item["path"] == str(reveal_mov)
+    assert movie_item["fallback"]
+    for key in ("x", "y", "w", "h"):
+        assert movie_item[key] == image_item[key]
+
+
+def test_emit_item_landmark_movie_fallback_uses_image_not_shape():
+    import obed_edom.maps_keynote as mod
+
+    item = mod._item(
+        "movie", 0, 0, 100, 100, path="/tmp/reveal.mov", fallback="/tmp/still.png", landmark=True
+    )
+    script = "\n".join(mod._emit_item(item))
+    assert "make new image with properties {file:" in script
+    assert "shape type:" not in script
+
+
+def test_emit_item_droppin_movie_no_fallback_omits_shape():
+    import obed_edom.maps_keynote as mod
+
+    item = mod._item("movie", 0, 0, 40, 40, path="/tmp/wave.mov")
+    script = "\n".join(mod._emit_item(item))
+    assert "shape type:" not in script
+    assert "make new image with properties {file:" in script
+
+
+def test_landmark_reveal_suppressed_on_duplicate_slide(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    reveal_mov = tmp_path / "reveal" / "s1-lm.mov"
+    reveal_mov.parent.mkdir(parents=True, exist_ok=True)
+    reveal_mov.write_bytes(b"mov")
+    camera = _camera(3.0, 101.0, 8)
+    slide = _slide("s1", camera, churches=[_landmark_church()])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root, allow_reveal=False,
+        reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
+    )
+    landmark_item = next(item for item in items if item.get("landmark"))
+    assert landmark_item["kind"] == "image"
+
+
+def test_render_reveals_returns_mapping_without_mutating_church(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert reveals[("lw", "s1", "lm")].endswith(".mov")
+    assert "revealMov" not in church
+    assert "revealMov" not in slide["churches"][0]
+
+
+def test_render_reveals_regenerates_when_duration_or_opacity_changes(tmp_path: Path, monkeypatch):
+    calls: list[float] = []
+
+    def fake_render(asset, dest, *, duration, seed, opacity, strokes=4, fingerprint=None, is_cancelled=None):
+        calls.append(duration)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f"mov-{duration}-{opacity}".encode())
+        if fingerprint is not None:
+            dest.with_suffix(dest.suffix + ".fp").write_text(fingerprint)
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.render_reveal", fake_render)
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+
+    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 1
+    dest = Path(reveals[("lw", "s1", "lm")])
+    first_bytes = dest.read_bytes()
+
+    # Unchanged inputs must reuse the cached movie.
+    reveals_again, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 1
+    assert reveals_again[("lw", "s1", "lm")] == reveals[("lw", "s1", "lm")]
+    assert dest.read_bytes() == first_bytes
+
+    # A duration change must invalidate the cache and re-render.
+    church["reveal"]["duration"] = 2.4
+    _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 2
+    assert dest.read_bytes() != first_bytes
+
+    # An opacity change (not covered by mtime) must also invalidate the cache.
+    church["opacity"] = 0.5
+    _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 3
+
+
+def test_render_reveals_uses_separate_lw_and_cg_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    lw_church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    cg_church = _landmark_church(reveal={"kind": "brush", "duration": 1.2}, opacity=0.4)
+    slide = _slide(
+        "s1", _camera(3.0, 101.0, 8), churches=[lw_church],
+        cg={"camera": _camera(3.0, 101.0, 8), "style": "positron", "churches": [cg_church]},
+    )
+    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert reveals[("lw", "s1", "lm")] != reveals[("cg", "s1", "lm")]
+
+
+def test_reveal_movie_slide_emits_bg_movie_and_no_still(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    landmark = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    dot = {"id": "d1", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}
+    slide = _slide("s1", camera, churches=[landmark, dot], revealMovie=True)
+    slide2 = _slide("s2", camera)
+    _dummy_png(output_dir / "stills" / "s2.png")
+    link = {"from": "s1", "to": "s2", "kind": "cut"}
+    reveal_movie = output_dir / "movies" / "Map BG_s1-reveal.mov"
+    reveal_movie.parent.mkdir(parents=True, exist_ok=True)
+    reveal_movie.write_bytes(b"mov")
+    ops = plan_deck(
+        [slide, slide2], [link], {}, output_dir=output_dir, preview_dir=output_dir / "previews", movie=None,
+        wall=True, reveals={}, reveal_movies={("lw", "s1"): str(reveal_movie)},
+    )
+    items = ops[0]["items"]
+    assert items[0] == {
+        "kind": "movie", "x": int(CENTRE_ORIGIN_X), "y": 0, "w": CENTRE_WIDTH, "h": WALL_HEIGHT,
+        "path": str(reveal_movie), "map": True,
+    }
+    assert not any(item.get("kind") == "image" and item.get("map") for item in items)
+    assert not any(item.get("landmark") for item in items)
+    assert any(item.get("kind") == "shape" for item in items)
+    assert any(item.get("kind") == "text" for item in items)
+
+
+def test_reveal_movie_skipped_when_slide_is_a_fly_source(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", camera, churches=[church], revealMovie=True)
+    slide2 = _slide("s2", camera)
+    link = {"from": "s1", "to": "s2", "kind": "movie"}
+    reveals, reveal_movies = _render_reveals(output_dir, [slide, slide2], [link], lambda _m: None, None)
+    assert reveal_movies == {}
+    assert reveals == {}
+
+
+def test_reveal_movie_transition_is_automatic_dissolve_after_duration(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    camera = _camera(3.0, 101.0, 8)
+    landmark = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", camera, churches=[landmark], revealMovie=True)
+    slide2 = _slide("s2", camera)
+    _dummy_png(output_dir / "stills" / "s2.png")
+    link = {"from": "s1", "to": "s2", "kind": "cut"}
+    reveal_movie = output_dir / "movies" / "Map BG_s1-reveal.mov"
+    reveal_movie.parent.mkdir(parents=True, exist_ok=True)
+    reveal_movie.write_bytes(b"mov")
+    ops = plan_deck(
+        [slide, slide2], [link], {}, output_dir=output_dir, preview_dir=output_dir / "previews", movie=None,
+        wall=True, reveals={}, reveal_movies={("lw", "s1"): str(reveal_movie)},
+    )
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 1.5}
+
+
+def test_export_maps_job_does_not_leak_reveal_mov_into_stored_document(tmp_path: Path, monkeypatch):
+    from obed_edom.web.maps import MapsDocument
+
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+
+    for stored_slide in result["slides"]:
+        for stored_church in stored_slide.get("churches") or []:
+            assert "revealMov" not in stored_church
+
+    doc = MapsDocument.model_validate(
+        {
+            "defaultStyle": "positron",
+            "crop": "wall",
+            "exportLw": True,
+            "exportCg": True,
+            "slides": result["slides"],
+            "links": result["links"],
+        }
+    )
+    assert doc.slides[0].churches[0].reveal.duration == 1.2
+
+
+def test_full_deck_landmark_reveal_script_has_no_shape_type(tmp_path: Path, monkeypatch):
+    scripts: list[str] = []
+    monkeypatch.setattr(
+        "obed_edom.maps_keynote.run_osascript",
+        lambda script, **_k: scripts.append(script) or _ok_osascript(script),
+    )
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    export_maps_job(job, export_lw=True, export_cg=False)
+
+    assert scripts
+    for script in scripts:
+        assert "shape type" not in script
 
 
 def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Path):
@@ -765,7 +1037,7 @@ def test_plan_deck_uses_backdrop_movie_when_present(tmp_path: Path):
     assert item["kind"] == "movie"
     assert (item["x"], item["y"], item["w"], item["h"]) == (CENTRE_ORIGIN_X, 0, CENTRE_WIDTH, WALL_HEIGHT)
     assert item["map"] is True
-    assert ops[0]["transition"] == {"effect": None, "duration": 1.0, "automatic": True, "delay": 2.5}
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.5}
 
 
 def test_plan_deck_backdrop_movie_cg_shift(tmp_path: Path):
@@ -979,3 +1251,113 @@ def test_plan_deck_movie_uses_max_capture_width(tmp_path: Path):
     item = ops[0]["items"][0]
     assert item["kind"] == "movie"
     assert (item["x"], item["y"], item["w"], item["h"]) == (0, 0, WALL_WIDTH, WALL_HEIGHT)
+
+
+def test_export_plan_still_carries_country_cutout_when_isolated():
+    a = _slide("s1", _camera(3.0, 101.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", _camera(3.0, 102.0))
+    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0}])
+    stills = {row["slideId"]: row for row in plan["stills"]}
+    assert stills["s1"]["stillPngCountry"] == "s1-country.png"
+    assert "stillPngCountry" not in stills["s2"]
+
+
+def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s1-country.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    items = ops[0]["items"]
+    map_items = [item for item in items if item.get("map")]
+    assert len(map_items) == 2
+    assert Path(map_items[0]["path"]).name == "s1.png"
+    assert Path(map_items[1]["path"]).name == "s1-country.png"
+    assert (map_items[0]["x"], map_items[0]["y"], map_items[0]["w"], map_items[0]["h"]) == (
+        map_items[1]["x"],
+        map_items[1]["y"],
+        map_items[1]["w"],
+        map_items[1]["h"],
+    )
+    assert len([item for item in ops[1]["items"] if item.get("map")]) == 1
+
+
+def test_plan_deck_magic_move_duplicate_skips_country_cutout(tmp_path: Path):
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plates, links = assign_morph_plates([a, b], links)
+    _write_plan_rasters(tmp_path, [a, b], links)
+    _dummy_png(tmp_path / "stills" / "s1-country.png")
+    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert ops[1]["duplicate"] is True
+    assert len(ops[1]["items"]) == 1
+
+
+def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
+    plan = maps_export_plan([a, b], links)
+    stills = {row["slideId"]: row for row in plan["stills"]}
+    assert set(stills) == {"s1", "s2", "s2__landing"}
+    landing = stills["s2__landing"]
+    assert landing["camera"] == b["camera"]
+    assert landing["highlights"] == []
+    assert landing["isolate"] is None
+    assert "stillPngCountry" not in landing
+    assert landing["_landingFor"] == "s2"
+
+
+def test_export_plan_no_landing_row_for_dissolve_or_no_highlights():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 1.0}]
+    plan = maps_export_plan([a, b], links)
+    assert {row["slideId"] for row in plan["stills"]} == {"s1", "s2"}
+
+    c = _slide("s3", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=[])
+    plan2 = maps_export_plan([a, c], [{"from": "s1", "to": "s3", "kind": "movie", "duration": 1.0}])
+    assert {row["slideId"] for row in plan2["stills"]} == {"s1", "s3"}
+
+
+def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0, 8), movieDuration=2.0)
+    b = _slide("s2", _camera(3.0, 102.0, 8), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.5, "playWithoutClick": False}]
+    mov = movie_path(tmp_path, "s1")
+    mov.parent.mkdir(parents=True, exist_ok=True)
+    mov.write_bytes(b"fake-mov")
+    _dummy_png(tmp_path / "stills" / "s2__landing.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
+    assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.0}
+    assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
+    assert len([item for item in ops[2]["items"] if item.get("map")]) == 2
+
+
+def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    assert [op["id"] for op in ops] == ["s1", "s2"]
+
+
+def test_split_cg_export_plan_keeps_landing_still_for_affected_slide():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide(
+        "s2", _camera(3.0, 102.0), isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"],
+        cg={"style": "toner"},
+    )
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0}]
+    plan = split_cg_export_plan([a, b], links)
+    assert "s2__landing" in {row["slideId"] for row in plan["stills"]}

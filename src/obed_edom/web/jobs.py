@@ -82,8 +82,15 @@ class JobRunner:
         self._worker = threading.Thread(target=self._loop, daemon=True)
         self._worker.start()
 
-    def submit(self, kind: str, fn: Callable[[Job], dict[str, Any]], *, feature: str | None = None) -> Job:
-        job = Job(id=str(uuid.uuid4())[:8], kind=kind, feature=feature or kind)
+    def submit(
+        self,
+        kind: str,
+        fn: Callable[[Job], dict[str, Any]],
+        *,
+        feature: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> Job:
+        job = Job(id=str(uuid.uuid4())[:8], kind=kind, feature=feature or kind, result=result)
         with self._cv:
             self._jobs[job.id] = job
             self._fns[job.id] = fn

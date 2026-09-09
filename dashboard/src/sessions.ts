@@ -15,13 +15,18 @@ export function jobLabel(job: Job): string {
     const b = right.split("/").pop() || right;
     return b ? `${a} vs ${b}` : a;
   }
+  const items = Array.isArray(result.items) ? (result.items as Array<{ name?: string }>) : [];
+  if (items.length) {
+    const first = items[0]?.name || job.id;
+    return items.length > 1 ? `${first} +${items.length - 1}` : first;
+  }
   return job.id;
 }
 
 export function libraryJobs(jobs: Job[]): Job[] {
   return jobs.filter((job) => {
     const feature = job.feature || job.kind;
-    return feature === "generate" || feature === "diff" || feature === "visual" || feature === "check" || feature === "dsk" || feature === "resize" || feature === "maps";
+    return feature === "generate" || feature === "diff" || feature === "visual" || feature === "check" || feature === "dsk" || feature === "resize" || feature === "maps" || feature === "watercolour";
     // "visual" kept so leftover Visual Checker sessions still appear in History.
   });
 }

@@ -2,7 +2,7 @@ export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
 export const HILLSHADE_NE2_LAYER_ID = "terrarium-ne2";
 
-export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d";
+export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d" | "toner" | "toner-background" | "toner-lines" | "watercolour";
 export type MapsCropId = "wall" | "center+cg";
 export type MapsLayerFilterId =
   | "roads"
@@ -15,7 +15,7 @@ export type MapsLayerFilterId =
   | "labels"
   | "boundaries";
 export type MapsHopKind = "morph" | "movie" | "dissolve" | "cut";
-export type MapsPinKind = "dot" | "dropPin";
+export type MapsPinKind = "dot" | "dropPin" | "landmark";
 export type MapsIconId = "none" | "building" | "cross";
 export type MapsEasing = "ease-in-out" | "linear" | "ease-in" | "ease-out";
 
@@ -27,6 +27,8 @@ export type MapsCamera = {
   pitch: number;
 };
 
+export type MapsIsolate = { mode: "darken"; strength: number };
+
 export type MapsChurch = {
   id: string;
   name: string;
@@ -37,6 +39,13 @@ export type MapsChurch = {
   showLabel?: boolean;
   icon?: MapsIconId;
   photoPath?: string;
+  assetId?: string;
+  assetVersion?: string;
+  assetWidth?: number;
+  assetHeight?: number;
+  size?: number;
+  opacity?: number;
+  reveal?: { kind: "brush"; duration: number; strokes?: number };
 };
 
 export type MapsCgOverride = {
@@ -46,9 +55,11 @@ export type MapsCgOverride = {
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   stillPng?: string;
   movieMov?: string;
   movieDuration?: number;
+  revealMovie?: boolean;
 };
 
 export type MapsSlide = {
@@ -60,7 +71,11 @@ export type MapsSlide = {
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   stillPng?: string;
+  movieMov?: string;
+  movieDuration?: number;
+  revealMovie?: boolean;
   cgShiftX: number;
   cgShiftY: number;
   includeSidePanels: boolean;
@@ -95,6 +110,15 @@ export type MapsLink = {
   easeIn?: number;
   easeOut?: number;
   flyZoom?: number;
+  curve?: number;
+  objectTransition?: "fade" | "hold";
+};
+
+export type MapsAsset = {
+  id: string;
+  version: string;
+  width: number;
+  height: number;
 };
 
 export type MapsDocument = {
@@ -105,6 +129,7 @@ export type MapsDocument = {
   exportDsk: boolean;
   hiddenLayers: MapsLayerFilterId[];
   cachedCountries: string[];
+  assets: MapsAsset[];
   slides: MapsSlide[];
   links: MapsLink[];
 };
@@ -164,6 +189,31 @@ export function captureWidth(slide: { includeSidePanels?: boolean }): number {
   return slide.includeSidePanels ? WALL_W : CENTRE_W;
 }
 
+export function showCgBand(slide: { cg?: unknown }): boolean {
+  return !slide.cg;
+}
+
+/** Band the preview canvas occupies inside the frame, at the authored aspect ratio (surfaceWidth × surfaceHeight). Matches the `.maps-map-band` CSS sizing. */
+export function previewHostRect(
+  frameWidth: number,
+  frameHeight: number,
+  surfaceWidth: number,
+  surfaceHeight = 1080
+): { x: number; y: number; width: number; height: number } {
+  if (!frameWidth || !frameHeight) return { x: 0, y: 0, width: 0, height: 0 };
+  const width = Math.min(frameWidth, (frameHeight * surfaceWidth) / surfaceHeight);
+  const height = (width * surfaceHeight) / surfaceWidth;
+  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
+}
+
+/** MapLibre's cameraToCenterDistance = 0.5*canvasHeight/tan(fov/2). Widening the canvas past the band (full-frame host) needs a matching fov widening so the band region projects the same as an export sized to the band alone. */
+export function compensatedFov(canvasHeight: number, bandHeight: number, baseFovDeg = 36.87): number {
+  if (!bandHeight) return baseFovDeg;
+  const baseFovRad = (baseFovDeg * Math.PI) / 180;
+  const fovRad = 2 * Math.atan((Math.tan(baseFovRad / 2) * canvasHeight) / bandHeight);
+  return (fovRad * 180) / Math.PI;
+}
+
 export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   const byId = new Map(doc.slides.map((slide) => [slide.id, slide]));
   return {
@@ -181,6 +231,7 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
       let next: MapsLink = link;
       if (link.kind === "morph" && suggested !== "morph") {
         next = { ...link, kind: suggested };
+        if (suggested === "movie") next.objectTransition = "fade";
         delete next.plateId;
       }
       if (next.kind !== "movie") {
@@ -189,13 +240,15 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
         delete next.easeIn;
         delete next.easeOut;
         delete next.flyZoom;
+        delete next.curve;
+        delete next.objectTransition;
       }
       return next;
     }),
   };
 }
 
-export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade";
+export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade" | "isolate";
 
 export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearanceField[] {
   const out: MapsAppearanceField[] = [];
@@ -205,13 +258,21 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
   const layers = (s: MapsSlide) => slideHiddenLayers(s).sort().join(",");
   if (layers(from) !== layers(to)) out.push("hiddenLayers");
   if ((from.hillshade === true) !== (to.hillshade === true)) out.push("hillshade");
+  const iso = (s: MapsSlide) => (s.isolate ? `${s.isolate.mode}:${s.isolate.strength.toFixed(2)}` : "off");
+  if (iso(from) !== iso(to)) out.push("isolate");
   return out;
 }
 
+/** Isolate/highlight mismatches on a Movie hop are expected (landing slide or darkened fly + cut) — never style/layers. */
+export function softMovieFields(_from: MapsSlide, _to: MapsSlide): Set<MapsAppearanceField> {
+  return new Set<MapsAppearanceField>(["highlights", "isolate"]);
+}
+
 export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
-  if (appearanceMismatch(from, to).length > 0) return true;
-  if (!from.cg && !to.cg) return false;
-  return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(to, "cg")).length > 0;
+  const target: MapsSlide = to.isolate && to.highlights.length ? { ...to, highlights: [], isolate: undefined } : to;
+  if (appearanceMismatch(from, target).length > 0) return true;
+  if (!from.cg && !target.cg) return false;
+  return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(target, "cg")).length > 0;
 }
 
 export function inferHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
@@ -239,6 +300,74 @@ export function suggestedHopKind(from: MapsSlide, to: MapsSlide): MapsHopKind {
   const kind = inferHopKind(from, to);
   if (kind === "morph" && !plateFitsMorph(from, to)) return "movie";
   return kind;
+}
+
+export function restitchLinks(nextSlides: MapsSlide[], prevLinks: MapsLink[]): MapsLink[] {
+  const links: MapsLink[] = [];
+  for (let i = 0; i < nextSlides.length - 1; i++) {
+    const from = nextSlides[i];
+    const to = nextSlides[i + 1];
+    const existing = prevLinks.find((link) => link.from === from.id && link.to === to.id);
+    const kind = suggestedHopKind(from, to);
+    links.push(
+      existing || {
+        from: from.id,
+        to: to.id,
+        kind,
+        duration: 1.0,
+        playWithoutClick: false,
+        ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
+      }
+    );
+  }
+  return links;
+}
+
+function clearMovieFields(slide: MapsSlide): MapsSlide {
+  const next: MapsSlide = { ...slide };
+  delete next.movieMov;
+  delete next.movieDuration;
+  if (next.cg) {
+    next.cg = { ...next.cg };
+    delete next.cg.movieMov;
+    delete next.cg.movieDuration;
+  }
+  return next;
+}
+
+function outgoingPairs(slides: MapsSlide[]): Map<string, string> {
+  const pairs = new Map<string, string>();
+  for (let i = 0; i < slides.length - 1; i++) pairs.set(slides[i].id, slides[i + 1].id);
+  return pairs;
+}
+
+/** Move the slide at `id` to `toIndex`, restitch links, and drop stale movie renders on every outgoing hop that changed. Returns `doc` unchanged if the move is a no-op or `id` is unknown. */
+export function moveSlideTo(doc: MapsDocument, id: string, toIndex: number): MapsDocument {
+  const fromIndex = doc.slides.findIndex((s) => s.id === id);
+  if (fromIndex < 0) return doc;
+  const target = Math.max(0, Math.min(doc.slides.length - 1, toIndex));
+  if (target === fromIndex) return doc;
+  const prevPairs = outgoingPairs(doc.slides);
+  const slides = [...doc.slides];
+  const [moved] = slides.splice(fromIndex, 1);
+  slides.splice(target, 0, moved);
+  const nextPairs = outgoingPairs(slides);
+  const clearIds = new Set<string>();
+  for (const from of new Set([...prevPairs.keys(), ...nextPairs.keys()])) {
+    if (prevPairs.get(from) !== nextPairs.get(from)) clearIds.add(from);
+  }
+  const nextSlides = slides.map((slide) => (clearIds.has(slide.id) ? clearMovieFields(slide) : slide));
+  const links = restitchLinks(nextSlides, doc.links);
+  return { ...doc, slides: nextSlides, links };
+}
+
+/** Swap the slide at `id` with its neighbour `delta` away, restitch links, and drop stale movie renders on the affected outgoing hops. Returns `doc` unchanged if the move is out of range. */
+export function reorderSlides(doc: MapsDocument, id: string, delta: number): MapsDocument {
+  const index = doc.slides.findIndex((s) => s.id === id);
+  if (index < 0) return doc;
+  const target = index + delta;
+  if (target < 0 || target >= doc.slides.length) return doc;
+  return moveSlideTo(doc, id, target);
 }
 
 function mercatorY(lat: number): number {
@@ -357,15 +486,26 @@ export function parseRoute(raw: unknown): MapsRoute | undefined {
   return { points: next };
 }
 
+export function parseIsolate(raw: unknown): MapsIsolate | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const mode = (raw as { mode?: unknown }).mode;
+  if (mode !== undefined && mode !== "darken" && mode !== "erase") return undefined;
+  const strengthRaw = Number((raw as { strength?: unknown }).strength);
+  const strength = Number.isFinite(strengthRaw) ? Math.max(0, Math.min(1, strengthRaw)) : 0.6;
+  return { mode: "darken", strength };
+}
+
 function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {
   if (!cg) return undefined;
-  const { hiddenLayers, hillshade, ...rest } = cg;
+  const { hiddenLayers, hillshade, isolate, ...rest } = cg;
+  const iso = parseIsolate(isolate);
   return {
     ...rest,
     highlights: cg.highlights || [],
     churches: cg.churches || [],
     ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
     ...(typeof hillshade === "boolean" ? { hillshade } : {}),
+    ...(iso ? { isolate: iso } : {}),
     camera: { ...cg.camera, zoom: clampZoom(cg.camera.zoom), lon: wrapLon(cg.camera.lon) },
   };
 }
@@ -382,6 +522,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     churches: slide.churches || [],
     hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
     hillshade: slide.hillshade === true,
+    isolate: parseIsolate(slide.isolate),
     cg: cgFromResult(slide.cg),
     camera: {
       ...slide.camera,
@@ -397,6 +538,8 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     if (typeof next.easeIn !== "number" || !Number.isFinite(next.easeIn)) delete next.easeIn;
     if (typeof next.easeOut !== "number" || !Number.isFinite(next.easeOut)) delete next.easeOut;
     if (typeof next.flyZoom !== "number" || !Number.isFinite(next.flyZoom)) delete next.flyZoom;
+    if (typeof next.curve !== "number" || !Number.isFinite(next.curve)) delete next.curve;
+    if (next.objectTransition !== "fade" && next.objectTransition !== "hold") delete next.objectTransition;
     return next;
   });
   return coerceHopKinds({
@@ -408,6 +551,9 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     hiddenLayers: deckHidden,
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
+      : [],
+    assets: Array.isArray(result.assets)
+      ? (result.assets as MapsAsset[]).filter((asset) => asset && typeof asset.id === "string" && typeof asset.version === "string")
       : [],
     slides,
     links,

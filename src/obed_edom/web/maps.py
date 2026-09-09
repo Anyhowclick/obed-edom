@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import csv
+import copy
+import hashlib
 import io
 import json
 import shutil
 import tempfile
+import threading
+import uuid
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -14,6 +18,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -54,19 +59,40 @@ from obed_edom.paths import output_root
 
 router = APIRouter(prefix="/api/maps", tags=["maps"])
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2
 SESSION_MAX_FILES = 100_000
 SESSION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 DIR_KEYS = {"outputDir", "workDir", "previewDir", "stem", "previews", "previewFiles"}
-STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d")
-MapsStyleId = Literal["positron", "liberty", "bright", "dark", "fiord", "buildings3d"]
+_MUTATION_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _mutation_lock(job_id: str) -> threading.RLock:
+    return _MUTATION_LOCKS.setdefault(job_id, threading.RLock())
+
+
+def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict[str, Any]:
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        _require_idle(job)
+        result = copy.deepcopy(job.result or {})
+        revision = int(result.get("stateRevision") or 0)
+        if expected_revision is not None and expected_revision != revision:
+            raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
+        updated = mutate(result)
+        updated["stateRevision"] = revision + 1
+        saved = _runner().update_result(job_id, updated)
+        if not saved:
+            raise HTTPException(404, "Unknown maps job")
+        return _runner().public_dict(saved)
+STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour")
+MapsStyleId = Literal["positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour"]
 MapsCropId = Literal["wall", "center+cg"]
 MapsLayerFilterId = Literal[
     "roads", "roadnames", "shields", "arrows", "pois", "rail", "buildings", "labels", "boundaries"
 ]
 MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
-MapsPinKind = Literal["dot", "dropPin"]
+MapsPinKind = Literal["dot", "dropPin", "landmark"]
 MapsIconId = Literal["none", "building", "cross"]
 MapsEasing = Literal["ease-in-out", "linear", "ease-in", "ease-out"]
 
@@ -86,6 +112,19 @@ class MapsCamera(BaseModel):
     pitch: float = 0.0
 
 
+class MapsIsolate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["darken"] = "darken"
+    strength: float = Field(default=0.6, ge=0, le=1)
+
+
+class MapsReveal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["brush"] = "brush"
+    duration: float = Field(default=1.2, ge=0.3, le=5)
+    strokes: int = Field(default=4, ge=2, le=24)
+
+
 class MapsChurch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -97,6 +136,21 @@ class MapsChurch(BaseModel):
     showLabel: bool = True
     icon: MapsIconId | None = None
     photoPath: str | None = None
+    assetId: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    assetVersion: str | None = Field(default=None, pattern=r"^[a-f0-9]{8,64}$")
+    assetWidth: int | None = Field(default=None, ge=1, le=10000)
+    assetHeight: int | None = Field(default=None, ge=1, le=10000)
+    size: float | None = Field(default=None, ge=1, le=4000)
+    opacity: float | None = Field(default=None, ge=0, le=1)
+    reveal: MapsReveal | None = None
+
+
+class MapsAsset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    version: str = Field(pattern=r"^[a-f0-9]{8,64}$")
+    width: int = Field(ge=1, le=10000)
+    height: int = Field(ge=1, le=10000)
 
 
 class MapsCgOverride(BaseModel):
@@ -107,9 +161,11 @@ class MapsCgOverride(BaseModel):
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
     hillshade: bool | None = None
+    isolate: MapsIsolate | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
+    revealMovie: bool = False
 
 
 class MapsSlide(BaseModel):
@@ -122,9 +178,11 @@ class MapsSlide(BaseModel):
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
     hillshade: bool = False
+    isolate: MapsIsolate | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
+    revealMovie: bool = False
     cgShiftX: float = 0
     cgShiftY: float = 0
     includeSidePanels: bool = False
@@ -169,10 +227,12 @@ class MapsLink(BaseModel):
     easeIn: float | None = None
     easeOut: float | None = None
     flyZoom: float | None = None
+    curve: float | None = Field(default=None, ge=0.5, le=3)
+    objectTransition: Literal["fade", "hold"] | None = None
 
     def dumped(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True)
-        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom")
+        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom", "curve", "objectTransition")
         if data.get("kind") != "movie":
             for key in movie_only:
                 data.pop(key, None)
@@ -194,6 +254,7 @@ class MapsDocument(BaseModel):
     exportDsk: bool = False
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
+    assets: list[MapsAsset] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -235,6 +296,23 @@ class MapsDocument(BaseModel):
     def _one_export(self) -> MapsDocument:
         if not self.exportLw and not self.exportCg and not self.exportDsk:
             raise ValueError("At least one export target must be on")
+        slide_ids = [slide.id.strip() for slide in self.slides]
+        if not all(slide_ids) or len(set(slide_ids)) != len(slide_ids):
+            raise ValueError("Slide ids must be non-empty and unique")
+        if any(sid.endswith("__landing") for sid in slide_ids):
+            raise ValueError("Slide ids may not end in '__landing' (reserved for synthetic landings)")
+        for slide in self.slides:
+            for view in (slide, slide.cg):
+                if view is None:
+                    continue
+                church_ids = [church.id.strip() for church in view.churches]
+                if not all(church_ids) or len(set(church_ids)) != len(church_ids):
+                    raise ValueError("Object ids must be non-empty and unique on each slide")
+        links = [(link.from_, link.to) for link in self.links]
+        if len(set(links)) != len(links):
+            raise ValueError("Map links must be unique")
+        if any(source not in slide_ids or target not in slide_ids for source, target in links):
+            raise ValueError("Map links must reference slides in this document")
         return self
 
 
@@ -276,6 +354,136 @@ def _safe_name(raw: str) -> str:
     return name
 
 
+def _asset_root(result: dict[str, Any]) -> Path:
+    root = Path(str(result.get("outputDir") or "")) / "assets"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _asset_path(result: dict[str, Any], asset_id: str) -> Path:
+    if not asset_id or Path(asset_id).name != asset_id:
+        raise HTTPException(400, "Invalid Maps asset id")
+    return _asset_root(result) / f"{asset_id}.png"
+
+
+def _decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
+    if not raw or len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(413, "Image exceeds the 20 MB upload limit")
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            if image.width * image.height > 24_000_000:
+                raise HTTPException(413, "Image exceeds the 24 megapixel limit")
+            converted = image.convert("RGBA")
+            output = io.BytesIO()
+            converted.save(output, "PNG", optimize=False)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, "Invalid image upload") from exc
+    payload = output.getvalue()
+    return payload, converted.width, converted.height, hashlib.sha256(payload).hexdigest()
+
+
+def _read_limited(stream, limit: int = 20 * 1024 * 1024) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(min(1024 * 1024, limit + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, "Image exceeds the 20 MB upload limit")
+        chunks.append(chunk)
+
+
+RASTER_MAX_BYTES = 20 * 1024 * 1024
+RASTER_MAX_SIDE = 8192
+
+
+async def _read_limited_request(request: Request, limit: int | None = None) -> bytes:
+    cap = RASTER_MAX_BYTES if limit is None else limit
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(413, f"Body exceeds the {cap // (1024 * 1024)} MB upload limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validate_raster(raw: bytes, *, max_side: int | None = None) -> tuple[int, int]:
+    cap = RASTER_MAX_SIDE if max_side is None else max_side
+    is_png = raw.startswith(b"\x89PNG\r\n\x1a\n")
+    is_jpeg = raw[:3] == b"\xff\xd8\xff"
+    if not raw or not (is_png or is_jpeg):
+        raise HTTPException(400, "Invalid image upload")
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            width, height = image.width, image.height
+    except Exception as exc:
+        raise HTTPException(400, "Invalid image upload") from exc
+    if width < 1 or height < 1 or width > cap or height > cap:
+        raise HTTPException(400, f"Image dimensions must be between 1 and {cap} pixels")
+    return width, height
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def _referenced_asset_ids(doc: MapsDocument) -> set[str]:
+    return {
+        church.assetId
+        for slide in doc.slides
+        for view in (slide, slide.cg)
+        if view is not None
+        for church in view.churches
+        if church.assetId
+    }
+
+
+def _validate_asset_document(doc: MapsDocument, result: dict[str, Any]) -> MapsDocument:
+    for slide in doc.slides:
+        for view in (slide, slide.cg):
+            if view is None:
+                continue
+            for church in view.churches:
+                if church.photoPath:
+                    raise HTTPException(400, "Legacy external photo paths are not supported; upload an owned Maps asset")
+                if church.kind == "landmark" and not church.assetId:
+                    raise HTTPException(400, "Landmark objects require an uploaded Maps asset")
+                if church.reveal and church.kind != "landmark":
+                    raise HTTPException(400, "Paint-on reveal is only available for landmark objects")
+            if view.revealMovie and not any(c.kind == "landmark" and c.reveal for c in view.churches):
+                raise HTTPException(400, "Reveal as slide movie needs a landmark with a paint-on reveal")
+    available = {asset.id: asset for asset in (MapsAsset.model_validate(row) for row in result.get("assets") or [])}
+    referenced = _referenced_asset_ids(doc)
+    if referenced - set(available):
+        raise HTTPException(400, "Maps document references an unknown asset")
+    for asset_id in referenced:
+        if not _asset_path(result, asset_id).is_file():
+            raise HTTPException(400, "Maps document references an unavailable asset")
+    for slide in doc.slides:
+        for view in (slide, slide.cg):
+            if view is None:
+                continue
+            for church in view.churches:
+                if church.assetId:
+                    asset = available[church.assetId]
+                    church.assetVersion = asset.version
+                    church.assetWidth = asset.width
+                    church.assetHeight = asset.height
+    doc.assets = [available[asset_id] for asset_id in sorted(referenced)]
+    return doc
+
+
 def _dump_document(doc: MapsDocument) -> dict[str, Any]:
     return {
         "defaultStyle": doc.defaultStyle,
@@ -285,6 +493,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "exportDsk": doc.exportDsk,
         "hiddenLayers": list(doc.hiddenLayers),
         "cachedCountries": list(doc.cachedCountries),
+        "assets": [asset.model_dump() for asset in doc.assets],
         "slides": [slide.model_dump() for slide in doc.slides],
         "links": [link.dumped() for link in doc.links],
     }
@@ -300,10 +509,17 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "assets",
         "slides",
         "links",
     )
     body = {key: cleaned[key] for key in keep if key in cleaned}
+    for slide in body.get("slides") or []:
+        if not isinstance(slide, dict):
+            continue
+        for isolate in (slide.get("isolate"), (slide.get("cg") or {}).get("isolate")):
+            if isinstance(isolate, dict) and isolate.get("mode") == "erase":
+                isolate["mode"] = "darken"
     try:
         return MapsDocument.model_validate(body)
     except Exception as exc:
@@ -328,10 +544,12 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "exportLw": True,
         "exportCg": True,
         "exportDsk": False,
+        "stateRevision": 0,
         "defaultStyle": "positron",
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
         "cachedCountries": [],
+        "assets": [],
         "slides": [
             {
                 "id": "s1",
@@ -442,6 +660,7 @@ def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
                     "from": prev["id"],
                     "to": slide["id"],
                     "kind": infer_hop_kind(prev, slide),
+                    "objectTransition": "fade" if infer_hop_kind(prev, slide) == "movie" else None,
                     "duration": 1.2,
                     "playWithoutClick": False,
                 }
@@ -518,7 +737,7 @@ def _clear_derived_maps_output(result: dict[str, Any], *, clear_preview: bool = 
 
 def _write_session_archive(job) -> Path:
     result = dict(job.result or {})
-    doc = _parse_document(result)
+    doc = _validate_asset_document(_parse_document(result), result)
     path = _session_path(job)
     temp_path = path.with_suffix(f"{path.suffix}.tmp")
     manifest = {
@@ -537,6 +756,12 @@ def _write_session_archive(job) -> Path:
         source = preview_dir / name
         if source.is_file():
             entries.append((source, f"previews/{name}"))
+    referenced = _referenced_asset_ids(doc)
+    for asset_id in sorted(referenced):
+        source = _asset_path(result, asset_id)
+        if not source.is_file():
+            raise HTTPException(400, "Maps document references an unavailable asset")
+        entries.append((source, f"assets/{asset_id}.png"))
     root = cache_root()
     for source in sorted(root.rglob("*")):
         if source.is_file() and not source.name.endswith(".tmp"):
@@ -570,6 +795,7 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             raise HTTPException(413, "Maps session is too large")
         preview_entries: list[tuple[zipfile.ZipInfo, str]] = []
         tile_entries: list[tuple[zipfile.ZipInfo, str]] = []
+        asset_entries: list[tuple[zipfile.ZipInfo, str]] = []
         destinations: set[str] = set()
         for info in files:
             member = _valid_session_member(info.filename)
@@ -588,15 +814,28 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
                 except ValueError as exc:
                     raise HTTPException(400, "Invalid Maps session tile path") from exc
                 tile_entries.append((info, rel))
+            elif len(member.parts) == 2 and member.parts[0] == "assets" and member.parts[1].endswith(".png"):
+                asset_id = member.parts[1][:-4]
+                if not asset_id or Path(asset_id).name != asset_id:
+                    raise HTTPException(400, "Invalid Maps session asset path")
+                asset_entries.append((info, asset_id))
             elif destination != "manifest.json":
                 raise HTTPException(400, "Maps session contains an unknown archive path")
         try:
             manifest = json.loads(archive.read("manifest.json"))
         except (KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise HTTPException(400, "Maps session manifest is missing or invalid") from exc
-        if manifest.get("format") != "obed-edom-maps" or manifest.get("version") != SESSION_VERSION:
+        if manifest.get("format") != "obed-edom-maps" or manifest.get("version") not in {1, SESSION_VERSION}:
             raise HTTPException(400, "Unsupported Maps session format")
         doc = _parse_document(manifest.get("document") or {})
+        if len({asset.id for asset in doc.assets}) != len(doc.assets):
+            raise HTTPException(400, "Maps session has duplicate asset metadata ids")
+        assets_by_id = {asset.id: asset for asset in doc.assets}
+        referenced = _referenced_asset_ids(doc)
+        if manifest.get("version") == 1 and (asset_entries or assets_by_id):
+            raise HTTPException(400, "Version 1 Maps sessions cannot contain image assets")
+        if {asset_id for _, asset_id in asset_entries} != referenced or set(assets_by_id) != referenced:
+            raise HTTPException(400, "Maps session assets do not match the manifest")
         result = dict(job.result or {})
         output_dir = Path(str(result.get("outputDir") or ""))
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -608,6 +847,7 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             staging = Path(staging_raw)
             staged_previews = staging / "previews"
             staged_tiles = staging / "tile-cache"
+            staged_assets = staging / "assets"
             staged_previews.mkdir()
             try:
                 for info, name in preview_entries:
@@ -618,6 +858,14 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
                     staged.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(info) as src, staged.open("wb") as dest:
                         shutil.copyfileobj(src, dest)
+                for info, asset_id in asset_entries:
+                    with archive.open(info) as src:
+                        payload, width, height, version = _decode_png(_read_limited(src))
+                    meta = assets_by_id[asset_id]
+                    if (meta.width, meta.height, meta.version) != (width, height, version):
+                        raise HTTPException(400, "Maps session asset metadata does not match its image")
+                    staged_assets.mkdir(exist_ok=True)
+                    (staged_assets / f"{asset_id}.png").write_bytes(payload)
             except zipfile.BadZipFile as exc:
                 raise HTTPException(400, "Maps session archive is corrupt") from exc
             try:
@@ -639,6 +887,23 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
                 for created in created_tiles:
                     created.unlink(missing_ok=True)
                 raise
+            remap = {old_id: uuid.uuid4().hex for _info, old_id in asset_entries}
+            installed_assets = staging / "installed-assets"
+            installed_assets.mkdir()
+            for old_id, new_id in remap.items():
+                shutil.copyfile(staged_assets / f"{old_id}.png", installed_assets / f"{new_id}.png")
+            asset_root = Path(str(result.get("outputDir") or "")) / "assets"
+            previous_assets = staging / "previous-assets"
+            if asset_root.exists():
+                asset_root.replace(previous_assets)
+            try:
+                installed_assets.replace(asset_root)
+            except Exception:
+                if previous_assets.exists():
+                    previous_assets.replace(asset_root)
+                for created in created_tiles:
+                    created.unlink(missing_ok=True)
+                raise
             previous_previews = staging / "previous-previews"
             if preview_dir.exists():
                 preview_dir.replace(previous_previews)
@@ -647,11 +912,21 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             except Exception:
                 if previous_previews.exists():
                     previous_previews.replace(preview_dir)
+                shutil.rmtree(asset_root, ignore_errors=True)
+                if previous_assets.exists():
+                    previous_assets.replace(asset_root)
                 for created in created_tiles:
                     created.unlink(missing_ok=True)
                 raise
             _clear_derived_maps_output(result, clear_preview=False)
     dumped = _dump_document(doc)
+    if asset_entries:
+        for slide in dumped["slides"]:
+            for view in [slide, *([slide["cg"]] if isinstance(slide.get("cg"), dict) else [])]:
+                for church in view.get("churches") or []:
+                    if church.get("assetId") in remap:
+                        church["assetId"] = remap[church["assetId"]]
+        dumped["assets"] = [{**asset.model_dump(), "id": remap[asset.id]} for asset in doc.assets]
     for slide in dumped["slides"]:
         slide.pop("movieMov", None)
         slide.pop("movieDuration", None)
@@ -678,6 +953,36 @@ def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False)
 def create_maps() -> dict:
     job = _runner().submit("maps", _run_maps, feature="maps")
     return _runner().public_dict(job)
+
+
+@router.post("/{job_id}/assets")
+async def upload_asset(job_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    payload, width, height, version = _decode_png(_read_limited(file.file))
+    asset_id = uuid.uuid4().hex
+    def register(result: dict[str, Any]) -> dict[str, Any]:
+        path = _asset_path(result, asset_id); temp = path.with_suffix(".tmp")
+        temp.write_bytes(payload); temp.replace(path)
+        result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
+        return result
+    updated = _mutate_document(job_id, None, register)
+    result = dict(updated["result"] or {})
+    return {
+        "asset": {"id": asset_id, "version": version, "width": width, "height": height},
+        "stateRevision": result.get("stateRevision"),
+        "document": _dump_document(_parse_document(result)),
+    }
+
+
+@router.get("/{job_id}/assets/{asset_id}.png")
+def get_asset(job_id: str, asset_id: str):
+    job = _job_or_404(job_id)
+    result = dict(job.result or {})
+    if asset_id not in {str(row.get("id") or "") for row in (result.get("assets") or [])}:
+        raise HTTPException(404, "Unknown Maps asset")
+    path = _asset_path(result, asset_id)
+    if not path.is_file():
+        raise HTTPException(404, "Maps asset is unavailable")
+    return FileResponse(path, media_type="image/png", headers={"Content-Disposition": f'inline; filename="{asset_id}.png"'})
 
 
 @router.get("/tiles/countries")
@@ -800,7 +1105,12 @@ async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
 
     def import_uploaded() -> tuple[dict[str, Any], dict[str, int]]:
         with tempfile.NamedTemporaryFile(suffix=".obedmaps") as uploaded:
-            shutil.copyfileobj(file.file, uploaded)
+            total = 0
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > SESSION_MAX_BYTES:
+                    raise HTTPException(413, "Maps session is too large")
+                uploaded.write(chunk)
             uploaded.flush()
             return _read_session_archive(job, uploaded.name)
 
@@ -813,21 +1123,21 @@ async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
         await file.close()
     job.status = "done"
     job.error = None
-    updated = _runner().update_result(job_id, result)
-    if not updated:
-        raise HTTPException(404, "Unknown maps job")
-    payload = _runner().public_dict(updated)
+    payload = _mutate_document(job_id, None, lambda _latest: result)
     payload["sessionImport"] = imported
     return payload
 
 
 @router.post("/{job_id}/state")
 def save_state(job_id: str, payload: dict[str, Any]) -> dict:
-    job = _job_or_404(job_id)
-    _require_idle(job)
-    result = dict(job.result or {})
-    incoming = payload if isinstance(payload, dict) else {}
-    keep = (
+    if not isinstance(payload, dict) or not isinstance(payload.get("document"), dict):
+        raise HTTPException(400, "Maps saves require a document envelope")
+    incoming = payload["document"]
+    expected = payload.get("expectedRevision")
+    if not isinstance(expected, int):
+        raise HTTPException(400, "expectedRevision must be an integer")
+    def apply(result: dict[str, Any]) -> dict[str, Any]:
+      keep = (
         "defaultStyle",
         "crop",
         "exportLw",
@@ -835,21 +1145,21 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "assets",
         "slides",
         "links",
-    )
-    merged = {key: result.get(key) for key in keep}
-    for key in keep:
+      )
+      merged = {key: result.get(key) for key in keep}
+      for key in keep:
         if key in incoming:
             merged[key] = incoming[key]
-    doc = _parse_document(merged)
-    dumped = _dump_document(doc)
-    dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
-    result.update(dumped)
-    updated = _runner().update_result(job_id, result)
-    if not updated:
-        raise HTTPException(404, "Unknown maps job")
-    return _runner().public_dict(updated)
+      merged["assets"] = result.get("assets") or []
+      doc = _validate_asset_document(_parse_document(merged), result)
+      dumped = _dump_document(doc)
+      dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
+      result.update(dumped)
+      return result
+    return _mutate_document(job_id, expected, apply)
 
 
 @router.post("/{job_id}/png")
@@ -860,31 +1170,34 @@ async def post_png(
     plateId: str | None = Query(None),
     kind: str = Query("thumb"),
     audience: Literal["lw", "cg"] = Query("lw"),
+    variant: str | None = Query(None),
 ) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
     result = dict(job.result or {})
     slides = list(result.get("slides") or [])
     ids = {str(slide.get("id")) for slide in slides}
-    body = await request.body()
+    body = await _read_limited_request(request)
     if not body:
         raise HTTPException(400, "PNG body required")
     if kind not in {"thumb", "still", "plate"}:
         raise HTTPException(400, "kind must be thumb, still, or plate")
+    _validate_raster(body)
     output_dir = Path(str(result.get("outputDir") or ""))
     if kind == "plate":
         if not plateId:
             raise HTTPException(400, "plateId is required for kind=plate")
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
-        folder.mkdir(parents=True, exist_ok=True)
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
         path = folder / plate_filename(plate_name)
-        path.write_bytes(body)
+        _write_atomic(path, body)
         return _runner().public_dict(job)
     if not slideId:
         raise HTTPException(400, "slideId is required")
-    if slideId not in ids:
+    landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
+    landing_ok = landing_base in ids and kind == "still" and variant != "country" if landing_base else False
+    if slideId not in ids and not landing_ok:
         raise HTTPException(400, "slideId is not in this deck")
     safe = _safe_name(slideId)
     if audience == "cg":
@@ -892,14 +1205,17 @@ async def post_png(
     if not safe.endswith(".png"):
         safe = f"{safe}.png"
     if kind == "still":
+        if variant is not None and variant != "country":
+            raise HTTPException(400, "variant must be country")
         folder = output_dir / "stills"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / Path(safe).name).write_bytes(body)
+        name = Path(safe).name
+        if variant == "country":
+            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        _write_atomic(folder / name, body)
         return _runner().public_dict(job)
     folder = Path(str(result.get("previewDir") or ""))
-    folder.mkdir(parents=True, exist_ok=True)
     path = folder / Path(safe).name
-    path.write_bytes(body)
+    _write_atomic(path, body)
     next_slides = []
     names = list((result.get("previewFiles") or {}).get("maps") or [])
     if safe not in names:
@@ -916,10 +1232,17 @@ async def post_png(
     files = dict(result.get("previewFiles") or {})
     files["maps"] = names
     result["previewFiles"] = files
-    updated = _runner().update_result(job_id, result)
-    if not updated:
-        raise HTTPException(404, "Unknown maps job")
-    return _runner().public_dict(updated)
+    def publish(latest: dict[str, Any]) -> dict[str, Any]:
+        fresh_slides = list(latest.get("slides") or [])
+        fresh_names = list((latest.get("previewFiles") or {}).get("maps") or [])
+        if safe not in fresh_names: fresh_names.append(safe)
+        for item in fresh_slides:
+            if item.get("id") == slideId:
+                if audience == "cg" and isinstance(item.get("cg"), dict): item["cg"] = {**item["cg"], "stillPng": safe}
+                else: item["stillPng"] = safe
+        latest["slides"] = fresh_slides; latest["previewFiles"] = {**(latest.get("previewFiles") or {}), "maps": fresh_names}
+        return latest
+    return _mutate_document(job_id, None, publish)
 
 
 @router.post("/{job_id}/frame")
@@ -939,15 +1262,16 @@ async def post_frame(
     ids = {str(slide.get("id")) for slide in slides}
     if not slideId or slideId not in ids:
         raise HTTPException(400, "slideId is not in this deck")
-    if index < 0:
-        raise HTTPException(400, "index must be >= 0")
-    if count < 1:
-        raise HTTPException(400, "count must be >= 1")
+    if not 1 <= count <= 20000:
+        raise HTTPException(400, "count must be between 1 and 20000")
+    if not 0 <= index < count:
+        raise HTTPException(400, "index must be between 0 and count - 1")
     if not 1 <= fps <= 60:
         raise HTTPException(400, "fps must be between 1 and 60")
-    body = await request.body()
+    body = await _read_limited_request(request)
     if not body:
         raise HTTPException(400, "Frame body required")
+    _validate_raster(body)
     content_type = request.headers.get("content-type", "")
     output_dir = Path(str(result.get("outputDir") or ""))
     from obed_edom.maps_movie import write_frame, write_frames_meta
