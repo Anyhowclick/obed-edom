@@ -1982,6 +1982,16 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   border: var(--border-glass);
   border-radius: var(--radius-lg);
 }
+.maps-map-band {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(100cqw, calc(100cqh * var(--maps-surface-width) / 1080));
+  height: min(100cqh, calc(100cqw * 1080 / var(--maps-surface-width)));
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  overflow: hidden;
+}
 .maps-map-host {
   position: absolute;
   inset: 0;
@@ -2018,16 +2028,6 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .maps-nav-margin.bottom {
   bottom: 0;
   height: max(0px, calc((100cqh - min(100cqh, calc(100cqw * 1080 / var(--maps-surface-width)))) / 2));
-}
-.maps-export-band {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(100cqw, calc(100cqh * var(--maps-surface-width) / 1080));
-  height: min(100cqh, calc(100cqw * 1080 / var(--maps-surface-width)));
-  transform: translate(-50%, -50%);
-  z-index: 2;
-  pointer-events: none;
 }
 .maps-crop-overlay {
   position: absolute;

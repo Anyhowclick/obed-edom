@@ -27,7 +27,6 @@ import {
 } from "./types";
 
 const WALL_W = 7680;
-const WALL_HEIGHT = 1080;
 const FW_W = 1920;
 const CG_W = 1920;
 const CG_ORIGIN = 2880;
@@ -37,14 +36,10 @@ const ML_MIN_ZOOM = -2;
 const ML_PREVIEW_MIN_ZOOM = -8;
 const ML_MAX_ZOOM = 22;
 
-function previewSurfaceRect(map: MapLibreMap, authoredWidth = WALL_W) {
+// The map container is `.maps-map-band`, already sized to the authored aspect by CSS — the whole canvas is the band.
+function previewSurfaceRect(map: MapLibreMap, _authoredWidth = WALL_W) {
   const container = map.getContainer();
-  const frameWidth = container.clientWidth;
-  const frameHeight = container.clientHeight;
-  if (!frameWidth || !frameHeight) return { x: 0, y: 0, width: 0, height: 0 };
-  const width = Math.min(frameWidth, (frameHeight * authoredWidth) / WALL_HEIGHT);
-  const height = (width * WALL_HEIGHT) / authoredWidth;
-  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
+  return { x: 0, y: 0, width: container.clientWidth, height: container.clientHeight };
 }
 
 function previewZoomDelta(map: MapLibreMap, authoredWidth = WALL_W): number {
@@ -58,29 +53,9 @@ function objectPreviewScale(map: MapLibreMap, authoredWidth = WALL_W): number {
   return width > 0 ? width / authoredWidth : 1;
 }
 
-function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
-  if (!rect) {
-    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-  }
-  const scaleX = canvas.width / canvas.clientWidth;
-  const scaleY = canvas.height / canvas.clientHeight;
-  const output = document.createElement("canvas");
-  output.width = Math.max(1, Math.round(rect.width * scaleX));
-  output.height = Math.max(1, Math.round(rect.height * scaleY));
-  const ctx = output.getContext("2d");
-  if (!ctx) return Promise.resolve(null);
-  ctx.drawImage(
-    canvas,
-    rect.x * scaleX,
-    rect.y * scaleY,
-    rect.width * scaleX,
-    rect.height * scaleY,
-    0,
-    0,
-    output.width,
-    output.height
-  );
-  return new Promise<Blob | null>((resolve) => output.toBlob(resolve, "image/png"));
+// The preview canvas is now sized to the export band exactly, so a whole-canvas grab is the export.
+function captureCanvas(canvas: HTMLCanvasElement) {
+  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
 }
 
 function clampMapZoom(zoom: number): number {
@@ -402,17 +377,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         cameraRef.current.zoom
       );
       const canvas = map.getCanvas();
-      const surface = previewSurfaceRect(map, authoredWidthRef.current);
       const shifted = map.unproject([
-        canvas.clientWidth / 2 + (cgShiftX * surface.width) / authoredWidthRef.current,
+        canvas.clientWidth / 2 + (cgShiftX * canvas.clientWidth) / authoredWidthRef.current,
         canvas.clientHeight / 2,
       ]);
       return { ...current, lat: shifted.lat, lon: wrapLon(shifted.lng) };
     },
     captureBlob() {
       const map = mapRef.current;
-      if (!map) return Promise.resolve(null);
-      return captureCanvas(map.getCanvas(), previewSurfaceRect(map, authoredWidthRef.current));
+      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
     },
     capturePreviewBlob() {
       const map = mapRef.current;
@@ -830,7 +803,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (at) callbacks.current.onAddPin(at.lat, at.lon);
       return;
     }
-    const band = event.currentTarget.closest(".maps-export-band");
+    const band = event.currentTarget.closest(".maps-map-band");
     const width = band?.clientWidth || 1;
     event.currentTarget.setPointerCapture(event.pointerId);
     cgDrag.current = { x: event.clientX, shift: cgShiftX, width };
@@ -864,13 +837,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       className={`maps-map-frame ${surfaceClass}`}
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
     >
-      <div className="maps-map-host" ref={host} />
-      {styleId === "watercolour" && (
-        <div className="maps-paper-grain" style={{ backgroundImage: `url(${paperGrainUrl()})` }} />
-      )}
-      <div className="maps-nav-margin top" />
-      <div className="maps-nav-margin bottom" />
-      <div className="maps-export-band">
+      <div className="maps-map-band">
+        <div className="maps-map-host" ref={host} />
+        {styleId === "watercolour" && (
+          <div className="maps-paper-grain" style={{ backgroundImage: `url(${paperGrainUrl()})` }} />
+        )}
         <div className="maps-crop-overlay">
           {splitCg ? (
             <div className="maps-crop-frame cg">
@@ -896,17 +867,19 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             </div>
           )}
         </div>
+        {handlePos && (
+          <div
+            className="maps-object-handle"
+            style={{ left: handlePos.x, top: handlePos.y }}
+            onPointerDown={onHandlePointerDown}
+            onPointerMove={onHandlePointerMove}
+            onPointerUp={onHandlePointerUp}
+            onPointerCancel={onHandlePointerUp}
+          />
+        )}
       </div>
-      {handlePos && (
-        <div
-          className="maps-object-handle"
-          style={{ left: handlePos.x, top: handlePos.y }}
-          onPointerDown={onHandlePointerDown}
-          onPointerMove={onHandlePointerMove}
-          onPointerUp={onHandlePointerUp}
-          onPointerCancel={onHandlePointerUp}
-        />
-      )}
+      <div className="maps-nav-margin top" />
+      <div className="maps-nav-margin bottom" />
       {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}
     </div>

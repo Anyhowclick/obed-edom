@@ -190,6 +190,19 @@ export function showCgBand(slide: { cg?: unknown }): boolean {
   return !slide.cg;
 }
 
+/** Band the preview canvas occupies inside the frame, at the authored aspect ratio (surfaceWidth × surfaceHeight). Matches the `.maps-map-band` CSS sizing. */
+export function previewHostRect(
+  frameWidth: number,
+  frameHeight: number,
+  surfaceWidth: number,
+  surfaceHeight = 1080
+): { x: number; y: number; width: number; height: number } {
+  if (!frameWidth || !frameHeight) return { x: 0, y: 0, width: 0, height: 0 };
+  const width = Math.min(frameWidth, (frameHeight * surfaceWidth) / surfaceHeight);
+  const height = (width * surfaceHeight) / surfaceWidth;
+  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
+}
+
 export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   const byId = new Map(doc.slides.map((slide) => [slide.id, slide]));
   return {
