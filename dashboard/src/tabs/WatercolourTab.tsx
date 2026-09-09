@@ -117,6 +117,52 @@ function MaskEditor({
   );
 }
 
+function LookSlider({
+  label,
+  hint,
+  value,
+  onChange,
+}: { label: string; hint: string; value: number; onChange: (next: number) => void }) {
+  const [text, setText] = useState(value.toFixed(2));
+
+  function commit(next: number) {
+    const clamped = Math.min(1, Math.max(0, next));
+    setText(clamped.toFixed(2));
+    onChange(clamped);
+  }
+
+  return (
+    <div className="wash-card">
+      <label className="ae-scrub has-slider wash-num">
+        <span>{label}:</span>
+        <input
+          type="range"
+          className="ae-scrub-slider"
+          min="0"
+          max="1"
+          step="0.05"
+          value={value}
+          onChange={(event) => commit(Number(event.target.value))}
+        />
+        <input
+          type="number"
+          min="0"
+          max="1"
+          step="0.05"
+          value={text}
+          onChange={(event) => {
+            const raw = event.target.value;
+            setText(raw);
+            if (/^\d*\.?\d+$/.test(raw)) onChange(Math.min(1, Math.max(0, Number(raw))));
+          }}
+          onBlur={() => commit(/^\d*\.?\d+$/.test(text) ? Number(text) : value)}
+        />
+      </label>
+      <small className="wash-hint">{hint}</small>
+    </div>
+  );
+}
+
 function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; file?: File }) {
   const urlRef = useRef("");
   const [url, setUrl] = useState("");
@@ -248,26 +294,18 @@ export function WatercolourTab() {
 
       <h2>Look</h2>
       <div className="wash-look">
-        <div className="wash-look-controls">
-          <label className="settings-block wash-look-item">
-            <span>Wash softness {wash.toFixed(2)}</span>
-            <input type="range" min="0" max="1" step="0.05" value={wash} onChange={(event) => setWash(Number(event.target.value))} />
-            <small className="wash-hint">Higher = paler washes, less pigment</small>
-          </label>
-          <label className="settings-block wash-look-item">
-            <span>Ink amount {ink.toFixed(2)}</span>
-            <input type="range" min="0" max="1" step="0.05" value={ink} onChange={(event) => setInk(Number(event.target.value))} />
-            <small className="wash-hint">Higher = stronger pencil lines</small>
-          </label>
-          <div className="wash-look-item">
-            <label className="check">
+        <WatercolourPreview wash={wash} ink={ink} file={files[0]} />
+        <div className="wash-look-col">
+          <LookSlider label="Wash softness" hint="Higher = paler washes, less pigment" value={wash} onChange={setWash} />
+          <LookSlider label="Ink amount" hint="Higher = stronger pencil lines" value={ink} onChange={setInk} />
+          <div className="wash-card">
+            <label className="check wash-card-head">
               <input type="checkbox" checked={transparent} onChange={(event) => setTransparent(event.target.checked)} />
-              <span>Transparent landmark output</span>
+              <span className="wash-card-title">Transparent landmark output</span>
             </label>
             <small className="wash-hint">Cuts the landmark out so it can be dropped on a map slide</small>
           </div>
         </div>
-        <WatercolourPreview wash={wash} ink={ink} file={files[0]} />
       </div>
       {transparent && files.length > 0 && (
         <>
