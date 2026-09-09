@@ -1513,13 +1513,10 @@ def drop_outlier_groups(grouped: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if scale <= 0:
         return grouped
     kept: list[dict[str, Any]] = []
-    dropped: list[float] = []
     for group in grouped:
         ratio = group["affine"].s / scale
         if group is dominant or 1 / OUTLIER_SCALE_FACTOR <= ratio <= OUTLIER_SCALE_FACTOR:
             kept.append(group)
-        else:
-            dropped.append(round(group["affine"].s, 4))
     return kept
 
 
@@ -2006,14 +2003,6 @@ def _style_text_box(
     dst_size = _f(style.get("size")) if style else 0.0
     font_name = (str(style.get("font") or "") or None) if style else None
     colour = norm_rgb(style.get("color")) if style else None
-    snippet = (item.get("text") or "").replace("\n", " ")[:48]
-    interesting = bool(
-        re.search(
-            r"global|missions|oct|183|269|total|churches|countries",
-            snippet,
-            re.I,
-        )
-    )
     if style and dst_size > 0 and wall_font > 0:
         ratio = dst_size / wall_font
         if aff is not None:
