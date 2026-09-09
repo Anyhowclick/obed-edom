@@ -245,3 +245,198 @@ def test_wash_softness_extremes_change_luminance():
     airy=np.asarray(render(_sample(), WatercolourOptions(wash_softness=1.0)),dtype=np.float32)
     assert np.abs(crisp-airy).mean() > 28 and airy.mean() > crisp.mean() + 20
 
+
+def test_transparent_hard_edge_stays_crisp():
+    image=Image.new('RGBA',(64,64),(220,80,40,0))
+    for y in range(20,44):
+        for x in range(20,44): image.putpixel((x,y),(220,80,40,255))
+    result=render(image,WatercolourOptions(transparent=True,seed=2))
+    assert result.getpixel((10,10))[3] == 0
+    assert result.getpixel((32,32))[3] == 255
+
+
+def _rect_mask_spec(rect=(10,10,20,20)):
+    return {'transparent': True, 'rect': list(rect)}
+
+
+def test_preview_rejects_non_dict_masks_at_top_level():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps([1,2,3])},
+    )
+    assert response.status_code == 400
+
+
+def test_preview_rejects_rect_with_wrong_length():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[10,10,20]})},
+    )
+    assert response.status_code == 400
+    assert 'invalid' in response.text.lower()
+
+
+def test_preview_rejects_non_finite_rect():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':'{"transparent": true, "rect": [380, 280, NaN, Infinity]}'},
+    )
+    assert response.status_code == 400
+
+
+def test_preview_rejects_rect_outside_image():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[380,280,100,100]})},
+    )
+    assert response.status_code == 400
+
+
+def test_preview_rejects_malformed_foreground_points():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[110,66,178,166],'foreground':[[1,2,3]]})},
+    )
+    assert response.status_code == 400
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[110,66,178,166],'foreground':[['a','b']]})},
+    )
+    assert response.status_code == 400
+
+
+def test_start_watercolour_rejects_malformed_masks_field():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))], data={'masks':'[]'})
+    assert response.status_code == 400
+    response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))], data={'masks':'{"0": 5}'})
+    assert response.status_code == 400
+
+
+def test_batch_out_of_bounds_mask_becomes_item_error_not_500():
+    from obed_edom.web.app import app, RUNNER
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    masks=json.dumps({'0': _rect_mask_spec((380,280,100,100))})
+    response=client.post('/api/watercolour', files=[('files',('good.png',_landmark_png(),'image/png'))], data={'masks':masks})
+    assert response.status_code == 200, response.text
+    job_id=response.json()['id']
+    import time
+    for _ in range(80):
+        job=client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done','error'}: break
+        time.sleep(.03)
+    items=job['result']['items']
+    assert items[0]['status'] == 'error'
+
+
+def test_batch_duplicate_filenames_processed_independently():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    masks=json.dumps({'1': _rect_mask_spec((110,66,178,166))})
+    response=client.post(
+        '/api/watercolour',
+        files=[('files',('good.png',_landmark_png(),'image/png')),('files',('good.png',_landmark_png(),'image/png'))],
+        data={'masks':masks},
+    )
+    assert response.status_code == 200, response.text
+    job_id=response.json()['id']
+    import time
+    for _ in range(80):
+        job=client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done','error'}: break
+        time.sleep(.03)
+    items=job['result']['items']
+    assert [item['status'] for item in items] == ['done','done']
+    assert items[0]['transparent'] is False
+    assert items[0]['result'] != items[1]['result']
+    assert client.get(f"/api/watercolour/{job_id}/items/{items[0]['id']}/result").status_code == 200
+    assert client.get(f"/api/watercolour/{job_id}/items/{items[1]['id']}/result").status_code == 200
+
+
+def test_submit_failure_cleans_up_staged_uploads():
+    from pathlib import Path
+    from obed_edom.paths import output_root
+    from obed_edom.web import app as app_module
+    from obed_edom.web import watercolour as watercolour_web
+    from fastapi.testclient import TestClient
+    uploads_dir = output_root() / '.watercolour' / '.uploads'
+    before = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
+
+    class _BoomRunner:
+        def submit(self, *args, **kwargs):
+            raise RuntimeError('boom')
+
+    original = watercolour_web._runner
+    watercolour_web._runner = lambda: _BoomRunner()
+    try:
+        client=TestClient(app_module.app, raise_server_exceptions=False)
+        response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))])
+    finally:
+        watercolour_web._runner = original
+    assert response.status_code == 500
+    after = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
+    assert after == before
+
+
+def test_batch_rollback_removes_orphan_original_and_tmp_files():
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from obed_edom.web import watercolour as watercolour_web
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    original_convert = watercolour_web.convert
+    calls = {'n': 0}
+
+    def _flaky_convert(*args, **kwargs):
+        calls['n'] += 1
+        if calls['n'] == 2:
+            raise ValueError('boom')
+        return original_convert(*args, **kwargs)
+
+    watercolour_web.convert = _flaky_convert
+    try:
+        response=client.post(
+            '/api/watercolour',
+            files=[('files',('a.png',png((90,140,210,255)),'image/png')),('files',('b.png',png((10,20,30,255)),'image/png'))],
+        )
+        assert response.status_code == 200, response.text
+        job_id=response.json()['id']
+        import time
+        for _ in range(80):
+            job=client.get(f'/api/jobs/{job_id}').json()
+            if job['status'] in {'done','error'}: break
+            time.sleep(.03)
+    finally:
+        watercolour_web.convert = original_convert
+    items=job['result']['items']
+    assert [item['status'] for item in items] == ['done','error']
+    originals_dir = Path(job['result']['originalDir'])
+    assert len(list(originals_dir.glob('*'))) == 1
+    output_dir = Path(job['result']['outputDir'])
+    assert not list(output_dir.rglob('*.tmp'))
+

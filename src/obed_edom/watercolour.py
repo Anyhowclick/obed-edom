@@ -180,7 +180,7 @@ def _fill_hidden(rgb: np.ndarray, alpha: np.ndarray, scale: float) -> np.ndarray
     return np.where(alpha[:, :, None] > 0, rgb, np.clip(filled, 0, 255)).astype(np.uint8)
 
 
-def _feather_mask(mask: np.ndarray, amount: float = 1.5) -> np.ndarray:
+def _feather_mask(mask: np.ndarray, amount: float = 0.8) -> np.ndarray:
     if mask.dtype != np.uint8:
         mask = np.clip(mask, 0, 255).astype(np.uint8)
     return cv2.GaussianBlur(mask, (0, 0), amount)
@@ -221,7 +221,7 @@ def grabcut_mask(
     if foreground or background or keep_mask is not None or remove_mask is not None:
         cv2.grabCut(rgb, mask, None, model_bg, model_fg, 3, cv2.GC_INIT_WITH_MASK)
     alpha = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
-    return Image.fromarray(_feather_mask(alpha), "L")
+    return Image.fromarray(alpha, "L")
 
 
 def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | None = None) -> Image.Image:

@@ -76,9 +76,36 @@ def _decode_mask_field(spec: dict[str, Any], key: str) -> Image.Image | None:
     return mask.convert("L")
 
 
+def _validate_spec(spec: dict[str, Any] | None, size: tuple[int, int] | None = None) -> None:
+    if spec is None:
+        return
+    rect = spec.get("rect")
+    if rect is not None and (not isinstance(rect, list) or len(rect) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect)):
+        raise WatercolourError("Mask settings are invalid")
+    if rect is not None and size is not None:
+        x, y, w, h = rect
+        width, height = size
+        if not (0 <= x < width and 0 <= y < height and x + w <= width and y + h <= height):
+            raise WatercolourError("Mask settings are invalid")
+    for key in ("foreground", "background"):
+        points = spec.get(key)
+        if points is None:
+            continue
+        if not isinstance(points, list):
+            raise WatercolourError("Mask settings are invalid")
+        for point in points:
+            if not isinstance(point, list) or len(point) != 2 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in point):
+                raise WatercolourError("Mask settings are invalid")
+    for key in ("keepMask", "removeMask"):
+        value = spec.get(key)
+        if value is not None and not isinstance(value, str):
+            raise WatercolourError("Mask settings are invalid")
+
+
 def _mask_for(image, spec: dict[str, Any] | None):
     if not spec or not spec.get("transparent"):
         return None
+    _validate_spec(spec, image.size)
     rect = spec.get("rect")
     if rect is None and image.getchannel("A").getextrema()[0] < 255:
         return image.getchannel("A")
@@ -101,11 +128,10 @@ def _mask_for(image, spec: dict[str, Any] | None):
 def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int]) -> dict[str, Any] | None:
     if not spec or not spec.get("transparent"):
         return None
+    _validate_spec(spec)
     width, height = size
 
     def scale_point(point: Any) -> list[float]:
-        if not isinstance(point, list) or len(point) != 2 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in point):
-            raise WatercolourError("Mask settings are invalid")
         x, y = point
         return [min(max(round(x * factor), 0), width - 1), min(max(round(y * factor), 0), height - 1)]
 
@@ -122,8 +148,6 @@ def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int
         scaled["maskSize"] = spec.get("maskSize")
     rect = spec.get("rect")
     if rect is not None:
-        if not isinstance(rect, list) or len(rect) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect):
-            raise WatercolourError("Mask settings are invalid")
         x, y, w, h = rect
         sx = min(max(round(x * factor), 0), width - 2)
         sy = min(max(round(y * factor), 0), height - 2)
@@ -140,18 +164,23 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
     job.result = {"outputDir": str(root), "originalDir": str(originals), "resultDir": str(results), "items": rows}
     try:
       for index, (name, path) in enumerate(staged):
-        if job.cancelled(): break
-        stem = f"{index:02d}-{Path(name).stem or 'photo'}"; original_path = originals / f"{stem}.png"
+        if job.cancelled():
+            for remaining_name, _remaining_path in staged[index:]:
+                rows.append({"id": uuid.uuid4().hex, "name": remaining_name, "status": "error", "error": "Cancelled."})
+            break
+        stem = f"{index:02d}-{Path(name).stem or 'photo'}"
+        original_path = originals / f"{stem}.png"; original_tmp = original_path.with_suffix(".tmp")
+        result_path = results / f"{stem}-watercolour.png"; result_tmp = result_path.with_suffix(".tmp")
         try:
             raw = path.read_bytes(); image = decode_image(raw)
-            temp = original_path.with_suffix(".tmp"); image.save(temp, "PNG", optimize=False); temp.replace(original_path)
+            image.save(original_tmp, "PNG", optimize=False); original_tmp.replace(original_path)
             spec = masks.get(str(index)) or masks.get(name)
             transparent = bool(spec and spec.get("transparent"))
             payload, size = convert(raw, WatercolourOptions(**{**options.__dict__, "transparent": transparent, "paper": not transparent}), _mask_for(image, spec))
-            result_name = f"{stem}-watercolour.png"
-            result_path = results / result_name; temp = result_path.with_suffix(".tmp"); temp.write_bytes(payload); temp.replace(result_path)
-            rows.append({"id": uuid.uuid4().hex, "name": name, "original": original_path.name, "result": result_name, "width": size[0], "height": size[1], "transparent": transparent, "status": "done"})
+            result_tmp.write_bytes(payload); result_tmp.replace(result_path)
+            rows.append({"id": uuid.uuid4().hex, "name": name, "original": original_path.name, "result": result_path.name, "width": size[0], "height": size[1], "transparent": transparent, "status": "done"})
         except (OSError, WatercolourError, ValueError, TypeError, cv2.error) as exc:
+            original_path.unlink(missing_ok=True); original_tmp.unlink(missing_ok=True); result_tmp.unlink(missing_ok=True)
             rows.append({"id": uuid.uuid4().hex, "name": name, "status": "error", "error": str(exc)})
         finally:
             path.unlink(missing_ok=True)
@@ -188,14 +217,15 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
             path = staged_root / f"{index:02d}.upload"
             path.write_bytes(payload)
             staged.append((Path(upload.filename or f"photo-{index + 1}").name, path))
+        options = WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)
+        job = _runner().submit("watercolour", lambda job: _run_batch(job, staged, options, mask_specs), feature="watercolour")
+        job.result = {"stagingDir": str(staged_root)}
     except Exception:
         shutil.rmtree(staged_root, ignore_errors=True)
         raise
     finally:
         for upload in files:
             await upload.close()
-    options = WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)
-    job = _runner().submit("watercolour", lambda job: _run_batch(job, staged, options, mask_specs), feature="watercolour")
     return _runner().public_dict(job)
 
 
@@ -211,8 +241,9 @@ def _preview(image: Image.Image, wash_softness: float, ink_amount: float, spec: 
     preview.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE), Image.LANCZOS)
     factor = preview.width / image.width
     try:
+        _validate_spec(spec, image.size)
         mask = _mask_for(preview, _scale_spec(spec, factor, preview.size))
-    except (WatercolourError, cv2.error) as exc:
+    except (WatercolourError, cv2.error, ValueError, TypeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     transparent = mask is not None or bool(spec and spec.get("transparent"))
     output = io.BytesIO()
@@ -255,6 +286,9 @@ def cancel_watercolour(job_id: str) -> dict:
     if not job or job.feature != "watercolour":
         raise HTTPException(404, "Unknown Watercolour job")
     cancelled = _runner().cancel(job_id)
+    result = cancelled.result if cancelled else None
+    if cancelled and cancelled.status == "error" and result and not result.get("items") and result.get("stagingDir"):
+        shutil.rmtree(result["stagingDir"], ignore_errors=True)
     return _runner().public_dict(cancelled)
 
 
