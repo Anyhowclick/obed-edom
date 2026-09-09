@@ -1,0 +1,406 @@
+{
+ "deck": "Gold_Wall_Input.key",
+ "enrichment": {
+  "builds": 13,
+  "groupCaption": 8,
+  "groupChildText": 10,
+  "groupChildren": 9,
+  "templateGroupCaption": 2
+ },
+ "env": {
+  "OBED_AS_GEOMETRY": "1",
+  "OBED_GEOM_PROPS": null,
+  "OBED_OFFLINE_READ": "on",
+  "OBED_OFFLINE_WRITE": "off",
+  "OBED_SUPPRESS_GEOMETRY": null,
+  "OBED_WRITE_TIMING": null
+ },
+ "goldenVersion": 1,
+ "inspectVersion": 4,
+ "planSha256": "a0e805b7f678dd038daa4b593fbda81657cfb4cb17c2ffe190546249e24d5504",
+ "previews": "none",
+ "reuses": [
+  {
+   "add": 85,
+   "from": 11,
+   "groupRemove": 0,
+   "mutate": 0,
+   "persist": 161,
+   "remove": 6,
+   "slide": 12,
+   "strip": 275
+  },
+  {
+   "add": 9,
+   "from": 12,
+   "groupRemove": 0,
+   "mutate": 0,
+   "persist": 161,
+   "remove": 0,
+   "slide": 13,
+   "strip": 358
+  },
+  {
+   "add": 45,
+   "from": 13,
+   "groupRemove": 3,
+   "mutate": 0,
+   "persist": 167,
+   "remove": 0,
+   "slide": 14,
+   "strip": 169
+  },
+  {
+   "add": 29,
+   "from": 14,
+   "groupRemove": 47,
+   "mutate": 0,
+   "persist": 170,
+   "remove": 0,
+   "slide": 15,
+   "strip": 170
+  },
+  {
+   "add": 3,
+   "from": 15,
+   "groupRemove": 76,
+   "mutate": 0,
+   "persist": 170,
+   "remove": 0,
+   "slide": 16,
+   "strip": 171
+  },
+  {
+   "add": 3,
+   "from": 16,
+   "groupRemove": 80,
+   "mutate": 0,
+   "persist": 169,
+   "remove": 0,
+   "slide": 17,
+   "strip": 169
+  }
+ ],
+ "slides": [
+  {
+   "asGeomLines": 130,
+   "asGeomSha": "5f4a7d136148",
+   "badgeRaises": 1,
+   "groupRemoves": 0,
+   "n": 6,
+   "roles": {
+    "other": 5,
+    "title": 1
+   },
+   "slide": 1,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 131,
+   "asGeomSha": "e2ef35bf1710",
+   "badgeRaises": 0,
+   "groupRemoves": 0,
+   "n": 9,
+   "roles": {
+    "hide": 4,
+    "other": 5
+   },
+   "slide": 2,
+   "statJobs": 2
+  },
+  {
+   "asGeomLines": 337,
+   "asGeomSha": "e2938eaa367b",
+   "badgeRaises": 7,
+   "groupRemoves": 0,
+   "n": 27,
+   "roles": {
+    "hide": 11,
+    "line": 1,
+    "map": 6,
+    "other": 7,
+    "pin": 2
+   },
+   "slide": 3,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 369,
+   "asGeomSha": "36247d488981",
+   "badgeRaises": 7,
+   "groupRemoves": 0,
+   "n": 28,
+   "roles": {
+    "hide": 11,
+    "line": 1,
+    "map": 6,
+    "other": 9,
+    "pin": 1
+   },
+   "slide": 4,
+   "statJobs": 1
+  },
+  {
+   "asGeomLines": 248,
+   "asGeomSha": "8488bde2b8a0",
+   "badgeRaises": 6,
+   "groupRemoves": 0,
+   "n": 14,
+   "roles": {
+    "hide": 3,
+    "line": 1,
+    "map": 3,
+    "other": 7
+   },
+   "slide": 5,
+   "statJobs": 1
+  },
+  {
+   "asGeomLines": 46,
+   "asGeomSha": "1cfa6bf24143",
+   "badgeRaises": 0,
+   "groupRemoves": 0,
+   "n": 5,
+   "roles": {
+    "hide": 3,
+    "other": 2
+   },
+   "slide": 6,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 335,
+   "asGeomSha": "407454020bf7",
+   "badgeRaises": 0,
+   "groupRemoves": 0,
+   "n": 18,
+   "roles": {
+    "hide": 3,
+    "map": 12,
+    "other": 3
+   },
+   "slide": 7,
+   "statJobs": 1
+  },
+  {
+   "asGeomLines": 694,
+   "asGeomSha": "4e797413ed5d",
+   "badgeRaises": 6,
+   "groupRemoves": 0,
+   "n": 36,
+   "roles": {
+    "hide": 3,
+    "line": 1,
+    "map": 7,
+    "other": 18,
+    "pin": 7
+   },
+   "slide": 8,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 1471,
+   "asGeomSha": "f26316f0441b",
+   "badgeRaises": 6,
+   "groupRemoves": 0,
+   "n": 73,
+   "roles": {
+    "hide": 3,
+    "line": 1,
+    "map": 7,
+    "other": 34,
+    "pin": 28
+   },
+   "slide": 9,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 25,
+   "asGeomSha": "bcc0d4c0f4c5",
+   "badgeRaises": 0,
+   "groupRemoves": 0,
+   "n": 4,
+   "roles": {
+    "hide": 3,
+    "other": 1
+   },
+   "slide": 10,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 3511,
+   "asGeomSha": "f5531157886e",
+   "badgeRaises": 3,
+   "groupRemoves": 0,
+   "n": 173,
+   "roles": {
+    "hide": 6,
+    "list": 6,
+    "map": 21,
+    "other": 1,
+    "pin": 138,
+    "title": 1
+   },
+   "slide": 11,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 5170,
+   "asGeomSha": "5f9092b3bfe4",
+   "badgeRaises": 3,
+   "groupRemoves": 0,
+   "n": 360,
+   "roles": {
+    "hide": 114,
+    "list": 85,
+    "map": 21,
+    "other": 1,
+    "pin": 138,
+    "title": 1
+   },
+   "slide": 12,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 3646,
+   "asGeomSha": "b69a7dc96707",
+   "badgeRaises": 3,
+   "groupRemoves": 0,
+   "n": 367,
+   "roles": {
+    "hide": 197,
+    "line": 1,
+    "map": 21,
+    "other": 16,
+    "pin": 131,
+    "title": 1
+   },
+   "slide": 13,
+   "statJobs": 8
+  },
+  {
+   "asGeomLines": 4512,
+   "asGeomSha": "1c3cd57bb577",
+   "badgeRaises": 3,
+   "groupRemoves": 3,
+   "n": 214,
+   "roles": {
+    "hide": 2,
+    "line": 1,
+    "map": 21,
+    "other": 102,
+    "pin": 87,
+    "title": 1
+   },
+   "slide": 14,
+   "statJobs": 50
+  },
+  {
+   "asGeomLines": 4197,
+   "asGeomSha": "3f9214ca89a1",
+   "badgeRaises": 3,
+   "groupRemoves": 47,
+   "n": 199,
+   "roles": {
+    "hide": 2,
+    "line": 1,
+    "map": 21,
+    "other": 72,
+    "pin": 102,
+    "title": 1
+   },
+   "slide": 15,
+   "statJobs": 35
+  },
+  {
+   "asGeomLines": 3651,
+   "asGeomSha": "99cdfd26a2b1",
+   "badgeRaises": 3,
+   "groupRemoves": 76,
+   "n": 174,
+   "roles": {
+    "hide": 3,
+    "line": 1,
+    "map": 21,
+    "other": 20,
+    "pin": 128,
+    "title": 1
+   },
+   "slide": 16,
+   "statJobs": 9
+  },
+  {
+   "asGeomLines": 3703,
+   "asGeomSha": "615f860cf4ce",
+   "badgeRaises": 3,
+   "groupRemoves": 80,
+   "n": 172,
+   "roles": {
+    "hide": 2,
+    "line": 1,
+    "map": 21,
+    "other": 18,
+    "pin": 129,
+    "title": 1
+   },
+   "slide": 17,
+   "statJobs": 8
+  },
+  {
+   "asGeomLines": 67,
+   "asGeomSha": "7c1ec703690d",
+   "badgeRaises": 1,
+   "groupRemoves": 0,
+   "n": 6,
+   "roles": {
+    "hide": 3,
+    "other": 2,
+    "title": 1
+   },
+   "slide": 18,
+   "statJobs": 0
+  },
+  {
+   "asGeomLines": 5197,
+   "asGeomSha": "8c804819b364",
+   "badgeRaises": 0,
+   "groupRemoves": 0,
+   "n": 259,
+   "roles": {
+    "hide": 2,
+    "line": 68,
+    "map": 120,
+    "other": 69
+   },
+   "slide": 19,
+   "statJobs": 67
+  }
+ ],
+ "sourceDigest": "c7f870edf4a5be2f862eec95a52e7c8224a8628d133e4d236beb611d06011f67",
+ "statSlides": [
+  2,
+  4,
+  5,
+  7,
+  13,
+  14,
+  15,
+  16,
+  17,
+  19
+ ],
+ "suppressGeometry": [],
+ "template": "Base_CG_Assets.key",
+ "templateDigest": "bbb0d1d45b46e7fe943bee2badeea8cdaac9ca5e7dac29fa74403913b9ea38f1",
+ "totals": {
+  "asGeom": 19,
+  "badgeRaises": 55,
+  "groupRemoves": 206,
+  "reuses": 6,
+  "statJobs": 182,
+  "statSlides": 10,
+  "suppressGeometry": 0,
+  "transforms": 2144
+ },
+ "wallPayloadSource": "offline_wall_payload"
+}
