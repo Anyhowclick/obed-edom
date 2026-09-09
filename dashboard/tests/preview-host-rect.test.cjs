@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { previewHostRect } = require(path.join(out, "types.js"));
+const { previewHostRect, compensatedFov } = require(path.join(out, "types.js"));
 
 test("previewHostRect centres a width-limited frame (frame narrower than the authored aspect)", () => {
   const rect = previewHostRect(1200, 420, 3840);
@@ -42,4 +42,20 @@ test("previewHostRect keeps the authored aspect for both FW and CG surface width
 test("previewHostRect is all zero when either frame dimension is zero", () => {
   assert.deepEqual(previewHostRect(0, 500, 3840), { x: 0, y: 0, width: 0, height: 0 });
   assert.deepEqual(previewHostRect(500, 0, 3840), { x: 0, y: 0, width: 0, height: 0 });
+});
+
+test("compensatedFov is the base fov when canvas equals the band", () => {
+  assert.ok(Math.abs(compensatedFov(1080, 1080) - 36.87) < 1e-9);
+});
+
+test("compensatedFov widens for a canvas taller than the band", () => {
+  const base = 36.87;
+  const baseRad = (base * Math.PI) / 180;
+  const expectedRad = 2 * Math.atan(2 * Math.tan(baseRad / 2));
+  const expected = (expectedRad * 180) / Math.PI;
+  assert.ok(Math.abs(compensatedFov(2160, 1080, base) - expected) < 1e-9);
+});
+
+test("compensatedFov falls back to the base fov when the band is zero", () => {
+  assert.equal(compensatedFov(1080, 0), 36.87);
 });

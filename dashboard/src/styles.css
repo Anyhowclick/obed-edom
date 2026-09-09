@@ -1988,6 +1988,13 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   border: var(--border-glass);
   border-radius: var(--radius-lg);
 }
+.maps-map-host {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #07070A;
+}
 .maps-map-band {
   position: absolute;
   left: 50%;
@@ -1996,14 +2003,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   height: min(100cqh, calc(100cqw * 1080 / var(--maps-surface-width)));
   transform: translate(-50%, -50%);
   z-index: 2;
-  overflow: hidden;
-}
-.maps-map-host {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  background: #07070A;
+  pointer-events: none;
 }
 .maps-map-host .maplibregl-ctrl-attrib {
   background: rgba(7, 7, 10, 0.72);

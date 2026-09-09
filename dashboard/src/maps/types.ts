@@ -45,7 +45,7 @@ export type MapsChurch = {
   assetHeight?: number;
   size?: number;
   opacity?: number;
-  reveal?: { kind: "brush"; duration: number };
+  reveal?: { kind: "brush"; duration: number; strokes?: number };
 };
 
 export type MapsCgOverride = {
@@ -204,6 +204,14 @@ export function previewHostRect(
   const width = Math.min(frameWidth, (frameHeight * surfaceWidth) / surfaceHeight);
   const height = (width * surfaceHeight) / surfaceWidth;
   return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
+}
+
+/** MapLibre's cameraToCenterDistance = 0.5*canvasHeight/tan(fov/2). Widening the canvas past the band (full-frame host) needs a matching fov widening so the band region projects the same as an export sized to the band alone. */
+export function compensatedFov(canvasHeight: number, bandHeight: number, baseFovDeg = 36.87): number {
+  if (!bandHeight) return baseFovDeg;
+  const baseFovRad = (baseFovDeg * Math.PI) / 180;
+  const fovRad = 2 * Math.atan((Math.tan(baseFovRad / 2) * canvasHeight) / bandHeight);
+  return (fovRad * 180) / Math.PI;
 }
 
 export function coerceHopKinds(doc: MapsDocument): MapsDocument {

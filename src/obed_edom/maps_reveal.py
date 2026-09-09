@@ -11,18 +11,23 @@ import time
 from pathlib import Path
 from typing import Callable, Iterator
 
+import cv2
 import numpy as np
 from PIL import Image
 
 from obed_edom.maps_movie import MOVIE_DIR, encode_fly_movie, ffmpeg_exe, frames_dir, safe_slide_id
-from obed_edom.watercolour import _blur
+from obed_edom.watercolour import _blur, _noise
 
 MAX_LONG_SIDE = 1600
 REVEAL_DIR = "reveal"
-REVEAL_ALGO_VERSION = 2
+REVEAL_ALGO_VERSION = 3
+DEFAULT_STROKES = 4
 STROKE_SPAN = 0.18
 STROKE_EDGE = 0.06
 STROKE_SAMPLES = 96
+FIELD_SCALE_LONG = 0.25
+FIELD_SCALE_SHORT = 0.5
+FIELD_SCALE_CUTOFF = 1200
 
 
 def reveal_path(output_dir: Path, slide_id: str, church_id: str, audience: str = "lw") -> Path:
@@ -39,12 +44,29 @@ def _fingerprint_path(dest: Path) -> Path:
 
 
 def reveal_fingerprint(
-    asset: Path, *, duration: float, opacity: float, seed: int, width: int, height: int
+    asset: Path,
+    *,
+    duration: float,
+    opacity: float,
+    seed: int,
+    width: int,
+    height: int,
+    strokes: int = DEFAULT_STROKES,
 ) -> str:
     stat = asset.stat()
     payload = "|".join(
         str(part)
-        for part in (stat.st_mtime_ns, stat.st_size, duration, opacity, seed, width, height, REVEAL_ALGO_VERSION)
+        for part in (
+            stat.st_mtime_ns,
+            stat.st_size,
+            duration,
+            opacity,
+            seed,
+            width,
+            height,
+            strokes,
+            REVEAL_ALGO_VERSION,
+        )
     )
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -60,16 +82,61 @@ def _smoothstep(a: np.ndarray) -> np.ndarray:
     return a * a * (3 - 2 * a)
 
 
-def _bezier_polyline(p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+def _blur_coarse(a: np.ndarray, sigma: float, scale: float = 0.25) -> np.ndarray:
+    """Blur at a fraction of resolution then resize back up — a per-frame blur is too costly at full res."""
+    if sigma <= 0:
+        return a
+    h, w = a.shape
+    sh, sw = max(2, round(h * scale)), max(2, round(w * scale))
+    small = cv2.resize(a, (sw, sh), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), max(sigma * scale, 0.6))
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _bezier_polyline(
+    p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, n: int, wobble: float = 0.0
+) -> tuple[np.ndarray, np.ndarray]:
     u = np.linspace(0.0, 1.0, n)
     pts = (1 - u)[:, None] ** 2 * p0 + 2 * (1 - u)[:, None] * u[:, None] * p1 + u[:, None] ** 2 * p2
+    if wobble:
+        pts = pts.copy()
+        pts[:, 1] += wobble * np.sin(4 * np.pi * u)
     seg_len = np.hypot(*np.diff(pts, axis=0).T)
     arc = np.concatenate([[0.0], np.cumsum(seg_len)])
     total = arc[-1] if arc[-1] > 0 else 1.0
     return pts, (arc / total).astype(np.float32)
 
 
-def _plan_strokes(shape: tuple[int, int], alpha: np.ndarray, rng: np.random.Generator) -> list[dict]:
+def _stroke_dist_arc(
+    row_lo: int, row_hi: int, w: int, pts: np.ndarray, arc_norm: np.ndarray, scale: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest-segment distance and arc-position fields, computed on a coarse grid then resized up."""
+    rows = row_hi - row_lo
+    coarse_h = max(2, round(rows * scale))
+    coarse_w = max(2, round(w * scale))
+    cy = np.linspace(row_lo, row_hi - 1, coarse_h, dtype=np.float32)
+    cx = np.linspace(0, w - 1, coarse_w, dtype=np.float32)
+    gyy, gxx = np.meshgrid(cy, cx, indexing="ij")
+    a, b = pts[:-1], pts[1:]
+    ab = b - a
+    denom = np.where(ab[:, 0] ** 2 + ab[:, 1] ** 2 == 0, 1e-6, ab[:, 0] ** 2 + ab[:, 1] ** 2).reshape(-1, 1, 1)
+    ax, ay = a[:, 0].reshape(-1, 1, 1), a[:, 1].reshape(-1, 1, 1)
+    abx, aby = ab[:, 0].reshape(-1, 1, 1), ab[:, 1].reshape(-1, 1, 1)
+    t = np.clip(((gxx[None] - ax) * abx + (gyy[None] - ay) * aby) / denom, 0, 1)
+    d = np.hypot(gxx[None] - (ax + t * abx), gyy[None] - (ay + t * aby))
+    idx = np.argmin(d, axis=0, keepdims=True)
+    dist_c = np.take_along_axis(d, idx, axis=0)[0]
+    arc0, arc1 = arc_norm[:-1].reshape(-1, 1, 1), arc_norm[1:].reshape(-1, 1, 1)
+    arc_seg = arc0 + t * (arc1 - arc0)
+    arc_c = np.take_along_axis(arc_seg, idx, axis=0)[0]
+    dist = cv2.resize(dist_c.astype(np.float32), (w, rows), interpolation=cv2.INTER_LINEAR)
+    arc = cv2.resize(arc_c.astype(np.float32), (w, rows), interpolation=cv2.INTER_LINEAR)
+    return dist, arc
+
+
+def _plan_strokes(
+    shape: tuple[int, int], alpha: np.ndarray, rng: np.random.Generator, strokes_count: int
+) -> list[dict]:
     """Ground-up bezier brush strokes: each stroke's slab carries distance-to-curve and arc-position fields."""
     h, w = shape
     ys, xs = np.nonzero(alpha > 8)
@@ -81,75 +148,83 @@ def _plan_strokes(shape: tuple[int, int], alpha: np.ndarray, rng: np.random.Gene
     bw = max(1, x1 - x0)
     bh = max(1, y1 - y0)
     short = min(bw, bh)
-    k = int(np.clip(round(math.sqrt(bw * bh) / 90), 10, 18))
-    wid = short * rng.uniform(0.12, 0.18)
-    feather = 0.015 * short
-    step = bh / k
+    k = max(2, int(strokes_count))
+    band_h = bh / k
+    wid = band_h * 1.35
+    feather = max(1.0, 0.10 * wid)
+    cov_feather = 0.015 * short
+    field_scale = FIELD_SCALE_LONG if max(h, w) > FIELD_SCALE_CUTOFF else FIELD_SCALE_SHORT
 
     raw = []
     for i in range(k):
-        cy = y1 - (i + 0.5) * step + rng.uniform(-0.15, 0.15) * bh / k
+        cy = y1 - (i + 0.5) * band_h + rng.uniform(-0.15, 0.15) * band_h
         p0 = np.array([x0 - 0.15 * bw, cy + rng.uniform(-0.06, 0.06) * bh], np.float32)
         p2 = np.array([x1 + 0.15 * bw, cy + rng.uniform(-0.06, 0.06) * bh], np.float32)
         if i % 2:
             p0, p2 = p2, p0
-        p1 = (p0 + p2) / 2 + np.array([0.0, rng.uniform(-0.10, 0.10) * bh], np.float32)
-        raw.append((cy, p0, p1, p2))
+        p1 = (p0 + p2) / 2 + np.array([0.0, rng.uniform(-0.12, 0.12) * bh], np.float32)
+        wobble = rng.uniform(0.015, 0.035) * bh
+        raw.append((cy, p0, p1, p2, wobble))
     raw.sort(key=lambda r: -r[0])
 
     strokes = []
-    for idx, (cy, p0, p1, p2) in enumerate(raw):
+    for idx, (cy, p0, p1, p2, wobble) in enumerate(raw):
         row_lo = max(0, int(math.floor(cy - 1.2 * wid)))
         row_hi = min(h, int(math.ceil(cy + 1.2 * wid)) + 1)
         if row_hi <= row_lo:
             continue
-        pts, arc_norm = _bezier_polyline(p0, p1, p2, STROKE_SAMPLES)
-        yy, xx = np.mgrid[row_lo:row_hi, 0:w].astype(np.float32)
-        dist = np.full(yy.shape, np.inf, np.float32)
-        arc = np.zeros(yy.shape, np.float32)
-        for s in range(len(pts) - 1):
-            a, b = pts[s], pts[s + 1]
-            ab = b - a
-            denom = float(ab[0] ** 2 + ab[1] ** 2) or 1e-6
-            t = np.clip(((xx - a[0]) * ab[0] + (yy - a[1]) * ab[1]) / denom, 0, 1)
-            d = np.hypot(xx - (a[0] + t * ab[0]), yy - (a[1] + t * ab[1]))
-            better = d < dist
-            dist = np.where(better, d, dist)
-            arc = np.where(better, arc_norm[s] + t * (arc_norm[s + 1] - arc_norm[s]), arc)
+        pts, arc_norm = _bezier_polyline(p0, p1, p2, STROKE_SAMPLES, wobble)
+        dist, arc = _stroke_dist_arc(row_lo, row_hi, w, pts, arc_norm, field_scale)
+
+        taper = 0.55 + 0.45 * np.power(np.clip(np.sin(np.pi * arc), 0, None), 0.6)
+        noise_pts = _blur(rng.normal(0, 1, (1, 16)).astype(np.float32), 1.5).ravel()
+        noise_pts = noise_pts / (np.abs(noise_pts).max() + 1e-6)
+        lowfreq = np.interp(arc.ravel(), np.linspace(0, 1, noise_pts.size, dtype=np.float32), noise_pts)
+        lowfreq = lowfreq.reshape(arc.shape).astype(np.float32)
+        w_s = wid * taper * (1 + 0.18 * lowfreq)
+
+        edge_noise = _noise(rng, dist.shape, 0.01 * short)
+        edge_noise = np.clip(edge_noise / (edge_noise.std() * 3 + 1e-6), -1, 1)
+        profile = np.clip((w_s / 2 + edge_noise * 0.12 * wid - dist) / feather, 0, 1)
+
         bristle_col = _blur(rng.random((row_hi - row_lo, 1)).astype(np.float32), 1.2)
         lo, hi = float(bristle_col.min()), float(bristle_col.max())
         bristle_col = (bristle_col - lo) / (hi - lo) if hi > lo else bristle_col
-        bristle = np.broadcast_to(0.82 + 0.18 * bristle_col, (row_hi - row_lo, w))
+        edge_prox = np.clip(dist / (w_s / 2 + 1e-6), 0, 1)
+        bristle = (0.82 + 0.18 * bristle_col) * (0.85 + 0.30 * edge_prox)
+
+        cap_edge = STROKE_EDGE * (1 + 0.6 * np.clip(dist / (w_s / 2 + 1e-6), 0, 2))
+
         strokes.append(
             dict(
                 row_slice=slice(row_lo, row_hi),
                 dist=dist,
                 arc=arc,
-                wid=wid,
-                feather=feather,
+                profile=profile,
                 bristle=bristle,
+                cap_edge=cap_edge,
+                cov_feather=cov_feather,
                 t_start=idx * (1 - STROKE_SPAN) / max(1, k - 1),
             )
         )
     return strokes
 
 
-def reveal_frames(rgba: np.ndarray, *, count: int, seed: int) -> Iterator[np.ndarray]:
+def reveal_frames(rgba: np.ndarray, *, count: int, seed: int, strokes: int = DEFAULT_STROKES) -> Iterator[np.ndarray]:
     rng = np.random.default_rng(seed)
     h, w = rgba.shape[:2]
     alpha = rgba[:, :, 3].astype(np.float32)
-    strokes = _plan_strokes((h, w), alpha, rng)
+    planned = _plan_strokes((h, w), alpha, rng, strokes)
     prev_total = np.zeros((h, w), np.float32)
     for i in range(count):
         t = i / max(1, count - 1)
         total = np.zeros((h, w), np.float32)
-        for st in strokes:
+        for st in planned:
             rs = st["row_slice"]
             p = np.clip((t - st["t_start"]) / STROKE_SPAN, 0, 1)
-            cov = _smoothstep(np.clip((p - st["arc"]) / STROKE_EDGE, 0, 1))
-            cov = _blur(cov, st["feather"])
-            prof = np.clip((st["wid"] / 2 - st["dist"]) / st["feather"], 0, 1)
-            total[rs] += cov * prof * st["bristle"]
+            cov = _smoothstep(np.clip((p - st["arc"]) / st["cap_edge"], 0, 1))
+            cov = _blur_coarse(cov, st["cov_feather"])
+            total[rs] += cov * st["profile"] * st["bristle"]
         total = np.clip(total, 0, 1)
         total = np.maximum(prev_total, total)
         if i == count - 1:
@@ -203,6 +278,7 @@ def render_reveal(
     seed: int,
     fps: int = 30,
     opacity: float = 1.0,
+    strokes: int = DEFAULT_STROKES,
     fingerprint: str | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> Path:
@@ -252,7 +328,7 @@ def render_reveal(
         "-an",
         str(tmp_dest),
     ]
-    frames = reveal_frames(rgba, count=count, seed=seed)
+    frames = reveal_frames(rgba, count=count, seed=seed, strokes=strokes)
     try:
         _run_ffmpeg_stdin(cmd, frames, is_cancelled)
     except Exception:
@@ -276,6 +352,7 @@ def reveal_movie_fingerprint(base_png: Path, landmarks: list[dict]) -> str:
             landmark["duration"],
             landmark["seed"],
             landmark.get("opacity", 1.0),
+            landmark.get("strokes", DEFAULT_STROKES),
         )
         for landmark in landmarks
     )
@@ -326,7 +403,11 @@ def render_slide_reveal_movie(
             rgba = rgba.copy()
             rgba[:, :, 3] = np.round(rgba[:, :, 3].astype(np.float32) * opacity).astype(np.uint8)
         count = max(2, round(float(landmark["duration"]) * fps))
-        frames = list(reveal_frames(rgba, count=count, seed=int(landmark["seed"])))
+        frames = list(
+            reveal_frames(
+                rgba, count=count, seed=int(landmark["seed"]), strokes=int(landmark.get("strokes", DEFAULT_STROKES))
+            )
+        )
         prepared.append(dict(x=int(landmark["x"]), y=int(landmark["y"]), frames=frames))
 
     tail = round(0.3 * fps)

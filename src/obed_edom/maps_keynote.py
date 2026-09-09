@@ -1528,6 +1528,7 @@ def _render_reveals(
                 duration = float(reveal.get("duration") or 1.2)
                 seed = reveal_seed(church_id)
                 opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
+                strokes = int(reveal.get("strokes") or 4)
                 fingerprint = reveal_fingerprint(
                     asset,
                     duration=duration,
@@ -1535,6 +1536,7 @@ def _render_reveals(
                     seed=seed,
                     width=int(church.get("assetWidth") or 0),
                     height=int(church.get("assetHeight") or 0),
+                    strokes=strokes,
                 )
                 if reveal_stale(dest, fingerprint):
                     _raise_if_cancelled(is_cancelled)
@@ -1545,6 +1547,7 @@ def _render_reveals(
                         duration=duration,
                         seed=seed,
                         opacity=opacity,
+                        strokes=strokes,
                         fingerprint=fingerprint,
                         is_cancelled=is_cancelled,
                     )
@@ -1598,6 +1601,7 @@ def _render_reveals(
                         duration=float(reveal.get("duration") or 1.2),
                         seed=reveal_seed(str(church.get("id") or "")),
                         opacity=float(church.get("opacity") if church.get("opacity") is not None else 1),
+                        strokes=int(reveal.get("strokes") or 4),
                     )
                 )
             if not landmarks:

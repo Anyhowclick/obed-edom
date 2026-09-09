@@ -2269,24 +2269,48 @@ export function MapsTab() {
                         Paint-on reveal
                       </label>
                       {pin.reveal && (
-                        <label>
-                          Reveal duration (s)
-                          <input
-                            type="number"
-                            min="0.3"
-                            max="5"
-                            step="0.1"
-                            value={pin.reveal.duration}
-                            disabled={locked}
-                            onChange={(event) =>
-                              updateActive({
-                                churches: (activeView?.churches || []).map((c) =>
-                                  c.id === pin.id ? { ...c, reveal: { kind: "brush", duration: Number(event.target.value) } } : c
-                                ),
-                              })
-                            }
-                          />
-                        </label>
+                        <>
+                          <label>
+                            Reveal duration (s)
+                            <input
+                              type="number"
+                              min="0.3"
+                              max="5"
+                              step="0.1"
+                              value={pin.reveal.duration}
+                              disabled={locked}
+                              onChange={(event) =>
+                                updateActive({
+                                  churches: (activeView?.churches || []).map((c) =>
+                                    c.id === pin.id
+                                      ? { ...c, reveal: { ...c.reveal!, kind: "brush", duration: Number(event.target.value) } }
+                                      : c
+                                  ),
+                                })
+                              }
+                            />
+                          </label>
+                          <label>
+                            Strokes
+                            <input
+                              type="number"
+                              min="2"
+                              max="24"
+                              step="1"
+                              value={pin.reveal.strokes ?? 4}
+                              disabled={locked}
+                              onChange={(event) =>
+                                updateActive({
+                                  churches: (activeView?.churches || []).map((c) =>
+                                    c.id === pin.id
+                                      ? { ...c, reveal: { ...c.reveal!, kind: "brush", strokes: Number(event.target.value) } }
+                                      : c
+                                  ),
+                                })
+                              }
+                            />
+                          </label>
+                        </>
                       )}
                     </>
                   )}

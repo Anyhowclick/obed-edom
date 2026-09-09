@@ -409,7 +409,7 @@ def test_render_reveals_returns_mapping_without_mutating_church(tmp_path: Path, 
 def test_render_reveals_regenerates_when_duration_or_opacity_changes(tmp_path: Path, monkeypatch):
     calls: list[float] = []
 
-    def fake_render(asset, dest, *, duration, seed, opacity, fingerprint=None, is_cancelled=None):
+    def fake_render(asset, dest, *, duration, seed, opacity, strokes=4, fingerprint=None, is_cancelled=None):
         calls.append(duration)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(f"mov-{duration}-{opacity}".encode())

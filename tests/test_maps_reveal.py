@@ -262,3 +262,63 @@ def test_render_reveal_encodes_real_movie(tmp_path: Path):
     assert result == dest
     assert dest.exists()
     assert dest.stat().st_size > 0
+
+
+def _row_band_count(frame: np.ndarray, threshold: float = 40.0) -> int:
+    row_means = frame[:, :, 3].astype(float).mean(axis=1)
+    covered = row_means > threshold
+    bands = 0
+    prev = False
+    for value in covered:
+        if value and not prev:
+            bands += 1
+        prev = value
+    return bands
+
+
+def test_fewer_strokes_yields_fewer_broad_bands():
+    rgba = _rgba(w=200, h=200)
+    frames = list(reveal_frames(rgba, count=45, seed=reveal_seed("church-1"), strokes=3))
+    frame = frames[round(0.35 * (len(frames) - 1))]
+    assert _row_band_count(frame) <= 3
+
+
+def test_more_strokes_yields_more_bands_than_fewer():
+    rgba = _rgba(w=200, h=200)
+    seed = reveal_seed("church-1")
+    frame_few = list(reveal_frames(rgba, count=45, seed=seed, strokes=3))[round(0.35 * 44)]
+    frame_many = list(reveal_frames(rgba, count=45, seed=seed, strokes=12))[round(0.35 * 44)]
+    assert _row_band_count(frame_many) >= _row_band_count(frame_few)
+
+
+def test_stroke_mid_wider_than_ends():
+    """A stroke's width tapers: the column extent (rows covered) is on average wider near the middle than near the ends."""
+    rgba = _rgba(w=600, h=200)
+    frames = list(reveal_frames(rgba, count=8, seed=reveal_seed("taper"), strokes=6))
+    frame = frames[-2]
+    alpha = frame[:, :, 3].astype(float) > 10
+    extent = alpha.sum(axis=0)
+    w = extent.shape[0]
+    mid = extent[w // 3 : 2 * w // 3].mean()
+    ends = np.concatenate([extent[: w // 6], extent[-w // 6 :]]).mean()
+    assert mid > ends
+
+
+def test_strokes_determinism_and_seed_variation():
+    rgba = _rgba(w=120, h=90)
+    seed = reveal_seed("church-strokes")
+    a = list(reveal_frames(rgba, count=10, seed=seed, strokes=8))
+    b = list(reveal_frames(rgba, count=10, seed=seed, strokes=8))
+    for fa, fb in zip(a, b):
+        assert np.array_equal(fa, fb)
+    other = list(reveal_frames(rgba, count=10, seed=seed, strokes=4))
+    assert not all(np.array_equal(fa, fo) for fa, fo in zip(a, other))
+
+
+def test_reveal_frames_timing_smoke(tmp_path: Path):
+    import time
+
+    rgba = _rgba(w=640, h=480)
+    t0 = time.time()
+    list(reveal_frames(rgba, count=20, seed=reveal_seed("timing"), strokes=4))
+    assert time.time() - t0 < 5.0

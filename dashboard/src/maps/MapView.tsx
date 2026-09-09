@@ -13,7 +13,9 @@ import { installPatternById, installPatterns, paperGrainUrl, stylePatterns } fro
 import { mapsTransformRequest } from "./tileProxy";
 import {
   clampZoom,
+  compensatedFov,
   minZoomForView,
+  previewHostRect,
   wrapLon,
   worldCopyWarning,
   type MapsCamera,
@@ -36,10 +38,9 @@ const ML_MIN_ZOOM = -2;
 const ML_PREVIEW_MIN_ZOOM = -8;
 const ML_MAX_ZOOM = 22;
 
-// The map container is `.maps-map-band`, already sized to the authored aspect by CSS — the whole canvas is the band.
-function previewSurfaceRect(map: MapLibreMap, _authoredWidth = WALL_W) {
+function previewSurfaceRect(map: MapLibreMap, authoredWidth = WALL_W) {
   const container = map.getContainer();
-  return { x: 0, y: 0, width: container.clientWidth, height: container.clientHeight };
+  return previewHostRect(container.clientWidth, container.clientHeight, authoredWidth);
 }
 
 function previewZoomDelta(map: MapLibreMap, authoredWidth = WALL_W): number {
@@ -53,9 +54,36 @@ function objectPreviewScale(map: MapLibreMap, authoredWidth = WALL_W): number {
   return width > 0 ? width / authoredWidth : 1;
 }
 
-// The preview canvas is now sized to the export band exactly, so a whole-canvas grab is the export.
-function captureCanvas(canvas: HTMLCanvasElement) {
-  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
+  if (!rect) {
+    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  }
+  const scaleX = canvas.width / canvas.clientWidth;
+  const scaleY = canvas.height / canvas.clientHeight;
+  const output = document.createElement("canvas");
+  output.width = Math.max(1, Math.round(rect.width * scaleX));
+  output.height = Math.max(1, Math.round(rect.height * scaleY));
+  const ctx = output.getContext("2d");
+  if (!ctx) return Promise.resolve(null);
+  ctx.drawImage(
+    canvas,
+    rect.x * scaleX,
+    rect.y * scaleY,
+    rect.width * scaleX,
+    rect.height * scaleY,
+    0,
+    0,
+    output.width,
+    output.height
+  );
+  return new Promise<Blob | null>((resolve) => output.toBlob(resolve, "image/png"));
+}
+
+function applyFovCompensation(map: MapLibreMap, authoredWidth: number) {
+  const container = map.getContainer();
+  const band = previewHostRect(container.clientWidth, container.clientHeight, authoredWidth);
+  const setFov = (map as unknown as { setVerticalFieldOfView?: (deg: number) => void }).setVerticalFieldOfView;
+  if (typeof setFov === "function") setFov.call(map, compensatedFov(container.clientHeight, band.height));
 }
 
 function clampMapZoom(zoom: number): number {
@@ -124,6 +152,7 @@ function recastPreviewCamera(
   try {
     const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
     map.resize();
+    applyFovCompensation(map, authoredWidth);
     const d = applyPreviewZoomLimits(map, minZoom, previewZoomDelta(map, authoredWidth));
     deltaRef.current = d;
     applyBoundaryZoomOffset(map, d);
@@ -377,15 +406,17 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         cameraRef.current.zoom
       );
       const canvas = map.getCanvas();
+      const surface = previewSurfaceRect(map, authoredWidthRef.current);
       const shifted = map.unproject([
-        canvas.clientWidth / 2 + (cgShiftX * canvas.clientWidth) / authoredWidthRef.current,
+        canvas.clientWidth / 2 + (cgShiftX * surface.width) / authoredWidthRef.current,
         canvas.clientHeight / 2,
       ]);
       return { ...current, lat: shifted.lat, lon: wrapLon(shifted.lng) };
     },
     captureBlob() {
       const map = mapRef.current;
-      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
+      if (!map) return Promise.resolve(null);
+      return captureCanvas(map.getCanvas(), previewSurfaceRect(map, authoredWidthRef.current));
     },
     capturePreviewBlob() {
       const map = mapRef.current;
@@ -584,6 +615,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           try {
             map?.resize();
             if (map) {
+              applyFovCompensation(map, authoredWidthRef.current);
               const zMin = minZoomRef.current;
               const d = applyPreviewZoomLimits(map, zMin, previewZoomDelta(map, authoredWidthRef.current));
               deltaRef.current = d;
@@ -609,6 +641,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.on("style.load", () => {
           map?.resize();
           if (map) {
+            applyFovCompensation(map, authoredWidthRef.current);
             ensureLowZoomRaster(map, overlay.current.styleId);
             installPatterns(map, stylePatterns(overlay.current.styleId));
             applyLayerFilters(map, overlay.current.hiddenLayers);
@@ -687,6 +720,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
         map.resize();
+        applyFovCompensation(map, authoredWidthRef.current);
         applyBoundaryZoomOffset(map, previewZoomDelta(map, authoredWidthRef.current));
         ensureLowZoomRaster(map, styleId);
         applyLayerFilters(map, overlay.current.hiddenLayers);
@@ -852,11 +886,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       className={`maps-map-frame ${surfaceClass}`}
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
     >
+      <div className="maps-map-host" ref={host} />
+      {styleId === "watercolour" && (
+        <div className="maps-paper-grain" style={{ backgroundImage: `url(${paperGrainUrl()})` }} />
+      )}
+      <div className="maps-nav-margin top" />
+      <div className="maps-nav-margin bottom" />
       <div className="maps-map-band">
-        <div className="maps-map-host" ref={host} />
-        {styleId === "watercolour" && (
-          <div className="maps-paper-grain" style={{ backgroundImage: `url(${paperGrainUrl()})` }} />
-        )}
         <div className="maps-crop-overlay">
           {splitCg ? (
             <div className="maps-crop-frame cg">
@@ -882,19 +918,17 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             </div>
           )}
         </div>
-        {handlePos && (
-          <div
-            className="maps-object-handle"
-            style={{ left: handlePos.x, top: handlePos.y }}
-            onPointerDown={onHandlePointerDown}
-            onPointerMove={onHandlePointerMove}
-            onPointerUp={onHandlePointerUp}
-            onPointerCancel={onHandlePointerUp}
-          />
-        )}
       </div>
-      <div className="maps-nav-margin top" />
-      <div className="maps-nav-margin bottom" />
+      {handlePos && (
+        <div
+          className="maps-object-handle"
+          style={{ left: handlePos.x, top: handlePos.y }}
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+          onPointerCancel={onHandlePointerUp}
+        />
+      )}
       {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}
     </div>

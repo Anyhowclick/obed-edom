@@ -35,6 +35,7 @@ from obed_edom.maps_geo import (
     load_admin0,
     load_places,
     parse_maps_query,
+    sea_overview_camera,
 )
 from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
 from obed_edom.maps_tiles import (
@@ -121,6 +122,7 @@ class MapsReveal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["brush"] = "brush"
     duration: float = Field(default=1.2, ge=0.3, le=5)
+    strokes: int = Field(default=4, ge=2, le=24)
 
 
 class MapsChurch(BaseModel):
@@ -531,7 +533,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
     root = output_root() / ".maps" / job_id
     preview = root / "previews"
     preview.mkdir(parents=True, exist_ok=True)
-    camera = {"lat": 1.2894, "lon": 103.8596, "zoom": 16.7, "pitch": 0, "bearing": 52}
+    camera = sea_overview_camera()
     return {
         "stem": f"maps-{job_id}",
         "outputDir": str(root),
@@ -551,7 +553,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "slides": [
             {
                 "id": "s1",
-                "title": "Downtown Singapore",
+                "title": "Southeast Asia",
                 "style": "positron",
                 "camera": camera,
                 "highlights": [],
