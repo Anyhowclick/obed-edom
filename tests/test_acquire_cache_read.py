@@ -18,6 +18,15 @@ def _cached_wall(reader: str = "jxa") -> dict:
     }
 
 
+def _fail_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
+                   is_cancelled=None):
+    pytest.fail("legacy read")
+
+
+def _no_bulk_geometry(key_path, slides=None, *, keep_open=False, log=None):
+    return {}
+
+
 @pytest.mark.parametrize(
     ("mode", "reader"),
     [("on", "jxa"), ("on", "offline"), ("off", "jxa")],
@@ -30,7 +39,7 @@ def test_acquire_uses_compatible_complete_cache_for_ranged_apply(
     cached = _cached_wall(reader)
     logs: list[str] = []
     monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
-    monkeypatch.setattr(rk, "inspect_keynote", lambda *a, **k: pytest.fail("legacy read"))
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
 
     out = rk.acquire_wall_payload(
         source, slide_range=frozenset({2}), mode=mode, say=logs.append
@@ -60,10 +69,14 @@ def test_rejected_cache_bypasses_legacy_cache(monkeypatch, tmp_path, cached):
     source = tmp_path / "wall.key"
     source.touch()
     calls: list[dict] = []
+
+    def fake_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
+                      is_cancelled=None):
+        calls.append({"use_cache": use_cache})
+        return {"legacy": True}
+
     monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
-    monkeypatch.setattr(
-        rk, "inspect_keynote", lambda *_args, **kwargs: calls.append(kwargs) or {"legacy": True}
-    )
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
 
     out = rk.acquire_wall_payload(source, slide_range=frozenset({2}), mode="off", say=lambda _m: None)
 
@@ -75,13 +88,22 @@ def test_rejected_cache_bypasses_cache_after_two_tier_failure(monkeypatch, tmp_p
     source = tmp_path / "wall.key"
     source.touch()
     calls: list[dict] = []
+
+    def fake_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
+                      is_cancelled=None):
+        calls.append({"use_cache": use_cache})
+        return {"legacy": True}
+
+    def boom_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
+        raise RuntimeError("bad IWA")
+
     monkeypatch.setattr(rk, "cached_payload", lambda _source: {"reader": "offline", "slides": []})
-    monkeypatch.setattr(rk, "inspect_keynote", lambda *_args, **kwargs: calls.append(kwargs) or {"legacy": True})
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
     import obed_edom.inspect as inspect_mod
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(inspect_mod, "bulk_geometry", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad IWA")))
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom_two_tier)
 
     out = rk.acquire_wall_payload(source, slide_range=frozenset({2}), mode="on", say=lambda _m: None)
 
@@ -98,10 +120,13 @@ def test_fresh_two_tier_read_is_full_deck_and_stamped_offline(monkeypatch, tmp_p
     import obed_edom.inspect as inspect_mod
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(inspect_mod, "bulk_geometry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
 
-    def fake_two_tier(_source, **kwargs):
-        seen.update(kwargs)
+    _unset = object()
+
+    def fake_two_tier(key_path, bulk_geometry_fn=None, slide_range=_unset, *, deck=None, log=None):
+        if slide_range is not _unset:
+            seen["slide_range"] = slide_range
         return {"slideCount": 3, "slides": _cached_wall()["slides"], "_offline": {"bulk_ok": True}}
 
     monkeypatch.setattr(offline_mod, "two_tier_wall_payload", fake_two_tier)
@@ -122,11 +147,8 @@ def test_rejected_cache_bypasses_cache_on_partial_two_tier_fallback(monkeypatch,
     import obed_edom.inspect as inspect_mod
     import obed_edom.offline_inspect as offline_mod
 
-    monkeypatch.setattr(inspect_mod, "bulk_geometry", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(
-        offline_mod,
-        "two_tier_wall_payload",
-        lambda *_args, **_kwargs: {
+    def fake_two_tier(key_path, bulk_geometry_fn=None, slide_range=None, *, deck=None, log=None):
+        return {
             "slideCount": 1,
             "slides": [{"number": 1, "index": 0, "items": []}],
             "_offline": {
@@ -134,8 +156,10 @@ def test_rejected_cache_bypasses_cache_on_partial_two_tier_fallback(monkeypatch,
                 "fallback_slides": [1],
                 "fallback": [{"slide": 1, "reason": "count-mismatch"}],
             },
-        },
-    )
+        }
+
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", fake_two_tier)
     monkeypatch.setattr(
         rk, "_merge_legacy_slides", lambda *_args, **kwargs: calls.append(kwargs)
     )
@@ -150,10 +174,14 @@ def test_no_cache_keeps_legacy_cache_behavior(monkeypatch, tmp_path):
     source = tmp_path / "wall.key"
     source.touch()
     calls: list[dict] = []
+
+    def fake_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
+                      is_cancelled=None):
+        calls.append({} if use_cache is None else {"use_cache": use_cache})
+        return {"legacy": True}
+
     monkeypatch.setattr(rk, "cached_payload", lambda _source: None)
-    monkeypatch.setattr(
-        rk, "inspect_keynote", lambda *_args, **kwargs: calls.append(kwargs) or {"legacy": True}
-    )
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect)
 
     rk.acquire_wall_payload(source, slide_range=frozenset({2}), mode="off", say=lambda _m: None)
 

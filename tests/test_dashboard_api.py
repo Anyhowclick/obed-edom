@@ -83,16 +83,12 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
     template.write_text("template")
     cached = _cached_wall("offline")
     original = copy.deepcopy(cached)
-    seen = {"inspects": [], "acquires": [], "prepares": []}
+    seen = {"inspects": [], "acquires": []}
     logs = []
 
     def fake_acquire(source, *, slide_range, mode, say):
         seen["acquires"].append((Path(source), slide_range))
         return cached
-
-    def fake_prepare(source, wall_payload, template_path, template_data, say):
-        seen["prepares"].append(wall_payload is cached)
-        return 4.0
 
     def fake_inspect(path, **kwargs):
         seen["inspects"].append((Path(path), kwargs))
@@ -108,7 +104,6 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
         }
 
     monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
-    monkeypatch.setattr(app_mod, "prepare_wall_payload", fake_prepare)
     monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
     monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
     monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": True})
@@ -137,9 +132,7 @@ def test_ranged_propose_reuses_complete_cache_without_renumbering_or_mutating_it
     assert [slide["number"] for slide in proposal["full_wall_payload"]["slides"]] == [1, 2, 3]
     assert proposal["wall_payload"]["slides"][0] is not proposal["full_wall_payload"]["slides"][2]
     assert proposal["slide_range"] == frozenset({3})
-    assert proposal["card_stroke"] == 4.0
     assert seen["acquires"] == [(wall, None)]
-    assert seen["prepares"] == [True]
     assert seen["inspects"] == [(template, {})]
     assert result["pages"][0]["index"] == 2
     assert result["pages"][0]["decision"]["wallIndex"] == 2
@@ -167,10 +160,6 @@ def test_ranged_propose_falls_back_for_malformed_cache_and_rejects_valid_cache_o
         lambda path, **kwargs: {"slideWidth": 1920, "slideHeight": 1080, "slides": []},
     )
     monkeypatch.setattr(
-        app_mod, "prepare_wall_payload",
-        lambda source, wall_payload, template_path, template_data, say: 3.0,
-    )
-    monkeypatch.setattr(
         app_mod,
         "propose_framings",
         lambda *_args, **_kwargs: {"wallDigests": [], "templateDigest": "", "pages": []},
@@ -195,16 +184,11 @@ def test_ranged_propose_rejects_navigator_range_past_visible_slides(tmp_path, mo
     monkeypatch.setattr(
         app_mod, "acquire_wall_payload", lambda source, *, slide_range, mode, say: _cached_wall()
     )
-    monkeypatch.setattr(
-        app_mod,
-        "inspect_keynote",
-        lambda *_args, **_kwargs: pytest.fail("valid navigator range must reject before the template read"),
-    )
-    monkeypatch.setattr(
-        app_mod,
-        "prepare_wall_payload",
-        lambda *_args, **_kwargs: pytest.fail("valid navigator range must reject before enrichment"),
-    )
+    def fail_inspect(key_path, *, export_dir=None, slide_range=None, use_cache=None,
+                      is_cancelled=None):
+        pytest.fail("valid navigator range must reject before the template read")
+
+    monkeypatch.setattr(app_mod, "inspect_keynote", fail_inspect)
 
     logs: list[str] = []
     with pytest.raises(RuntimeError, match="shows 2 slides"):
@@ -486,9 +470,6 @@ def test_resize_asks_for_framings_before_remapping(tmp_path, monkeypatch):
     def fake_acquire(source, *, slide_range, mode, say):
         return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
 
-    def fake_prepare(source, wall_payload, template_path, template_data, say):
-        return 3.0
-
     def fake_inspect(path, **kwargs):
         return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
 
@@ -519,7 +500,6 @@ def test_resize_asks_for_framings_before_remapping(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
     monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
-    monkeypatch.setattr(app_mod, "prepare_wall_payload", fake_prepare)
     monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
     monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
     client = TestClient(app)
@@ -567,9 +547,6 @@ def test_side_content_whitelist_and_undo_round_trip(tmp_path, monkeypatch):
     def fake_acquire(source, *, slide_range, mode, say):
         return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
 
-    def fake_prepare(source, wall_payload, template_path, template_data, say):
-        return 3.0
-
     def fake_inspect(path, **kwargs):
         return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
 
@@ -593,7 +570,6 @@ def test_side_content_whitelist_and_undo_round_trip(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
     monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
-    monkeypatch.setattr(app_mod, "prepare_wall_payload", fake_prepare)
     monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
     monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
     client = TestClient(app)
