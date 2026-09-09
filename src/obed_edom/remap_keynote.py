@@ -796,6 +796,60 @@ def restore_source_builds(
     }
 
 
+_DETAIL_LOG_CAP = 40
+_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown")
+_RESOLVE_RARE_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip")
+
+
+def _say_chunked_detail(
+    label: str, parts: list[str], say: Callable[[str], None], trailing_note: str = ""
+) -> None:
+    if not parts:
+        return
+    chunks = [parts[i : i + _DETAIL_LOG_CAP] for i in range(0, len(parts), _DETAIL_LOG_CAP)]
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, start=1):
+        prefix = f"{label}: ({i}/{total}) " if total > 1 else f"{label}: "
+        line = prefix + " ".join(chunk)
+        if i == total:
+            line += trailing_note
+        say(line)
+
+
+def _resolve_detail_parts(tokens: dict[str, list[str]]) -> tuple[list[str], str]:
+    """Rare kinds are never dropped; only the `sigFallback` tail is capped."""
+    parts = [f"{k}({a})" for k in _RESOLVE_RARE_KINDS for a in tokens.get(k) or ()]
+    fallback = tokens.get("sigFallback") or ()
+    kept = fallback[:_DETAIL_LOG_CAP]
+    parts += [f"sigFallback({a})" for a in kept]
+    note = f" (+{len(fallback) - len(kept)} more)" if len(fallback) > len(kept) else ""
+    return parts, note
+
+
+def _say_stat_finalize_detail(
+    child_resize_result: dict[str, Any],
+    badge_raises: list[dict] | None,
+    say: Callable[[str], None],
+) -> None:
+    tokens = child_resize_result.get("tokens") or {}
+    raise_parts = [f"{k}({a})" for k in _RAISE_TOKEN_KINDS for a in tokens.get(k) or ()]
+    _say_chunked_detail("Stat raise detail", raise_parts, say)
+    front_err = child_resize_result.get("frontErr") or ""
+    if front_err:
+        say(
+            f"WARNING stat-finalize: GUI Bring to Front returned error(s) {front_err} — "
+            "-1743/-25211 mean Accessibility is denied to the launching process and every "
+            "GUI raise on this run is unreliable."
+        )
+    if badge_raises:
+        detail = child_resize_result.get("detail") or ""
+        badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
+        if badge_detail:
+            say(f"Badge raise detail: {badge_detail}")
+    resolve_parts, resolve_note = _resolve_detail_parts(tokens)
+    _say_chunked_detail("Stat resolve detail", resolve_parts, say, resolve_note)
+
+
 def remap_keynote(
     source: Path | str,
     dest: Path | str,
@@ -1424,11 +1478,7 @@ def remap_keynote(
                     "stay buried; the remaining raises on the affected slide(s) were "
                     "skipped rather than guessed."
                 )
-            if badge_raises:
-                detail = child_resize_result.get("detail") or ""
-                badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
-                if badge_detail:
-                    say(f"Badge raise detail: {badge_detail}")
+            _say_stat_finalize_detail(child_resize_result, badge_raises, say)
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "
