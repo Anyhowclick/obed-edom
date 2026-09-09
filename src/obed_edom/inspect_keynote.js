@@ -445,28 +445,9 @@ function collectItems(slide, bulkRead) {
 
 // No z-order from iWorkItems (reports 0 on real slides). Remap stacking is role_order, not recovered z.
 
-function exportImages(Keynote, doc, exportDir) {
-  const folder = Path(exportDir);
-  try {
-    Keynote.export(doc, {
-      to: folder,
-      as: "slide images",
-      withProperties: { imageFormat: "PNG", skippedSlides: false },
-    });
-    return true;
-  } catch (err1) {
-    try {
-      doc.export({
-        to: folder,
-        as: "slide images",
-        withProperties: { imageFormat: "PNG" },
-      });
-      return true;
-    } catch (err2) {
-      return false;
-    }
-  }
-}
+// JXA export never works on 15.3.1 (both forms throw "Can't convert types.", 0 PNGs).
+// Export is AppleScript-only now (inspect.export_slide_images); exported/exportError
+// stay false/"" here for payload-shape parity.
 
 function canvasSize(doc) {
   // slideWidth() throws; width() works.
@@ -628,17 +609,6 @@ function run(argv) {
     });
   }
 
-  let exported = false;
-  let exportError = "";
-  if (plan.exportDir) {
-    try {
-      exported = exportImages(Keynote, doc, plan.exportDir);
-      if (!exported) exportError = "Keynote export as slide images failed.";
-    } catch (eExp) {
-      exportError = String(eExp);
-    }
-  }
-
   try {
     Keynote.close(doc, { saving: "no" });
   } catch (e3) {
@@ -652,8 +622,8 @@ function run(argv) {
     slideWidth: slideWidth,
     slideHeight: slideHeight,
     slideCount: slides.length,
-    exported: exported,
-    exportError: exportError,
+    exported: false,
+    exportError: "",
     slides: outSlides,
   });
 }
