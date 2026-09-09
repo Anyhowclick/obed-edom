@@ -300,7 +300,10 @@ Run the Full gate on copies with `--mode verify --no-validate`; use
 problem. Require Accessibility, refuse any already-open Keynote document, run
 serially, and quit Keynote between A and B. This workflow is viable on the
 16GB host when guarded this way; the memory caution is not a blanket ban on
-full-deck work.
+full-deck work. Run it from an unlocked working copy of the deck — `ditto`
+preserves Finder's `uchg` flag, and a locked copy breaks the gate's writes.
+After any planner/driver change, also run `scripts/golden_plan.py` — a
+Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote`.
 
 The 2026-09-07 Full bank under
 `output/handover-2026-09-07/write-gate-full/` completed RED but is reusable:

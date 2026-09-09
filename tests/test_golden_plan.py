@@ -205,12 +205,6 @@ def test_gate_fails_on_malformed_live_planner_env(monkeypatch: pytest.MonkeyPatc
         _gate(deck_name, monkeypatch, tmp_path)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="propose plans on the UN-enriched payload (framing.py:376-377 never runs the "
-    "remap_keynote.py:860-925 preamble); 32 of 155 slides differ today, measured "
-    "2026-09-09. R2b turns this green.",
-)
 def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPatch) -> None:
     deck_name = "Full_Report_Card_Wall.key"
     golden = _skip_ladder(deck_name)
