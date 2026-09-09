@@ -325,19 +325,39 @@ function clearMovieFields(slide: MapsSlide): MapsSlide {
   return next;
 }
 
-/** Swap the slide at `id` with its neighbour `delta` away, restitch links, and drop stale movie renders on the affected outgoing hops. Returns `doc` unchanged if the move is out of range. */
-export function reorderSlides(doc: MapsDocument, id: string, delta: number): MapsDocument {
-  const index = doc.slides.findIndex((s) => s.id === id);
-  const target = index + delta;
-  if (index < 0 || target < 0 || target >= doc.slides.length) return doc;
+function outgoingPairs(slides: MapsSlide[]): Map<string, string> {
+  const pairs = new Map<string, string>();
+  for (let i = 0; i < slides.length - 1; i++) pairs.set(slides[i].id, slides[i + 1].id);
+  return pairs;
+}
+
+/** Move the slide at `id` to `toIndex`, restitch links, and drop stale movie renders on every outgoing hop that changed. Returns `doc` unchanged if the move is a no-op or `id` is unknown. */
+export function moveSlideTo(doc: MapsDocument, id: string, toIndex: number): MapsDocument {
+  const fromIndex = doc.slides.findIndex((s) => s.id === id);
+  if (fromIndex < 0) return doc;
+  const target = Math.max(0, Math.min(doc.slides.length - 1, toIndex));
+  if (target === fromIndex) return doc;
+  const prevPairs = outgoingPairs(doc.slides);
   const slides = [...doc.slides];
-  [slides[index], slides[target]] = [slides[target], slides[index]];
-  const clearIds = new Set([slides[index].id, slides[target].id]);
-  const predecessor = slides[Math.min(index, target) - 1];
-  if (predecessor) clearIds.add(predecessor.id);
+  const [moved] = slides.splice(fromIndex, 1);
+  slides.splice(target, 0, moved);
+  const nextPairs = outgoingPairs(slides);
+  const clearIds = new Set<string>();
+  for (const from of new Set([...prevPairs.keys(), ...nextPairs.keys()])) {
+    if (prevPairs.get(from) !== nextPairs.get(from)) clearIds.add(from);
+  }
   const nextSlides = slides.map((slide) => (clearIds.has(slide.id) ? clearMovieFields(slide) : slide));
   const links = restitchLinks(nextSlides, doc.links);
   return { ...doc, slides: nextSlides, links };
+}
+
+/** Swap the slide at `id` with its neighbour `delta` away, restitch links, and drop stale movie renders on the affected outgoing hops. Returns `doc` unchanged if the move is out of range. */
+export function reorderSlides(doc: MapsDocument, id: string, delta: number): MapsDocument {
+  const index = doc.slides.findIndex((s) => s.id === id);
+  if (index < 0) return doc;
+  const target = index + delta;
+  if (target < 0 || target >= doc.slides.length) return doc;
+  return moveSlideTo(doc, id, target);
 }
 
 function mercatorY(lat: number): number {

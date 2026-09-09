@@ -1781,11 +1781,25 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .maps-thumb.active { border-color: var(--accent-primary); box-shadow: 0 0 0 1px var(--accent-primary); }
 .maps-thumb:disabled { opacity: 0.55; cursor: default; }
 .maps-thumb-card {
+  position: relative;
   overflow: hidden;
   border: var(--border-glass);
   border-radius: var(--radius-md);
   background: var(--bg-surface-glass);
 }
+.maps-thumb-card[draggable="true"] { cursor: grab; }
+.maps-thumb-card.dragging { opacity: 0.5; }
+.maps-drop-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-primary);
+  z-index: 1;
+  pointer-events: none;
+}
+.maps-drop-line.before { top: 0; }
+.maps-drop-line.after { bottom: 0; }
 .maps-thumb-pair {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1913,14 +1927,6 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   margin-top: 4px;
 }
 .maps-nav-actions .btn { flex: 1; padding: 6px 8px; }
-.btn.maps-nav-move {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 36px;
-  width: 36px;
-  padding: 0;
-}
 .maps-landmark-pop { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
 .maps-landmark-grid { grid-template-columns: repeat(3, 96px); margin-top: 4px; }
 .maps-landmark-tile {

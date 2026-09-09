@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   bootstrapMapsCsv,
   bootstrapMapsPinsCsv,
@@ -60,6 +60,7 @@ import {
   nextPinId,
   nextSlideId,
   reorderSlides,
+  moveSlideTo,
   restitchLinks,
   slideHiddenLayers,
   suggestedHopKind,
@@ -112,22 +113,6 @@ function IconTrash() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-    </svg>
-  );
-}
-
-function IconArrowUp() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M12 5l-6 6M12 5l6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconArrowDown() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 19V5M12 19l-6-6M12 19l6-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -200,6 +185,8 @@ export function MapsTab() {
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeAudience, setActiveAudience] = useState<MapsAudience>("lw");
+  const [draggedSlideId, setDraggedSlideId] = useState<string | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedPins, setSelectedPins] = useState<string[]>([]);
   const [objectClipboard, setObjectClipboard] = useState<MapsChurch[]>([]);
@@ -761,6 +748,46 @@ export function MapsTab() {
     fireAndForgetSave();
   }
   moveSlideRef.current = moveSlide;
+
+  function handleSlideDragStart(event: DragEvent<HTMLDivElement>, slideId: string) {
+    if (locked) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", slideId);
+    setDraggedSlideId(slideId);
+  }
+
+  function handleSlideDragOver(event: DragEvent<HTMLDivElement>, slideId: string) {
+    if (locked || !draggedSlideId || draggedSlideId === slideId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setDropIndicator((prev) => (prev && prev.id === slideId && prev.position === position ? prev : { id: slideId, position }));
+  }
+
+  function handleSlideDrop(event: DragEvent<HTMLDivElement>, slideId: string) {
+    event.preventDefault();
+    const current = docRef.current;
+    const draggedId = draggedSlideId;
+    setDraggedSlideId(null);
+    setDropIndicator(null);
+    if (!current || locked || !draggedId || draggedId === slideId) return;
+    const targetIndex = current.slides.findIndex((s) => s.id === slideId);
+    if (targetIndex < 0) return;
+    const position = event.clientY < event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 ? "before" : "after";
+    const draggedIndex = current.slides.findIndex((s) => s.id === draggedId);
+    let toIndex = position === "before" ? targetIndex : targetIndex + 1;
+    if (draggedIndex >= 0 && draggedIndex < toIndex) toIndex -= 1;
+    const next = moveSlideTo(current, draggedId, toIndex);
+    if (next === current) return;
+    patchDoc(next);
+    fireAndForgetSave();
+  }
+
+  function handleSlideDragEnd() {
+    setDraggedSlideId(null);
+    setDropIndicator(null);
+  }
 
   function removeSlide() {
     const current = docRef.current;
@@ -1959,7 +1986,15 @@ export function MapsTab() {
             return (
               <div key={slide.id}>
                 {slide.cg ? (
-                  <div className="maps-thumb-card">
+                  <div
+                    className={`maps-thumb-card${draggedSlideId === slide.id ? " dragging" : ""}`}
+                    draggable={!locked}
+                    onDragStart={(event) => handleSlideDragStart(event, slide.id)}
+                    onDragOver={(event) => handleSlideDragOver(event, slide.id)}
+                    onDrop={(event) => handleSlideDrop(event, slide.id)}
+                    onDragEnd={handleSlideDragEnd}
+                  >
+                    {dropIndicator?.id === slide.id && <span className={`maps-drop-line ${dropIndicator.position}`} />}
                     <div className="maps-thumb-pair">
                       <button
                         type="button"
@@ -1985,7 +2020,15 @@ export function MapsTab() {
                     {slideTitleControl(slide)}
                   </div>
                 ) : (
-                  <div className="maps-thumb-card">
+                  <div
+                    className={`maps-thumb-card${draggedSlideId === slide.id ? " dragging" : ""}`}
+                    draggable={!locked}
+                    onDragStart={(event) => handleSlideDragStart(event, slide.id)}
+                    onDragOver={(event) => handleSlideDragOver(event, slide.id)}
+                    onDrop={(event) => handleSlideDrop(event, slide.id)}
+                    onDragEnd={handleSlideDragEnd}
+                  >
+                    {dropIndicator?.id === slide.id && <span className={`maps-drop-line ${dropIndicator.position}`} />}
                     <button
                       type="button"
                       className={`maps-thumb${slide.id === active?.id ? " active" : ""}${slide.includeSidePanels ? " fw" : " lw"}`}
@@ -2037,12 +2080,6 @@ export function MapsTab() {
           <div className="maps-nav-actions">
             <button className="btn secondary" type="button" onClick={addSlide} disabled={locked}>
               +
-            </button>
-            <button className="btn secondary maps-nav-move" type="button" onClick={() => moveSlide(-1)} disabled={locked || !active || activeIndex <= 0} title="Move slide up" aria-label="Move slide up">
-              <IconArrowUp />
-            </button>
-            <button className="btn secondary maps-nav-move" type="button" onClick={() => moveSlide(1)} disabled={locked || !active || activeIndex >= slides.length - 1} title="Move slide down" aria-label="Move slide down">
-              <IconArrowDown />
             </button>
             <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />

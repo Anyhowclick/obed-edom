@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { reorderSlides, restitchLinks } = require(path.join(out, "types.js"));
+const { reorderSlides, restitchLinks, moveSlideTo } = require(path.join(out, "types.js"));
 
 const baseCamera = { lat: 0, lon: 0, zoom: 4, bearing: 0, pitch: 0 };
 function slide(id, overrides) {
@@ -154,6 +154,96 @@ test("movieMov cleared on cg override too", () => {
   const byId = Object.fromEntries(next.slides.map((s) => [s.id, s]));
   assert.equal(byId.s1.cg.movieMov, undefined);
   assert.equal(byId.s2.cg.movieMov, undefined);
+});
+
+test("moveSlideTo first to last", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const s4 = slide("s4");
+  const d = doc([s1, s2, s3, s4], restitchLinks([s1, s2, s3, s4], []));
+  const next = moveSlideTo(d, "s1", 3);
+  assert.deepEqual(next.slides.map((s) => s.id), ["s2", "s3", "s4", "s1"]);
+});
+
+test("moveSlideTo last to first", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const s4 = slide("s4");
+  const d = doc([s1, s2, s3, s4], restitchLinks([s1, s2, s3, s4], []));
+  const next = moveSlideTo(d, "s4", 0);
+  assert.deepEqual(next.slides.map((s) => s.id), ["s4", "s1", "s2", "s3"]);
+});
+
+test("moveSlideTo middle to arbitrary index", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const s4 = slide("s4");
+  const s5 = slide("s5");
+  const d = doc([s1, s2, s3, s4, s5], restitchLinks([s1, s2, s3, s4, s5], []));
+  const next = moveSlideTo(d, "s2", 3);
+  assert.deepEqual(next.slides.map((s) => s.id), ["s1", "s3", "s4", "s2", "s5"]);
+});
+
+test("moveSlideTo clamps out-of-range indices", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const d = doc([s1, s2, s3], restitchLinks([s1, s2, s3], []));
+  const overshoot = moveSlideTo(d, "s1", 99);
+  assert.deepEqual(overshoot.slides.map((s) => s.id), ["s2", "s3", "s1"]);
+  const undershoot = moveSlideTo(d, "s3", -99);
+  assert.deepEqual(undershoot.slides.map((s) => s.id), ["s3", "s1", "s2"]);
+});
+
+test("moveSlideTo is identity when the index does not change or the id is unknown", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const d = doc([s1, s2, s3], restitchLinks([s1, s2, s3], []));
+  assert.equal(moveSlideTo(d, "s2", 1), d);
+  assert.equal(moveSlideTo(d, "nope", 0), d);
+});
+
+test("moveSlideTo restitches links, preserving surviving (from,to) pairs", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const s4 = slide("s4");
+  const survivor = { from: "s3", to: "s4", kind: "movie", duration: 3.5, playWithoutClick: false };
+  const links = [
+    { from: "s1", to: "s2", kind: "cut", duration: 0, playWithoutClick: false },
+    { from: "s2", to: "s3", kind: "cut", duration: 0, playWithoutClick: false },
+    survivor,
+  ];
+  const d = doc([s1, s2, s3, s4], links);
+  const next = moveSlideTo(d, "s1", 3); // -> s2, s3, s4, s1; (s3,s4) pair untouched
+  assert.equal(next.links.length, next.slides.length - 1);
+  const kept = next.links.find((l) => l.from === "s3" && l.to === "s4");
+  assert.equal(kept, survivor);
+});
+
+test("moveSlideTo clears movieMov exactly on slides whose outgoing pair changed", () => {
+  const s1 = slide("s1", { movieMov: "s1.mov", movieDuration: 2 });
+  const s2 = slide("s2", { movieMov: "s2.mov", movieDuration: 2 });
+  const s3 = slide("s3", { movieMov: "s3.mov", movieDuration: 2 });
+  const s4 = slide("s4", { movieMov: "s4.mov", movieDuration: 2 });
+  const s5 = slide("s5", { movieMov: "s5.mov", movieDuration: 2 });
+  const d = doc([s1, s2, s3, s4, s5], restitchLinks([s1, s2, s3, s4, s5], []));
+  const next = moveSlideTo(d, "s2", 3); // -> s1, s3, s4, s2, s5
+  const byId = Object.fromEntries(next.slides.map((s) => [s.id, s]));
+  // s1->s2 becomes s1->s3: s1 changed
+  assert.equal(byId.s1.movieMov, undefined);
+  // s2->s3 becomes s2->s5: s2 changed
+  assert.equal(byId.s2.movieMov, undefined);
+  // s3->s4 stays s3->s4: unchanged
+  assert.equal(byId.s3.movieMov, "s3.mov");
+  // s4->s5 becomes s4->s2: s4 changed
+  assert.equal(byId.s4.movieMov, undefined);
+  // s5 had no outgoing pair before or after: unchanged
+  assert.equal(byId.s5.movieMov, "s5.mov");
 });
 
 test("links.length is always slides.length - 1 and endpoints exist", () => {
