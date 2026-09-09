@@ -778,6 +778,9 @@ def _sig_handlers() -> list[str]:
     ]
 
 
+_RAISE_TOKEN_CAP = 40
+
+
 _STAT_ACCUMULATORS = (
     "theDoc",
     "doneJobs",
@@ -962,9 +965,7 @@ def _stat_job_handlers() -> list[str]:
         "      end tell",
         "    end if",
         "    if not _found then",
-        "      if raiseUnknown is 0 then",
-        '        set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      end if",
+        '      set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
         "      set raiseUnknown to raiseUnknown + (count of _rem)",
         "      return",
         "    end if",
@@ -978,7 +979,7 @@ def _stat_job_handlers() -> list[str]:
         "      end repeat",
         "      set _rem to _new",
         "    else if _at is _mn then",
-        "      if raiseDead is 0 then",
+        f"      if raiseDead < {_RAISE_TOKEN_CAP} then",
         '        set report to report & " raiseDead(s=" & slideNo & ",idx=" & _mn & ")"',
         "      end if",
         "      set raiseDead to raiseDead + 1",
@@ -988,9 +989,7 @@ def _stat_job_handlers() -> list[str]:
         "      end repeat",
         "      set _rem to _new",
         "    else",
-        "      if raiseUnknown is 0 then",
-        '        set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      end if",
+        '      set report to report & " raiseUnknown(s=" & slideNo & ",idx=" & _mn & ")"',
         "      set raiseUnknown to raiseUnknown + (count of _rem)",
         "      return",
         "    end if",
@@ -1248,6 +1247,17 @@ def _stat_job_handlers() -> list[str]:
     return lines
 
 
+_DETAIL_TOKEN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)\(([^()]*)\)")
+
+
+def _parse_detail_tokens(detail: str) -> dict[str, list[str]]:
+    """`detail=` report tokens as `{name: [args, ...]}`, in emission order per name."""
+    tokens: dict[str, list[str]] = {}
+    for name, args in _DETAIL_TOKEN_RE.findall(detail or ""):
+        tokens.setdefault(name, []).append(args)
+    return tokens
+
+
 def _build_stat_finalize_script(
     dest: Path,
     jobs: list[dict],
@@ -1484,6 +1494,9 @@ def _run_stat_finalize(
         pngs = preview_pngs(export_dir)
         preview_files = [p.name for p in pngs]
         exported = bool(pngs)
+    detail = raw.split("detail=", 1)[1].strip() if "detail=" in raw else ""
+    front_err_match = re.search(r"frontErr=(.*?)(?= exported=|$)", raw)
+    front_err = (front_err_match.group(1) if front_err_match else "").strip()
     return {
         "ok": ok,
         "jobs": len(jobs),
@@ -1503,7 +1516,9 @@ def _run_stat_finalize(
         "raiseMoved": _num("raiseMoved"),
         "raiseDead": _num("raiseDead"),
         "raiseUnknown": _num("raiseUnknown"),
-        "detail": raw.split("detail=", 1)[1].strip() if "detail=" in raw else "",
+        "detail": detail,
+        "tokens": _parse_detail_tokens(detail),
+        "frontErr": front_err,
         "exported": exported,
         "previewFiles": preview_files,
         "raw": raw,

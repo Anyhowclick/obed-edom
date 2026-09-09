@@ -15,7 +15,13 @@ Delete highest-index first.
 import re
 from pathlib import Path
 
-from obed_edom.keynote import _STAT_ACCUMULATORS, _build_stat_finalize_script, _run_stat_finalize
+from obed_edom.keynote import (
+    _RAISE_TOKEN_CAP,
+    _STAT_ACCUMULATORS,
+    _build_stat_finalize_script,
+    _parse_detail_tokens,
+    _run_stat_finalize,
+)
 from obed_edom.map_remap import (
     ItemTransform,
     _resync_badge_rows_after_placement,
@@ -475,9 +481,9 @@ def test_raise_unknown_outcome_abandons_the_slide_and_never_guesses():
     assert "raiseUnknown to raiseUnknown + (count of _rem)" in unknown_branch
     assert "return" in unknown_branch
     assert "- 1" not in unknown_branch
-    # Two "end if" (the report-token guard, then the if/else-if/else itself) then the
+    # One "end if" (the if/else-if/else itself, its report token now unguarded) then the
     # loop's own "end repeat" -- no fourth branch after this one.
-    assert unknown_branch.count("end if") == 2
+    assert unknown_branch.count("end if") == 1
 
 
 def test_raise_does_not_latch_the_badge_pass():
@@ -502,26 +508,37 @@ def test_obed_raise_slide_fronts_only_when_selection_succeeded():
 
 
 def test_raise_report_tokens_are_capped():
-    """A globally-dead Bring to Front must not emit one report token per raise target;
-    each raiseDead/raiseUnknown token is guarded on its counter still being 0."""
+    """Each dead raise up to `_RAISE_TOKEN_CAP` is localised: the raiseDead token is
+    guarded on the counter staying below the cap. raiseUnknown needs no such cap -- each
+    branch that emits it `return`s immediately after, so at most one token per slide can
+    ever exist by construction."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
     )
     handler = _raise_slide_handler(script)
-    for marker, counter in (('" raiseDead(', "raiseDead"), ('" raiseUnknown(', "raiseUnknown")):
-        start = 0
-        occurrences = 0
-        while True:
-            token_at = handler.find(marker, start)
-            if token_at == -1:
-                break
-            occurrences += 1
-            preceding = handler[:token_at]
-            guard_at = preceding.rindex(f"if {counter}")
-            guard_line = preceding[guard_at : preceding.index("\n", guard_at)]
-            assert "is 0" in guard_line
-            start = token_at + 1
-        assert occurrences >= 1
+    dead_at = handler.index('" raiseDead(')
+    preceding = handler[:dead_at]
+    guard_at = preceding.rindex("if raiseDead")
+    guard_line = preceding[guard_at : preceding.index("\n", guard_at)]
+    assert f"if raiseDead < {_RAISE_TOKEN_CAP}" in guard_line
+
+    start = 0
+    occurrences = 0
+    while True:
+        token_at = handler.find('" raiseUnknown(', start)
+        if token_at == -1:
+            break
+        occurrences += 1
+        line_start = handler.rindex("\n", 0, token_at) + 1
+        preceding_line_start = handler.rindex("\n", 0, line_start - 1) + 1
+        preceding_line = handler[preceding_line_start : line_start - 1]
+        assert "if raiseUnknown" not in preceding_line
+        branch_end = handler.index("end if", token_at)
+        branch = handler[token_at:branch_end]
+        assert "raiseUnknown to raiseUnknown + (count of _rem)" in branch
+        assert "return" in branch
+        start = token_at + 1
+    assert occurrences >= 1
 
 
 def test_stat_accumulators_include_raise_liveness_counters():
@@ -1597,3 +1614,178 @@ def test_caption_point_size_zero_reproduces_todays_script():
         Path("/tmp/x.key"), [{"slide": 6, "groupIndex": 7, "childSig": "183\nSchools", "s": 1.0}], {}
     )
     assert with_zero == without_key
+
+
+def test_parse_detail_tokens_groups_by_name():
+    tokens = _parse_detail_tokens(
+        "raiseDead(s=106,idx=15) sigFallback(s=4,gi=1) raiseDead(s=110,idx=2)"
+    )
+    assert tokens == {
+        "raiseDead": ["s=106,idx=15", "s=110,idx=2"],
+        "sigFallback": ["s=4,gi=1"],
+    }
+    assert _parse_detail_tokens("") == {}
+    assert _parse_detail_tokens(None) == {}
+
+
+def test_parse_detail_tokens_keeps_spaced_error_text():
+    """`skip(...)` carries a Keynote error message that may contain spaces (fine, the
+    regex is not whitespace-split) or parentheses (that one token is then skipped rather
+    than corrupting neighbouring tokens); raw `detail` still carries the lost text."""
+    detail = (
+        "raiseDead(s=106,idx=15) skip(font,s=4,err=-1728:Keynote got an error) "
+        "skip(font,s=5,err=-1728:got (nested) error) raiseDead(s=110,idx=2)"
+    )
+    tokens = _parse_detail_tokens(detail)
+    assert tokens["skip"] == ["font,s=4,err=-1728:Keynote got an error"]
+    assert tokens["raiseDead"] == ["s=106,idx=15", "s=110,idx=2"]
+
+
+def test_run_stat_finalize_exposes_front_err_and_tokens(monkeypatch, tmp_path):
+    """End-to-end through _run_stat_finalize's own raw-string parsing, with
+    subprocess.run stubbed so no Keynote/osascript actually runs."""
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+
+    state = {"raw": ""}
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= [-1743] [-1743] exported=false sigFallback=1 unresolved=0 badgeFallback=0 "
+        "badgeUnresolved=0 badgeMoved=0 badgeFrontDead=0 raiseMoved=0 raiseDead=2 "
+        "raiseUnknown=1 detail= raiseDead(s=106,idx=15) raiseDead(s=110,idx=2) "
+        "raiseUnknown(s=42,idx=3) sigFallback(s=4,gi=1)"
+    )
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["frontErr"] == "[-1743] [-1743]"
+    assert result["tokens"]["raiseDead"] == ["s=106,idx=15", "s=110,idx=2"]
+    assert result["tokens"]["raiseUnknown"] == ["s=42,idx=3"]
+    assert result["detail"] == (
+        "raiseDead(s=106,idx=15) raiseDead(s=110,idx=2) raiseUnknown(s=42,idx=3) sigFallback(s=4,gi=1)"
+    )
+
+
+def test_run_stat_finalize_front_err_empty_when_absent(monkeypatch, tmp_path):
+    """End-to-end through _run_stat_finalize's own raw-string parsing, with
+    subprocess.run stubbed so no Keynote/osascript actually runs."""
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+
+    state = {"raw": ""}
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false"
+    )
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["frontErr"] == ""
+    assert result["tokens"] == {}
+
+    state["raw"] = "done=1 skipped=0 sized=0 sizeSkips=0 front=0"
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["frontErr"] == ""
+    assert result["tokens"] == {}
+
+
+def test_say_stat_finalize_detail_logs_every_token_kind():
+    from obed_edom.remap_keynote import _say_stat_finalize_detail
+
+    child_resize_result = {
+        "tokens": {
+            "raiseDead": ["s=106,idx=15", "s=110,idx=2"],
+            "raiseUnknown": ["s=42,idx=3"],
+            "sigTwin": ["s=1,gi=1"],
+            "sigFallback": ["s=4,gi=1"],
+            "unresolved": ["s=5,gi=2"],
+            "dedupMiss": ["s=6,gi=3"],
+            "skip": ["font,s=7,err=-1728:msg"],
+            "badgeSkip": ["s=3,k=shape"],
+        },
+        "frontErr": "[-1743]",
+        "detail": "badgeSkip(s=3,k=shape)",
+    }
+    lines: list[str] = []
+    _say_stat_finalize_detail(child_resize_result, [{"slide": 3}], lines.append)
+
+    raise_lines = [line for line in lines if line.startswith("Stat raise detail: ")]
+    assert len(raise_lines) == 1
+    assert "raiseDead(s=106,idx=15)" in raise_lines[0]
+    assert "raiseDead(s=110,idx=2)" in raise_lines[0]
+    assert "raiseUnknown(s=42,idx=3)" in raise_lines[0]
+    assert "sigFallback" not in raise_lines[0]
+
+    front_err_lines = [
+        line
+        for line in lines
+        if line.startswith("WARNING stat-finalize: GUI Bring to Front returned error(s) [-1743]")
+    ]
+    assert len(front_err_lines) == 1
+
+    assert "Badge raise detail: badgeSkip(s=3,k=shape)" in lines
+
+    resolve_lines = [line for line in lines if line.startswith("Stat resolve detail: ")]
+    assert len(resolve_lines) == 1
+    resolve_line = resolve_lines[0]
+    for kind in ("sigTwin", "unresolved", "dedupMiss", "skip(", "sigFallback"):
+        assert kind in resolve_line
+    fallback_at = resolve_line.index("sigFallback")
+    for kind in ("sigTwin", "unresolved", "dedupMiss", "skip("):
+        assert resolve_line.index(kind) < fallback_at
+
+
+def test_say_stat_finalize_detail_silent_and_badge_gated():
+    from obed_edom.remap_keynote import _say_stat_finalize_detail
+
+    lines: list[str] = []
+    _say_stat_finalize_detail({"tokens": {}, "frontErr": "", "detail": ""}, None, lines.append)
+    assert lines == []
+
+    lines = []
+    _say_stat_finalize_detail(
+        {"tokens": {"raiseDead": ["s=1,idx=1"]}, "frontErr": "", "detail": ""},
+        None,
+        lines.append,
+    )
+    assert len(lines) == 1
+    assert lines[0].startswith("Stat raise detail: ")
+
+
+def test_say_stat_finalize_detail_caps_sig_fallback():
+    from obed_edom.remap_keynote import _DETAIL_LOG_CAP, _say_stat_finalize_detail
+
+    tokens = {
+        "unresolved": ["s=1,gi=1"],
+        "sigFallback": [f"s={i},gi=1" for i in range(110)],
+    }
+    lines: list[str] = []
+    _say_stat_finalize_detail({"tokens": tokens, "frontErr": "", "detail": ""}, None, lines.append)
+    resolve_lines = [line for line in lines if line.startswith("Stat resolve detail: ")]
+    assert len(resolve_lines) == 1
+    line = resolve_lines[0]
+    assert line.endswith("(+71 more)")
+    body = line[len("Stat resolve detail: ") : -len(" (+71 more)")]
+    parts = body.split()
+    assert len(parts) == _DETAIL_LOG_CAP == 40
+    assert parts[0].startswith("unresolved(")
