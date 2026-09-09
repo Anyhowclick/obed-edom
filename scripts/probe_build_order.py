@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SUPERSEDED by D8 (``output/handover-2026-09-08/build-order/D8-build-chunks.md``):
+"""SUPERSEDED by D8 (``output/bank/2026-09-08/build-order/D8-build-chunks.md``):
 ``buildChunks``, not ``builds``, is Keynote's render timeline. This script's
 default census reports the D7 metric (the ``builds`` array's key sequence), which
 D8 showed is not what renders; ``WITNESS_SLIDE`` 36's ``AFTER_ORDER`` constant is
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.probe_stroke_patch import _px_per_pt  # noqa: E402
 
-DEFAULT_OUT = Path(__file__).resolve().parent.parent / "output" / "build-order-probe"
+DEFAULT_OUT = Path(__file__).resolve().parent.parent / "output" / "bank" / "probes" / "build-order-probe"
 WITNESS_SLIDE = 36
 BEFORE_ORDER = ("Ps Aizhen", "Ps Bob", "Caijuan", "Guo Rong")
 AFTER_ORDER = ("Ps Bob", "Guo Rong", "Caijuan", "Ps Aizhen")
