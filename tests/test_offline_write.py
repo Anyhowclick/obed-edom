@@ -39,6 +39,7 @@ from scripts.offline_write_ab import (
     CARD_REF_FLOOR,
     Tolerances,
     accessibility_ok,
+    card_border_damage_reasons,
     card_border_refs,
     compare_units_by_addr,
     compare_units_identity,
@@ -54,7 +55,6 @@ from scripts.offline_write_ab import (
     plan_oracle_slide,
     plan_parity,
     run_record,
-    stolen_interaction_reasons,
     tol_for_bucket,
     unit_bucket,
     write_run_record,
@@ -2075,43 +2075,61 @@ def test_plan_parity_suppress_geometry_never_an_equality_check():
     assert plan_parity(plan_a, plan_b, compared_slides=[2, 5]) == []
 
 
-# --- stolen_interaction_reasons / card_border_refs (item 4) --------------------------
+# --- card_border_damage_reasons / card_border_refs (item 4) ---------------------------
 
 
-def test_stolen_interaction_reasons_clean_arm():
+def test_card_border_damage_reasons_clean_arm():
     # Arm B, banked (2026-09-07 Full bank): output refs == source refs.
-    assert stolen_interaction_reasons("B", 83, 83, None) == []
+    assert card_border_damage_reasons("B", 83, 83, None) == []
 
 
-def test_stolen_interaction_reasons_hard_fails_on_card_loss():
+def test_card_border_damage_reasons_hard_fails_on_card_loss():
     # Regression, banked numbers (2026-09-07 Full bank arm A: 43 vs source 83).
-    reasons = stolen_interaction_reasons("A", 43, 83, {"dedupShortfall": 141, "unresolved": 67})
+    reasons = card_border_damage_reasons("A", 43, 83, {"dedupShortfall": 141, "unresolved": 67})
     assert len(reasons) == 1
     r = reasons[0]
     assert "43" in r
     assert "83" in r
     assert "dedupShortfall=141" in r
     assert "unresolved=67" in r
-    assert "re-run" in r
-    assert "do NOT debug the code first" in r
+    assert "MISSING card images" in r
+    assert "does NOT establish a cause" in r
+    assert "f76e8d3" in r
+    assert "FATAL reuse slide" in r
+    assert "census cards per slide" in r
 
 
-def test_stolen_interaction_reasons_tolerates_borderline_shortfall():
+def test_card_border_damage_reasons_carries_no_disproven_advice():
+    # D1 attributed the 43-vs-83 shortfall to a stolen GUI focus/clipboard interaction and
+    # told the operator to re-run on an untouched machine and not debug the code. D6
+    # disproved that (a second run on a verified-untouched machine reproduced 43 refs and
+    # character-identical stat-finalize integers) and f76e8d3 fixed the real load-sensitive
+    # applyReuse paste defect. Neither branch of this message may carry that advice again.
+    shortfall = card_border_damage_reasons("A", 43, 83, None)
+    ambiguous = card_border_damage_reasons("A", None, 83, None)
+    for r in shortfall + ambiguous:
+        assert "stolen" not in r.lower()
+        assert "untouched machine" not in r
+        assert "do NOT debug the code first" not in r
+        assert "known cause" not in r
+
+
+def test_card_border_damage_reasons_tolerates_borderline_shortfall():
     # 70/83 = 0.843 >= CARD_REF_FLOOR (0.75) — the false-positive guard.
     assert CARD_REF_FLOOR == 0.75
-    assert stolen_interaction_reasons("A", 70, 83, None) == []
+    assert card_border_damage_reasons("A", 70, 83, None) == []
 
 
-def test_stolen_interaction_reasons_not_applicable_without_card_style():
+def test_card_border_damage_reasons_not_applicable_without_card_style():
     # No unambiguous card-border style in the SOURCE — the check cannot apply.
-    assert stolen_interaction_reasons("A", 43, None, None) == []
+    assert card_border_damage_reasons("A", 43, None, None) == []
 
 
-def test_stolen_interaction_reasons_output_lost_its_card_style():
+def test_card_border_damage_reasons_output_lost_its_card_style():
     # N2: an ambiguous OUTPUT style is not a measured shortfall -- no fabricated ratio,
     # and the remedy must not blame the machine (a surplus of stranded donor copies
     # lands here too, and a surplus must never be told "re-run on an untouched machine").
-    reasons = stolen_interaction_reasons("A", None, 83, None)
+    reasons = card_border_damage_reasons("A", None, 83, None)
     assert len(reasons) == 1
     r = reasons[0]
     assert "83" in r
@@ -2120,11 +2138,12 @@ def test_stolen_interaction_reasons_output_lost_its_card_style():
     assert "0.000" not in r
     assert "re-run this arm on an untouched machine" not in r
     assert "inspect the deck's media styles" in r
+    assert "stolen" not in r.lower()
 
 
-def test_stolen_interaction_reasons_surplus_is_not_hard():
+def test_card_border_damage_reasons_surplus_is_not_hard():
     # A surplus (stranded donor copies) is a dedup shortfall, not this hard fail.
-    assert stolen_interaction_reasons("B", 120, 83, None) == []
+    assert card_border_damage_reasons("B", 120, 83, None) == []
 
 
 def test_card_border_refs_single_style(monkeypatch):

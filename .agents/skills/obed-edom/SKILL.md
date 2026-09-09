@@ -315,11 +315,15 @@ A 2026-09-07 gate-integrity follow-up added a gating `group` bar (composed
 child-union vs the planned rect, 2.5px) to the offline verify — it is expected
 FAIL against today's writer (the known `sx = spec/reported` defect), not a new
 regression, plus slide 36 `ki2..ki5` (≈139px), the separate never-written-spec
-bug, which will keep this line RED after the writer fix — and a pre-comparison
-stolen-interaction hard-fail (card-border
-media-style ref count vs the source deck): re-gating this bank now ABORTs with
-"run A is DAMAGED" rather than running the geometry compare at all, which is
-the correct, intended outcome.
+bug, which will keep this line RED after the writer fix — and a pre-comparison card-border
+damage check (output card-border media-style ref count vs the source deck): re-gating the
+2026-09-07 bank now ABORTs with "run A is DAMAGED" rather than running the geometry compare,
+which is correct — that bank's arm A really did lose 44 report cards. The check reports the
+shortfall as an observation only: D1's "stolen GUI interaction" cause was disproven by D6 and
+the real defect was fixed in `f76e8d3`, so the RED line names that mechanism as a hypothesis
+and points at the run log, not at a re-run. The untouched-machine operator rule still applies
+to genuinely focus-dependent signatures (`front` z-order raises, pass-2 badge raises); it does
+not explain this one.
 
 ---
 
@@ -455,7 +459,9 @@ Load-bearing rules:
   geometry and every other slide byte-identical (probed live 2026-09-05); orphaned
   `Build`/`BuildChunk` archives may be left behind unreferenced and are harmless. The
   patcher self-checks by archive id and header before writing and refuses rather than
-  guess.
+  guess. `buildChunks` is the render timeline and `builds` an unordered owning set
+  Keynote permutes on save, so never read `builds` order as reveal order (measured:
+  chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
 
 ---
 

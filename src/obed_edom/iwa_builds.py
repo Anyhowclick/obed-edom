@@ -77,20 +77,26 @@ def _contains_identifier(node: Any) -> bool:
 def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
     """``{slide number (1-based): {"slideId", "builds": [...], "transition": dict|None}}``.
 
-    Each build record: ``{"buildId", "chunkIds", "kind", "kindIndex", "effect",
-    "animationType", "identity"}``. Every build in these decks targets a top-level
-    drawable (measured: 593/593 source, 1515/1515 output); a build whose drawable does
-    not resolve to one is dropped — it cannot be matched to source/output identity and
-    offers no patch instruction.
+    Each build record: ``{"buildId", "chunkIds", "chunkOrder", "chunkReferent",
+    "kind", "kindIndex", "effect", "animationType", "identity"}``. ``chunkIds`` is
+    ascending by the slide's own ``buildChunks`` position; ``chunkOrder`` carries
+    that same position per chunk and ``chunkReferent`` each chunk's ``referent``
+    flag. ``buildChunks`` is Keynote's render timeline; ``builds`` is an unordered
+    owning set Keynote re-serialises freely on save (D8). Every build in these
+    decks targets a top-level drawable (measured: 593/593 source, 1515/1515
+    output); a build whose drawable does not resolve to one is dropped — it cannot
+    be matched to source/output identity and offers no patch instruction.
     """
     objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(path)
     with zipfile.ZipFile(path) as zf:
         data_index = _build_data_index(zf.namelist())
 
     chunks_by_build: dict[str, list[str]] = {}
+    chunk_referent: dict[str, bool] = {}
     for obj_id, obj in objects.items():
         if obj.get("_pbtype") != "KN.BuildChunkArchive":
             continue
+        chunk_referent[obj_id] = bool(obj.get("referent"))
         bid = _ref_id(obj.get("build"))
         if bid is not None:
             chunks_by_build.setdefault(bid, []).append(obj_id)
@@ -140,6 +146,8 @@ def deck_builds(path: str | Path, *, deck: Any = None) -> dict[int, dict]:
                 {
                     "buildId": bid,
                     "chunkIds": chunk_ids,
+                    "chunkOrder": [chunk_order[cid] for cid in chunk_ids],
+                    "chunkReferent": [chunk_referent.get(cid, False) for cid in chunk_ids],
                     "kind": kind,
                     "kindIndex": kind_index,
                     "effect": effect,
@@ -164,13 +172,25 @@ def plan_build_patch(
 ) -> dict[str, Any]:
     """Per-slide build/transition patch instructions for ``slides`` (the reuse
     targets) — pure, no I/O. Keeps ``min(source_count, output_count)`` per
-    ``(effect, animationType, identity)`` key, drops every key absent from the
-    source, and orders survivors by their matched SOURCE build's index so click
-    order matches the source exactly. Returns ``{"plans": {slideId: {"builds":
-    [ids], "buildChunks": [ids], "transition": dict|None}}, "report": [{"slide",
-    "kept", "dropped", "retimed", "transitionSkipped"?}, ...]}``. A source with no
-    transition, or one holding a cross-member reference, leaves the output's own
-    transition untouched; ``report[i]["transitionSkipped"]`` names why.
+    ``(effect, animationType, identity)`` key, matching a duplicate key's output
+    survivors to its chunk-order-earliest source occurrences first (agreeing with
+    ``verify_builds``' own restriction), drops every key absent from the source,
+    and orders survivors by their matched source build's chunk-0 position
+    (``buildChunks`` is the render timeline; ``builds`` is not — D8), tie-broken by
+    source ``builds`` index for chunkless builds. Chunks are 1:1 with builds in all
+    nine banked decks (4996/4996), so a build's chunks never straddle another's;
+    emission is builds sorted by first chunk position, each build's own chunks
+    concatenated in place. Returns ``{"plans": {slideId: {"builds": [ids],
+    "buildChunks": [ids], "transition": dict|None}}, "report": [{"slide", "kept",
+    "dropped", "retimed", "transitionSkipped"?, "chainHeadless"?,
+    "ambiguousPairs"?}, ...]}``. A source with no transition, or one holding a
+    cross-member reference, leaves the output's own transition untouched;
+    ``report[i]["transitionSkipped"]`` names why. ``chainHeadless`` (``"source"``,
+    ``"survivors"``, ``"fields"`` or ``"unresolved"``) WARNs when the emitted
+    timeline cannot start with a chain head; ordering cannot repair a broken chain,
+    so this never halts the plan. ``ambiguousPairs`` counts keys where both the
+    source and output groups have ≥2 members, i.e. where the pairing is genuinely
+    arbitrary.
     """
     plans: dict[str, dict] = {}
     report: list[dict] = []
@@ -188,17 +208,52 @@ def plan_build_patch(
         for build in out["builds"]:
             out_by_key.setdefault(_key_of(build), []).append(build)
 
-        assigned: list[tuple[int, dict]] = []
+        assigned: list[tuple[int, dict, dict]] = []
+        ambiguous_pairs = 0
         for key, out_group in out_by_key.items():
-            src_group = src_by_key.get(key) or []
-            for src_index, out_build in zip((i for i, _b in src_group), out_group):
-                assigned.append((src_index, out_build))
-        assigned.sort(key=lambda pair: pair[0])
-        ordered = [build for _src_index, build in assigned]
+            src_group = sorted(
+                src_by_key.get(key) or [],
+                key=lambda pair: pair[1]["chunkOrder"][0] if pair[1]["chunkOrder"] else float("inf"),
+            )
+            if len(src_group) >= 2 and len(out_group) >= 2:
+                ambiguous_pairs += 1
+            for (src_index, src_build), out_build in zip(src_group, out_group):
+                assigned.append((src_index, src_build, out_build))
+        assigned.sort(
+            key=lambda triple: (
+                triple[1]["chunkOrder"][0] if triple[1]["chunkOrder"] else float("inf"),
+                triple[0],
+            )
+        )
+        matched_src_indices = {src_index for src_index, _src_build, _out_build in assigned}
+        ordered = [out_build for _src_index, _src_build, out_build in assigned]
 
         chunk_ids: list[str] = []
+        chunk_referent: list[bool] = []
         for build in ordered:
             chunk_ids.extend(build["chunkIds"])
+            chunk_referent.extend(build["chunkReferent"])
+
+        chain_headless = None
+        head_src_index = None
+        head_referent = None
+        for src_index, build in enumerate(src["builds"]):
+            if build.get("chunkOrder") and build["chunkOrder"][0] == 0:
+                head_src_index = src_index
+                head_referent = build["chunkReferent"][0]
+                break
+        if head_src_index is not None:
+            if not head_referent:
+                chain_headless = "source"
+            elif head_src_index not in matched_src_indices:
+                chain_headless = "survivors"
+            elif chunk_referent and not chunk_referent[0]:
+                chain_headless = "fields"
+        elif any(build.get("chunkOrder") for build in src["builds"]):
+            # The slide has chunked builds, but none claims chunk 0 -- its owner was
+            # dropped from src["builds"] entirely (deck_builds: an unresolvable
+            # drawable), not merely non-referent. Diagnose rather than stay silent.
+            chain_headless = "unresolved"
 
         transition = src.get("transition")
         transition_skipped = None
@@ -224,8 +279,36 @@ def plan_build_patch(
         }
         if transition_skipped:
             entry["transitionSkipped"] = transition_skipped
+        if chain_headless is not None:
+            entry["chainHeadless"] = chain_headless
+        if ambiguous_pairs:
+            entry["ambiguousPairs"] = ambiguous_pairs
         report.append(entry)
     return {"plans": plans, "report": report}
+
+
+def _chunk_key_sequence(slide: dict) -> list[tuple]:
+    """Builds in chunk-render order (stable by first chunk position); chunkless
+    builds are excluded — they carry no reveal order."""
+    ordered = sorted(
+        (b for b in slide["builds"] if b.get("chunkOrder")),
+        key=lambda b: b["chunkOrder"][0],
+    )
+    return [_key_of(b) for b in ordered]
+
+
+def _restricted(a: list[tuple], b: list[tuple]) -> list[tuple]:
+    """``a`` restricted to the first ``min(count_a(key), count_b(key))``
+    occurrences of each key, in ``a``'s order."""
+    b_counts = Counter(b)
+    limit = {key: min(count, b_counts.get(key, 0)) for key, count in Counter(a).items()}
+    seen: Counter = Counter()
+    out: list[tuple] = []
+    for key in a:
+        if seen[key] < limit.get(key, 0):
+            out.append(key)
+            seen[key] += 1
+    return out
 
 
 def verify_builds(
@@ -235,12 +318,17 @@ def verify_builds(
     deck) by ``(effect, animationType, identity)`` and its transition. Surplus
     (output has something the source lacks) or a transition mismatch is load-bearing
     — the caller raises. Shortfall is expected (an object may legitimately have been
-    deleted, e.g. a dropped side-panel column) and is reported, never raised.
+    deleted, e.g. a dropped side-panel column) and is reported, never raised. Also
+    compares the chunk-render-order key sequence, source vs output, restricted to
+    the multiset intersection so a legitimate shortfall stays silent; the first
+    divergence per slide is reported in ``"order"`` — the caller raises on an entry
+    for a patched slide, and WARNs otherwise.
     """
     wanted = set(slides) if slides is not None else set(out_by_number) | set(src_by_number)
     surplus: list[dict] = []
     missing: list[dict] = []
     transitions: list[dict] = []
+    order: list[dict] = []
     for number in sorted(wanted):
         src = src_by_number.get(number) or {"builds": [], "transition": None}
         out = out_by_number.get(number) or {"builds": [], "transition": None}
@@ -260,4 +348,11 @@ def verify_builds(
         out_t = _transition_effect_duration(out.get("transition"))
         if src_t != out_t:
             transitions.append({"slide": number, "source": src_t, "output": out_t})
-    return {"surplus": surplus, "missing": missing, "transitions": transitions}
+
+        src_seq = _restricted(_chunk_key_sequence(src), _chunk_key_sequence(out))
+        out_seq = _restricted(_chunk_key_sequence(out), _chunk_key_sequence(src))
+        for i, (s_key, o_key) in enumerate(zip(src_seq, out_seq)):
+            if s_key != o_key:
+                order.append({"slide": number, "at": i, "source": s_key, "output": o_key})
+                break
+    return {"surplus": surplus, "missing": missing, "transitions": transitions, "order": order}

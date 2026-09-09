@@ -5,8 +5,8 @@ validated against Keynote separately. These lock the pure-Python parts: the plan
 emitting one job per stat group, and the generated AppleScript embedding the template
 sizes and the z-order/badge steps.
 
-Index is verified by content; descending raise relies on Bring-to-Front append
-semantics. Handlers that name Keynote objects MUST wrap the body in `tell application id`
+Index is verified by content; ascending raise, decrement gated on a verified landing
+(Bring-to-Front append semantics). Handlers that name Keynote objects MUST wrap the body in `tell application id`
 (not just `using terms from`) or `count of iWork items` fails -1700.
 DFS-leaf-signature separator MUST equal iwa_runs._SIG_JOIN ("\\n").
 Delete highest-index first.
@@ -393,8 +393,13 @@ def test_finalize_font_call_carries_group_scale():
     assert 'my obedStatJob(4, _sigs, 1, {"CHC Arao"}, 0.8547, 1, 0.0)' in script
 
 
-def test_finalize_phase2_raises_resolved_targets_descending():
-    """Phase 2 raises recorded targets per slide, highest index first (Bring to Front appends)."""
+def _raise_slide_handler(script: str) -> str:
+    return script[script.index("on obedRaiseSlide") : script.index("end obedRaiseSlide")]
+
+
+def test_finalize_phase2_raises_resolved_targets_ascending():
+    """Phase 2 raises recorded targets per slide, lowest index first (Bring to Front
+    appends, so ascending raise order reproduces source stacking)."""
     jobs = [
         {"slide": 4, "groupIndex": 1, "childSig": "111"},
         {"slide": 4, "groupIndex": 3, "childSig": "222"},
@@ -403,10 +408,241 @@ def test_finalize_phase2_raises_resolved_targets_descending():
     script = _build_stat_finalize_script(Path("/tmp/x.key"), jobs, {"269": 200.0})
     assert "my obedRaiseSlide(4)" in script
     assert "my obedRaiseSlide(5)" in script
-    assert "> _mx" in script
-    assert "set selection of theDoc to {group _mx of slide slideNo of theDoc}" in script
+    handler = _raise_slide_handler(script)
+    assert "< _mn" in handler
+    assert "> _mx" not in handler
+    assert "> _mx" in script  # obedApplyDeletes legitimately keeps descending deletes
+    assert "set selection of theDoc to {group _mn of slide slideNo of theDoc}" in handler
     assert "obedZRaise" not in script
     assert "obedSigLeaves(group _gi of slide slideNo of theDoc) is sig" not in script
+
+
+def test_raise_decrements_only_on_a_verified_landing():
+    """The remaining indices only shift down when the raised target verifiably landed at
+    the real top; a provably-dead raise drops the target without touching the rest."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    top_at = handler.index("if _at is _top then")
+    mn_at = handler.index("else if _at is _mn then")
+    unknown_at = handler.index("    else\n")
+    assert top_at < mn_at < unknown_at
+    top_branch = handler[top_at:mn_at]
+    dead_branch = handler[mn_at:unknown_at]
+    assert "- 1" in top_branch
+    assert "- 1" not in dead_branch
+
+
+def test_raise_liveness_probes_top_real_by_frame():
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    assert (
+        'my obedBadgeFind(slideNo, "group", _top, fx of _f, fy of _f, fw of _f, fh of _f, '
+        "true, true, false)" in handler
+    )
+
+
+def test_raise_computes_top_real_once_per_slide():
+    """The cost guarantee: obedTopReal/obedKindCount are hoisted out of the drain loop,
+    computed once per slide rather than once per raise."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    loop_at = handler.index("repeat while (count of _rem) > 0")
+    top_real_at = handler.index("obedTopReal")
+    kind_count_at = handler.index("obedKindCount")
+    assert top_real_at < loop_at
+    assert kind_count_at < loop_at
+    assert handler.count("obedTopReal") == 1
+    assert handler.count("obedKindCount") == 1
+
+
+def test_raise_unknown_outcome_abandons_the_slide_and_never_guesses():
+    """The third outcome (anything but the raised target landing at the real top, or
+    provably staying put) increments raiseUnknown and returns -- it never falls through
+    to a fourth branch that would decrement on a guess."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    unknown_at = handler.index("    else\n")
+    end_repeat_at = handler.index("end repeat", unknown_at)
+    unknown_branch = handler[unknown_at:end_repeat_at]
+    assert "raiseUnknown to raiseUnknown + (count of _rem)" in unknown_branch
+    assert "return" in unknown_branch
+    assert "- 1" not in unknown_branch
+    # Two "end if" (the report-token guard, then the if/else-if/else itself) then the
+    # loop's own "end repeat" -- no fourth branch after this one.
+    assert unknown_branch.count("end if") == 2
+
+
+def test_raise_does_not_latch_the_badge_pass():
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    assert "badgeFrontDead" not in handler
+
+
+def test_obed_raise_slide_fronts_only_when_selection_succeeded():
+    """Mirror of test_obed_raise_item_fronts_only_when_selection_succeeded: a swallowed
+    `set selection` must not fall through to Bring-to-Front on a stale selection."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    found_true_at = handler.index("set _found to true")
+    front_at = handler.index("my obedFront()")
+    guard_at = handler.index("if not _found then")
+    assert found_true_at < guard_at < front_at
+
+
+def test_raise_report_tokens_are_capped():
+    """A globally-dead Bring to Front must not emit one report token per raise target;
+    each raiseDead/raiseUnknown token is guarded on its counter still being 0."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    for marker, counter in (('" raiseDead(', "raiseDead"), ('" raiseUnknown(', "raiseUnknown")):
+        start = 0
+        occurrences = 0
+        while True:
+            token_at = handler.find(marker, start)
+            if token_at == -1:
+                break
+            occurrences += 1
+            preceding = handler[:token_at]
+            guard_at = preceding.rindex(f"if {counter}")
+            guard_line = preceding[guard_at : preceding.index("\n", guard_at)]
+            assert "is 0" in guard_line
+            start = token_at + 1
+        assert occurrences >= 1
+
+
+def test_stat_accumulators_include_raise_liveness_counters():
+    assert "raiseMoved" in _STAT_ACCUMULATORS
+    assert "raiseDead" in _STAT_ACCUMULATORS
+    assert "raiseUnknown" in _STAT_ACCUMULATORS
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    assert "raiseMoved=" in script
+    assert "raiseDead=" in script
+    assert "raiseUnknown=" in script
+    assert "set raiseMoved to 0" in script
+    assert "set raiseDead to 0" in script
+    assert "set raiseUnknown to 0" in script
+
+
+def test_run_stat_finalize_result_dict_exposes_raise_liveness_counters(monkeypatch, tmp_path):
+    """End-to-end through _run_stat_finalize's own raw-string parsing, with
+    subprocess.run stubbed so no Keynote/osascript actually runs."""
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+
+    state = {"raw": ""}
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=0 "
+        "badgeUnresolved=0 badgeMoved=0 badgeFrontDead=0 raiseMoved=5 raiseDead=1 "
+        "raiseUnknown=2 detail= raiseDead(s=4,idx=2)"
+    )
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["raiseMoved"] == 5
+    assert result["raiseDead"] == 1
+    assert result["raiseUnknown"] == 2
+
+
+def _raise_ground_truth_and_formula(n, targets, dead=frozenset()):
+    """Simulate obedRaiseSlide's addressing scheme two ways at once and cross-check them
+    every step: `state` is a real list mutated by pop/append (the actual Bring-to-Front
+    geometry -- pop the raised item out, append it at the end); `rem` is the pure decrement
+    arithmetic the AppleScript performs (no list lookup, just min-pick then subtract 1 from
+    everything left after a landed raise). If the arithmetic ever computed the wrong current
+    position, `state.index(mn) + 1 != mn` would fire on the very next raise.
+
+    `dead` names targets whose Bring to Front does not land (the group stays put; the
+    remaining targets are NOT decremented for it, matching the `_at is _mn` branch).
+
+    `rem` holds (label, tracked_position) pairs: `label` is the target's fixed identity
+    (its original index, never changed) and `tracked_position` is what the pure decrement
+    arithmetic believes its current position is -- the two coincide only at the start."""
+    state = list(range(1, n + 1))
+    rem = [(t, t) for t in targets]
+    landed: list[int] = []
+    dead_out: list[int] = []
+    dead_positions: dict[int, int] = {}
+    while rem:
+        mn_pos = min(p for _, p in rem)
+        mn_label = next(label for label, p in rem if p == mn_pos)
+        assert state.index(mn_label) + 1 == mn_pos, "formula position desynced from real position"
+        if mn_label in dead:
+            dead_out.append(mn_label)
+            dead_positions[mn_label] = mn_pos
+            rem = [(label, p) for label, p in rem if label != mn_label]
+        else:
+            landed.append(mn_label)
+            popped = state.pop(mn_pos - 1)
+            assert popped == mn_label
+            state.append(popped)
+            rem = [
+                (label, p - 1) for label, p in rem if label != mn_label
+            ]
+    return state, landed, dead_out, dead_positions
+
+
+_RAISE_SHAPES = [
+    (5, [2, 5]),  # 2 targets, one already at the top
+    (10, [1, 4, 9]),  # 3 targets
+    (20, [2, 5, 9, 14, 20]),  # 5 targets, one already at the top
+    (40, [1, 3, 7, 12, 18, 25, 33, 40]),  # 8 targets
+    (200, list(range(3, 3 + 68 * 2, 2))),  # 68 targets, interleaved with non-targets
+]
+
+
+def test_raise_loop_semantics_preserve_source_order():
+    """The important test: it would have caught the original max-first defect. Pins
+    semantics (a permutation), not AppleScript strings."""
+    for n, targets in _RAISE_SHAPES:
+        assert max(targets) <= n
+        state, landed, dead_out, _ = _raise_ground_truth_and_formula(n, targets)
+        assert dead_out == []
+        assert landed == sorted(targets)
+        raised_order = [x for x in state if x in targets]
+        assert raised_order == sorted(targets)
+
+
+def test_raise_loop_semantics_dead_raise_leaves_target_unraised_others_in_order():
+    for n, targets in _RAISE_SHAPES:
+        dead_target = targets[len(targets) // 2]
+        state, landed, dead_out, dead_positions = _raise_ground_truth_and_formula(
+            n, targets, dead={dead_target}
+        )
+        assert dead_out == [dead_target]
+        assert dead_target not in landed
+        assert sorted(landed) == sorted(t for t in targets if t != dead_target)
+        raised_order = [x for x in state if x in landed]
+        assert raised_order == sorted(landed)
+        # The dead target never moved after it was marked dead -- it sits exactly where
+        # the formula last computed it to be, and nothing later touches a position below it.
+        assert state.index(dead_target) + 1 == dead_positions[dead_target]
 
 
 def test_finalize_job_without_childsig_is_skipped_not_indexed():

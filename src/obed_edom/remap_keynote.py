@@ -690,7 +690,9 @@ def restore_source_builds(
     own source slide, never the donor's — Keynote cannot script builds at all.
     Offline IWA write, unconditional (like restore_card_stroke_widths), after
     stat-finalize. Only `slides` are rewritten; every slide is verified, and a
-    surplus anywhere raises."""
+    surplus anywhere raises. The reveal order on a reuse target is restored from
+    the source slide's own `buildChunks` (Keynote's render timeline, not `builds`
+    — D8); a wrong reveal order on a patched slide raises."""
     try:
         from obed_edom import iwa_builds  # noqa: PLC0415
         from obed_edom.iwa_write import patch_slide_builds  # noqa: PLC0415
@@ -739,12 +741,37 @@ def restore_source_builds(
             f"WARNING builds: slide {slide_no} lost {count} {effect} "
             "build(s) (the object is no longer on that slide)."
         )
+    chain_headless_reasons = {
+        "source": "the source itself starts mid-chain",
+        "survivors": "the source's first build is not on the output slide, so nothing anchors the timing chain",
+        "fields": (
+            "the source's first build was kept, but the emitted first chunk is not flagged as a "
+            "chain head, so nothing anchors the timing chain"
+        ),
+        "unresolved": (
+            "the source's chunk-0 build could not be resolved to a drawable on the source slide, "
+            "so nothing anchors the timing chain"
+        ),
+    }
+    for r in plan["report"]:
+        if r.get("chainHeadless"):
+            reason = chain_headless_reasons.get(r["chainHeadless"], r["chainHeadless"])
+            say(f"WARNING builds: slide {r['slide']} starts mid-chain ({reason}).")
+    for r in plan["report"]:
+        if r.get("ambiguousPairs"):
+            say(
+                f"WARNING builds: slide {r['slide']} has {r['ambiguousPairs']} build pair(s) the "
+                "source cannot disambiguate; the pairing within them is arbitrary."
+            )
+    for o in verify["order"]:
+        if o["slide"] not in slides:
+            say(f"WARNING builds: slide {o['slide']} reveal order differs from source at position {o['at']}.")
     kept = sum(r.get("kept", 0) for r in plan["report"])
     dropped = sum(r.get("dropped", 0) for r in plan["report"])
     retimed = sum(1 for r in plan["report"] if r.get("retimed"))
     say(
-        f"Builds follow source: {kept} kept, {dropped} dropped, {retimed} "
-        f"transition(s) restored on {len(slides)} reuse slide(s)."
+        f"Builds follow source: {kept} kept, {dropped} dropped, {retimed} transition(s) restored "
+        f"on {len(slides)} reuse slide(s); reveal order follows the source's buildChunks."
     )
 
     if verify["surplus"]:
@@ -753,6 +780,10 @@ def restore_source_builds(
     transitions = [t for t in verify["transitions"] if t["slide"] not in skipped_transitions]
     if transitions:
         raise RuntimeError(f"Build patch left a transition mismatch: {transitions[:5]}")
+    order_on_patched = [o for o in verify["order"] if o["slide"] in slides]
+    if order_on_patched:
+        notes = sorted({_surplus_slide_note(o["slide"], slides) for o in order_on_patched})
+        raise RuntimeError(f"Build patch left a wrong reveal order on {', '.join(notes)}: {order_on_patched[:5]}")
 
     return {
         "skipped": False,
@@ -761,6 +792,7 @@ def restore_source_builds(
         "retimed": retimed,
         "report": plan["report"],
         "shortfalls": verify["missing"],
+        "order": verify["order"],
     }
 
 
@@ -1343,10 +1375,14 @@ def remap_keynote(
         badge_unresolved = child_resize_result.get("badgeUnresolved") or 0
         badge_moved = child_resize_result.get("badgeMoved") or 0
         badge_front_dead = child_resize_result.get("badgeFrontDead") or 0
+        raise_moved = child_resize_result.get("raiseMoved") or 0
+        raise_dead = child_resize_result.get("raiseDead") or 0
+        raise_unknown = child_resize_result.get("raiseUnknown") or 0
         if child_resize_result.get("ok"):
             say(
                 f"Stat-finalize pass: {done} group(s) done, {sized} number(s) sized to "
                 f"the template, {front} object(s) brought to front"
+                f", {raise_moved} stat raise(s) landed"
                 + (f", {dedup_deleted} donor-copy group(s) deduped" if group_removes else "")
                 + (f", {skipped} skipped" if skipped else "")
                 + (f", {sig_fallback} sig-fallback(s)" if sig_fallback else "")
@@ -1380,6 +1416,13 @@ def remap_keynote(
                     "was raised in full or not at all is NOT guaranteed, but later slides keep "
                     "their source stacking. Grant Accessibility to the launching process and "
                     "re-run if a badge is buried."
+                )
+            if raise_dead or raise_unknown:
+                say(
+                    f"WARNING stat-finalize: {raise_dead} stat group(s) did not move on "
+                    f"Bring to Front ({raise_unknown} abandoned mid-slide) — those groups "
+                    "stay buried; the remaining raises on the affected slide(s) were "
+                    "skipped rather than guessed."
                 )
             if badge_raises:
                 detail = child_resize_result.get("detail") or ""
