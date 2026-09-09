@@ -598,6 +598,24 @@ export async function startWatercolour(
   return res.json();
 }
 
+export async function fetchWatercolourPreview(
+  opts: { washSoftness: number; inkAmount: number; file?: File },
+  signal: AbortSignal
+): Promise<Blob> {
+  let res: Response;
+  if (opts.file) {
+    const body = new FormData();
+    body.set("file", opts.file);
+    body.set("wash_softness", String(opts.washSoftness));
+    body.set("ink_amount", String(opts.inkAmount));
+    res = await fetch("/api/watercolour/preview", { method: "POST", body, signal });
+  } else {
+    res = await fetch(`/api/watercolour/preview?wash_softness=${opts.washSoftness}&ink_amount=${opts.inkAmount}`, { signal });
+  }
+  if (!res.ok) throw new Error(await readError(res));
+  return res.blob();
+}
+
 export async function cancelWatercolour(id: string): Promise<Job> {
   const res = await fetch(`/api/watercolour/${id}/cancel`, { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));

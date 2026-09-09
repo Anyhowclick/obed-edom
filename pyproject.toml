@@ -52,7 +52,7 @@ obed-edom = "obed_edom.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-obed_edom = ["*.yaml", "*.js", "data/ne/*"]
+obed_edom = ["*.yaml", "*.js", "data/ne/*", "data/*.jpg"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -92,3 +92,30 @@ def test_no_wobble_consumes_the_same_random_draws_as_the_previous_helper():
     watercolour._noise(prior, shape[:2], 9 * 1.3)
     assert actual.bit_generator.state == prior.bit_generator.state
 
+
+def test_preview_renders_the_bundled_sample():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.get('/api/watercolour/preview', params={'wash_softness':0.2,'ink_amount':0.9})
+    assert response.status_code == 200, response.text
+    assert response.headers['content-type'] == 'image/png'
+    image=Image.open(BytesIO(response.content))
+    assert max(image.size) <= 360
+    response=client.get('/api/watercolour/preview', params={'wash_softness':1.4,'ink_amount':0.5})
+    assert response.status_code == 400
+
+
+def test_preview_uses_an_uploaded_photo():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('shot.png',png((90,140,210,255),(720,540)),'image/png')},
+        data={'wash_softness':'0.65','ink_amount':'0.42'},
+    )
+    assert response.status_code == 200, response.text
+    image=Image.open(BytesIO(response.content))
+    assert image.size == (360, 270)
+

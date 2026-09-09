@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { cancelWatercolour, pollJob, startWatercolour } from "../api";
+import { cancelWatercolour, fetchWatercolourPreview, pollJob, startWatercolour } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { FileWell } from "../components/FileWell";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
@@ -117,6 +117,53 @@ function MaskEditor({
   );
 }
 
+function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; file?: File }) {
+  const urlRef = useRef("");
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setBusy(true);
+    const controller = new AbortController();
+    async function load() {
+      try {
+        const blob = await fetchWatercolourPreview({ washSoftness: wash, inkAmount: ink, file }, controller.signal);
+        const next = URL.createObjectURL(blob);
+        if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+        urlRef.current = next;
+        setUrl(next);
+        setBusy(false);
+      } catch {
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    }
+    const timer = setTimeout(() => {
+      void load();
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [wash, ink, file]);
+
+  useEffect(() => {
+    return () => {
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    };
+  }, []);
+
+  return (
+    <figure className="wash-tile wash-preview">
+      {url ? (
+        <img src={url} alt="Watercolour preview" className={`wash-shot${busy ? " busy" : ""}`} />
+      ) : (
+        <div className="wash-preview-empty">Rendering preview…</div>
+      )}
+      <figcaption className="wash-cap">Preview · {file ? file.name : "sample photo"}</figcaption>
+    </figure>
+  );
+}
+
 export function WatercolourTab() {
   const { job, upsert, error: openError } = useCurrentJob("watercolour");
   const [files, setFiles] = useState<File[]>([]);
@@ -200,19 +247,28 @@ export function WatercolourTab() {
       {files.length > 0 && <p className="note">{files.map((file) => file.name).join(", ")}</p>}
 
       <h2>Look</h2>
-      <label className="settings-block">
-        <span>Wash softness {wash.toFixed(2)}</span>
-        <input type="range" min="0" max="1" step="0.05" value={wash} onChange={(event) => setWash(Number(event.target.value))} />
-      </label>
-      <label className="settings-block">
-        <span>Ink amount {ink.toFixed(2)}</span>
-        <input type="range" min="0" max="1" step="0.05" value={ink} onChange={(event) => setInk(Number(event.target.value))} />
-      </label>
-
-      <label className="check">
-        <input type="checkbox" checked={transparent} onChange={(event) => setTransparent(event.target.checked)} />
-        <span>Transparent landmark output — cuts the landmark out so it can be dropped on a map slide</span>
-      </label>
+      <div className="wash-look">
+        <div className="wash-look-controls">
+          <label className="settings-block wash-look-item">
+            <span>Wash softness {wash.toFixed(2)}</span>
+            <input type="range" min="0" max="1" step="0.05" value={wash} onChange={(event) => setWash(Number(event.target.value))} />
+            <small className="wash-hint">Higher = paler washes, less pigment</small>
+          </label>
+          <label className="settings-block wash-look-item">
+            <span>Ink amount {ink.toFixed(2)}</span>
+            <input type="range" min="0" max="1" step="0.05" value={ink} onChange={(event) => setInk(Number(event.target.value))} />
+            <small className="wash-hint">Higher = stronger pencil lines</small>
+          </label>
+          <div className="wash-look-item">
+            <label className="check">
+              <input type="checkbox" checked={transparent} onChange={(event) => setTransparent(event.target.checked)} />
+              <span>Transparent landmark output</span>
+            </label>
+            <small className="wash-hint">Cuts the landmark out so it can be dropped on a map slide</small>
+          </div>
+        </div>
+        <WatercolourPreview wash={wash} ink={ink} file={files[0]} />
+      </div>
       {transparent && files.length > 0 && (
         <>
           <label className="field">

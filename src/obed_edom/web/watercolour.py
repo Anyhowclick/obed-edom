@@ -1,22 +1,27 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import uuid
 import zipfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import cv2
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from PIL import Image
 
 from obed_edom.paths import output_root
-from obed_edom.watercolour import MAX_ENCODED_BYTES, WatercolourError, WatercolourOptions, convert, decode_image, grabcut_mask
+from obed_edom.watercolour import MAX_ENCODED_BYTES, WatercolourError, WatercolourOptions, convert, decode_image, grabcut_mask, render
 
 router = APIRouter(prefix="/api/watercolour", tags=["watercolour"])
 MAX_BATCH_FILES = 20
 MAX_BATCH_BYTES = 100 * 1024 * 1024
+PREVIEW_MAX_SIDE = 360
+SAMPLE_PATH = Path(__file__).resolve().parents[1] / "data" / "watercolour-sample.jpg"
 
 
 def _runner():
@@ -117,6 +122,39 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
     options = WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)
     job = _runner().submit("watercolour", lambda job: _run_batch(job, staged, options, mask_specs), feature="watercolour")
     return _runner().public_dict(job)
+
+
+@lru_cache(maxsize=1)
+def _sample() -> Image.Image:
+    return decode_image(SAMPLE_PATH.read_bytes())
+
+
+def _preview(image: Image.Image, wash_softness: float, ink_amount: float) -> Response:
+    if not 0 <= wash_softness <= 1 or not 0 <= ink_amount <= 1:
+        raise HTTPException(400, "Watercolour controls must be between zero and one")
+    preview = image.copy()
+    preview.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE), Image.LANCZOS)
+    output = io.BytesIO()
+    render(preview, WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)).save(output, "PNG")
+    return Response(output.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/preview")
+def watercolour_preview(wash_softness: float = 0.65, ink_amount: float = 0.42) -> Response:
+    return _preview(_sample(), wash_softness, ink_amount)
+
+
+@router.post("/preview")
+async def watercolour_preview_upload(file: UploadFile = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42)) -> Response:
+    try:
+        raw = _read_limited(file)
+    finally:
+        await file.close()
+    try:
+        image = decode_image(raw)
+    except WatercolourError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _preview(image, wash_softness, ink_amount)
 
 
 @router.post("/{job_id}/cancel")
