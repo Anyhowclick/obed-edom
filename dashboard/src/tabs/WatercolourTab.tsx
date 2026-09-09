@@ -557,6 +557,66 @@ function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; fi
   );
 }
 
+const TOOL_ICONS: Record<string, JSX.Element> = {
+  rect: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="2.5" y="3.5" width="11" height="9" rx="1" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2.4 2" />
+    </svg>
+  ),
+  pen: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3 12 3 6 7 3 12 5 13 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="3" cy="12" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  magnetic: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2.5 4 3 9.5 8 12.5 13 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M11 10.5v2a1.7 1.7 0 0 0 3.4 0v-2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M11 10.5h1.1M13.3 10.5h1.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+  wand: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.5 13 10 6.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M11 3v2.2M13.8 5.8H11.6M12.6 2.4l-1.6 1.6M9.9 5.1l-1.6 1.6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+  magnifier: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="6.8" cy="6.8" r="4" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M9.7 9.7 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M6.8 5.1v3.4M5.1 6.8h3.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
+  compare: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="2.5" y="2.5" width="11" height="11" rx="1" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 2.5v11" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M6 8 4.7 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M5.3 6.9 4 8l1.3 1.1M10 8h1.3M10.7 6.9 12 8l-1.3 1.1" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  reset: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M12.5 8A4.5 4.5 0 1 1 10.8 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M10.4 2.6 10.9 4.9 8.6 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  keep: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 5.5v5M5.5 8h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+  remove: (
+    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5.5 8h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+};
+
 function LandmarkMask({
   files,
   index,
@@ -617,43 +677,83 @@ function LandmarkMask({
           </label>
         )}
         <div className="maps-stylebar">
-          <button className={`btn secondary toggle${mode === "rect" ? " on" : ""}`} type="button" onClick={() => selectMode("rect")}>
-            Landmark box
-          </button>
-          <button className={`btn secondary toggle${mode === "pen" ? " on" : ""}`} type="button" onClick={() => selectMode("pen")}>
-            Pen
-          </button>
-          <button className={`btn secondary toggle${mode === "magnetic" ? " on" : ""}`} type="button" onClick={() => selectMode("magnetic")}>
-            Magnetic pen
-          </button>
-          <button className={`btn secondary toggle${mode === "wand" ? " on" : ""}`} type="button" onClick={() => selectMode("wand")}>
-            Wand
+          <button
+            className={`btn secondary icon-btn toggle${mode === "rect" ? " on" : ""}`}
+            type="button"
+            title="Landmark box — drag a rectangle"
+            aria-label="Landmark box"
+            onClick={() => selectMode("rect")}
+          >
+            {TOOL_ICONS.rect}
           </button>
           <button
-            className={`btn secondary toggle${magnifierOn ? " on" : ""}`}
+            className={`btn secondary icon-btn toggle${mode === "pen" ? " on" : ""}`}
             type="button"
+            title="Pen — click points, click the first to close"
+            aria-label="Pen"
+            onClick={() => selectMode("pen")}
+          >
+            {TOOL_ICONS.pen}
+          </button>
+          <button
+            className={`btn secondary icon-btn toggle${mode === "magnetic" ? " on" : ""}`}
+            type="button"
+            title="Magnetic pen — snaps points to edges"
+            aria-label="Magnetic pen"
+            onClick={() => selectMode("magnetic")}
+          >
+            {TOOL_ICONS.magnetic}
+          </button>
+          <button
+            className={`btn secondary icon-btn toggle${mode === "wand" ? " on" : ""}`}
+            type="button"
+            title="Wand — click to select by colour"
+            aria-label="Wand"
+            onClick={() => selectMode("wand")}
+          >
+            {TOOL_ICONS.wand}
+          </button>
+          <button
+            className={`btn secondary icon-btn toggle${magnifierOn ? " on" : ""}`}
+            type="button"
+            title="Magnifier"
+            aria-label="Magnifier"
             onClick={() => setMagnifierOn((current) => !current)}
           >
-            Magnifier
+            {TOOL_ICONS.magnifier}
           </button>
           <button
-            className={`btn secondary toggle${compareOn ? " on" : ""}`}
+            className={`btn secondary icon-btn toggle${compareOn ? " on" : ""}`}
             type="button"
+            title="Compare"
+            aria-label="Compare"
             onClick={() => setCompareOn((current) => !current)}
           >
-            Compare
+            {TOOL_ICONS.compare}
           </button>
-          <button className="btn secondary" type="button" onClick={onReset}>
-            Reset
+          <button className="btn secondary icon-btn" type="button" title="Reset" aria-label="Reset" onClick={onReset}>
+            {TOOL_ICONS.reset}
           </button>
         </div>
         {(mode === "pen" || mode === "magnetic" || mode === "wand") && (
           <div className="maps-stylebar">
-            <button className={`btn secondary toggle${polarity === "keep" ? " on" : ""}`} type="button" onClick={() => setPolarity("keep")}>
-              Keep
+            <button
+              className={`btn secondary icon-btn toggle${polarity === "keep" ? " on" : ""}`}
+              type="button"
+              title="Keep — the traced area is kept"
+              aria-label="Keep"
+              onClick={() => setPolarity("keep")}
+            >
+              {TOOL_ICONS.keep}
             </button>
-            <button className={`btn secondary toggle${polarity === "remove" ? " on" : ""}`} type="button" onClick={() => setPolarity("remove")}>
-              Remove
+            <button
+              className={`btn secondary icon-btn toggle${polarity === "remove" ? " on" : ""}`}
+              type="button"
+              title="Remove — the traced area is cut away"
+              aria-label="Remove"
+              onClick={() => setPolarity("remove")}
+            >
+              {TOOL_ICONS.remove}
             </button>
           </div>
         )}
