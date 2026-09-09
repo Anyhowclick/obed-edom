@@ -94,6 +94,7 @@ def test_cache_hit_export_only_skips_the_rebuild(deck, monkeypatch, tmp_path):
         raise AssertionError("offline+bulk rebuild must not run when only export is needed")
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", boom)
+    monkeypatch.setattr(inspect_mod, "inspect_keynote", boom)
 
     exported: dict = {"calls": 0}
 
@@ -290,3 +291,161 @@ def test_cache_hit_without_bulk_errors_does_not_warn(deck, monkeypatch):
     logged = []
     inspect_mod.inspect_keynote_checker(deck, use_cache=True, log=logged.append)
     assert logged == []
+
+
+# --- checker export fold: keepOpen handoff ---------------------------------
+
+
+def test_keep_open_requested_only_when_exporting(deck, monkeypatch, tmp_path):
+    calls: dict = {}
+
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        calls["keep_open"] = keep_open
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+
+    def boom_export(*a, **k):  # pragma: no cover - must not run, this test is about the flag
+        raise AssertionError("export must not run in this test")
+
+    monkeypatch.setattr(inspect_mod, "export_slide_images", boom_export)
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", boom_export)
+
+    inspect_mod.inspect_keynote_checker(deck, use_cache=False)
+    assert calls["keep_open"] is False
+
+    with pytest.raises(AssertionError):
+        inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=False)
+    assert calls["keep_open"] is True
+
+
+def test_folded_export_uses_the_already_open_form_when_bulk_kept_it_open(deck, monkeypatch, tmp_path):
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        inspect_mod.LAST_BULK_KEPT_OPEN = True
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+
+    open_calls: list[Path] = []
+    standalone_calls: list[Path] = []
+
+    def fake_open_export(key_path, export_dir):
+        open_calls.append(Path(export_dir))
+        Path(export_dir).mkdir(parents=True, exist_ok=True)
+        (Path(export_dir) / "slide-1.png").write_bytes(b"\x89PNG")
+        return None
+
+    def boom_standalone(*a, **k):  # pragma: no cover
+        raise AssertionError("the already-open handoff must not also run a standalone export")
+
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", fake_open_export)
+    monkeypatch.setattr(inspect_mod, "export_slide_images", boom_standalone)
+
+    dest = tmp_path / "job"
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=dest, use_cache=False)
+
+    assert open_calls == [dest]
+    assert standalone_calls == []
+    assert out["exported"] is True
+    assert "exportError" not in out
+
+
+def test_fold_falls_back_to_standalone_export_when_bulk_never_opened_a_doc(deck, monkeypatch, tmp_path):
+    """DRIFT-4: wanted==[] (or any path where bulk_geometry_fn is never actually
+    invoked) must leave `LAST_BULK_KEPT_OPEN` False -- the fold falls back to the
+    ordinary fresh-open-and-close standalone exporter, never the already-open form."""
+
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        # bulk_geometry_fn is never called (mirrors offline_inspect's `wanted == []`).
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+    inspect_mod.LAST_BULK_KEPT_OPEN = True  # stale leftover from an earlier, unrelated call
+
+    standalone_calls: list[Path] = []
+
+    def fake_standalone(key_path, export_dir):
+        standalone_calls.append(Path(export_dir))
+        Path(export_dir).mkdir(parents=True, exist_ok=True)
+        (Path(export_dir) / "slide-1.png").write_bytes(b"\x89PNG")
+        return None
+
+    def boom_open(*a, **k):  # pragma: no cover
+        raise AssertionError("must not use the already-open form when bulk never kept a doc open")
+
+    monkeypatch.setattr(inspect_mod, "export_slide_images", fake_standalone)
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", boom_open)
+
+    dest = tmp_path / "job"
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=dest, use_cache=False)
+
+    assert standalone_calls == [dest]
+    assert out["exported"] is True
+
+
+def test_folded_export_failure_is_surfaced_once_and_does_not_fail_geometry(deck, monkeypatch, tmp_path):
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        inspect_mod.LAST_BULK_KEPT_OPEN = True
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+
+    attempts = {"calls": 0}
+
+    def failing_open_export(key_path, export_dir):
+        attempts["calls"] += 1
+        return "export bound wrong document"
+
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", failing_open_export)
+
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=False)
+
+    assert attempts["calls"] == 1
+    assert out["exported"] is False
+    assert out["exportError"] == "export bound wrong document"
+    assert out["slideCount"] == 1  # geometry payload survives the export failure
+
+
+def test_folded_export_exception_does_not_fail_geometry(deck, monkeypatch, tmp_path):
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        inspect_mod.LAST_BULK_KEPT_OPEN = True
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+
+    def boom_open_export(*a, **k):
+        raise RuntimeError("osascript crashed")
+
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", boom_open_export)
+
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=False)
+
+    assert out["exported"] is False
+    assert out["exportError"] == "osascript crashed"
+    assert out["slideCount"] == 1
+
+
+def test_read_and_export_timings_both_present_and_non_negative(deck, monkeypatch, tmp_path):
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        inspect_mod.LAST_BULK_KEPT_OPEN = True
+        return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+
+    def fake_open_export(key_path, export_dir):
+        Path(export_dir).mkdir(parents=True, exist_ok=True)
+        (Path(export_dir) / "slide-1.png").write_bytes(b"\x89PNG")
+        return None
+
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", fake_open_export)
+
+    out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=False)
+
+    assert out["_timing"]["read"] >= 0
+    assert out["_timing"]["export"] >= 0

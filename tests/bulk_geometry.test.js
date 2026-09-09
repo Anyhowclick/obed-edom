@@ -228,4 +228,94 @@ test("an unreadable count (NaN/negative) reports a count error", function () {
   assert.ok(errors[0].error.indexOf("-1") !== -1);
 });
 
+// --- run(): the keepOpen handoff (R0.4 checkpoint 2, under-specified point C) ----
+// `run` is exported specifically so this branch is unit-testable without a live
+// Keynote session. `Application`/`Path`/`$`/`ObjC` are free identifiers in
+// bulk_geometry.js (never declared inside the module), so stubbing them as globals
+// here intercepts every call `run()` makes through them.
+
+function withPlanFile(plan, fn) {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const planPath = path.join(os.tmpdir(), "bulk_geometry_run_test_" + Date.now() + ".json");
+  fs.writeFileSync(planPath, JSON.stringify(plan));
+  try {
+    fn(planPath);
+  } finally {
+    fs.unlinkSync(planPath);
+  }
+}
+
+function stubJXAGlobals(fakeApp) {
+  const fs = require("fs");
+  global.$ = {
+    NSUTF8StringEncoding: 4,
+    NSData: { dataWithContentsOfFile: function (p) { return p; } },
+    NSString: {
+      alloc: { initWithDataEncoding: function (p) { return fs.readFileSync(p, "utf8"); } },
+    },
+  };
+  global.ObjC = { unwrap: function (s) { return s; } };
+  global.Application = function () { return fakeApp; };
+  global.Path = function (p) { return p; };
+}
+
+function unstubJXAGlobals() {
+  delete global.$;
+  delete global.ObjC;
+  delete global.Application;
+  delete global.Path;
+}
+
+function emptySlide() {
+  return {
+    textItems: function () { return []; },
+    images: function () { return []; },
+    movies: function () { return []; },
+    groups: function () { return []; },
+  };
+}
+
+test("run(): keepOpen leaves the doc open and reports keptOpen", function () {
+  let closeCalled = false;
+  const fakeDoc = { slides: function () { return [emptySlide()]; } };
+  const fakeApp = {
+    includeStandardAdditions: false,
+    open: function () { return fakeDoc; },
+    close: function () { closeCalled = true; },
+  };
+  stubJXAGlobals(fakeApp);
+  try {
+    withPlanFile({ path: "/tmp/deck.key", bundleId: "com.apple.Keynote", keepOpen: true }, function (planPath) {
+      const out = JSON.parse(m.run([planPath]));
+      assert.strictEqual(closeCalled, false, "keepOpen must skip the close");
+      assert.strictEqual(out.keptOpen, true);
+      assert.strictEqual(out.slideCount, 1);
+    });
+  } finally {
+    unstubJXAGlobals();
+  }
+});
+
+test("run(): default (no keepOpen) closes and reports keptOpen false", function () {
+  let closeCalled = false;
+  const fakeDoc = { slides: function () { return [emptySlide()]; } };
+  const fakeApp = {
+    includeStandardAdditions: false,
+    open: function () { return fakeDoc; },
+    close: function () { closeCalled = true; },
+  };
+  stubJXAGlobals(fakeApp);
+  try {
+    withPlanFile({ path: "/tmp/deck.key", bundleId: "com.apple.Keynote" }, function (planPath) {
+      const out = JSON.parse(m.run([planPath]));
+      assert.strictEqual(closeCalled, true, "default must close the doc");
+      assert.strictEqual(out.keptOpen, false);
+    });
+  } finally {
+    unstubJXAGlobals();
+  }
+});
+
 console.log("\n" + passed + " passing");

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -27,31 +28,79 @@ def _as_escape(text: str) -> str:
 
 
 def export_applescript(key_path: Path, export_dir: Path) -> str:
+    """Close-by-name (both "<stem>" and "<stem>.key" -- ``name of document`` doesn't
+    reliably carry the extension) -> open -> ``document 1`` bind + name guard -> export
+    -> close saving no. Mirrors ``scripts/probe_stroke_patch.py``'s
+    ``stroke_probe_applescript`` and ``maps_keynote.py``'s export script."""
     key = _as_escape(str(Path(key_path).resolve()))
     dest = _as_escape(str(Path(export_dir).resolve()))
     app = keynote_app.bundle_id()
+    stem = _as_escape(Path(key_path).stem)
     return "\n".join(
         [
+            f'using terms from application id "{app}"',
             f'tell application id "{app}"',
-            f'  using terms from application id "{app}"',
-            f'    set theDoc to open POSIX file "{key}"',
+            "  activate",
+            "  with timeout of 3600 seconds",
+            "    try",
+            f'      close (every document whose name is "{stem}") saving no',
+            f'      close (every document whose name is "{stem}.key") saving no',
+            "      delay 0.3",
+            "    end try",
+            f'    set theFile to POSIX file "{key}"',
+            "    open theFile",
+            "    delay 0.4",
+            "    set theDoc to document 1",
+            f'    if name of theDoc does not start with "{stem}" then error '
+            f'"export bound wrong document: " & (name of theDoc)',
             f'    set exportFolder to POSIX file "{dest}"',
-            "    export theDoc to exportFolder as slide images with properties {image format:PNG, skipped slides:false}",
+            "    export theDoc to exportFolder as slide images with properties "
+            "{image format:PNG, skipped slides:false}",
             "    try",
             "      close theDoc saving no",
             "    end try",
-            "  end using terms from",
+            "  end timeout",
             "end tell",
+            "end using terms from",
         ]
     )
 
 
-def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
+def _export_open_applescript(key_path: Path, export_dir: Path) -> str:
+    """Already-open handoff form: no close-by-name, no ``open`` -- binds the doc the
+    caller left open (e.g. ``bulk_geometry(..., keep_open=True)``). Guard and export
+    share one ``try`` so a wrong-document bind or a failed export still reaches the
+    unconditional close -- this form must never leave a document open."""
+    dest = _as_escape(str(Path(export_dir).resolve()))
+    app = keynote_app.bundle_id()
+    stem = _as_escape(Path(key_path).stem)
+    return "\n".join(
+        [
+            f'using terms from application id "{app}"',
+            f'tell application id "{app}"',
+            "  activate",
+            "  with timeout of 3600 seconds",
+            "    set theDoc to document 1",
+            "    try",
+            f'      if name of theDoc does not start with "{stem}" then error '
+            f'"export bound wrong document: " & (name of theDoc)',
+            f'      set exportFolder to POSIX file "{dest}"',
+            "      export theDoc to exportFolder as slide images with properties "
+            "{image format:PNG, skipped slides:false}",
+            "    end try",
+            "    try",
+            "      close theDoc saving no",
+            "    end try",
+            "  end timeout",
+            "end tell",
+            "end using terms from",
+        ]
+    )
+
+
+def _run_applescript_export(script: str, export_dir: Path) -> str | None:
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
-    script = export_applescript(key_path, export_dir)
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
         handle.write(script)
         script_path = Path(handle.name)
@@ -70,6 +119,20 @@ def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
     if proc.returncode != 0:
         return f"Preview export failed: {err}"
     return err
+
+
+def export_slide_images(key_path: Path, export_dir: Path) -> str | None:
+    script = export_applescript(key_path, export_dir)
+    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
+    time.sleep(0.4)
+    return _run_applescript_export(script, export_dir)
+
+
+def _export_open_slide_images(key_path: Path, export_dir: Path) -> str | None:
+    """The keep-open handoff's exporter: the doc is already open (left by the caller),
+    so no ``open -b`` / activation delay is needed before running the script."""
+    script = _export_open_applescript(key_path, export_dir)
+    return _run_applescript_export(script, export_dir)
 
 
 def _set_export_state(
@@ -161,15 +224,30 @@ def inspect_keynote(
         timing["digest"] = time.perf_counter() - t_hash
         json_path = inspect_cache_path(digest)
         png_dir = preview_cache_dir(digest)
-        pngs_ok = dest is None or bool(preview_pngs(png_dir))
-        if json_path.is_file() and pngs_ok:
+        if json_path.is_file():
             payload = json.loads(json_path.read_text(encoding="utf-8"))
+            slides = payload.get("slides") or []
+            slide_count = int(payload.get("slideCount") or len(slides))
+            skipped = sum(1 for slide in slides if slide.get("skipped"))
+            expected_pngs = slide_count - skipped
+            have = 0 if png_dir is None else len(preview_pngs(png_dir))
+            if dest is None or have == expected_pngs:
+                payload["_cached"] = True
+                payload["_digest"] = digest
+                payload["_timing"] = timing
+                if dest is not None:
+                    payload["previewDir"] = str(png_dir)
+                    _set_export_state(payload, png_dir)
+                return payload
+            png_dir.mkdir(parents=True, exist_ok=True)
+            t_export = time.perf_counter()
+            err = export_slide_images(key_path, png_dir)
             payload["_cached"] = True
             payload["_digest"] = digest
+            _set_export_state(payload, png_dir, err, failed=True)
+            payload["previewDir"] = str(png_dir)
+            timing["export"] = time.perf_counter() - t_export
             payload["_timing"] = timing
-            if dest is not None:
-                payload["previewDir"] = str(png_dir)
-                _set_export_state(payload, png_dir)
             return payload
         if dest is not None:
             dest = png_dir
@@ -182,8 +260,6 @@ def inspect_keynote(
         "bundleId": keynote_app.bundle_id(),
         "bulkRead": bulk_read_enabled(),
     }
-    if dest:
-        plan["exportDir"] = str(dest.resolve())
     wanted = slides_for_plan(slide_range)
     if wanted:
         plan["slides"] = wanted
@@ -241,6 +317,7 @@ def inspect_keynote(
 
 LAST_BULK_ERRORS: list[dict[str, Any]] = []
 LAST_BULK_NOTES: list[dict[str, Any]] = []
+LAST_BULK_KEPT_OPEN: bool = False
 
 
 def _log_bulk_errors(errors: list[dict[str, Any]], error_count: int, log: Any) -> None:
@@ -263,6 +340,7 @@ def bulk_geometry(
     key_path: Path | str,
     slides: list[int] | None = None,
     *,
+    keep_open: bool = False,
     log: Any = None,
 ) -> dict[int, dict[str, list[list[float]]]]:
     """{slide (0-based): {kind: [[x, y, w, h], ...]}}. bulk_geometry.js's own per-
@@ -273,10 +351,14 @@ def bulk_geometry(
     `path` (a caller snapshotting them must never accidentally pick up a DIFFERENT
     key_path's leftovers). Logged here (first 5 errors + total; notes just a count) via
     `log` -- default `None` (library code never prints on its own; pass `log=print` or an
-    operator `say` explicitly)."""
-    global LAST_BULK_ERRORS, LAST_BULK_NOTES
+    operator `say` explicitly). `keep_open` is an opt-in handoff for a caller that
+    immediately exports the still-open doc itself (only the checker fold does this --
+    every other caller keeps the close-by-default behaviour); `LAST_BULK_KEPT_OPEN`
+    reflects what bulk_geometry.js actually did, not what was requested."""
+    global LAST_BULK_ERRORS, LAST_BULK_NOTES, LAST_BULK_KEPT_OPEN
     LAST_BULK_ERRORS = []
     LAST_BULK_NOTES = []
+    LAST_BULK_KEPT_OPEN = False
     key_path = Path(key_path).expanduser().resolve()
     if not key_path.exists():
         raise FileNotFoundError(f"Keynote not found: {key_path}")
@@ -284,6 +366,8 @@ def bulk_geometry(
         "path": str(key_path),
         "bundleId": keynote_app.bundle_id(),
     }
+    if keep_open:
+        plan["keepOpen"] = True
     if slides:
         wanted = sorted({int(n) for n in slides})
         plan["slides"] = wanted
@@ -318,6 +402,7 @@ def bulk_geometry(
     path_str = str(key_path)
     LAST_BULK_ERRORS = [{**e, "path": path_str} for e in (parsed.get("errors") or [])]
     LAST_BULK_NOTES = [{**n, "path": path_str} for n in (parsed.get("notes") or [])]
+    LAST_BULK_KEPT_OPEN = bool(parsed.get("keptOpen"))
     _log_bulk_errors(LAST_BULK_ERRORS, int(parsed.get("errorCount") or 0), log)
     _log_bulk_notes(LAST_BULK_NOTES, int(parsed.get("noteCount") or 0), log)
     geometry = parsed.get("geometry") or {}
@@ -491,12 +576,17 @@ def _build_checker_offline(
     bulk_geometry_fn: Any,
     *,
     slide_range: Any = None,
+    keep_open: bool = False,
     log: Any = None,
 ) -> dict[str, Any]:
-    """Two-tier IWA + attach_runs; one decode. Raises ImportError without ``iwa``."""
+    """Two-tier IWA + attach_runs; one decode. Raises ImportError without ``iwa``.
+    ``keep_open`` binds ``bulk_geometry_fn`` to leave the deck open for an immediate
+    already-open export (the checker fold); every other caller leaves it ``False``."""
     from obed_edom.iwa_runs import _load_deck, attach_runs  # noqa: PLC0415
     from obed_edom.offline_inspect import two_tier_wall_payload  # noqa: PLC0415
 
+    if keep_open:
+        bulk_geometry_fn = functools.partial(bulk_geometry_fn, keep_open=True)
     deck = _load_deck(key_path)
     payload = two_tier_wall_payload(
         key_path, bulk_geometry_fn=bulk_geometry_fn, slide_range=slide_range, deck=deck, log=log
@@ -576,9 +666,22 @@ def inspect_keynote_checker(
                 cached["_timing"] = timing
                 return cached
 
+    export_target = dest
+    if want_cache and dest is not None and png_dir is not None:
+        export_target = png_dir
+    if export_target is not None:
+        export_target = Path(export_target)
+        export_target.mkdir(parents=True, exist_ok=True)
+
+    global LAST_BULK_KEPT_OPEN
+    LAST_BULK_KEPT_OPEN = False
+
     t_read = time.perf_counter()
     try:
-        payload = _build_checker_offline(key_path, bulk_geometry, slide_range=slide_range, log=log)
+        payload = _build_checker_offline(
+            key_path, bulk_geometry, slide_range=slide_range,
+            keep_open=export_target is not None, log=log,
+        )
     except Exception as exc:  # noqa: BLE001 — missing iwa extra / decode error -> legacy JXA
         if log is not None:
             log(f"WARN: offline checker build failed for {key_path.name} ({exc!r}) -- falling back to legacy JXA.")
@@ -631,16 +734,17 @@ def inspect_keynote_checker(
     payload["reader"] = "offline"  # persists past the cache-write underscore strip
     payload.setdefault("exported", False)
 
-    export_target = dest
-    if want_cache and dest is not None and png_dir is not None:
-        export_target = png_dir
     if export_target is not None:
-        export_target = Path(export_target)
-        export_target.mkdir(parents=True, exist_ok=True)
         t_export = time.perf_counter()
-        err: str | None = None
-        if not preview_pngs(export_target):
-            err = export_slide_images(key_path, export_target)
+        if LAST_BULK_KEPT_OPEN:
+            try:
+                err = _export_open_slide_images(key_path, export_target)
+            except Exception as exc:  # noqa: BLE001 — export failure must not fail geometry
+                err = str(exc)
+        else:
+            err = None
+            if not preview_pngs(export_target):
+                err = export_slide_images(key_path, export_target)
         _set_export_state(payload, export_target, err, failed=True)
         timing["export"] = time.perf_counter() - t_export
         payload["previewDir"] = str(export_target.resolve())

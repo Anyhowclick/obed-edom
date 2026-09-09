@@ -220,6 +220,10 @@ def test_arm_c_merge_failure_falls_back_to_legacy_once_not_reraised(monkeypatch,
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
     monkeypatch.setattr(
+        inspect_mod, "inspect_keynote",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy JXA must not run")),
+    )
+    monkeypatch.setattr(
         inspect_mod, "_merge_legacy_items",
         lambda *a, **k: (_ for _ in ()).throw(TypeError("boom")),
     )
@@ -304,7 +308,7 @@ def test_checker_ranged_subsets_slides_and_never_caches(deck, monkeypatch):
     dropped and swallowed by a `**kwargs` stub) -- that's what scopes the bulk Keynote read
     itself, the ranged path's entire cost saving."""
 
-    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, log=None):
+    def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, log=None, **kwargs):
         assert slide_range == frozenset({2})
         return {
             "slideCount": 3,
@@ -317,6 +321,10 @@ def test_checker_ranged_subsets_slides_and_never_caches(deck, monkeypatch):
         }
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+    monkeypatch.setattr(
+        inspect_mod, "inspect_keynote",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy JXA must not run")),
+    )
 
     out = inspect_mod.inspect_keynote_checker(deck, slide_range=frozenset({2}), use_cache=True)
 
@@ -360,6 +368,10 @@ def test_uncached_checker_exports_into_export_dir_not_digest_cache(deck, monkeyp
         }
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
+    monkeypatch.setattr(
+        inspect_mod, "inspect_keynote",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy JXA must not run")),
+    )
 
     export_calls: list[Path] = []
 

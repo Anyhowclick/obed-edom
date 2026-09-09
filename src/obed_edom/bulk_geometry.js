@@ -232,12 +232,15 @@ function run(argv) {
     geometry[i] = slideGeom(slides[i], i);
   }
 
-  try {
-    Keynote.close(doc, { saving: "no" });
-  } catch (e3) {
+  const keepOpen = !!plan.keepOpen;
+  if (!keepOpen) {
     try {
-      doc.close({ saving: "no" });
-    } catch (e4) {}
+      Keynote.close(doc, { saving: "no" });
+    } catch (e3) {
+      try {
+        doc.close({ saving: "no" });
+      } catch (e4) {}
+    }
   }
 
   return JSON.stringify({
@@ -248,6 +251,7 @@ function run(argv) {
     errorCount: errorCount,
     notes: notes,
     noteCount: noteCount,
+    keptOpen: keepOpen,
   });
 }
 
@@ -263,5 +267,6 @@ if (typeof module !== "undefined" && module.exports) {
     getNotes: function () { return notes; },
     getNoteCount: function () { return noteCount; },
     resetErrors: function () { errors = []; errorCount = 0; notes = []; noteCount = 0; },
+    run: run,
   };
 }

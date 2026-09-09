@@ -82,6 +82,38 @@ def test_scripts_address_keynote_by_bundle_id(monkeypatch, tmp_path: Path):
     assert 'application "Keynote"' not in script
 
 
+def test_export_applescript_ordering_guards_and_cleanup(tmp_path: Path):
+    script = export_applescript(tmp_path / "Sermon.key", tmp_path / "out")
+    close_by_name = script.index('close (every document whose name is "Sermon") saving no')
+    close_by_name_key = script.index(
+        'close (every document whose name is "Sermon.key") saving no'
+    )
+    open_at = script.index("open theFile")
+    bind_at = script.index("set theDoc to document 1")
+    guard_at = script.index("name of theDoc does not start with")
+    export_at = script.index("export theDoc to exportFolder as slide images")
+    close_doc_at = script.rindex("close theDoc saving no")
+
+    assert close_by_name < close_by_name_key < open_at < bind_at < guard_at < export_at
+    assert export_at < close_doc_at
+    assert "with timeout of 3600 seconds" in script
+    assert "activate" in script
+
+
+def test_export_open_applescript_has_no_close_by_name_or_open(tmp_path: Path):
+    from obed_edom.inspect import _export_open_applescript
+
+    script = _export_open_applescript(tmp_path / "Sermon.key", tmp_path / "out")
+    assert "close (every document whose name is" not in script
+    assert "open theFile" not in script
+    bind_at = script.index("set theDoc to document 1")
+    guard_at = script.index("name of theDoc does not start with")
+    export_at = script.index("export theDoc to exportFolder as slide images")
+    close_doc_at = script.rindex("close theDoc saving no")
+    assert bind_at < guard_at < export_at < close_doc_at
+    assert "with timeout of 3600 seconds" in script
+
+
 def test_cache_is_partitioned_by_app_version(tmp_path: Path):
     fifteen = inspect_cache_path("abc", tmp_path, app_version="15.3.1")
     fourteen = inspect_cache_path("abc", tmp_path, app_version="14.5")
