@@ -545,6 +545,7 @@ export function MapsTab() {
     if (slide) await mapRef.current?.waitUntilIdle(slideForAudience(slide, activeAudienceRef.current).style);
     await captureThumb(id);
     if (next && jobRef.current) scheduleSave(next, immediate);
+    if (immediate) await saveQueue.current?.flush().catch(() => undefined);
   }
 
   async function selectSlide(nextId: string, opts?: { flush?: boolean; audience?: MapsAudience }) {
@@ -830,7 +831,7 @@ export function MapsTab() {
 
   function deleteSelectedPins() {
     if (!activeView || selectedPins.length === 0 || locked) return;
-    if (!window.confirm(`Remove ${selectedPins.length} selected pin${selectedPins.length === 1 ? "" : "s"}?`)) return;
+    if (!window.confirm(`Remove ${selectedPins.length} selected object${selectedPins.length === 1 ? "" : "s"}?`)) return;
     const selected = new Set(selectedPins);
     updateActive({ churches: activeView.churches.filter((church) => !selected.has(church.id)) });
     if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
@@ -1982,7 +1983,7 @@ export function MapsTab() {
                   if (!activeView) return;
                   const church = activeView.churches.find((c) => c.id === id);
                   if (!church) return;
-                  const name = window.prompt("Pin name", church.name);
+                  const name = window.prompt("Object name", church.name);
                   if (name == null) return;
                   updateActive({ churches: activeView.churches.map((c) => (c.id === id ? { ...c, name } : c)) });
                 }}
@@ -2046,7 +2047,7 @@ export function MapsTab() {
                   <button className="maps-insp-back" type="button" onClick={() => setSelectedPin(null)}>
                     ← Camera
                   </button>
-                  <div className="cap">Pin</div>
+                  <div className="cap">Object</div>
                   <label>
                     Name:
                     <input
@@ -2062,15 +2063,19 @@ export function MapsTab() {
                     <select
                       value={pin.kind}
                       disabled={locked}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const kind = event.target.value as MapsPinKind;
+                        if (kind === "landmark" && !pin.assetId) return;
                         updateActive({
-                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, kind: event.target.value as MapsPinKind } : c)),
-                        })
-                      }
+                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, kind } : c)),
+                        });
+                      }}
                     >
                       <option value="dot">Dot</option>
                       <option value="dropPin">Drop pin</option>
-                      {pin.assetId && <option value="landmark">Transparent landmark</option>}
+                      {(pin.assetId || pin.kind === "landmark") && (
+                        <option value="landmark" disabled={!pin.assetId}>Transparent landmark</option>
+                      )}
                     </select>
                   </label>
                   <label>Size <input type="range" min="24" max="600" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
@@ -2087,17 +2092,6 @@ export function MapsTab() {
                       }
                     />
                   </label>
-                  <label className="maps-check">
-                    <input
-                      type="checkbox"
-                      checked={pin.showLabel !== false}
-                      disabled={locked}
-                      onChange={(event) =>
-                        updateActive({ churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, showLabel: event.target.checked } : c)) })
-                      }
-                    />
-                    Show label on map
-                  </label>
                   <button
                     className="btn secondary"
                     type="button"
@@ -2108,7 +2102,7 @@ export function MapsTab() {
                       setSelectedPins((ids) => ids.filter((id) => id !== pin.id));
                     }}
                   >
-                    Remove pin
+                    Remove object
                   </button>
                 </>
               )}
@@ -2296,8 +2290,8 @@ export function MapsTab() {
                     <p className="note">Shift-click the map to add a pin, or add a transparent landmark.</p>
                   ) : (
                     <>
-                      <div className="maps-pin-bulk" role="group" aria-label="Selected pins">
-                        <span className="note">{selectedPins.length ? `${selectedPins.length} selected` : "Select pins"}</span>
+                      <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
+                        <span className="note">{selectedPins.length ? `${selectedPins.length} selected` : "Select objects"}</span>
                         <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })}>
                           Show labels
                         </button>
@@ -2307,7 +2301,7 @@ export function MapsTab() {
                         <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins}>Copy</button>
                         <button className="btn secondary" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)}>Paste</button>
                         <button className="btn secondary" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)}>Paste to slides</button>
-                        <button className="btn maps-delete maps-pin-bulk-delete" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected pins" aria-label="Delete selected pins">
+                        <button className="btn maps-delete maps-pin-bulk-delete" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>

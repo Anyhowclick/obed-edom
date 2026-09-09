@@ -474,6 +474,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "exportLw": True,
         "exportCg": True,
         "exportDsk": False,
+        "stateRevision": 0,
         "defaultStyle": "positron",
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),

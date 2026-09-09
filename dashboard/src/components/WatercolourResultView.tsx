@@ -34,12 +34,16 @@ export function WatercolourResultView({
   const [target, setTarget] = useState("");
   const [added, setAdded] = useState(false);
 
-  useEffect(() => {
-    listJobs("maps")
+  function loadMapJobs() {
+    return listJobs("maps")
       .then((jobs) => setMapJobs(jobs.filter((candidate) => candidate.status === "done")))
       .catch((err) => onError(err instanceof Error ? err.message : String(err)));
+  }
+
+  useEffect(() => {
+    void loadMapJobs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [job.id]);
 
   const items = (job.result?.items as Item[] | undefined) || [];
   const hasDone = items.some((item) => item.status === "done");
@@ -70,17 +74,27 @@ export function WatercolourResultView({
       {hasTransparent && (
         <label className="field">
           Add landmarks to
-          <select value={target} onChange={(event) => setTarget(event.target.value)}>
+          <select value={target} onChange={(event) => setTarget(event.target.value)} onFocus={() => void loadMapJobs()}>
             <option value="">Choose a map slide</option>
-            {mapJobs.map((map) => (
-              <optgroup key={map.id} label={mapLabel(map)}>
-                {((map.result?.slides as { id: string; title: string }[] | undefined) || []).map((slide) => (
-                  <option key={`${map.id}:${slide.id}`} value={`${map.id}:${slide.id}`}>
-                    {slide.title}
+            {mapJobs.map((map) => {
+              const slides = (map.result?.slides as { id: string; title: string }[] | undefined) || [];
+              if (slides.length === 1) {
+                return (
+                  <option key={map.id} value={`${map.id}:${slides[0].id}`}>
+                    {mapLabel(map)}
                   </option>
-                ))}
-              </optgroup>
-            ))}
+                );
+              }
+              return (
+                <optgroup key={map.id} label={mapLabel(map)}>
+                  {slides.map((slide) => (
+                    <option key={`${map.id}:${slide.id}`} value={`${map.id}:${slide.id}`}>
+                      {slide.title}
+                    </option>
+                  ))}
+                </optgroup>
+              );
+            })}
           </select>
         </label>
       )}

@@ -842,6 +842,14 @@ def test_state_allows_dsk_as_the_only_export_target():
     assert saved.json()["result"]["exportDsk"] is True
 
 
+def test_first_state_save_of_a_fresh_deck_starts_at_revision_zero():
+    job = _seed()
+    assert job["result"]["stateRevision"] == 0
+    saved = client.post(f"/api/maps/{job['id']}/state", json={"expectedRevision": 0, "document": _doc(job)})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["stateRevision"] == 1
+
+
 def test_state_revision_rejects_stale_document_save():
     job = _seed()
     doc = _doc(job)

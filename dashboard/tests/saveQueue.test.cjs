@@ -90,3 +90,55 @@ test("queue keeps a conflict candidate with unrelated remote additions for expli
   assert.equal(conflict.candidate.slides[0].churches[0].id, "p1");
   assert.equal(conflict.candidate.slides[0].title, "Local");
 });
+
+test("reset abandons the in-flight save so the next flush starts a fresh request", async () => {
+  let live = doc();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      calls.push({ sent, revision });
+      await gate;
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.setAcknowledged({ document: live, revision: 0 });
+  queue.markDirty();
+  const first = queue.flush();
+  queue.reset({ document: doc(), revision: 7 });
+  queue.markDirty();
+  const second = queue.flush();
+  assert.notStrictEqual(second, first);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].revision, 7);
+});
+
+test("a stale acknowledgement cannot move the base revision backwards", async () => {
+  let live = doc("Current");
+  const calls = [];
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      calls.push({ sent, revision });
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.reset({ document: live, revision: 5 });
+  queue.reconcile({ document: doc("Stale"), revision: 3 });
+  assert.equal(live.slides[0].title, "Current");
+  queue.markDirty();
+  await queue.flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].revision, 5);
+  assert.equal(live.slides[0].title, "Current");
+});

@@ -53,3 +53,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 obed_edom = ["*.yaml", "*.js", "data/ne/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
