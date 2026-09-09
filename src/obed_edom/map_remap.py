@@ -122,7 +122,7 @@ class ItemTransform:
     # uniform scale about the group's LIVE frame — after setSlideSize that frame is the
     # union of a word-wrapped autosize child (measured 278x88 -> 69x261 on Gold slide 2),
     # and the resize freezes the child wrapped permanently. Source-deck rects; the targets
-    # are derived in as_dict so they survive _pack_left_groups moving x/y afterwards.
+    # are derived in as_dict from this transform's final x/y, whatever moved it there.
     child_src: list[dict[str, Any]] | None = None
 
     def _child_payload(self) -> list[dict[str, Any]] | None:
@@ -651,36 +651,6 @@ def pack_columns_from_right(
     return placed
 
 
-def pack_columns_from_left(
-    boxes: list[Rect],
-    dest_w: float,
-    dest_h: float,
-    *,
-    gap: float = 10.0,
-    margin: float = 16.0,
-) -> list[Rect]:
-    """Stack left-edge columns; a new column must clear the widest box in the previous one."""
-    if not boxes:
-        return []
-    top = margin
-    bottom = max(margin + 8.0, dest_h - margin)
-    placed: list[Rect] = []
-    col_left = margin
-    col_max_w = 0.0
-    y = top
-    for box in boxes:
-        w = max(8.0, box.w)
-        h = max(8.0, box.h)
-        if placed and y + h > bottom + 0.5:
-            col_left = col_left + col_max_w + gap
-            y = top
-            col_max_w = 0.0
-        placed.append(Rect(col_left, y, w, h))
-        col_max_w = max(col_max_w, w)
-        y += h + gap
-    return placed
-
-
 def template_line_slots(
     slides: list[dict], slide_number: int | None = None
 ) -> list[dict[str, Any]]:
@@ -865,25 +835,6 @@ def map_point(x: float, y: float, src: Rect, dst: Rect) -> tuple[float, float]:
 def map_rect(rect: Rect, src: Rect, dst: Rect) -> Rect:
     s, tx, ty = affine_of(src, dst)
     return Rect(rect.x * s + tx, rect.y * s + ty, rect.w * s, rect.h * s)
-
-
-def enforce_min_size(rect: Rect, minimum: float) -> Rect:
-    if minimum <= 0:
-        return rect
-    w, h = rect.w, rect.h
-    if w >= minimum and h >= minimum:
-        return rect
-    cx, cy = rect.center()
-    if w <= 0 or h <= 0:
-        return Rect(cx - minimum / 2.0, cy - minimum / 2.0, minimum, minimum)
-    scale = max(minimum / w, minimum / h)
-    w2, h2 = w * scale, h * scale
-    return Rect(cx - w2 / 2.0, cy - h2 / 2.0, w2, h2)
-
-
-def _basename(name: str) -> str:
-    stem = name.rsplit("/", 1)[-1]
-    return re.sub(r"-\d+\.[A-Za-z0-9]+$", "", stem).lower()
 
 
 def pair_by_order(left: list[dict], right: list[dict]) -> list[tuple[dict, dict]]:
@@ -1128,26 +1079,6 @@ def merge_affine_groups(pairs: list[tuple[dict, dict]]) -> list[dict[str, Any]]:
         )
     out.sort(key=lambda g: (g["src"].w * g["src"].h) if g["src"] else 0, reverse=True)
     return out
-
-
-def pair_maps(wall: list[dict], gold: list[dict]) -> list[tuple[dict, dict]]:
-    if len(wall) == 1 and len(gold) == 1:
-        return [(wall[0], gold[0])]
-    gold_by = {_basename(file_name(it)): it for it in gold}
-    pairs: list[tuple[dict, dict]] = []
-    used: set[int] = set()
-    for item in wall:
-        key = _basename(file_name(item))
-        other = gold_by.get(key)
-        if other is not None and id(other) not in used:
-            pairs.append((item, other))
-            used.add(id(other))
-    if pairs:
-        return pairs
-    return pair_by_order(
-        sorted(wall, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True),
-        sorted(gold, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True),
-    )
 
 
 def pair_list(wall: list[dict], gold: list[dict]) -> list[tuple[dict, dict]]:
@@ -1582,13 +1513,10 @@ def drop_outlier_groups(grouped: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if scale <= 0:
         return grouped
     kept: list[dict[str, Any]] = []
-    dropped: list[float] = []
     for group in grouped:
         ratio = group["affine"].s / scale
         if group is dominant or 1 / OUTLIER_SCALE_FACTOR <= ratio <= OUTLIER_SCALE_FACTOR:
             kept.append(group)
-        else:
-            dropped.append(round(group["affine"].s, 4))
     return kept
 
 
@@ -1616,10 +1544,6 @@ def _group_for_item(
 
 def _affine_for_item(item: dict, groups: list[tuple[Affine, Rect]]) -> Affine | None:
     return _group_for_item(item, groups)[0]
-
-
-def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
-    return list(_groups_from_recipe(recipe))
 
 
 def title_plate(slide: dict, slide_size: tuple[float, float] | None = None) -> dict | None:
@@ -2075,14 +1999,6 @@ def _style_text_box(
     dst_size = _f(style.get("size")) if style else 0.0
     font_name = (str(style.get("font") or "") or None) if style else None
     colour = norm_rgb(style.get("color")) if style else None
-    snippet = (item.get("text") or "").replace("\n", " ")[:48]
-    interesting = bool(
-        re.search(
-            r"global|missions|oct|183|269|total|churches|countries",
-            snippet,
-            re.I,
-        )
-    )
     if style and dst_size > 0 and wall_font > 0:
         ratio = dst_size / wall_font
         if aff is not None:
@@ -2163,20 +2079,6 @@ def _pack_list_transforms(transforms: list[ItemTransform], recipe: dict[str, Any
         lists[idx].y = rect.y
         lists[idx].w = rect.w
         lists[idx].h = rect.h
-
-
-def _pack_left_groups(groups: list["ItemTransform"], recipe: dict[str, Any]) -> None:
-    """Re-place left-column groups parked at x=16. Group width does not scale children, so only move."""
-    if len(groups) < 2:
-        return
-    dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
-    dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
-    order = sorted(range(len(groups)), key=lambda i: (groups[i].src.y, groups[i].src.x))
-    boxes = [Rect(groups[i].x, groups[i].y, groups[i].w, groups[i].h) for i in order]
-    placed = pack_columns_from_left(boxes, dest_w, dest_h)
-    for idx, rect in zip(order, placed, strict=True):
-        groups[idx].x = rect.x
-        groups[idx].y = rect.y
 
 
 # FIT_MAX_DELTA_FRACTION: max body nudge back on-screen, so it stays near where it was placed.
@@ -2393,7 +2295,7 @@ def plan_slide_transforms(
     card_stroke: float = DEFAULT_CARD_STROKE,
     card_grid_report: list[dict[str, Any]] | None = None,
 ) -> list[ItemTransform]:
-    groups = _groups_for_slide(slide, recipe)
+    groups = _groups_from_recipe(recipe)
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
         slide, recipe, wall_size
     )
@@ -2429,7 +2331,7 @@ def plan_slide_transforms(
         else:
             _bm, body_final_size, _bf, _bc = _style_text_box(
                 body_for_body,
-                _affine_for_item(body_for_body, _groups_for_slide(slide, recipe)),
+                _affine_for_item(body_for_body, _groups_from_recipe(recipe)),
                 match_character_style(body_for_body, styles_pre),
             )
     body_wall_rect = item_rect(body_for_body) if (overlay_ids and body_for_body) else None
@@ -2452,7 +2354,6 @@ def plan_slide_transforms(
     from obed_edom.inspect import is_duplicate_item  # noqa: PLC0415
 
     out: list[ItemTransform] = []
-    left_groups: list[ItemTransform] = []
     wall_w, wall_h = wall_size or (0.0, 0.0)
     group_child_text: dict[int, str] = slide.get("groupChildText") or {}
     group_caption: dict[int, dict[str, Any]] = slide.get("groupCaption") or {}
@@ -2478,7 +2379,6 @@ def plan_slide_transforms(
             continue
         item_index = _item_index(item, fallback_i)
         kind_index = _item_kind_index(item, item_index)
-        parked_left = False
         # Hide coincident magic-move copies; skipping them lets the canvas scale ghosts back on-frame.
         if id(item) in coincident_dups:
             out.append(_hide_item_transform(item, number, item_index, kind_index))
@@ -2850,11 +2750,8 @@ def plan_slide_transforms(
                 child_src=child_src,
             )
         )
-        if parked_left:
-            left_groups.append(out[-1])
     if pack_lists:
         _pack_list_transforms(out, recipe)
-    _pack_left_groups(left_groups, recipe)
     if card_keys:
         grid_cards = [t for t in out if (t.kind, t.kind_index) in card_keys]
         grid_obstacles = [
@@ -3752,6 +3649,14 @@ def fit_to_frame_recipe(
     }
 
 
+def carry_fit_context(fitted: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:
+    """Copy text/card context keys from `recipe` onto a `fit_to_frame_recipe` result."""
+    for carry in ("characterStyles", "listFontSize", "listSample", "cardSamples"):
+        if recipe.get(carry) is not None:
+            fitted[carry] = recipe[carry]
+    return fitted
+
+
 def frame_affine(recipe: dict[str, Any]) -> Affine | None:
     src = _rect_from_dict(recipe.get("mapSrc"))
     dst = _rect_from_dict(recipe.get("mapDst"))
@@ -3763,22 +3668,6 @@ def frame_affine(recipe: dict[str, Any]) -> Affine | None:
         if gsrc and gdst and gsrc.w > 0 and gsrc.h > 0:
             return affine_from_rects(gsrc, gdst)
     return None
-
-
-def repack_free_text(
-    transforms: list[ItemTransform],
-    slide: dict,
-    recipe: dict[str, Any],
-    *,
-    preview: Any,
-    wall_w: float,
-    wall_h: float,
-) -> list[dict[str, Any]]:
-    """Pack background-only text. Never drop text: crowded boxes stay at the least-overlapping spot."""
-    analysis = analyse_free_text(slide, recipe, preview=preview, wall_w=wall_w, wall_h=wall_h)
-    if analysis is None:
-        return []
-    return _place_free_text(transforms, slide, recipe, analysis)
 
 
 def analyse_free_text(
@@ -4131,10 +4020,7 @@ def plan_payload_transforms(
                     _f(slide_recipe.get("destHeight"), CG_HEIGHT),
                 )
                 if fitted:
-                    for carry in ("characterStyles", "listFontSize", "listSample", "cardSamples"):
-                        if slide_recipe.get(carry) is not None:
-                            fitted[carry] = slide_recipe[carry]
-                    slide_recipe = fitted
+                    slide_recipe = carry_fit_context(fitted, slide_recipe)
                     if fitted_slides is not None:
                         fitted_slides.append(number)
                     if framing_report:
@@ -4331,33 +4217,6 @@ def _greedy_match(
         out.append((predicted[i], gold[j]))
     return out
 
-
-def fit_similarity(
-    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
-) -> tuple[float, float, float] | None:
-    """Uniform scale+translation of predicted points onto gold; residual is geometric fidelity, not layout choice."""
-    n = len(pairs)
-    if n < 2:
-        return None
-    px = sum(p[0] for p, _ in pairs) / n
-    py = sum(p[1] for p, _ in pairs) / n
-    gx = sum(g[0] for _, g in pairs) / n
-    gy = sum(g[1] for _, g in pairs) / n
-    num = sum((p[0] - px) * (g[0] - gx) + (p[1] - py) * (g[1] - gy) for p, g in pairs)
-    den = sum((p[0] - px) ** 2 + (p[1] - py) ** 2 for p, _ in pairs)
-    if den <= 1e-9:
-        return None
-    s = num / den
-    return s, gx - s * px, gy - s * py
-
-
-def residual_rmse(
-    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
-    fit: tuple[float, float, float],
-) -> float:
-    s, tx, ty = fit
-    moved = [((s * p[0] + tx, s * p[1] + ty), g) for p, g in pairs]
-    return rmse_points(moved)
 
 
 def score_against_gold(

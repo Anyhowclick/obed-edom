@@ -20,6 +20,8 @@ default stays ``off``; this suite pins the parts that DO hold and records the ga
 from __future__ import annotations
 
 import json
+import struct
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -341,6 +343,44 @@ def test_data_index_strips_the_id_suffix():
     assert index["15976"] == "1. 2025_FILLER_V3-small.png"
     assert index["32789"] == "mt-9E7B9BBB-4535-4DB9-BD3D-03A011FABAD7.png"
     assert "Index/Slide-1.iwa" not in index.values()
+
+
+def _clear_utf8_flag(raw: bytearray, name_bytes: bytes) -> bytearray:
+    """Clear the general-purpose UTF-8 flag (bit 0x800) on the member named
+    ``name_bytes``, in both the local file header and the central directory --
+    mirroring Keynote's writer, which emits UTF-8 names without setting it."""
+    i = raw.find(b"PK\x03\x04")
+    while i != -1:
+        flag = struct.unpack_from("<H", raw, i + 6)[0]
+        namelen = struct.unpack_from("<H", raw, i + 26)[0]
+        if bytes(raw[i + 30 : i + 30 + namelen]) == name_bytes:
+            struct.pack_into("<H", raw, i + 6, flag & ~0x0800)
+        i = raw.find(b"PK\x03\x04", i + 4)
+    i = raw.find(b"PK\x01\x02")
+    while i != -1:
+        flag = struct.unpack_from("<H", raw, i + 8)[0]
+        namelen = struct.unpack_from("<H", raw, i + 28)[0]
+        if bytes(raw[i + 46 : i + 46 + namelen]) == name_bytes:
+            struct.pack_into("<H", raw, i + 8, flag & ~0x0800)
+        i = raw.find(b"PK\x01\x02", i + 4)
+    return raw
+
+
+def test_data_member_names_decode_as_utf8(tmp_path):
+    name = "Data/x y-1.png"
+    path = tmp_path / "mojibake.zip"
+    zi = zipfile.ZipInfo(name)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(zi, b"")
+    raw = _clear_utf8_flag(bytearray(path.read_bytes()), name.encode("utf-8"))
+    path.write_bytes(raw)
+
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+    assert names == ["Data/x y-1.png".encode("utf-8").decode("cp437")]
+
+    index = _build_data_index(names)
+    assert index["1"] == "x y.png"
 
 
 def test_filename_clean_resolves_and_dirty_id_flags():
@@ -1117,6 +1157,31 @@ def test_two_tier_splice_makes_write_affecting_gate_green_full_deck():
     # for the resizer: whether L1 flags or vouches those images, the bulk splice
     # overwrites their geometry and the remap plan stays JXA-identical.
     _assert_two_tier_gate_green(FULL_DECK)
+
+
+# Digest of the Full wall's bytes as banked when the JXA payload below was captured;
+# the deck has since been re-saved, so ``_cached_payload(FULL_DECK)`` no longer finds
+# it under the deck's current digest. Load it by this explicit path instead.
+BANKED_FULL_WALL_JXA_DIGEST = "8f5e69b10e39ceeb26429b4ec1ac2bba25aadb491b987b4a43ad11637392c0d4"
+
+
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_data_member_names_decode_cleanly_on_the_full_deck():
+    pytest.importorskip("keynote_parser")
+    from obed_edom.baseline import deck_slide_digests, inspect_cache_path
+
+    off = offline_wall_payload(FULL_DECK)
+    for slide in off["slides"]:
+        for item in slide.get("items") or []:
+            file_name = item.get("fileName")
+            if file_name:
+                assert "�" not in file_name
+
+    banked_path = inspect_cache_path(BANKED_FULL_WALL_JXA_DIGEST)
+    if not banked_path.is_file():
+        pytest.skip("no banked JXA payload for the Full wall in this cache")
+    jxa = json.loads(banked_path.read_text())
+    assert deck_slide_digests(off) == deck_slide_digests(jxa)
 
 
 @pytest.mark.parametrize("deck", [MAP_DECK, FULL_DECK], ids=["map", "full"])

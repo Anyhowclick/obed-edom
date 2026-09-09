@@ -13,12 +13,14 @@ from typing import Any
 from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import (
     LegacyInspectFailed,
+    _truthy_cache,
     cached_payload,
     complete_cached_wall_payload,
     export_slide_images,
     inspect_keynote,
     inspect_keynote_checker,
     preview_pngs,
+    store_inspect_payload,
 )
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
@@ -227,6 +229,11 @@ def acquire_wall_payload(
     say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
     offline["reader"] = "offline"
+    if _truthy_cache(None, None):
+        try:
+            store_inspect_payload(source, offline)
+        except OSError as exc:
+            say(f"Could not cache the two-tier read of {source.name} ({type(exc).__name__}: {exc}).")
     return offline
 
 
@@ -796,66 +803,70 @@ def restore_source_builds(
     }
 
 
-def remap_keynote(
-    source: Path | str,
-    dest: Path | str,
-    *,
-    template: Path | str,
-    slide_range: tuple[int, int] | frozenset[int] | None = None,
-    keep_side_panels: bool = False,
-    wall_payload: dict[str, Any] | None = None,
-    template_payload: dict[str, Any] | None = None,
-    framing_overrides: dict[int, int] | None = None,
-    side_content_slides: set[int] | None = None,
-    source_previews: Path | str | None = None,
-    export_dir: Path | str | None = None,
-    offline_read: str | None = None,
-    plan_out: dict[str, Any] | None = None,
-    log: Callable[[str], None] | None = None,
-) -> dict[str, Any]:
-    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
-    def say(message: str) -> None:
-        if log:
-            log(message)
+_DETAIL_LOG_CAP = 40
+_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown")
+_RESOLVE_RARE_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip")
 
-    source = Path(source).expanduser().resolve()
-    dest = Path(dest).expanduser().resolve()
-    if not source.exists():
-        raise FileNotFoundError(source)
-    template_path = Path(template).expanduser().resolve()
-    if not template_path.exists():
-        raise FileNotFoundError(template_path)
 
-    if wall_payload is not None:
-        wall = wall_payload
-    else:
-        wall = acquire_wall_payload(
-            source,
-            slide_range=slide_range,
-            mode=offline_read_mode(offline_read),
-            say=say,
+def _say_chunked_detail(
+    label: str, parts: list[str], say: Callable[[str], None], trailing_note: str = ""
+) -> None:
+    if not parts:
+        return
+    chunks = [parts[i : i + _DETAIL_LOG_CAP] for i in range(0, len(parts), _DETAIL_LOG_CAP)]
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, start=1):
+        prefix = f"{label}: ({i}/{total}) " if total > 1 else f"{label}: "
+        line = prefix + " ".join(chunk)
+        if i == total:
+            line += trailing_note
+        say(line)
+
+
+def _resolve_detail_parts(tokens: dict[str, list[str]]) -> tuple[list[str], str]:
+    """Rare kinds are never dropped; only the `sigFallback` tail is capped."""
+    parts = [f"{k}({a})" for k in _RESOLVE_RARE_KINDS for a in tokens.get(k) or ()]
+    fallback = tokens.get("sigFallback") or ()
+    kept = fallback[:_DETAIL_LOG_CAP]
+    parts += [f"sigFallback({a})" for a in kept]
+    note = f" (+{len(fallback) - len(kept)} more)" if len(fallback) > len(kept) else ""
+    return parts, note
+
+
+def _say_stat_finalize_detail(
+    child_resize_result: dict[str, Any],
+    badge_raises: list[dict] | None,
+    say: Callable[[str], None],
+) -> None:
+    tokens = child_resize_result.get("tokens") or {}
+    raise_parts = [f"{k}({a})" for k in _RAISE_TOKEN_KINDS for a in tokens.get(k) or ()]
+    _say_chunked_detail("Stat raise detail", raise_parts, say)
+    front_err = child_resize_result.get("frontErr") or ""
+    if front_err:
+        say(
+            f"WARNING stat-finalize: GUI Bring to Front returned error(s) {front_err} — "
+            "-1743/-25211 mean Accessibility is denied to the launching process and every "
+            "GUI raise on this run is unreliable."
         )
-    if wall_payload is None:
-        if slide_range:
-            label = format_slide_range(slide_range)
-            say(
-                f"Inspected {source.name} slide {label}: "
-                f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
-            )
-        else:
-            say(
-                f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, "
-                f"{wall.get('slideCount')} slides."
-            )
-        note = navigator_numbering(wall)
-        if note:
-            say(note)
-    if template_payload is not None:
-        template_data = template_payload
-    else:
-        say(f"Inspecting CG template {template_path.name}…")
-        template_data = inspect_keynote(template_path)
+    if badge_raises:
+        detail = child_resize_result.get("detail") or ""
+        badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
+        if badge_detail:
+            say(f"Badge raise detail: {badge_detail}")
+    resolve_parts, resolve_note = _resolve_detail_parts(tokens)
+    _say_chunked_detail("Stat resolve detail", resolve_parts, say, resolve_note)
 
+
+def prepare_wall_payload(
+    source: Path,
+    wall: dict[str, Any],
+    template_path: Path,
+    template_data: dict[str, Any],
+    say: Callable[[str], None],
+    *,
+    offline_read: str | None = None,
+) -> float:
+    """Attach group/caption/build context to `wall` and `template_data`; returns the card stroke."""
     try:
         from obed_edom.iwa_runs import attach_group_captions  # noqa: PLC0415
 
@@ -923,6 +934,73 @@ def remap_keynote(
             f"Card-border stroke read unavailable ({type(exc).__name__}: {exc}); "
             f"the card grid's fallback-pitch floor uses {card_stroke}pt instead."
         )
+
+    return card_stroke
+
+
+def remap_keynote(
+    source: Path | str,
+    dest: Path | str,
+    *,
+    template: Path | str,
+    slide_range: tuple[int, int] | frozenset[int] | None = None,
+    keep_side_panels: bool = False,
+    wall_payload: dict[str, Any] | None = None,
+    template_payload: dict[str, Any] | None = None,
+    framing_overrides: dict[int, int] | None = None,
+    side_content_slides: set[int] | None = None,
+    source_previews: Path | str | None = None,
+    export_dir: Path | str | None = None,
+    offline_read: str | None = None,
+    plan_out: dict[str, Any] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
+    def say(message: str) -> None:
+        if log:
+            log(message)
+
+    source = Path(source).expanduser().resolve()
+    dest = Path(dest).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    template_path = Path(template).expanduser().resolve()
+    if not template_path.exists():
+        raise FileNotFoundError(template_path)
+
+    if wall_payload is not None:
+        wall = wall_payload
+    else:
+        wall = acquire_wall_payload(
+            source,
+            slide_range=slide_range,
+            mode=offline_read_mode(offline_read),
+            say=say,
+        )
+    if wall_payload is None:
+        if slide_range:
+            label = format_slide_range(slide_range)
+            say(
+                f"Inspected {source.name} slide {label}: "
+                f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
+            )
+        else:
+            say(
+                f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, "
+                f"{wall.get('slideCount')} slides."
+            )
+        note = navigator_numbering(wall)
+        if note:
+            say(note)
+    if template_payload is not None:
+        template_data = template_payload
+    else:
+        say(f"Inspecting CG template {template_path.name}…")
+        template_data = inspect_keynote(template_path)
+
+    card_stroke = prepare_wall_payload(
+        source, wall, template_path, template_data, say, offline_read=offline_read
+    )
 
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}
@@ -1424,11 +1502,7 @@ def remap_keynote(
                     "stay buried; the remaining raises on the affected slide(s) were "
                     "skipped rather than guessed."
                 )
-            if badge_raises:
-                detail = child_resize_result.get("detail") or ""
-                badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
-                if badge_detail:
-                    say(f"Badge raise detail: {badge_detail}")
+            _say_stat_finalize_detail(child_resize_result, badge_raises, say)
         else:
             say(
                 "Stat-finalize pass did not complete; stat groups stay at the JXA "

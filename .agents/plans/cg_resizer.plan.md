@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-09, main is `2d6ae55` (PR #59) and the round branch `chore/parity-round-2026-09-09` carries 10 unpushed commits ending at `a4d85a8`. R0.1-R0.4 and R2 readback are complete; the 2026-09-09 parity remap closed the build-order and stat-finalize items and opened `stat-raise-dead-4` plus `surface-raise-tokens`. R2b `r-propose-two-tier` is the next unblocked item; the W1 default flip stays ON HOLD and W2 stays gated on W1. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-09 (later same day), main is `a555f24` after PR #60 (parity round + R0.4), #61 `surface-raise-tokens`, #62 dead-code removal, #64 the Keynote-free golden plan gate, and #65 R2b `r-propose-two-tier`; the current branch `chore/golden-gate-hard-parity` carries one commit `20feac0` on top making propose/apply parity a hard gate. R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens` and a six-survey refactor assessment are all complete. Open sequence: the W1 whole-deck gate on the Full wall (nap window), then `stat-raise-dead-4` from that gate's log, a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -18,8 +18,8 @@ todos:
     content: "TRANCHE 2 (R2) - DONE 2026-09-07 on `fix/resizer-backlog-r2`, shipped `b50d22b` + fix round `7bb0f52`. The validated-resize readback now goes through a `_readback_payload` ladder (offline-write verify forces legacy, then the `OBED_OFFLINE_READ` kill switch, then two-tier ranged, with a fail-safe to ONE legacy read); `inspect_keynote_checker` gained `slide_range` and ranged reads never cache. Verified twice: a ranged A/B (identical scalars/flags, no cache write, only the documented zero-rect placeholder-tail difference) and a whole-deck field-parity A/B on all four Gold banks - childCount gate 0, zero blocking item differences, exact validate flags, and 2.4-2.6x timings (130.7 -> 52.5s on main). Evidence: `output/handover-2026-09-07/ranged-ab/` and `output/handover-2026-09-07/full-ab/`. Unblocked `r-propose-two-tier`."
     status: completed
   - id: r-propose-two-tier
-    content: "TRANCHE 2 (R2b), after r-readback-two-tier's FULL-DECK field-parity A/B exists. The resize PROPOSE source read is still full JXA (_run_resize_propose → inspect_keynote in web/app.py, not acquire_wall_payload): a new deck's first propose pays the full legacy read although apply reads two-tier. Same consumer audit plus deck_slide_digests parity (pairings/framings key on digests of ALL slides), propose_framings/planner parity, and cache the two-tier propose payload under the digest so propose→apply→re-propose reuse it (cross-serve is then deliberate — verify once). The old 12.6→~3 min figure is a projection, not a measured result. Risk MEDIUM (fingerprint churn; worst case a one-time pairing re-align)."
-    status: pending
+    content: "TRANCHE 2 (R2b) - DONE 2026-09-09, PR #65 `feat/r2b-propose-two-tier` (`4627497`, 16 commits, Codex 4 passes). UTF-8 decode of CP437-mangled Data/ member names in `offline_inspect._build_data_index` (deck_slide_digests churn 3→0 slides on the Full wall); `remap_keynote.prepare_wall_payload` (enrichment extracted; called INSIDE `framing.propose_framings`); checker refuses a cache entry unless every eligible text item carries runs (`_payload_has_runs` coverage predicate) and a rejected entry never reaches the legacy reader (`use_cache=False`); `inspect.store_inspect_payload` caches the two-tier payload under the digest with reader=offline; propose reads through `acquire_wall_payload` (full deck then slice; navigator numbering always); `framing._transform_of` uses `map_remap.frame_affine`; `map_remap.carry_fit_context` shared by planner and propose; `planned_rects` rounds the serialised 2-dp apply coordinates; `tests/test_propose_two_tier.py` hard parity 0/155 (Counter multiset). LIVE-VERIFIED 2026-09-09 on Gold_Wall_Input.key (`output/handover-2026-09-09/nap-run/r2b/results.md`): cold propose 96s two-tier (vs 269s legacy), cache entry reader=offline, apply read `from cached offline payload` (Applied 832/0, 269 refs, 181 raises landed, no raiseDead), re-propose 4s cache hit; counter deltas vs r2-round all the sparkle-twin fix. OPEN R2b RESIDUAL: the apply→propose plan hand-off (survey obs. 9) is still not passed through."
+    status: completed
   - id: w-zorder-patch
     content: "TRANCHE 2 (W2). Offline drawablesZOrder+ownedDrawables reorder (patch BOTH identically) at the W1 hook, LAST per slide, replacing pass 2's GUI Bring-to-Front raises (obedRaiseSlide + the badge raise) and the resizer's Accessibility dependency. PROBE LIVE PASS 99771bf (2026-09-02): Keynote 15.3.1 honours a patched order on open, a re-save keeps it, the render changes; permute within the target ids' slots (a fresh deck carries 3 placeholder drawables). Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation: ~0.55s/raise × N GUI clicks + Accessibility + run-to-run group-index churn. 2026-09-04 evidence this is now COSTING content, not just speed: the gold-baseline A/B kit (w-offline-write-stabilise) ran the identical `remap` twice (main vs branch, same default path) and got two different renders purely from Keynote's own drawablesZOrder scrambling on save/open — banner text hidden on Gold slides 3/4/5/8/9 in one run, 'Global Missions' clipped to 'Glob' on slides 11-17 in the other. Same deck, same code, different z-order outcome each Keynote pass. Raises the priority of this item independent of the read-speed payoff. Must run after pass 2's font sizing (or recompute stat indices), and the read-back compares reordered kinds AS A SET. Gated on W1 stable. Risk MEDIUM. 2026-09-05, offline z-order reads of the banked gold decks: the pass-2 GUI raise arranged 0 of 227 reported objects on the `main` run (all 19 slides byte-identical to the source order) and 91 on the `branch-verify2` run, with identical 'front=' counters. frontRaised counts System-Events clicks, not arrangements. W2 also removes an unverifiable counter. D7 (2026-09-08, offline) measured build order and z-order as DISSOCIABLE arrays sharing only one upstream trigger (Keynote's non-deterministic slide-archive re-serialisation on save): 7 slides scramble builds with z-order perfectly intact, 3 scramble z-order with builds perfectly intact, and build-position/z-index Kendall tau is -0.016 output vs +0.058 source null control — so W2's own plan must NOT assume its z-order write also fixes build order (see w1-build-order-nondeterminism), and the build-order patch (`restore_source_builds`) must keep running LAST, after any future W2 z-order write, for the same reason it works today. D8 narrowed the build-order defect to our own patch (`plan_build_patch` writing `builds` order instead of `buildChunks` order on 3 reuse slides) — see w1-build-order-nondeterminism — so W2 inherits no build-order obligation of its own. D9 (2026-09-08, offline + owner playback) DISPROVES this item's own earlier claim that 'Correctness is already handled by the index-guarded descending raise (23de0d2) — this is purely the optimisation': `obedRaiseSlide` drains its per-slide raise targets highest-index-first, and because Bring to Front appends, every raised set with ≥2 members came out EXACTLY reversed — 16 slides deck-wide, 13 of them non-reuse, byte-deterministic across two separate production runs days apart (not Keynote's z-order churn). Fixed in `8a7b4bb`, MERGED PR #59 (`2d6ae55`): ascending raise gated on a verified per-target landing (new `obedGroupFrame` + the existing `obedTopReal`/`obedBadgeFind`), with `raiseMoved`/`raiseDead`/`raiseUnknown` counters replacing the unverifiable `front=` click count. CONFIRMED ON SCREEN 2026-09-09 (`raiseDead=0`, 11/15 subset slides preserved including the sparkle twins). Residual reversals on constellation slides 131/133/134/144 are owner-DEFERRED to the framing workstream, attribution not yet measured — tracked under `r-reuse-photo-placement`, not as an open z-order bug here. With the raise-order bug fixed, W2 remains PURELY the speed/Accessibility-removal optimisation it was always scoped as (replacing 699 GUI clicks + the Accessibility dependency with an offline `drawablesZOrder`/`ownedDrawables` write); it still gates on W1 stable, and the build-order patch (`restore_source_builds`, see `w1-build-order-nondeterminism`) must still run LAST after any future W2 z-order write — unchanged from D7's finding that the two arrays are dissociable. The 2026-09-09 parity run shows the ascending raise (`8a7b4bb`) at raiseDead=4/381 deck-wide, with the two located misses on non-reuse slides 106/110 (`stat-raise-dead-4`) — record here, do not re-plan W2 on it."
     status: pending
@@ -39,8 +39,17 @@ todos:
     content: "BUG BACKLOG (B), NEW 2026-09-09, found in the parity remap (`output/handover-2026-09-09/parity-run/run.log`): `WARNING stat-finalize: 4 stat group(s) did not move on Bring to Front (0 abandoned mid-slide)` — raiseMoved 377 / raiseDead 4 / raiseUnknown 0 of 381 done groups, deck-wide, on `8a7b4bb`'s ascending gated raise. Offline localisation this round (`probes/find_raise_dead.py`, same run) found 2 of 4 by non-contiguous-group-block analysis: slide 106 group `18386827` ('Keiko', z=15, buried while siblings 'Daniel'/'Grace' raised to 18/19) and slide 110 group `19010920` ('Sunday Service', z=2, buried while siblings 'Children's Church'/'Bible Study' raised to 6/7) — both non-reuse, and both were CONTIGUOUS in the banked 2026-09-08 healthy run (`output/handover-2026-09-08/twin-zorder/PREFIX2.json`), so both are regressions against that baseline, not pre-existing. The other 2 raiseDead are unlocatable offline: a lone stat group on its slide leaves no z-order contiguity signal to test against. The reuse band 123-128 is internally contiguous on every slide with groups (self-consistency check, not a source comparison). Slide 42's own 2-group gap was checked and ruled out — identical in this run and the 2026-09-08 healthy run, pre-existing and unrelated. Facts only, no cause yet: the machine was hands-off by the owner's own timestamped ack (`ENV.txt`: 'I'm already hands off, out for breakfast. start!', 09:40:44) so the stolen-GUI-interaction story that explained the 2026-09-07 arm-A card loss does not apply by default here — but per 'measure before attributing', this is still n=1 on a single run and needs a second measurement before ruling it out formally. Precondition / first step: `surface-raise-tokens` below — the per-slide `raiseDead(s=,idx=)`/`raiseUnknown(s=,idx=)` tokens are not currently logged, so this round's localisation needed an offline z-order probe instead of reading the log directly; the next run should localise all 4 by log alone."
     status: pending
   - id: surface-raise-tokens
-    content: "SMALL CODE CHANGE, NEW 2026-09-09, own 1/1/1, precondition for `stat-raise-dead-4`'s diagnosis. `remap_keynote.py` must `say()` the per-stat-group `raiseDead(s=,idx=)` / `raiseUnknown(s=,idx=)` tokens (mirror the existing badge-token filter at the `Badge raise detail:` line, `:1431`) instead of leaving them only in the WARNING count, and promote `frontErr` (currently reaching only `result[\"raw\"]` via `keynote.py:1421`/`:1508` — see `full-deck-stat-finalize-unresolved`) to a named result key, so the next parity run localises all 4 `raiseDead` occurrences (and any `-1719`-class `frontErr`) by log alone, with no offline z-order probe needed."
-    status: pending
+    content: "DONE 2026-09-09, PR #61 `fix/surface-raise-tokens` (`c5e9c34`, Codex 3 passes), precondition for `stat-raise-dead-4`'s diagnosis. `keynote._run_stat_finalize` now returns `tokens` {name: [args]} and `frontErr`; `obedRaiseSlide` emits a `raiseDead(s=,idx=)` token for EVERY dead raise (the `is 0` guards removed); `remap_keynote._say_stat_finalize_detail` logs `Stat raise detail: ` (chunks of ≤40, marker `(i/n)` after the prefix), `WARNING stat-finalize: GUI Bring to Front returned error(s) `, `Badge raise detail: ` (unchanged), `Stat resolve detail: ` (rare kinds uncapped, sigFallback capped at 40). Unblocks `stat-raise-dead-4` localising all 4 `raiseDead` occurrences by log alone on the next production run."
+    status: completed
+  - id: resizer-dead-code
+    content: "DONE 2026-09-09, PR #62 `chore/resizer-dead-code` (`7e0d517`). Deleted `enforce_min_size`, `pair_maps`/`_basename`, `repack_free_text`, `fit_similarity`, `residual_rmse`, the dead `parked_left`/`_pack_left_groups`/`pack_columns_from_left` path (dead since `9bca221`; overlap now owned by `stat-group-template-sample`), dead locals, inlined `_groups_for_slide`, deleted `subset_keynote.py`/`.js`. No behaviour change."
+    status: completed
+  - id: golden-plan-gate
+    content: "DONE 2026-09-09, PR #64 `chore/golden-plan-gate` (`4651b7b`, Codex 4 passes). `scripts/golden_plan.py` + `tests/test_golden_plan.py` + `tests/fixtures/golden-plan/{gold_wall_input,full_report_card_wall}.json` — a Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote` with `_run_jxa` sentinel-stubbed; goldens keyed on deck/template digests, INSPECT_VERSION, env pins, plannerEnv {osBuild via `sw_vers`, caption faces via `_ns_font`}; `update --accept-input-drift`. Run this after any planner/driver change; see also `chore/golden-gate-hard-parity` (`20feac0`), which makes propose/apply parity a hard gate on top."
+    status: completed
+  - id: resizer-refactor-assessment
+    content: "DONE 2026-09-09. Owner asked whether to refactor; verdict NO REWRITE. Six read-only surveys banked at `output/handover-2026-09-09/refactor-survey/`. Defects found (not style): `_KEYNOTE_LOCK` covers reads only (pass 1/2, fallback, template stat read unlocked); NO timeout on any JXA subprocess; `_read_template_stat_sizes_via_keynote` ignores rc → `{}`; stat-finalize and template-stat scripts bind `document 1` unverified then save; `_build_slide_geometry_script` itemIndex fallback addresses a typed collection; `deleteHides` failure → opacity-0 ghost; `layouts.error`/`sizeProp`/`saved` produced never read; `iwa_geometry._natural_size` (bezier-only) vs `_path_source` (6 kinds) disagree — editable-bezier text composes (0,0); autosize sentinel height-only on read vs either-axis on write; `_group_child_records` hard-codes the centre anchor; `_load_deck` silently drops undecodable members and is decoded ≥6x per verify run; `iwa_text_shape` anchor model (`compose_text_geometry`, `TextGeometry`, `geometry_flags`, `TEXT_INSET`) has no production caller; `slide_fingerprint.py` unwired; 12 osascript runners, 3 decode→re-encode→diff copies in `iwa_write`. Sequence ruled: shared osascript runner (timeout/lock/name-verified bind) before the W1 flip; IWA natural-size/sentinel unification + one decode→re-encode→diff before W2; planner split only when the next role lands."
+    status: completed
   - id: stat-group-template-sample
     content: "BUG BACKLOG (B), follow-up from batch 2 (owner accepted the overlap for now). The re-pitched card grids overlap the affine-sized stat blocks (slide 4: date banner + '44 / Total Church Buildings' 109×265; slide 5: '110 / Full-Time Workers') — 4 + 6 cards, reported per card by caption in the say() line. Gold hand-reshaped those blocks (44 block → 509×88 bar above the grid). Fix = a stat-block sample in the template so those groups take a template size/shape (sibling of the constellation cluster affine: role-named group + template anchor). Until then the operator drags them; the grid origin already descends below stat blocks when the rows still fit (slide 5 y0=392)."
     status: pending
@@ -144,32 +153,36 @@ the banked deck, one clean Keynote process, no concurrent automation, one deck a
 memory-pressure monitoring. Stop if pressure climbs or Keynote stops responding. A larger-memory
 Mac is preferred, not mandatory policy. Historical reviews retain their original stronger wording.
 
-## Current state (2026-09-09, branch `chore/parity-round-2026-09-09` @ `a4d85a8`)
+## Current state (2026-09-09 evening, branch `chore/golden-gate-hard-parity` @ `20feac0`)
 
-- `main` is `2d6ae55` (PR #59). This round branch carries **10 unpushed commits** on top and no
-  PR: docs refresh `4283bf3`, SKILL frontmatter `9fc6846`, parity docs `cbe8b6d`, R0.4
-  `a89b9b3` → `b981eb0` (with `006f68b`, `db3109d`, `bdc3ee4`, `bb04d91`), closing docs `a4d85a8`.
-- The 2026-09-09 **parity remap** (plain production `remap`, `OBED_OFFLINE_WRITE=off`, 2051s wall,
-  EXIT 0, `output/handover-2026-09-09/parity-run/`) CLOSED two items —
-  `w1-build-order-nondeterminism` (V3/V4 build-order PASS) and
-  `full-deck-stat-finalize-unresolved` (full counter parity against its own 2026-09-04 originals)
-  — and OPENED two: `stat-raise-dead-4` and its precondition `surface-raise-tokens`.
-- The V5 raise-order residual reproduced on constellation slides 131/132/133/134/144 (132 is new
-  versus the four the owner named on 2026-09-08, not yet reconciled with them); owner-deferred to
-  the framing workstream and tracked under `r-reuse-photo-placement`, not as a W2 or build-order matter.
-- R0.1–R0.4 are all complete (R0.4 merged into this branch as `b981eb0`). **R2b
-  `r-propose-two-tier` is the next unblocked item.**
+- `main` is `a555f24`. Merged today, in order: PR #60 (parity round + R0.4), #61
+  `fix/surface-raise-tokens` (`c5e9c34`), #62 `chore/resizer-dead-code` (`7e0d517`), #64
+  `chore/golden-plan-gate` (`4651b7b`), #65 `feat/r2b-propose-two-tier` (`4627497`). The current
+  branch carries one commit on top of `a555f24` — `20feac0`, making propose/apply parity a hard
+  gate now that R2b is merged.
+- `surface-raise-tokens` and R2b `r-propose-two-tier` are both DONE (see their todos); their
+  shared precondition/successor `stat-raise-dead-4` is next, unblocked, and should localise all 4
+  `raiseDead` occurrences by log alone on the next production run.
+- `resizer-refactor-assessment` is DONE: no rewrite, six read-only surveys banked, and the defects
+  found reorder the sequence ahead of W1/W2 — see that todo and "Order of work" below.
 - **W1 default flip stays ON HOLD** (`w-offline-write-stabilise`: universal naturalSize writer +
-  a healthy whole-deck gate are its bar). **W2 `w-zorder-patch` stays gated on W1** and is now
-  purely the speed/Accessibility-removal optimisation, since `8a7b4bb` fixed the raise-order
-  correctness bug W2's own plan had assumed was already handled.
+  a healthy whole-deck gate are its bar), now with a **nap-window whole-deck gate run on the Full
+  wall** as the next concrete step (`output/handover-2026-09-09/nap-run/`). **W2 `w-zorder-patch`
+  stays gated on W1** and is purely speed/Accessibility removal, since `8a7b4bb` fixed the
+  raise-order correctness bug W2's own plan had assumed was already handled.
+- **Deck facts:** `Map_Extracted_Wall_1st.key` is gone from the decks folder (58 oracle tests
+  skip); `Full_Report_Card_Wall.key` was re-saved by autosave 2026-09-09 10:34 (content identical,
+  digest `291b0322`, old cache stale) and is owner Finder-locked — `ditto` preserves `uchg`, so the
+  W1 gate must run from an unlocked working copy (`RUNBOOK.md` step B0). Owner soft deadline: W2
+  within ~1.5 weeks of 2026-09-09.
 - `scripts/e2e_run_parity.py` has NOT been run since R0.4 landed, and R0.4 changed the
   read/export path — Discipline requires it. It opens Keynote, so it needs an owner-acked window.
 - **Artefacts:** the 5.4 GB parity output deck was DELETED by the owner on 2026-09-09; the B-side
   evidence that survives is the JSON censuses + `run.log` under
   `output/handover-2026-09-09/parity-run/`. The R0.4 checkpoint-0 bank
-  (`output/handover-2026-09-09/cp0/`) is still on disk. No output `.key` deck survives anywhere
-  under `output/` — `output/gold-baseline/*` holds logs and previews only.
+  (`output/handover-2026-09-09/cp0/`) and the R2b nap-run results
+  (`output/handover-2026-09-09/nap-run/r2b/results.md`) are still on disk. No output `.key` deck
+  survives anywhere under `output/` — `output/gold-baseline/*` holds logs and previews only.
 
 ### R0.1–R0.4 outcomes (all complete)
 
@@ -245,31 +258,39 @@ One line per round (full detail lives in the completed todos and in git history)
   `e987a46` sparkle-twin hide, live-verified on a production remap (that directory is deleted;
   censuses survive at `output/handover-2026-09-08/{build-order,twin-zorder}/`). D7→D8 settled
   `buildChunks` as the render timeline; D9 found the descending-raise exact reversal.
-- **2026-09-09 — PR #59 (`2d6ae55`) + this round branch.** PR #59 landed the damage-check
+- **2026-09-09 — PR #59 (`2d6ae55`) + parity round + PRs #60-65.** PR #59 landed the damage-check
   re-attribution (`917b00f`, `eab0cec`), the build-order fix (`c1d916a` probe + `59111fc`) and the
-  raise-order fix (`8a7b4bb`). The branch then ran the parity remap
-  (`output/handover-2026-09-09/parity-run/`) and landed R0.4 (`b981eb0`). See "Current state".
+  raise-order fix (`8a7b4bb`). The round branch ran the parity remap
+  (`output/handover-2026-09-09/parity-run/`) and merged as PR #60 with R0.4. Same day: PR #61
+  `surface-raise-tokens`, PR #62 dead-code removal, PR #64 the golden plan gate, PR #65 R2b
+  two-tier propose (live-verified in `output/handover-2026-09-09/nap-run/r2b/`), the
+  refactor assessment (six surveys, no rewrite), and `chore/golden-gate-hard-parity` (`20feac0`).
+  See "Current state".
 
 ## Order of work
 
 **Done** (see the completed todos): W0 probes; output-bugs batches 1–2; the reuse/builds/side-panel
-rounds and the pre-add duplicate; R0.1–R0.4; R1 (probe answer NO); R2 readback; PR #57 and PR #59
-fixes; the 2026-09-09 parity remap.
+rounds and the pre-add duplicate; R0.1–R0.4; R1 (probe answer NO); R2 readback; R2b two-tier
+propose; PR #57 and PR #59 fixes; the 2026-09-09 parity remap; `surface-raise-tokens`; the dead-code
+cleanup and golden-plan gate; the refactor assessment.
 
-**Open sequence:**
+**Open sequence** (reordered 2026-09-09 evening per the refactor assessment):
 
-1. **R2b `r-propose-two-tier`** — the next unblocked item, unblocked by the passed R2 A/B.
-2. **`surface-raise-tokens`** — small 1/1/1 change; precondition for (3).
-3. **`stat-raise-dead-4`** — localise all 4 by log alone on the next production run.
-4. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
+1. **W1 whole-deck gate on the Full wall**, nap window 2026-09-09
+   (`output/handover-2026-09-09/nap-run/`) — run from an unlocked working copy (deck facts above).
+2. **`stat-raise-dead-4`** from that gate's `raiseDead(s=,idx=)` log lines — localise all 4 by log
+   alone, now that `surface-raise-tokens` is merged.
+3. **Shared osascript runner** (timeout/lock/name-verified bind) — before the W1 flip.
+4. **IWA natural-size/sentinel unification** + one decode→re-encode→diff — before W2.
+5. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
    a healthy whole-deck gate (green on both gold decks, with the consistency audit).
-5. **W2 `w-zorder-patch`** — gated on W1 stable; purely speed + Accessibility removal now.
+6. **W2 `w-zorder-patch`** — gated on W1 stable; purely speed + Accessibility removal now.
    `restore_source_builds` must still run LAST, after any future z-order write.
-6. **Bug backlog:** `map-label-offslide-parked-delete`, `card-border-source-ref-floor-fix`
+7. **Bug backlog:** `map-label-offslide-parked-delete`, `card-border-source-ref-floor-fix`
    (residual: output card refs 10-31 still refuse on the Full wall), `r-reuse-photo-placement`
    part B including the constellation z-order residual, `stat-group-template-sample`,
    `constellation-cluster-affine`, `reuse-chain-parked-snapshot`.
-7. **Features:** `propose-pins-flag`, `recipe-library`, `stat-drift`, `outline-editor`,
+8. **Features:** `propose-pins-flag`, `recipe-library`, `stat-drift`, `outline-editor`,
    `image-cues`, `iwa-surgical-write-generator`.
 
 Standing: re-run `scripts/e2e_run_parity.py` after R0.4 (needs an owner-acked Keynote window).
@@ -284,9 +305,10 @@ Standing: re-run `scripts/e2e_run_parity.py` after R0.4 (needs an owner-acked Ke
 | **W2** | `w-zorder-patch` | yes | OPEN — gated on W1; purely speed/Accessibility removal since `8a7b4bb` |
 | **R0** | `r-cache-quick-wins` (R0.1–R0.4) | no | DONE — parts (1)-(3) 2026-09-07, R0.4 merged `b981eb0` 2026-09-09 |
 | **R1** | `r-nested-bulk-probe` | yes | DONE — correct+safe but NOT faster (object-bound); closed with `r-bulk-counts-plan` |
-| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | readback DONE (2.4–2.6×); **R2b open and next** |
+| **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | both DONE — readback 2.4–2.6x; R2b PR #65 (`4627497`), cold propose 96s vs 269s legacy |
 | B (merged) | `w1-build-order-nondeterminism`, z-order raise-order fix | owner playback + parity remap | both DONE and CLOSED — `59111fc` and `8a7b4bb`, PR #59 |
-| B (new) | `stat-raise-dead-4` ← `surface-raise-tokens` | a second production run | OPEN — `raiseDead=4/381`; 2 of 4 located offline on non-reuse slides 106/110 |
+| B (merged) | `surface-raise-tokens` | none (log surfacing) | DONE — PR #61 (`c5e9c34`); precondition for `stat-raise-dead-4` |
+| B (new) | `stat-raise-dead-4` | a second production run | OPEN, NEXT — `raiseDead=4/381`; 2 of 4 located offline on non-reuse slides 106/110; localise all 4 by log now |
 | B (branch) | `builds-follow-source`, `side-panels-positional`, `autosize-rect-alignment-fix`, `pack-lists-gate-widen`, `reuse-chain-preadd-duplicate` | Gold builds | all DONE + Gold-verified; backlog spin-off `reuse-chain-parked-snapshot` open |
 | B / features | reuse framing fallback, cluster affine, stat/photo/label residuals | mixed | open, independent — see "Order of work" 6–7 |
 | drop | `w-hides-offline`, skipped-slide option (2), Stage B / batch z-order / batch delete | | closed with reasons (see Insights) |
@@ -449,6 +471,12 @@ whose number disagrees with the run either side of it. Ships at `warning`.
 | z-order raise-order fix | 8a7b4bb | ascending raise gated on a verified landing; fixes the descending Bring-to-Front exact reversal |
 | PR #59 merge | 2d6ae55 | `917b00f`/`eab0cec`/`c1d916a`/`59111fc`/`8a7b4bb`/`7c200a4` on main, 2026-09-09 |
 | R0.4 misc cleanups + three Codex fix rounds + merge | a89b9b3, 006f68b, db3109d, bdc3ee4, bb04d91, b981eb0 | closes all four R0 leftovers; suite 1535/20; live gate PASS |
+| PR #60: parity round + R0.4 merge | (see above) | round branch folded into main |
+| PR #61: surface-raise-tokens | c5e9c34 | `tokens`/`frontErr` result keys; `raiseDead`/`raiseUnknown` always emitted; new say() detail lines |
+| PR #62: resizer dead-code removal | 7e0d517 | deleted unused functions, dead left-pack path, `subset_keynote.py`/`.js`; no behaviour change |
+| PR #64: golden plan gate | 4651b7b | Keynote-free apply-plan SHA-256 gate through the real planner; run after any planner/driver change |
+| PR #65: R2b propose two-tier | 4627497 | propose reads through `acquire_wall_payload`; cold propose 96s vs 269s legacy; hard parity 0/155 |
+| golden-gate-hard-parity | 20feac0 | propose/apply parity promoted to a hard gate now that R2b is merged |
 
 ## Insights worth keeping
 

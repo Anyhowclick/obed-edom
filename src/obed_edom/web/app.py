@@ -44,7 +44,6 @@ from obed_edom.framing import (
     save_framings,
 )
 from obed_edom.inspect import (
-    cached_payload,
     complete_cached_wall_payload,
     diff_work_dir,
     inspect_keynote,
@@ -73,7 +72,11 @@ from obed_edom.outline_check import visible as visible_slides
 from obed_edom.paths import find_repo_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
-from obed_edom.remap_keynote import remap_and_inspect
+from obed_edom.remap_keynote import (
+    acquire_wall_payload,
+    offline_read_mode,
+    remap_and_inspect,
+)
 from obed_edom.settings import load_settings, save_settings
 from obed_edom.validate import validate_inspect
 from obed_edom.web.jobs import (
@@ -1257,34 +1260,27 @@ def _run_resize_propose(
     validate: bool = True,
 ) -> dict[str, Any]:
     typed = slide_range
-    numbering = ""
-    full_wall: dict[str, Any] | None = None
-    if slide_range:
-        known = cached_payload(path)
-        if not _complete_cached_wall_payload(known):
-            numbering = (
-                "This deck has not been read in full, so the range is taken as "
-                "document positions, counting any slides set to Skip Slide. "
-                "Propose once without a range to have Keynote's numbering used."
-            )
-        else:
-            full_wall = copy.deepcopy(known)
-            _assert_range_within_navigator(path.name, known, slide_range)
-            slide_range = to_document_range(known, slide_range)
-            numbering = navigator_numbering(known)
-            if slide_range != expand_slide_range(typed):
-                job.log(
-                    f"Range {format_slide_range(typed)} is Keynote's numbering; "
-                    f"that is document position {format_slide_range(slide_range)}."
-                )
     label = format_slide_range(slide_range)
     scope = f"slide {label}" if label else "every slide"
     job.log(f"Reading {path.name} and {template.name} to propose framings ({scope})…")
+    full_wall = acquire_wall_payload(
+        path, slide_range=None, mode=offline_read_mode(), say=job.log
+    )
+    if slide_range:
+        _assert_range_within_navigator(path.name, full_wall, slide_range)
+    template_data = inspect_keynote(template)
+    numbering = ""
+    if slide_range:
+        slide_range = to_document_range(full_wall, slide_range)
+        numbering = navigator_numbering(full_wall)
+        if slide_range != expand_slide_range(typed):
+            job.log(
+                f"Range {format_slide_range(typed)} is Keynote's numbering; "
+                f"that is document position {format_slide_range(slide_range)}."
+            )
     if numbering:
         job.log(numbering)
-    if full_wall is None:
-        wall = inspect_keynote(path, slide_range=slide_range)
-    else:
+    if slide_range:
         wall = {
             **full_wall,
             "slides": copy.deepcopy(
@@ -1295,9 +1291,10 @@ def _run_resize_propose(
                 ]
             ),
         }
+    else:
+        wall = full_wall
     _assert_range_within_deck(path.name, int(wall.get("slideCount") or 0), slide_range)
-    template_data = inspect_keynote(template)
-    full_context = full_wall if full_wall is not None else wall
+    full_context = full_wall
     settings = load_settings()
     reuse = FramingReuse()
     if settings["reusePairings"]:

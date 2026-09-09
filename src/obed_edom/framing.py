@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from obed_edom.baseline import index_map, pairing_path
+from obed_edom.map_remap import DEFAULT_CARD_STROKE, frame_affine
 
 FRAMING_VERSION = 1
 FRAMING_KIND = "framing"
@@ -189,37 +190,12 @@ THUMB_QUALITY = 82
 
 
 def _transform_of(recipe: dict[str, Any]) -> dict[str, float] | None:
-    """Uniform scale+offset. Same precedence as the planner: first group affine, else mapSrc/mapDst."""
-    groups = recipe.get("groups") or []
-    if groups:
-        first = groups[0] or {}
-        try:
-            s = float(first.get("s") or 0)
-            if s > 0:
-                return {
-                    "s": round(s, 6),
-                    "tx": round(float(first.get("tx") or 0), 2),
-                    "ty": round(float(first.get("ty") or 0), 2),
-                }
-        except (TypeError, ValueError):
-            pass
-    src = recipe.get("mapSrc") or {}
-    dst = recipe.get("mapDst") or {}
-    try:
-        sw = float(src.get("w") or 0)
-        sh = float(src.get("h") or 0)
-        if sw <= 0 or sh <= 0:
-            return None
-        s = float(dst.get("w") or 0) / sw
-        if s <= 0:
-            return None
-        return {
-            "s": round(s, 6),
-            "tx": round(float(dst.get("x") or 0) - float(src.get("x") or 0) * s, 2),
-            "ty": round(float(dst.get("y") or 0) - float(src.get("y") or 0) * s, 2),
-        }
-    except (TypeError, ValueError, ZeroDivisionError):
+    """Uniform scale+offset shown in the propose overlay. Precedence is the planner's own
+    (`map_remap.frame_affine`): mapSrc/mapDst first, else groups[0] -- not the reverse."""
+    aff = frame_affine(recipe)
+    if aff is None:
         return None
+    return {"s": round(aff.s, 6), "tx": round(aff.tx, 2), "ty": round(aff.ty, 2)}
 
 
 def build_preview_thumbs(
@@ -289,6 +265,7 @@ def planned_rects(
     wall_size: tuple[float, float],
     keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
+    card_stroke: float = DEFAULT_CARD_STROKE,
 ) -> list[dict[str, Any]]:
     """Planned dest rects for this recipe. Do not pass a template (that re-learns the automatic pick)."""
     from obed_edom.map_remap import plan_payload_transforms  # noqa: PLC0415
@@ -301,15 +278,22 @@ def planned_rects(
         recipe,
         keep_side_panels=keep_side_panels,
         side_content_slides=side_content_slides,
+        card_stroke=card_stroke,
     ):
         dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
+        # Round the same 2-decimal values apply serializes (as_dict), not the raw floats,
+        # so parity holds under banker's rounding at .5 boundaries. as_dict only carries
+        # w/h for the sized roles (a "line" is width=length/height=0 there, ignored by
+        # Keynote) -- fall back to the raw transform for every other role's height/width.
+        applied = spec.as_dict()
+        has_wh = spec.role in {"map", "list", "pin", "title", "other"}
         rect = {
             "role": spec.role,
             "kind": spec.kind,
-            "x": round(spec.x),
-            "y": round(spec.y),
-            "w": round(spec.w),
-            "h": round(spec.h),
+            "x": round(applied["x"]),
+            "y": round(applied["y"]),
+            "w": round(applied["w"]) if has_wh else round(spec.w),
+            "h": round(applied["h"]) if has_wh else round(spec.h),
             "willBeInOutput": not dropped,
         }
         if spec.match_text:
@@ -333,6 +317,7 @@ def propose_framings(
     template_payload: dict[str, Any] | None = None,
     keep_side_panels: bool = False,
     side_content_slides: set[int] | None = None,
+    card_stroke: float = DEFAULT_CARD_STROKE,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Propose framings over cached inspect payloads. Nothing is copied or written."""
@@ -342,6 +327,7 @@ def propose_framings(
         CG_HEIGHT,
         CG_WIDTH,
         MIN_ON_CANVAS_FRACTION,
+        carry_fit_context,
         fit_to_frame_recipe,
         is_degenerate_scale,
         learn_recipe,
@@ -356,6 +342,8 @@ def propose_framings(
         if log:
             log(message)
 
+    from obed_edom.remap_keynote import prepare_wall_payload  # noqa: PLC0415
+
     wall_path = Path(wall).expanduser().resolve()
     template_path = Path(template).expanduser().resolve()
     wall_data = wall_payload if wall_payload is not None else inspect_keynote(wall_path)
@@ -363,6 +351,7 @@ def propose_framings(
     template_data = (
         template_payload if template_payload is not None else inspect_keynote(template_path)
     )
+    card_stroke = prepare_wall_payload(wall_path, wall_data, template_path, template_data, say)
 
     wall_w = float(wall_data.get("slideWidth") or 7680)
     wall_h = float(wall_data.get("slideHeight") or 1080)
@@ -380,6 +369,7 @@ def propose_framings(
         slide_range=slide_range,
         template=template_data,
         framing_report=report,
+        card_stroke=card_stroke,
     )
     thumbs = build_preview_thumbs(wall_path, full_wall_data, log=log)
     template_thumbs = build_preview_thumbs(template_path, template_data, log=log)
@@ -420,7 +410,7 @@ def propose_framings(
                     float(trial.get("destHeight") or CG_HEIGHT),
                 )
                 if fitted:
-                    shown = fitted
+                    shown = carry_fit_context(fitted, trial)
             candidate["transform"] = _transform_of(shown)
             candidate["rects"] = planned_rects(
                 slide,
@@ -428,6 +418,7 @@ def propose_framings(
                 wall_size=(wall_w, wall_h),
                 keep_side_panels=keep_side_panels,
                 side_content_slides=side_content_slides,
+                card_stroke=card_stroke,
             )
         usable = [c for c in candidates if not c.get("wouldFallBack", False)]
         auto_slide = row.get("templateSlide")

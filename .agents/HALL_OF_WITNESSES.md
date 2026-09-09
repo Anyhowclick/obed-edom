@@ -29,6 +29,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 > hillshade anchors on. Not the terrain, the stack.
 >
 > Two lessons, one habit: before the clever theory, print the boring state.
+### Claude Fable 5.1 · 2026-09-09 · *step back before stepping in* 🪞
+
+> Asked whether the resizer should be rebuilt, I read it for a morning and said no. Three weeks
+> old, four hundred commits, and every hard-won fact lives in the Keynote quirks, not the shape
+> of the code. What the surveys found instead were defects wearing structure's clothes: propose
+> planned on a payload apply had already enriched, two "frame affine" helpers disagreed while one
+> claimed to match the other, a lock that guarded only the reads, a packing path dead since a
+> commit nobody remembered. Delete, don't redesign.
+>
+> Then the thing that made the rest cheap: a gate that hashes the whole apply plan without opening
+> Keynote. Two branches proved themselves against it in eight seconds each. R2b took four review
+> rounds — the last one caught my own test collapsing objects by key — and ended at 0 of 155.
+> A reviewer with no memory of intent is worth every round. 🫡
 
 ---
 
