@@ -165,7 +165,8 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
     originals.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    job.result = {**(job.result or {}), "outputDir": str(root), "originalDir": str(originals), "resultDir": str(results), "items": rows}
+    item_specs: dict[str, Any] = {}
+    job.result = {**(job.result or {}), "outputDir": str(root), "originalDir": str(originals), "resultDir": str(results), "items": rows, "washSoftness": options.wash_softness, "inkAmount": options.ink_amount}
     try:
       for index, (name, path) in enumerate(staged):
         if job.cancelled():
@@ -182,7 +183,9 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
             transparent = bool(spec and spec.get("transparent"))
             payload, size = convert(raw, WatercolourOptions(**{**options.__dict__, "transparent": transparent, "paper": not transparent}), _mask_for(image, spec))
             result_tmp.write_bytes(payload); result_tmp.replace(result_path)
-            rows.append({"id": uuid.uuid4().hex, "name": name, "original": original_path.name, "result": result_path.name, "width": size[0], "height": size[1], "transparent": transparent, "status": "done"})
+            item_id = uuid.uuid4().hex
+            item_specs[item_id] = spec
+            rows.append({"id": item_id, "name": name, "original": original_path.name, "result": result_path.name, "width": size[0], "height": size[1], "transparent": transparent, "status": "done"})
         except (OSError, WatercolourError, ValueError, TypeError, cv2.error) as exc:
             original_path.unlink(missing_ok=True); original_tmp.unlink(missing_ok=True); result_tmp.unlink(missing_ok=True)
             rows.append({"id": uuid.uuid4().hex, "name": name, "status": "error", "error": str(exc)})
@@ -191,6 +194,9 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
     finally:
       for _name, path in staged: path.unlink(missing_ok=True)
       shutil.rmtree(staged[0][1].parent if staged else root / ".uploads", ignore_errors=True)
+      sidecar = root / "masks.json"; sidecar_tmp = sidecar.with_suffix(".tmp")
+      sidecar_tmp.write_text(json.dumps({"washSoftness": options.wash_softness, "inkAmount": options.ink_amount, "items": item_specs}))
+      sidecar_tmp.replace(sidecar)
     return dict(job.result)
 
 
@@ -300,6 +306,11 @@ def cancel_watercolour(job_id: str) -> dict:
     return _runner().public_dict(cancelled)
 
 
+def _default_landmark_size(asset_width: int) -> int:
+    """Spans roughly a third to two-thirds of the 1920 px CG; never upscales a tiny asset beyond native px."""
+    return int(max(240, min(1600, min(asset_width, 1920 // 3 * 2))))
+
+
 @router.post("/{job_id}/items/{item_id}/add-to-map/{maps_job_id}/{slide_id}")
 def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> dict:
     source_job = _runner().get(job_id)
@@ -323,7 +334,7 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
         churches = list(slide.get("churches") or []); used = {str(church.get("id") or "") for church in churches}; n = 1
         while f"p{n}" in used: n += 1
         camera = slide.get("camera") or {}
-        churches.append({"id": f"p{n}", "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": 180, "opacity": 1})
+        churches.append({"id": f"p{n}", "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1})
         slide["churches"] = churches; result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]; return result
     return maps._mutate_document(maps_job_id, None, append)
 
@@ -354,6 +365,21 @@ def _result_file(job_id: str, item_id: str, key: str) -> Path:
 @router.get("/{job_id}/items/{item_id}/original")
 def watercolour_original(job_id: str, item_id: str):
     return FileResponse(_result_file(job_id, item_id, "original"), media_type="image/png")
+
+
+@router.get("/{job_id}/items/{item_id}/spec")
+def watercolour_spec(job_id: str, item_id: str) -> dict:
+    job = _runner().get(job_id)
+    if not job or job.feature != "watercolour":
+        raise HTTPException(404, "Unknown Watercolour job")
+    row = next((item for item in (job.result or {}).get("items", []) if item.get("id") == item_id), None)
+    if not row:
+        raise HTTPException(404, "Watercolour image is unavailable")
+    sidecar = _job_root(job_id) / "masks.json"
+    if not sidecar.is_file():
+        return {"spec": None}
+    items = json.loads(sidecar.read_text()).get("items") or {}
+    return {"spec": items.get(item_id)}
 
 
 @router.get("/{job_id}/items/{item_id}/result")

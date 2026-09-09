@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { addWatercolourToMap, listJobs, watercolourDownloadUrl, watercolourImageUrl, type Job } from "../api";
+import {
+  addWatercolourToMap,
+  fetchWatercolourOriginal,
+  fetchWatercolourSpec,
+  listJobs,
+  watercolourDownloadUrl,
+  watercolourImageUrl,
+  type Job,
+} from "../api";
 import { jobLabel } from "../sessions";
 
 export type Item = {
@@ -25,10 +33,12 @@ export function WatercolourResultView({
   job,
   onOpen,
   onError,
+  onEdit,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onError: (message: string | null) => void;
+  onEdit?: (payload: { files: File[]; masks: Record<string, unknown>; transparent: boolean; wash: number; ink: number }) => void;
 }) {
   const [mapJobs, setMapJobs] = useState<Job[]>([]);
   const [target, setTarget] = useState("");
@@ -62,6 +72,36 @@ export function WatercolourResultView({
     }
   }
 
+  async function editAgain() {
+    const done = items.filter((item) => item.status === "done");
+    try {
+      const files: File[] = [];
+      const masks: Record<string, unknown> = {};
+      const specs: unknown[] = [];
+      for (let index = 0; index < done.length; index += 1) {
+        const item = done[index];
+        const [file, spec] = await Promise.all([
+          fetchWatercolourOriginal(job.id, item.id, item.name),
+          fetchWatercolourSpec(job.id, item.id),
+        ]);
+        files.push(file);
+        masks[String(index)] = spec;
+        specs.push(spec);
+      }
+      const result = (job.result || {}) as { washSoftness?: number; inkAmount?: number };
+      onError(null);
+      onEdit?.({
+        files,
+        masks,
+        transparent: specs.some((spec) => (spec as { transparent?: boolean } | null)?.transparent === true),
+        wash: result.washSoftness ?? 0.65,
+        ink: result.inkAmount ?? 0.42,
+      });
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return (
     <div>
       {hasDone && (
@@ -69,6 +109,11 @@ export function WatercolourResultView({
           <a className="btn secondary" href={watercolourDownloadUrl(job.id)}>
             Download batch
           </a>
+          {onEdit && (
+            <button className="btn secondary" type="button" onClick={() => void editAgain()}>
+              Edit again
+            </button>
+          )}
         </div>
       )}
       {hasTransparent && (

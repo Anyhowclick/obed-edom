@@ -668,8 +668,8 @@ const TOOL_ICONS: Record<string, JSX.Element> = {
   ),
   reset: (
     <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M12.5 8A4.5 4.5 0 1 1 10.8 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M10.4 2.6 10.9 4.9 8.6 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5.6 2.5h4.8L13.5 5.6v4.8L10.4 13.5H5.6L2.5 10.4V5.6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      <path d="M6.4 6.4 9.6 9.6M9.6 6.4 6.4 9.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   ),
   undo: (
@@ -719,7 +719,7 @@ function LandmarkMask({
 }) {
   const [mode, setMode] = useState<MaskMode>("rect");
   const [polarity, setPolarity] = useState<Polarity>("keep");
-  const [magnifierOn, setMagnifierOn] = useState(false);
+  const [magnifierOn, setMagnifierOn] = useState(true);
   const [compareOn, setCompareOn] = useState(false);
   const [tolerance, setTolerance] = useState(24);
   const [resetGeneration, setResetGeneration] = useState(0);
@@ -854,7 +854,7 @@ function LandmarkMask({
           <button
             className={`btn secondary icon-btn toggle${magnifierOn ? " on" : ""}`}
             type="button"
-            title="Magnifier"
+            title="Magnifier — click to toggle, or hold Option to peek while off"
             aria-label="Magnifier"
             onClick={() => setMagnifierOn((current) => !current)}
           >
@@ -950,6 +950,7 @@ function LandmarkMask({
         <div className="wash-card">
           <small className="wash-hint">{MASK_HINT[mode]}</small>
           {error && <small className="wash-hint">{error}</small>}
+          <small className="wash-hint">Hold Option to peek with the magnifier while it is off.</small>
         </div>
       </div>
     </div>
@@ -1088,7 +1089,21 @@ export function WatercolourTab() {
           }}
         />
       )}
-      {job && <WatercolourResultView job={job} onOpen={setOpen} onError={setError} />}
+      {job && (
+        <WatercolourResultView
+          job={job}
+          onOpen={setOpen}
+          onError={setError}
+          onEdit={(p) => {
+            setFiles(p.files);
+            setMasks(p.masks as Record<string, MaskSpec>);
+            setMaskFile(0);
+            setWash(p.wash);
+            setInk(p.ink);
+            setTransparent(p.transparent);
+          }}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

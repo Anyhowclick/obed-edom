@@ -2070,6 +2070,18 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   color: var(--plum);
 }
 .maps-crop-cg:active { cursor: grabbing; }
+.maps-object-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--accent-primary);
+  background: var(--bg-surface-glass);
+  border-radius: 2px;
+  z-index: 3;
+  cursor: nwse-resize;
+  pointer-events: auto;
+}
 .maps-zoom-slider {
   position: absolute;
   left: 18%;

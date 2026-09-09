@@ -6,6 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt } from "./overlays";
+import { resizeFromHandle } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyBoundaryZoomOffset } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainUrl, stylePatterns } from "./watercolourStyle";
@@ -211,6 +212,9 @@ type Props = {
   onAddPin: (lat: number, lon: number) => void;
   onSelectPin: (id: string | null) => void;
   onEditPin: (id: string) => void;
+  onMoveObject: (id: string, lat: number, lon: number) => void;
+  onResizeObject: (id: string, size: number) => void;
+  onObjectCommit: () => void;
   onCgShift: (dx: number) => void;
   onPreviewAbort?: () => void;
   assetBaseUrl?: string;
@@ -244,6 +248,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     onAddPin,
     onSelectPin,
     onEditPin,
+    onMoveObject,
+    onResizeObject,
+    onObjectCommit,
     onCgShift,
     onPreviewAbort,
     assetBaseUrl,
@@ -258,9 +265,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const styleReady = useRef(false);
   const overlayGeneration = useRef(0);
   const previewingRef = useRef(previewing);
-  const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort });
+  const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
   const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins });
   const cgDrag = useRef<{ x: number; shift: number; width: number } | null>(null);
+  const objDrag = useRef<{ id: string; grabDx: number; grabDy: number; pointerId: number } | null>(null);
+  const handleDrag = useRef<{ pointerId: number; startX: number; startSize: number } | null>(null);
+  const [handlePos, setHandlePos] = useState<{ x: number; y: number; size: number } | null>(null);
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
   const hopResolve = useRef<(() => void) | null>(null);
@@ -285,7 +295,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   cameraRef.current = camera;
   minZoomRef.current = minZoomForView();
   authoredWidthRef.current = authoredWidth;
-  callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort };
+  callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins };
 
   useImperativeHandle(ref, () => ({
@@ -483,6 +493,37 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
     };
 
+    const onObjPointerDown = (event: PointerEvent) => {
+      if (!map || previewingRef.current || event.shiftKey) return;
+      const rect = map.getCanvas().getBoundingClientRect();
+      const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+      const layers = PIN_LAYERS.filter((id) => map!.getLayer(id));
+      const id = String((layers.length ? map.queryRenderedFeatures(point, { layers }) : [])[0]?.properties?.id || "");
+      const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
+      if (!church) return;
+      const anchor = map.project([church.lon, church.lat]);
+      map.dragPan.disable();
+      map.getCanvas().setPointerCapture(event.pointerId);
+      objDrag.current = { id, grabDx: point[0] - anchor.x, grabDy: point[1] - anchor.y, pointerId: event.pointerId };
+    };
+
+    const onObjPointerMove = (event: PointerEvent) => {
+      const drag = objDrag.current;
+      if (!map || !drag || drag.pointerId !== event.pointerId) return;
+      const rect = map.getCanvas().getBoundingClientRect();
+      const lngLat = map.unproject([event.clientX - rect.left - drag.grabDx, event.clientY - rect.top - drag.grabDy]);
+      callbacks.current.onMoveObject(drag.id, lngLat.lat, lngLat.lng);
+    };
+
+    const onObjPointerUp = (event: PointerEvent) => {
+      const drag = objDrag.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (map?.getCanvas().hasPointerCapture(event.pointerId)) map.getCanvas().releasePointerCapture(event.pointerId);
+      map?.dragPan.enable();
+      objDrag.current = null;
+      callbacks.current.onObjectCommit();
+    };
+
     const createMap = (wantedStyle: MapsStyleId) => {
       const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / authoredWidthRef.current) : 0;
       void resolveOpenFreeMapStyle(wantedStyle, d0).then((style) => {
@@ -636,6 +677,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           }
         });
         map.getCanvas().addEventListener("pointerup", onPointerUp);
+        map.getCanvas().addEventListener("pointerdown", onObjPointerDown);
+        map.getCanvas().addEventListener("pointermove", onObjPointerMove);
+        map.getCanvas().addEventListener("pointerup", onObjPointerUp);
+        map.getCanvas().addEventListener("pointercancel", onObjPointerUp);
         ro.observe(hostEl);
       });
     };
@@ -645,6 +690,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       cancelled = true;
       ro.disconnect();
       map?.getCanvas().removeEventListener("pointerup", onPointerUp);
+      map?.getCanvas().removeEventListener("pointerdown", onObjPointerDown);
+      map?.getCanvas().removeEventListener("pointermove", onObjPointerMove);
+      map?.getCanvas().removeEventListener("pointerup", onObjPointerUp);
+      map?.getCanvas().removeEventListener("pointercancel", onObjPointerUp);
       map?.remove();
       mapRef.current = null;
     };
@@ -713,6 +762,57 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!map) return;
     applyHillshade(map, hillshade);
   }, [hillshade]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !selectedPinId || previewing) {
+      setHandlePos(null);
+      return;
+    }
+    const recompute = () => {
+      const church = overlay.current.churches.find((c) => c.id === selectedPinId);
+      if (!church || church.kind !== "landmark") {
+        setHandlePos(null);
+        return;
+      }
+      const scale = objectPreviewScale(map, authoredWidthRef.current);
+      const size = church.size || 120;
+      const width = size * scale;
+      const anchor = map.project([church.lon, church.lat]);
+      // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
+      setHandlePos({ x: anchor.x + width / 2, y: anchor.y, size });
+    };
+    recompute();
+    map.on("move", recompute);
+    map.on("render", recompute);
+    return () => {
+      map.off("move", recompute);
+      map.off("render", recompute);
+    };
+  }, [selectedPinId, previewing, churches]);
+
+  function onHandlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!handlePos) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    handleDrag.current = { pointerId: event.pointerId, startX: event.clientX, startSize: handlePos.size };
+  }
+
+  function onHandlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = handleDrag.current;
+    const map = mapRef.current;
+    if (!drag || !map || !selectedPinId) return;
+    const scale = objectPreviewScale(map, authoredWidthRef.current);
+    const size = resizeFromHandle({ x: drag.startX, y: 0 }, { x: event.clientX, y: 0 }, drag.startSize, scale);
+    callbacks.current.onResizeObject(selectedPinId, size);
+  }
+
+  function onHandlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    handleDrag.current = null;
+    callbacks.current.onObjectCommit();
+  }
 
   function eventToLngLat(event: { clientX: number; clientY: number }): { lat: number; lon: number } | null {
     const map = mapRef.current;
@@ -797,6 +897,16 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           )}
         </div>
       </div>
+      {handlePos && (
+        <div
+          className="maps-object-handle"
+          style={{ left: handlePos.x, top: handlePos.y }}
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+          onPointerCancel={onHandlePointerUp}
+        />
+      )}
       {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}
     </div>

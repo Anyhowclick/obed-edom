@@ -1177,3 +1177,35 @@ def test_isolate_erase_mode_migrates_to_darken():
     saved = _save(job, doc)
     assert saved.status_code == 200, saved.text
     assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
+
+
+def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+
+    wash_response = client.post(
+        "/api/watercolour",
+        files=[("files", ("landmark.png", _landmark_png(), "image/png"))],
+        data={"masks": json.dumps({"0": {"transparent": True, "rect": [4, 2, 30, 14]}})},
+    )
+    assert wash_response.status_code == 200, wash_response.text
+    wash_job_id = wash_response.json()["id"]
+    wash_job = None
+    for _ in range(80):
+        wash_job = client.get(f"/api/jobs/{wash_job_id}").json()
+        if wash_job["status"] in {"done", "error"}:
+            break
+        time.sleep(0.03)
+    assert wash_job["status"] == "done", wash_job.get("error")
+    item = wash_job["result"]["items"][0]
+    assert item["status"] == "done" and item["transparent"] is True
+
+    from obed_edom.web.watercolour import _default_landmark_size
+
+    added = client.post(f"/api/watercolour/{wash_job_id}/items/{item['id']}/add-to-map/{map_job['id']}/{slide_id}")
+    assert added.status_code == 200, added.text
+    doc = added.json()["result"]
+    slide = next(s for s in doc["slides"] if s["id"] == slide_id)
+    church = slide["churches"][-1]
+    assert church["size"] == _default_landmark_size(church["assetWidth"])
+    assert church["size"] != 180

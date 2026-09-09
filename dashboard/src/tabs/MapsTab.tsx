@@ -2023,6 +2023,18 @@ export function MapsTab() {
                   if (name == null) return;
                   updateActive({ churches: activeView.churches.map((c) => (c.id === id ? { ...c, name } : c)) });
                 }}
+                onMoveObject={(id, lat, lon) => {
+                  if (!activeView || locked) return;
+                  updateActive({ churches: activeView.churches.map((c) => (c.id === id ? { ...c, lat, lon } : c)) });
+                }}
+                onResizeObject={(id, size) => {
+                  if (!activeView || locked) return;
+                  updateActive({ churches: activeView.churches.map((c) => (c.id === id ? { ...c, size } : c)) });
+                }}
+                onObjectCommit={() => {
+                  if (locked) return;
+                  fireAndForgetSave();
+                }}
                 onCgShift={(dx) => updateActive(clampCgShift(dx, 0))}
                 onPreviewAbort={() => stopPreview(true)}
                 assetBaseUrl={job ? `/api/maps/${job.id}/assets` : undefined}
@@ -2114,7 +2126,7 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="600" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
+                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   <label className="maps-check"><input type="checkbox" checked={pin.showLabel !== false} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, showLabel: event.target.checked } : c) })} /> Show label</label>
                   <label>

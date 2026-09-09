@@ -506,3 +506,66 @@ def test_mask_field_rejects_oversized_dimensions_before_decompression():
     assert response.status_code == 400
     assert 'invalid' in response.text.lower()
 
+
+
+def test_batch_writes_masks_sidecar_with_spec_and_job_scalars():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    import time
+    client=TestClient(app)
+    masks=json.dumps({'0': _rect_mask_spec((110,66,178,166))})
+    response=client.post(
+        '/api/watercolour',
+        files=[('files',('landmark.png',_landmark_png(),'image/png'))],
+        data={'masks':masks,'wash_softness':'0.7','ink_amount':'0.3'},
+    )
+    assert response.status_code == 200, response.text
+    job_id=response.json()['id']
+    for _ in range(80):
+        job=client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done','error'}: break
+        time.sleep(.03)
+    assert job['result']['washSoftness'] == 0.7
+    assert job['result']['inkAmount'] == 0.3
+    item_id=job['result']['items'][0]['id']
+    spec_response=client.get(f'/api/watercolour/{job_id}/items/{item_id}/spec')
+    assert spec_response.status_code == 200
+    spec=spec_response.json()['spec']
+    assert spec['transparent'] is True
+    assert spec['rect'] == [110,66,178,166]
+
+
+def test_spec_route_returns_null_when_masks_sidecar_is_missing():
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    import time
+    client=TestClient(app)
+    response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))])
+    assert response.status_code == 200, response.text
+    job_id=response.json()['id']
+    for _ in range(80):
+        job=client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done','error'}: break
+        time.sleep(.03)
+    item_id=job['result']['items'][0]['id']
+    sidecar=Path(job['result']['outputDir']) / 'masks.json'
+    sidecar.unlink()
+    spec_response=client.get(f'/api/watercolour/{job_id}/items/{item_id}/spec')
+    assert spec_response.status_code == 200
+    assert spec_response.json() == {'spec': None}
+
+
+def test_spec_route_404s_for_unknown_job_or_item():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    assert client.get('/api/watercolour/nope/items/nope/spec').status_code == 404
+
+
+def test_default_landmark_size_boundaries():
+    from obed_edom.web.watercolour import _default_landmark_size
+    assert _default_landmark_size(10) == 240
+    assert _default_landmark_size(900) == 900
+    assert _default_landmark_size(5000) == 1280
+    assert _default_landmark_size(3000) == 1280

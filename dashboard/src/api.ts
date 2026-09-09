@@ -635,6 +635,20 @@ export function watercolourImageUrl(jobId: string, itemId: string, kind: "origin
   return `/api/watercolour/${jobId}/items/${itemId}/${kind}`;
 }
 
+export async function fetchWatercolourSpec(jobId: string, itemId: string): Promise<unknown> {
+  const res = await fetch(`/api/watercolour/${jobId}/items/${itemId}/spec`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.spec ?? null;
+}
+
+export async function fetchWatercolourOriginal(jobId: string, itemId: string, name: string): Promise<File> {
+  const res = await fetch(watercolourImageUrl(jobId, itemId, "original"));
+  if (!res.ok) throw new Error(await readError(res));
+  const blob = await res.blob();
+  return new File([blob], name, { type: blob.type || "image/png" });
+}
+
 export function watercolourDownloadUrl(jobId: string): string {
   return `/api/watercolour/${jobId}/download`;
 }
