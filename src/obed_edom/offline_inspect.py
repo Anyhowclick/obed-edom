@@ -43,7 +43,11 @@ def _round_pt(value: float) -> int:
 
 def _build_data_index(zip_names: list[str]) -> dict[str, str]:
     index: dict[str, str] = {}
-    for name in zip_names:
+    for raw_name in zip_names:
+        try:
+            name = raw_name.encode("cp437").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            name = raw_name
         m = _DATA_MEMBER.match(name)
         if not m:
             continue

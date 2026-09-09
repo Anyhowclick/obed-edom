@@ -636,6 +636,23 @@ def _merge_legacy_items(
     return sorted(unreadable_numbers)
 
 
+def _payload_has_runs(payload: dict[str, Any]) -> bool:
+    """True when every eligible text item -- mirroring iwa_runs.attach_runs'
+    ``_match_runs_to_items`` matching criteria -- carries a ``runs`` key
+    (checker-shaped). A payload with no eligible text items counts as covered."""
+    for slide in payload.get("slides") or []:
+        for item in slide.get("items") or []:
+            if is_duplicate_item(item):
+                continue
+            if (item.get("kind") or "text") not in {"text", "shape"}:
+                continue
+            if not (item.get("text") or "").strip():
+                continue
+            if "runs" not in item:
+                return False
+    return True
+
+
 def _build_checker_offline(
     key_path: Path,
     bulk_geometry_fn: Any,
@@ -691,6 +708,7 @@ def inspect_keynote_checker(
 
     digest = ""
     png_dir: Path | None = None
+    rejected_cache = False
     if want_cache:
         t_hash = time.perf_counter()
         digest = deck_digest(key_path)
@@ -699,8 +717,11 @@ def inspect_keynote_checker(
         png_dir = preview_cache_dir(digest)
         if json_path.is_file():
             cached = json.loads(json_path.read_text(encoding="utf-8"))
+            rejected_cache = True
             # Shared digest cache: a JXA hit has no runs[]; serving it would skip attach_runs.
-            if cached.get("reader") == "offline":
+            # A runs-less offline entry (e.g. from two_tier_wall_payload, which never
+            # attaches runs) is not checker-shaped either -- fall through and rebuild.
+            if cached.get("reader") == "offline" and _payload_has_runs(cached):
                 bulk_errors = cached.get("bulkErrors") or []
                 if bulk_errors and log is not None:
                     log(f"WARN: cached offline read for {key_path.name} carries "
@@ -753,7 +774,8 @@ def inspect_keynote_checker(
                 log(f"WARN: offline checker build failed for {key_path.name} ({exc!r}) -- falling back to legacy JXA.")
             try:
                 return inspect_keynote(
-                    key_path, export_dir=export_dir, slide_range=slide_range, use_cache=use_cache
+                    key_path, export_dir=export_dir, slide_range=slide_range,
+                    use_cache=False if rejected_cache else use_cache,
                 )
             except Exception as legacy_exc:
                 raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
@@ -768,7 +790,8 @@ def inspect_keynote_checker(
             if not sidecar.get("bulk_ok") and fallback_slides:
                 try:
                     return inspect_keynote(
-                        key_path, export_dir=export_dir, slide_range=slide_range, use_cache=use_cache
+                        key_path, export_dir=export_dir, slide_range=slide_range,
+                        use_cache=False if rejected_cache else use_cache,
                     )
                 except Exception as legacy_exc:
                     raise LegacyInspectFailed(str(legacy_exc)) from legacy_exc
@@ -863,6 +886,18 @@ def cached_payload(key_path: Path | str) -> dict[str, Any] | None:
         return None
     payload["_cached"] = True
     return payload
+
+
+def store_inspect_payload(key_path: Path | str, payload: dict[str, Any], digest: str = "") -> None:
+    """Write a full-deck payload to the shared digest cache, minus `_`-prefixed keys."""
+    from obed_edom.baseline import deck_digest, inspect_cache_path  # noqa: PLC0415
+
+    if not digest:
+        digest = deck_digest(key_path)
+    stored = {key: value for key, value in payload.items() if not str(key).startswith("_")}
+    json_path = inspect_cache_path(digest)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(stored), encoding="utf-8")
 
 
 def complete_cached_wall_payload(payload: dict[str, Any] | None) -> bool:

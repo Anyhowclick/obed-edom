@@ -13,12 +13,14 @@ from typing import Any
 from obed_edom import keynote_app, offline_write
 from obed_edom.inspect import (
     LegacyInspectFailed,
+    _truthy_cache,
     cached_payload,
     complete_cached_wall_payload,
     export_slide_images,
     inspect_keynote,
     inspect_keynote_checker,
     preview_pngs,
+    store_inspect_payload,
 )
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
@@ -227,6 +229,11 @@ def acquire_wall_payload(
     say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
     offline["reader"] = "offline"
+    if _truthy_cache(None, None):
+        try:
+            store_inspect_payload(source, offline)
+        except OSError as exc:
+            say(f"Could not cache the two-tier read of {source.name} ({type(exc).__name__}: {exc}).")
     return offline
 
 
@@ -850,66 +857,16 @@ def _say_stat_finalize_detail(
     _say_chunked_detail("Stat resolve detail", resolve_parts, say, resolve_note)
 
 
-def remap_keynote(
-    source: Path | str,
-    dest: Path | str,
+def prepare_wall_payload(
+    source: Path,
+    wall: dict[str, Any],
+    template_path: Path,
+    template_data: dict[str, Any],
+    say: Callable[[str], None],
     *,
-    template: Path | str,
-    slide_range: tuple[int, int] | frozenset[int] | None = None,
-    keep_side_panels: bool = False,
-    wall_payload: dict[str, Any] | None = None,
-    template_payload: dict[str, Any] | None = None,
-    framing_overrides: dict[int, int] | None = None,
-    side_content_slides: set[int] | None = None,
-    source_previews: Path | str | None = None,
-    export_dir: Path | str | None = None,
     offline_read: str | None = None,
-    plan_out: dict[str, Any] | None = None,
-    log: Callable[[str], None] | None = None,
-) -> dict[str, Any]:
-    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    source = Path(source).expanduser().resolve()
-    dest = Path(dest).expanduser().resolve()
-    if not source.exists():
-        raise FileNotFoundError(source)
-    template_path = Path(template).expanduser().resolve()
-    if not template_path.exists():
-        raise FileNotFoundError(template_path)
-
-    if wall_payload is not None:
-        wall = wall_payload
-    else:
-        wall = acquire_wall_payload(
-            source,
-            slide_range=slide_range,
-            mode=offline_read_mode(offline_read),
-            say=say,
-        )
-    if wall_payload is None:
-        if slide_range:
-            label = format_slide_range(slide_range)
-            say(
-                f"Inspected {source.name} slide {label}: "
-                f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
-            )
-        else:
-            say(
-                f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, "
-                f"{wall.get('slideCount')} slides."
-            )
-        note = navigator_numbering(wall)
-        if note:
-            say(note)
-    if template_payload is not None:
-        template_data = template_payload
-    else:
-        say(f"Inspecting CG template {template_path.name}…")
-        template_data = inspect_keynote(template_path)
-
+) -> float:
+    """Attach group/caption/build context to `wall` and `template_data`; returns the card stroke."""
     try:
         from obed_edom.iwa_runs import attach_group_captions  # noqa: PLC0415
 
@@ -977,6 +934,73 @@ def remap_keynote(
             f"Card-border stroke read unavailable ({type(exc).__name__}: {exc}); "
             f"the card grid's fallback-pitch floor uses {card_stroke}pt instead."
         )
+
+    return card_stroke
+
+
+def remap_keynote(
+    source: Path | str,
+    dest: Path | str,
+    *,
+    template: Path | str,
+    slide_range: tuple[int, int] | frozenset[int] | None = None,
+    keep_side_panels: bool = False,
+    wall_payload: dict[str, Any] | None = None,
+    template_payload: dict[str, Any] | None = None,
+    framing_overrides: dict[int, int] | None = None,
+    side_content_slides: set[int] | None = None,
+    source_previews: Path | str | None = None,
+    export_dir: Path | str | None = None,
+    offline_read: str | None = None,
+    plan_out: dict[str, Any] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Copy wall `source` to `dest` and remap in place from the CG template crop."""
+    def say(message: str) -> None:
+        if log:
+            log(message)
+
+    source = Path(source).expanduser().resolve()
+    dest = Path(dest).expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    template_path = Path(template).expanduser().resolve()
+    if not template_path.exists():
+        raise FileNotFoundError(template_path)
+
+    if wall_payload is not None:
+        wall = wall_payload
+    else:
+        wall = acquire_wall_payload(
+            source,
+            slide_range=slide_range,
+            mode=offline_read_mode(offline_read),
+            say=say,
+        )
+    if wall_payload is None:
+        if slide_range:
+            label = format_slide_range(slide_range)
+            say(
+                f"Inspected {source.name} slide {label}: "
+                f"canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}."
+            )
+        else:
+            say(
+                f"Inspected {source.name}: canvas {wall.get('slideWidth')}×{wall.get('slideHeight')}, "
+                f"{wall.get('slideCount')} slides."
+            )
+        note = navigator_numbering(wall)
+        if note:
+            say(note)
+    if template_payload is not None:
+        template_data = template_payload
+    else:
+        say(f"Inspecting CG template {template_path.name}…")
+        template_data = inspect_keynote(template_path)
+
+    card_stroke = prepare_wall_payload(
+        source, wall, template_path, template_data, say, offline_read=offline_read
+    )
 
     recipe = recipe_for(wall, template_data)
     previews: dict[int, Any] = {}

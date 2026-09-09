@@ -3649,6 +3649,14 @@ def fit_to_frame_recipe(
     }
 
 
+def carry_fit_context(fitted: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:
+    """Copy text/card context keys from `recipe` onto a `fit_to_frame_recipe` result."""
+    for carry in ("characterStyles", "listFontSize", "listSample", "cardSamples"):
+        if recipe.get(carry) is not None:
+            fitted[carry] = recipe[carry]
+    return fitted
+
+
 def frame_affine(recipe: dict[str, Any]) -> Affine | None:
     src = _rect_from_dict(recipe.get("mapSrc"))
     dst = _rect_from_dict(recipe.get("mapDst"))
@@ -4012,10 +4020,7 @@ def plan_payload_transforms(
                     _f(slide_recipe.get("destHeight"), CG_HEIGHT),
                 )
                 if fitted:
-                    for carry in ("characterStyles", "listFontSize", "listSample", "cardSamples"):
-                        if slide_recipe.get(carry) is not None:
-                            fitted[carry] = slide_recipe[carry]
-                    slide_recipe = fitted
+                    slide_recipe = carry_fit_context(fitted, slide_recipe)
                     if fitted_slides is not None:
                         fitted_slides.append(number)
                     if framing_report:
