@@ -1546,10 +1546,6 @@ def _affine_for_item(item: dict, groups: list[tuple[Affine, Rect]]) -> Affine | 
     return _group_for_item(item, groups)[0]
 
 
-def _groups_for_slide(slide: dict, recipe: dict[str, Any]) -> list[tuple[Affine, Rect]]:
-    return list(_groups_from_recipe(recipe))
-
-
 def title_plate(slide: dict, slide_size: tuple[float, float] | None = None) -> dict | None:
     """Badge plate: a short lettered shape, not the largest shape (side columns are taller)."""
     items = slide.get("items") or []
@@ -2299,7 +2295,7 @@ def plan_slide_transforms(
     card_stroke: float = DEFAULT_CARD_STROKE,
     card_grid_report: list[dict[str, Any]] | None = None,
 ) -> list[ItemTransform]:
-    groups = _groups_for_slide(slide, recipe)
+    groups = _groups_from_recipe(recipe)
     title_aff, title_src, title_ids, badge_slots, title_item = _title_badge(
         slide, recipe, wall_size
     )
@@ -2335,7 +2331,7 @@ def plan_slide_transforms(
         else:
             _bm, body_final_size, _bf, _bc = _style_text_box(
                 body_for_body,
-                _affine_for_item(body_for_body, _groups_for_slide(slide, recipe)),
+                _affine_for_item(body_for_body, _groups_from_recipe(recipe)),
                 match_character_style(body_for_body, styles_pre),
             )
     body_wall_rect = item_rect(body_for_body) if (overlay_ids and body_for_body) else None
