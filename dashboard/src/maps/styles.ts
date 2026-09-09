@@ -2,6 +2,7 @@ import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./stampOsm";
+import { withLowZoomBoundaries } from "./tonerBoundaries";
 import { buildWatercolourStyle } from "./watercolourStyle";
 import tonerStyleUrl from "./vendor/maptiler-toner-8688fbd.json?url";
 
@@ -69,7 +70,7 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
   next.sources = { openmaptiles: { ...structuredClone(vector), attribution: "© OpenStreetMap contributors · © MapTiler" } };
   next.glyphs = base.glyphs;
   delete next.sprite;
-  next.layers = (remapTonerFonts(next.layers) as LayerSpecification[]).filter((layer) => {
+  next.layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[]).filter((layer) => {
     if (styleId === "toner-background") return layer.type === "background" || layer.type === "fill";
     if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";
     return true;

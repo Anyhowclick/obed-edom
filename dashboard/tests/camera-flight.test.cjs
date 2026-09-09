@@ -71,14 +71,54 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
     const styles = require(path.join(out, "styles.js"));
     assert.deepEqual(styles.remapTonerFonts({ nested: ["Nunito Regular", "Nunito SemiBold", "Noto Sans Bold Italic"] }), { nested: ["Noto Sans Regular", "Noto Sans Bold", "Noto Sans Italic"] });
     const [full, background, lines] = await Promise.all([styles.resolveOpenFreeMapStyle("toner"), styles.resolveOpenFreeMapStyle("toner-background"), styles.resolveOpenFreeMapStyle("toner-lines")]);
-    assert.equal(full.layers.length, 38);
+    assert.equal(full.layers.length, 39);
     assert.equal(background.layers.length, 13);
-    assert.equal(lines.layers.length, 14);
+    assert.equal(lines.layers.length, 15);
     for (const style of [full, background, lines]) {
       assert.equal(style.sprite, undefined);
       assert.equal(style.sources.openmaptiles.attribution, "© OpenStreetMap contributors · © MapTiler");
       assert.match(style.sources.openmaptiles.tiles[0], /openfreemap/);
       assert.match(style.glyphs, /openfreemap/);
     }
+    const boundaryIds = ["boundary_state", "boundary_state_z1-4", "boundary_country_z0-4", "boundary_country_z5-"];
+    const lineIds = new Set(lines.layers.map((layer) => layer.id));
+    const backgroundIds = new Set(background.layers.map((layer) => layer.id));
+    for (const id of boundaryIds) {
+      assert.ok(lineIds.has(id), `toner-lines is missing ${id}`);
+      assert.ok(!backgroundIds.has(id), `toner-background unexpectedly has ${id}`);
+    }
   } finally { global.fetch = oldFetch; }
+});
+
+test("withLowZoomBoundaries re-gates only the three toner boundary layers, weights stay vendored", () => {
+  const vendor = JSON.parse(fs.readFileSync(path.join(root, "src/maps/vendor/maptiler-toner-8688fbd.json"), "utf8"));
+  const { withLowZoomBoundaries } = require(path.join(out, "tonerBoundaries.js"));
+  const byId = (layers, id) => layers.find((layer) => layer.id === id);
+  const vendorState = byId(vendor.layers, "boundary_state");
+  const vendorCountryLow = byId(vendor.layers, "boundary_country_z0-4");
+  const vendorCountryHigh = byId(vendor.layers, "boundary_country_z5-");
+
+  const next = withLowZoomBoundaries(vendor.layers);
+  assert.equal(next.length, vendor.layers.length + 1);
+
+  const low = byId(next, "boundary_state_z1-4");
+  assert.equal(low.minzoom, 1);
+  assert.equal(low.maxzoom, 5);
+  assert.equal(low.paint["line-width"], 1.2);
+  assert.deepEqual(low.filter, vendorState.filter);
+
+  const countryLow = byId(next, "boundary_country_z0-4");
+  assert.equal(countryLow.minzoom, 0);
+  assert.deepEqual({ ...countryLow, minzoom: vendorCountryLow.minzoom }, vendorCountryLow);
+
+  const state = byId(next, "boundary_state");
+  assert.equal(state.minzoom, 5);
+  assert.deepEqual({ ...state, minzoom: vendorState.minzoom }, vendorState);
+
+  assert.deepEqual(byId(next, "boundary_country_z5-"), vendorCountryHigh);
+
+  const nextIds = next.map((layer) => layer.id);
+  const vendorIds = vendor.layers.map((layer) => layer.id);
+  assert.deepEqual(nextIds.filter((id) => id !== "boundary_state_z1-4"), vendorIds);
+  assert.equal(nextIds.indexOf("boundary_state_z1-4"), nextIds.indexOf("boundary_state") - 1);
 });

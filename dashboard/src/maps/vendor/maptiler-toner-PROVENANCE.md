@@ -10,4 +10,5 @@ The accompanying upstream licence is retained as `maptiler-toner-LICENSE.md`.
 The style is adapted at runtime to use OpenFreeMap vector and glyph endpoints,
 local procedural replacements for the four required fill patterns, and no
 external sprite endpoint. Captured and interactive maps retain the required
-OpenStreetMap and MapTiler attribution.
+OpenStreetMap and MapTiler attribution. The three boundary layers are
+re-gated and re-weighted at load time for low-zoom wall exports.
