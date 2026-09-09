@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from obed_edom.baseline import index_map, pairing_path
-from obed_edom.map_remap import DEFAULT_CARD_STROKE
+from obed_edom.map_remap import DEFAULT_CARD_STROKE, frame_affine
 
 FRAMING_VERSION = 1
 FRAMING_KIND = "framing"
@@ -190,37 +190,12 @@ THUMB_QUALITY = 82
 
 
 def _transform_of(recipe: dict[str, Any]) -> dict[str, float] | None:
-    """Uniform scale+offset. Same precedence as the planner: first group affine, else mapSrc/mapDst."""
-    groups = recipe.get("groups") or []
-    if groups:
-        first = groups[0] or {}
-        try:
-            s = float(first.get("s") or 0)
-            if s > 0:
-                return {
-                    "s": round(s, 6),
-                    "tx": round(float(first.get("tx") or 0), 2),
-                    "ty": round(float(first.get("ty") or 0), 2),
-                }
-        except (TypeError, ValueError):
-            pass
-    src = recipe.get("mapSrc") or {}
-    dst = recipe.get("mapDst") or {}
-    try:
-        sw = float(src.get("w") or 0)
-        sh = float(src.get("h") or 0)
-        if sw <= 0 or sh <= 0:
-            return None
-        s = float(dst.get("w") or 0) / sw
-        if s <= 0:
-            return None
-        return {
-            "s": round(s, 6),
-            "tx": round(float(dst.get("x") or 0) - float(src.get("x") or 0) * s, 2),
-            "ty": round(float(dst.get("y") or 0) - float(src.get("y") or 0) * s, 2),
-        }
-    except (TypeError, ValueError, ZeroDivisionError):
+    """Uniform scale+offset shown in the propose overlay. Precedence is the planner's own
+    (`map_remap.frame_affine`): mapSrc/mapDst first, else groups[0] -- not the reverse."""
+    aff = frame_affine(recipe)
+    if aff is None:
         return None
+    return {"s": round(aff.s, 6), "tx": round(aff.tx, 2), "ty": round(aff.ty, 2)}
 
 
 def build_preview_thumbs(

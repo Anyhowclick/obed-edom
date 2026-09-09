@@ -20,11 +20,13 @@ from obed_edom.framing import (
     DEFERRED,
     PINNED,
     Decision,
+    _transform_of,
     load_framings,
     normalize_decision,
     reuse_framings,
     save_framings,
 )
+from obed_edom.map_remap import frame_affine
 
 WALL = "/tmp/Wall.key"
 TEMPLATE = "/tmp/Base_CG_Assets.key"
@@ -242,3 +244,24 @@ def test_proposal_uses_full_wall_context_for_digests_navigator_and_thumbnails(tm
     ]
     assert result["skippedSlides"] == [2]
     assert "Skip Slide" in result["numberingNote"]
+
+
+def test_transform_of_uses_the_planner_frame_affine():
+    recipe = {
+        "mapSrc": {"x": 0, "y": 0, "w": 100, "h": 50},
+        "mapDst": {"x": 10, "y": 20, "w": 200, "h": 100},
+        "groups": [
+            {
+                "s": 5.0, "tx": 999.0, "ty": 999.0,
+                "src": {"x": 0, "y": 0, "w": 10, "h": 10},
+                "dst": {"x": 0, "y": 0, "w": 20, "h": 20},
+                "members": 3,
+            }
+        ],
+    }
+    aff = frame_affine(recipe)
+    assert aff is not None
+    expected = {"s": round(aff.s, 6), "tx": round(aff.tx, 2), "ty": round(aff.ty, 2)}
+    assert _transform_of(recipe) == expected
+    # The old precedence (groups[0] first) would have returned this instead.
+    assert expected != {"s": 5.0, "tx": 999.0, "ty": 999.0}
