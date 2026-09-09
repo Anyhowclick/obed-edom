@@ -203,10 +203,21 @@ function run(argv) {
   Keynote.includeStandardAdditions = true;
 
   var doc, slides;
+  function closeDoc() {
+    try {
+      Keynote.close(doc, { saving: "no" });
+    } catch (e3) {
+      try {
+        doc.close({ saving: "no" });
+      } catch (e4) {}
+    }
+  }
+
   try {
     doc = Keynote.open(Path(plan.path));
     slides = doc.slides();
   } catch (eOpen) {
+    if (doc) closeDoc();
     var openMsg = String(eOpen);
     if (!openMsg) openMsg = "Keynote.open/doc.slides() failed with no message";
     return JSON.stringify({ path: plan.path, error: openMsg });
@@ -224,16 +235,6 @@ function run(argv) {
     }
   } else {
     for (let i = start; i < end; i++) indices.push(i);
-  }
-
-  function closeDoc() {
-    try {
-      Keynote.close(doc, { saving: "no" });
-    } catch (e3) {
-      try {
-        doc.close({ saving: "no" });
-      } catch (e4) {}
-    }
   }
 
   const geometry = {};

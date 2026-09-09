@@ -51,8 +51,8 @@ def _capture_plan(monkeypatch):
             "path": captured["plan"]["path"],
             "slideWidth": 1920,
             "slideHeight": 1080,
-            "slideCount": 0,
-            "slides": [],
+            "slideCount": 1,
+            "slides": [{"index": 0, "number": 1, "skipped": False, "items": []}],
         }
         kw["stdout"].write(json.dumps(payload).encode())
         return SimpleNamespace(args=args, returncode=0, poll=lambda: 0)
@@ -88,7 +88,7 @@ def test_use_cache_false_exports_into_export_dir_not_the_digest_cache(tmp_path, 
     captured = _capture_plan(monkeypatch)
     export_calls: list[Path] = []
 
-    def fake_export(_key_path, dest):
+    def fake_export(_key_path, dest, **_kwargs):
         export_calls.append(Path(dest))
         return None
 
@@ -143,12 +143,16 @@ def test_failed_fallback_export_keeps_its_error(tmp_path, monkeypatch):
     def fake_run(*_args, **_kwargs):
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps({"slideCount": 0, "slides": [], "exportError": "old error"}),
+            stdout=json.dumps({
+                "slideCount": 1,
+                "slides": [{"index": 0, "number": 1, "skipped": False}],
+                "exportError": "old error",
+            }),
             stderr="",
         )
 
     monkeypatch.setattr(inspect_mod, "_run_jxa_inspect", fake_run)
-    monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *_args: "fallback failed")
+    monkeypatch.setattr(inspect_mod, "export_slide_images", lambda *_args, **_kwargs: "fallback failed")
 
     out = inspect_keynote(key, export_dir=tmp_path / "previews", use_cache=False)
 

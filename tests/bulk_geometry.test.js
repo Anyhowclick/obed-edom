@@ -346,4 +346,28 @@ test("run(): an exception during the geometry loop closes the doc and returns an
   }
 });
 
+test("run(): open() succeeds but doc.slides() throws still closes the doc", function () {
+  let closeCalled = false;
+  const fakeDoc = {
+    slides: function () {
+      throw new Error("slides boom");
+    },
+  };
+  const fakeApp = {
+    includeStandardAdditions: false,
+    open: function () { return fakeDoc; },
+    close: function () { closeCalled = true; },
+  };
+  stubJXAGlobals(fakeApp);
+  try {
+    withPlanFile({ path: "/tmp/deck.key", bundleId: "com.apple.Keynote" }, function (planPath) {
+      const out = JSON.parse(m.run([planPath]));
+      assert.strictEqual(closeCalled, true, "an open doc whose slides() throws must still close");
+      assert.ok(out.error, "the failure must be reported, not swallowed");
+    });
+  } finally {
+    unstubJXAGlobals();
+  }
+});
+
 console.log("\n" + passed + " passing");

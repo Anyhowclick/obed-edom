@@ -452,13 +452,18 @@ def test_folded_export_failure_is_surfaced_once_and_does_not_fail_geometry(deck,
 
 
 def test_folded_export_exception_does_not_fail_geometry(deck, monkeypatch, tmp_path):
+    """An exception from `_export_open_slide_images` must not clear ownership: the
+    outer `finally` (not the exporter, which never ran to completion) closes the doc."""
+
     def spy_build(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
         inspect_mod.LAST_BULK_KEPT_OPEN = str(Path(key_path).resolve())
         return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
                 "_offline": {"bulk_ok": True, "fallback_slides": []}}
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
-    monkeypatch.setattr(inspect_mod, "_close_document_by_name", _boom_close)
+
+    closed: list[Path] = []
+    monkeypatch.setattr(inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p)))
 
     def boom_open_export(*a, **k):
         raise RuntimeError("osascript crashed")
@@ -467,6 +472,7 @@ def test_folded_export_exception_does_not_fail_geometry(deck, monkeypatch, tmp_p
 
     out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=False)
 
+    assert closed == [deck.resolve()]
     assert out["exported"] is False
     assert out["exportError"] == "osascript crashed"
     assert out["slideCount"] == 1
@@ -570,10 +576,11 @@ def test_legacy_cache_hit_fallback_after_kept_open_still_closes(deck, monkeypatc
     assert closed == [deck.resolve()]
 
 
-def test_all_skipped_real_traversal_never_opens_bulk_and_uses_standalone(deck, monkeypatch, tmp_path):
+def test_all_skipped_real_traversal_never_opens_bulk_and_needs_no_export(deck, monkeypatch, tmp_path):
     """A REAL (unmocked) `_build_checker_offline` / `two_tier_wall_payload` traversal:
-    an all-skipped deck never reaches `bulk_geometry_fn`, so `LAST_BULK_KEPT_OPEN`
-    stays unset for this deck and the fold falls back to the standalone exporter."""
+    an all-skipped deck never reaches `bulk_geometry_fn`, so `LAST_BULK_KEPT_OPEN` stays
+    unset for this deck; expected PNGs is 0, already satisfied by an empty dest, so
+    neither exporter form runs and the fold still reports success."""
     from obed_edom import iwa_runs, offline_inspect
 
     def fake_offline_wall_payload(key_path, slide_range=None, *, deck=None):
@@ -608,6 +615,7 @@ def test_all_skipped_real_traversal_never_opens_bulk_and_uses_standalone(deck, m
     dest = tmp_path / "job"
     out = inspect_mod.inspect_keynote_checker(deck, export_dir=dest, use_cache=False)
 
-    assert standalone_calls == [dest]
+    assert standalone_calls == []  # expected PNGs is 0, already satisfied
     assert inspect_mod.LAST_BULK_KEPT_OPEN is None
     assert out["slideCount"] == 3
+    assert out["exported"] is True

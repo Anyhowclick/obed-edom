@@ -114,7 +114,7 @@ def test_export_applescript_closes_by_name_and_reraises_on_export_error(tmp_path
     assert on_error_at < error_close < reraise_at
 
 
-def test_export_open_applescript_has_no_close_by_name_or_open(tmp_path: Path):
+def test_export_open_applescript_has_no_open_or_document_one_preamble(tmp_path: Path):
     from obed_edom.inspect import _export_open_applescript
 
     script = _export_open_applescript(tmp_path / "Sermon.key", tmp_path / "out")
