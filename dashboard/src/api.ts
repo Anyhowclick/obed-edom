@@ -583,3 +583,36 @@ export async function cancelMapsExport(id: string): Promise<Job> {
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
+
+export async function startWatercolour(
+  files: File[],
+  opts: { washSoftness: number; inkAmount: number; masks: Record<string, unknown> }
+): Promise<Job> {
+  const body = new FormData();
+  for (const file of files) body.append("files", file);
+  body.set("wash_softness", String(opts.washSoftness));
+  body.set("ink_amount", String(opts.inkAmount));
+  body.set("masks", JSON.stringify(opts.masks));
+  const res = await fetch("/api/watercolour", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function cancelWatercolour(id: string): Promise<Job> {
+  const res = await fetch(`/api/watercolour/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function addWatercolourToMap(jobId: string, itemId: string, mapsJobId: string, slideId: string): Promise<void> {
+  const res = await fetch(`/api/watercolour/${jobId}/items/${itemId}/add-to-map/${mapsJobId}/${slideId}`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export function watercolourImageUrl(jobId: string, itemId: string, kind: "original" | "result"): string {
+  return `/api/watercolour/${jobId}/items/${itemId}/${kind}`;
+}
+
+export function watercolourDownloadUrl(jobId: string): string {
+  return `/api/watercolour/${jobId}/download`;
+}

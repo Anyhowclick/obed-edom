@@ -37,6 +37,25 @@ def test_studio_batch_request_persists_success_and_per_item_error():
     assert client.get(f"/api/watercolour/{job_id}/items/{items[0]['id']}/original").status_code == 200
     assert client.get(f"/api/watercolour/{job_id}/items/{items[0]['id']}/result").status_code == 200
 
+def test_delete_purges_watercolour_output_dir():
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))])
+    assert response.status_code == 200, response.text
+    job_id=response.json()['id']
+    import time
+    for _ in range(80):
+        job=client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done','error'}: break
+        time.sleep(.03)
+    output_dir=job['result']['outputDir']
+    assert Path(output_dir).is_dir()
+    assert client.delete(f'/api/jobs/{job_id}').status_code == 200
+    assert not Path(output_dir).exists()
+    assert client.get(f'/api/jobs/{job_id}').status_code == 404
+
 def test_white_input_is_reserved_as_bare_paper():
     # Watercolour is subtractive: a white photo has no pigment, so the output must be the cream paper itself.
     raw=png((255,255,255,255),(96,72)); payload,_=convert(raw,WatercolourOptions(seed=3))

@@ -2653,4 +2653,15 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   accent-color: var(--sky);
   cursor: pointer;
 }
+
+.wash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.wash-tile { margin: 0; overflow: hidden; border: var(--border-glass); border-radius: var(--radius-md); background: var(--bg-surface-glass); }
+.wash-pair { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 2px; }
+.wash-shot { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #07070A; cursor: pointer; }
+.wash-shot.alpha, .wash-checker { background: repeating-conic-gradient(#2a2a33 0 25%, #1a1a22 0 50%) 50% / 18px 18px; }
+.wash-checker { position: relative; display: inline-block; }
+.wash-cap { padding: 6px 8px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wash-tile .row-acts { margin: 0; padding: 0 8px 8px; }
+.wash-mask-img { display: block; max-width: 540px; max-height: 360px; }
+.wash-mask-rect { position: absolute; border: 2px solid #e8772a; pointer-events: none; }
 .maps-inspector .thumbs { margin-top: 8px; }
