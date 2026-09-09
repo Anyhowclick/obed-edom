@@ -15,6 +15,7 @@ from obed_edom.maps_keynote import (
     PANEL_EDGES,
     WALL_HEIGHT,
     WALL_WIDTH,
+    _render_reveals,
     assign_morph_plates,
     avoid_straddle,
     build_deck_script,
@@ -340,9 +341,10 @@ def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: 
     image_item = next(item for item in baseline if item.get("landmark"))
     assert image_item["kind"] == "image"
 
-    with_reveal = _slide("s1", camera, churches=[_landmark_church(revealMov=str(reveal_mov))])
+    with_reveal = _slide("s1", camera, churches=[_landmark_church()])
     revealed = build_slide_items(
-        with_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root
+        with_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     movie_item = next(item for item in revealed if item.get("landmark"))
     assert movie_item["kind"] == "movie"
@@ -358,13 +360,120 @@ def test_landmark_reveal_suppressed_on_duplicate_slide(tmp_path: Path):
     reveal_mov.parent.mkdir(parents=True, exist_ok=True)
     reveal_mov.write_bytes(b"mov")
     camera = _camera(3.0, 101.0, 8)
-    slide = _slide("s1", camera, churches=[_landmark_church(revealMov=str(reveal_mov))])
+    slide = _slide("s1", camera, churches=[_landmark_church()])
     still = _dummy_png(tmp_path / "s1.png")
     items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root, allow_reveal=False
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root, allow_reveal=False,
+        reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     landmark_item = next(item for item in items if item.get("landmark"))
     assert landmark_item["kind"] == "image"
+
+
+def test_render_reveals_returns_mapping_without_mutating_church(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    reveals = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert reveals[("lw", "s1", "lm")].endswith(".mov")
+    assert "revealMov" not in church
+    assert "revealMov" not in slide["churches"][0]
+
+
+def test_render_reveals_regenerates_when_duration_or_opacity_changes(tmp_path: Path, monkeypatch):
+    calls: list[float] = []
+
+    def fake_render(asset, dest, *, duration, seed, opacity, fingerprint=None, is_cancelled=None):
+        calls.append(duration)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f"mov-{duration}-{opacity}".encode())
+        if fingerprint is not None:
+            dest.with_suffix(dest.suffix + ".fp").write_text(fingerprint)
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.render_reveal", fake_render)
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+
+    reveals = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 1
+    dest = Path(reveals[("lw", "s1", "lm")])
+    first_bytes = dest.read_bytes()
+
+    # Unchanged inputs must reuse the cached movie.
+    reveals_again = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 1
+    assert reveals_again[("lw", "s1", "lm")] == reveals[("lw", "s1", "lm")]
+    assert dest.read_bytes() == first_bytes
+
+    # A duration change must invalidate the cache and re-render.
+    church["reveal"]["duration"] = 2.4
+    _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 2
+    assert dest.read_bytes() != first_bytes
+
+    # An opacity change (not covered by mtime) must also invalidate the cache.
+    church["opacity"] = 0.5
+    _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert len(calls) == 3
+
+
+def test_render_reveals_uses_separate_lw_and_cg_paths(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    lw_church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    cg_church = _landmark_church(reveal={"kind": "brush", "duration": 1.2}, opacity=0.4)
+    slide = _slide(
+        "s1", _camera(3.0, 101.0, 8), churches=[lw_church],
+        cg={"camera": _camera(3.0, 101.0, 8), "style": "positron", "churches": [cg_church]},
+    )
+    reveals = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert reveals[("lw", "s1", "lm")] != reveals[("cg", "s1", "lm")]
+
+
+def test_export_maps_job_does_not_leak_reveal_mov_into_stored_document(tmp_path: Path, monkeypatch):
+    from obed_edom.web.maps import MapsDocument
+
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+
+    for stored_slide in result["slides"]:
+        for stored_church in stored_slide.get("churches") or []:
+            assert "revealMov" not in stored_church
+
+    doc = MapsDocument.model_validate(
+        {
+            "defaultStyle": "positron",
+            "crop": "wall",
+            "exportLw": True,
+            "exportCg": True,
+            "slides": result["slides"],
+            "links": result["links"],
+        }
+    )
+    assert doc.slides[0].churches[0].reveal.duration == 1.2
 
 
 def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Path):

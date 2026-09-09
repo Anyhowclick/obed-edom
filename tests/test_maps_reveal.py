@@ -7,7 +7,15 @@ import pytest
 from PIL import Image
 
 from obed_edom.maps_movie import ffmpeg_exe
-from obed_edom.maps_reveal import render_reveal, reveal_frames, reveal_path, reveal_seed
+from obed_edom.maps_reveal import (
+    _run_ffmpeg_stdin,
+    render_reveal,
+    reveal_fingerprint,
+    reveal_frames,
+    reveal_path,
+    reveal_seed,
+    reveal_stale,
+)
 
 
 def _rgba(w: int = 40, h: int = 30) -> np.ndarray:
@@ -101,6 +109,106 @@ def test_reveal_path_layout(tmp_path: Path):
     path = reveal_path(tmp_path, "slide 1", "church/1")
     assert path.parent == tmp_path / "reveal"
     assert path.suffix == ".mov"
+
+
+def test_reveal_path_separates_lw_and_cg():
+    lw = reveal_path(Path("/out"), "s1", "c1", "lw")
+    cg = reveal_path(Path("/out"), "s1", "c1", "cg")
+    assert lw != cg
+    assert cg.name.endswith("-cg.mov")
+
+
+def test_reveal_fingerprint_changes_with_duration_and_opacity(tmp_path: Path):
+    asset = tmp_path / "a.png"
+    Image.new("RGBA", (10, 10), (1, 2, 3, 255)).save(asset)
+    base = reveal_fingerprint(asset, duration=1.0, opacity=1.0, seed=1, width=10, height=10)
+    assert base != reveal_fingerprint(asset, duration=2.0, opacity=1.0, seed=1, width=10, height=10)
+    assert base != reveal_fingerprint(asset, duration=1.0, opacity=0.5, seed=1, width=10, height=10)
+    assert base != reveal_fingerprint(asset, duration=1.0, opacity=1.0, seed=2, width=10, height=10)
+
+
+def test_reveal_stale_true_without_dest_or_sidecar_true_on_mismatch_false_on_match(tmp_path: Path):
+    dest = tmp_path / "out.mov"
+    assert reveal_stale(dest, "fp-a") is True
+    dest.write_bytes(b"movie")
+    assert reveal_stale(dest, "fp-a") is True
+    dest.with_suffix(".mov.fp").write_text("fp-a")
+    assert reveal_stale(dest, "fp-a") is False
+    assert reveal_stale(dest, "fp-b") is True
+
+
+def test_render_reveal_writes_fingerprint_sidecar(tmp_path: Path, monkeypatch):
+    asset = tmp_path / "a.png"
+    Image.new("RGBA", (10, 10), (1, 2, 3, 255)).save(asset)
+    dest = tmp_path / "reveal" / "out.mov"
+
+    def fake_run(cmd, frames, is_cancelled):
+        list(frames)
+        Path(cmd[-1]).write_bytes(b"movie")
+
+    monkeypatch.setattr("obed_edom.maps_reveal._run_ffmpeg_stdin", fake_run)
+    render_reveal(asset, dest, duration=1.0, seed=1, fingerprint="abc123")
+    assert dest.with_suffix(".mov.fp").read_text() == "abc123"
+
+
+def test_render_reveal_cleans_up_tmp_movie_on_failure(tmp_path: Path, monkeypatch):
+    asset = tmp_path / "a.png"
+    Image.new("RGBA", (10, 10), (1, 2, 3, 255)).save(asset)
+    dest = tmp_path / "reveal" / "out.mov"
+
+    def failing_run(cmd, frames, is_cancelled):
+        list(frames)
+        Path(cmd[-1]).write_bytes(b"partial")
+        raise RuntimeError("ffmpeg failed: boom")
+
+    monkeypatch.setattr("obed_edom.maps_reveal._run_ffmpeg_stdin", failing_run)
+    with pytest.raises(RuntimeError, match="boom"):
+        render_reveal(asset, dest, duration=1.0, seed=1)
+    tmp_dest = dest.with_name(f".{dest.stem}.tmp{dest.suffix}")
+    assert not tmp_dest.exists()
+    assert not dest.exists()
+
+
+def test_encoder_does_not_deadlock_on_large_stderr_and_can_be_cancelled(tmp_path: Path):
+    """A fake ffmpeg that floods stderr past the OS pipe buffer must not hang the frame-writing loop."""
+    if ffmpeg_exe() is None:
+        pytest.skip("no shell available for the fake ffmpeg script")
+    script = tmp_path / "fake_ffmpeg.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "sys.stderr.write('x' * 2_000_000)\n"
+        "sys.stderr.flush()\n"
+        "sys.exit(1)\n"
+    )
+    cmd = [__import__("sys").executable, str(script)]
+
+    def frames():
+        for _ in range(3):
+            yield np.zeros((4, 4, 4), np.uint8)
+
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        _run_ffmpeg_stdin(cmd, frames(), None)
+
+
+def test_encoder_cancellation_terminates_child_process():
+    script_cmd = [
+        __import__("sys").executable,
+        "-c",
+        "import sys, time; sys.stdin.read(); time.sleep(30)",
+    ]
+    calls = {"n": 0}
+
+    def is_cancelled():
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    def frames():
+        for _ in range(1):
+            yield np.zeros((4, 4, 4), np.uint8)
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        _run_ffmpeg_stdin(script_cmd, frames(), is_cancelled)
 
 
 def test_render_reveal_encodes_real_movie(tmp_path: Path):

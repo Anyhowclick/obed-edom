@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { cancelWatercolour, fetchWatercolourPreview, pollJob, startWatercolour } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { FileWell } from "../components/FileWell";
@@ -7,7 +7,15 @@ import { WatercolourResultView } from "../components/WatercolourResultView";
 import { useCurrentJob } from "../sessions";
 import { floodFill } from "../watercolour/floodFill";
 import { sobelMagnitude, snapToEdge } from "../watercolour/edges";
-import { createHistory, push as pushHistory, undo as undoHistory, redo as redoHistory, canUndo, canRedo } from "../watercolour/history";
+import {
+  createHistory,
+  push as pushHistory,
+  undo as undoHistory,
+  redo as redoHistory,
+  canUndo,
+  canRedo,
+  type History,
+} from "../watercolour/history";
 import { loupeCorner } from "../watercolour/loupe";
 
 type MaskSpec = {
@@ -124,17 +132,9 @@ function overlayDataUrl(keep: Uint8Array, remove: Uint8Array, w: number, h: numb
   return canvas.toDataURL("image/png");
 }
 
-function MaskEditor({
-  file,
-  spec,
-  mode,
-  polarity,
-  tolerance,
-  magnifierOn,
-  compareOn,
-  cutoutUrl,
-  onChange,
-}: {
+type MaskEditorHandle = { flushPending: () => MaskSpec | undefined };
+
+const MaskEditor = forwardRef<MaskEditorHandle, {
   file: File;
   spec: MaskSpec;
   mode: MaskMode;
@@ -144,7 +144,17 @@ function MaskEditor({
   compareOn: boolean;
   cutoutUrl: string;
   onChange: (next: MaskSpec) => void;
-}) {
+}>(function MaskEditor({
+  file,
+  spec,
+  mode,
+  polarity,
+  tolerance,
+  magnifierOn,
+  compareOn,
+  cutoutUrl,
+  onChange,
+}, ref) {
   const [url, setUrl] = useState("");
   const [size, setSize] = useState<[number, number]>([1, 1]);
   const [drag, setDrag] = useState<{ start: [number, number]; now: [number, number] } | null>(null);
@@ -163,6 +173,35 @@ function MaskEditor({
   const removeRef = useRef<Uint8Array | null>(null);
   const [overlayUrl, setOverlayUrl] = useState("");
   const encodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRef = useRef(false);
+  const editGenRef = useRef(0);
+  const specRef = useRef(spec);
+  specRef.current = spec;
+
+  function flush(): MaskSpec | undefined {
+    if (encodeTimer.current) {
+      clearTimeout(encodeTimer.current);
+      encodeTimer.current = null;
+    }
+    if (!pendingRef.current) return undefined;
+    const working = workingRef.current;
+    const keep = keepRef.current;
+    const remove = removeRef.current;
+    if (!working || !keep || !remove) return undefined;
+    pendingRef.current = false;
+    const next: MaskSpec = {
+      ...specRef.current,
+      transparent: true,
+      keepMask: encodeMask(keep, working.ww, working.wh),
+      removeMask: encodeMask(remove, working.ww, working.wh),
+      maskSize: [working.ww, working.wh],
+    };
+    onChange(next);
+    setOverlayUrl(overlayDataUrl(keep, remove, working.ww, working.wh));
+    return next;
+  }
+
+  useImperativeHandle(ref, () => ({ flushPending: flush }));
 
   useEffect(() => {
     const next = URL.createObjectURL(file);
@@ -173,8 +212,8 @@ function MaskEditor({
     removeRef.current = null;
     setOverlayUrl("");
     return () => {
+      flush();
       URL.revokeObjectURL(next);
-      if (encodeTimer.current) clearTimeout(encodeTimer.current);
     };
   }, [file]);
 
@@ -204,11 +243,12 @@ function MaskEditor({
     if (spec.keepMask || spec.removeMask) {
       const keep = keepRef.current;
       const remove = removeRef.current;
+      const gen = editGenRef.current;
       Promise.all([
         spec.keepMask ? decodeMaskInto(spec.keepMask, ww, wh) : null,
         spec.removeMask ? decodeMaskInto(spec.removeMask, ww, wh) : null,
       ]).then(([decodedKeep, decodedRemove]) => {
-        if (workingRef.current !== working) return;
+        if (workingRef.current !== working || editGenRef.current !== gen) return;
         if (decodedKeep) keep.set(decodedKeep);
         if (decodedRemove) remove.set(decodedRemove);
         setOverlayUrl(overlayDataUrl(keep, remove, ww, wh));
@@ -241,21 +281,9 @@ function MaskEditor({
   }
 
   function scheduleSerialise() {
+    pendingRef.current = true;
     if (encodeTimer.current) clearTimeout(encodeTimer.current);
-    encodeTimer.current = setTimeout(() => {
-      const working = workingRef.current;
-      const keep = keepRef.current;
-      const remove = removeRef.current;
-      if (!working || !keep || !remove) return;
-      onChange({
-        ...spec,
-        transparent: true,
-        keepMask: encodeMask(keep, working.ww, working.wh),
-        removeMask: encodeMask(remove, working.ww, working.wh),
-        maskSize: [working.ww, working.wh],
-      });
-      setOverlayUrl(overlayDataUrl(keep, remove, working.ww, working.wh));
-    }, 150);
+    encodeTimer.current = setTimeout(flush, 150);
   }
 
   function applyRegion(region: Uint8Array) {
@@ -270,6 +298,7 @@ function MaskEditor({
         other[i] = 0;
       }
     }
+    editGenRef.current += 1;
     scheduleSerialise();
   }
 
@@ -512,7 +541,7 @@ function MaskEditor({
       )}
     </figure>
   );
-}
+});
 
 function LookSlider({
   label,
@@ -698,16 +727,9 @@ const TOOL_ICONS: Record<string, JSX.Element> = {
   ),
 };
 
-function LandmarkMask({
-  files,
-  index,
-  onIndex,
-  spec,
-  onChange,
-  onReset,
-  wash,
-  ink,
-}: {
+type LandmarkMaskHandle = { flushPending: () => MaskSpec | undefined };
+
+const LandmarkMask = forwardRef<LandmarkMaskHandle, {
   files: File[];
   index: number;
   onIndex: (next: number) => void;
@@ -716,7 +738,16 @@ function LandmarkMask({
   onReset: () => void;
   wash: number;
   ink: number;
-}) {
+}>(function LandmarkMask({
+  files,
+  index,
+  onIndex,
+  spec,
+  onChange,
+  onReset,
+  wash,
+  ink,
+}, ref) {
   const [mode, setMode] = useState<MaskMode>("rect");
   const [polarity, setPolarity] = useState<Polarity>("keep");
   const [magnifierOn, setMagnifierOn] = useState(true);
@@ -724,7 +755,18 @@ function LandmarkMask({
   const [tolerance, setTolerance] = useState(24);
   const [resetGeneration, setResetGeneration] = useState(0);
   const [editGeneration, setEditGeneration] = useState(0);
-  const [history, setHistory] = useState(() => createHistory(spec));
+  const editorRef = useRef<MaskEditorHandle | null>(null);
+  const file = files[index];
+  const fileKey = `${file.name}-${file.size}`;
+  const [histories, setHistories] = useState<Record<string, History<MaskSpec>>>(() => ({ [fileKey]: createHistory(spec) }));
+  const history = histories[fileKey] || createHistory(spec);
+
+  useEffect(() => {
+    setHistories((current) => (current[fileKey] ? current : { ...current, [fileKey]: createHistory(spec) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileKey]);
+
+  useImperativeHandle(ref, () => ({ flushPending: () => editorRef.current?.flushPending() }));
 
   const mask = JSON.stringify(spec);
   const { url: cutoutUrl, busy, error } = usePreviewImage({ wash, ink, file: files[index], mask }, Boolean(spec.rect), 250);
@@ -733,36 +775,43 @@ function LandmarkMask({
     setMode(next);
   }
 
+  function switchIndex(next: number) {
+    editorRef.current?.flushPending();
+    onIndex(next);
+  }
+
   function handleCommit(next: MaskSpec) {
     onChange(next);
-    setHistory((current) => pushHistory(current, next));
+    setHistories((current) => ({ ...current, [fileKey]: pushHistory(current[fileKey] || createHistory(spec), next) }));
   }
 
   function handleReset() {
     setResetGeneration((current) => current + 1);
-    setHistory((current) => pushHistory(current, { transparent: true }));
+    setHistories((current) => ({ ...current, [fileKey]: pushHistory(current[fileKey] || createHistory(spec), { transparent: true }) }));
     onReset();
   }
 
   function handleUndo() {
-    setHistory((current) => {
-      const next = undoHistory(current);
-      if (next !== current) {
+    setHistories((current) => {
+      const active = current[fileKey] || createHistory(spec);
+      const next = undoHistory(active);
+      if (next !== active) {
         onChange(next.present);
         setEditGeneration((generation) => generation + 1);
       }
-      return next;
+      return { ...current, [fileKey]: next };
     });
   }
 
   function handleRedo() {
-    setHistory((current) => {
-      const next = redoHistory(current);
-      if (next !== current) {
+    setHistories((current) => {
+      const active = current[fileKey] || createHistory(spec);
+      const next = redoHistory(active);
+      if (next !== active) {
         onChange(next.present);
         setEditGeneration((generation) => generation + 1);
       }
-      return next;
+      return { ...current, [fileKey]: next };
     });
   }
 
@@ -784,8 +833,6 @@ function LandmarkMask({
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onChange]);
-
-  const file = files[index];
 
   return (
     <>
@@ -897,7 +944,8 @@ function LandmarkMask({
       </div>
       <div className="wash-look" tabIndex={-1}>
         <MaskEditor
-          key={`${file.name}-${file.size}-${resetGeneration}-${editGeneration}`}
+          ref={editorRef}
+          key={`${fileKey}-${resetGeneration}-${editGeneration}`}
           file={file}
           spec={spec}
           mode={mode}
@@ -912,7 +960,7 @@ function LandmarkMask({
           {files.length > 1 && (
             <label className="wash-card">
               <span className="wash-card-title">Photo</span>
-              <select value={index} onChange={(event) => onIndex(Number(event.target.value))}>
+              <select value={index} onChange={(event) => switchIndex(Number(event.target.value))}>
                 {files.map((file, fileIndex) => (
                   <option key={`${file.name}-${fileIndex}`} value={fileIndex}>
                     {file.name}
@@ -962,7 +1010,7 @@ function LandmarkMask({
       </div>
     </>
   );
-}
+});
 
 export function WatercolourTab() {
   const { job, upsert, error: openError } = useCurrentJob("watercolour");
@@ -977,6 +1025,7 @@ export function WatercolourTab() {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const cancelRef = useRef(false);
+  const landmarkMaskRef = useRef<LandmarkMaskHandle | null>(null);
 
   async function selectFiles(next: File[]) {
     const resolved = await Promise.all(next.map(toSupported));
@@ -994,13 +1043,15 @@ export function WatercolourTab() {
   }
 
   async function convert() {
+    const flushed = landmarkMaskRef.current?.flushPending();
+    const currentMasks = flushed ? { ...masks, [String(activeIndex)]: flushed } : masks;
     setError(null);
     setBusy(true);
     cancelRef.current = false;
     const selectedMasks: Record<string, MaskSpec> = {};
     if (transparent) {
       for (const [index] of files.entries()) {
-        const selected = masks[String(index)];
+        const selected = currentMasks[String(index)];
         selectedMasks[String(index)] = { ...(selected || {}), transparent: true };
       }
     }
@@ -1064,6 +1115,7 @@ export function WatercolourTab() {
       </div>
       {transparent && files.length > 0 && (
         <LandmarkMask
+          ref={landmarkMaskRef}
           files={files}
           index={activeIndex}
           onIndex={setMaskFile}

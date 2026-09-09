@@ -295,6 +295,8 @@ class MapsDocument(BaseModel):
         slide_ids = [slide.id.strip() for slide in self.slides]
         if not all(slide_ids) or len(set(slide_ids)) != len(slide_ids):
             raise ValueError("Slide ids must be non-empty and unique")
+        if any(sid.endswith("__landing") for sid in slide_ids):
+            raise ValueError("Slide ids may not end in '__landing' (reserved for synthetic landings)")
         for slide in self.slides:
             for view in (slide, slide.cg):
                 if view is None:
@@ -390,6 +392,46 @@ def _read_limited(stream, limit: int = 20 * 1024 * 1024) -> bytes:
         if total > limit:
             raise HTTPException(413, "Image exceeds the 20 MB upload limit")
         chunks.append(chunk)
+
+
+RASTER_MAX_BYTES = 20 * 1024 * 1024
+RASTER_MAX_SIDE = 8192
+
+
+async def _read_limited_request(request: Request, limit: int | None = None) -> bytes:
+    cap = RASTER_MAX_BYTES if limit is None else limit
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(413, f"Body exceeds the {cap // (1024 * 1024)} MB upload limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validate_raster(raw: bytes, *, max_side: int | None = None) -> tuple[int, int]:
+    cap = RASTER_MAX_SIDE if max_side is None else max_side
+    is_png = raw.startswith(b"\x89PNG\r\n\x1a\n")
+    is_jpeg = raw[:3] == b"\xff\xd8\xff"
+    if not raw or not (is_png or is_jpeg):
+        raise HTTPException(400, "Invalid image upload")
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            width, height = image.width, image.height
+    except Exception as exc:
+        raise HTTPException(400, "Invalid image upload") from exc
+    if width < 1 or height < 1 or width > cap or height > cap:
+        raise HTTPException(400, f"Image dimensions must be between 1 and {cap} pixels")
+    return width, height
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
 
 
 def _referenced_asset_ids(doc: MapsDocument) -> set[str]:
@@ -1129,21 +1171,21 @@ async def post_png(
     result = dict(job.result or {})
     slides = list(result.get("slides") or [])
     ids = {str(slide.get("id")) for slide in slides}
-    body = await request.body()
+    body = await _read_limited_request(request)
     if not body:
         raise HTTPException(400, "PNG body required")
     if kind not in {"thumb", "still", "plate"}:
         raise HTTPException(400, "kind must be thumb, still, or plate")
+    _validate_raster(body)
     output_dir = Path(str(result.get("outputDir") or ""))
     if kind == "plate":
         if not plateId:
             raise HTTPException(400, "plateId is required for kind=plate")
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
-        folder.mkdir(parents=True, exist_ok=True)
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
         path = folder / plate_filename(plate_name)
-        path.write_bytes(body)
+        _write_atomic(path, body)
         return _runner().public_dict(job)
     if not slideId:
         raise HTTPException(400, "slideId is required")
@@ -1160,16 +1202,14 @@ async def post_png(
         if variant is not None and variant != "country":
             raise HTTPException(400, "variant must be country")
         folder = output_dir / "stills"
-        folder.mkdir(parents=True, exist_ok=True)
         name = Path(safe).name
         if variant == "country":
             name = f"{Path(name).stem}-country{Path(name).suffix}"
-        (folder / name).write_bytes(body)
+        _write_atomic(folder / name, body)
         return _runner().public_dict(job)
     folder = Path(str(result.get("previewDir") or ""))
-    folder.mkdir(parents=True, exist_ok=True)
     path = folder / Path(safe).name
-    path.write_bytes(body)
+    _write_atomic(path, body)
     next_slides = []
     names = list((result.get("previewFiles") or {}).get("maps") or [])
     if safe not in names:
@@ -1216,15 +1256,16 @@ async def post_frame(
     ids = {str(slide.get("id")) for slide in slides}
     if not slideId or slideId not in ids:
         raise HTTPException(400, "slideId is not in this deck")
-    if index < 0:
-        raise HTTPException(400, "index must be >= 0")
-    if count < 1:
-        raise HTTPException(400, "count must be >= 1")
+    if not 1 <= count <= 20000:
+        raise HTTPException(400, "count must be between 1 and 20000")
+    if not 0 <= index < count:
+        raise HTTPException(400, "index must be between 0 and count - 1")
     if not 1 <= fps <= 60:
         raise HTTPException(400, "fps must be between 1 and 60")
-    body = await request.body()
+    body = await _read_limited_request(request)
     if not body:
         raise HTTPException(400, "Frame body required")
+    _validate_raster(body)
     content_type = request.headers.get("content-type", "")
     output_dir = Path(str(result.get("outputDir") or ""))
     from obed_edom.maps_movie import write_frame, write_frames_meta

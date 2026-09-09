@@ -796,6 +796,21 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   }
 
   function onCgPointerDown(event: React.PointerEvent<HTMLElement>) {
+    const map = mapRef.current;
+    if (map && !event.shiftKey) {
+      const rect = map.getCanvas().getBoundingClientRect();
+      const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+      const layers = PIN_LAYERS.filter((id) => map.getLayer(id));
+      const hitId = String((layers.length ? map.queryRenderedFeatures(point, { layers }) : [])[0]?.properties?.id || "");
+      const church = hitId ? overlay.current.churches.find((c) => c.id === hitId) : undefined;
+      if (church) {
+        const anchor = map.project([church.lon, church.lat]);
+        map.dragPan.disable();
+        map.getCanvas().setPointerCapture(event.pointerId);
+        objDrag.current = { id: church.id, grabDx: point[0] - anchor.x, grabDy: point[1] - anchor.y, pointerId: event.pointerId };
+        return;
+      }
+    }
     event.preventDefault();
     event.stopPropagation();
     if (event.shiftKey) {
