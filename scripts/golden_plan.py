@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from collections import Counter
@@ -126,7 +127,11 @@ def _pinned_env():
                 os.environ[name] = value
 
 
-_FACES_UNAVAILABLE = "FONT_ENV_UNAVAILABLE"
+FONT_ENV_UNAVAILABLE = "FONT_ENV_UNAVAILABLE"
+
+# `"<font>|<bold>|<italic>"`, the key `_resolve_faces` builds below. Public so the
+# gate's shape check cannot drift from the producer that emits these keys.
+FACE_KEY_RE = re.compile(r"^[^|]+\|(True|False)\|(True|False)$")
 
 
 def _os_build() -> str:
@@ -160,7 +165,7 @@ def _resolve_faces(faces: list[tuple[str, bool, bool]]) -> dict[str, str] | str:
 
         from obed_edom.iwa_text_shape import _ns_font  # noqa: PLC0415
     except Exception:  # noqa: BLE001 — no bridge -> stable sentinel, never raise
-        return _FACES_UNAVAILABLE
+        return FONT_ENV_UNAVAILABLE
 
     out: dict[str, str] = {}
     for font, bold, italic in faces:
@@ -180,6 +185,46 @@ def planner_env(wall: dict[str, Any]) -> dict[str, Any]:
     `iwa_text_shape._ns_font`). Must be called after enrichment, since `faces`
     reads the `groupCaption` records `remap_keynote` attaches in place."""
     return {"osBuild": _os_build(), "faces": _resolve_faces(_caption_faces(wall))}
+
+
+def validate_planner_env(env: Any) -> list[str]:
+    """Problems with a `planner_env()` shape (from a golden fixture or a live
+    capture): non-empty `osBuild`, and `faces` either exactly
+    `FONT_ENV_UNAVAILABLE` or a non-empty mapping of `FACE_KEY_RE` keys to
+    `"missing"`/`"<fontName>|<familyName>"` values. One place both the
+    producer's shape and the gate's check are measured against, so they
+    cannot drift apart."""
+    problems: list[str] = []
+    if not isinstance(env, dict):
+        return [f"plannerEnv expected a mapping, got {env!r}"]
+
+    os_build = env.get("osBuild")
+    if not isinstance(os_build, str) or not os_build.strip():
+        problems.append(f"plannerEnv.osBuild expected a non-empty str, got {os_build!r}")
+
+    faces = env.get("faces")
+    if faces == FONT_ENV_UNAVAILABLE:
+        pass
+    elif isinstance(faces, dict) and faces:
+        for key, value in faces.items():
+            if not isinstance(key, str) or not FACE_KEY_RE.fullmatch(key):
+                problems.append(f"plannerEnv.faces key {key!r} must match {FACE_KEY_RE.pattern!r}")
+                continue
+            if not isinstance(value, str) or not value:
+                problems.append(f"plannerEnv.faces[{key!r}] expected a non-empty str, got {value!r}")
+                continue
+            if value == "missing":
+                continue
+            parts = value.split("|")
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                problems.append(
+                    f"plannerEnv.faces[{key!r}] expected 'missing' or '<fontName>|<familyName>', got {value!r}"
+                )
+    else:
+        problems.append(
+            f"plannerEnv.faces expected {FONT_ENV_UNAVAILABLE!r} or a non-empty mapping, got {faces!r}"
+        )
+    return problems
 
 
 def capture_plan(

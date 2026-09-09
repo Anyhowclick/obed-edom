@@ -13,6 +13,7 @@ pytest.importorskip("keynote_parser")
 
 from scripts.golden_plan import (  # noqa: E402
     ENV_PINS,
+    FONT_ENV_UNAVAILABLE,
     GOLDEN_VERSION,
     PREVIEWS_NONE,
     TEMPLATE as SCRIPT_TEMPLATE,
@@ -25,6 +26,7 @@ from scripts.golden_plan import (  # noqa: E402
     plan_hash,
     summarize,
     summary_diff,
+    validate_planner_env,
 )
 
 from obed_edom import baseline  # noqa: E402
@@ -81,17 +83,9 @@ def _skip_ladder(deck_name: str) -> dict:
         if not isinstance(value, str) or not _HEX64.fullmatch(value):
             pytest.fail(f"golden fixture schema drift: {field} expected a 64-char lowercase hex digest, got {value!r}")
 
-    planner_env = golden.get("plannerEnv")
-    if not isinstance(planner_env, dict):
-        pytest.fail(f"golden fixture schema drift: plannerEnv expected a mapping, got {planner_env!r}")
-    os_build = planner_env.get("osBuild")
-    if not isinstance(os_build, str) or not os_build:
-        pytest.fail(f"golden fixture schema drift: plannerEnv.osBuild expected a non-empty str, got {os_build!r}")
-    faces = planner_env.get("faces")
-    if not ((isinstance(faces, str) and faces) or (isinstance(faces, dict) and faces)):
-        pytest.fail(
-            f"golden fixture schema drift: plannerEnv.faces expected a non-empty str or mapping, got {faces!r}"
-        )
+    problems = validate_planner_env(golden.get("plannerEnv"))
+    if problems:
+        pytest.fail("golden fixture schema drift: " + "; ".join(problems))
 
     source_digest = baseline.deck_digest(deck)
     template_digest = baseline.deck_digest(TEMPLATE)
@@ -169,6 +163,30 @@ def test_golden_apply_plan_gold_wall_input(monkeypatch: pytest.MonkeyPatch, tmp_
 
 def test_golden_apply_plan_full_report_card_wall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _gate("Full_Report_Card_Wall.key", monkeypatch, tmp_path)
+
+
+def test_validate_planner_env_rejects_malformed() -> None:
+    cases: dict[str, tuple[dict, str]] = {
+        "blank osBuild": ({"osBuild": "  ", "faces": FONT_ENV_UNAVAILABLE}, "osBuild"),
+        "faces typo": ({"osBuild": "25G83", "faces": "typo"}, "faces"),
+        "face key missing bools": (
+            {"osBuild": "25G83", "faces": {"Amplitude-Bold": "Amplitude-Bold|Amplitude"}},
+            "faces",
+        ),
+        "face value one part": (
+            {"osBuild": "25G83", "faces": {"Amplitude-Bold|True|False": "OnlyOnePart"}},
+            "faces",
+        ),
+        "empty faces mapping": ({"osBuild": "25G83", "faces": {}}, "faces"),
+    }
+    for label, (env, field) in cases.items():
+        problems = validate_planner_env(env)
+        assert problems, f"{label}: expected a problem, got none"
+        assert any(field in p for p in problems), f"{label}: {problems} does not name {field!r}"
+
+    for deck_name in WALL_DECKS:
+        golden = json.loads(golden_path(deck_name).read_text())
+        assert validate_planner_env(golden["plannerEnv"]) == []
 
 
 @pytest.mark.xfail(
