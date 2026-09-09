@@ -14,6 +14,7 @@ export function admin0Name(code: string): string {
 
 let admin0Cache: Admin0 | null = null;
 let admin0Pending: Promise<Admin0 | null> | null = null;
+const landmarkRenderWidths = new Map<string, number>();
 
 export async function loadAdmin0(): Promise<Admin0 | null> {
   if (admin0Cache) return admin0Cache;
@@ -34,6 +35,7 @@ export async function loadAdmin0(): Promise<Admin0 | null> {
 
 /** Positron/Bright/Dark/Fiord ship the NE raster source but no layer; Liberty shows land at SEA zoom because it does. */
 export function ensureLowZoomRaster(map: MapLibreMap, styleId?: string): void {
+  if (styleId === "watercolour") return;
   if (!map.getSource("ne2_shaded")) return;
   const style = map.getStyle();
   if (!style) return;
@@ -129,7 +131,8 @@ export async function ensureAdmin0Highlights(map: MapLibreMap, highlights: strin
 export function churchesGeo(
   churches: MapsChurch[],
   selectedPinId: string | null,
-  numberPins = false
+  numberPins = false,
+  objectScale = 1
 ): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
@@ -142,11 +145,30 @@ export function churchesGeo(
         color: church.color,
         kind: church.kind,
         pinImage: dropPinImageId(church.color),
+        assetId: church.assetId || "",
+        assetVersion: church.assetVersion || "v1",
+        assetWidth: church.assetWidth || 1,
+        assetRenderWidth: landmarkRenderWidths.get(`landmark-${church.assetId}-${church.assetVersion || "v1"}`) || church.assetWidth || 1,
+        assetHeight: church.assetHeight || 1,
+        size: church.size || 120,
+        opacity: church.opacity ?? 1,
         sel: church.id === selectedPinId,
+        objectScale,
       },
       geometry: { type: "Point", coordinates: [church.lon, church.lat] },
     })),
   };
+}
+
+export function movieObjectsAt(from: MapsChurch[], to: MapsChurch[], t: number, transition: "fade" | "hold" | undefined): MapsChurch[] {
+  const clamped = Math.max(0, Math.min(1, t));
+  if ((transition || "hold") === "hold") return clamped < 1 ? from.map((item) => ({ ...item, opacity: item.opacity ?? 1 })) : to.map((item) => ({ ...item, opacity: item.opacity ?? 1 }));
+  const source = Math.max(0, 1 - 2 * clamped);
+  const destination = Math.max(0, 2 * clamped - 1);
+  return [
+    ...from.map((item) => ({ ...item, opacity: (item.opacity ?? 1) * source })),
+    ...to.map((item) => ({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destination })),
+  ];
 }
 
 function dropPinImageId(color: string): string {
@@ -191,17 +213,39 @@ export function ensureDropPinImages(map: MapLibreMap, churches: MapsChurch[]) {
   }
 }
 
+export async function ensureLandmarkImages(map: MapLibreMap, churches: MapsChurch[], assetBaseUrl?: string): Promise<void> {
+  for (const church of churches) {
+    if (church.kind !== "landmark" || !church.assetId || !assetBaseUrl) continue;
+    const id = `landmark-${church.assetId}-${church.assetVersion || "v1"}`;
+    if (map.hasImage(id)) continue;
+    const response = await fetch(`${assetBaseUrl}/${encodeURIComponent(church.assetId)}.png`);
+    if (!response.ok) continue;
+    const image = await createImageBitmap(await response.blob());
+    const max = 1024;
+    const scale = Math.min(1, max / Math.max(image.width, image.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
+    landmarkRenderWidths.set(id, canvas.width);
+    if (!map.hasImage(id)) map.addImage(id, canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height), { pixelRatio: 1 });
+  }
+}
+
 export async function addOverlays(
   map: MapLibreMap,
   highlights: string[],
   churches: MapsChurch[],
   selectedPinId: string | null,
   styleId: MapsStyleId,
-  numberPins: boolean
+  numberPins: boolean,
+  assetBaseUrl?: string,
+  objectScale = 1
 ) {
   await ensureAdmin0Highlights(map, highlights, styleId);
   ensureDropPinImages(map, churches);
-  const pins = churchesGeo(churches, selectedPinId, numberPins);
+  await ensureLandmarkImages(map, churches, assetBaseUrl);
+  const pins = churchesGeo(churches, selectedPinId, numberPins, objectScale);
   if (!map.getSource("churches")) {
     map.addSource("churches", { type: "geojson", data: pins, promoteId: "id" });
     map.addLayer({
@@ -210,11 +254,28 @@ export async function addOverlays(
       source: "churches",
       filter: ["==", ["get", "kind"], "dot"],
       paint: {
-        "circle-radius": 7,
+        "circle-radius": ["*", 14, ["get", "objectScale"]],
         "circle-color": ["get", "color"],
-        "circle-stroke-width": ["case", ["boolean", ["get", "sel"], false], 3, 1.5],
+        "circle-opacity": ["coalesce", ["get", "opacity"], 1],
+        "circle-stroke-opacity": ["coalesce", ["get", "opacity"], 1],
+        "circle-stroke-width": ["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"]],
         "circle-stroke-color": "#FFFFFF",
       },
+    });
+    map.addLayer({
+      id: "churches-landmarks",
+      type: "symbol",
+      source: "churches",
+      filter: ["==", ["get", "kind"], "landmark"],
+      layout: {
+        "icon-image": ["concat", "landmark-", ["get", "assetId"], "-", ["coalesce", ["get", "assetVersion"], "v1"]],
+        "icon-anchor": "bottom",
+        "icon-allow-overlap": true,
+        "icon-size": ["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]],
+        "icon-rotation-alignment": "viewport",
+        "icon-pitch-alignment": "viewport",
+      },
+      paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
     });
     map.addLayer({
       id: "churches-drops",
@@ -225,8 +286,9 @@ export async function addOverlays(
         "icon-image": ["get", "pinImage"],
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
-        "icon-size": ["case", ["boolean", ["get", "sel"], false], 1.08, 1],
+        "icon-size": ["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "objectScale"]],
       },
+      paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
     });
     map.addLayer({
       id: "churches-labels",
@@ -235,11 +297,11 @@ export async function addOverlays(
       filter: ["==", ["get", "showLabel"], true],
       layout: {
         "text-field": ["get", "name"],
-        "text-size": 12,
+        "text-size": ["*", 24, ["get", "objectScale"]],
         "text-offset": [0, 1.35],
         "text-anchor": "top",
       },
-      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": 1.2 },
+      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": ["*", 1.2, ["get", "objectScale"]], "text-opacity": ["coalesce", ["get", "opacity"], 1] },
     });
   } else {
     (map.getSource("churches") as GeoJSONSource).setData(pins);

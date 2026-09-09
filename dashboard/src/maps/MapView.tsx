@@ -5,8 +5,9 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, churchesGeo, ensureDropPinImages, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
+import { addOverlays, applyHighlights, applyHillshade, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt } from "./overlays";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
+import { installPatternById, installPatterns, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
 import {
   clampZoom,
@@ -27,7 +28,7 @@ const WALL_HEIGHT = 1080;
 const FW_W = 1920;
 const CG_W = 1920;
 const CG_ORIGIN = 2880;
-const PIN_LAYERS = ["churches-dots", "churches-drops", "churches-labels"];
+const PIN_LAYERS = ["churches-dots", "churches-drops", "churches-landmarks", "churches-labels"];
 const COUNTRY_PICK_MAX_ZOOM = 7;
 const ML_MIN_ZOOM = -2;
 const ML_PREVIEW_MIN_ZOOM = -8;
@@ -47,6 +48,11 @@ function previewZoomDelta(map: MapLibreMap, authoredWidth = WALL_W): number {
   const width = previewSurfaceRect(map, authoredWidth).width;
   if (!width) return 0;
   return Math.log2(width / authoredWidth);
+}
+
+function objectPreviewScale(map: MapLibreMap, authoredWidth = WALL_W): number {
+  const width = previewSurfaceRect(map, authoredWidth).width;
+  return width > 0 ? width / authoredWidth : 1;
 }
 
 function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
@@ -163,10 +169,14 @@ export type MapViewHandle = {
     durationMs: number;
     easing?: MapsEasing;
     routePoints?: MapsRoutePoint[];
+    curve?: number;
     flyZoom?: number;
     easeIn?: number;
     easeOut?: number;
     width?: number;
+    fromObjects?: MapsChurch[];
+    toObjects?: MapsChurch[];
+    objectTransition?: "fade" | "hold";
   }) => Promise<void>;
   stop: () => void;
   getCamera: () => MapsCamera | null;
@@ -199,6 +209,7 @@ type Props = {
   onEditPin: (id: string) => void;
   onCgShift: (dx: number) => void;
   onPreviewAbort?: () => void;
+  assetBaseUrl?: string;
 };
 
 function pinIdFromEvent(event: MapMouseEvent, map: MapLibreMap): string {
@@ -230,6 +241,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     onEditPin,
     onCgShift,
     onPreviewAbort,
+    assetBaseUrl,
   },
   ref
 ) {
@@ -237,6 +249,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const mapRef = useRef<MapLibreMap | null>(null);
   const suppress = useRef(false);
   const styleUrl = useRef(OPENFREEMAP_STYLES[styleId]);
+  const styleIdentity = useRef(styleId);
   const styleReady = useRef(false);
   const overlayGeneration = useRef(0);
   const previewingRef = useRef(previewing);
@@ -305,22 +318,27 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         });
       });
     },
-    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, flyZoom, easeIn, easeOut, width }) {
+    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, curve, flyZoom, easeIn, easeOut, width, fromObjects, toObjects, objectTransition }) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
       hopAbort.current = false;
       finishHop();
-      return new Promise((resolve) => {
+      return Promise.all([ensureLandmarkImages(map, [...(fromObjects || []), ...(toObjects || [])], assetBaseUrl), Promise.resolve(ensureDropPinImages(map, [...(fromObjects || []), ...(toObjects || [])]))]).then(() => new Promise((resolve) => {
         const apply = (t: number) => {
           const cam = cameraAtHop(from, to, t, {
             easing,
             routePoints,
+            curve,
             flyZoom,
             easeIn,
             easeOut,
             duration: durationMs / 1000,
             width,
           });
+          if (fromObjects && map.getSource("churches")) {
+            const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition) : fromObjects;
+            (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(objects, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current)));
+          }
           map.jumpTo({
             center: [cam.lon, cam.lat],
             zoom: mapZoomOf(cam.zoom, deltaRef.current, minZoomRef.current),
@@ -348,7 +366,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           else finishHop();
         };
         hopRaf.current = requestAnimationFrame(step);
-      });
+      }));
     },
     stop() {
       hopAbort.current = true;
@@ -388,8 +406,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     waitUntilIdle(expectedStyleId, timeoutMs = 15000) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
-      const expectedUrl = expectedStyleId ? OPENFREEMAP_STYLES[expectedStyleId] : styleUrl.current;
-      return new Promise((resolve) => {
+      const expected = expectedStyleId || styleIdentity.current;
+      return new Promise((resolve, reject) => {
         let finished = false;
         let timer = 0;
         let poll = 0;
@@ -401,17 +419,21 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           map.off("idle", check);
           resolve();
         };
+        const fail = (message: string) => {
+          if (finished) return;
+          finished = true;
+          window.clearTimeout(timer);
+          window.clearInterval(poll);
+          map.off("idle", check);
+          reject(new Error(message));
+        };
         const check = () => {
-          if (
-            mapRef.current !== map ||
-            (styleUrl.current === expectedUrl && styleReady.current && map.loaded() && map.areTilesLoaded())
-          ) {
-            finish();
-          }
+          if (mapRef.current !== map || styleIdentity.current !== expected) return fail("Map style changed before capture was ready");
+          if (styleReady.current && map.loaded() && map.areTilesLoaded()) finish();
         };
         map.on("idle", check);
         poll = window.setInterval(check, 50);
-        timer = window.setTimeout(finish, Math.max(250, timeoutMs));
+        timer = window.setTimeout(() => fail("Map did not become ready before capture timed out"), Math.max(250, timeoutMs));
         requestAnimationFrame(check);
       });
     },
@@ -426,6 +448,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         cameraRef.current.zoom,
         authoredWidthRef.current
       );
+      if (map.getSource("churches")) {
+        (map.getSource("churches") as GeoJSONSource).setData(
+          churchesGeo(overlay.current.churches, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current))
+        );
+      }
     },
   }));
 
@@ -451,8 +478,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
     };
 
-    void resolveOpenFreeMapStyle(styleId).then((style) => {
+    const createMap = (wantedStyle: MapsStyleId) => void resolveOpenFreeMapStyle(wantedStyle).then((style) => {
       if (cancelled) return;
+      if (overlay.current.styleId !== wantedStyle) {
+        createMap(overlay.current.styleId);
+        return;
+      }
       const zMin = minZoomRef.current;
       const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / authoredWidthRef.current) : 0;
       deltaRef.current = d0;
@@ -474,7 +505,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         canvasContextAttributes: { preserveDrawingBuffer: true },
       });
       mapRef.current = map;
-      styleUrl.current = OPENFREEMAP_STYLES[styleId];
+      styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
+      styleIdentity.current = wantedStyle;
 
       function probeTex() {
         if (!map) return;
@@ -494,6 +526,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         const generation = ++overlayGeneration.current;
         styleReady.current = false;
         ensureLowZoomRaster(currentMap, overlay.current.styleId);
+        installPatterns(currentMap, stylePatterns(overlay.current.styleId));
         applyLayerFilters(currentMap, overlay.current.hiddenLayers);
         applyHillshade(currentMap, overlay.current.hillshade);
         void addOverlays(
@@ -502,7 +535,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           overlay.current.churches,
           overlay.current.selectedPinId,
           overlay.current.styleId,
-          overlay.current.numberPins
+          overlay.current.numberPins,
+          assetBaseUrl,
+          objectPreviewScale(currentMap, authoredWidthRef.current)
         ).then(() => {
           if (mapRef.current === currentMap && overlayGeneration.current === generation) {
             styleReady.current = true;
@@ -520,6 +555,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         const message = event.error?.message || "MapLibre error";
         console.warn("maplibre", message);
       });
+      map.on("styleimagemissing", (event) => {
+        if (map) installPatternById(map, overlay.current.styleId, event.id);
+      });
       map.on("load", () => {
         probeTex();
         try {
@@ -534,6 +572,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
               suppress.current = false;
             });
             ensureLowZoomRaster(map, overlay.current.styleId);
+            installPatterns(map, stylePatterns(overlay.current.styleId));
             applyLayerFilters(map, overlay.current.hiddenLayers);
             applyHillshade(map, overlay.current.hillshade);
           }
@@ -549,6 +588,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map?.resize();
         if (map) {
           ensureLowZoomRaster(map, overlay.current.styleId);
+          installPatterns(map, stylePatterns(overlay.current.styleId));
           applyLayerFilters(map, overlay.current.hiddenLayers);
           applyHillshade(map, overlay.current.hillshade);
         }
@@ -590,6 +630,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       map.getCanvas().addEventListener("pointerup", onPointerUp);
       ro.observe(hostEl);
     });
+    createMap(styleId);
 
     return () => {
       cancelled = true;
@@ -606,11 +647,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!map) return;
     const url = OPENFREEMAP_STYLES[styleId];
-    if (styleUrl.current === url) return;
+    if (styleIdentity.current === styleId) return;
     styleUrl.current = url;
+    styleIdentity.current = styleId;
     styleReady.current = false;
     void resolveOpenFreeMapStyle(styleId).then((style) => {
-      if (mapRef.current !== map || styleUrl.current !== url) return;
+      if (mapRef.current !== map || styleIdentity.current !== styleId) return;
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
         map.resize();
@@ -624,9 +666,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   useEffect(() => {
     const map = mapRef.current;
     if (!map?.getSource("churches")) return;
-    ensureDropPinImages(map, churches);
-    (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins));
-  }, [churches, selectedPinId, numberPins]);
+    void ensureLandmarkImages(map, churches, assetBaseUrl).then(() => {
+      ensureDropPinImages(map, churches);
+      (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins, objectPreviewScale(map, authoredWidthRef.current)));
+    });
+  }, [churches, selectedPinId, numberPins, assetBaseUrl]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -710,6 +754,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
     >
       <div className="maps-map-host" ref={host} />
+      {styleId === "watercolour" && (
+        <div className="maps-paper-grain" style={{ backgroundImage: `url(${paperGrainUrl()})` }} />
+      )}
       <div className="maps-nav-margin top" />
       <div className="maps-nav-margin bottom" />
       <div className="maps-export-band">

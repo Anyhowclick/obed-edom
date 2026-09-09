@@ -343,12 +343,33 @@ export async function startMaps(): Promise<Job> {
   return res.json();
 }
 
-export async function saveMapsState(id: string, doc: Record<string, unknown>): Promise<Job> {
+export type MapsStateConflict = {
+  stateRevision: number;
+  document: Record<string, unknown>;
+};
+
+export class MapsStateConflictError extends Error {
+  readonly conflict: MapsStateConflict;
+
+  constructor(conflict: MapsStateConflict) {
+    super("This map changed elsewhere.");
+    this.conflict = conflict;
+  }
+}
+
+export async function saveMapsState(id: string, doc: Record<string, unknown>, expectedRevision: number): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/state`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(doc),
+    body: JSON.stringify({ expectedRevision, document: doc }),
   });
+  if (res.status === 409) {
+    const data = await res.json().catch(() => null);
+    const detail = data?.detail;
+    if (detail && typeof detail === "object" && typeof detail.stateRevision === "number" && detail.document && typeof detail.document === "object") {
+      throw new MapsStateConflictError(detail as MapsStateConflict);
+    }
+  }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -525,6 +546,26 @@ export async function bootstrapMapsPinsCsv(id: string, file: File, slideId: stri
   const res = await fetch(`/api/maps/${id}/bootstrap-csv`, { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+export type UploadedMapsAsset = {
+  asset: { id: string; version: string; width: number; height: number };
+  stateRevision: number;
+  document: Record<string, unknown>;
+};
+
+export async function uploadMapsAsset(id: string, file: File): Promise<UploadedMapsAsset> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch(`/api/maps/${encodeURIComponent(id)}/assets`, { method: "POST", body });
+  if (!response.ok) throw new Error(await response.text());
+  const data = await response.json();
+  const { asset, stateRevision, document } = data as Record<string, unknown>;
+  const { id: assetId, version, width, height } = (asset || {}) as Record<string, unknown>;
+  if (typeof assetId !== "string" || typeof version !== "string" || typeof width !== "number" || typeof height !== "number" || typeof stateRevision !== "number" || !document || typeof document !== "object") {
+    throw new Error("The uploaded landmark response was incomplete.");
+  }
+  return { asset: { id: assetId, version, width, height }, stateRevision, document: document as Record<string, unknown> };
 }
 
 export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean }): Promise<Job> {

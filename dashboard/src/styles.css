@@ -1941,6 +1941,14 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   font-size: 11px;
 }
 .maps-map-host .maplibregl-ctrl-attrib a { color: var(--sky); }
+.maps-paper-grain {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+  background-repeat: repeat;
+}
 .maps-nav-margin {
   position: absolute;
   left: 0;

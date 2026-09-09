@@ -14,6 +14,7 @@ type Props = {
   multiple?: boolean;
   folder?: boolean;
   tone?: "keynote" | "document";
+  browseLabel?: string;
 };
 
 export function FileWell({
@@ -29,6 +30,7 @@ export function FileWell({
   multiple,
   folder,
   tone,
+  browseLabel,
 }: Props) {
   const [over, setOver] = useState(false);
   const inputId = `file-${label.replace(/[^a-z0-9]+/gi, "-")}`;
@@ -81,6 +83,7 @@ export function FileWell({
             id={inputId}
             onChange={(e) => {
               const files = e.target.files ? [...e.target.files] : [];
+              e.target.value = "";
               if (files.length) onFiles(files);
             }}
           />
@@ -96,7 +99,7 @@ export function FileWell({
               document.getElementById(inputId)?.click();
             }}
           >
-            Browse files
+            {browseLabel || "Browse files"}
           </button>
         </div>
       )}

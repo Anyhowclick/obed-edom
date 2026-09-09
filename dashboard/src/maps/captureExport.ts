@@ -5,6 +5,7 @@ import { addOverlays, applyHillshade, ensureAdmin0Highlights, ensureLowZoomRaste
 import { stampOsm } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
+import { installPatternById, installPatterns, stylePatterns } from "./watercolourStyle";
 import {
   type MapsCamera,
   type MapsChurch,
@@ -125,6 +126,7 @@ export type ExportMapOpts = {
   hillshade?: boolean;
   churches?: MapsChurch[];
   numberPins?: boolean;
+  assetBaseUrl?: string;
   isCancelled?: () => boolean;
 };
 
@@ -139,6 +141,7 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     hillshade = false,
     churches,
     numberPins = false,
+    assetBaseUrl,
     isCancelled,
   } = opts;
   const tex = maxTextureSize();
@@ -168,13 +171,15 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     transformRequest: (url) => mapsTransformRequest(url),
     canvasContextAttributes: { preserveDrawingBuffer: true },
   });
+  map.on("styleimagemissing", (event) => installPatternById(map, styleId, event.id));
   try {
     await waitEvent(map, "load", TILE_WAIT_MS, isCancelled);
+    installPatterns(map, stylePatterns(styleId));
     ensureLowZoomRaster(map, styleId);
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
     if (churches) {
-      await addOverlays(map, highlights, churches, null, styleId, numberPins);
+      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl);
     } else {
       await ensureAdmin0Highlights(map, highlights, styleId);
     }
@@ -202,7 +207,7 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
         reject(new Error("Map canvas is tainted (CORS). Cannot export."));
       }
     });
-    return await stampOsm(raw, opts.hillshade === true);
+    return await stampOsm(raw, opts.hillshade === true, opts.styleId);
   } finally {
     map.remove();
     host.remove();

@@ -2,7 +2,7 @@ export const HILLSHADE_LAYER_ID = "hillshade";
 export const HILLSHADE_SOURCE_ID = "terrarium";
 export const HILLSHADE_NE2_LAYER_ID = "terrarium-ne2";
 
-export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d";
+export type MapsStyleId = "positron" | "liberty" | "bright" | "dark" | "fiord" | "buildings3d" | "toner" | "toner-background" | "toner-lines" | "watercolour";
 export type MapsCropId = "wall" | "center+cg";
 export type MapsLayerFilterId =
   | "roads"
@@ -15,7 +15,7 @@ export type MapsLayerFilterId =
   | "labels"
   | "boundaries";
 export type MapsHopKind = "morph" | "movie" | "dissolve" | "cut";
-export type MapsPinKind = "dot" | "dropPin";
+export type MapsPinKind = "dot" | "dropPin" | "landmark";
 export type MapsIconId = "none" | "building" | "cross";
 export type MapsEasing = "ease-in-out" | "linear" | "ease-in" | "ease-out";
 
@@ -37,6 +37,12 @@ export type MapsChurch = {
   showLabel?: boolean;
   icon?: MapsIconId;
   photoPath?: string;
+  assetId?: string;
+  assetVersion?: string;
+  assetWidth?: number;
+  assetHeight?: number;
+  size?: number;
+  opacity?: number;
 };
 
 export type MapsCgOverride = {
@@ -95,6 +101,15 @@ export type MapsLink = {
   easeIn?: number;
   easeOut?: number;
   flyZoom?: number;
+  curve?: number;
+  objectTransition?: "fade" | "hold";
+};
+
+export type MapsAsset = {
+  id: string;
+  version: string;
+  width: number;
+  height: number;
 };
 
 export type MapsDocument = {
@@ -105,6 +120,7 @@ export type MapsDocument = {
   exportDsk: boolean;
   hiddenLayers: MapsLayerFilterId[];
   cachedCountries: string[];
+  assets: MapsAsset[];
   slides: MapsSlide[];
   links: MapsLink[];
 };
@@ -181,6 +197,7 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
       let next: MapsLink = link;
       if (link.kind === "morph" && suggested !== "morph") {
         next = { ...link, kind: suggested };
+        if (suggested === "movie") next.objectTransition = "fade";
         delete next.plateId;
       }
       if (next.kind !== "movie") {
@@ -189,6 +206,8 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
         delete next.easeIn;
         delete next.easeOut;
         delete next.flyZoom;
+        delete next.curve;
+        delete next.objectTransition;
       }
       return next;
     }),
@@ -397,6 +416,8 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     if (typeof next.easeIn !== "number" || !Number.isFinite(next.easeIn)) delete next.easeIn;
     if (typeof next.easeOut !== "number" || !Number.isFinite(next.easeOut)) delete next.easeOut;
     if (typeof next.flyZoom !== "number" || !Number.isFinite(next.flyZoom)) delete next.flyZoom;
+    if (typeof next.curve !== "number" || !Number.isFinite(next.curve)) delete next.curve;
+    if (next.objectTransition !== "fade" && next.objectTransition !== "hold") delete next.objectTransition;
     return next;
   });
   return coerceHopKinds({
@@ -408,6 +429,9 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     hiddenLayers: deckHidden,
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
+      : [],
+    assets: Array.isArray(result.assets)
+      ? (result.assets as MapsAsset[]).filter((asset) => asset && typeof asset.id === "string" && typeof asset.version === "string")
       : [],
     slides,
     links,
