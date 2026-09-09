@@ -798,14 +798,32 @@ def restore_source_builds(
 
 _DETAIL_LOG_CAP = 40
 _RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown")
-_RESOLVE_TOKEN_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip", "sigFallback")
+_RESOLVE_RARE_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip")
 
 
-def _detail_line(tokens: dict[str, list[str]], kinds: tuple[str, ...]) -> str:
-    parts = [f"{k}({a})" for k in kinds for a in tokens.get(k) or ()]
-    if len(parts) > _DETAIL_LOG_CAP:
-        return " ".join(parts[:_DETAIL_LOG_CAP]) + f" (+{len(parts) - _DETAIL_LOG_CAP} more)"
-    return " ".join(parts)
+def _say_chunked_detail(
+    label: str, parts: list[str], say: Callable[[str], None], trailing_note: str = ""
+) -> None:
+    if not parts:
+        return
+    chunks = [parts[i : i + _DETAIL_LOG_CAP] for i in range(0, len(parts), _DETAIL_LOG_CAP)]
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, start=1):
+        prefix = f"{label} ({i}/{total}): " if total > 1 else f"{label}: "
+        line = prefix + " ".join(chunk)
+        if i == total:
+            line += trailing_note
+        say(line)
+
+
+def _resolve_detail_parts(tokens: dict[str, list[str]]) -> tuple[list[str], str]:
+    """Rare kinds are never dropped; only the `sigFallback` tail is capped."""
+    parts = [f"{k}({a})" for k in _RESOLVE_RARE_KINDS for a in tokens.get(k) or ()]
+    fallback = tokens.get("sigFallback") or ()
+    kept = fallback[:_DETAIL_LOG_CAP]
+    parts += [f"sigFallback({a})" for a in kept]
+    note = f" (+{len(fallback) - len(kept)} more)" if len(fallback) > len(kept) else ""
+    return parts, note
 
 
 def _say_stat_finalize_detail(
@@ -814,9 +832,8 @@ def _say_stat_finalize_detail(
     say: Callable[[str], None],
 ) -> None:
     tokens = child_resize_result.get("tokens") or {}
-    raise_detail = _detail_line(tokens, _RAISE_TOKEN_KINDS)
-    if raise_detail:
-        say(f"Stat raise detail: {raise_detail}")
+    raise_parts = [f"{k}({a})" for k in _RAISE_TOKEN_KINDS for a in tokens.get(k) or ()]
+    _say_chunked_detail("Stat raise detail", raise_parts, say)
     front_err = child_resize_result.get("frontErr") or ""
     if front_err:
         say(
@@ -829,9 +846,8 @@ def _say_stat_finalize_detail(
         badge_detail = " ".join(t for t in detail.split() if t.startswith("badge"))
         if badge_detail:
             say(f"Badge raise detail: {badge_detail}")
-    resolve_detail = _detail_line(tokens, _RESOLVE_TOKEN_KINDS)
-    if resolve_detail:
-        say(f"Stat resolve detail: {resolve_detail}")
+    resolve_parts, resolve_note = _resolve_detail_parts(tokens)
+    _say_chunked_detail("Stat resolve detail", resolve_parts, say, resolve_note)
 
 
 def remap_keynote(

@@ -16,7 +16,6 @@ import re
 from pathlib import Path
 
 from obed_edom.keynote import (
-    _RAISE_TOKEN_CAP,
     _STAT_ACCUMULATORS,
     _build_stat_finalize_script,
     _parse_detail_tokens,
@@ -507,20 +506,25 @@ def test_obed_raise_slide_fronts_only_when_selection_succeeded():
     assert found_true_at < guard_at < front_at
 
 
-def test_raise_report_tokens_are_capped():
-    """Each dead raise up to `_RAISE_TOKEN_CAP` is localised: the raiseDead token is
-    guarded on the counter staying below the cap. raiseUnknown needs no such cap -- each
-    branch that emits it `return`s immediately after, so at most one token per slide can
+def test_raise_report_tokens_are_unguarded():
+    """Every dead raise gets a report token: the raiseDead line carries no counter guard
+    and unconditionally increments. raiseUnknown likewise carries no guard -- each of its
+    two emission sites `return`s immediately after, so at most one token per slide can
     ever exist by construction."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
     )
     handler = _raise_slide_handler(script)
+    assert handler.count('" raiseDead(') == 1
     dead_at = handler.index('" raiseDead(')
-    preceding = handler[:dead_at]
-    guard_at = preceding.rindex("if raiseDead")
-    guard_line = preceding[guard_at : preceding.index("\n", guard_at)]
-    assert f"if raiseDead < {_RAISE_TOKEN_CAP}" in guard_line
+    dead_line_start = handler.rindex("\n", 0, dead_at) + 1
+    dead_preceding_line_start = handler.rindex("\n", 0, dead_line_start - 1) + 1
+    dead_preceding_line = handler[dead_preceding_line_start : dead_line_start - 1]
+    assert "if raiseDead" not in dead_preceding_line
+    dead_line_end = handler.index("\n", dead_at)
+    next_line_end = handler.index("\n", dead_line_end + 1)
+    next_line = handler[dead_line_end + 1 : next_line_end]
+    assert "set raiseDead to raiseDead + 1" in next_line
 
     start = 0
     occurrences = 0
@@ -538,7 +542,7 @@ def test_raise_report_tokens_are_capped():
         assert "raiseUnknown to raiseUnknown + (count of _rem)" in branch
         assert "return" in branch
         start = token_at + 1
-    assert occurrences >= 1
+    assert occurrences == 2
 
 
 def test_stat_accumulators_include_raise_liveness_counters():
@@ -1630,15 +1634,34 @@ def test_parse_detail_tokens_groups_by_name():
 
 def test_parse_detail_tokens_keeps_spaced_error_text():
     """`skip(...)` carries a Keynote error message that may contain spaces (fine, the
-    regex is not whitespace-split) or parentheses (that one token is then skipped rather
-    than corrupting neighbouring tokens); raw `detail` still carries the lost text."""
+    scanner is not whitespace-split) or its own balanced nested parens (captured
+    verbatim by depth-counting rather than corrupting neighbouring tokens)."""
     detail = (
         "raiseDead(s=106,idx=15) skip(font,s=4,err=-1728:Keynote got an error) "
         "skip(font,s=5,err=-1728:got (nested) error) raiseDead(s=110,idx=2)"
     )
     tokens = _parse_detail_tokens(detail)
-    assert tokens["skip"] == ["font,s=4,err=-1728:Keynote got an error"]
+    assert tokens["skip"] == [
+        "font,s=4,err=-1728:Keynote got an error",
+        "font,s=5,err=-1728:got (nested) error",
+    ]
     assert tokens["raiseDead"] == ["s=106,idx=15", "s=110,idx=2"]
+
+
+def test_parse_detail_tokens_ignores_token_shaped_text_inside_an_error_message():
+    """A Keynote error message that itself contains token-shaped text (e.g. quoting
+    another `raiseDead(...)`) must not manufacture a phantom top-level token: the
+    depth-counting scanner keeps it as part of the enclosing `skip` token's args and
+    never rescans consumed text."""
+    detail = (
+        "skip(font,s=4,err=-1728:Keynote says raiseDead(s=999,idx=1) is invalid) "
+        "raiseDead(s=106,idx=15)"
+    )
+    tokens = _parse_detail_tokens(detail)
+    assert tokens["skip"] == [
+        "font,s=4,err=-1728:Keynote says raiseDead(s=999,idx=1) is invalid"
+    ]
+    assert tokens["raiseDead"] == ["s=106,idx=15"]
 
 
 def test_run_stat_finalize_exposes_front_err_and_tokens(monkeypatch, tmp_path):
@@ -1773,19 +1796,22 @@ def test_say_stat_finalize_detail_silent_and_badge_gated():
 
 
 def test_say_stat_finalize_detail_caps_sig_fallback():
+    """Rare kinds (here `unresolved`) are never dropped; only the `sigFallback` tail is
+    capped at `_DETAIL_LOG_CAP`, with the shortfall noted once truncation occurs."""
     from obed_edom.remap_keynote import _DETAIL_LOG_CAP, _say_stat_finalize_detail
 
     tokens = {
-        "unresolved": ["s=1,gi=1"],
+        "unresolved": [f"s={i},gi=1" for i in range(45)],
         "sigFallback": [f"s={i},gi=1" for i in range(110)],
     }
     lines: list[str] = []
     _say_stat_finalize_detail({"tokens": tokens, "frontErr": "", "detail": ""}, None, lines.append)
-    resolve_lines = [line for line in lines if line.startswith("Stat resolve detail: ")]
-    assert len(resolve_lines) == 1
-    line = resolve_lines[0]
-    assert line.endswith("(+71 more)")
-    body = line[len("Stat resolve detail: ") : -len(" (+71 more)")]
-    parts = body.split()
-    assert len(parts) == _DETAIL_LOG_CAP == 40
-    assert parts[0].startswith("unresolved(")
+    resolve_lines = [line for line in lines if line.startswith("Stat resolve detail")]
+    assert resolve_lines
+
+    joined = " ".join(resolve_lines)
+    assert joined.count("unresolved(") == 45
+    assert joined.count("sigFallback(") == _DETAIL_LOG_CAP == 40
+
+    truncated = [line for line in resolve_lines if line.endswith("(+70 more)")]
+    assert len(truncated) == 1

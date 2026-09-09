@@ -778,9 +778,6 @@ def _sig_handlers() -> list[str]:
     ]
 
 
-_RAISE_TOKEN_CAP = 40
-
-
 _STAT_ACCUMULATORS = (
     "theDoc",
     "doneJobs",
@@ -979,9 +976,7 @@ def _stat_job_handlers() -> list[str]:
         "      end repeat",
         "      set _rem to _new",
         "    else if _at is _mn then",
-        f"      if raiseDead < {_RAISE_TOKEN_CAP} then",
-        '        set report to report & " raiseDead(s=" & slideNo & ",idx=" & _mn & ")"',
-        "      end if",
+        '      set report to report & " raiseDead(s=" & slideNo & ",idx=" & _mn & ")"',
         "      set raiseDead to raiseDead + 1",
         "      set _new to {}",
         "      repeat with _k from 1 to count of _rem",
@@ -1247,14 +1242,38 @@ def _stat_job_handlers() -> list[str]:
     return lines
 
 
-_DETAIL_TOKEN_RE = re.compile(r"([A-Za-z][A-Za-z0-9]*)\(([^()]*)\)")
+_DETAIL_TOKEN_HEAD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*\(")
 
 
 def _parse_detail_tokens(detail: str) -> dict[str, list[str]]:
-    """`detail=` report tokens as `{name: [args, ...]}`, in emission order per name."""
+    """`detail=` report tokens as `{name: [args, ...]}`, in emission order per name.
+
+    Scans left to right: a token starts at a bare-word `name(` at position 0 or preceded
+    by whitespace, and consumes to its depth-balanced close, so parens nested inside an
+    error message (e.g. `skip(...)`) are never mistaken for a separate token. A token
+    whose parens never balance is dropped and scanning stops.
+    """
     tokens: dict[str, list[str]] = {}
-    for name, args in _DETAIL_TOKEN_RE.findall(detail or ""):
-        tokens.setdefault(name, []).append(args)
+    text = detail or ""
+    length = len(text)
+    pos = 0
+    while pos < length:
+        head = _DETAIL_TOKEN_HEAD_RE.match(text, pos)
+        if head and (pos == 0 or text[pos - 1].isspace()):
+            depth = 1
+            i = head.end()
+            while i < length and depth:
+                if text[i] == "(":
+                    depth += 1
+                elif text[i] == ")":
+                    depth -= 1
+                i += 1
+            if depth:
+                break
+            tokens.setdefault(head.group(0)[:-1], []).append(text[head.end() : i - 1])
+            pos = i
+        else:
+            pos += 1
     return tokens
 
 
