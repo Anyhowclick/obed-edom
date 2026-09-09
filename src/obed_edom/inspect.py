@@ -636,6 +636,15 @@ def _merge_legacy_items(
     return sorted(unreadable_numbers)
 
 
+def _payload_has_runs(payload: dict[str, Any]) -> bool:
+    """True when any item on any slide carries a ``runs`` key (checker-shaped)."""
+    for slide in payload.get("slides") or []:
+        for item in slide.get("items") or []:
+            if "runs" in item:
+                return True
+    return False
+
+
 def _build_checker_offline(
     key_path: Path,
     bulk_geometry_fn: Any,
@@ -700,7 +709,9 @@ def inspect_keynote_checker(
         if json_path.is_file():
             cached = json.loads(json_path.read_text(encoding="utf-8"))
             # Shared digest cache: a JXA hit has no runs[]; serving it would skip attach_runs.
-            if cached.get("reader") == "offline":
+            # A runs-less offline entry (e.g. from two_tier_wall_payload, which never
+            # attaches runs) is not checker-shaped either -- fall through and rebuild.
+            if cached.get("reader") == "offline" and _payload_has_runs(cached):
                 bulk_errors = cached.get("bulkErrors") or []
                 if bulk_errors and log is not None:
                     log(f"WARN: cached offline read for {key_path.name} carries "
