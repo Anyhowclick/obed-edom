@@ -13,21 +13,37 @@ type MaskSpec = {
   background?: [number, number][];
 };
 
+type MaskMode = "rect" | "foreground" | "background";
+
+const MASK_STATUS: Record<MaskMode, string> = {
+  rect: "Drag to box the landmark",
+  foreground: "Click to keep",
+  background: "Click to remove",
+};
+
+function rectOf(drag: { start: [number, number]; now: [number, number] }): [number, number, number, number] {
+  return [
+    Math.min(drag.start[0], drag.now[0]),
+    Math.min(drag.start[1], drag.now[1]),
+    Math.abs(drag.now[0] - drag.start[0]),
+    Math.abs(drag.now[1] - drag.start[1]),
+  ];
+}
+
 function MaskEditor({
   file,
   spec,
+  mode,
   onChange,
-  onReset,
 }: {
   file: File;
   spec: MaskSpec;
+  mode: MaskMode;
   onChange: (next: MaskSpec) => void;
-  onReset: () => void;
 }) {
   const [url, setUrl] = useState("");
-  const [dimensions, setDimensions] = useState<[number, number]>([1, 1]);
-  const [mode, setMode] = useState<"rect" | "foreground" | "background">("rect");
-  const [drag, setDrag] = useState<[number, number] | null>(null);
+  const [size, setSize] = useState<[number, number]>([1, 1]);
+  const [drag, setDrag] = useState<{ start: [number, number]; now: [number, number] } | null>(null);
 
   useEffect(() => {
     const next = URL.createObjectURL(file);
@@ -43,77 +59,65 @@ function MaskEditor({
     ];
   }
 
-  function add(kind: "foreground" | "background", next: [number, number]) {
-    onChange({ ...spec, [kind]: [...(spec[kind] || []), next] });
-  }
+  const liveRect = drag ? rectOf(drag) : spec.rect;
 
   return (
-    <div className="watercolour-mask">
-      <p className="note">
-        Draw a box around the landmark, then click Keep or Remove to correct the mask. The checkerboard shows the
-        transparent result area.
-      </p>
-      <div className="maps-stylebar">
-        <button className={`btn secondary${mode === "rect" ? " on" : ""}`} type="button" onClick={() => setMode("rect")}>
-          Draw foreground box
-        </button>
-        <button
-          className={`btn secondary${mode === "foreground" ? " on" : ""}`}
-          type="button"
-          onClick={() => setMode("foreground")}
-        >
-          Keep brush
-        </button>
-        <button
-          className={`btn secondary${mode === "background" ? " on" : ""}`}
-          type="button"
-          onClick={() => setMode("background")}
-        >
-          Remove brush
-        </button>
-        <button className="btn secondary" type="button" onClick={onReset}>
-          Reset mask
-        </button>
-      </div>
-      <div className="wash-checker">
+    <figure className="wash-tile">
+      <div className="wash-mask">
         <img
           src={url}
           alt="Landmark mask source"
-          className="wash-mask-img"
-          onLoad={(event) => setDimensions([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight])}
+          draggable={false}
+          onLoad={(event) => setSize([event.currentTarget.naturalWidth, event.currentTarget.naturalHeight])}
           onPointerDown={(event) => {
-            if (mode === "rect") {
-              event.currentTarget.setPointerCapture(event.pointerId);
-              setDrag(point(event));
-            }
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            if (mode === "rect") setDrag({ start: point(event), now: point(event) });
+          }}
+          onPointerMove={(event) => {
+            if (drag) setDrag({ ...drag, now: point(event) });
           }}
           onPointerUp={(event) => {
-            const next = point(event);
             if (mode === "rect" && drag) {
-              onChange({
-                ...spec,
-                transparent: true,
-                rect: [Math.min(drag[0], next[0]), Math.min(drag[1], next[1]), Math.abs(next[0] - drag[0]), Math.abs(next[1] - drag[1])],
-              });
+              const [minX, minY, w, h] = rectOf(drag);
+              if (w >= 4 && h >= 4) onChange({ ...spec, transparent: true, rect: [minX, minY, w, h] });
             } else if (mode !== "rect") {
-              add(mode, next);
+              const next = point(event);
+              onChange({ ...spec, [mode]: [...(spec[mode] || []), next] });
             }
             setDrag(null);
           }}
         />
-        {spec.rect && (
+        {liveRect && (
           <div
             className="wash-mask-rect"
             style={{
-              left: `${(spec.rect[0] / dimensions[0]) * 100}%`,
-              top: `${(spec.rect[1] / dimensions[1]) * 100}%`,
-              width: `${(spec.rect[2] / dimensions[0]) * 100}%`,
-              height: `${(spec.rect[3] / dimensions[1]) * 100}%`,
+              left: `${(liveRect[0] / size[0]) * 100}%`,
+              top: `${(liveRect[1] / size[1]) * 100}%`,
+              width: `${(liveRect[2] / size[0]) * 100}%`,
+              height: `${(liveRect[3] / size[1]) * 100}%`,
             }}
           />
         )}
+        {(spec.foreground || []).map((pt, index) => (
+          <div
+            key={`fg-${index}`}
+            className="wash-mask-dot keep"
+            style={{ left: `${(pt[0] / size[0]) * 100}%`, top: `${(pt[1] / size[1]) * 100}%` }}
+          />
+        ))}
+        {(spec.background || []).map((pt, index) => (
+          <div
+            key={`bg-${index}`}
+            className="wash-mask-dot remove"
+            style={{ left: `${(pt[0] / size[0]) * 100}%`, top: `${(pt[1] / size[1]) * 100}%` }}
+          />
+        ))}
       </div>
-    </div>
+      <figcaption className="wash-cap">Photo · {file.name}</figcaption>
+      <p className="wash-mask-status">{MASK_STATUS[mode]}</p>
+    </figure>
   );
 }
 
@@ -163,40 +167,59 @@ function LookSlider({
   );
 }
 
-function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; file?: File }) {
+function usePreviewImage(
+  opts: { wash: number; ink: number; file?: File; mask?: string },
+  enabled: boolean,
+  delay: number
+): { url: string; busy: boolean; error: string } {
   const urlRef = useRef("");
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!enabled) return;
     setBusy(true);
     const controller = new AbortController();
     async function load() {
       try {
-        const blob = await fetchWatercolourPreview({ washSoftness: wash, inkAmount: ink, file }, controller.signal);
+        const blob = await fetchWatercolourPreview(
+          { washSoftness: opts.wash, inkAmount: opts.ink, file: opts.file, mask: opts.mask },
+          controller.signal
+        );
         const next = URL.createObjectURL(blob);
         if (urlRef.current) URL.revokeObjectURL(urlRef.current);
         urlRef.current = next;
         setUrl(next);
+        setError("");
         setBusy(false);
-      } catch {
-        if (!controller.signal.aborted) setBusy(false);
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setError(err instanceof Error ? err.message : String(err));
+          setBusy(false);
+        }
       }
     }
     const timer = setTimeout(() => {
       void load();
-    }, 150);
+    }, delay);
     return () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [wash, ink, file]);
+  }, [opts.wash, opts.ink, opts.file, opts.mask, enabled, delay]);
 
   useEffect(() => {
     return () => {
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
     };
   }, []);
+
+  return { url, busy, error };
+}
+
+function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; file?: File }) {
+  const { url, busy } = usePreviewImage({ wash, ink, file }, true, 150);
 
   return (
     <figure className="wash-tile wash-preview">
@@ -207,6 +230,109 @@ function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; fi
       )}
       <figcaption className="wash-cap">Preview · {file ? file.name : "sample photo"}</figcaption>
     </figure>
+  );
+}
+
+function CutoutPreview({ wash, ink, file, spec }: { wash: number; ink: number; file: File; spec: MaskSpec }) {
+  const mask = JSON.stringify(spec);
+  const { url, busy, error } = usePreviewImage({ wash, ink, file, mask }, Boolean(spec.rect), 250);
+
+  return (
+    <figure className="wash-tile">
+      {spec.rect && url ? (
+        <img src={url} alt="Landmark cut-out preview" className={`wash-shot alpha${busy ? " busy" : ""}`} />
+      ) : (
+        <div className="wash-preview-empty">Draw the landmark box to see the cut-out.</div>
+      )}
+      <figcaption className="wash-cap">Cut-out · {file.name}</figcaption>
+      {error && <small className="wash-hint">{error}</small>}
+    </figure>
+  );
+}
+
+const MASK_HINT: Record<MaskMode, string> = {
+  rect: "Drag a box around the landmark. Everything outside the box is removed.",
+  foreground: "Click parts inside the box that were wrongly cut away.",
+  background: "Click parts that should be transparent.",
+};
+
+function LandmarkMask({
+  files,
+  index,
+  onIndex,
+  spec,
+  onChange,
+  onReset,
+  wash,
+  ink,
+}: {
+  files: File[];
+  index: number;
+  onIndex: (next: number) => void;
+  spec: MaskSpec;
+  onChange: (next: MaskSpec) => void;
+  onReset: () => void;
+  wash: number;
+  ink: number;
+}) {
+  const [mode, setMode] = useState<MaskMode>("rect");
+  const keep = (spec.foreground || []).length;
+  const remove = (spec.background || []).length;
+
+  return (
+    <div className="wash-look">
+      <MaskEditor file={files[index]} spec={spec} mode={mode} onChange={onChange} />
+      <div className="wash-look-col">
+        {files.length > 1 && (
+          <label className="wash-card">
+            <span className="wash-card-title">Photo</span>
+            <select value={index} onChange={(event) => onIndex(Number(event.target.value))}>
+              {files.map((file, fileIndex) => (
+                <option key={`${file.name}-${fileIndex}`} value={fileIndex}>
+                  {file.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <div className="wash-card">
+          <span className="wash-card-title">Mask tools</span>
+          <div className="maps-stylebar">
+            <button className={`btn secondary toggle${mode === "rect" ? " on" : ""}`} type="button" onClick={() => setMode("rect")}>
+              Landmark box
+            </button>
+            <button
+              className={`btn secondary toggle${mode === "foreground" ? " on" : ""}`}
+              type="button"
+              onClick={() => setMode("foreground")}
+            >
+              Keep
+            </button>
+            <button
+              className={`btn secondary toggle${mode === "background" ? " on" : ""}`}
+              type="button"
+              onClick={() => setMode("background")}
+            >
+              Remove
+            </button>
+            <button className="btn secondary" type="button" onClick={onReset}>
+              Reset
+            </button>
+          </div>
+          <small className="wash-hint">{MASK_HINT[mode]}</small>
+          {keep + remove > 0 && (
+            <small className="wash-hint">
+              {keep} keep · {remove} remove points
+            </small>
+          )}
+        </div>
+        <div className="wash-card">
+          <span className="wash-card-title">Cut-out preview</span>
+          <CutoutPreview wash={wash} ink={ink} file={files[index]} spec={spec} />
+          <small className="wash-hint">This is what Add to map will place on the slide.</small>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -309,21 +435,16 @@ export function WatercolourTab() {
       </div>
       {transparent && files.length > 0 && (
         <>
-          <label className="field">
-            Photo
-            <select value={maskFile} onChange={(event) => setMaskFile(Number(event.target.value))}>
-              {files.map((file, index) => (
-                <option key={`${file.name}-${index}`} value={index}>
-                  {file.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <MaskEditor
-            file={files[activeIndex]}
+          <h2>Landmark mask</h2>
+          <LandmarkMask
+            files={files}
+            index={activeIndex}
+            onIndex={setMaskFile}
             spec={masks[String(activeIndex)] || { transparent: true }}
             onChange={(next) => setMasks((current) => ({ ...current, [String(activeIndex)]: next }))}
             onReset={() => resetMask(activeIndex)}
+            wash={wash}
+            ink={ink}
           />
         </>
       )}

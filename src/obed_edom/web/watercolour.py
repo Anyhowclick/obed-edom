@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import shutil
 import uuid
 import zipfile
@@ -54,6 +55,33 @@ def _mask_for(image, spec: dict[str, Any] | None):
     foreground = spec.get("foreground") if isinstance(spec.get("foreground"), list) else []
     background = spec.get("background") if isinstance(spec.get("background"), list) else []
     return grabcut_mask(image, tuple(float(value) for value in rect), foreground=foreground, background=background)
+
+
+def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int]) -> dict[str, Any] | None:
+    if not spec or not spec.get("transparent"):
+        return None
+    width, height = size
+
+    def scale_point(point: Any) -> list[float]:
+        if not isinstance(point, list) or len(point) != 2 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in point):
+            raise WatercolourError("Mask settings are invalid")
+        x, y = point
+        return [min(max(round(x * factor), 0), width - 1), min(max(round(y * factor), 0), height - 1)]
+
+    scaled: dict[str, Any] = {
+        "transparent": True,
+        "foreground": [scale_point(point) for point in (spec.get("foreground") or [])],
+        "background": [scale_point(point) for point in (spec.get("background") or [])],
+    }
+    rect = spec.get("rect")
+    if rect is not None:
+        if not isinstance(rect, list) or len(rect) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect):
+            raise WatercolourError("Mask settings are invalid")
+        x, y, w, h = rect
+        sx = min(max(round(x * factor), 0), width - 2)
+        sy = min(max(round(y * factor), 0), height - 2)
+        scaled["rect"] = [sx, sy, min(max(2, round(w * factor)), width - sx), min(max(2, round(h * factor)), height - sy)]
+    return scaled
 
 
 def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions, masks: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -129,13 +157,20 @@ def _sample() -> Image.Image:
     return decode_image(SAMPLE_PATH.read_bytes())
 
 
-def _preview(image: Image.Image, wash_softness: float, ink_amount: float) -> Response:
+def _preview(image: Image.Image, wash_softness: float, ink_amount: float, spec: dict[str, Any] | None = None) -> Response:
     if not 0 <= wash_softness <= 1 or not 0 <= ink_amount <= 1:
         raise HTTPException(400, "Watercolour controls must be between zero and one")
     preview = image.copy()
     preview.thumbnail((PREVIEW_MAX_SIDE, PREVIEW_MAX_SIDE), Image.LANCZOS)
+    factor = preview.width / image.width
+    try:
+        mask = _mask_for(preview, _scale_spec(spec, factor, preview.size))
+    except (WatercolourError, cv2.error) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    transparent = mask is not None or bool(spec and spec.get("transparent"))
     output = io.BytesIO()
-    render(preview, WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)).save(output, "PNG")
+    options = WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount, transparent=transparent, paper=not transparent)
+    render(preview, options, mask).save(output, "PNG")
     return Response(output.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
@@ -145,7 +180,9 @@ def watercolour_preview(wash_softness: float = 0.65, ink_amount: float = 0.42) -
 
 
 @router.post("/preview")
-async def watercolour_preview_upload(file: UploadFile = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42)) -> Response:
+async def watercolour_preview_upload(
+    file: UploadFile = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42), mask: str = Form("{}")
+) -> Response:
     try:
         raw = _read_limited(file)
     finally:
@@ -154,7 +191,15 @@ async def watercolour_preview_upload(file: UploadFile = File(...), wash_softness
         image = decode_image(raw)
     except WatercolourError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return _preview(image, wash_softness, ink_amount)
+    if len(mask.encode("utf-8")) > 256 * 1024:
+        raise HTTPException(413, "Mask settings exceed the 256 KB limit")
+    try:
+        spec = json.loads(mask)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "Mask settings are invalid") from exc
+    if not isinstance(spec, dict):
+        raise HTTPException(400, "Mask settings are invalid")
+    return _preview(image, wash_softness, ink_amount, spec)
 
 
 @router.post("/{job_id}/cancel")

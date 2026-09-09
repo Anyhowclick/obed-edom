@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 from PIL import Image
 import numpy as np
@@ -6,6 +7,12 @@ from obed_edom.watercolour import WatercolourOptions, convert, render
 
 def png(color, size=(32,24)):
     out=BytesIO(); Image.new('RGBA',size,color).save(out,'PNG'); return out.getvalue()
+
+def _landmark_png():
+    rng=np.random.default_rng(5); width,height=400,300
+    pixels=np.clip(np.array([60,90,160],np.float32)+rng.normal(0,12,(height,width,3)),0,255).astype(np.uint8)
+    pixels[66:232,110:288]=np.array([230,90,40],np.uint8)
+    out=BytesIO(); Image.fromarray(pixels,'RGB').convert('RGBA').save(out,'PNG'); return out.getvalue()
 
 def test_convert_is_deterministic_and_keeps_size():
     raw=png((80,140,210,255)); a,size=convert(raw,WatercolourOptions(seed=7)); b,_=convert(raw,WatercolourOptions(seed=7)); assert a==b and size==(32,24)
@@ -118,4 +125,55 @@ def test_preview_uses_an_uploaded_photo():
     assert response.status_code == 200, response.text
     image=Image.open(BytesIO(response.content))
     assert image.size == (360, 270)
+
+
+def test_preview_cuts_out_the_landmark_rect():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[110,66,178,166]})},
+    )
+    assert response.status_code == 200, response.text
+    image=Image.open(BytesIO(response.content))
+    assert image.mode == 'RGBA'
+    assert max(image.size) <= 360
+    alpha=np.asarray(image)[:,:,3]
+    assert (alpha == 0).any() and (alpha == 255).any()
+
+
+def test_preview_rejects_transparent_without_a_rect():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True})},
+    )
+    assert response.status_code == 400
+    assert 'foreground rectangle' in response.text.lower()
+
+
+def test_slider_gains_are_exactly_neutral_at_the_defaults():
+    assert watercolour._slider_gain(0.42, 0.42, 0.60, 0.435) == 1.0
+    assert watercolour._slider_gain(0.65, 0.65, -0.30, -0.85) == 1.0
+    assert watercolour._slider_gain(0.0, 0.42, 0.60, 0.435) < 0.5 and watercolour._slider_gain(1.0, 0.42, 0.60, 0.435) > 1.5
+
+def _sample():
+    from obed_edom.web.watercolour import SAMPLE_PATH
+    return Image.open(BytesIO(SAMPLE_PATH.read_bytes()))
+
+def test_ink_amount_zero_removes_pencil_marks():
+    lo=np.asarray(render(_sample(), WatercolourOptions(ink_amount=0.0)),dtype=np.float32)
+    hi=np.asarray(render(_sample(), WatercolourOptions(ink_amount=1.0)),dtype=np.float32)
+    assert np.abs(lo-hi).mean() > 11
+    assert (lo.mean(axis=2) < 110).sum() < (hi.mean(axis=2) < 110).sum()
+
+def test_wash_softness_extremes_change_luminance():
+    crisp=np.asarray(render(_sample(), WatercolourOptions(wash_softness=0.0)),dtype=np.float32)
+    airy=np.asarray(render(_sample(), WatercolourOptions(wash_softness=1.0)),dtype=np.float32)
+    assert np.abs(crisp-airy).mean() > 28 and airy.mean() > crisp.mean() + 20
 

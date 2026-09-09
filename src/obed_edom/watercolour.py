@@ -72,6 +72,12 @@ def _percentile(a: np.ndarray, q: float) -> float:
     return max(float(np.percentile(a[::step, ::step], q)), 1e-5)
 
 
+def _slider_gain(value: float, default: float, below: float, above: float) -> float:
+    """Piecewise-linear slider response; exactly 1.0 at the default."""
+    ratio = value / default
+    return 1.0 + (below * (ratio - 1.0) if ratio <= 1.0 else above * (ratio - 1.0))
+
+
 def _gradient(a: np.ndarray, sigma: float) -> np.ndarray:
     smooth = _blur(a, sigma)
     return np.hypot(cv2.Sobel(smooth, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(smooth, cv2.CV_32F, 0, 1, ksize=3)) / 8.0
@@ -113,9 +119,9 @@ def _wobble(img: np.ndarray, rng: np.random.Generator, scale: float) -> np.ndarr
     return img
 
 
-def _pencil_edges(gray: np.ndarray, scale: float) -> np.ndarray:
+def _pencil_edges(gray: np.ndarray, scale: float, hi: float = 1.5) -> np.ndarray:
     edges = np.maximum(_blur(gray, 0.84 * scale) - _blur(gray, 0.6 * scale), 0)
-    t = np.clip((edges / _percentile(edges, 99) - 0.16) / (1.5 - 0.16), 0, 1)
+    t = np.clip((edges / _percentile(edges, 99) - 0.16) / (hi - 0.16), 0, 1)
     return t * t * (3 - 2 * t)
 
 
@@ -132,7 +138,8 @@ def _wash(rgb: np.ndarray, busy: np.ndarray, scale: float, softness: float) -> t
     lab += (cv2.cvtColor(blotch, cv2.COLOR_BGR2LAB).astype(np.float32) - lab) * (0.6 * busy)[:, :, None]
     luminance = lab[:, :, 0] / 255.0
     chroma = np.clip(np.hypot(lab[:, :, 1] - 128, lab[:, :, 2] - 128) / 60.0, 0, 1)
-    tone = np.clip(luminance / (0.92 - 0.09 * softness + 0.14 * chroma), 0, 1)
+    tone_gain = _slider_gain(softness, 0.65, -0.20, -0.30)
+    tone = np.clip(luminance / ((0.92 - 0.09 * softness + 0.14 * chroma) * tone_gain), 0, 1)
     tone = np.minimum(tone, 1 - 0.3 * chroma)
     tone = 0.14 + 0.86 * tone
     tone += (1 - tone) * busy * 0.25
@@ -152,7 +159,8 @@ def _wash_layers(rgb: np.ndarray, busy: np.ndarray, rng: np.random.Generator, sc
     patch = np.clip(_norm(_noise(rng, shape, 14 * scale)) * 0.25 + 0.8, 0, 1)
     shade = np.maximum(_strokes(shape, rng, (math.radians(50),), 9, 0.7, scale), _strokes(shape, rng, (math.radians(122),), 9, 0.4, scale) * 0.7)
     dark = np.clip((0.40 - _blur(luminance, 1.5 * scale)) / 0.40, 0, 1) * (1 - smooth)
-    cover = (1 - smooth) + scribble * patch * 0.85 * smooth
+    hatch = _slider_gain(options.ink_amount, 0.42, 0.60, 0.435)
+    cover = (1 - smooth) + scribble * patch * (0.85 * hatch) * smooth
     cover *= 1 - dark * (1 - shade) * 0.5 * options.ink_amount
     wash = wash * (1 - smooth[:, :, None]) + (wash ** 1.25) * smooth[:, :, None]
     wash = _wobble(wash, rng, scale)
@@ -221,6 +229,8 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
     ink = _pencil_edges(gray, scale)
     busy = np.clip(_blur((ink > 0.35).astype(np.float32), 5 * scale) / 0.45, 0, 1)
+    edge_gain = _slider_gain(options.ink_amount, 0.42, 0.40, 0.55)
+    drawn = ink if edge_gain == 1.0 else _pencil_edges(gray, scale, 1.5 / edge_gain)
     factor = min(1.0, WORK_MIN_SIDE / min(h, w))
     if factor < 1:
         size = (max(2, round(w * factor)), max(2, round(h * factor)))
@@ -228,16 +238,18 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
         wash, cover, pool, smooth = (cv2.resize(layer, (w, h), interpolation=cv2.INTER_LINEAR) for layer in layers)
     else:
         wash, cover, pool, smooth = _wash_layers(rgb, busy, rng, scale, options)
-    cover = cover * (0.90 - 0.18 * options.wash_softness) * np.clip(1 - 0.22 * np.maximum(height - 0.4, 0), 0.5, 1)
+    wash_gain = _slider_gain(options.wash_softness, 0.65, -0.30, -0.85)
+    cover = cover * ((0.90 - 0.18 * options.wash_softness) * wash_gain) * np.clip(1 - 0.22 * np.maximum(height - 0.4, 0), 0.5, 1)
     dark_source = _blur(gray, 0.6 * scale)
     pigment_floor = np.clip((0.60 - dark_source) / 0.35, 0, 1)
     pigment_floor = pigment_floor * pigment_floor * (3 - 2 * pigment_floor)
-    cover = np.maximum(cover, 0.78 * pigment_floor)
+    floor_gain = min(max(wash_gain, 0.55), 1.15)
+    cover = np.maximum(cover, (0.78 * floor_gain) * pigment_floor)
     transmit = np.clip(1 - (1 - wash) * cover[:, :, None], 0, 1) ** (1 + 0.35 * pool)[:, :, None]
     result = paper * transmit
     strength = _gradient(gray, 1.2 * scale)
     strength = np.clip(strength / _percentile(strength, 95), 0, 1) ** 0.8
-    ink = ink * (0.35 + 0.65 * strength) * (1 - 0.85 * smooth) * (1 - 0.55 * busy) * np.clip(1 - 0.4 * np.maximum(height, 0), 0.4, 1) * options.ink_amount
+    ink = drawn * (0.35 + 0.65 * strength) * (1 - 0.85 * smooth) * (1 - 0.55 * busy) * np.clip(1 - 0.4 * np.maximum(height, 0), 0.4, 1) * options.ink_amount
     if options.transparent:
         out_alpha = _feather_mask(alpha)
         ink = ink * (out_alpha / 255.0)
