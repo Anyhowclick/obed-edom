@@ -867,25 +867,6 @@ def map_rect(rect: Rect, src: Rect, dst: Rect) -> Rect:
     return Rect(rect.x * s + tx, rect.y * s + ty, rect.w * s, rect.h * s)
 
 
-def enforce_min_size(rect: Rect, minimum: float) -> Rect:
-    if minimum <= 0:
-        return rect
-    w, h = rect.w, rect.h
-    if w >= minimum and h >= minimum:
-        return rect
-    cx, cy = rect.center()
-    if w <= 0 or h <= 0:
-        return Rect(cx - minimum / 2.0, cy - minimum / 2.0, minimum, minimum)
-    scale = max(minimum / w, minimum / h)
-    w2, h2 = w * scale, h * scale
-    return Rect(cx - w2 / 2.0, cy - h2 / 2.0, w2, h2)
-
-
-def _basename(name: str) -> str:
-    stem = name.rsplit("/", 1)[-1]
-    return re.sub(r"-\d+\.[A-Za-z0-9]+$", "", stem).lower()
-
-
 def pair_by_order(left: list[dict], right: list[dict]) -> list[tuple[dict, dict]]:
     n = min(len(left), len(right))
     return list(zip(left[:n], right[:n], strict=False))
@@ -1128,26 +1109,6 @@ def merge_affine_groups(pairs: list[tuple[dict, dict]]) -> list[dict[str, Any]]:
         )
     out.sort(key=lambda g: (g["src"].w * g["src"].h) if g["src"] else 0, reverse=True)
     return out
-
-
-def pair_maps(wall: list[dict], gold: list[dict]) -> list[tuple[dict, dict]]:
-    if len(wall) == 1 and len(gold) == 1:
-        return [(wall[0], gold[0])]
-    gold_by = {_basename(file_name(it)): it for it in gold}
-    pairs: list[tuple[dict, dict]] = []
-    used: set[int] = set()
-    for item in wall:
-        key = _basename(file_name(item))
-        other = gold_by.get(key)
-        if other is not None and id(other) not in used:
-            pairs.append((item, other))
-            used.add(id(other))
-    if pairs:
-        return pairs
-    return pair_by_order(
-        sorted(wall, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True),
-        sorted(gold, key=lambda it: _f(it.get("w")) * _f(it.get("h")), reverse=True),
-    )
 
 
 def pair_list(wall: list[dict], gold: list[dict]) -> list[tuple[dict, dict]]:
@@ -3765,22 +3726,6 @@ def frame_affine(recipe: dict[str, Any]) -> Affine | None:
     return None
 
 
-def repack_free_text(
-    transforms: list[ItemTransform],
-    slide: dict,
-    recipe: dict[str, Any],
-    *,
-    preview: Any,
-    wall_w: float,
-    wall_h: float,
-) -> list[dict[str, Any]]:
-    """Pack background-only text. Never drop text: crowded boxes stay at the least-overlapping spot."""
-    analysis = analyse_free_text(slide, recipe, preview=preview, wall_w=wall_w, wall_h=wall_h)
-    if analysis is None:
-        return []
-    return _place_free_text(transforms, slide, recipe, analysis)
-
-
 def analyse_free_text(
     slide: dict,
     recipe: dict[str, Any],
@@ -4331,33 +4276,6 @@ def _greedy_match(
         out.append((predicted[i], gold[j]))
     return out
 
-
-def fit_similarity(
-    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
-) -> tuple[float, float, float] | None:
-    """Uniform scale+translation of predicted points onto gold; residual is geometric fidelity, not layout choice."""
-    n = len(pairs)
-    if n < 2:
-        return None
-    px = sum(p[0] for p, _ in pairs) / n
-    py = sum(p[1] for p, _ in pairs) / n
-    gx = sum(g[0] for _, g in pairs) / n
-    gy = sum(g[1] for _, g in pairs) / n
-    num = sum((p[0] - px) * (g[0] - gx) + (p[1] - py) * (g[1] - gy) for p, g in pairs)
-    den = sum((p[0] - px) ** 2 + (p[1] - py) ** 2 for p, _ in pairs)
-    if den <= 1e-9:
-        return None
-    s = num / den
-    return s, gx - s * px, gy - s * py
-
-
-def residual_rmse(
-    pairs: list[tuple[tuple[float, float], tuple[float, float]]],
-    fit: tuple[float, float, float],
-) -> float:
-    s, tx, ty = fit
-    moved = [((s * p[0] + tx, s * p[1] + ty), g) for p, g in pairs]
-    return rmse_points(moved)
 
 
 def score_against_gold(
