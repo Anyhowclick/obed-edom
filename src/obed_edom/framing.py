@@ -281,13 +281,19 @@ def planned_rects(
         card_stroke=card_stroke,
     ):
         dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
+        # Round the same 2-decimal values apply serializes (as_dict), not the raw floats,
+        # so parity holds under banker's rounding at .5 boundaries. as_dict only carries
+        # w/h for the sized roles (a "line" is width=length/height=0 there, ignored by
+        # Keynote) -- fall back to the raw transform for every other role's height/width.
+        applied = spec.as_dict()
+        has_wh = spec.role in {"map", "list", "pin", "title", "other"}
         rect = {
             "role": spec.role,
             "kind": spec.kind,
-            "x": round(spec.x),
-            "y": round(spec.y),
-            "w": round(spec.w),
-            "h": round(spec.h),
+            "x": round(applied["x"]),
+            "y": round(applied["y"]),
+            "w": round(applied["w"]) if has_wh else round(spec.w),
+            "h": round(applied["h"]) if has_wh else round(spec.h),
             "willBeInOutput": not dropped,
         }
         if spec.match_text:
