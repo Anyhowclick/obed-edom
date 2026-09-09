@@ -771,16 +771,27 @@ def _place_churches(
                     opacity = float(church.get("opacity") if church.get("opacity") is not None else 1)
                     church_id = str(church.get("id") or "")
                     reveal_mov = reveals.get((reveal_audience, sid, church_id)) if allow_reveal and reveals else None
+                    if opacity < 1:
+                        faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
+                        if not faded.exists():
+                            rgba = image.convert("RGBA")
+                            rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
+                            rgba.save(faded, "PNG")
+                        landmark = faded
                     if reveal_mov:
-                        items.append(_item("movie", x, cy - height, size, height, path=str(reveal_mov), landmark=True))
+                        items.append(
+                            _item(
+                                "movie",
+                                x,
+                                cy - height,
+                                size,
+                                height,
+                                path=str(reveal_mov),
+                                fallback=str(landmark),
+                                landmark=True,
+                            )
+                        )
                     else:
-                        if opacity < 1:
-                            faded = asset_root / f"{asset_id}-{int(opacity * 1000)}.png"
-                            if not faded.exists():
-                                rgba = image.convert("RGBA")
-                                rgba.putalpha(rgba.getchannel("A").point(lambda value: round(value * opacity)))
-                                rgba.save(faded, "PNG")
-                            landmark = faded
                         item = _item("image", x, cy - height, size, height, path=str(landmark), landmark=True)
                         item["opacity"] = opacity
                         items.append(item)
@@ -1089,7 +1100,8 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
                 f"        set width of mv to {w}",
                 f"        set height of mv to {h}",
             ]
-        return [
+        fallback = item.get("fallback")
+        lines = [
             "        try",
             f'          set movFile to (POSIX file "{path}") as alias',
             "          set mv to make new image with properties {file:movFile}",
@@ -1097,10 +1109,18 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
             f"          set width of mv to {w}",
             f"          set height of mv to {h}",
             "        on error",
-            "          set shp to make new shape with properties {shape type:oval, "
-            f"position:{{{x}, {y}}}, width:{w}, height:{h}}}",
-            "        end try",
         ]
+        if fallback:
+            fb_path = _as_escape(fallback)
+            lines += [
+                f'          set fbFile to (POSIX file "{fb_path}") as alias',
+                "          set img to make new image with properties {file:fbFile}",
+                f"          set position of img to {{{x}, {y}}}",
+                f"          set width of img to {w}",
+                f"          set height of img to {h}",
+            ]
+        lines.append("        end try")
+        return lines
     if kind == "shape":
         color = item.get("color") or (0xC4 * 257, 0x4A * 257, 0x42 * 257)
         shape = item.get("shape") or "oval"

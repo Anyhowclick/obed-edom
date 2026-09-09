@@ -349,8 +349,29 @@ def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: 
     movie_item = next(item for item in revealed if item.get("landmark"))
     assert movie_item["kind"] == "movie"
     assert movie_item["path"] == str(reveal_mov)
+    assert movie_item["fallback"]
     for key in ("x", "y", "w", "h"):
         assert movie_item[key] == image_item[key]
+
+
+def test_emit_item_landmark_movie_fallback_uses_image_not_shape():
+    import obed_edom.maps_keynote as mod
+
+    item = mod._item(
+        "movie", 0, 0, 100, 100, path="/tmp/reveal.mov", fallback="/tmp/still.png", landmark=True
+    )
+    script = "\n".join(mod._emit_item(item))
+    assert "make new image with properties {file:" in script
+    assert "shape type:" not in script
+
+
+def test_emit_item_droppin_movie_no_fallback_omits_shape():
+    import obed_edom.maps_keynote as mod
+
+    item = mod._item("movie", 0, 0, 40, 40, path="/tmp/wave.mov")
+    script = "\n".join(mod._emit_item(item))
+    assert "shape type:" not in script
+    assert "make new image with properties {file:" in script
 
 
 def test_landmark_reveal_suppressed_on_duplicate_slide(tmp_path: Path):
@@ -474,6 +495,30 @@ def test_export_maps_job_does_not_leak_reveal_mov_into_stored_document(tmp_path:
         }
     )
     assert doc.slides[0].churches[0].reveal.duration == 1.2
+
+
+def test_full_deck_landmark_reveal_script_has_no_shape_type(tmp_path: Path, monkeypatch):
+    scripts: list[str] = []
+    monkeypatch.setattr(
+        "obed_edom.maps_keynote.run_osascript",
+        lambda script, **_k: scripts.append(script) or _ok_osascript(script),
+    )
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    export_maps_job(job, export_lw=True, export_cg=False)
+
+    assert scripts
+    for script in scripts:
+        assert "shape type" not in script
 
 
 def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Path):
