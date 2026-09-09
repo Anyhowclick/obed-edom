@@ -83,7 +83,8 @@ todos:
       cache keyed by the slide fingerprint — its WIDER pixel surface is already covered:
       Data CRCs capture image bytes, the slide iwa captures effects/colour, the global
       key captures theme/master backgrounds. Export only missed slides via
-      subset_keynote OR P2's skipped-flag route — a subset deck's filenames renumber
+      P2's skipped-flag route (subset_keynote deleted 2026-09-09, chore/resizer-dead-code) —
+      a subset deck's filenames renumber
       sequentially over kept slides in kept order, so map-back to original numbers is
       deterministic. RENDER-DIVERGENCE hazards of a subset deck: slide-number
       placeholders (position-dependent digits; offline detection is a TO-BUILD —

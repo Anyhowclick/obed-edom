@@ -122,7 +122,7 @@ class ItemTransform:
     # uniform scale about the group's LIVE frame — after setSlideSize that frame is the
     # union of a word-wrapped autosize child (measured 278x88 -> 69x261 on Gold slide 2),
     # and the resize freezes the child wrapped permanently. Source-deck rects; the targets
-    # are derived in as_dict so they survive _pack_list_transforms moving x/y afterwards.
+    # are derived in as_dict from this transform's final x/y, whatever moved it there.
     child_src: list[dict[str, Any]] | None = None
 
     def _child_payload(self) -> list[dict[str, Any]] | None:
