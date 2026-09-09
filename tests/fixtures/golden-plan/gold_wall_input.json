@@ -19,8 +19,11 @@
  "inspectVersion": 4,
  "planSha256": "a0e805b7f678dd038daa4b593fbda81657cfb4cb17c2ffe190546249e24d5504",
  "plannerEnv": {
-  "fontEnv": "FONT_ENV_UNAVAILABLE",
-  "osBuild": "26.6.2"
+  "faces": {
+   "Amplitude-Bold|True|False": "Amplitude-Bold|Amplitude",
+   "AzoSans-Bold|True|False": "AzoSans-Bold|Azo Sans"
+  },
+  "osBuild": "25G83"
  },
  "previews": "none",
  "reuses": [
