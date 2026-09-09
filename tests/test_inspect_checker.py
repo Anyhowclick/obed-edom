@@ -74,7 +74,8 @@ def test_non_offline_cached_payload_is_rejected_and_rebuilt(deck, monkeypatch, r
 def test_offline_cached_payload_is_served_without_rebuild(deck, monkeypatch):
     # The positive control: an offline-reader payload IS served (builder untouched).
     _seed_cache(deck, {"reader": "offline", "slideCount": 1,
-                       "slides": [{"index": 0, "number": 1, "items": [{"runs": []}]}],
+                       "slides": [{"index": 0, "number": 1,
+                                   "items": [{"kind": "text", "text": "Covered", "runs": []}]}],
                        "sentinel": "CACHED"})
 
     def boom(*a, **k):  # pragma: no cover - must not run

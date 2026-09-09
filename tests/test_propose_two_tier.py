@@ -9,6 +9,7 @@ falls back to a real Keynote read.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -293,27 +294,27 @@ def test_propose_framings_rects_equal_the_apply_plan_for_every_slide(tmp_path, m
     diffs: list[dict[str, Any]] = []
     for page in proposal["pages"]:
         n = int(page["slide"])
-        propose_by_role_kind: dict[tuple, tuple] = {}
-        for r in page.get("autoRects") or []:
-            if r["role"] not in _AUTO_RECT_ROLES:
-                continue
-            propose_by_role_kind[(r["role"], r["kind"])] = (r["x"], r["y"], r["w"], r["h"])
-        apply_by_role_kind: dict[tuple, tuple] = {
-            (role, kind): (x, y, w, h) for role, kind, x, y, w, h in apply_by_slide.get(n, [])
-        }
-        for key in sorted(set(propose_by_role_kind) | set(apply_by_role_kind)):
-            role, kind = key
-            propose_rect = propose_by_role_kind.get(key)
-            apply_rect = apply_by_role_kind.get(key)
-            if propose_rect == apply_rect:
-                continue
-            for coord, idx in (("x", 0), ("y", 1), ("w", 2), ("h", 3)):
-                apply_v = apply_rect[idx] if apply_rect is not None else None
-                propose_v = propose_rect[idx] if propose_rect is not None else None
-                if apply_v != propose_v:
-                    diffs.append({
-                        "slide": n, "role": role, "kind": kind, "coordinate": coord,
-                        "apply": apply_v, "propose": propose_v,
-                    })
+        propose_tuples = [
+            (r["role"], r["kind"], round(r["x"]), round(r["y"]), round(r["w"]), round(r["h"]))
+            for r in (page.get("autoRects") or [])
+            if r["role"] in _AUTO_RECT_ROLES
+        ]
+        apply_tuples = apply_by_slide.get(n, [])
 
-    assert diffs == [], f"{len(diffs)} coordinate diff(s) across {len(proposal['pages'])} slides: {diffs}"
+        if len(apply_tuples) != len(propose_tuples):
+            diffs.append({
+                "slide": n, "kind": "count",
+                "apply_count": len(apply_tuples), "propose_count": len(propose_tuples),
+            })
+            continue
+
+        apply_counts = Counter(apply_tuples)
+        propose_counts = Counter(propose_tuples)
+        if apply_counts != propose_counts:
+            diffs.append({
+                "slide": n, "kind": "multiset",
+                "only_in_apply": list((apply_counts - propose_counts).elements()),
+                "only_in_propose": list((propose_counts - apply_counts).elements()),
+            })
+
+    assert diffs == [], f"{len(diffs)} slide diff(s) across {len(proposal['pages'])} slides: {diffs}"
