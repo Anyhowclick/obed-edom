@@ -13,8 +13,10 @@ and Keynote is never opened; the deck file is a throwaway of arbitrary bytes.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -432,7 +434,9 @@ def test_folded_export_failure_is_surfaced_once_and_does_not_fail_geometry(deck,
                 "_offline": {"bulk_ok": True, "fallback_slides": []}}
 
     monkeypatch.setattr(inspect_mod, "_build_checker_offline", spy_build)
-    monkeypatch.setattr(inspect_mod, "_close_document_by_name", _boom_close)
+
+    closed: list[Path] = []
+    monkeypatch.setattr(inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p)))
 
     attempts = {"calls": 0}
 
@@ -448,7 +452,7 @@ def test_folded_export_failure_is_surfaced_once_and_does_not_fail_geometry(deck,
     assert out["exported"] is False
     assert out["exportError"] == "export bound wrong document"
     assert out["slideCount"] == 1  # geometry payload survives the export failure
-    assert inspect_mod.LAST_BULK_KEPT_OPEN is None
+    assert closed == [deck.resolve()]
 
 
 def test_folded_export_exception_does_not_fail_geometry(deck, monkeypatch, tmp_path):
@@ -619,3 +623,66 @@ def test_all_skipped_real_traversal_never_opens_bulk_and_needs_no_export(deck, m
     assert inspect_mod.LAST_BULK_KEPT_OPEN is None
     assert out["slideCount"] == 3
     assert out["exported"] is True
+
+
+def test_lock_blocks_a_racing_reset_from_clearing_kept_open_ownership(deck, tmp_path, monkeypatch):
+    """The `LAST_BULK_KEPT_OPEN = None` reset lives inside the locked transaction; a
+    second checker call must block on the lock before it can run that reset, so it
+    can never clear a lock-holder's just-stamped ownership."""
+    deck_b = tmp_path / "deck-b.key"
+    deck_b.write_bytes(b"other deck bytes")
+
+    a_ready = threading.Event()
+    release_a = threading.Event()
+    b_entered = threading.Event()
+    ownership_seen_by_a: list[str | None] = []
+
+    def dispatch_offline(key_path, bulk_geometry_fn, *, slide_range=None, keep_open=False, log=None):
+        key_path = Path(key_path)
+        if key_path.name == "deck.key":
+            inspect_mod.LAST_BULK_KEPT_OPEN = str(key_path.resolve())
+            a_ready.set()
+            assert release_a.wait(timeout=5)
+            return {"slideCount": 1, "slides": [{"index": 0, "number": 1, "items": []}],
+                    "_offline": {"bulk_ok": True, "fallback_slides": []}}
+        b_entered.set()
+        return {"slideCount": 0, "slides": [], "_offline": {"bulk_ok": True, "fallback_slides": []}}
+
+    closed: list[Path] = []
+
+    def failing_open_export(key_path, export_dir, **kwargs):
+        ownership_seen_by_a.append(inspect_mod.LAST_BULK_KEPT_OPEN)
+        return "export bound wrong document"
+
+    monkeypatch.setattr(inspect_mod, "_build_checker_offline", dispatch_offline)
+    monkeypatch.setattr(inspect_mod, "_export_open_slide_images", failing_open_export)
+    monkeypatch.setattr(inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p)))
+
+    result_a: dict[str, Any] = {}
+
+    def run_a():
+        result_a["out"] = inspect_mod.inspect_keynote_checker(
+            deck, export_dir=tmp_path / "job", use_cache=False
+        )
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    assert a_ready.wait(timeout=5)
+
+    thread_b = threading.Thread(
+        target=lambda: inspect_mod.inspect_keynote_checker(deck_b, use_cache=False)
+    )
+    thread_b.start()
+
+    assert not b_entered.wait(timeout=0.3)
+    assert inspect_mod.LAST_BULK_KEPT_OPEN == str(deck.resolve())
+
+    release_a.set()
+    thread_a.join(timeout=5)
+    thread_b.join(timeout=5)
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+
+    assert ownership_seen_by_a == [str(deck.resolve())]
+    assert closed == [deck.resolve()]
+    assert result_a["out"]["exported"] is False

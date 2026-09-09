@@ -327,41 +327,42 @@ def inspect_keynote(
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(plan, handle)
         plan_path = handle.name
-    try:
-        t_jxa = time.perf_counter()
-        proc = _run_jxa_inspect(
-            ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path], is_cancelled
-        )
-        timing["jxa"] = time.perf_counter() - t_jxa
-    finally:
-        Path(plan_path).unlink(missing_ok=True)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "Keynote inspect failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
-        )
-    raw = (proc.stdout or "").strip()
-    if not raw:
-        raise RuntimeError("Keynote inspect returned no JSON.")
-    payload = json.loads(raw)
-    try:
-        from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
+    with _KEYNOTE_LOCK:
+        try:
+            t_jxa = time.perf_counter()
+            proc = _run_jxa_inspect(
+                ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path], is_cancelled
+            )
+            timing["jxa"] = time.perf_counter() - t_jxa
+        finally:
+            Path(plan_path).unlink(missing_ok=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Keynote inspect failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
+            )
+        raw = (proc.stdout or "").strip()
+        if not raw:
+            raise RuntimeError("Keynote inspect returned no JSON.")
+        payload = json.loads(raw)
+        try:
+            from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
 
-        attach_runs(key_path, payload)
-    except Exception:  # noqa: BLE001 — missing extra / non-zip / decode error -> runs stay []
-        pass
-    payload["keynoteBundleId"] = keynote_app.bundle_id()
-    payload["keynoteVersion"] = keynote_app.app_version()
-    payload["reader"] = "jxa"  # persists past the cache-write underscore strip
-    if dest:
-        t_export = time.perf_counter()
-        expected_pngs = _expected_pngs(payload)
-        if len(preview_pngs(dest)) == expected_pngs:
-            _set_export_state(payload, dest, expected=expected_pngs)
-        else:
-            fallback_err = export_slide_images(key_path, dest, expected=expected_pngs)
-            _set_export_state(payload, dest, fallback_err, failed=True, expected=expected_pngs)
-        timing["export"] = time.perf_counter() - t_export
-        payload["previewDir"] = str(dest.resolve())
+            attach_runs(key_path, payload)
+        except Exception:  # noqa: BLE001 — missing extra / non-zip / decode error -> runs stay []
+            pass
+        payload["keynoteBundleId"] = keynote_app.bundle_id()
+        payload["keynoteVersion"] = keynote_app.app_version()
+        payload["reader"] = "jxa"  # persists past the cache-write underscore strip
+        if dest:
+            t_export = time.perf_counter()
+            expected_pngs = _expected_pngs(payload)
+            if len(preview_pngs(dest)) == expected_pngs:
+                _set_export_state(payload, dest, expected=expected_pngs)
+            else:
+                fallback_err = export_slide_images(key_path, dest, expected=expected_pngs)
+                _set_export_state(payload, dest, fallback_err, failed=True, expected=expected_pngs)
+            timing["export"] = time.perf_counter() - t_export
+            payload["previewDir"] = str(dest.resolve())
     payload["_timing"] = timing
     payload["_cached"] = False
     payload["_digest"] = digest
@@ -514,15 +515,16 @@ def inspect_items(
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(plan, handle)
         plan_path = handle.name
-    try:
-        proc = subprocess.run(
-            ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        Path(plan_path).unlink(missing_ok=True)
+    with _KEYNOTE_LOCK:
+        try:
+            proc = subprocess.run(
+                ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            Path(plan_path).unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(
             "Item-scoped inspect failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
@@ -733,13 +735,13 @@ def inspect_keynote_checker(
         export_target.mkdir(parents=True, exist_ok=True)
 
     global LAST_BULK_KEPT_OPEN
-    LAST_BULK_KEPT_OPEN = None
     key_str = str(key_path)
 
     def _kept_open() -> bool:
         return LAST_BULK_KEPT_OPEN == key_str
 
     with _KEYNOTE_LOCK:
+        LAST_BULK_KEPT_OPEN = None
         t_read = time.perf_counter()
         try:
             payload = _build_checker_offline(
@@ -782,13 +784,12 @@ def inspect_keynote_checker(
                     from obed_edom.remap_keynote import _merge_legacy_slides  # noqa: PLC0415
 
                     _merge_legacy_slides(payload, key_path, slide_numbers)
-            # Keynote's own export is full-deck (skipped slides:false); compute the
-            # expected PNG count before slide_range narrows payload["slides"] below.
+            # Full-deck export: compute expected count before slide_range narrows payload["slides"].
             full_expected = _expected_pngs(payload)
             if slide_range is not None:
                 from obed_edom.map_remap import wants_slide  # noqa: PLC0415
 
-                # Legacy ranged JXA returns only the wanted slides (deck-absolute number/index).
+                # Legacy ranged JXA returns only the wanted slides.
                 payload["slides"] = [
                     s
                     for s in (payload.get("slides") or [])
@@ -811,7 +812,8 @@ def inspect_keynote_checker(
                     except Exception as exc:  # noqa: BLE001 — export failure must not fail geometry
                         err = str(exc)
                     else:
-                        LAST_BULK_KEPT_OPEN = None  # the already-open script closes it either way
+                        if err is None:
+                            LAST_BULK_KEPT_OPEN = None
                 else:
                     err = None
                     if len(preview_pngs(export_target)) != expected:
