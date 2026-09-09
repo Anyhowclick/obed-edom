@@ -106,16 +106,15 @@ function normalise(values: Float32Array): Float32Array {
   return out;
 }
 
-/** Paper grain carries only tooth/fibre/mottle, as a multiply layer over the map background. */
-export function paperGrainPixels(size = 256, seed = 7): Uint8ClampedArray<ArrayBuffer> {
+/** Paper grain carries only tooth/fibre, as a multiply layer over the map background. */
+export function paperGrainPixels(size = 1024, seed = 7): Uint8ClampedArray<ArrayBuffer> {
   const rand = mulberry(seed);
   const fibre = normalise(blurWrap(field(size, rand), size, 1));
   const tooth = normalise(field(size, rand));
-  const mottle = normalise(blurWrap(field(size, rand), size, 12, 3));
   const pixels = new Uint8ClampedArray(size * size * 4);
   for (let i = 0; i < size * size; i++) {
-    const h = 0.55 * fibre[i] + 0.3 * tooth[i] + 0.15 * mottle[i];
-    const v = Math.max(0, Math.min(255, 255 * (0.985 + 0.022 * h + 0.012 * mottle[i])));
+    const h = 0.6 * fibre[i] + 0.4 * tooth[i];
+    const v = 255 * (0.985 + 0.02 * h);
     pixels[i * 4] = v;
     pixels[i * 4 + 1] = v;
     pixels[i * 4 + 2] = v;
@@ -129,8 +128,8 @@ let paperGrainCache: HTMLCanvasElement | null = null;
 export function paperGrainCanvas(): HTMLCanvasElement {
   if (paperGrainCache) return paperGrainCache;
   const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = 256;
-  canvas.getContext("2d")!.putImageData(new ImageData(paperGrainPixels(256, 7), 256, 256), 0, 0);
+  canvas.width = canvas.height = 1024;
+  canvas.getContext("2d")!.putImageData(new ImageData(paperGrainPixels(1024, 7), 1024, 1024), 0, 0);
   paperGrainCache = canvas;
   return canvas;
 }
@@ -140,6 +139,19 @@ let paperGrainUrlCache: string | null = null;
 export function paperGrainUrl(): string {
   if (!paperGrainUrlCache) paperGrainUrlCache = paperGrainCanvas().toDataURL();
   return paperGrainUrlCache;
+}
+
+/**
+ * Preview counterpart to compositePaperGrain's 1024-authored-px tile. Every export path (full wall,
+ * centre-only, CG crop) composites the pattern fresh onto its own output canvas starting at that
+ * canvas's local (0,0) — the export never phases the tile by an authored-space origin. The preview
+ * band matches by scaling the tile to previewWidth/authoredWidth and always anchoring it at the
+ * band's own local (0,0), never at an authored offset like CG_ORIGIN.
+ */
+export function paperGrainCss(previewWidth: number, authoredWidth: number): { backgroundSize: string; backgroundPosition: string } {
+  const ratio = authoredWidth > 0 ? previewWidth / authoredWidth : 1;
+  const tile = 1024 * ratio;
+  return { backgroundSize: `${tile}px ${tile}px`, backgroundPosition: "0px 0px" };
 }
 
 /** Restores globalCompositeOperation: stampOsm.ts reuses one scratch canvas and must paint the attribution bar normally afterwards. */

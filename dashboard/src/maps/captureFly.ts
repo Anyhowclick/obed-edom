@@ -1,7 +1,7 @@
 import { Map as MapLibreMap, MercatorCoordinate } from "maplibre-gl";
 import { createExportMap, waitIdleForFrame } from "./captureExport";
 import { stampOsmCropOnCanvas, stampOsmOnCanvas } from "./stampOsm";
-import { churchesGeo, movieObjectsAt } from "./overlays";
+import { churchesGeo, movieObjectsAt, withoutRevealed } from "./overlays";
 import {
   type MapsCamera,
   type MapsChurch,
@@ -383,6 +383,7 @@ export async function captureFlyFrames(opts: {
   isolate?: MapsIsolate;
   churches?: MapsChurch[];
   destinationChurches?: MapsChurch[];
+  destinationPaintsReveal?: boolean;
   objectTransition?: "fade" | "hold";
   assetBaseUrl?: string;
   numberPins?: boolean;
@@ -417,6 +418,7 @@ export async function captureFlyFrames(opts: {
     isolate,
     churches,
     destinationChurches,
+    destinationPaintsReveal = true,
     objectTransition,
     assetBaseUrl,
     numberPins = false,
@@ -444,7 +446,7 @@ export async function captureFlyFrames(opts: {
     hiddenLayers,
     hillshade,
     isolate,
-    churches: destinationChurches ? [...(churches || []), ...destinationChurches] : churches,
+    churches: destinationChurches ? [...(churches || []), ...(destinationPaintsReveal ? withoutRevealed(destinationChurches) : destinationChurches)] : churches,
     numberPins,
     assetBaseUrl,
     isCancelled,
@@ -460,7 +462,7 @@ export async function captureFlyFrames(opts: {
       const cam = cameras[i];
       const t = i / (count - 1);
       if (churches && map.getSource("churches")) {
-        const objects = destinationChurches ? movieObjectsAt(churches, destinationChurches, t, objectTransition) : churches;
+        const objects = destinationChurches ? movieObjectsAt(churches, destinationChurches, t, objectTransition, destinationPaintsReveal) : churches;
         (map.getSource("churches") as unknown as { setData(data: GeoJSON.FeatureCollection): void }).setData(churchesGeo(objects, null, numberPins));
         map.triggerRepaint();
       }

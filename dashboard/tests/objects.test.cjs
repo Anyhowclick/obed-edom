@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { defaultLandmarkSize, resizeFromHandle } = require(path.join(out, "objects.js"));
+const { defaultLandmarkSize, resizeFromCorner } = require(path.join(out, "objects.js"));
 
 test("defaultLandmarkSize floors tiny assets at 240", () => {
   assert.equal(defaultLandmarkSize(10), 240);
@@ -27,20 +27,33 @@ test("defaultLandmarkSize passes through a typical asset width", () => {
   assert.equal(defaultLandmarkSize(800), 800);
 });
 
-test("resizeFromHandle grows with a rightward drag", () => {
-  assert.equal(resizeFromHandle({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 1), 220);
+test("resizeFromCorner se: rightward drag matches the old edge-handle behaviour", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 1, "se"), 220);
 });
 
-test("resizeFromHandle shrinks with a leftward drag", () => {
-  assert.equal(resizeFromHandle({ x: 0, y: 0 }, { x: -20, y: 0 }, 120, 1), 80);
+test("resizeFromCorner sw: leftward drag grows the box", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: -50, y: 0 }, 120, 1, "sw"), 220);
 });
 
-test("resizeFromHandle clamps to [24, 4000]", () => {
-  assert.equal(resizeFromHandle({ x: 0, y: 0 }, { x: -1000, y: 0 }, 120, 1), 24);
-  assert.equal(resizeFromHandle({ x: 0, y: 0 }, { x: 10000, y: 0 }, 120, 1), 4000);
+test("resizeFromCorner ne: upward drag grows by |dy| / aspect", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 0, y: -50 }, 120, 1, "ne"), 170);
 });
 
-test("resizeFromHandle accounts for objectScale != 1", () => {
-  assert.equal(resizeFromHandle({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 0.5), 320);
-  assert.equal(resizeFromHandle({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 2), 170);
+test("resizeFromCorner: aspect 2 halves the y contribution", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 0, y: -50 }, 120, 1, "ne", 2), 145);
+});
+
+test("resizeFromCorner picks the dominant axis", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 5 }, 120, 1, "se"), 220);
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 5, y: 50 }, 120, 1, "se"), 170);
+});
+
+test("resizeFromCorner clamps to [24, 4000]", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: -1000, y: 0 }, 120, 1, "se"), 24);
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 10000, y: 0 }, 120, 1, "se"), 4000);
+});
+
+test("resizeFromCorner accounts for objectScale != 1", () => {
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 0.5, "se"), 320);
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 2, "se"), 170);
 });

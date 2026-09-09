@@ -5,17 +5,18 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt } from "./overlays";
-import { resizeFromHandle } from "./objects";
+import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
+import { resizeFromCorner, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyBoundaryZoomOffset } from "./tonerBoundaries";
-import { installPatternById, installPatterns, paperGrainUrl, stylePatterns } from "./watercolourStyle";
+import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
 import {
   clampZoom,
   compensatedFov,
   minZoomForView,
   previewHostRect,
+  snapCgShift,
   wrapLon,
   worldCopyWarning,
   type MapsCamera,
@@ -185,6 +186,7 @@ export type MapViewHandle = {
     fromObjects?: MapsChurch[];
     toObjects?: MapsChurch[];
     objectTransition?: "fade" | "hold";
+    destinationPaintsReveal?: boolean;
   }) => Promise<void>;
   stop: () => void;
   getCamera: () => MapsCamera | null;
@@ -273,8 +275,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins });
   const cgDrag = useRef<{ x: number; shift: number; width: number } | null>(null);
   const objDrag = useRef<{ id: string; grabDx: number; grabDy: number; pointerId: number } | null>(null);
-  const handleDrag = useRef<{ pointerId: number; startX: number; startSize: number } | null>(null);
-  const [handlePos, setHandlePos] = useState<{ x: number; y: number; size: number } | null>(null);
+  const handleDrag = useRef<{ pointerId: number; startX: number; startY: number; startSize: number; corner: ObjectCorner; aspect: number } | null>(null);
+  const [boxPos, setBoxPos] = useState<{ x: number; y: number; w: number; h: number; size: number } | null>(null);
+  const [grainPreviewWidth, setGrainPreviewWidth] = useState<number>(authoredWidth);
+  const [cgSnapped, setCgSnapped] = useState(false);
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
   const hopResolve = useRef<(() => void) | null>(null);
@@ -337,12 +341,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         });
       });
     },
-    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, curve, flyZoom, easeIn, easeOut, width, fromObjects, toObjects, objectTransition }) {
+    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, curve, flyZoom, easeIn, easeOut, width, fromObjects, toObjects, objectTransition, destinationPaintsReveal = true }) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
       hopAbort.current = false;
       finishHop();
-      return Promise.all([ensureLandmarkImages(map, [...(fromObjects || []), ...(toObjects || [])], assetBaseUrl), Promise.resolve(ensureDropPinImages(map, [...(fromObjects || []), ...(toObjects || [])]))]).then(() => new Promise((resolve) => {
+      const toObjectsPainted = destinationPaintsReveal ? withoutRevealed(toObjects || []) : toObjects || [];
+      return Promise.all([ensureLandmarkImages(map, [...(fromObjects || []), ...toObjectsPainted], assetBaseUrl), Promise.resolve(ensureDropPinImages(map, [...(fromObjects || []), ...toObjectsPainted]))]).then(() => new Promise((resolve) => {
         const apply = (t: number) => {
           const cam = cameraAtHop(from, to, t, {
             easing,
@@ -355,7 +360,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             width,
           });
           if (fromObjects && map.getSource("churches")) {
-            const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition) : fromObjects;
+            const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition, destinationPaintsReveal) : fromObjects;
             (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(objects, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current)));
           }
           map.jumpTo({
@@ -490,11 +495,26 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         cameraRef.current.zoom,
         authoredWidthRef.current
       );
+      setGrainPreviewWidth(previewSurfaceRect(map, authoredWidthRef.current).width || authoredWidthRef.current);
     };
     const ro = new ResizeObserver(() => recast());
     const onPointerUp = () => {
       if (!map || suppress.current || previewingRef.current) return;
       callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
+    };
+
+    const onCanvasMouseMove = (event: MapMouseEvent) => {
+      if (!map || previewingRef.current || objDrag.current) return;
+      const selectedPinId = overlay.current.selectedPinId;
+      if (!selectedPinId) {
+        map.getCanvas().style.cursor = "";
+        return;
+      }
+      const layers = PIN_LAYERS.filter((id) => map!.getLayer(id));
+      const hit = layers.length ? map.queryRenderedFeatures(event.point, { layers }) : [];
+      const id = String(hit[0]?.properties?.id || "");
+      const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
+      map.getCanvas().style.cursor = church && church.id === selectedPinId && church.kind === "landmark" ? "move" : "";
     };
 
     const onObjPointerDown = (event: PointerEvent) => {
@@ -652,6 +672,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           });
         });
         map.on("moveend", commitCamera);
+        map.on("mousemove", onCanvasMouseMove);
+        map.on("mouseout", () => {
+          if (map) map.getCanvas().style.cursor = "";
+        });
         map.on("click", (event) => {
           if (!map) return;
           if (previewingRef.current) {
@@ -756,6 +780,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       cameraRef.current.zoom,
       authoredWidthRef.current
     );
+    setGrainPreviewWidth(previewSurfaceRect(map, authoredWidthRef.current).width || authoredWidthRef.current);
   }, [crop, authoredWidth]);
 
   useEffect(() => {
@@ -773,21 +798,22 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !selectedPinId || previewing) {
-      setHandlePos(null);
+      setBoxPos(null);
       return;
     }
     const recompute = () => {
       const church = overlay.current.churches.find((c) => c.id === selectedPinId);
       if (!church || church.kind !== "landmark") {
-        setHandlePos(null);
+        setBoxPos(null);
         return;
       }
       const scale = objectPreviewScale(map, authoredWidthRef.current);
       const size = church.size || 120;
-      const width = size * scale;
+      const w = size * scale;
+      const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
       const anchor = map.project([church.lon, church.lat]);
       // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
-      setHandlePos({ x: anchor.x + width / 2, y: anchor.y, size });
+      setBoxPos({ x: anchor.x - w / 2, y: anchor.y - h, w, h, size });
     };
     recompute();
     map.on("move", recompute);
@@ -798,12 +824,22 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     };
   }, [selectedPinId, previewing, churches]);
 
-  function onHandlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!handlePos) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    handleDrag.current = { pointerId: event.pointerId, startX: event.clientX, startSize: handlePos.size };
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.getCanvas().style.cursor = "";
+  }, [previewing, selectedPinId]);
+
+  function onHandlePointerDown(corner: ObjectCorner) {
+    return (event: React.PointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!boxPos) return;
+      const church = overlay.current.churches.find((c) => c.id === selectedPinId);
+      const aspect = (church?.assetHeight || 1) / (church?.assetWidth || 1);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      handleDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startSize: boxPos.size, corner, aspect };
+    };
   }
 
   function onHandlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
@@ -811,7 +847,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!drag || !map || !selectedPinId) return;
     const scale = objectPreviewScale(map, authoredWidthRef.current);
-    const size = resizeFromHandle({ x: drag.startX, y: 0 }, { x: event.clientX, y: 0 }, drag.startSize, scale);
+    const size = resizeFromCorner(
+      { x: drag.startX, y: drag.startY },
+      { x: event.clientX, y: event.clientY },
+      drag.startSize,
+      scale,
+      drag.corner,
+      drag.aspect
+    );
     callbacks.current.onResizeObject(selectedPinId, size);
   }
 
@@ -862,7 +905,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const drag = cgDrag.current;
     if (!drag) return;
     const dx = ((event.clientX - drag.x) * authoredWidthRef.current) / drag.width;
-    callbacks.current.onCgShift(drag.shift + dx);
+    const next = snapCgShift(drag.shift + dx);
+    setCgSnapped(next === 0);
+    callbacks.current.onCgShift(next);
   }
 
   function onCgPointerUp(event: React.PointerEvent<HTMLElement>) {
@@ -870,6 +915,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     cgDrag.current = null;
+    setCgSnapped(false);
   }
 
   const wrapWarn = worldCopyWarning(camera.zoom);
@@ -887,12 +933,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
     >
       <div className="maps-map-host" ref={host} />
-      {styleId === "watercolour" && (
-        <div className="maps-paper-grain" style={{ backgroundImage: `url(${paperGrainUrl()})` }} />
-      )}
       <div className="maps-nav-margin top" />
       <div className="maps-nav-margin bottom" />
       <div className="maps-map-band">
+        {styleId === "watercolour" && (
+          <div
+            className="maps-paper-grain"
+            style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(grainPreviewWidth, surfaceWidth) }}
+          />
+        )}
         <div className="maps-crop-overlay">
           {splitCg ? (
             <div className="maps-crop-frame cg">
@@ -907,7 +956,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           )}
           {exportCg && !splitCg && (
             <div
-              className="maps-crop-cg"
+              className={`maps-crop-cg${cgSnapped ? " snapped" : ""}`}
               style={{ left: `${cgLeft}%`, width: `${cgWidth}%` }}
               onPointerDown={onCgPointerDown}
               onPointerMove={onCgPointerMove}
@@ -919,15 +968,19 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           )}
         </div>
       </div>
-      {handlePos && (
-        <div
-          className="maps-object-handle"
-          style={{ left: handlePos.x, top: handlePos.y }}
-          onPointerDown={onHandlePointerDown}
-          onPointerMove={onHandlePointerMove}
-          onPointerUp={onHandlePointerUp}
-          onPointerCancel={onHandlePointerUp}
-        />
+      {boxPos && (
+        <div className="maps-object-box" style={{ left: boxPos.x, top: boxPos.y, width: boxPos.w, height: boxPos.h }}>
+          {(["nw", "ne", "sw", "se"] as ObjectCorner[]).map((corner) => (
+            <div
+              key={corner}
+              className={`maps-object-handle ${corner}`}
+              onPointerDown={onHandlePointerDown(corner)}
+              onPointerMove={onHandlePointerMove}
+              onPointerUp={onHandlePointerUp}
+              onPointerCancel={onHandlePointerUp}
+            />
+          ))}
+        </div>
       )}
       {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}

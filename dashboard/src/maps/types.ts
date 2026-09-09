@@ -414,6 +414,15 @@ export function morphPlatePx(
 /** 1920 CG window slides inside the 3840 centre wall (1920–5760). */
 export const CG_SHIFT_MAX = 960;
 
+export function snapCgShift(x: number, threshold = 24): number {
+  return Math.abs(x) <= threshold ? 0 : x;
+}
+
+/** Mirrors maps_keynote's `_outgoing(...).kind === "movie"`: the *first* outgoing link's kind, not any outgoing link. */
+export function hasOutgoingMovie(links: MapsLink[], slideId: string): boolean {
+  return links.find((link) => link.from === slideId)?.kind === "movie";
+}
+
 export function clampCgShift(dx: number, dy: number): { cgShiftX: number; cgShiftY: number } {
   let x = Math.max(-CG_SHIFT_MAX, Math.min(CG_SHIFT_MAX, dx));
   if (2880 + x < 1920) x = 1920 - 2880;

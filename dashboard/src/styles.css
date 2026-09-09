@@ -2014,7 +2014,6 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .maps-paper-grain {
   position: absolute;
   inset: 0;
-  z-index: 5;
   pointer-events: none;
   mix-blend-mode: multiply;
   background-repeat: repeat;
@@ -2095,18 +2094,27 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   color: var(--plum);
 }
 .maps-crop-cg:active { cursor: grabbing; }
+.maps-crop-cg.snapped { border-color: var(--accent-primary); }
+.maps-object-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--accent-primary);
+  z-index: 3;
+  pointer-events: none;
+}
 .maps-object-handle {
   position: absolute;
-  width: 12px;
-  height: 12px;
-  transform: translate(-50%, -50%);
-  border: 2px solid var(--accent-primary);
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-primary);
   background: var(--bg-surface-glass);
-  border-radius: 2px;
-  z-index: 3;
-  cursor: nwse-resize;
   pointer-events: auto;
 }
+.maps-object-handle.nw { left: 0; top: 0; transform: translate(-50%, -50%); cursor: nwse-resize; }
+.maps-object-handle.ne { right: 0; top: 0; transform: translate(50%, -50%); cursor: nesw-resize; }
+.maps-object-handle.sw { left: 0; bottom: 0; transform: translate(-50%, 50%); cursor: nesw-resize; }
+.maps-object-handle.se { right: 0; bottom: 0; transform: translate(50%, 50%); cursor: nwse-resize; }
 .maps-zoom-slider {
   position: absolute;
   left: 18%;
@@ -2342,6 +2350,12 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   background: rgba(255, 255, 255, 0.08);
   font-size: 10px;
 }
+.maps-pin-hidden.icon {
+  display: inline-flex;
+  padding: 1px 3px;
+  background: none;
+  color: var(--ink-tertiary);
+}
 .maps-pin-bulk {
   display: flex;
   flex-wrap: wrap;
@@ -2351,11 +2365,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 }
 .maps-pin-bulk .note { flex: 1 1 100%; margin: 0; }
 .maps-pin-bulk .btn { padding: 5px 7px; font-size: 11px; }
-.maps-pin-bulk .maps-pin-bulk-delete {
-  flex: 0 0 30px;
-  width: 30px;
-  height: 30px;
-}
+.maps-pin-bulk .icon-btn { padding: 4px 6px; }
 .hop-tl-wrap { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
 .hop-phase-toggles {
   display: grid;

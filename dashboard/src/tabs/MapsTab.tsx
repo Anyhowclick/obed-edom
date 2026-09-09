@@ -54,6 +54,7 @@ import {
   clampZoom,
   coerceHopKinds,
   documentFromResult,
+  hasOutgoingMovie,
   minZoomForView,
   movieAppearanceMismatch,
   worldCopyWarning,
@@ -140,6 +141,59 @@ function IconRelief() {
   return (
     <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 17 8.5 8l4 6.5L15 10l6 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconLabelOff() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M4 20 20 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconPlus() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconLabel() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconCopy() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function IconPaste() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="5.5" y="5.5" width="13" height="15" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="9" y="3.5" width="6" height="3.5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function IconPasteSlides() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="5.5" width="11" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="7" y="3.5" width="4" height="3" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M15.5 12h5M17.5 9.5 20.5 12l-3 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -1094,6 +1148,7 @@ export function MapsTab() {
         fromObjects: fromView.churches,
         toObjects: toView.churches,
         objectTransition: link.objectTransition,
+        destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
         width: Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience)),
       });
       if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
@@ -1528,6 +1583,7 @@ export function MapsTab() {
           isolate: from.isolate,
           churches: from.churches,
           destinationChurches: to.churches,
+          destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
           objectTransition: link.objectTransition,
           assetBaseUrl: `/api/maps/${id}/assets`,
           numberPins: true,
@@ -1605,6 +1661,7 @@ export function MapsTab() {
             isolate: from.isolate,
             churches: from.churches,
             destinationChurches: to.churches,
+            destinationPaintsReveal: !hasOutgoingMovie((plan.cg?.links as MapsLink[] | undefined) || [], baseTo.id),
             objectTransition: link.objectTransition,
             assetBaseUrl: `/api/maps/${id}/assets`,
             numberPins: true,
@@ -2555,8 +2612,10 @@ export function MapsTab() {
                   />
                   <div className="style-picker" ref={landmarkPickerRef}>
                     <button
-                      className="btn secondary style-picker-trigger"
+                      className="btn secondary icon-btn style-picker-trigger"
                       type="button"
+                      title="Add transparent landmark"
+                      aria-label="Add transparent landmark"
                       aria-haspopup="true"
                       aria-expanded={landmarkPicker}
                       disabled={locked}
@@ -2570,7 +2629,7 @@ export function MapsTab() {
                         void loadWcJobs();
                       }}
                     >
-                      Add transparent landmark ▾
+                      <IconPlus />
                     </button>
                     {landmarkPicker && (
                       <div className="style-picker-pop maps-landmark-pop">
@@ -2619,17 +2678,23 @@ export function MapsTab() {
                   ) : (
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
-                        <span className="note">{selectedPins.length ? `${selectedPins.length} selected` : "Select objects"}</span>
-                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })}>
-                          Show labels
+                        {selectedPins.length > 0 && <span className="note">{selectedPins.length} selected</span>}
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })} title="Show labels" aria-label="Show labels">
+                          <IconLabel />
                         </button>
-                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: false })}>
-                          Hide labels
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: false })} title="Hide labels" aria-label="Hide labels">
+                          <IconLabelOff />
                         </button>
-                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins}>Copy</button>
-                        <button className="btn secondary" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)}>Paste</button>
-                        <button className="btn secondary" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)}>Paste to slides</button>
-                        <button className="btn maps-delete maps-pin-bulk-delete" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins} title="Copy" aria-label="Copy">
+                          <IconCopy />
+                        </button>
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
+                          <IconPaste />
+                        </button>
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
+                          <IconPasteSlides />
+                        </button>
+                        <button className="btn maps-delete maps-pin-bulk-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
@@ -2649,7 +2714,7 @@ export function MapsTab() {
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
-                              {church.showLabel === false && <span className="maps-pin-hidden">Hidden</span>}
+                              {church.showLabel === false && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
                             </button>
                           </div>
                         ))}
