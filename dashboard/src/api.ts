@@ -401,6 +401,7 @@ export type MapsExportPlan = {
     highlights: string[];
     hiddenLayers?: string[];
     hillshade?: boolean;
+    isolate?: unknown;
     width?: number;
     height?: number;
   }>;
@@ -413,6 +414,7 @@ export type MapsExportPlan = {
     highlights: string[];
     hiddenLayers?: string[];
     hillshade?: boolean;
+    isolate?: unknown;
   }>;
   cg?: {
     links: Array<Record<string, unknown>>;

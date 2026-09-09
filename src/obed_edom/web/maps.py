@@ -112,6 +112,12 @@ class MapsCamera(BaseModel):
     pitch: float = 0.0
 
 
+class MapsIsolate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["darken", "erase"]
+    strength: float = Field(default=0.6, ge=0, le=1)
+
+
 class MapsChurch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -147,6 +153,7 @@ class MapsCgOverride(BaseModel):
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
     hillshade: bool | None = None
+    isolate: MapsIsolate | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None
@@ -162,6 +169,7 @@ class MapsSlide(BaseModel):
     churches: list[MapsChurch] = Field(default_factory=list)
     hiddenLayers: list[MapsLayerFilterId] | None = None
     hillshade: bool = False
+    isolate: MapsIsolate | None = None
     stillPng: str | None = None
     movieMov: str | None = None
     movieDuration: float | None = None

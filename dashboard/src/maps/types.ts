@@ -27,6 +27,8 @@ export type MapsCamera = {
   pitch: number;
 };
 
+export type MapsIsolate = { mode: "darken" | "erase"; strength: number };
+
 export type MapsChurch = {
   id: string;
   name: string;
@@ -52,6 +54,7 @@ export type MapsCgOverride = {
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   stillPng?: string;
   movieMov?: string;
   movieDuration?: number;
@@ -66,6 +69,7 @@ export type MapsSlide = {
   churches: MapsChurch[];
   hiddenLayers?: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   stillPng?: string;
   cgShiftX: number;
   cgShiftY: number;
@@ -214,7 +218,7 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
   };
 }
 
-export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade";
+export type MapsAppearanceField = "style" | "highlights" | "hiddenLayers" | "hillshade" | "isolate";
 
 export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearanceField[] {
   const out: MapsAppearanceField[] = [];
@@ -224,6 +228,8 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
   const layers = (s: MapsSlide) => slideHiddenLayers(s).sort().join(",");
   if (layers(from) !== layers(to)) out.push("hiddenLayers");
   if ((from.hillshade === true) !== (to.hillshade === true)) out.push("hillshade");
+  const iso = (s: MapsSlide) => (s.isolate ? `${s.isolate.mode}:${s.isolate.strength.toFixed(2)}` : "off");
+  if (iso(from) !== iso(to)) out.push("isolate");
   return out;
 }
 
@@ -376,15 +382,26 @@ export function parseRoute(raw: unknown): MapsRoute | undefined {
   return { points: next };
 }
 
+export function parseIsolate(raw: unknown): MapsIsolate | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const mode = (raw as { mode?: unknown }).mode;
+  if (mode !== "darken" && mode !== "erase") return undefined;
+  const strengthRaw = Number((raw as { strength?: unknown }).strength);
+  const strength = Number.isFinite(strengthRaw) ? Math.max(0, Math.min(1, strengthRaw)) : 0.6;
+  return { mode, strength };
+}
+
 function cgFromResult(cg: MapsCgOverride | undefined): MapsCgOverride | undefined {
   if (!cg) return undefined;
-  const { hiddenLayers, hillshade, ...rest } = cg;
+  const { hiddenLayers, hillshade, isolate, ...rest } = cg;
+  const iso = parseIsolate(isolate);
   return {
     ...rest,
     highlights: cg.highlights || [],
     churches: cg.churches || [],
     ...(hiddenLayers ? { hiddenLayers: parseHiddenLayers(hiddenLayers) } : {}),
     ...(typeof hillshade === "boolean" ? { hillshade } : {}),
+    ...(iso ? { isolate: iso } : {}),
     camera: { ...cg.camera, zoom: clampZoom(cg.camera.zoom), lon: wrapLon(cg.camera.lon) },
   };
 }
@@ -401,6 +418,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     churches: slide.churches || [],
     hiddenLayers: parseHiddenLayers(slide.hiddenLayers ?? deckHidden),
     hillshade: slide.hillshade === true,
+    isolate: parseIsolate(slide.isolate),
     cg: cgFromResult(slide.cg),
     camera: {
       ...slide.camera,

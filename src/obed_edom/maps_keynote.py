@@ -461,6 +461,7 @@ def maps_export_plan(
                 "highlights": list(slide.get("highlights") or []),
                 "hiddenLayers": slide_hidden_layers(slide),
                 "hillshade": bool(slide.get("hillshade")),
+                "isolate": slide.get("isolate"),
                 "width": cap_w,
                 "height": cap_h,
             }
@@ -483,6 +484,7 @@ def maps_export_plan(
                 "highlights": list((first or {}).get("highlights") or []),
                 "hiddenLayers": slide_hidden_layers(first or {}),
                 "hillshade": bool((first or {}).get("hillshade")),
+                "isolate": (first or {}).get("isolate"),
             }
         )
     if audience == "cg":

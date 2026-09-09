@@ -31,6 +31,10 @@ function layersLabel(ids: MapsLayerFilterId[], relief: boolean): string {
   return relief ? `${base} · relief on` : base;
 }
 
+function isolateLabel(s: MapsSlide): string {
+  return s.isolate ? `${s.isolate.mode} ${Math.round(s.isolate.strength * 100)}%` : "off";
+}
+
 function fmtDeg(n: number): string {
   const rounded = Math.abs(n) < 0.05 ? 0 : n;
   return `${rounded.toFixed(0)}°`;
@@ -71,6 +75,13 @@ export function morphGateList(from: MapsSlide, to: MapsSlide): Gate[] {
           ? countriesLabel(fromHi)
           : `${countriesLabel(fromHi)} → ${countriesLabel(toHi)}`,
       tip: "Highlighted regions must match on both shots. Panning part of the map off-screen is fine.",
+    },
+    {
+      id: "isolate",
+      label: "Same isolate",
+      ok: !mismatch.has("isolate"),
+      detail: isolateLabel(from) === isolateLabel(to) ? isolateLabel(from) : `${isolateLabel(from)} → ${isolateLabel(to)}`,
+      tip: "Isolate country (darken/erase) must match on both shots.",
     },
     {
       id: "layers",

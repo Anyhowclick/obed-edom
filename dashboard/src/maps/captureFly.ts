@@ -6,6 +6,7 @@ import {
   type MapsCamera,
   type MapsChurch,
   type MapsEasing,
+  type MapsIsolate,
   type MapsLayerFilterId,
   type MapsRoutePoint,
   type MapsStyleId,
@@ -379,6 +380,7 @@ export async function captureFlyFrames(opts: {
   highlights: string[];
   hiddenLayers: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   churches?: MapsChurch[];
   destinationChurches?: MapsChurch[];
   objectTransition?: "fade" | "hold";
@@ -412,6 +414,7 @@ export async function captureFlyFrames(opts: {
     highlights,
     hiddenLayers,
     hillshade,
+    isolate,
     churches,
     destinationChurches,
     objectTransition,
@@ -440,6 +443,7 @@ export async function captureFlyFrames(opts: {
     highlights,
     hiddenLayers,
     hillshade,
+    isolate,
     churches: destinationChurches ? [...(churches || []), ...destinationChurches] : churches,
     numberPins,
     assetBaseUrl,

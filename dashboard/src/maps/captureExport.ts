@@ -9,6 +9,7 @@ import { installPatternById, installPatterns, stylePatterns } from "./watercolou
 import {
   type MapsCamera,
   type MapsChurch,
+  type MapsIsolate,
   type MapsLayerFilterId,
   type MapsStyleId,
 } from "./types";
@@ -124,6 +125,7 @@ export type ExportMapOpts = {
   highlights: string[];
   hiddenLayers: MapsLayerFilterId[];
   hillshade?: boolean;
+  isolate?: MapsIsolate;
   churches?: MapsChurch[];
   numberPins?: boolean;
   assetBaseUrl?: string;
@@ -139,6 +141,7 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     highlights,
     hiddenLayers,
     hillshade = false,
+    isolate,
     churches,
     numberPins = false,
     assetBaseUrl,
@@ -179,9 +182,9 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
     if (churches) {
-      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl);
+      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl, 1, isolate);
     } else {
-      await ensureAdmin0Highlights(map, highlights, styleId);
+      await ensureAdmin0Highlights(map, highlights, styleId, isolate);
     }
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);

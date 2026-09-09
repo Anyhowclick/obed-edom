@@ -1143,3 +1143,22 @@ def test_tile_cache_prefetch_rejects_bad_rel_batches(tmp_path, monkeypatch):
         },
     )
     assert combined.status_code == 400
+
+
+def test_isolate_rejects_unknown_mode():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "blur", "strength": 0.5}
+    response = _save(job, doc)
+    assert response.status_code == 400
+
+
+def test_isolate_round_trips_on_save():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "erase", "strength": 0.35}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "erase", "strength": 0.35}
+    fetched = client.get(f"/api/jobs/{job['id']}")
+    assert fetched.json()["result"]["slides"][0]["isolate"] == {"mode": "erase", "strength": 0.35}

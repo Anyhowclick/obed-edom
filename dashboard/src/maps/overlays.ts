@@ -1,9 +1,14 @@
 import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
-import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsStyleId } from "./types";
+import { isolateMaskGeometry } from "./isolate";
+import { STYLE_SWATCHES } from "./styles";
+import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 
 export type Admin0 = {
   type: "FeatureCollection";
-  features: Array<{ properties?: { ADM0_A3?: string; NAME?: string } | null }>;
+  features: Array<{
+    properties?: { ADM0_A3?: string; NAME?: string } | null;
+    geometry?: { type: string; coordinates: unknown } | null;
+  }>;
 };
 
 export function admin0Name(code: string): string {
@@ -90,7 +95,55 @@ function firstSymbolId(map: MapLibreMap): string | undefined {
   return style?.layers?.find((layer) => layer.type === "symbol")?.id;
 }
 
-export async function ensureAdmin0Highlights(map: MapLibreMap, highlights: string[], styleId?: string): Promise<void> {
+function backgroundColor(map: MapLibreMap, styleId?: string): string {
+  const style = map.getStyle();
+  const bgLayer = style?.layers?.find((layer) => layer.type === "background");
+  const color = (bgLayer as { paint?: { "background-color"?: unknown } } | undefined)?.paint?.["background-color"];
+  if (typeof color === "string") return color;
+  return STYLE_SWATCHES.find((item) => item.id === styleId)?.color || "#ffffff";
+}
+
+const isolateModeByMap = new WeakMap<MapLibreMap, MapsIsolate["mode"]>();
+
+export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: MapsIsolate | undefined, styleId?: string): void {
+  if (!map.getStyle()) return;
+  const mask = isolate ? isolateMaskGeometry((admin0Cache?.features || []) as never, highlights) : null;
+  if (!isolate || !mask) {
+    if (map.getLayer("isolate-fill")) map.removeLayer("isolate-fill");
+    if (map.getSource("isolate")) map.removeSource("isolate");
+    isolateModeByMap.delete(map);
+    return;
+  }
+  const source = map.getSource("isolate") as GeoJSONSource | undefined;
+  if (source && isolateModeByMap.get(map) === isolate.mode) {
+    source.setData(mask);
+  } else {
+    if (map.getLayer("isolate-fill")) map.removeLayer("isolate-fill");
+    if (map.getSource("isolate")) map.removeSource("isolate");
+    map.addSource("isolate", { type: "geojson", data: mask });
+    map.addLayer(
+      {
+        id: "isolate-fill",
+        type: "fill",
+        source: "isolate",
+        paint: {
+          "fill-color": isolate.mode === "darken" ? "#000000" : backgroundColor(map, styleId),
+          "fill-opacity": Math.max(0, Math.min(1, isolate.strength)),
+          "fill-antialias": false,
+        },
+      },
+      isolate.mode === "darken" ? firstSymbolId(map) : undefined
+    );
+    isolateModeByMap.set(map, isolate.mode);
+  }
+}
+
+export async function ensureAdmin0Highlights(
+  map: MapLibreMap,
+  highlights: string[],
+  styleId?: string,
+  isolate?: MapsIsolate
+): Promise<void> {
   ensureLowZoomRaster(map, styleId);
   const data = await loadAdmin0();
   if (!data) return;
@@ -126,6 +179,7 @@ export async function ensureAdmin0Highlights(map: MapLibreMap, highlights: strin
     );
   }
   applyHighlights(map, highlights);
+  applyIsolate(map, highlights, isolate, styleId);
 }
 
 export function churchesGeo(
@@ -240,9 +294,10 @@ export async function addOverlays(
   styleId: MapsStyleId,
   numberPins: boolean,
   assetBaseUrl?: string,
-  objectScale = 1
+  objectScale = 1,
+  isolate?: MapsIsolate
 ) {
-  await ensureAdmin0Highlights(map, highlights, styleId);
+  await ensureAdmin0Highlights(map, highlights, styleId, isolate);
   ensureDropPinImages(map, churches);
   await ensureLandmarkImages(map, churches, assetBaseUrl);
   const pins = churchesGeo(churches, selectedPinId, numberPins, objectScale);
@@ -307,4 +362,5 @@ export async function addOverlays(
     (map.getSource("churches") as GeoJSONSource).setData(pins);
   }
   applyHighlights(map, highlights);
+  applyIsolate(map, highlights, isolate, styleId);
 }

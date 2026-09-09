@@ -5,7 +5,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt } from "./overlays";
+import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt } from "./overlays";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyBoundaryZoomOffset } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainUrl, stylePatterns } from "./watercolourStyle";
@@ -19,6 +19,7 @@ import {
   type MapsChurch,
   type MapsCropId,
   type MapsEasing,
+  type MapsIsolate,
   type MapsLayerFilterId,
   type MapsRoutePoint,
   type MapsStyleId,
@@ -200,6 +201,7 @@ type Props = {
   exportCg: boolean;
   hiddenLayers: MapsLayerFilterId[];
   hillshade: boolean;
+  isolate?: MapsIsolate;
   cgShiftX: number;
   authoredWidth?: number;
   previewing: boolean;
@@ -232,6 +234,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     exportCg,
     hiddenLayers,
     hillshade,
+    isolate,
     cgShiftX,
     authoredWidth = WALL_W,
     previewing,
@@ -256,7 +259,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const overlayGeneration = useRef(0);
   const previewingRef = useRef(previewing);
   const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort });
-  const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, numberPins });
+  const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins });
   const cgDrag = useRef<{ x: number; shift: number; width: number } | null>(null);
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
@@ -283,7 +286,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   minZoomRef.current = minZoomForView();
   authoredWidthRef.current = authoredWidth;
   callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onCgShift, onPreviewAbort };
-  overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, numberPins };
+  overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins };
 
   useImperativeHandle(ref, () => ({
     jumpTo(next) {
@@ -540,7 +543,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             overlay.current.styleId,
             overlay.current.numberPins,
             assetBaseUrl,
-            objectPreviewScale(currentMap, authoredWidthRef.current)
+            objectPreviewScale(currentMap, authoredWidthRef.current),
+            overlay.current.isolate
           ).then(() => {
             if (mapRef.current === currentMap && overlayGeneration.current === generation) {
               styleReady.current = true;
@@ -682,7 +686,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!map?.getSource("admin0")) return;
     applyHighlights(map, highlights);
-  }, [highlights]);
+    applyIsolate(map, highlights, isolate, styleId);
+  }, [highlights, isolate?.mode, isolate?.strength]);
 
   useEffect(() => {
     const map = mapRef.current;

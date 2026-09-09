@@ -63,6 +63,7 @@ import {
   type MapsDocument,
   type MapsEasing,
   type MapsHopKind,
+  type MapsIsolate,
   type MapsLayerFilterId,
   type MapsLink,
   type MapsPinKind,
@@ -523,13 +524,13 @@ export function MapsTab() {
     const view = slide ? slideForAudience(slide, audience) : null;
     if (!view) return;
     const token = ++thumbnailToken.current;
-    const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade });
+    const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade, isolate: view.isolate });
     await mapRef.current?.waitUntilIdle(view.style);
     if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
     const blob = await mapRef.current?.captureBlob();
     if (!blob || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
     const latest = docRef.current?.slides.find((item) => item.id === slideId);
-    if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade }) !== fingerprint) return;
+    if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade, isolate: slideForAudience(latest, audience).isolate }) !== fingerprint) return;
     const hillshade = view?.hillshade === true;
     const stamped = await stampOsm(blob, hillshade, view?.style);
     if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
@@ -629,6 +630,7 @@ export function MapsTab() {
         style: source.style,
         highlights: [...source.highlights],
         churches: source.churches.map((church) => ({ ...church })),
+        isolate: source.isolate,
       },
     });
     activeAudienceRef.current = "cg";
@@ -1277,6 +1279,7 @@ export function MapsTab() {
           highlights: still.highlights,
           hiddenLayers: slideHiddenLayers(still),
           hillshade: (still.hillshade as boolean | undefined) === true,
+          isolate: still.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
         });
         throwIfCancelled();
@@ -1295,6 +1298,7 @@ export function MapsTab() {
           highlights: plate.highlights,
           hiddenLayers: slideHiddenLayers(plate),
           hillshade: (plate.hillshade as boolean | undefined) === true,
+          isolate: plate.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
         });
         throwIfCancelled();
@@ -1314,6 +1318,7 @@ export function MapsTab() {
             highlights: still.highlights,
             hiddenLayers: slideHiddenLayers(still),
             hillshade: (still.hillshade as boolean | undefined) === true,
+            isolate: still.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
           });
           throwIfCancelled();
@@ -1332,6 +1337,7 @@ export function MapsTab() {
             highlights: plate.highlights,
             hiddenLayers: slideHiddenLayers(plate),
             hillshade: (plate.hillshade as boolean | undefined) === true,
+            isolate: plate.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
           });
           throwIfCancelled();
@@ -1389,6 +1395,7 @@ export function MapsTab() {
           highlights: from.highlights,
           hiddenLayers: slideHiddenLayers(from),
           hillshade: from.hillshade === true,
+          isolate: from.isolate,
           churches: from.churches,
           destinationChurches: to.churches,
           objectTransition: link.objectTransition,
@@ -1465,6 +1472,7 @@ export function MapsTab() {
             highlights: from.highlights,
             hiddenLayers: slideHiddenLayers(from),
             hillshade: from.hillshade === true,
+            isolate: from.isolate,
             churches: from.churches,
             destinationChurches: to.churches,
             objectTransition: link.objectTransition,
@@ -1945,6 +1953,7 @@ export function MapsTab() {
                 camera={renderedView?.camera || active.camera}
                 styleId={renderedView?.style || active.style}
                 highlights={renderedView?.highlights || active.highlights}
+                isolate={renderedView?.isolate || active.isolate}
                 churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
@@ -2268,6 +2277,45 @@ export function MapsTab() {
                       </div>
                     </div>
                   )}
+                  <div className="maps-hl">
+                    <div className="cap">Isolate country</div>
+                    <label>
+                      Mode:
+                      <select
+                        value={activeView?.isolate?.mode || "off"}
+                        disabled={locked}
+                        onChange={(event) => {
+                          const value = event.target.value as "off" | "darken" | "erase";
+                          updateActive({
+                            isolate: value === "off" ? undefined : { mode: value, strength: activeView?.isolate?.strength ?? 0.6 },
+                          });
+                        }}
+                      >
+                        <option value="off">Off</option>
+                        <option value="darken">Darken</option>
+                        <option value="erase">Erase</option>
+                      </select>
+                    </label>
+                    {activeView?.isolate && (
+                      <AeScrub
+                        label="Strength"
+                        value={activeView.isolate.strength}
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        slider
+                        digits={2}
+                        disabled={locked}
+                        onChange={(strength) => updateActive({ isolate: { ...activeView.isolate!, strength } })}
+                        onCommit={() => void flushAndSave(true)}
+                      />
+                    )}
+                    <p className="note">
+                      {(activeView?.highlights.length || 0)
+                        ? "Applies to the orange countries above."
+                        : "Add an orange country first — isolate does nothing without one."}
+                    </p>
+                  </div>
                 </>
               )}
               {inspTab === "pins" && (
