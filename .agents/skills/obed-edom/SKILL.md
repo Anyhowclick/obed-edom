@@ -1,13 +1,12 @@
 ---
-
 name: obed-edom
 description: >-
-Generates LW (LED wall) and DSK Keynote decks from semantic-cue sermon,
-offering, or testimony Word outlines; writes [LW]/[DSK] show-call cues,
-audits Bible references, and resizes wall decks to 16:9 CG. Use for sermon
-slides, DSK, LW, FW, LED cues, Keynote templates, generate/remap/dashboard
-work, or Keynote automation in this repo.
------------------------------------------
+  Generates LW (LED wall) and DSK Keynote decks from semantic-cue sermon,
+  offering, or testimony Word outlines; writes [LW]/[DSK] show-call cues,
+  audits Bible references, and resizes wall decks to 16:9 CG. Use for sermon
+  slides, DSK, LW, FW, LED cues, Keynote templates, generate/remap/dashboard
+  work, or Keynote automation in this repo.
+---
 
 # Obed-Edom
 
