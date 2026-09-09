@@ -2419,6 +2419,8 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   white-space: normal;
 }
 .morph-gate.bad .morph-gate-detail { color: #ff8a8a; }
+.morph-gate.soft { color: var(--ink-secondary); }
+.morph-gate.soft .morph-gate-detail { color: var(--warn); }
 .morph-mark {
   width: 16px;
   height: 16px;
@@ -2441,6 +2443,11 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   box-shadow: 0 0 10px rgba(255, 77, 77, 0.45);
   animation: morph-lamp-bad 1.15s ease-in-out infinite;
 }
+.morph-mark.soft {
+  color: var(--warn);
+  background: transparent;
+  animation: morph-warn-pulse 1.6s ease-in-out infinite;
+}
 .morph-gates-hint {
   margin: 2px 0 0;
   font-size: 11px;
@@ -2458,9 +2465,14 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   0%, 100% { box-shadow: 0 0 4px rgba(255, 77, 77, 0.25); opacity: 0.78; }
   50% { box-shadow: 0 0 12px 2px rgba(255, 77, 77, 0.55); opacity: 1; }
 }
+@keyframes morph-warn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 @media (prefers-reduced-motion: reduce) {
   .morph-mark.ok,
-  .morph-mark.bad { animation: none; opacity: 1; }
+  .morph-mark.bad,
+  .morph-mark.soft { animation: none; opacity: 1; }
 }
 .morph-sr {
   position: absolute;

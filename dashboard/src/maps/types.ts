@@ -237,6 +237,11 @@ export function appearanceMismatch(from: MapsSlide, to: MapsSlide): MapsAppearan
   return out;
 }
 
+/** Isolate/highlight mismatches on a Movie hop are expected (landing slide or darkened fly + cut) — never style/layers. */
+export function softMovieFields(_from: MapsSlide, _to: MapsSlide): Set<MapsAppearanceField> {
+  return new Set<MapsAppearanceField>(["highlights", "isolate"]);
+}
+
 export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
   const target: MapsSlide = to.isolate && to.highlights.length ? { ...to, highlights: [], isolate: undefined } : to;
   if (appearanceMismatch(from, target).length > 0) return true;

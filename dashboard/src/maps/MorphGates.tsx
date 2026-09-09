@@ -11,11 +11,24 @@ import {
   bearingDelta,
   captureWidth,
   slideHiddenLayers,
+  softMovieFields,
   type MapsLayerFilterId,
   type MapsSlide,
 } from "./types";
 
 type Gate = { id: string; label: string; ok: boolean; detail: string; tip: string };
+
+function WarnMark({ className = "" }: { className?: string }) {
+  return (
+    <span className={`morph-mark soft ${className}`.trim()} aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+        <path d="M8 1.6 14.8 13.6H1.2Z" />
+        <path d="M8 6.2v3.6" strokeLinecap="round" />
+        <circle cx="8" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      </svg>
+    </span>
+  );
+}
 
 function styleLabel(id: MapsSlide["style"]): string {
   return STYLE_SWATCHES.find((item) => item.id === id)?.label || id;
@@ -186,29 +199,37 @@ export function MovieAppearanceGate({
   disabled: boolean;
   onMatch: () => void;
 }) {
-  const landing = to.isolate && to.highlights.length ? ({ ...to, highlights: [], isolate: undefined } as MapsSlide) : null;
-  const rows = morphGateList(from, landing || to).filter((gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "isolate" || gate.id === "layers") && !gate.ok);
-  if (!rows.length && !crossAudience) {
-    if (!landing) return null;
-    return (
-      <div className="morph-gates" role="status" aria-label="Movie appearance">
-        <p className="morph-gates-hint">Lands on the plain view, then dissolves into the isolated view.</p>
-      </div>
-    );
-  }
-  const showMatchButton = rows.some((gate) => gate.id === "layers");
+  const destIsolated = !!(to.isolate && to.highlights.length);
+  const sourceIsolated = !!from.isolate && !destIsolated;
+  const softFields = softMovieFields(from, to);
+  const allRows = morphGateList(from, to).filter(
+    (gate) => (gate.id === "style" || gate.id === "countries" || gate.id === "isolate" || gate.id === "layers") && !gate.ok,
+  );
+  const isSoftRow = (gate: Gate) =>
+    (gate.id === "countries" && softFields.has("highlights")) || (gate.id === "isolate" && softFields.has("isolate"));
+  const hardRows = allRows.filter((gate) => !isSoftRow(gate));
+  const softRows = allRows.filter(isSoftRow);
+  const hasHard = hardRows.length > 0 || crossAudience;
+
+  if (!hasHard && !softRows.length && !destIsolated && !sourceIsolated) return null;
+
+  const showMatchButton = hardRows.some((gate) => gate.id === "layers");
   return (
-    <div className="morph-gates warn" role="status" aria-label="Movie appearance mismatch">
+    <div className="morph-gates warn" role="status" aria-label={hasHard ? "Movie appearance mismatch" : "Movie appearance heads-up"}>
       <div className="morph-gates-head">
-        <span className="morph-mark bad" aria-hidden="true">
-          ✕
-        </span>
+        {hasHard ? (
+          <span className="morph-mark bad" aria-hidden="true">
+            ✕
+          </span>
+        ) : (
+          <WarnMark />
+        )}
         Movie appearance
-        <span className="morph-gates-state">Mismatch</span>
+        <span className="morph-gates-state">{hasHard ? "Mismatch" : "Heads-up"}</span>
       </div>
-      {rows.length > 0 && (
+      {(hardRows.length > 0 || softRows.length > 0) && (
         <ul className="morph-gate-list">
-          {rows.map((gate) => (
+          {hardRows.map((gate) => (
             <li key={gate.id} className="morph-gate bad" title={gate.tip}>
               <span className="morph-mark bad" aria-hidden="true">
                 ✕
@@ -220,16 +241,29 @@ export function MovieAppearanceGate({
               <span className="morph-gate-detail">{gate.detail}</span>
             </li>
           ))}
+          {softRows.map((gate) => (
+            <li key={gate.id} className="morph-gate soft" title={gate.tip}>
+              <WarnMark />
+              <span className="morph-gate-label">
+                <span className="morph-sr">Heads-up: </span>
+                {gate.label}
+              </span>
+              <span className="morph-gate-detail">{gate.detail}</span>
+            </li>
+          ))}
         </ul>
       )}
-      <p className="morph-gates-hint">
-        The fly renders entirely in the source shot's appearance, so these differences pop at the cut to the next
-        slide. Style, highlight, or isolate mismatches are not auto-copied — use "Reset hop" to re-suggest a hop kind instead.
-      </p>
+      {hasHard && (
+        <p className="morph-gates-hint">
+          The fly renders entirely in the source shot's appearance, so these differences pop at the cut to the next
+          slide. Style, highlight, or isolate mismatches are not auto-copied — use "Reset hop" to re-suggest a hop kind instead.
+        </p>
+      )}
       {crossAudience && (
         <p className="morph-gates-hint">The other audience also mismatches on this hop and must be fixed by switching audiences.</p>
       )}
-      {landing && <p className="morph-gates-hint">Lands on the plain view, then dissolves into the isolated view.</p>}
+      {destIsolated && <p className="morph-gates-hint">Lands on the plain view, then dissolves into the isolated view.</p>}
+      {sourceIsolated && <p className="morph-gates-hint">The fly stays darkened, then cuts to the plain view.</p>}
       {showMatchButton && (
         <button
           type="button"
