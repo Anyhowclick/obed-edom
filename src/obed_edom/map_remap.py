@@ -3887,9 +3887,12 @@ def _recipe_reusing_affine(
     if src is None or src.w <= 0 or src.h <= 0 or affine.s <= 0:
         return None
     # Offline geometry reports a rotated item's AABB top-left with its UNROTATED w/h (iwa_geometry
-    # `_frame_rect`), so `_cover_clamp`'s axis-aligned covers-the-frame test is meaningless for it —
-    # refuse the clamp rather than move an already-valid rotated crop on bad arithmetic.
-    if panel_item is None or _f(panel_item.get("rotation")) % 360 == 0:
+    # `_frame_rect`), so `_cover_clamp`'s axis-aligned covers-the-frame test is only meaningful once
+    # the source is positively known to be unrotated. If no panel item was resolved (src fell back to
+    # mapSrc) or its rotation is absent/unknown, that cannot be proven — refuse the clamp rather than
+    # move an already-valid crop on an unproven assumption.
+    known_rotation = panel_item.get("rotation") if panel_item is not None else None
+    if known_rotation is not None and _f(known_rotation) % 360 == 0:
         affine = _cover_clamp(affine, src, dest_w, dest_h)
     dst = affine.apply_rect(src)
     out = dict(recipe)

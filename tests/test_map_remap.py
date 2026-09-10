@@ -327,29 +327,35 @@ def test_reused_affine_clamps_to_cover_the_frame_only_where_the_panel_is_big_eno
     tall as the destination frame on an axis, that axis is clamped so it covers
     with no gap -- exactly the Gold slide 5 -> 6/7 case, where slide 5's inset
     ty=+130 would otherwise leave a bare band. A panel smaller than the frame on
-    an axis is left alone: there is nothing to cover with."""
+    an axis is left alone: there is nothing to cover with. The panel item must
+    win `_centre_panel_item` and report rotation=0 for the clamp to be trusted
+    at all -- see test_the_clamp_refuses_a_reuse_source_with_no_resolved_panel."""
     from obed_edom.map_remap import frame_affine
 
-    slide = {"number": 6, "items": []}
+    slide_with_panel = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1821, y=0, w=3840, h=1080, rotation=0)],
+    }
 
     full_bleed = {
         "destWidth": 1920.0, "destHeight": 1080.0,
         "mapSrc": {"x": 1821.0, "y": 0.0, "w": 3840.0, "h": 1080.0},
     }
     clamped = frame_affine(
-        _recipe_reusing_affine(slide, full_bleed, Affine(s=1.0, tx=-2932.0, ty=130.0), 7680.0, 1080.0)
+        _recipe_reusing_affine(slide_with_panel, full_bleed, Affine(s=1.0, tx=-2932.0, ty=130.0), 7680.0, 1080.0)
     )
     assert clamped.tx == -2932.0  # width already covers; untouched
     assert clamped.ty == 0.0  # height covers exactly; ty clamps to close the gap
 
+    slide_without_panel = {"number": 6, "items": []}
     smaller = {
         "destWidth": 1920.0, "destHeight": 1080.0,
         "mapSrc": {"x": 0.0, "y": 0.0, "w": 500.0, "h": 400.0},
     }
     unclamped = frame_affine(
-        _recipe_reusing_affine(slide, smaller, Affine(s=1.0, tx=100.0, ty=50.0), 7680.0, 1080.0)
+        _recipe_reusing_affine(slide_without_panel, smaller, Affine(s=1.0, tx=100.0, ty=50.0), 7680.0, 1080.0)
     )
-    assert unclamped.tx == 100.0 and unclamped.ty == 50.0  # neither axis covers; nothing to clamp
+    assert unclamped.tx == 100.0 and unclamped.ty == 50.0  # no panel resolved; nothing to clamp
 
 
 def test_the_clamp_refuses_a_rotated_reuse_source():
@@ -379,6 +385,51 @@ def test_the_clamp_refuses_a_rotated_reuse_source():
     clamped = frame_affine(_recipe_reusing_affine(upright_slide, recipe, affine, 7680.0, 1080.0))
     assert clamped.tx == -2932.0
     assert clamped.ty == 0.0  # same geometry, no rotation: clamps as before
+
+
+def test_the_clamp_refuses_a_reuse_source_with_no_resolved_panel():
+    """A rotated source too narrow to win `_centre_panel_item` (CENTRE_PANEL_MIN_WIDTH_FRAMES *
+    dest_w = 1.7 * 1920 = 3264) leaves `panel_item` None, so `src` falls back to `mapSrc` -- the
+    same axis-aligned-AABB blindness `test_the_clamp_refuses_a_rotated_reuse_source` guards against,
+    reached through a different door. Clamping here would move an already-valid editorial crop:
+    a 3000x1080 rotated image reported at (2200, -100), reused with ty=0, would get ty pushed to
+    100 by a blind clamp. Refuse to clamp whenever the panel item -- and therefore its rotation --
+    cannot be positively identified."""
+    from obed_edom.map_remap import frame_affine
+
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 2200.0, "y": -100.0, "w": 3000.0, "h": 1080.0},
+    }
+    affine = Affine(s=1.0, tx=-2200.0, ty=0.0)
+
+    slide = {
+        "number": 6,
+        "items": [
+            _item(index=0, kind="image", fileName="Panel.png", x=2200, y=-100, w=3000, h=1080, rotation=10),
+        ],
+    }
+    unclamped = frame_affine(_recipe_reusing_affine(slide, recipe, affine, 7680.0, 1080.0))
+    assert unclamped.tx == -2200.0
+    assert unclamped.ty == 0.0  # refused: no panel item resolved, so rotation cannot be proven safe
+
+
+def test_the_clamp_refuses_a_panel_item_with_no_rotation_key():
+    """`rotation` absent is not the same as proven zero -- every production reader stamps it, but the
+    guard must not rely on that being true everywhere; `_f`'s None-default would otherwise silently
+    treat "unknown" as "unrotated"."""
+    from obed_edom.map_remap import frame_affine
+
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0}
+    affine = Affine(s=1.0, tx=-2932.0, ty=130.0)
+
+    slide = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1920, y=0, w=3840, h=1080)],
+    }
+    unclamped = frame_affine(_recipe_reusing_affine(slide, recipe, affine, 7680.0, 1080.0))
+    assert unclamped.tx == -2932.0
+    assert unclamped.ty == 130.0  # rotation key missing: refused, not defaulted to unrotated
 
 
 def test_a_letterboxed_predecessor_never_seeds_reuse():
