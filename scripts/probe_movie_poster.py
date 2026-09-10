@@ -18,6 +18,15 @@ Ask the owner to run ``dump`` on the deck where they have already set a poster f
 by hand, AND on an untouched export of the same deck -- diffing the two answers
 whether a manual poster-frame set writes posterTime alone or posterTime plus a fresh
 posterImageData.
+
+``patch`` default selection skips full-width background fly movies (WALL centre
+band, width >= 3840, or frame spans the full slide height 1080) and only patches
+landmark-sized archives; pass ``--all`` to patch every archive found, or ``--id``
+to patch one specific archive regardless of size.
+
+Probe result (2026-09-10, Keynote 15.3.1): setting a poster frame by hand in the
+Keynote UI changes only ``posterTime`` (to ``endTime``) -- no ``posterImageData``,
+database-backed poster image, or alpha-support field changes.
 """
 from __future__ import annotations
 
@@ -92,6 +101,39 @@ def _resolve_poster(archive: dict, poster: str) -> float:
     return float(poster)
 
 
+FULL_WIDTH_MIN = 3840.0
+FULL_HEIGHT = 1080.0
+
+
+def select_archives_to_patch(
+    archives: list[dict], *, all_archives: bool = False, only_id: str | None = None
+) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Pick which archives ``patch`` touches. Returns (selected, skipped) where
+    skipped is [(id, reason), ...].
+
+    Default: skip full-width background fly movies (WALL centre band width
+    >= FULL_WIDTH_MIN, or a frame spanning the full slide height FULL_HEIGHT) so
+    ``patch`` without flags can't silently repoint a background movie's poster;
+    only landmark-sized archives are kept. ``--all`` opts back into everything.
+    ``--id`` overrides selection entirely and patches just that one archive.
+    """
+    if only_id is not None:
+        selected = [a for a in archives if a["id"] == only_id]
+        return selected, []
+    if all_archives:
+        return list(archives), []
+    selected: list[dict] = []
+    skipped: list[tuple[str, str]] = []
+    for a in archives:
+        if a["w"] >= FULL_WIDTH_MIN:
+            skipped.append((a["id"], f"width {a['w']:.1f} >= {FULL_WIDTH_MIN:.0f} (WALL centre band)"))
+        elif a["h"] >= FULL_HEIGHT:
+            skipped.append((a["id"], f"height {a['h']:.1f} spans full slide height {FULL_HEIGHT:.0f}"))
+        else:
+            selected.append(a)
+    return selected, skipped
+
+
 def cmd_patch(args: argparse.Namespace) -> int:
     if not args.deck.exists():
         raise SystemExit(f"--deck not found: {args.deck}")
@@ -104,11 +146,14 @@ def cmd_patch(args: argparse.Namespace) -> int:
     shutil.copyfile(args.deck, copy_path)
     print(f"copied {args.deck} -> {copy_path}")
 
-    archives = movie_archives(copy_path)
-    if args.id:
-        archives = [a for a in archives if a["id"] == args.id]
-        if not archives:
-            raise SystemExit(f"--id {args.id} not found in deck")
+    all_archives = movie_archives(copy_path)
+    if args.id and args.id not in {a["id"] for a in all_archives}:
+        raise SystemExit(f"--id {args.id} not found in deck")
+    archives, skipped = select_archives_to_patch(all_archives, all_archives=args.all, only_id=args.id)
+    for oid, reason in skipped:
+        print(f"SKIP {oid}: {reason}")
+    if not archives:
+        raise SystemExit("no archives selected to patch")
     posters = {a["id"]: _resolve_poster(a, args.poster) for a in archives}
     result = patch_movie_posters(copy_path, posters)
     print(f"PATCH: refused={result['refused']} applied={result.get('applied')}")
@@ -215,7 +260,9 @@ def main(argv: list[str] | None = None) -> int:
     patch_ap = sub.add_parser("patch", help="offline: copy, patch posterTime, re-dump")
     patch_ap.add_argument("deck", type=Path)
     patch_ap.add_argument("--poster", default="last", help='"last" or a literal seconds value')
-    patch_ap.add_argument("--id", default=None, help="patch only this archive id (default: all found)")
+    patch_ap.add_argument("--id", default=None, help="patch only this archive id, regardless of size")
+    patch_ap.add_argument("--all", action="store_true",
+                           help="patch every archive found, including full-width background movies")
     patch_ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help="scratch dir for the copy")
     patch_ap.add_argument("--force", action="store_true", help="overwrite an existing copy at --out")
     patch_ap.set_defaults(func=cmd_patch)

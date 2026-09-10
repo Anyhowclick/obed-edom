@@ -6,13 +6,49 @@ from pathlib import Path
 
 import pytest
 
-from scripts.probe_movie_poster import _resolve_poster, reopen_applescript
+from scripts.probe_movie_poster import _resolve_poster, reopen_applescript, select_archives_to_patch
 
 
 def _archive(**extra) -> dict:
-    base = {"id": "300", "startTime": 0.0, "endTime": 0.0}
+    base = {"id": "300", "startTime": 0.0, "endTime": 0.0, "w": 640.0, "h": 360.0}
     base.update(extra)
     return base
+
+
+def test_select_default_keeps_landmark_sized_archives():
+    landmark = _archive(id="1", w=640.0, h=360.0)
+    selected, skipped = select_archives_to_patch([landmark])
+    assert selected == [landmark]
+    assert skipped == []
+
+
+def test_select_default_skips_full_width_background_movie():
+    wall = _archive(id="2", w=3840.0, h=1080.0)
+    selected, skipped = select_archives_to_patch([wall])
+    assert selected == []
+    assert skipped == [("2", "width 3840.0 >= 3840 (WALL centre band)")]
+
+
+def test_select_default_skips_full_slide_height_movie_even_if_narrower():
+    tall = _archive(id="3", w=1920.0, h=1080.0)
+    selected, skipped = select_archives_to_patch([tall])
+    assert selected == []
+    assert skipped == [("3", "height 1080.0 spans full slide height 1080")]
+
+
+def test_select_all_opts_back_into_full_width_archives():
+    wall = _archive(id="4", w=3840.0, h=1080.0)
+    selected, skipped = select_archives_to_patch([wall], all_archives=True)
+    assert selected == [wall]
+    assert skipped == []
+
+
+def test_select_id_overrides_size_based_skip():
+    wall = _archive(id="5", w=3840.0, h=1080.0)
+    landmark = _archive(id="6", w=640.0, h=360.0)
+    selected, skipped = select_archives_to_patch([wall, landmark], only_id="5")
+    assert selected == [wall]
+    assert skipped == []
 
 
 def test_resolve_poster_last_refuses_without_explicit_positive_end_time():
