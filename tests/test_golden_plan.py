@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("keynote_parser")
 
 from scripts import golden_plan  # noqa: E402
+from scripts.bank_jxa_slide_digests import BANK_VERSION, bank_path  # noqa: E402
 from scripts.golden_plan import (  # noqa: E402
     ENV_PINS,
     FONT_ENV_UNAVAILABLE,
@@ -253,14 +254,92 @@ def test_propose_auto_rects_match_apply_transforms(monkeypatch: pytest.MonkeyPat
     assert differing == [], "\n".join([f"{len(differing)} slide(s) differ", *detail])
 
 
-@pytest.mark.parametrize("deck_name", WALL_DECKS)
-def test_deck_slide_digests_offline_matches_cached_jxa(deck_name: str) -> None:
+_FULL_WALL_BANK_SKIP = (
+    "no JXA slide-digest bank for Full_Report_Card_Wall.key: a legacy Keynote read of a "
+    "155-slide, 6.7 GB deck is deliberately not run on this machine (Gold, at 19 slides, "
+    "peaked at 2.29 GB). Gold_Wall_Input.key is the cross-check deck; bank Full with "
+    "scripts/bank_jxa_slide_digests.py --deck Full_Report_Card_Wall.key if you ever want it."
+)
+
+
+def _bank_skip_ladder(deck_name: str) -> dict:
+    """Skip on a missing deck or bank file (Full's bank is deliberately absent, by
+    name) or a deck digest drift (a missing input), naming the regeneration
+    command. Fail on any other provenance drift (schema/version/config) or a bank
+    whose digests no longer describe its own parts: a mis-described bank is a bug,
+    not a missing input. Returns the loaded bank fixture."""
     deck = DECKS / deck_name
     if not deck.exists():
         pytest.skip("local gold deck only")
-    cache_path = baseline.inspect_cache_path(baseline.deck_digest(deck))
-    if not cache_path.is_file():
-        pytest.skip("cache is cold for the current deck bytes; refuse to open Keynote")
+    bank_file = bank_path(deck_name)
+    if not bank_file.exists():
+        if deck_name == "Full_Report_Card_Wall.key":
+            pytest.skip(_FULL_WALL_BANK_SKIP)
+        pytest.skip(f"no JXA slide-digest bank for {deck_name}: {bank_file}")
+    bank = json.loads(bank_file.read_text())
+
+    for field, expected in (
+        ("bankVersion", BANK_VERSION),
+        ("slideDigestVersion", baseline.SLIDE_DIGEST_VERSION),
+        ("inspectVersion", baseline.INSPECT_VERSION),
+        ("deck", deck_name),
+        ("reader", "jxa"),
+    ):
+        actual = bank.get(field, "<missing>")
+        if actual != expected:
+            pytest.fail(f"bank schema drift: {field} expected {expected!r}, got {actual!r}")
+
+    source_digest = bank.get("sourceDigest")
+    if not isinstance(source_digest, str) or not _HEX64.fullmatch(source_digest):
+        pytest.fail(
+            f"bank schema drift: sourceDigest expected a 64-char lowercase hex digest, got {source_digest!r}"
+        )
+
+    slides = bank.get("slides")
+    slide_count = bank.get("slideCount")
+    if not isinstance(slides, list) or slide_count != len(slides) or not slide_count:
+        pytest.fail(
+            f"bank schema drift: slideCount {slide_count!r} does not match "
+            f"{len(slides) if isinstance(slides, list) else '<slides is not a list>'} banked slides"
+        )
+
+    problems = []
+    for row in slides:
+        parts = {"skipped": row.get("skipped"), "text": row.get("text"), "images": row.get("images")}
+        recomputed = baseline.slide_digest(parts)
+        if recomputed != row.get("digest"):
+            problems.append(
+                f"slide {row.get('slide')}: bank digest {row.get('digest')!r} != "
+                f"{recomputed!r} recomputed from its own banked parts"
+            )
+    if problems:
+        pytest.fail(
+            "the bank's digests disagree with its own parts: `deck_slide_digests` changed "
+            "without a `SLIDE_DIGEST_VERSION` bump\n" + "\n".join(problems)
+        )
+
+    actual_deck_digest = baseline.deck_digest(deck)
+    if actual_deck_digest != source_digest:
+        pytest.skip(
+            f"deck digest drift (source {actual_deck_digest} vs {source_digest}); regenerate "
+            f"with scripts/bank_jxa_slide_digests.py --deck {deck_name} --accept-input-drift"
+        )
+    return bank
+
+
+@pytest.mark.parametrize("deck_name", WALL_DECKS)
+def test_deck_slide_digests_offline_matches_banked_jxa(deck_name: str) -> None:
+    bank = _bank_skip_ladder(deck_name)
+    deck = DECKS / deck_name
     offline = offline_wall_payload(deck)
-    cached = json.loads(cache_path.read_text())
-    assert baseline.deck_slide_digests(offline) == baseline.deck_slide_digests(cached)
+    actual = [baseline.slide_digest_parts(s) for s in offline.get("slides") or []]
+    assert len(actual) == bank["slideCount"]
+
+    problems: list[str] = []
+    for index, (row, parts) in enumerate(zip(bank["slides"], actual)):
+        for field in ("skipped", "text", "images"):
+            if row.get(field) != parts.get(field):
+                problems.append(f"slide {index} {field}: bank={row.get(field)!r} offline={parts.get(field)!r}")
+    assert not problems, "\n".join(problems)
+
+    assert baseline.deck_slide_digests(offline) == [row["digest"] for row in bank["slides"]]
