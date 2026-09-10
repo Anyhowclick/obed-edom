@@ -933,15 +933,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
     >
       <div className="maps-map-host" ref={host} />
+      {styleId === "watercolour" && (
+        <div
+          className="maps-paper-grain"
+          style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(grainPreviewWidth, surfaceWidth) }}
+        />
+      )}
       <div className="maps-nav-margin top" />
       <div className="maps-nav-margin bottom" />
       <div className="maps-map-band">
-        {styleId === "watercolour" && (
-          <div
-            className="maps-paper-grain"
-            style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(grainPreviewWidth, surfaceWidth) }}
-          />
-        )}
         <div className="maps-crop-overlay">
           {splitCg ? (
             <div className="maps-crop-frame cg">
