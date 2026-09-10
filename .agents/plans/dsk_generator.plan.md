@@ -38,8 +38,8 @@ todos:
     content: "Assemble the DSK deck by copy-and-transform of the FW deck (copy carries builds), live geometry, live deletes, CG-style layout import, white 5pt stroke."
     status: pending
   - id: d5-pp7-export
-    content: "Export folder for PP7: one true-alpha asset per build step on `built` slides via the owner's chosen route (Open question 13) — stage PNGs (iii), difference-matte ProRes 4444 (iv), or KPF/Chromium (ii); opaque `.m4v` clips for `movie` slides and as fallback; slide attribution reconstructed from per-slide stage counts; manifest."
-    status: pending
+    content: "landed 7d5260d (48 tests; live-accepted 3 runs; Codex 4 rounds APPROVE-WITH-NITS applied): export folder for PP7: one true-alpha asset per build step on `built` slides via the owner's chosen route (Open question 13) — stage PNGs (iii), difference-matte ProRes 4444 (iv), or KPF/Chromium (ii); opaque `.m4v` clips for `movie` slides and as fallback; slide attribution reconstructed from per-slide stage counts; manifest."
+    status: completed
   - id: d5b-exporter
     content: "Standalone **Exporter**: classify ANY DSK deck offline, operator picks slides, emit the PP7 asset folder (per-build alpha assets, opaque movie clips, alpha stage PNGs) with d5's naming/manifest. Reuses `dsk_movie_export.py` + `dsk_plan.py`; no band affine, no scratch centre-panel deck."
     status: pending
@@ -79,6 +79,71 @@ inspect flow and calls only `stubDsk` (`dashboard/src/api.ts:233`); `POST
 /api/dsk` is a 501 stub at `src/obed_edom/web/app.py:494`. This plan supersedes
 the `dsk-generator` todo in `.agents/plans/cue_palette_and_dsk_generator.plan.md`;
 the cue-palette item there is unaffected.
+
+## Resume checklist (written 2026-09-10 22:30, work stops 23:00)
+
+State: branch `feat/dsk-gen` (worktree `.claude/worktrees/dsk-gen`, draft PR #72).
+Committed: plan; d1+d2 `dsk_plan.py` (b94a128); d3 `dsk_movie_export.py` + CLI
+`dsk-export-clips` (7d5a571); `dsk_live.py` scaffold + `iwa_write.patch_media_stroke`
+(f97912c); d5 `dsk_stage_export.py` (7d5260d). In progress: d4 `dsk_assemble.py`
++ CLI `dsk-assemble` (+ cli.py) — live acceptance 3 SUCCEEDED end-to-end with 2
+defects; Codex rounds 1–4 REVISE; fix round 4 (stroke gate by pattern; text
+OVERFLOW read-back + `--text-fit warn|shrink`; paired movie-start tolerance;
+staged-index remap excluding deletes; rotated-leaf AABB; docstrings) **LANDED**
+and will be committed tonight as a checkpoint
+`"wip(dsk): d4 deck assembly (live-accepted; Codex round 5 findings open)"`.
+
+**Live acceptance 4 (2026-09-10 22:40): 14/15 PASS** — stroke grant fired
+(styles 2651144/2651150 → white/`TSDSolidPattern`/5.0 in the saved package;
+answers item (c) for the offline patch — a Keynote open+save round-trip is
+still owed), builds pairing tolerated exactly the clip's movie-start,
+`movie_props` none/100, slide 32 rect exact, output 633,831,170 B; the one
+FAIL (OVERFLOW read-back never emitted — gated on the empty autosize set) was
+fixed afterwards (gate = text items without a uniform size write; 102 tests)
+but **NOT yet live-verified**. Slide 32's source transition (dissolve 0.6) →
+none is **by design** (clip owns timing).
+
+Tomorrow, in order:
+1. `PYTHONPATH=src .venv/bin/python -m pytest tests/test_dsk_assemble.py -q` must be green (102).
+2. Fix Codex round 5 findings:
+   - **HIGH** — stroke grants/width restores guard only `style["slides"]` but
+     the stylesheet patch is global: census every reference to a candidate
+     style (including layouts/non-retained objects) and patch only when all
+     refs are retained staged media, else create a retained-object-specific
+     style.
+   - **MEDIUM** — inherited styles bypass the pattern rule (inherited
+     `TSDEmptyPattern` gets no grant; inherited real pattern not restored):
+     classify by resolved pattern regardless of inheritance, with a safe
+     child-style override.
+   - **MEDIUM** — `--text-fit shrink` must apply only to autosize/overflowing
+     boxes, size = max(source run sizes) × slide scale.
+   - **MEDIUM** — movie-start pairing must be count-balanced (surplus count ≤
+     deleted-source movie-start count).
+   - **LOW** — purge remaining history prose (lines ~403, ~498, ~885, test ~1532).
+3. Codex round 6.
+4. Live re-acceptance on `~/Desktop/dsk-d4-work/` (copy of GW deck +
+   `clips/Sermon_PK (GW).032.mov` are kept there; run
+   `dsk-assemble … --slides 8,13,17,32 --include-side 8 --clip 32=…`), including
+   the OVERFLOW warning visible for slide 13 and a Keynote open+save
+   round-trip of the output to confirm the created stroke survives.
+5. Commit `"feat(dsk): DSK deck assembly (d4)"` and push.
+6. Then d6 (API/UI: `POST /api/dsk` propose/review/apply, DskTab split
+   Generator/Exporter, review list with per-slide action/anchor/keep-side/overlay
+   toggles), d5b Exporter CLI wrapper (`dsk-export-stages` on any DSK deck —
+   engine exists; needs a cli.py subcommand), d5c KPF alpha pipeline
+   (strategic), d7 insert mode, d8 maps reuse.
+
+Operator reminders: Keynote must be closed before live steps; strictly serial;
+one agent per live run (two returned-early live agents nearly collided today —
+stop stale ones with TaskStop); `pgrep -x Keynote` (not -f); copies under
+`~/Desktop`, never `/private/tmp`; the machine hands-off during exports; peak
+RSS ~2.3 GB on the 669MB GW deck.
+
+Evidence dirs to keep/clean: `~/Desktop/dsk-d4-work/` (669MB copy + 509MB .mov
++ out deck 604MB + evidence-r2/r3 + png-r3), `~/Desktop/dsk-d5-work/`
+(accept*/ PNGs, layoutprobe), `~/Desktop/dsk-d3-work/`,
+`~/Desktop/mm-probe-work/` (~300MB) — all deletable except as noted for
+tomorrow's re-run.
 
 ## Probe results (measured 2026-09-10, read-only)
 
@@ -426,6 +491,13 @@ tweak to `d2`.
 **Resolved by the owner (2026-09-10):** scale-only is the agreed contract.
 The one live probe still owed (mask travels with a live width/height write)
 becomes a `d4` acceptance line rather than an open design question.
+
+**Probe answered (live acceptance 3, 2026-09-10, evidence
+`~/Desktop/dsk-d4-work/evidence-r3/`):** on a live width/height write, the mask
+scales with the frame — measured frame ratio == mask ratio (0.2407), no reveal
+and no clip. Scale-only images keep their existing crop through the resize; no
+new crop is created and none is lost. The blocker's remaining open item is
+editorial cropping itself, which stays operator work in the editable DSK deck.
 
 ## Blocker: off-canvas media
 
@@ -928,6 +1000,14 @@ slide 19, which has no band item. In that case **duplicate the style for the kep
 refs**, and only if that is not possible fall back to refuse-and-report. Option
 (2), the white rectangle shape, stays rejected (it needs a GUI z-order raise).
 
+**Stroke width shrinks with the canvas (live acceptance 3, 2026-09-10).** The
+7680→1920 width write scales all content ×0.25, geometry included — every fitted
+rect landed within 1pt of the model — but it also scales **stroke width** the
+same ×0.25 (measured 1.0→0.25 on an unrestored style). The stroke gate must
+therefore **decide by pattern, not merely by presence**: `TSDEmptyPattern` (no
+stroke) grants the house white 5.0pt; any real pattern gets its width **restored**
+to the pre-shrink value, not left at the shrunk ×0.25. Fix round 4, in progress.
+
 **Transitions.** `movie`-category slides get their slide transition set to
 **no transition** (via `set transition properties of slide N to {transition
 effect:no transition effect}`), because the exported clip owns the timing and
@@ -946,7 +1026,10 @@ the review page offers a per-slide choice: **"bake overlay into clip"** (default
 vs **"clip only, operator adds the text manually in PP7"**.
 
 **Presenter notes** survive the `ditto` copy untouched; nothing to do, and
-nothing is lost (unlike a KPF export, where notes are not exported).
+nothing is lost (unlike a KPF export, where notes are not exported). **Live
+acceptance 3 (2026-09-10):** none of the kept slides in the acceptance run had
+notes in the source, so this line is **acceptance-vacuous** on that fixture —
+confirmed as a no-op, not as tested-with-content.
 
 ## Per-slide export mechanics and cost
 
@@ -1226,13 +1309,14 @@ operator-run, hands-off Keynote window on a **copy**.
    audio retained); slide 8 7680×1080, 5.63 s with side content included. Wall
    time was 27–41 s per batch; peak Keynote RSS was 2.03–2.22 GB across runs;
    Keynote quit cleanly with no leftovers after every run.
-4. **`d4` deck assembly — live.** Acceptance: DSK deck opens; a `static` slide's
-   media sits in the band; **no kept slide's base layout is an FW/7680-wide
-   layout**; the **resolved layout passes the offline full-canvas-drawable
-   gate**; `card_styles` on the output reports the kept media styles as
-   white/`TSDSolidPattern`/5.0, and any style whose refs escape the kept band media
-   is **refused and reported** rather than patched; `verify_builds` reports **0
-   surplus** on kept slides; `movie` slides have transition `no transition effect`;
+4. **`d4` deck assembly — live.** Acceptance: DSK deck opens (a); a `static` slide's
+   media sits in the band (b — **answered**); **no kept slide's base layout is an
+   FW/7680-wide layout** (c — **still pending**); the **resolved layout passes the
+   offline full-canvas-drawable gate** (d — **answered**); `card_styles` on the
+   output reports the kept media styles as white/`TSDSolidPattern`/5.0, and any
+   style whose refs escape the kept band media is **refused and reported** rather
+   than patched (e — **answered**); `verify_builds` reports **0 surplus** on kept
+   slides; `movie` slides have transition `no transition effect`;
    presenter notes are present; a masked image's mask scales with its frame
    after the live width/height write (no content revealed or clipped).
    **Status (2026-09-10):** core + orchestration landed as `dsk_assemble.py` +
@@ -1240,7 +1324,20 @@ operator-run, hands-off Keynote window on a **copy**.
    progress; layout policy parameterised `preserve|import`; live acceptance 1:
    clip export PASS (32.mov 35.63 s); assembly reached the clip insert
    (`make new image {file:.mov}` DID create a movie object — confirmed) then
-   failed on the transition line; fix pending; items b–e still unverified.
+   failed on the transition line; fix pending.
+   **Live acceptance 3 (2026-09-10, evidence `~/Desktop/dsk-d4-work/evidence-r3/`):
+   assembly SUCCEEDED end to end.** 21/23 acceptance lines pass; 2 defects found,
+   fix round 4 in progress: **(1) stroke gate** must decide by pattern
+   (`TSDEmptyPattern` == no stroke → grant the house white 5pt; a real pattern →
+   restore the shrunk width instead of leaving it patched) and **(2) a mixed-run
+   text box autosizes back to its wrapped height and overflows the band** (h 269
+   vs the 247.2 band height) — surfaced as a read-back OVERFLOW warning, with an
+   opt-in `--text-fit shrink` (flattens run sizes) the operator applies by default
+   per the owner. `movie` insertion (`make new image {file:.mov}` inside `tell
+   slide N`), `repetition method`/`movie volume` copy, and the no-transition write
+   all confirmed working live. Codex rounds 1–4: REVISE.
+   **Status:** checkpoint committed 2026-09-10 (wip); live acceptance 4: 14/15;
+   Codex round 5 REVISE (5 findings) open — see Resume checklist.
 5. **`d5` PP7 export folder — offline (naming) + live (content).** Acceptance:
    `built` slides yield **one asset per build step** (N builds → N+1 stages → the
    route's asset count, each showing only that step, verified by frame- or
@@ -1261,10 +1358,8 @@ operator-run, hands-off Keynote window on a **copy**.
    each one**. Per-build asset generation and the naming/manifest work are
    separate PRs, and the alpha route is not started until Open question 13 is
    answered.
-   **Status (2026-09-10):** engine landed as `dsk_stage_export.py` (30 tests);
-   first live run was opaque due to the `Blank` layout reassignment → fixed
-   (layouts untouched, folder-basename glob, 1-based stages); Codex round 1
-   fixes applied; live re-run pending.
+   **Status (2026-09-10):** landed 7d5260d (48 tests; live-accepted 3 runs;
+   Codex 4 rounds APPROVE-WITH-NITS applied).
 6. **`d5b` Exporter — offline (classify/selection) + live (export).** Acceptance:
    pointed at `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`, the
    classifier reports its **7 built slides {5, 13, 14, 17, 26, 29, 30}** and its
@@ -1514,12 +1609,24 @@ operator-run, hands-off Keynote window on a **copy**.
   only; setting colour/pattern is an untested extension of a probed-safe single-member
   patch. Gate it behind read-back verification, and refuse-and-report rather than
   fall back to the white-rectangle shape (which needs a GUI z-order raise).
-- **Deck size.** A copy-and-transform DSK deck starts at FW size (up to 6.7GB).
-  **"The saved output shrinks" is UNVERIFIED** — Keynote may not purge unreferenced
-  `Data/` payloads on save. Measure the saved size after the deletes in `d4`; if it
-  does not shrink, the only known remedy is *File → Reduce File Size*, which is
-  **GUI-only** (no sdef command), so it becomes an operator step or an
+- **Deck size does not purge on save.** A copy-and-transform DSK deck starts at FW
+  size (up to 6.7GB). **Answered (live acceptance 3, 2026-09-10):** the saved deck
+  was 633,828,926 bytes = **94.7% of the 669MB source** — Keynote does **not**
+  purge unreferenced `Data/` payloads on save, so "the saved output shrinks" is
+  **false**; it barely does. The only known remedy is *File → Reduce File Size*,
+  which is **GUI-only** (no sdef command), so it stays an operator step or an
   Accessibility-driven GUI pass.
+- **Stroke width shrinks with the canvas.** The 7680→1920 geometry write that
+  fits all content within 1pt also scales stroke width ×0.25 (measured 1.0→0.25
+  on an unrestored style). Every stroke gate must restore the pre-shrink width on
+  a real pattern, not just grant the house white on an empty one — see "Border"
+  under DSK deck assembly. Fix round 4, in progress as of 2026-09-10.
+- **Autosize overflow on mixed-run text.** A text box with mixed run styling
+  autosizes back to its wrapped height on the live geometry write and can exceed
+  the band (measured h 269 vs a 247.2 band height). Must be caught as a read-back
+  OVERFLOW warning, not silently shipped; `--text-fit shrink` (flattens run
+  sizes) is an opt-in fix the operator applies by default per the owner, not the
+  automatic behaviour. Fix round 4, in progress as of 2026-09-10.
 - **KPF fidelity (if route (ii) ships).** Unsupported builds/transitions are simplified by
   Apple's player, movies are not in the canvas capture at all, and slides with a
   full-bleed background image stay opaque even after the lead-fill strip.
