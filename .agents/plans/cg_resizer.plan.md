@@ -137,6 +137,99 @@ todos:
   - id: iwa-surgical-write-generator
     content: "FEATURE (generator). Use the offline IWA writer (ec20f4b) to set cyan superscript verse numbers offline and retire generate's GUI Copy/Paste-Style pass 2 (Accessibility, silent-fail). Style-table patch = a harder byte class than geometry floats; own spike + per-deck openability test."
     status: pending
+  - id: framing-pin-continuity
+    content: "BUG (code implemented, pending review), 2026-09-10 on branch `fix/framing-pin-continuity`
+      @ `02e16c5`. The sibling-reuse gate in `plan_payload_transforms` (`map_remap.py`) tracked
+      `prev_pin` — the OPERATOR'S requested template slide on the previous page — as the condition
+      for reusing that page's affine when the current page's own pin collapses to a sliver. That
+      meant an UNPINNED predecessor that still landed on the wanted template by pairing could never
+      seed a reuse chain, only a slide the operator pinned by hand could. Renamed to `prev_template`,
+      read from `slide_recipe.get(\"templateSlide\")` AFTER the fit fallback (not the pre-fit
+      `framing_report[-1]`, which would be stale) — the rule is now \"reuse the adjacent previous
+      slide's affine when it landed on the same template, by pin or by pairing.\" A letterboxed
+      predecessor still can never seed reuse (`fit_to_frame_recipe`/`carry_fit_context` emit no
+      `templateSlide`). Nested under `wanted is not None`, so both golden-plan decks stay byte-neutral
+      (`golden_plan.py:capture_plan` never passes `framing_overrides`) — `tests/test_golden_plan.py`
+      passed with NO regeneration. OWNER DECISION (2026-09-10): reusing the predecessor's affine
+      verbatim can carry translation from a differently-cropped page — on the Gold deck, slide 5's
+      affine (map inset, ty=+130) reused unclamped on slides 6/7 (full-bleed panel) would leave a
+      130px bare band at the top and cut 130px off the bottom (12% of frame height) against a ~28px
+      alignment gain. Owner chose a cover-clamp instead: in `_recipe_reusing_affine` only, if the
+      reused affine maps the panel at least as wide/tall as the destination frame on an axis, that
+      axis's translation is clamped so it covers with no gap (accounting for the panel's own x/y
+      offset, not just its translation — an early draft of the clamp ignored that offset and
+      corrupted slide 6's tx before this was caught by re-measuring against the Gold deck); an axis
+      the panel doesn't cover is left untouched. `on_canvas_fraction`'s returned fraction is
+      unchanged (proved, not asserted — see `framing-coverage-report`'s T7). Gold-measured (offline,
+      Keynote-free, pinning 6/7 to template slide 4 as the operator would): slide 5 unpinned reaches
+      template 4 by pairing (`templateSlide 4/source template-layout/pairQuality 1`, own affine
+      `s=1.0 tx=-2932.0 ty=130.0`); slides 6 and 7 both take `source sibling-affine/reusedSibling
+      True`, and the `China Adjusted.png` transform on both is `x=-1111.0 y=0.0` (post-clamp:
+      `1821-2932` unchanged on x since width already covers; `ty` clamped 130→0 since height covers
+      exactly) — never `-544.0`, which was `Wilderness.png`'s hand crop, the bug's literal signature;
+      slides 8/9's own affine stays `tx=-3032.0`, 100px off slide 5's, proving they were not dragged
+      onto it; `fitted_slides == [10]`, unchanged. RISK measured and holding: slide 7's own
+      `on_canvas_fraction` sits at exactly 0.5 against `MIN_ON_CANVAS_FRACTION`'s strict `<`, and
+      stays exactly 0.5 after the ty clamp (re-measured, did not assume) — any future change to that
+      comparison, `CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION`, or `_replaced_item_ids` flips slide 7 to
+      `fitted` and silently undoes this fix there. Tests: `tests/test_map_remap.py` — renamed
+      `test_a_degenerate_pin_reuses_an_adjacent_sibling_on_the_same_template` (was
+      `..._same_pin_siblings_affine`); extended `test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse`
+      with the differently-pinned half it never exercised; new
+      `test_an_unpinned_predecessor_seeds_reuse_when_it_lands_on_the_same_template`,
+      `test_a_letterboxed_predecessor_never_seeds_reuse`,
+      `test_reused_affine_clamps_to_cover_the_frame_only_where_the_panel_is_big_enough`,
+      `test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped` (skip-if-missing, offline via
+      `offline_wall_payload`)."
+    status: pending
+  - id: framing-coverage-report
+    content: "FEATURE (report-only, code implemented, pending review), 2026-09-10, same branch as
+      `framing-pin-continuity`. Owner ruled slide 7's thumbnail-overlay stranding ACCEPTED (see
+      `framing-pin-continuity`'s R2), so this is measurement honesty only — it does NOT gate or touch
+      `_framing_unusable`. `on_canvas_fraction` gained a 5th optional out-param
+      `excluded_report: dict[str,int]|None = None` (matching the module's existing `*_report` optional
+      convention): the two early-continue exclusion arms (`_replaced_item_ids` overlays and the
+      cover's `crop_footprint` side-panel skip) now set a `skipped` flag and branch AFTER the mapped
+      on/off-canvas position is computed, so an excluded item is still mapped before being counted —
+      filling `excluded`/`excludedOffCanvas` without changing which items increment `seen`/`inside`,
+      so the RETURNED FRACTION IS ARITHMETICALLY UNCHANGED (proved on every Gold slide, not asserted:
+      `test_gold_on_canvas_fraction_out_param_does_not_change_anything`, plus a synthetic
+      `test_on_canvas_fraction_reports_excluded_counts_without_moving_the_bar`). `map BG.png` chrome
+      tiles are genuinely hidden (`_hide_item_transform`) and correctly excluded from BOTH the
+      fraction and the new counts — they must never surface as \"excluded\". `plan_payload_transforms`
+      patches `framing_report[-1]` with `onCanvas`/`excluded`/`excludedOffCanvas` AFTER the fit
+      fallback (mirroring the existing `fitted` patch), inside the same `if template and (...)` block.
+      `remap_keynote.py` logs a `say()` line (list, `[:8]` truncation) naming slides with
+      `excludedOffCanvas > 0`, explaining they are \"scored on the framed artwork only; those overlays
+      are placed, not dropped.\" Gold-measured slide 7: `onCanvas 0.5, excluded 13, excludedOffCanvas
+      11` — of the 13 excluded items, 12 are the `_replaced_item_ids` overlay set (11 `pasted-movie.png`
+      + 1 `UPG.png`) and 1 is a side-panel shape (index 16) outside the panel's `crop_footprint`
+      x-range whose mapped centre also lands off-canvas; NOTE this excluded/excludedOffCanvas pair is
+      NOT the number this item's own originating plan predicted (12/10) — the plan's manual estimate
+      missed that side-panel shape; re-measured against the real Gold deck and reported here rather
+      than banked unchecked. `plan_out`/`golden_plan.py:capture_plan` never reaches `framingReport`
+      (it lives on `result`, not the 8-key `plan_out`), so this is also golden-neutral —
+      `tests/test_golden_plan.py` passed with NO regeneration. Dashboard/TS
+      (`dashboard/src/tabs/ResizeTab.tsx`) intentionally NOT touched (would drag in `npm install &&
+      npm run build`); the extra report keys are additive."
+    status: pending
+  - id: framing-auto-fallback-uncompared
+    content: "BUG BACKLOG (B), NEW 2026-09-10, deferred out of `framing-pin-continuity` on purpose.
+      `plan_payload_transforms`'s unconstrained fallback (`map_remap.py` ~:3993-3997, inside the
+      pinned-degenerate block) ranks candidate auto framings by \"fewer items off-canvas\" with no
+      floor on how degenerate the winning scale is. On the Gold deck's slide 7 this metric RANKS THE
+      DEGENERATE SLIVER FIRST: the pin-forced recipe strands 0 of 15 items precisely because it
+      collapses to `s=0.1776`, while every real candidate strands 10-12 and the CORRECT framing scores
+      WORST (12 of 15 stranded). A metric that prefers the collapse and rejects the fix is not a fix —
+      the project's own `SKILL.md` forbids exactly this pattern (rewarding a frame merely for keeping
+      content inside the canvas). `framing-pin-continuity` removes the one measured LIVE instance of
+      this on the Gold deck as a side effect (slide 6 now takes the reuse branch before this code path
+      is ever reached, and slide 7 reuses too, once pinned per the operator's real workflow) — but the
+      fallback itself is unfixed and will misrank again on any page without an adjacent same-template
+      sibling to reuse from. Needs its own metric (e.g. a floor on scale, or judging candidates by
+      on-canvas fraction of the ORIGINAL framing's own content rather than raw off-canvas count) before
+      it can be trusted; do not re-derive this reasoning from scratch if rediscovered."
+    status: pending
 isProject: false
 ---
 
