@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-09 (later same day), main is `a555f24` after PR #60 (parity round + R0.4), #61 `surface-raise-tokens`, #62 dead-code removal, #64 the Keynote-free golden plan gate, and #65 R2b `r-propose-two-tier`; the current branch `chore/golden-gate-hard-parity` carries one commit `20feac0` on top making propose/apply parity a hard gate. R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens` and a six-survey refactor assessment are all complete. Open sequence: the W1 whole-deck gate on the Full wall (nap window), then `stat-raise-dead-4` from that gate's log, a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-09 (later same day), main is `a555f24` after PR #60 (parity round + R0.4), #61 `surface-raise-tokens`, #62 dead-code removal, #64 the Keynote-free golden plan gate, and #65 R2b `r-propose-two-tier`; the current branch `chore/golden-gate-hard-parity` carries one commit `20feac0` on top making propose/apply parity a hard gate. R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens` and a six-survey refactor assessment are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. Open sequence: `stat-raise-dead-4` from the gate's log, `as-geometry-rounding` (arm A's rounding vs. the plan oracle bar), a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -37,6 +37,32 @@ todos:
     status: completed
   - id: stat-raise-dead-4
     content: "BUG BACKLOG (B), NEW 2026-09-09, found in the parity remap (`output/bank/2026-09-09/parity-run/run.log`): `WARNING stat-finalize: 4 stat group(s) did not move on Bring to Front (0 abandoned mid-slide)` — raiseMoved 377 / raiseDead 4 / raiseUnknown 0 of 381 done groups, deck-wide, on `8a7b4bb`'s ascending gated raise. Offline localisation this round (`probes/find_raise_dead.py`, same run) found 2 of 4 by non-contiguous-group-block analysis: slide 106 group `18386827` ('Keiko', z=15, buried while siblings 'Daniel'/'Grace' raised to 18/19) and slide 110 group `19010920` ('Sunday Service', z=2, buried while siblings 'Children's Church'/'Bible Study' raised to 6/7) — both non-reuse, and both were CONTIGUOUS in the banked 2026-09-08 healthy run (`output/bank/2026-09-08/twin-zorder/PREFIX2.json`), so both are regressions against that baseline, not pre-existing. The other 2 raiseDead are unlocatable offline: a lone stat group on its slide leaves no z-order contiguity signal to test against. The reuse band 123-128 is internally contiguous on every slide with groups (self-consistency check, not a source comparison). Slide 42's own 2-group gap was checked and ruled out — identical in this run and the 2026-09-08 healthy run, pre-existing and unrelated. Facts only, no cause yet: the machine was hands-off by the owner's own timestamped ack (`ENV.txt`: 'I'm already hands off, out for breakfast. start!', 09:40:44) so the stolen-GUI-interaction story that explained the 2026-09-07 arm-A card loss does not apply by default here — but per 'measure before attributing', this is still n=1 on a single run and needs a second measurement before ruling it out formally. Precondition / first step: `surface-raise-tokens` below — the per-slide `raiseDead(s=,idx=)`/`raiseUnknown(s=,idx=)` tokens are not currently logged, so this round's localisation needed an offline z-order probe instead of reading the log directly; the next run should localise all 4 by log alone."
+    status: pending
+  - id: as-geometry-rounding
+    content: "BUG BACKLOG (B), NEW 2026-09-10, opened from the 2026-09-10 W1 whole-deck gate
+      (`output/bank/2026-09-10/w1-gate/`, full write-up in its `results.md`). Gate came back RED,
+      but after the W1 group-union fixes landed, **arm A — the PRODUCTION AppleScript path — is now
+      the LARGER source of RED**, not the offline writer: arm A fails the plan oracle on 14 slides
+      [20, 36, 42, 43, 47, 56, 82, 87, 113, 119, 134, 138, 144, 150], worst values 1.19-1.92px — the
+      IDENTICAL slide set as the 2026-09-09 run, so stable and pre-existing, not a regression. By
+      contrast arm B (offline writer) now fails the plan oracle on 1 slide (36, the owner-accepted
+      D10 fix #4 AppleScript group-width miss), down from 18, and the A-vs-B identity compare went
+      12 failures -> 0. Cause understood in outline: Keynote's AppleScript/JXA geometry writes land
+      on integer or near-integer values, so arm A carries ~0.5-1.9px of rounding against the planned
+      rect. D10 measured exactly this on slide 144: arm A's values are integers (`109.921`, `142.0`,
+      `16.0`) with median |Delta| 0.46px, max 1.51px, versus arm B now exact at 0.00px. Slide 144 is
+      the sharpest illustration: after the fix, plan-oracle B is 0.00px PASS while plan-oracle A
+      stays 1.51px FAIL on the same 68 groups; the identity compare's residual (group 1.51 /
+      child:child 1.06 / child:image 1.31, all PASS) is arm A's rounding alone, because B is exact.
+      OPEN QUESTION this item exists to settle: whether the plan-oracle bar should be WIDENED for
+      the AppleScript arm (rounding is inherent to that write path and arguably not a defect), or
+      whether the AppleScript geometry writer should be made to LAND ON the planned value (e.g. by
+      compensating for Keynote's rounding), or whether these 14 slides hide a real placement defect
+      distinct from rounding. Measure before deciding — do not assume all 14 are pure rounding just
+      because the range looks like rounding; the range 1.19-1.92px is wider than pure integer
+      rounding of a sub-pixel value would explain, and slide 36 is in the set for a known DIFFERENT
+      reason (the group-width miss). Dependency: this matters for the W1 default flip, because while
+      arm A is the RED source, a gate GREEN cannot be reached by improving the offline writer alone."
     status: pending
   - id: surface-raise-tokens
     content: "DONE 2026-09-09, PR #61 `fix/surface-raise-tokens` (`c5e9c34`, Codex 3 passes), precondition for `stat-raise-dead-4`'s diagnosis. `keynote._run_stat_finalize` now returns `tokens` {name: [args]} and `frontErr`; `obedRaiseSlide` emits a `raiseDead(s=,idx=)` token for EVERY dead raise (the `is 0` guards removed); `remap_keynote._say_stat_finalize_detail` logs `Stat raise detail: ` (chunks of ≤40, marker `(i/n)` after the prefix), `WARNING stat-finalize: GUI Bring to Front returned error(s) `, `Badge raise detail: ` (unchanged), `Stat resolve detail: ` (rare kinds uncapped, sigFallback capped at 40). Unblocks `stat-raise-dead-4` localising all 4 `raiseDead` occurrences by log alone on the next production run."
@@ -111,6 +137,130 @@ todos:
   - id: iwa-surgical-write-generator
     content: "FEATURE (generator). Use the offline IWA writer (ec20f4b) to set cyan superscript verse numbers offline and retire generate's GUI Copy/Paste-Style pass 2 (Accessibility, silent-fail). Style-table patch = a harder byte class than geometry floats; own spike + per-deck openability test."
     status: pending
+  - id: framing-pin-continuity
+    content: "BUG (code implemented, pending review), 2026-09-10 on branch `fix/framing-pin-continuity`
+      @ `02e16c5`. The sibling-reuse gate in `plan_payload_transforms` (`map_remap.py`) tracked
+      `prev_pin` — the OPERATOR'S requested template slide on the previous page — as the condition
+      for reusing that page's affine when the current page's own pin collapses to a sliver. That
+      meant an UNPINNED predecessor that still landed on the wanted template by pairing could never
+      seed a reuse chain, only a slide the operator pinned by hand could. Renamed to `prev_template`,
+      read from `slide_recipe.get(\"templateSlide\")` AFTER the fit fallback (not the pre-fit
+      `framing_report[-1]`, which would be stale) — the rule is now \"reuse the adjacent previous
+      slide's affine when it landed on the same template, by pin or by pairing.\" A letterboxed
+      predecessor still can never seed reuse (`fit_to_frame_recipe`/`carry_fit_context` emit no
+      `templateSlide`). Nested under `wanted is not None`, so both golden-plan decks stay byte-neutral
+      (`golden_plan.py:capture_plan` never passes `framing_overrides`) — `tests/test_golden_plan.py`
+      passed with NO regeneration. OWNER DECISION (2026-09-10): reusing the predecessor's affine
+      verbatim can carry translation from a differently-cropped page — on the Gold deck, slide 5's
+      affine (map inset, ty=+130) reused unclamped on slides 6/7 (full-bleed panel) would leave a
+      130px bare band at the top and cut 130px off the bottom (12% of frame height) against a ~28px
+      alignment gain. Owner chose a cover-clamp instead: in `_recipe_reusing_affine` only, if the
+      reused affine maps the panel at least as wide/tall as the destination frame on an axis, that
+      axis's translation is clamped so it covers with no gap (accounting for the panel's own x/y
+      offset, not just its translation — an early draft of the clamp ignored that offset and
+      corrupted slide 6's tx before this was caught by re-measuring against the Gold deck); an axis
+      the panel doesn't cover is left untouched. `on_canvas_fraction`'s returned fraction is
+      unchanged (proved, not asserted — see `framing-coverage-report`'s T7). Gold-measured (offline,
+      Keynote-free, pinning 6/7 to template slide 4 as the operator would): slide 5 unpinned reaches
+      template 4 by pairing (`templateSlide 4/source template-layout/pairQuality 1`, own affine
+      `s=1.0 tx=-2932.0 ty=130.0`); slides 6 and 7 both take `source sibling-affine/reusedSibling
+      True`, and the `China Adjusted.png` transform on both is `x=-1111.0 y=0.0` (post-clamp:
+      `1821-2932` unchanged on x since width already covers; `ty` clamped 130→0 since height covers
+      exactly) — never `-544.0`, which was `Wilderness.png`'s hand crop, the bug's literal signature;
+      slides 8/9's own affine stays `tx=-3032.0`, 100px off slide 5's, proving they were not dragged
+      onto it; `fitted_slides == [10]`, unchanged. RISK measured and holding: slide 7's own
+      `on_canvas_fraction` sits at exactly 0.5 against `MIN_ON_CANVAS_FRACTION`'s strict `<`, and
+      stays exactly 0.5 after the ty clamp (re-measured, did not assume) — any future change to that
+      comparison, `CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION`, or `_replaced_item_ids` flips slide 7 to
+      `fitted` and silently undoes this fix there. Tests: `tests/test_map_remap.py` — renamed
+      `test_a_degenerate_pin_reuses_an_adjacent_sibling_on_the_same_template` (was
+      `..._same_pin_siblings_affine`); extended `test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse`
+      with the differently-pinned half it never exercised; new
+      `test_an_unpinned_predecessor_seeds_reuse_when_it_lands_on_the_same_template`,
+      `test_a_letterboxed_predecessor_never_seeds_reuse`,
+      `test_reused_affine_clamps_to_cover_the_frame_only_where_the_panel_is_big_enough`,
+      `test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped` (skip-if-missing, offline via
+      `offline_wall_payload`)."
+    status: pending
+  - id: framing-coverage-report
+    content: "FEATURE (report-only, code implemented, pending review), 2026-09-10, same branch as
+      `framing-pin-continuity`. Owner ruled slide 7's thumbnail-overlay stranding ACCEPTED (see
+      `framing-pin-continuity`'s R2), so this is measurement honesty only — it does NOT gate or touch
+      `_framing_unusable`. `on_canvas_fraction` gained a 5th optional out-param
+      `excluded_report: dict[str,int]|None = None` (matching the module's existing `*_report` optional
+      convention): the two early-continue exclusion arms (`_replaced_item_ids` overlays and the
+      cover's `crop_footprint` side-panel skip) now set a `skipped` flag and branch AFTER the mapped
+      on/off-canvas position is computed, so an excluded item is still mapped before being counted —
+      filling `excluded`/`excludedOffCanvas` without changing which items increment `seen`/`inside`,
+      so the RETURNED FRACTION IS ARITHMETICALLY UNCHANGED (proved on every Gold slide, not asserted:
+      `test_gold_on_canvas_fraction_out_param_does_not_change_anything`, plus a synthetic
+      `test_on_canvas_fraction_reports_excluded_counts_without_moving_the_bar`). `map BG.png` chrome
+      tiles are genuinely hidden (`_hide_item_transform`) and correctly excluded from BOTH the
+      fraction and the new counts — they must never surface as \"excluded\". `plan_payload_transforms`
+      patches `framing_report[-1]` with `onCanvas`/`excluded`/`excludedOffCanvas` AFTER the fit
+      fallback (mirroring the existing `fitted` patch), inside the same `if template and (...)` block.
+      `remap_keynote.py` logs a `say()` line (list, `[:8]` truncation) naming slides with
+      `excludedOffCanvas > 0`, explaining they are \"scored on the framed artwork only; those overlays
+      are placed, not dropped.\" Gold-measured slide 7: `onCanvas 0.5, excluded 13, excludedOffCanvas
+      11` — of the 13 excluded items, 12 are the `_replaced_item_ids` overlay set (11 `pasted-movie.png`
+      + 1 `UPG.png`) and 1 is a side-panel shape (index 16) outside the panel's `crop_footprint`
+      x-range whose mapped centre also lands off-canvas; NOTE this excluded/excludedOffCanvas pair is
+      NOT the number this item's own originating plan predicted (12/10) — the plan's manual estimate
+      missed that side-panel shape; re-measured against the real Gold deck and reported here rather
+      than banked unchecked. `plan_out`/`golden_plan.py:capture_plan` never reaches `framingReport`
+      (it lives on `result`, not the 8-key `plan_out`), so this is also golden-neutral —
+      `tests/test_golden_plan.py` passed with NO regeneration. Dashboard/TS
+      (`dashboard/src/tabs/ResizeTab.tsx`) intentionally NOT touched (would drag in `npm install &&
+      npm run build`); the extra report keys are additive."
+    status: pending
+  - id: framing-auto-fallback-uncompared
+    content: "BUG BACKLOG (B), NEW 2026-09-10, deferred out of `framing-pin-continuity` on purpose.
+      `plan_payload_transforms`'s unconstrained fallback (`map_remap.py` ~:3993-3997, inside the
+      pinned-degenerate block) ranks candidate auto framings by \"fewer items off-canvas\" with no
+      floor on how degenerate the winning scale is. On the Gold deck's slide 7 this metric RANKS THE
+      DEGENERATE SLIVER FIRST: the pin-forced recipe strands 0 of 15 items precisely because it
+      collapses to `s=0.1776`, while every real candidate strands 10-12 and the CORRECT framing scores
+      WORST (12 of 15 stranded). A metric that prefers the collapse and rejects the fix is not a fix —
+      the project's own `SKILL.md` forbids exactly this pattern (rewarding a frame merely for keeping
+      content inside the canvas). `framing-pin-continuity` removes the one measured LIVE instance of
+      this on the Gold deck as a side effect (slide 6 now takes the reuse branch before this code path
+      is ever reached, and slide 7 reuses too, once pinned per the operator's real workflow) — but the
+      fallback itself is unfixed and will misrank again on any page without an adjacent same-template
+      sibling to reuse from. Needs its own metric (e.g. a floor on scale, or judging candidates by
+      on-canvas fraction of the ORIGINAL framing's own content rather than raw off-canvas count) before
+      it can be trusted; do not re-derive this reasoning from scratch if rediscovered."
+    status: pending
+  - id: rotation-provenance-rounded
+    content: "BUG BACKLOG (B), NEW 2026-09-10, OWNER-ACCEPTED (owner, 2026-09-10: \"seems like an
+      edge case, if it bites me in the future then so be it\") — banked deliberately, not
+      fixed, deferred out of `framing-pin-continuity` on purpose. `_recipe_reusing_affine`'s
+      cover clamp (`map_remap.py:3894-3896`) fires only when the centre-panel item's
+      rotation is \"known and zero\", but independent review (Codex gpt-5.6-sol, round 3)
+      showed `rotation == 0` does not prove unrotated. Two provenance holes feed that field
+      a rounded or defaulted zero, both verified: `offline_inspect.py:214` stamps
+      `\"rotation\": _round_pt(angle) % 360` — whole-degree rounding, deliberate per its own
+      comment (\"fractional rotation churns the reuse fingerprint\"), so a real 0.4-degree
+      panel is emitted as `rotation=0`; `inspect_keynote.js:121` separately prefills
+      `rotation: 0` in the record literal, so that zero survives if `obj.rotation()` throws.
+      Measured impact: a 3840x1080 panel rotated 0.4 degrees has a true AABB height of
+      1106.8px (0.5 degrees -> 1113.5px) against the reported 1080, so the clamp can shift a
+      valid crop by up to ~33.5px. It bites only on the sibling-reuse path, which requires a
+      slide that was explicitly pinned AND whose own pinned recipe collapsed, AND a
+      sub-0.5-degree rotated source that wins `_centre_panel_item`. Fix if it ever bites: do
+      NOT un-round `rotation` (load-bearing for the reuse fingerprint); add a separate
+      positive fact instead — e.g. the reader stamping `angle % 360 == 0` computed BEFORE
+      rounding, omitted where the read failed — and have the guard at `map_remap.py:3895`
+      consult that; contained to `offline_inspect.py`, `inspect_keynote.js` and the one
+      guard. Pattern worth recording, since it recurred three times in one session on this
+      branch: a field that looks like proof but is not. `prev_pin` looked like provenance
+      for which template the previous slide used (it was the pin, not the result — see
+      `framing-pin-continuity`). `templateSlide` looked like lineage on a `cover-fallback`
+      recipe (the number recorded which slide was matched by name; none of its geometry
+      entered the affine). `rotation == 0` looks like \"unrotated\" (it is a rounded or
+      defaulted value). Each was found by independent review after the previous one was
+      closed. When a guard turns on a value meaning what its name suggests, verify that at
+      the point the value is PRODUCED, not where it is consumed."
+    status: pending
 isProject: false
 ---
 
@@ -166,8 +316,11 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
 - `resizer-refactor-assessment` is DONE: no rewrite, six read-only surveys banked, and the defects
   found reorder the sequence ahead of W1/W2 — see that todo and "Order of work" below.
 - **W1 default flip stays ON HOLD** (`w-offline-write-stabilise`: universal naturalSize writer +
-  a healthy whole-deck gate are its bar), now with a **nap-window whole-deck gate run on the Full
-  wall** as the next concrete step (`output/bank/2026-09-09/nap-run/`). **W2 `w-zorder-patch`
+  a healthy whole-deck gate are its bar). The 2026-09-10 nap-window whole-deck gate ran
+  (`output/bank/2026-09-10/w1-gate/`) and came back RED: arm B (offline writer) is now clean bar
+  the owner-accepted slide 36, but arm A (production AppleScript path) fails the plan oracle on 14
+  slides at 1.19-1.92px — see the new `as-geometry-rounding` item, which the flip now also depends
+  on (a gate GREEN cannot be reached by improving the offline writer alone). **W2 `w-zorder-patch`
   stays gated on W1** and is purely speed/Accessibility removal, since `8a7b4bb` fixed the
   raise-order correctness bug W2's own plan had assumed was already handled.
 - **Deck facts:** `Map_Extracted_Wall_1st.key` is gone from the decks folder (58 oracle tests
@@ -277,13 +430,19 @@ cleanup and golden-plan gate; the refactor assessment.
 **Open sequence** (reordered 2026-09-09 evening per the refactor assessment):
 
 1. **W1 whole-deck gate on the Full wall**, nap window 2026-09-09
-   (`output/bank/2026-09-09/nap-run/`) — run from an unlocked working copy (deck facts above).
+   (`output/bank/2026-09-09/nap-run/`) — run from an unlocked working copy (deck facts above). RE-RUN
+   2026-09-10 (`output/bank/2026-09-10/w1-gate/`): RED, arm B now clean bar slide 36, arm A now the
+   larger RED source — see `as-geometry-rounding`.
 2. **`stat-raise-dead-4`** from that gate's `raiseDead(s=,idx=)` log lines — localise all 4 by log
    alone, now that `surface-raise-tokens` is merged.
+2b. **`as-geometry-rounding`**, NEW 2026-09-10 — decide whether the plan-oracle bar widens for the
+   AppleScript arm, or the AppleScript geometry writer compensates for Keynote's rounding, or the
+   14 slides hide a real defect distinct from rounding; blocks the W1 default flip either way.
 3. **Shared osascript runner** (timeout/lock/name-verified bind) — before the W1 flip.
 4. **IWA natural-size/sentinel unification** + one decode→re-encode→diff — before W2.
 5. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
-   a healthy whole-deck gate (green on both gold decks, with the consistency audit).
+   a healthy whole-deck gate (green on both gold decks, with the consistency audit), now also
+   gated on `as-geometry-rounding`'s resolution for arm A.
 6. **W2 `w-zorder-patch`** — gated on W1 stable; purely speed + Accessibility removal now.
    `restore_source_builds` must still run LAST, after any future z-order write.
 7. **Bug backlog:** `map-label-offslide-parked-delete`, `card-border-source-ref-floor-fix`

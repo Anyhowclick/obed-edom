@@ -27,6 +27,7 @@ from obed_edom.map_remap import (
     Affine,
     CAPTION_SIZE_FLOOR,
     GRID_MIN_CLEAR,
+    MIN_ON_CANVAS_FRACTION,
     ItemTransform,
     Rect,
     affine_of,
@@ -189,15 +190,18 @@ def test_framing_report_says_what_each_slide_used():
     assert row["confirmed"] is True
     assert row["pinOverridden"] is False
     assert "fitted" in row
+    assert row["onCanvas"] == 1.0
+    assert row["excluded"] == 0
+    assert row["excludedOffCanvas"] == 0
 
 
-def test_a_degenerate_pin_reuses_an_adjacent_same_pin_siblings_affine():
-    """Magic-move siblings pinned to one framing keep the map 1:1 across the morph.
+def test_a_degenerate_pin_reuses_an_adjacent_sibling_on_the_same_template():
+    """Magic-move siblings that land on one template slide keep the map 1:1 across the morph.
 
     Slide 1's own art pairs cleanly; slides 2 and 3 are full-bleed photos that pair
-    to a sliver on their own. All three carry the same pin, so 2 reuses 1's affine
-    and 3 reuses 2's — the same transform down the sequence, not each page's own
-    shifted cover."""
+    to a sliver on their own. All three carry the same pin, and each predecessor
+    lands on the same template slide, so 2 reuses 1's affine and 3 reuses 2's — the
+    same transform down the sequence, not each page's own shifted cover."""
     template = {
         "slideWidth": 1920,
         "slideHeight": 1080,
@@ -256,6 +260,253 @@ def test_a_non_adjacent_or_differently_pinned_slide_does_not_reuse():
     slide3 = next(r for r in rows if r["slide"] == 3)
     assert slide3["reusedSibling"] is False  # slide 1 is not adjacent to slide 3
 
+    # Adjacent this time, but slide 1's own art lands it on template 1, not the
+    # template 2 slide 2 is pinned to — a different template must not seed reuse.
+    template2 = {
+        "slideWidth": 1920, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=-2880, y=0, w=7680, h=1080)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="m.pdf", x=200, y=0, w=480, h=135)]},
+        ],
+    }
+    wall2 = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=0, y=0, w=7680, h=1080)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
+        ],
+    }
+    rows2: list[dict] = []
+    plan_payload_transforms(
+        wall2, learn_recipe(wall2, template2), template=template2,
+        framing_overrides={1: 1, 2: 2}, framing_report=rows2,
+    )
+    assert rows2[0]["templateSlide"] == 1  # slide 1 pairs to template 1 on its own
+    slide2 = next(r for r in rows2 if r["slide"] == 2)
+    assert slide2["reusedSibling"] is False  # adjacent, but not the same template
+
+
+def test_an_unpinned_predecessor_seeds_reuse_when_it_lands_on_the_same_template():
+    """A pin is not required to seed a reuse chain — landing on the template by
+    pairing is enough, as long as the predecessor and successor land on the same
+    template slide. Slide 1 is unpinned and reaches template 2 by pairing; slide 2
+    is pinned there and collapses to a sliver on its own, so it reuses slide 1's
+    affine."""
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="m.pdf", x=200, y=0, w=480, h=135)]},
+        ],
+    }
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="m.pdf", x=3000, y=0, w=480, h=135)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
+        ],
+    }
+    rows: list[dict] = []
+    plan_payload_transforms(
+        wall, learn_recipe(wall, template), template=template,
+        framing_overrides={2: 2}, framing_report=rows,
+    )
+    assert rows[0]["templateSlide"] == 2 and rows[0]["reusedSibling"] is False
+    assert rows[1]["source"] == "sibling-affine" and rows[1]["reusedSibling"] is True
+
+    from obed_edom.map_remap import frame_affine
+    a1 = frame_affine(learn_recipe({"slideWidth": 7680, "slideHeight": 1080, "slides": [wall["slides"][0]]}, template))
+    a2 = frame_affine(_recipe_reusing_affine(wall["slides"][1], learn_recipe({"slideWidth": 7680, "slideHeight": 1080, "slides": [wall["slides"][1]]}, template, template_slide=2), a1, 7680, 1080))
+    assert abs(a2.s - a1.s) < 1e-6 and abs(a2.tx - a1.tx) < 1e-6
+
+
+def test_reused_affine_clamps_to_cover_the_frame_only_where_the_panel_is_big_enough():
+    """The owner's cover-clamp decision: a reused affine may carry translation
+    from a differently-cropped predecessor. If the panel maps at least as wide or
+    tall as the destination frame on an axis, that axis is clamped so it covers
+    with no gap -- exactly the Gold slide 5 -> 6/7 case, where slide 5's inset
+    ty=+130 would otherwise leave a bare band. A panel smaller than the frame on
+    an axis is left alone: there is nothing to cover with. The panel item must
+    win `_centre_panel_item` and report rotation=0 for the clamp to be trusted
+    at all -- see test_the_clamp_refuses_a_reuse_source_with_no_resolved_panel."""
+    from obed_edom.map_remap import frame_affine
+
+    slide_with_panel = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1821, y=0, w=3840, h=1080, rotation=0)],
+    }
+
+    full_bleed = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 1821.0, "y": 0.0, "w": 3840.0, "h": 1080.0},
+    }
+    clamped = frame_affine(
+        _recipe_reusing_affine(slide_with_panel, full_bleed, Affine(s=1.0, tx=-2932.0, ty=130.0), 7680.0, 1080.0)
+    )
+    assert clamped.tx == -2932.0  # width already covers; untouched
+    assert clamped.ty == 0.0  # height covers exactly; ty clamps to close the gap
+
+    slide_without_panel = {"number": 6, "items": []}
+    smaller = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 500.0, "h": 400.0},
+    }
+    unclamped = frame_affine(
+        _recipe_reusing_affine(slide_without_panel, smaller, Affine(s=1.0, tx=100.0, ty=50.0), 7680.0, 1080.0)
+    )
+    assert unclamped.tx == 100.0 and unclamped.ty == 50.0  # no panel resolved; nothing to clamp
+
+
+def test_the_clamp_refuses_a_rotated_reuse_source():
+    """Offline geometry reports a rotated item's AABB top-left with its UNROTATED
+    width/height (see iwa_geometry._frame_rect), so the exactly-1080-high rect
+    the clamp sees for a 3840x1080 panel rotated 10deg is not the panel's true
+    footprint -- clamping it would move an already-valid editorial crop. Same
+    slide/affine as the unrotated case above (which DOES clamp to ty=0): only
+    the `rotation` field differs."""
+    from obed_edom.map_remap import frame_affine
+
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0}
+    affine = Affine(s=1.0, tx=-2932.0, ty=130.0)
+
+    rotated_slide = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1920, y=0, w=3840, h=1080, rotation=10)],
+    }
+    unclamped = frame_affine(_recipe_reusing_affine(rotated_slide, recipe, affine, 7680.0, 1080.0))
+    assert unclamped.tx == -2932.0
+    assert unclamped.ty == 130.0  # refused: not clamped to 0 despite the unrotated AABB exactly covering
+
+    upright_slide = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1920, y=0, w=3840, h=1080, rotation=0)],
+    }
+    clamped = frame_affine(_recipe_reusing_affine(upright_slide, recipe, affine, 7680.0, 1080.0))
+    assert clamped.tx == -2932.0
+    assert clamped.ty == 0.0  # same geometry, no rotation: clamps as before
+
+
+def test_the_clamp_refuses_a_reuse_source_with_no_resolved_panel():
+    """A rotated source too narrow to win `_centre_panel_item` (CENTRE_PANEL_MIN_WIDTH_FRAMES *
+    dest_w = 1.7 * 1920 = 3264) leaves `panel_item` None, so `src` falls back to `mapSrc` -- the
+    same axis-aligned-AABB blindness `test_the_clamp_refuses_a_rotated_reuse_source` guards against,
+    reached through a different door. Clamping here would move an already-valid editorial crop:
+    a 3000x1080 rotated image reported at (2200, -100), reused with ty=0, would get ty pushed to
+    100 by a blind clamp. Refuse to clamp whenever the panel item -- and therefore its rotation --
+    cannot be positively identified."""
+    from obed_edom.map_remap import frame_affine
+
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 2200.0, "y": -100.0, "w": 3000.0, "h": 1080.0},
+    }
+    affine = Affine(s=1.0, tx=-2200.0, ty=0.0)
+
+    slide = {
+        "number": 6,
+        "items": [
+            _item(index=0, kind="image", fileName="Panel.png", x=2200, y=-100, w=3000, h=1080, rotation=10),
+        ],
+    }
+    unclamped = frame_affine(_recipe_reusing_affine(slide, recipe, affine, 7680.0, 1080.0))
+    assert unclamped.tx == -2200.0
+    assert unclamped.ty == 0.0  # refused: no panel item resolved, so rotation cannot be proven safe
+
+
+def test_the_clamp_refuses_a_panel_item_with_no_rotation_key():
+    """`rotation` absent is not the same as proven zero -- every production reader stamps it, but the
+    guard must not rely on that being true everywhere; `_f`'s None-default would otherwise silently
+    treat "unknown" as "unrotated"."""
+    from obed_edom.map_remap import frame_affine
+
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0}
+    affine = Affine(s=1.0, tx=-2932.0, ty=130.0)
+
+    slide = {
+        "number": 6,
+        "items": [_item(index=0, kind="image", fileName="Panel.png", x=1920, y=0, w=3840, h=1080)],
+    }
+    unclamped = frame_affine(_recipe_reusing_affine(slide, recipe, affine, 7680.0, 1080.0))
+    assert unclamped.tx == -2932.0
+    assert unclamped.ty == 130.0  # rotation key missing: refused, not defaulted to unrotated
+
+
+def test_a_letterboxed_predecessor_never_seeds_reuse():
+    """A predecessor that had to be fitted-to-frame carries no `templateSlide`
+    (`fit_to_frame_recipe`/`carry_fit_context` add none), so it can never seed a
+    reuse chain -- a letterboxed page has no template landing to share. Slide 2's
+    own pin is degenerate too, but it falls back to its OWN best framing rather
+    than inheriting anything from the letterboxed slide 1."""
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="image", fileName="map BG-1.png", x=-2880, y=0, w=7680, h=1080)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="map BG-1.png", x=0, y=100, w=1280, h=720)]},
+        ],
+    }
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            # Slide 1 pairs to nothing (no map art at all) -- fitted to frame.
+            {"number": 1, "items": [_item(index=0, kind="text", text="Title", x=100, y=100, w=400, h=80)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="map BG-1.png", x=0, y=0, w=7680, h=1080)]},
+        ],
+    }
+    rows: list[dict] = []
+    fitted: list[int] = []
+    plan_payload_transforms(
+        wall, learn_recipe(wall, template), template=template,
+        framing_overrides={2: 2}, framing_report=rows, fitted_slides=fitted,
+    )
+    assert fitted == [1]  # slide 2's own framing rescues it; only slide 1 is letterboxed
+    slide2 = next(r for r in rows if r["slide"] == 2)
+    assert slide2["reusedSibling"] is False
+    assert slide2["pinOverridden"] is True  # used its own framing, not slide 1's (none exists)
+
+
+def test_a_cover_fallback_predecessor_never_seeds_reuse():
+    """A `cover-fallback` recipe can carry a `templateSlide` (the pin it was asked
+    for) while its affine is a crop of the WALL panel alone -- no template
+    geometry went into it. That must not qualify as "landed on the template" for
+    reuse purposes, even though it looks the same shape as a genuine template fit.
+
+    Slide 1 is a text-only page pinned to template 4; template 4 has no map/list
+    content to pair against, so slide 1's own recipe is `cover-fallback` (its
+    on-canvas fraction is fine, so it stands unmodified). Slide 2 is a full-bleed
+    photo also pinned to 4, whose own pin collapses to a sliver against template
+    4's tiny placeholder image. Before the fix this silently inherited slide 1's
+    wall-derived crop as `sibling-affine`; after it, slide 1 not qualifying means
+    slide 2 falls through to its own auto framing / fit instead."""
+    template = {
+        "slideWidth": 1920,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 4, "items": [_item(index=0, kind="image", fileName="photo.png", x=200, y=400, w=480, h=135)]},
+        ],
+    }
+    wall = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {"number": 1, "items": [_item(index=0, kind="text", text="Some Title", x=3640, y=500, w=400, h=80)]},
+            {"number": 2, "items": [_item(index=0, kind="image", fileName="China.png", x=1920, y=0, w=3840, h=1080)]},
+        ],
+    }
+    rows: list[dict] = []
+    plan_payload_transforms(
+        wall, learn_recipe(wall, template), template=template,
+        framing_overrides={1: 4, 2: 4}, framing_report=rows,
+    )
+    slide1 = next(r for r in rows if r["slide"] == 1)
+    assert slide1["source"] == "cover-fallback" and slide1["templateSlide"] == 4
+    assert slide1["reusedSibling"] is False
+    slide2 = next(r for r in rows if r["slide"] == 2)
+    assert slide2["reusedSibling"] is False  # cover-fallback's templateSlide=4 must not seed reuse
+    assert slide2["source"] != "sibling-affine"
+
 
 def test_a_degenerate_pin_falls_back_to_the_pages_own_framing():
     """A pin that collapses the page to a sliver is overridden by its own framing.
@@ -302,6 +553,33 @@ def test_a_degenerate_pin_falls_back_to_the_pages_own_framing():
     assert row["confirmed"] is False
     assert row["fitted"] is False  # covered, not letterboxed
     assert fitted == []
+
+
+def test_on_canvas_fraction_reports_excluded_counts_without_moving_the_bar():
+    """A cover's side panel is excluded from the fraction on purpose (it is
+    dropped, not judged) -- the excluded/excludedOffCanvas counts say how much
+    was set aside, but must not themselves gate anything: a slide with a good
+    fraction can still carry excluded, off-frame overlays."""
+    slide = {
+        "number": 1,
+        "items": [
+            _item(index=0, kind="image", fileName="a.png", x=500, y=0, w=2000, h=1080),
+            # Outside the crop footprint (a side panel); its mapped centre also
+            # lands off the CG canvas.
+            _item(index=1, kind="image", fileName="b.png", x=2600, y=0, w=300, h=300),
+        ],
+    }
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "source": "template-cover",
+        "mapSrc": {"x": 500.0, "y": 0.0, "w": 2000.0, "h": 1080.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0},
+    }
+    counts: dict[str, int] = {}
+    frac = on_canvas_fraction(slide, recipe, 3000.0, 1080.0, counts)
+    assert frac >= MIN_ON_CANVAS_FRACTION
+    assert counts["excluded"] > 0
+    assert counts["excludedOffCanvas"] > 0
 
 
 def test_cover_keeps_center_pin_on_canvas():
@@ -4349,6 +4627,173 @@ def test_gold_full_report_card_deck_if_warm():
     # Whatever donor selection this deck makes, gating must never trip.
     for j in jobs:
         assert j["persist"] >= REUSE_MIN_PERSIST
+
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def _gold_pin_continuity_plan():
+    """Gold-deck oracle for the pin-continuity fix (offline, Keynote-free): slides
+    6 and 7 are pinned to template slide 4, as the operator would pin them; slide 5
+    is left unpinned and reaches template 4 on its own. Returns None if the Gold
+    wall/template decks are not present on this machine."""
+    from pathlib import Path
+
+    from obed_edom.offline_inspect import offline_wall_payload
+
+    decks = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
+    wall_path = decks / "Gold_Wall_Input.key"
+    template_path = decks / "Base_CG_Assets.key"
+    if not wall_path.exists() or not template_path.exists():
+        return None
+    wall = offline_wall_payload(wall_path)
+    template = offline_wall_payload(template_path)
+    recipe = learn_recipe(wall, template)
+    rows: list[dict] = []
+    fitted: list[int] = []
+    transforms = plan_payload_transforms(
+        wall, recipe, template=template,
+        framing_overrides={6: 4, 7: 4},
+        framing_report=rows, fitted_slides=fitted,
+    )
+    return {"wall": wall, "template": template, "rows": rows, "fitted": fitted, "transforms": transforms}
+
+
+def test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped():
+    """Slides 6 and 7 are pinned to template slide 4; their own art collapses to a
+    sliver, so they used to fall back to their own degenerate cover (a hand crop of
+    `Wilderness.png`, x=-544). Slide 5, left unpinned, reaches template 4 on its
+    own -- item 1 lets 6 and 7 pick that up as their adjacent sibling on the same
+    template, and the owner's ty-clamp keeps the reused panel full-bleed instead of
+    inheriting slide 5's y=61/h=947 inset."""
+    data = _gold_pin_continuity_plan()
+    if data is None:
+        pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
+    wall, template = data["wall"], data["template"]
+    rows, fitted, transforms = data["rows"], data["fitted"], data["transforms"]
+    by_slide = {r["slide"]: r for r in rows}
+
+    assert by_slide[5]["templateSlide"] == 4
+    assert by_slide[5]["requested"] is None
+    assert by_slide[5]["source"] == "template-layout"
+    assert by_slide[5]["pairQuality"] == 1
+
+    for n in (6, 7):
+        row = by_slide[n]
+        assert row["templateSlide"] == 4
+        assert row["requested"] == 4
+        assert row["source"] == "sibling-affine"
+        assert row["reusedSibling"] is True
+        assert row["pinOverridden"] is False
+
+    from obed_edom.map_remap import frame_affine
+
+    def _own_recipe(number):
+        slide = next(s for s in wall["slides"] if s.get("number") == number)
+        single = {"slideWidth": wall["slideWidth"], "slideHeight": wall["slideHeight"], "slides": [slide]}
+        return learn_recipe(single, template)
+
+    a5 = frame_affine(_own_recipe(5))
+    assert a5.s == 1.0 and a5.tx == -2932.0 and a5.ty == 130.0
+
+    for n in (8, 9):
+        # 100px off slide 5's own framing: proves they were not dragged onto it.
+        assert frame_affine(_own_recipe(n)).tx == -3032.0
+
+    for n in (6, 7):
+        slide = next(s for s in wall["slides"] if s.get("number") == n)
+        china_idx = next(
+            i for i, it in enumerate(slide.get("items") or []) if "China Adjusted" in (it.get("fileName") or "")
+        )
+        t = next(t for t in transforms if t.slide_number == n and t.item_index == china_idx)
+        assert t.x == -1111.0  # post-clamp: 1821 - 2932, slide 5's tx untouched (width already covers)
+        assert t.y == 0.0  # post-clamp: slide 5's ty=130 inset clamped to close the gap
+        assert t.x != -544.0  # -544 is Wilderness.png's hand crop -- the bug's signature
+
+    assert fitted == [10]
+
+
+def test_gold_slide_7_reports_excluded_overlays():
+    """Item 2: slide 7's coverage is honest about what it excluded from
+    `onCanvas`, without gating on it (the owner accepted the stranding)."""
+    data = _gold_pin_continuity_plan()
+    if data is None:
+        pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
+    row = next(r for r in data["rows"] if r["slide"] == 7)
+    assert row["onCanvas"] == 0.5  # R2 tripwire: exactly MIN_ON_CANVAS_FRACTION, strict `<` still passes it
+    assert row["excluded"] == 13
+    assert row["excludedOffCanvas"] == 11
+
+
+def test_gold_on_canvas_fraction_out_param_does_not_change_anything():
+    """Item 2a must be report-only: adding the `excluded_report` out-param changes
+    no fraction, and running `plan_payload_transforms` with or without a
+    `framing_report` to fill must not change which slides get fitted."""
+    data = _gold_pin_continuity_plan()
+    if data is None:
+        pytest.skip("Gold wall/template deck not available; refuse to open Keynote")
+    wall, template = data["wall"], data["template"]
+    recipe = learn_recipe(wall, template)
+
+    fitted_with_report: list[int] = []
+    plan_payload_transforms(
+        wall, recipe, template=template, framing_overrides={6: 4, 7: 4},
+        framing_report=[], fitted_slides=fitted_with_report,
+    )
+    fitted_without_report: list[int] = []
+    plan_payload_transforms(
+        wall, recipe, template=template, framing_overrides={6: 4, 7: 4},
+        fitted_slides=fitted_without_report,
+    )
+    assert fitted_with_report == fitted_without_report
+
+    wall_w, wall_h = wall["slideWidth"], wall["slideHeight"]
+    for slide in wall["slides"]:
+        single = {"slideWidth": wall_w, "slideHeight": wall_h, "slides": [slide]}
+        r = learn_recipe(single, template)
+        assert on_canvas_fraction(slide, r, wall_w, wall_h) == on_canvas_fraction(slide, r, wall_w, wall_h, {})
+
+
+def test_on_canvas_fraction_excluded_items_never_count_toward_seen():
+    """Item 2a, Keynote-free: the fraction is computed from first principles, not
+    by comparing the implementation against itself (that self-comparison is
+    vacuous -- a bug that folds excluded items into `seen`/`inside` moves both
+    calls identically and still passes). mapSrc [0,1000] -> mapDst [-200,1000]
+    is s=1.0, tx=-200: an included item's mapped x is its wall x minus 200.
+
+    3 INCLUDED items (centre x in [0, 1000], so not excluded by crop_footprint):
+    A x=600 -> mapped cx=450 (on), B x=800 -> mapped cx=650 (on),
+    C x=50 -> mapped cx=-100 (off, still on-slide) => seen=3, inside=2, 2/3.
+
+    2 EXCLUDED items (centre x outside [0, 1000]): D x=2500 -> mapped cx=2350
+    (off canvas), E x=1500 -> mapped cx=1350 (on canvas). Neither may count
+    toward seen/inside -- a broken implementation that let them in would total
+    seen=5, inside=3 (A, B, E) = 0.6, a different value from the correct 2/3,
+    so this fails loudly if `seen` is ever incremented before the exclusion
+    check runs."""
+    slide = {
+        "number": 1,
+        "items": [
+            _item(index=0, kind="image", fileName="a.png", x=600, y=400, w=100, h=100),
+            _item(index=1, kind="image", fileName="b.png", x=800, y=400, w=100, h=100),
+            _item(index=2, kind="image", fileName="c.png", x=50, y=400, w=100, h=100),
+            _item(index=3, kind="image", fileName="d.png", x=2500, y=400, w=100, h=100),
+            _item(index=4, kind="image", fileName="e.png", x=1500, y=400, w=100, h=100),
+        ],
+    }
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "source": "template-cover",
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 1000.0, "h": 1080.0},
+        "mapDst": {"x": -200.0, "y": 0.0, "w": 1200.0, "h": 1080.0},
+    }
+    counts: dict[str, int] = {}
+    frac = on_canvas_fraction(slide, recipe, 3000.0, 1080.0, counts)
+    assert frac == pytest.approx(2.0 / 3.0)
+    assert frac != 0.6  # the value a seen-before-skip bug would produce
+    assert counts["excluded"] == 2
+    assert counts["excludedOffCanvas"] == 1
 
 
 # --- Part B1: per-object OUTPUT-rect map threaded onto `remove` refs -----------
