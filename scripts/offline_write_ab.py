@@ -529,8 +529,9 @@ def tol_for_bucket(bucket: str, sig_type: str | None, tols: Tolerances) -> float
 # compare_units_multiset / compare_units_by_addr — kept as INFORMATIONAL cross-checks.
 # Positional pairing (each arm sorted independently by its own box, then zipped by
 # index) is unprovable without object ids -- a mis-pairing can look exactly like a real
-# displacement -- so compare_units_multiset's deltas are reported only as upper bounds
-# and never gate; only its population count, which is order-independent, gates here.
+# displacement -- so compare_units_multiset's deltas are reported only as upper bounds.
+# Its population count is the one order-independent, zip-truncation-immune signal in the
+# report, but the report is informational at the call site: gate_ok never reads it.
 # compare_units_identity (id-matched) is the primary gate.
 # ==========================================================================
 def _unit_box(u: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -569,9 +570,10 @@ def compare_units_multiset(
     Without object ids, positional pairing can never be proven correct — a mis-pairing
     is indistinguishable from a real displacement of the same size — so a per-unit delta
     is reported only as an upper bound and never fails the bucket or the overall report.
-    The population count is order-independent and trustworthy, so it keeps gating, before
-    any delta work and immune to ``zip`` truncation. :func:`compare_units_identity`
-    (id-matched) is the primary gate.
+    Within this report the population count is the trustworthy signal — order-independent,
+    checked before any delta work, immune to ``zip`` truncation — but the report itself is
+    informational at the call site: ``gate_ok`` never reads ``report["pass"]``.
+    :func:`compare_units_identity` (id-matched) is the primary gate.
 
     Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worstUpperBound,
     reasons, informational?}}}``.
@@ -1182,7 +1184,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the live-verify readback (required for the Full deck)")
     ap.add_argument("--tol-hard", type=float, default=TOL_HARD,
                     help=f"shape px tolerance vs the PLAN (oracle, per side; line is "
-                         f"skipped by the oracle); identity/multiset (A-vs-B) gates "
+                         f"skipped by the oracle); identity (A-vs-B) gates "
                          f"shape+line at 2x this (default {TOL_HARD})")
     ap.add_argument("--tol-soft", type=float, default=TOL_SOFT,
                     help=f"group/unmasked-image/movie px tolerance vs the PLAN (oracle, "
@@ -1505,6 +1507,8 @@ def main(argv: list[str] | None = None) -> int:
 
         multiset = compare_units_multiset(a_units, b_units, args.tol_hard, args.tol_soft)
         _log_multiset_report(multiset)  # informational cross-check only (D2)
+        # open: a count mismatch here isn't gated (e.g. a lost zero-width autosize shape
+        # identity doesn't carve) -- not decided whether it should be, not fixed here.
 
         if not identity["pass"]:
             _log(f"  slide {n}: identity compare FAILED — running the addr-matched permutation "
