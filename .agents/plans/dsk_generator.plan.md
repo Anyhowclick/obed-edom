@@ -284,6 +284,9 @@ to the centre panel with `map_remap.CENTRE_PANEL_RECT` (`map_remap.py:439`) and
 | `movie` | any `TSD.MovieArchive` in the centre panel | **export-crop**: scratch-deck movie export → ffmpeg → insert the exported clip into the DSK deck, stroke 5pt; the FW movie object is **deleted**, which clears its builds; the slide's own transition is set to `none` (the clip owns the timing) |
 | `mixed` | movie **and** builds/other content | treat as `movie` (the export bakes everything), flag in the review page for operator override |
 
+Side-panel items (outside the centre panel) are dropped unconditionally —
+owner decision 2026-09-10; no per-slide whitelist as in the CG resizer.
+
 Keep `deck_builds`'s per-slide-number dict as the primary key so slide-number
 bookkeeping stays consistent downstream. `built` is a genuine both-ways case:
 the owner's own sample keeps builds on 7 DSK slides, so "builds always become a
@@ -324,6 +327,10 @@ finished one. If automatic cropping turns out to be essential, it is a
 **separate workstream** (mask authoring via offline write, gated on
 `OBED_OFFLINE_WRITE` and on the render-fields defect being fixed), not a
 tweak to `d2`.
+
+**Resolved by the owner (2026-09-10):** scale-only is the agreed contract.
+The one live probe still owed (mask travels with a live width/height write)
+becomes a `d4` acceptance line rather than an open design question.
 
 ## Blocker: off-canvas media
 
@@ -623,7 +630,8 @@ operator-run, hands-off Keynote window on a **copy**.
    white/`TSDSolidPattern`/5.0, and any style whose refs escape the kept band media
    is **refused and reported** rather than patched; `verify_builds` reports **0
    surplus** on kept slides; `movie` slides have transition `none`; presenter notes
-   are present.
+   are present; a masked image's mask scales with its frame after the live
+   width/height write (no content revealed or clipped);
 5. **`d5` PP7 export folder — offline (naming) + live (content).** Acceptance:
    deterministic names per Open question 8; a manifest JSON listing slide → asset.
 6. **`d6` API/UI — offline.** Acceptance: propose/review/apply round-trips against a
@@ -661,6 +669,10 @@ operator-run, hands-off Keynote window on a **copy**.
    refused) — it will scale to the band and leave editorial cropping to you in the
    editable deck. Is that acceptable, or is auto-cropping essential enough to fund
    a separate mask-authoring workstream?
+   **Owner (2026-09-10):** scale-only is acceptable. Copy the image together with
+   its existing mask from the LW deck into the DSK deck and scale it; the operator
+   adjusts the crop manually afterwards. Side panels are ignored entirely by this
+   converter.
 8. The stat overlay ("1.9% Christians", top-right of the band) — is it FW wall content
    that should flow through automatically, or DSK-side text typed after import?
 9. **Insert mode is closer to core than stretch**: 63 FW slides → 43 DSK slides,
