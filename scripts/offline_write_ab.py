@@ -547,6 +547,18 @@ def _sort_key(u: dict[str, Any]) -> tuple[float, float, float, float]:
     return (round(x, 1), round(y, 1), round(w, 1), round(h, 1))
 
 
+def _order_unstable(units: list[dict[str, Any]], tol: float) -> bool:
+    """Positional pairing is only meaningful when the sort key separates the population by
+    more than the compared delta: two units whose leading key differs by less than ``tol``
+    can swap between arms and pair the wrong boxes."""
+    ordered = sorted(units, key=_sort_key)
+    for u, v in zip(ordered, ordered[1:]):
+        bu, bv = _unit_box(u), _unit_box(v)
+        if abs(bv[0] - bu[0]) <= tol and max(abs(a - b) for a, b in zip(bu, bv)) > tol:
+            return True
+    return False
+
+
 def compare_units_multiset(
     a_units: list[dict[str, Any]],
     b_units: list[dict[str, Any]],
@@ -562,10 +574,13 @@ def compare_units_multiset(
     ``kind``) keeps a group CHILD out of its parent's top-level bucket (D8). Shape/line
     gate at ``tol_hard``; everything else at ``tol_soft``; text is INFORMATIONAL
     (x-delta only, never gates the overall pass/fail) -- kept as a cross-check against
-    the identity compare, never the primary gate itself (D1).
+    the identity compare, never the primary gate itself (D1). A bucket whose sort key
+    does not separate the population by more than the compared tolerance (positional
+    pairing is then ambiguous -- adjacent units can swap between arms) is also demoted to
+    informational: its count mismatch still gates, but its per-unit delta does not.
 
     Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worst, reasons,
-    informational?}}}``.
+    informational?, ambiguous?}}}``.
     """
     a_by_kind: dict[str, list[dict[str, Any]]] = {}
     b_by_kind: dict[str, list[dict[str, Any]]] = {}
@@ -592,6 +607,10 @@ def compare_units_multiset(
             per_kind[bucket] = entry
             overall = False
             continue
+        tol = tol_hard if bucket in _HARD_KINDS else tol_soft
+        ambiguous = bucket not in _TEXT_BUCKETS and (
+            _order_unstable(a_list, tol) or _order_unstable(b_list, tol)
+        )
         x_only = bucket in _TEXT_BUCKETS
         worst = 0.0
         for ua, ub in zip(a_list, b_list):
@@ -606,8 +625,12 @@ def compare_units_multiset(
         entry["worst"] = worst
         if bucket in _TEXT_BUCKETS:
             entry["informational"] = True
+        elif ambiguous:
+            entry["ambiguous"] = True
+            entry["informational"] = True
+            if worst > tol:
+                entry["reasons"].append(f"worst Δ{worst:.2f}px > {tol}px")
         else:
-            tol = tol_hard if bucket in _HARD_KINDS else tol_soft
             if worst > tol:
                 entry["pass"] = False
                 entry["reasons"].append(f"worst Δ{worst:.2f}px > {tol}px")
@@ -626,9 +649,15 @@ def _log_multiset_report(report: dict[str, Any]) -> None:
             )
             continue
         tag = "info" if entry.get("informational") else ("PASS" if entry["pass"] else "FAIL")
+        note = (
+            "  (ordering ambiguous: sorted-position pairing is unreliable on this bucket; "
+            "worst is an upper bound, not a displacement)"
+            if entry.get("ambiguous") else ""
+        )
         _log(
             f"    {kind:8} n_a={entry['n_a']:<4} n_b={entry['n_b']:<4} "
             f"worst={entry['worst']:.2f}px  {tag}"
+            + note
             + (f"  {entry['reasons']}" if entry.get("reasons") else "")
         )
 
@@ -973,7 +1002,7 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
             )
     if soft_fallbacks:
         reasons.append(
-            f"{soft_fallbacks} soft (group/text/masked) frame(s) used a stale fallback, "
+            f"{soft_fallbacks} soft (text/masked) frame(s) used a stale fallback, "
             "not the live seed."
         )
     if not value_clean:

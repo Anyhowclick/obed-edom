@@ -1065,19 +1065,26 @@ def test_require_reconcile_proceeds_when_source_counts_present(deck):
 # --------------------------------------------------------------------------
 # Hardening 2: soft_fallbacks counts soft-class specs with no reported frame.
 # --------------------------------------------------------------------------
-def test_soft_fallbacks_counted_for_group_without_reported(deck):
-    # group is a soft class: with no reported frame its delta falls back to the offline
-    # composed frame, which must be COUNTED so the gate can insist on 0.
+def test_soft_fallbacks_never_counted_for_group(deck):
+    # group is no longer a soft class (fix 1): its frame comes from the offline composed
+    # child union, never from `reported`, so soft_fallbacks stays 0 whether or not a
+    # reported frame is supplied.
     specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "role": "other"}]
     res = patch_slide_geometry(deck, 1, specs)
-    assert res.applied == 1 and res.soft_fallbacks == 1
+    assert res.applied == 1 and res.soft_fallbacks == 0
 
-
-def test_soft_fallbacks_zero_when_reported_supplied(deck):
     before = _composed(deck)
     rep = [before[("group", 0)][k] for k in "xywh"]
-    specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "role": "other"}]
-    res = patch_slide_geometry(deck, 1, specs, reported={("group", 0): rep})
+    res2 = patch_slide_geometry(deck, 1, specs, reported={("group", 0): rep})
+    assert res2.applied == 1 and res2.soft_fallbacks == 0
+
+
+def test_soft_fallbacks_zero_when_text_reported_supplied(deck):
+    # text is the one remaining soft class: with a reported frame supplied, no fallback.
+    before = _composed(deck)
+    rep = [before[("text", 0)][k] for k in "xywh"]
+    specs = [{"kind": "text", "kindIndex": 0, "x": 720.0, "y": 380.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs, reported={("text", 0): rep})
     assert res.applied == 1 and res.soft_fallbacks == 0
 
 
@@ -1130,9 +1137,9 @@ def test_group_fields_pure_translation_when_size_not_scaled():
     # sx=sy=1, write_size=False must degenerate to the old translation-only rule.
     rec = {"id": "250"}
     stored = (500.0, 500.0, 30.0, 30.0, 0.0)
-    reported = [500.0, 500.0, 30.0, 30.0]
+    union = [500.0, 500.0, 30.0, 30.0]
     spec = {"x": 540.0, "y": 560.0}
-    (obj_id, fields), = _group_fields(rec, spec, reported, stored, 1.0, 1.0, False)
+    (obj_id, fields), = _group_fields(rec, spec, union, stored, 1.0, 1.0, False)
     assert obj_id == "250"
     assert fields == {"pos_x": 540.0, "pos_y": 560.0}
 
@@ -1140,10 +1147,10 @@ def test_group_fields_pure_translation_when_size_not_scaled():
 def test_group_fields_scaled_moves_origin_and_writes_own_size():
     rec = {"id": "250"}
     stored = (500.0, 500.0, 30.0, 30.0, 0.0)
-    reported = [480.0, 490.0, 15.0, 10.0]  # child-union denominator, not stored size
+    union = [480.0, 490.0, 15.0, 10.0]  # composed child-union denominator, not stored size
     spec = {"x": 540.0, "y": 560.0, "w": 60.0, "h": 40.0}
     sx, sy = 60.0 / 15.0, 40.0 / 10.0
-    (obj_id, fields), = _group_fields(rec, spec, reported, stored, sx, sy, True)
+    (obj_id, fields), = _group_fields(rec, spec, union, stored, sx, sy, True)
     assert obj_id == "250"
     assert fields["pos_x"] == pytest.approx(540.0 + (500.0 - 480.0) * sx)
     assert fields["pos_y"] == pytest.approx(560.0 + (500.0 - 490.0) * sy)
@@ -1283,19 +1290,32 @@ def test_group_children_scaled_end_to_end(tmp_path):
     assert xywh("254") == pytest.approx((10.0, 10.0, 20.0, 20.0))
 
 
-def test_group_zero_reported_size_falls_back_to_translation(deck):
-    # rep w/h == 0 must not divide-by-zero; the guard falls back to pure
-    # translation (no size/child writes), same as a spec lacking w/h.
-    before = _composed(deck)
+def test_group_zero_union_size_falls_back_to_translation(tmp_path):
+    # fix 1 stops reading `reported` for groups entirely, so the zero-size fallback case
+    # must now come from the composed UNION being zero: a group whose only child is a
+    # zero-extent nested group (`_group_union` returns None -> `_compose_record` falls
+    # back to the group's own stored frame) and whose own stored size is 0.0. union[2]/[3]
+    # == 0 must not divide-by-zero; the guard falls back to pure translation (no
+    # size/child writes), same as a spec lacking w/h.
+    nested = _arch(255, "TSD.GroupArchive", {"super": _geom(0, 0, 0, 0), "children": []})
+    group = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 0, 0), "children": [{"identifier": 255}]})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 250}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, group, nested]))
+    deck = tmp_path / "zero_union.key"
+    deck.write_bytes(buf.getvalue())
+
     specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "w": 100.0, "h": 100.0, "role": "other"}]
-    res = patch_slide_geometry(deck, 1, specs, reported={("group", 0): [500.0, 500.0, 0.0, 0.0]})
+    res = patch_slide_geometry(deck, 1, specs)
     assert not res.refused and res.missed == 0
     assert set(res.edited_ids) == {"250"}  # only the group itself; no child scaled
     after = _composed(deck)
     assert [after[("group", 0)][k] for k in "xy"] == pytest.approx([540.0, 560.0])
-    assert [after[("group", 0)][k] for k in "wh"] == pytest.approx(
-        [before[("group", 0)]["w"], before[("group", 0)]["h"]]
-    )
+    assert [after[("group", 0)][k] for k in "wh"] == pytest.approx([0.0, 0.0])
 
 
 def _build_masked_group_deck(path, *, img_angle=0.0, mask_angle=0.0):
@@ -2196,6 +2216,203 @@ def test_restore_source_builds_warns_the_operator_of_a_headless_chain(tmp_path, 
         "slide, so nothing anchors the timing chain)." in m
         for m in messages
     )
+
+
+# --------------------------------------------------------------------------
+# Fix 1 (D10): group scale/origin from the composed child union, never `reported`.
+# --------------------------------------------------------------------------
+def _build_union_group_deck(path, *, group_frame, leaf_local):
+    gx, gy, gw, gh = group_frame
+    lx, ly, lw, lh = leaf_local
+    leaf = _arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(lx, ly, lw, lh)})
+    group = _arch(250, "TSD.GroupArchive", {"super": _geom(gx, gy, gw, gh), "children": [{"identifier": 251}]})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 250}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, group, leaf]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_group_union_write_lands_on_plan_ignoring_reported(tmp_path):
+    """T1 -- the D10 defect, as a numeric oracle, deck-free of any real .key beyond a
+    synthetic one. Composed union == the real slide-144 ki0 union; `stored != union`
+    (the group's own frame is offset from it); `reported` carries the 4pt-quantised
+    entry D10 recovered. Fix 1 must land exactly on the plan and IGNORE `reported`."""
+    U = (3335.687, 430.916, 68.447, 88.423)
+    R = (3336.0, 432.0, 68.0, 88.0)  # 4*round(U/4): the reported entry fix 1 must ignore
+    P = (16.0, 502.77, 110.08, 142.46)
+    G = (3330.0, 425.0, 50.0, 40.0)  # group's own stored frame, offset from the union
+    leaf_local = (U[0] - G[0], U[1] - G[1], U[2], U[3])
+    deck = _build_union_group_deck(tmp_path / "union144.key", group_frame=G, leaf_local=leaf_local)
+
+    specs = [{"kind": "group", "kindIndex": 0, "x": P[0], "y": P[1], "w": P[2], "h": P[3], "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs, reported={("group", 0): list(R)})
+    assert not res.refused and res.missed == 0
+    after = _composed(deck)
+    # abs=1e-4, not 1e-6: geometry round-trips through a float32 IWA field.
+    assert [after[("group", 0)][k] for k in "xywh"] == pytest.approx(P, abs=1e-4)
+
+    # Regression oracle: the PRE-fix `sx = spec/reported` formula would have landed here
+    # instead (D10's measured slide-144 ki0 defect) -- pin it BY VALUE so a regression to
+    # the old rule is caught even if this test's tolerance is loosened later.
+    sx, sy = P[2] / R[2], P[3] / R[3]
+    old_union = (P[0] + sx * (U[0] - R[0]), P[1] + sy * (U[1] - R[1]), sx * U[2], sy * U[3])
+    assert old_union == pytest.approx((15.494, 501.015, 110.804, 143.144), abs=1e-3)
+
+
+@pytest.mark.parametrize("union,reported,plan,expected_err", [
+    ((3335.687, 430.916, 68.447, 88.423), (3336.0, 432.0, 68.0, 88.0),
+     (16.000, 502.770, 110.080, 142.460), (-0.5062, -1.7554, 0.7239, 0.6841)),
+    ((3429.723, 455.807, 78.189, 126.529), (3428.0, 456.0, 80.0, 128.0),
+     (16.000, 543.240, 126.270, 205.600), (2.7195, -0.3097, -2.8581, -2.3634)),
+    ((3520.423, 118.589, 639.154, 237.217), (3520.0, 120.0, 640.0, 236.0),
+     (640.000, 233.500, 639.000, 237.000), (0.4223, -1.4166, -0.8444, 1.2223)),
+    ((2863.790, 174.906, 380.279, 445.735), (2864.0, 176.0, 380.0, 444.0),
+     (16.000, 175.000, 380.000, 446.000), (-0.2097, -1.0989, 0.2787, 1.7432)),
+])
+def test_pre_fix_err_formula_reproduces_measured_defect(union, reported, plan, expected_err):
+    # T2 -- closed-form regression oracle for the D10 defect: err = s*(U - R),
+    # s = spec/reported. Table-driven over the four measured production cases.
+    sx = plan[2] / reported[2]
+    sy = plan[3] / reported[3]
+    err = (sx * (union[0] - reported[0]), sy * (union[1] - reported[1]),
+           sx * (union[2] - reported[2]), sy * (union[3] - reported[3]))
+    assert err == pytest.approx(expected_err, abs=1e-3)
+
+
+def _build_group_residual_deck(path):
+    """Group 250 with a single zero-extent `TSWP.ShapeInfoArchive` child: `_group_union`
+    excludes it (`_is_real_box`), and `_group_residual_reason` flags the group
+    `group-residual` -- fix 1 must refuse it, not guess from the union."""
+    leaf = _arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 0.0, 30.0)})
+    group = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 60, 60), "children": [{"identifier": 251}]})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 250}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, group, leaf]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_group_residual_union_is_refused_not_guessed(tmp_path):
+    # T3a -- `needs_keynote == "group-residual"`: refused, never guessed from the union.
+    deck = _build_group_residual_deck(tmp_path / "residual.key")
+    original = deck.read_bytes()
+    specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "w": 100.0, "h": 100.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.missed == 1 and res.applied == 0
+    assert res.missed_specs == specs
+    assert deck.read_bytes() == original  # reader-flagged union left untouched
+
+
+def _build_rotated_group_deck(path):
+    """Group 250's OWN frame is rotated: `_compose_record` flags `rotated-group` (a
+    translation-only union would be wrong). Fix 1 must refuse it."""
+    leaf = _arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _shape_super(0, 0, 30.0, 30.0)})
+    group = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 60, 60, angle=30.0),
+                  "children": [{"identifier": 251}]})
+    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 250}]})
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide, group, leaf]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_rotated_group_union_is_refused_not_guessed(tmp_path):
+    # T3b -- `needs_keynote == "rotated-group"`: refused, never guessed from the union.
+    deck = _build_rotated_group_deck(tmp_path / "rotated_group.key")
+    original = deck.read_bytes()
+    specs = [{"kind": "group", "kindIndex": 0, "x": 540.0, "y": 560.0, "w": 100.0, "h": 100.0, "role": "other"}]
+    res = patch_slide_geometry(deck, 1, specs)
+    assert res.missed == 1 and res.applied == 0
+    assert res.missed_specs == specs
+    assert deck.read_bytes() == original  # reader-flagged union left untouched
+
+
+def test_group_child_scale_ops_refuses_zero_height_non_textbox_child():
+    # T4 -- fix 5: the layout-cache sentinel (`cw==0.0 or ch==0.0` on a
+    # `TSWP.ShapeInfoArchive`) must refuse regardless of `isTextBox` -- the exact archive
+    # shape of slide-36 id 18821760 (`isTextBox: False`), which nothing else in the walk
+    # refuses under angle 0 and a uniform scale. Fails before fix 5, passes after.
+    objects = {
+        "1": {"_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": False,
+              "super": _shape_super(10, 20, 1317.4844, 0.0)},
+    }
+    group = {"super": _geom(0, 0, 0, 0), "children": [{"identifier": 1}]}
+    ops, ok = _group_child_scale_ops(group, objects, 2.0, 2.0, {}, "member")
+    assert ops == [] and not ok
+
+
+# --------------------------------------------------------------------------
+# T8 -- real-deck acceptance (skipped without the local W1 bank + source deck).
+# --------------------------------------------------------------------------
+FULL_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Full_Report_Card_Wall.key")
+W1_RUN = Path("output/bank/2026-09-09/nap-run/w1-gate/B_flagged.run.json")
+
+
+@pytest.mark.skipif(not (FULL_DECK.exists() and W1_RUN.exists()), reason="local W1 bank only")
+def test_group_union_write_lands_on_plan_on_the_full_wall_deck():
+    import json
+
+    record = json.loads(W1_RUN.read_text())
+    transforms = record["plan"]["transforms"]
+    offline = set(record["offlineWrite"]["slides"])
+
+    objects, id_to_file, _file_ids = _load_deck(FULL_DECK)
+    order = slide_order(objects)
+
+    written = 0
+    missed = 0
+    deck_max = 0.0
+    bad_slides: list[tuple[int, float]] = []
+
+    for n in sorted(offline):
+        specs = [t for t in transforms
+                 if t["slide"] == n and t.get("role") != "hide" and t.get("kind") == "group"]
+        if not specs:
+            continue
+        _target_member, edits, _soft, missed_specs, refuse_reason = _slide_edits(
+            n, specs, objects, id_to_file, order, reported=None,
+            address="positional", source_counts=None, require_reconcile=False,
+        )
+        assert refuse_reason is None, (n, refuse_reason)
+        missed += len(missed_specs)
+        written += len(specs) - len(missed_specs)
+
+        for obj_id, fields in edits.items():
+            _apply_geom_fields(objects[obj_id], fields)
+
+        slide_id = order[n - 1][0]
+        comp = {(r["kind"], r["kindIndex"]): r for r in compose_geometry(objects[slide_id], objects)}
+        missed_kis = {s.get("kindIndex") for s in missed_specs}
+        slide_max = 0.0
+        for s in specs:
+            if s.get("kindIndex") in missed_kis:
+                continue
+            rec = comp.get(("group", s["kindIndex"]))
+            assert rec is not None
+            d = max(abs(rec["x"] - s["x"]), abs(rec["y"] - s["y"]),
+                    abs(rec["w"] - s["w"]), abs(rec["h"] - s["h"]))
+            slide_max = max(slide_max, d)
+        deck_max = max(deck_max, slide_max)
+        if slide_max > 0.01:
+            bad_slides.append((n, slide_max))
+
+    assert written == 238
+    assert missed == 44
+    assert deck_max < 1e-6  # float32 IWA round-trip noise, not a real displacement
+    assert bad_slides == []
 
 
 def test_restore_source_builds_warns_the_operator_of_an_ambiguous_pairing(tmp_path, monkeypatch):

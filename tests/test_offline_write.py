@@ -188,16 +188,16 @@ def test_offline_slides_intersects_slide_range():
 # --- _soft_seed_slides --------------------------------------------------------
 
 
-def test_soft_seed_slides_only_group_and_text():
+def test_soft_seed_slides_only_text():
     specs_by_slide = {
-        1: [_spec(slide=1, kind="group", kindIndex=0)],
+        1: [_spec(slide=1, kind="group", kindIndex=0)],  # group: composed offline, no live seed
         2: [_spec(slide=2, kind="text", kindIndex=0)],
         3: [_spec(slide=3, kind="shape", kindIndex=0)],
-        4: [_spec(slide=4, kind="group", kindIndex=0, role="hide")],
+        4: [_spec(slide=4, kind="text", kindIndex=0, role="hide")],
         5: [_spec(slide=5, kind="image", kindIndex=0)],  # masked or not: never a soft seed
     }
     out = _soft_seed_slides({1, 2, 3, 4, 5}, specs_by_slide)
-    assert out == {1, 2}
+    assert out == {2}
 
 
 # --- _reported_from_bulk_rows -------------------------------------------------
@@ -808,7 +808,7 @@ def test_run_offline_write_group_verify_payload(monkeypatch):
     monkeypatch.setattr(ow_mod, "verify_offline_frames", lambda *a, **k: {"group": (1.0, 1, [])})
     group_specs = [_spec(slide=1, kind="group", kindIndex=0)]
     info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], lambda m: None)
-    assert info["groupVerify"] == {"planned": 1, "n": 1, "max": 1.0}
+    assert info["groupVerify"] == {"planned": 1, "written": 1, "n": 1, "max": 1.0, "missedMax": None}
 
     info_on = run_offline_write(Path("/tmp/x.key"), "on", {1}, group_specs, {}, [], lambda m: None)
     assert "groupVerify" not in info_on
@@ -848,6 +848,70 @@ def test_run_offline_write_reports_group_approx_not_gated(monkeypatch):
     info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], said.append)
     assert any("group-approx n=1 worst=139.25px NOT GATED" in m for m in said)
     assert info["offlineVerifyPass"] is True  # the approx line is informational, not gating
+
+
+def test_run_offline_write_group_missed_reports_and_does_not_fail(monkeypatch):
+    # T5 -- fix 3: a group spec the offline patcher missed (routed to the AppleScript
+    # fallback) must not be scored by the gating group bar, but its magnitude must still
+    # surface on a `group-missed ... NOT GATED` line, and it must not sink offlineVerifyPass.
+    import obed_edom.offline_write as ow_mod
+
+    written_spec = _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50)
+    missed_spec = _spec(slide=1, kind="group", kindIndex=1, x=200, y=200, w=100, h=50)
+    group_specs = [written_spec, missed_spec]
+
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {1: _result(missed_specs=[missed_spec])},
+    )
+    composed = {1: [
+        {"id": "g0", "kind": "group", "kindIndex": 0, "x": 0, "y": 0, "w": 100, "h": 50,
+         "geom_source": "group-union", "needs_keynote": None},
+        {"id": "g1", "kind": "group", "kindIndex": 1, "x": 339, "y": 200, "w": 100, "h": 50,
+         "geom_source": "group-union", "needs_keynote": None},
+    ]}
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: composed)
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    monkeypatch.setattr(ow_mod, "_fallback_bodies", lambda fb: {1: "BODY"})
+    monkeypatch.setattr(ow_mod, "build_fallback_scripts", lambda dest, bodies: ["SCRIPT"])
+    monkeypatch.setattr(ow_mod, "_run_fallback_scripts", lambda dest, scripts, say: (True, [], []))
+    said: list[str] = []
+    info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], said.append)
+
+    assert info["offlineVerifyPass"] is True
+    assert info["groupVerify"] == {
+        "planned": 2, "written": 1, "n": 1, "max": pytest.approx(0.0), "missedMax": pytest.approx(139.0)
+    }
+    assert any("group-missed n=1 worst=139.00px NOT GATED" in m for m in said)
+    assert not any("group bar did NOT run" in m for m in said)
+
+    # Negative: every group spec missed -> written == 0 -> the "bar did NOT run" line must
+    # NOT fire (it would prove nothing) and the run must not FAIL for it.
+    monkeypatch.setattr(
+        ow_mod, "_patch_offline_slides",
+        lambda *a, **k: {1: _result(missed_specs=[written_spec, missed_spec])},
+    )
+    said2: list[str] = []
+    info2 = run_offline_write(Path("/tmp/x.key"), "verify", {1}, group_specs, {}, [], said2.append)
+    assert info2["offlineVerifyPass"] is True
+    assert not any("group bar did NOT run" in m for m in said2)
+
+
+def test_run_offline_write_group_bar_still_gates_the_written_group(monkeypatch):
+    # T6 -- fix 3 must not weaken the writer's own bar: a WRITTEN group 5px off-plan
+    # still fails offlineVerifyPass (2.5px tolerance).
+    import obed_edom.offline_write as ow_mod
+
+    written_spec = _spec(slide=1, kind="group", kindIndex=0, x=0, y=0, w=100, h=50)
+    monkeypatch.setattr(ow_mod, "_patch_offline_slides", lambda *a, **k: {1: _result()})
+    composed = {1: [
+        {"id": "g0", "kind": "group", "kindIndex": 0, "x": 5, "y": 0, "w": 100, "h": 50,
+         "geom_source": "group-union", "needs_keynote": None},
+    ]}
+    monkeypatch.setattr(ow_mod, "_composed_frames", lambda *a, **k: composed)
+    monkeypatch.setattr(ow_mod, "_natural_audit", lambda *a, **k: {})
+    info = run_offline_write(Path("/tmp/x.key"), "verify", {1}, [written_spec], {}, [], lambda m: None)
+    assert info["offlineVerifyPass"] is False  # 5px > OFFLINE_VERIFY_TOL["group"] (2.5px)
 
 
 def test_run_offline_write_raises_when_fallback_fails(monkeypatch):
@@ -1130,6 +1194,40 @@ def test_compare_units_multiset_pass_and_fail():
     report_count = compare_units_multiset(a, b_short, tol_hard=0.5, tol_soft=1.0)
     assert report_count["pass"] is False
     assert "count" in report_count["per_kind"]["image"]["reasons"][0]
+
+
+def test_compare_units_multiset_demotes_ambiguous_ordering_but_keeps_count_gating():
+    # T7 -- fix 2: a bucket whose sort key doesn't separate the population by more than
+    # the tolerance is demoted to informational (positional pairing is unreliable), but a
+    # count mismatch under the same geometry still gates, and a resolvable-order delta
+    # still gates too.
+    def _u(x, y):
+        return _unit("shape", x, y, 10, 10)
+
+    # (a) x constant, y gaps of 1.6px (well under tol=1.0) -> ordering ambiguous: demoted
+    # to informational even though the arms differ by 3px.
+    a = [_u(16.0, 0.0), _u(16.0, 1.6), _u(16.0, 3.2)]
+    b = [_u(16.0, 3.0), _u(16.0, 4.6), _u(16.0, 6.2)]
+    report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
+    entry = report["per_kind"]["shape"]
+    assert entry["ambiguous"] is True
+    assert entry["informational"] is True
+    assert report["pass"] is True
+    assert entry["worst"] == pytest.approx(3.0)
+
+    # (b) x gaps of 100px (well over tol) -> ordering resolvable: a real displacement
+    # still gates.
+    a2 = [_u(0.0, 0.0), _u(100.0, 0.0), _u(200.0, 0.0)]
+    b2 = [_u(0.0, 0.0), _u(105.0, 0.0), _u(200.0, 0.0)]
+    report2 = compare_units_multiset(a2, b2, tol_hard=1.0, tol_soft=1.0)
+    assert report2["per_kind"]["shape"].get("ambiguous") is not True
+    assert report2["pass"] is False
+
+    # (c) count mismatch under the SAME ambiguous geometry as (a): the population check
+    # survives the ordering demotion.
+    report3 = compare_units_multiset(a, b[:2], tol_hard=1.0, tol_soft=1.0)
+    assert report3["pass"] is False
+    assert report3["per_kind"]["shape"]["pass"] is False
 
 
 def test_compare_units_multiset_text_is_informational():
