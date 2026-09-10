@@ -527,6 +527,12 @@ def tol_for_bucket(bucket: str, sig_type: str | None, tols: Tolerances) -> float
 
 # ==========================================================================
 # compare_units_multiset / compare_units_by_addr — kept as INFORMATIONAL cross-checks.
+# Positional pairing (each arm sorted independently by its own box, then zipped by
+# index) is unprovable without object ids -- a mis-pairing can look exactly like a real
+# displacement -- so compare_units_multiset's deltas are reported only as upper bounds.
+# Its population count is the one order-independent, zip-truncation-immune signal in the
+# report, but the report is informational at the call site: gate_ok never reads it.
+# compare_units_identity (id-matched) is the primary gate.
 # ==========================================================================
 def _unit_box(u: dict[str, Any]) -> tuple[float, float, float, float]:
     """``(x, y, w, h)`` box for one ``write_gate_ab.slide_units`` render unit, any sig type."""
@@ -559,13 +565,18 @@ def compare_units_multiset(
 
     ``write_gate_ab.slide_units`` already flattens a group's own union box AND every
     recursive child into the same flat list; bucketing by :func:`unit_bucket` (not raw
-    ``kind``) keeps a group CHILD out of its parent's top-level bucket (D8). Shape/line
-    gate at ``tol_hard``; everything else at ``tol_soft``; text is INFORMATIONAL
-    (x-delta only, never gates the overall pass/fail) -- kept as a cross-check against
-    the identity compare, never the primary gate itself (D1).
+    ``kind``) keeps a group CHILD out of its parent's top-level bucket (D8).
 
-    Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worst, reasons,
-    informational?}}}``.
+    Without object ids, positional pairing can never be proven correct — a mis-pairing
+    is indistinguishable from a real displacement of the same size — so a per-unit delta
+    is reported only as an upper bound and never fails the bucket or the overall report.
+    Within this report the population count is the trustworthy signal — order-independent,
+    checked before any delta work, immune to ``zip`` truncation — but the report itself is
+    informational at the call site: ``gate_ok`` never reads ``report["pass"]``.
+    :func:`compare_units_identity` (id-matched) is the primary gate.
+
+    Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worstUpperBound,
+    reasons, informational?}}}``.
     """
     a_by_kind: dict[str, list[dict[str, Any]]] = {}
     b_by_kind: dict[str, list[dict[str, Any]]] = {}
@@ -583,7 +594,7 @@ def compare_units_multiset(
             "n_a": len(a_list),
             "n_b": len(b_list),
             "pass": True,
-            "worst": 0.0,
+            "worstUpperBound": 0.0,
             "reasons": [],
         }
         if len(a_list) != len(b_list):
@@ -592,6 +603,7 @@ def compare_units_multiset(
             per_kind[bucket] = entry
             overall = False
             continue
+        tol = tol_hard if bucket in _HARD_KINDS else tol_soft
         x_only = bucket in _TEXT_BUCKETS
         worst = 0.0
         for ua, ub in zip(a_list, b_list):
@@ -603,15 +615,13 @@ def compare_units_multiset(
                 else max(abs(ax - bx), abs(ay - by), abs(aw - bw), abs(ah - bh))
             )
             worst = max(worst, delta)
-        entry["worst"] = worst
-        if bucket in _TEXT_BUCKETS:
-            entry["informational"] = True
-        else:
-            tol = tol_hard if bucket in _HARD_KINDS else tol_soft
-            if worst > tol:
-                entry["pass"] = False
-                entry["reasons"].append(f"worst Δ{worst:.2f}px > {tol}px")
-                overall = False
+        entry["worstUpperBound"] = worst
+        entry["informational"] = True
+        if worst > tol:
+            entry["reasons"].append(
+                f"upper bound from positional pairing (unproven), not a measured "
+                f"displacement: worst Δ{worst:.2f}px > {tol}px"
+            )
         per_kind[bucket] = entry
     return {"pass": overall, "per_kind": per_kind}
 
@@ -621,14 +631,14 @@ def _log_multiset_report(report: dict[str, Any]) -> None:
         if kind in _TEXT_BUCKETS:
             _log(
                 f"    {kind:8} n_a={entry['n_a']:<4} n_b={entry['n_b']:<4} "
-                f"worst={entry['worst']:.2f}px  "
+                f"worstUpperBound={entry['worstUpperBound']:.2f}px  "
                 "text: informational only — UNVERIFIED by this gate"
             )
             continue
         tag = "info" if entry.get("informational") else ("PASS" if entry["pass"] else "FAIL")
         _log(
             f"    {kind:8} n_a={entry['n_a']:<4} n_b={entry['n_b']:<4} "
-            f"worst={entry['worst']:.2f}px  {tag}"
+            f"worstUpperBound={entry['worstUpperBound']:.2f}px  {tag}"
             + (f"  {entry['reasons']}" if entry.get("reasons") else "")
         )
 
@@ -973,7 +983,7 @@ def summary_gate_reasons(ow: dict[str, Any], applied_a: int, applied_b: int) -> 
             )
     if soft_fallbacks:
         reasons.append(
-            f"{soft_fallbacks} soft (group/text/masked) frame(s) used a stale fallback, "
+            f"{soft_fallbacks} soft (text/masked) frame(s) used a stale fallback, "
             "not the live seed."
         )
     if not value_clean:
@@ -1174,7 +1184,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the live-verify readback (required for the Full deck)")
     ap.add_argument("--tol-hard", type=float, default=TOL_HARD,
                     help=f"shape px tolerance vs the PLAN (oracle, per side; line is "
-                         f"skipped by the oracle); identity/multiset (A-vs-B) gates "
+                         f"skipped by the oracle); identity (A-vs-B) gates "
                          f"shape+line at 2x this (default {TOL_HARD})")
     ap.add_argument("--tol-soft", type=float, default=TOL_SOFT,
                     help=f"group/unmasked-image/movie px tolerance vs the PLAN (oracle, "
@@ -1497,6 +1507,8 @@ def main(argv: list[str] | None = None) -> int:
 
         multiset = compare_units_multiset(a_units, b_units, args.tol_hard, args.tol_soft)
         _log_multiset_report(multiset)  # informational cross-check only (D2)
+        # open: a count mismatch here isn't gated (e.g. a lost zero-width autosize shape
+        # identity doesn't carve) -- not decided whether it should be, not fixed here.
 
         if not identity["pass"]:
             _log(f"  slide {n}: identity compare FAILED — running the addr-matched permutation "

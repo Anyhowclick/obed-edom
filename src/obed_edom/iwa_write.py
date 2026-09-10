@@ -2,15 +2,18 @@
 
 shape: write geometry.size AND naturalSize. line: length in both
 geometry.size.width and naturalSize.width. group: pure translation when spec
-lacks w/h; when both are given, a uniform scale (spec size / child-union size)
-also writes the group's own w/h and recursively rescales every descendant's
-local geometry (masked children rescale their mask too). A descendant that
-can't be safely scaled (rotated mask, cross-member mask) misses the whole
-group rather than partially scaling it. ``patch_deck_geometry`` resolves every
-slide's edits (pure, no I/O), then does exactly ONE zip rewrite touching only
-the edited members. In-place rewrite (O_TRUNC) preserves com.apple.macl and
-never ``os.replace``s. Positional addressing refuses a slide on
-reconcile_counts mismatch; refusal is always per slide.
+lacks w/h; when both are given, a uniform scale (spec size / offline composed
+child-union size) also writes the group's own w/h and recursively rescales
+every descendant's local geometry (masked children rescale their mask too).
+A group whose union is reader-flagged ``needs_keynote`` (rotated own frame,
+or a residual descendant) is refused to the AppleScript fallback rather than
+scaled from an approximate union. A descendant that can't be safely scaled
+(rotated mask, cross-member mask) misses the whole group rather than
+partially scaling it. ``patch_deck_geometry`` resolves every slide's edits
+(pure, no I/O), then does exactly ONE zip rewrite touching only the edited
+members. In-place rewrite (O_TRUNC) preserves com.apple.macl and never
+``os.replace``s. Positional addressing refuses a slide on reconcile_counts
+mismatch; refusal is always per slide.
 """
 from __future__ import annotations
 
@@ -62,7 +65,7 @@ class PatchResult:
     obj_diffs: int = 0
     header_diffs: int = 0
     edited_ids: list[str] = field(default_factory=list)
-    soft_fallbacks: int = 0  # group/text/masked used composed frame because reported was missing
+    soft_fallbacks: int = 0  # text/masked used composed frame because reported was missing
     missed_specs: list[dict] = field(default_factory=list)  # specs the patcher could not place
 
 
@@ -263,18 +266,18 @@ def _text_fields(rec: dict, spec: dict, reported: list[float],
     return [(rec["id"], fields)] if fields else []
 
 
-def _group_fields(rec: dict, spec: dict, reported: list[float],
+def _group_fields(rec: dict, spec: dict, union: list[float],
                   stored: tuple[float, float, float, float, float],
                   sx: float, sy: float, write_size: bool) -> list[tuple[str, dict]]:
-    """Own frame: origin moved so the (scaled) child union lands on spec; size = stored*s.
+    """Own frame: origin moved so the (scaled) composed child union lands on spec; size = stored*s.
 
     sx=sy=1, write_size=False degenerates to the old pure-translation rule.
     """
     fields: dict[str, float] = {}
     if spec.get("x") is not None:
-        fields["pos_x"] = float(spec["x"]) + (stored[0] - reported[0]) * sx
+        fields["pos_x"] = float(spec["x"]) + (stored[0] - union[0]) * sx
     if spec.get("y") is not None:
-        fields["pos_y"] = float(spec["y"]) + (stored[1] - reported[1]) * sy
+        fields["pos_y"] = float(spec["y"]) + (stored[1] - union[1]) * sy
     if write_size:
         fields["size_w"] = stored[2] * sx
         fields["size_h"] = stored[3] * sy
@@ -334,8 +337,8 @@ def _group_child_scale_ops(
                 "natural_w": mw * sx, "natural_h": mh * sy,
             }))
 
-        if pbtype == "TSWP.ShapeInfoArchive" and child.get("isTextBox") and (cw == 0.0 or ch == 0.0):
-            return ([], False)  # autosize text child: Keynote must lay it out; whole group misses
+        if pbtype == "TSWP.ShapeInfoArchive" and (cw == 0.0 or ch == 0.0):
+            return ([], False)  # zero-extent layout-cache sentinel: Keynote must lay it out; whole group misses
 
         if not _natural_writable(child, both_axes=True):
             return ([], False)
@@ -576,12 +579,15 @@ def _slide_edits(
                 continue
             ops = _shape_fields(rec, spec, stored)
         elif kind == "group":
+            if rec.get("needs_keynote"):
+                missed_specs.append(spec)
+                continue
+            union = [rec["x"], rec["y"], rec["w"], rec["h"]]
             spec_w, spec_h = spec.get("w"), spec.get("h")
-            rep_w, rep_h = rep[2], rep[3]
-            scaled = spec_w is not None and spec_h is not None and rep_w > 0 and rep_h > 0
-            sx = float(spec_w) / rep_w if scaled else 1.0
-            sy = float(spec_h) / rep_h if scaled else 1.0
-            ops = _group_fields(rec, spec, rep, stored, sx, sy, scaled)
+            scaled = spec_w is not None and spec_h is not None and union[2] > 0 and union[3] > 0
+            sx = float(spec_w) / union[2] if scaled else 1.0
+            sy = float(spec_h) / union[3] if scaled else 1.0
+            ops = _group_fields(rec, spec, union, stored, sx, sy, scaled)
             if scaled:
                 child_ops, ok = _group_child_scale_ops(obj, objects, sx, sy, id_to_file, target_member)
                 if not ok:
@@ -615,9 +621,9 @@ def _slide_edits(
             missed_specs.append(spec)
             continue
 
-        # Soft class used composed/reported frame: count for the 0-fallback gate. Masked
+        # Soft class used the reported frame: count for the 0-fallback gate. Masked
         # images only fall back to `reported` for x/y (never w/h — those read the mask).
-        used_reported = kind in ("group", "text") or (
+        used_reported = kind == "text" or (
             masked and (spec.get("x") is None or spec.get("y") is None)
         )
         if used_reported and not have_reported and ops:

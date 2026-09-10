@@ -15,6 +15,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from obed_edom import keynote_app
 from obed_edom.paths import find_repo_root
@@ -26,6 +27,8 @@ INSPECT_VERSION = 4
 TEMPLATE_STAT_VERSION = 1
 DIGEST_LEN = 16
 DECK_DIGEST_SIDECAR_VERSION = 1
+# Bump when slide_digest_parts/slide_digest's blob shape or hash changes.
+SLIDE_DIGEST_VERSION = 1
 
 
 CACHE_DIR_ENV = "OBED_EDOM_CACHE_DIR"
@@ -234,25 +237,30 @@ def _walk_items(node: dict):
         yield from _walk_items(item)
 
 
-def deck_slide_digests(payload: dict) -> list[str]:
-    """Per-slide fingerprint from inspect JSON: copy plus image identity."""
+def slide_digest_parts(slide: dict) -> dict[str, Any]:
+    """Copy plus image identity for one slide: the inputs `slide_digest` hashes."""
     from obed_edom.inspect import slide_plain_text  # noqa: PLC0415
     from obed_edom.text_diff import fingerprint  # noqa: PLC0415
 
-    out: list[str] = []
-    for slide in payload.get("slides") or []:
-        text = fingerprint(slide_plain_text(slide))
-        images: list[str] = []
-        for item in _walk_items(slide):
-            if (item.get("kind") or "") != "image":
-                continue
-            # Identity only: no geometry. Offline vs JXA frames would churn pairing of unedited slides.
-            images.append(str(item.get("fileName") or ""))
-        images.sort()
-        skipped = "1" if slide.get("skipped") else "0"
-        blob = f"{skipped}|{text}|{'|'.join(images)}"
-        out.append(hashlib.sha256(blob.encode("utf-8")).hexdigest()[:DIGEST_LEN])
-    return out
+    text = fingerprint(slide_plain_text(slide))
+    images: list[str] = []
+    for item in _walk_items(slide):
+        if (item.get("kind") or "") != "image":
+            continue
+        # Identity only: no geometry. Offline vs JXA frames would churn pairing of unedited slides.
+        images.append(str(item.get("fileName") or ""))
+    skipped = "1" if slide.get("skipped") else "0"
+    return {"skipped": skipped, "text": text, "images": sorted(images)}
+
+
+def slide_digest(parts: dict[str, Any]) -> str:
+    blob = f"{parts['skipped']}|{parts['text']}|{'|'.join(parts['images'])}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:DIGEST_LEN]
+
+
+def deck_slide_digests(payload: dict) -> list[str]:
+    """Per-slide fingerprint from inspect JSON: copy plus image identity."""
+    return [slide_digest(slide_digest_parts(slide)) for slide in payload.get("slides") or []]
 
 
 def pairing_key(kind: str, left: Path | str, right: Path | str) -> str:
