@@ -9,21 +9,54 @@ Audio is passed through unmodified (incl. volume) to follow the source slide's o
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
-import tempfile
-import threading
 import time
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from obed_edom import keynote_app
+from obed_edom import dsk_live, keynote_app
+from obed_edom.dsk_live import (
+    DEFAULT_BLACK_LAYOUT_NAMES,
+    DEFAULT_LAYOUT_TEMPLATE,
+    DEFAULT_RSS_LIMIT_BYTES,
+    LOCK_PATH,
+    LiveBatch,
+    _KEYNOTE_QUIT_WAIT_S,
+    _acquire_lock,
+    _applescript_string_list,
+    _as_escape,
+    _DisplayPoke,
+    _ERROR_RE,
+    _fingerprint_source,
+    _keynote_pid,
+    _keynote_pids,
+    _keynote_running,
+    _keynote_tell,
+    _keynote_terms,
+    _osascript_path,
+    _PROGRESS_RE,
+    _quit_and_wait_for_exit,
+    _quit_script,
+    _release_lock,
+    _run_osascript,
+    _run_quit_script,
+    _RssWatchdog,
+    _sample_rss_bytes,
+    acquire_lock,
+    fingerprint_source,
+    keynote_pid,
+    keynote_running,
+    ordinal_map,
+    quit_and_wait_for_exit,
+    release_lock,
+    run_osascript,
+)
 from obed_edom.dsk_plan import visible_union
 from obed_edom.map_remap import Rect
 from obed_edom.maps_geo import CENTRE_ORIGIN_X
@@ -31,19 +64,7 @@ from obed_edom.maps_movie import ffmpeg_exe
 from obed_edom.offline_inspect import offline_wall_payload
 from obed_edom.remap_keynote import copy_keynote
 
-LOCK_PATH = Path.home() / "Library" / "Application Support" / "obed-edom" / "keynote.lock"
-DEFAULT_LAYOUT_TEMPLATE = Path.home() / "Desktop" / "Default Templates" / "2026_Lower-Thirds (ENG).key"
-DEFAULT_RSS_LIMIT_BYTES = 3_000_000_000
-_DISPLAY_POKE_INTERVAL_S = 30
-_RSS_WATCHDOG_INTERVAL_S = 2
-_APPLESCRIPT_TIMEOUT_S = 3600
-_KEYNOTE_QUIT_WAIT_S = 30
-_KEYNOTE_QUIT_POLL_S = 0.5
-_PROGRESS_RE = re.compile(r"^OBED\t(\d+)\t")
-_ERROR_RE = re.compile(r"^ERR\t(\d+)\t(-?\d+)\t(.*)$")
 _FPS_TOLERANCE = 0.01
-
-DEFAULT_BLACK_LAYOUT_NAMES: tuple[str, ...] = ("BLACK BLANK", "Black", "BLACK", "black")
 
 CODECS = frozenset(
     {
@@ -205,244 +226,6 @@ def _normalize_even_crop(x: int, y: int, w: int, h: int, wall_w: int, wall_h: in
     return ex, ey, ew, eh
 
 
-def ordinal_map(keep: Collection[int]) -> dict[int, int]:
-    """Original slide number -> new ordinal after deleting everything not in `keep`."""
-    return {n: i + 1 for i, n in enumerate(sorted(set(keep)))}
-
-
-def _osascript_path(script: str, out_dir: Path) -> Path:
-    handle = tempfile.NamedTemporaryFile(
-        "w", suffix=".applescript", delete=False, dir=str(out_dir)
-    )
-    handle.write(script)
-    handle.close()
-    return Path(handle.name)
-
-
-def _run_osascript(
-    script_path: Path,
-    *,
-    timeout: int = _APPLESCRIPT_TIMEOUT_S,
-    register_proc: Callable[[subprocess.Popen], None] | None = None,
-    on_progress: Callable[[int], None] | None = None,
-) -> subprocess.CompletedProcess:
-    """Runs osascript via an owned `Popen` (so a watchdog can `terminate()` it). Exactly one
-    reader thread per pipe drains stdout/stderr live -- Keynote's `log` writes to stderr, not
-    stdout -- and `on_progress` fires as each `OBED` marker is received, not after the fact.
-    Never call `Popen.communicate()` here: it would spawn its own reader on the same pipes."""
-    proc = subprocess.Popen(
-        ["osascript", str(script_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
-    if register_proc is not None:
-        register_proc(proc)
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
-
-    def _drain_stdout() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            stdout_lines.append(line)
-
-    def _drain_stderr() -> None:
-        assert proc.stderr is not None
-        for line in proc.stderr:
-            stderr_lines.append(line)
-            if on_progress is not None:
-                match = _PROGRESS_RE.match(line)
-                if match:
-                    on_progress(int(match.group(1)))
-
-    stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
-    try:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-    finally:
-        stdout_thread.join(timeout=5)
-        stderr_thread.join(timeout=5)
-        if register_proc is not None:
-            register_proc(None)
-    return subprocess.CompletedProcess(proc.args, proc.returncode, "".join(stdout_lines), "".join(stderr_lines))
-
-
-def _keynote_tell() -> str:
-    return f'tell application id "{keynote_app.bundle_id()}"'
-
-
-def _keynote_terms() -> str:
-    return f'using terms from application id "{keynote_app.bundle_id()}"'
-
-
-def _as_escape(text: str) -> str:
-    return (
-        str(text)
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .replace("\n", '" & return & "')
-    )
-
-
-def _pid_start_time(pid: int) -> str | None:
-    try:
-        proc = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
-        text = proc.stdout.strip()
-        return text or None
-    except Exception:
-        return None
-
-
-def _acquire_lock() -> int:
-    """Exclusive, non-blocking `flock` on a persistent lock file for the whole batch. The
-    written pid+lstart is diagnostic only; the flock itself is the concurrency guard."""
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        raise RuntimeError(f"Keynote lock held ({LOCK_PATH}); refusing to run concurrently.") from None
-    payload = f"{os.getpid()}\n{_pid_start_time(os.getpid()) or ''}"
-    os.ftruncate(fd, 0)
-    os.write(fd, payload.encode())
-    os.fsync(fd)
-    return fd
-
-
-def _release_lock(fd: int) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
-def _keynote_pids() -> list[int]:
-    """Live Keynote pids, matched by `CFBundleExecutable` (never by app display name, which
-    varies across installs, e.g. "Keynote Creator Studio"). Falls back to scanning `ps` for a
-    `comm` path under the app's `Contents/MacOS/` when `pgrep -x` misses (e.g. a long comm
-    truncated by pgrep)."""
-    exe = keynote_app.executable_name(keynote_app.bundle_id())
-    if exe is None:
-        raise RuntimeError("Keynote application not resolvable; cannot determine whether it is running.")
-    try:
-        proc = subprocess.run(["pgrep", "-x", exe], capture_output=True, text=True)
-        pids = [int(l) for l in proc.stdout.strip().splitlines() if l.strip()]
-        if pids:
-            return pids
-    except Exception:
-        pass
-    app = keynote_app.app_path(keynote_app.bundle_id())
-    if app is None:
-        return []
-    macos_dir = str(app / "Contents" / "MacOS")
-    try:
-        proc = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True)
-    except Exception:
-        return []
-    pids = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        pid_text, _sep, comm = line.partition(" ")
-        if pid_text.isdigit() and comm.strip().startswith(macos_dir):
-            pids.append(int(pid_text))
-    return pids
-
-
-def _keynote_running() -> bool:
-    return bool(_keynote_pids())
-
-
-def _keynote_pid() -> int | None:
-    pids = _keynote_pids()
-    return pids[0] if pids else None
-
-
-class _DisplayPoke:
-    def __init__(self) -> None:
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._caffeinate: subprocess.Popen | None = None
-
-    def start(self) -> None:
-        try:
-            self._caffeinate = subprocess.Popen(["caffeinate", "-dimsu"])
-        except Exception:
-            self._caffeinate = None
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def _loop(self) -> None:
-        while not self._stop.wait(_DISPLAY_POKE_INTERVAL_S):
-            try:
-                subprocess.run(["caffeinate", "-u", "-t", "2"], check=False)
-            except Exception:
-                pass
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-        if self._caffeinate is not None:
-            self._caffeinate.terminate()
-
-
-class _RssWatchdog:
-    """Samples Keynote's RSS and terminates the registered osascript child on breach."""
-
-    def __init__(self, get_pid: Callable[[], int | None], limit_bytes: int, on_breach: Callable[[], None]):
-        self._get_pid = get_pid
-        self._limit_bytes = limit_bytes
-        self._on_breach = on_breach
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self.breached = False
-        self.peak_rss_bytes = 0
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def _loop(self) -> None:
-        while not self._stop.wait(_RSS_WATCHDOG_INTERVAL_S):
-            pid = self._get_pid()
-            if pid is None:
-                continue
-            rss = _sample_rss_bytes(pid)
-            if rss is None:
-                continue
-            self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
-            if rss > self._limit_bytes:
-                self.breached = True
-                self._on_breach()
-                return
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-
-
-def _sample_rss_bytes(pid: int) -> int | None:
-    try:
-        proc = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True)
-        text = proc.stdout.strip()
-        return int(text) * 1024 if text else None
-    except Exception:
-        return None
-
-
-def _applescript_string_list(values: Sequence[str]) -> str:
-    return "{" + ", ".join(f'"{_as_escape(v)}"' for v in values) + "}"
-
-
 def _build_export_script(
     *,
     scratch_path: Path,
@@ -494,36 +277,7 @@ def _build_export_script(
         "      set donorSlide to missing value",
     ]
     if layout_template is not None:
-        lines += [
-            '      if blackLayoutName is "" then',
-            "        try",
-            f'          set tmplDoc to open POSIX file "{_as_escape(str(layout_template))}"',
-            "          delay 2",
-            '          set donorLayoutName to ""',
-            "          set donorLayout to missing value",
-            "          repeat with lay in slide layouts of tmplDoc",
-            "            set tname to (name of lay as text)",
-            "            ignoring case",
-            '              if donorLayoutName is "" and tname is in approvedBlackNames then',
-            "                set donorLayoutName to tname",
-            "                set donorLayout to lay",
-            "              end if",
-            "            end ignoring",
-            "          end repeat",
-            '          if donorLayoutName is "" then error "no black layout found in layout_template"',
-            "          set madeSlide to (make new slide at end of slides of tmplDoc with properties {base layout:donorLayout})",
-            "          move madeSlide to end of slides of theDoc",
-            "          set donorSlide to slide (count of slides of theDoc) of theDoc",
-            "          set blackLayoutName to donorLayoutName",
-            "          close tmplDoc saving no",
-            "        on error errMsg number errNum",
-            "          try",
-            "            close tmplDoc saving no",
-            "          end try",
-            '          error "layout import failed: " & errMsg number errNum',
-            "        end try",
-            "      end if",
-        ]
+        lines += dsk_live.layout_import_lines("theDoc", "approvedBlackNames", layout_template)
     lines += [
         '      if blackLayoutName is "" then',
         '        error "no layout matching \\"black\\" resolvable in the FW deck or layout_template"',
@@ -590,49 +344,6 @@ def _build_export_script(
         "end using terms from",
     ]
     return "\n".join(lines)
-
-
-def _quit_script(stem: str, doc_name: str) -> str:
-    """Closes only the owned scratch document (by stem or filename) then quits Keynote.
-    Caller must only invoke this when Keynote is already running -- never to launch it."""
-    stem_escaped = _as_escape(stem)
-    doc_escaped = _as_escape(doc_name)
-    return "\n".join(
-        [
-            _keynote_terms(),
-            _keynote_tell(),
-            "  try",
-            f'    close (every document whose name is "{stem_escaped}" or name is "{doc_escaped}") saving no',
-            "  end try",
-            "  try",
-            "    quit",
-            "  end try",
-            "end tell",
-            "end using terms from",
-        ]
-    )
-
-
-def _run_quit_script(stem: str, doc_name: str, out_dir: Path) -> None:
-    quit_path = _osascript_path(_quit_script(stem, doc_name), out_dir)
-    try:
-        _run_osascript(quit_path, timeout=60)
-    finally:
-        quit_path.unlink(missing_ok=True)
-
-
-def _quit_and_wait_for_exit(stem: str, doc_name: str, out_dir: Path) -> None:
-    """Quits the owned scratch document's Keynote, then blocks until no Keynote process
-    remains (bounded), so a retry never recopies the scratch under a still-open document.
-    Raises if Keynote is still running at the deadline: the caller must not treat that as
-    a clean exit and must not recopy the scratch onto a document Keynote may still hold open."""
-    if _keynote_running():
-        _run_quit_script(stem, doc_name, out_dir)
-    deadline = time.monotonic() + _KEYNOTE_QUIT_WAIT_S
-    while _keynote_running() and time.monotonic() < deadline:
-        time.sleep(_KEYNOTE_QUIT_POLL_S)
-    if _keynote_running():
-        raise RuntimeError("Keynote still running after quit; refusing to retry the export batch.")
 
 
 def _ffprobe(path: Path) -> tuple[int, int, float, float]:
@@ -750,22 +461,6 @@ def _ffmpeg_process(
     return w, h
 
 
-def _fingerprint_source(path: Path) -> tuple:
-    """Identity of the source `.key` for before/after integrity comparison: for a package
-    (directory), every member's relative path, size, and mtime_ns; for a single file, the
-    same for that file."""
-    if path.is_dir():
-        entries: list[tuple[str, int, int]] = []
-        for root, _dirs, files in os.walk(path):
-            for name in files:
-                member = Path(root) / name
-                st = member.stat()
-                entries.append((str(member.relative_to(path)), st.st_size, st.st_mtime_ns))
-        return tuple(sorted(entries))
-    st = path.stat()
-    return ((path.name, st.st_size, st.st_mtime_ns),)
-
-
 def _derive_include_side_crop(fw_deck: Path, slides: Collection[int]) -> dict[int, Rect]:
     payload = offline_wall_payload(fw_deck)
     wall = (float(payload["slideWidth"]), float(payload["slideHeight"]))
@@ -802,12 +497,7 @@ def export_slide_clips(
         raise ValueError(f"Unsupported codec {codec!r}; expected one of {sorted(CODECS)}")
     fps_enum_name(fps)
     expected_fps = fps_rational(fps)
-    for bad in ("/private/tmp", "/tmp"):
-        if str(out_dir) == bad or str(out_dir).startswith(bad + "/"):
-            raise ValueError(f"Keynote cannot reliably open decks under {bad}; use a work dir under ~/Desktop.")
-    resolved_deck = fw_deck.resolve()
-    if str(out_dir) == str(resolved_deck) or str(out_dir).startswith(str(resolved_deck) + "/"):
-        raise ValueError(f"out_dir must not be inside the source .key package: {resolved_deck}")
+    dsk_live.guard_out_dir(out_dir, fw_deck)
 
     include_side = set(include_side)
     crop_rects = dict(crop_rects or {})

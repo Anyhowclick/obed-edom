@@ -16,6 +16,15 @@ from obed_edom.map_remap import Rect
 from obed_edom.maps_geo import CENTRE_ORIGIN_X
 
 
+def _set(monkeypatch, name, value):
+    """Patches `name` on both dsk_movie_export and dsk_live: the seam moved to dsk_live,
+    but a caller still resident in dsk_movie_export (e.g. export_slide_clips) resolves it
+    via dme's own globals, while a moved caller (e.g. _quit_and_wait_for_exit) resolves it
+    via dsk_live's."""
+    monkeypatch.setattr(dme, name, value)
+    monkeypatch.setattr(dme.dsk_live, name, value)
+
+
 @pytest.fixture(autouse=True)
 def no_keynote(monkeypatch):
     def _forbidden(*_args, **_kwargs):
@@ -343,7 +352,7 @@ def test_quit_script_closes_by_stem_or_filename_not_every_document():
 
 def test_lock_acquire_writes_pid_and_release_unlocks(tmp_path, monkeypatch):
     lock_path = tmp_path / "keynote.lock"
-    monkeypatch.setattr(dme, "LOCK_PATH", lock_path)
+    _set(monkeypatch, "LOCK_PATH", lock_path)
     fd = dme._acquire_lock()
     assert lock_path.read_text().splitlines()[0] == str(dme.os.getpid())
     dme._release_lock(fd)
@@ -353,7 +362,7 @@ def test_lock_second_acquire_contends_on_open_flock(tmp_path, monkeypatch):
     # flock is held per open-file-description, so two independent `_acquire_lock` calls in
     # the same process still contend -- this exercises the real concurrency guard.
     lock_path = tmp_path / "keynote.lock"
-    monkeypatch.setattr(dme, "LOCK_PATH", lock_path)
+    _set(monkeypatch, "LOCK_PATH", lock_path)
     fd1 = dme._acquire_lock()
     with pytest.raises(RuntimeError, match="lock held"):
         dme._acquire_lock()
@@ -364,7 +373,7 @@ def test_lock_second_acquire_contends_on_open_flock(tmp_path, monkeypatch):
 
 def test_lock_release_allows_reacquire(tmp_path, monkeypatch):
     lock_path = tmp_path / "keynote.lock"
-    monkeypatch.setattr(dme, "LOCK_PATH", lock_path)
+    _set(monkeypatch, "LOCK_PATH", lock_path)
     fd1 = dme._acquire_lock()
     dme._release_lock(fd1)
     fd2 = dme._acquire_lock()
@@ -375,13 +384,13 @@ def test_lock_release_allows_reacquire(tmp_path, monkeypatch):
 
 
 def test_keynote_pid_uses_same_fallback_as_keynote_running(monkeypatch):
-    monkeypatch.setattr(dme, "_keynote_pids", lambda: [4242])
+    _set(monkeypatch, "_keynote_pids", lambda: [4242])
     assert dme._keynote_running() is True
     assert dme._keynote_pid() == 4242
 
 
 def test_keynote_pid_none_when_not_running(monkeypatch):
-    monkeypatch.setattr(dme, "_keynote_pids", lambda: [])
+    _set(monkeypatch, "_keynote_pids", lambda: [])
     assert dme._keynote_running() is False
     assert dme._keynote_pid() is None
 
@@ -435,7 +444,7 @@ def test_export_slide_clips_refuses_at_preflight_when_keynote_unresolvable(monke
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
     lock_path = tmp_path / "keynote.lock"
-    monkeypatch.setattr(dme, "LOCK_PATH", lock_path)
+    _set(monkeypatch, "LOCK_PATH", lock_path)
     monkeypatch.setattr(dme.keynote_app, "executable_name", lambda identifier: None)
 
     def _forbidden_copy(src, dest):
@@ -539,7 +548,7 @@ def _stub_live(monkeypatch, tmp_path, *, keynote_running=False):
     # export AppleScript (which `activate`s Keynote), the process is genuinely running --
     # so the teardown quit-guard (which re-checks `_keynote_running`) fires as it would live.
     state = {"running": keynote_running}
-    monkeypatch.setattr(dme, "_keynote_running", lambda: state["running"])
+    _set(monkeypatch, "_keynote_running", lambda: state["running"])
 
     def fake_copy_keynote(src, dest):
         state["running"] = True
@@ -548,13 +557,13 @@ def _stub_live(monkeypatch, tmp_path, *, keynote_running=False):
         return dest
 
     monkeypatch.setattr(dme, "copy_keynote", fake_copy_keynote)
-    monkeypatch.setattr(dme, "_acquire_lock", lambda: None)
-    monkeypatch.setattr(dme, "_release_lock", lambda fd: None)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_release_lock", lambda fd: None)
     monkeypatch.setattr(dme._DisplayPoke, "start", lambda self: None)
     monkeypatch.setattr(dme._DisplayPoke, "stop", lambda self: None)
     monkeypatch.setattr(dme._RssWatchdog, "start", lambda self: None)
     monkeypatch.setattr(dme._RssWatchdog, "stop", lambda self: None)
-    monkeypatch.setattr(dme, "_keynote_pid", lambda: None)
+    _set(monkeypatch, "_keynote_pid", lambda: None)
 
     calls = {"osascript": 0}
 
@@ -574,7 +583,7 @@ def _stub_live(monkeypatch, tmp_path, *, keynote_running=False):
         state["running"] = False
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
     monkeypatch.setattr(dme, "_ffprobe", lambda path: (1920, 1080, 30.0, 8.43))
 
     def fake_ffmpeg_process(raw, dest, *, crop_rect, wall_w, wall_h, codec):
@@ -666,7 +675,7 @@ def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
     fw.write_bytes(b"source")
 
     running_state = {"running": False}
-    monkeypatch.setattr(dme, "_keynote_running", lambda: running_state["running"])
+    _set(monkeypatch, "_keynote_running", lambda: running_state["running"])
 
     def fake_copy_keynote(src, dest):
         running_state["running"] = True
@@ -677,12 +686,12 @@ def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
     monkeypatch.setattr(dme, "copy_keynote", fake_copy_keynote)
 
     released = {"lock": False}
-    monkeypatch.setattr(dme, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
 
     def _release(fd):
         released["lock"] = True
 
-    monkeypatch.setattr(dme, "_release_lock", _release)
+    _set(monkeypatch, "_release_lock", _release)
     monkeypatch.setattr(dme._DisplayPoke, "start", lambda self: None)
     stopped = {"poke": False, "watchdog": False}
 
@@ -696,7 +705,7 @@ def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
         stopped["watchdog"] = True
 
     monkeypatch.setattr(dme._RssWatchdog, "stop", _stop_watchdog)
-    monkeypatch.setattr(dme, "_keynote_pid", lambda: None)
+    _set(monkeypatch, "_keynote_pid", lambda: None)
 
     quit_calls = {"n": 0}
 
@@ -707,7 +716,7 @@ def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
         quit_calls["n"] += 1
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     with pytest.raises(RuntimeError, match="boom during export"):
         dme.export_slide_clips(fw, [17], out_dir)
@@ -732,7 +741,7 @@ def test_export_slide_clips_appplescript_error_reraised_with_number(monkeypatch,
             return _FakeCompleted(returncode=1, stderr="ERR\t17\t-1728\tCan't get slide 1.")
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     with pytest.raises(RuntimeError, match="-1728"):
         dme.export_slide_clips(fw, [17], out_dir)
@@ -763,7 +772,7 @@ def test_export_slide_clips_retries_1712_once(monkeypatch, tmp_path):
             job.tmp.write_bytes(b"movie-bytes")
         return _FakeCompleted(returncode=0, stderr=f"OBED\t17\tstamp")
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     results = dme.export_slide_clips(fw, [17], out_dir, log=lambda *_: None)
     assert attempts["n"] == 2
@@ -781,7 +790,7 @@ def test_export_slide_clips_missing_export_raises(monkeypatch, tmp_path):
     def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     with pytest.raises(RuntimeError, match="Expected export missing"):
         dme.export_slide_clips(fw, [17], out_dir)
@@ -805,7 +814,7 @@ def test_export_slide_clips_publishes_atomically_ignores_stale_dest(monkeypatch,
             return _FakeCompleted(returncode=0)
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     with pytest.raises(RuntimeError, match="Expected export missing"):
         dme.export_slide_clips(fw, [17], out_dir)
@@ -840,12 +849,12 @@ def test_derive_include_side_crop_refuses_degenerate_union(monkeypatch, tmp_path
 
 
 def test_quit_and_wait_for_exit_skips_quit_script_when_not_running(monkeypatch, tmp_path):
-    monkeypatch.setattr(dme, "_keynote_running", lambda: False)
+    _set(monkeypatch, "_keynote_running", lambda: False)
 
     def _forbidden(*a, **k):
         raise AssertionError("must not run a quit script when Keynote isn't running")
 
-    monkeypatch.setattr(dme, "_run_quit_script", _forbidden)
+    _set(monkeypatch, "_run_quit_script", _forbidden)
     dme._quit_and_wait_for_exit("Sermon", "Sermon.key", tmp_path)
 
 
@@ -853,8 +862,8 @@ def test_quit_and_wait_for_exit_waits_until_process_gone(monkeypatch, tmp_path):
     calls = {"quit": 0, "sleep": 0}
     running = iter([True, True, False])
 
-    monkeypatch.setattr(dme, "_keynote_running", lambda: next(running, False))
-    monkeypatch.setattr(dme, "_run_quit_script", lambda *a: calls.__setitem__("quit", calls["quit"] + 1))
+    _set(monkeypatch, "_keynote_running", lambda: next(running, False))
+    _set(monkeypatch, "_run_quit_script", lambda *a: calls.__setitem__("quit", calls["quit"] + 1))
     monkeypatch.setattr(dme.time, "sleep", lambda s: calls.__setitem__("sleep", calls["sleep"] + 1))
 
     dme._quit_and_wait_for_exit("Sermon", "Sermon.key", tmp_path)
@@ -863,9 +872,9 @@ def test_quit_and_wait_for_exit_waits_until_process_gone(monkeypatch, tmp_path):
 
 
 def test_quit_and_wait_for_exit_bounded_when_process_never_exits(monkeypatch, tmp_path):
-    monkeypatch.setattr(dme, "_keynote_running", lambda: True)
-    monkeypatch.setattr(dme, "_run_quit_script", lambda *a: None)
-    monkeypatch.setattr(dme, "_KEYNOTE_QUIT_WAIT_S", 0)
+    _set(monkeypatch, "_keynote_running", lambda: True)
+    _set(monkeypatch, "_run_quit_script", lambda *a: None)
+    _set(monkeypatch, "_KEYNOTE_QUIT_WAIT_S", 0)
     monkeypatch.setattr(dme.time, "sleep", lambda s: None)
     with pytest.raises(RuntimeError, match="still running"):
         dme._quit_and_wait_for_exit("Sermon", "Sermon.key", tmp_path)  # doesn't hang, doesn't lie
@@ -907,7 +916,7 @@ def test_export_slide_clips_1712_retry_recopies_scratch(monkeypatch, tmp_path):
             job.tmp.write_bytes(b"movie-bytes")
         return _FakeCompleted(returncode=0, stderr="OBED\t17\tstamp")
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     dme.export_slide_clips(fw, [17], out_dir, log=lambda *_: None)
     assert copy_calls["n"] == 2  # one pristine copy per attempt
@@ -922,7 +931,7 @@ def test_export_slide_clips_1712_retry_does_not_recopy_when_keynote_never_exits(
     calls = _stub_live(monkeypatch, tmp_path)
     state = calls["state"]
     _patch_build_export_script_capture(monkeypatch)
-    monkeypatch.setattr(dme, "_KEYNOTE_QUIT_WAIT_S", 0)
+    _set(monkeypatch, "_KEYNOTE_QUIT_WAIT_S", 0)
     monkeypatch.setattr(dme.time, "sleep", lambda s: None)
 
     copy_calls = {"n": 0}
@@ -942,7 +951,7 @@ def test_export_slide_clips_1712_retry_does_not_recopy_when_keynote_never_exits(
             return _FakeCompleted(returncode=0)  # quit script "succeeds" but Keynote stays up
         return _FakeCompleted(returncode=1, stderr="-1712")
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     with pytest.raises(RuntimeError, match="still running"):
         dme.export_slide_clips(fw, [17], out_dir, log=lambda *_: None)
@@ -1104,19 +1113,19 @@ def test_export_slide_clips_cleans_up_work_dir_on_failure(monkeypatch, tmp_path)
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
 
-    monkeypatch.setattr(dme, "_keynote_running", lambda: False)
+    _set(monkeypatch, "_keynote_running", lambda: False)
     monkeypatch.setattr(
         dme,
         "copy_keynote",
         lambda src, dest: (dest.parent.mkdir(parents=True, exist_ok=True), dest.write_bytes(b"key"))[-1] and dest,
     )
-    monkeypatch.setattr(dme, "_acquire_lock", lambda: None)
-    monkeypatch.setattr(dme, "_release_lock", lambda fd: None)
+    _set(monkeypatch, "_acquire_lock", lambda: None)
+    _set(monkeypatch, "_release_lock", lambda fd: None)
     monkeypatch.setattr(dme._DisplayPoke, "start", lambda self: None)
     monkeypatch.setattr(dme._DisplayPoke, "stop", lambda self: None)
     monkeypatch.setattr(dme._RssWatchdog, "start", lambda self: None)
     monkeypatch.setattr(dme._RssWatchdog, "stop", lambda self: None)
-    monkeypatch.setattr(dme, "_keynote_pid", lambda: None)
+    _set(monkeypatch, "_keynote_pid", lambda: None)
 
     def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
         text = script_path.read_text()
@@ -1124,7 +1133,7 @@ def test_export_slide_clips_cleans_up_work_dir_on_failure(monkeypatch, tmp_path)
             raise RuntimeError("boom during export")
         return _FakeCompleted(returncode=0)
 
-    monkeypatch.setattr(dme, "_run_osascript", fake_run_osascript)
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
 
     with pytest.raises(RuntimeError, match="boom during export"):
         dme.export_slide_clips(fw, [17], out_dir)
@@ -1151,7 +1160,7 @@ def test_rss_watchdog_loop_terminates_fake_process(monkeypatch):
     watchdog = dme._RssWatchdog(get_pid=lambda: 123, limit_bytes=1000, on_breach=_on_breach)
 
     rss_values = iter([500, 2000])
-    monkeypatch.setattr(dme, "_sample_rss_bytes", lambda pid: next(rss_values))
+    _set(monkeypatch, "_sample_rss_bytes", lambda pid: next(rss_values))
     monkeypatch.setattr(watchdog._stop, "wait", lambda timeout: watchdog.breached)
 
     watchdog._loop()

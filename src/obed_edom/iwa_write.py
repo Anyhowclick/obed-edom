@@ -1165,6 +1165,116 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
     }
 
 
+def _stroke_submessage(spec: dict) -> dict:
+    """Build a ``mediaProperties.stroke`` submessage shaped like a real solid stroke
+    (e.g. deck style 15303898): colour/width/cap/join/miterLimit/pattern, with the
+    pattern's zero-filled ``pattern`` array Keynote itself writes for a solid stroke."""
+    r, g, b, a = spec["color"]
+    return {
+        "color": {
+            "model": "rgb", "r": float(r), "g": float(g), "b": float(b), "a": float(a),
+            "rgbspace": spec.get("rgbspace", "srgb"),
+        },
+        "width": float(spec["width"]),
+        "cap": "ButtCap",
+        "join": "MiterJoin",
+        "miterLimit": 4.0,
+        "pattern": {
+            "type": spec.get("pattern", "TSDSolidPattern"),
+            "phase": 0.0,
+            "count": 0,
+            "pattern": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        },
+    }
+
+
+def patch_media_stroke(deck: Path, strokes: dict) -> dict:
+    """Set/overwrite ``mediaProperties.stroke`` for each ``TSD.MediaStyleArchive`` id in
+    ``strokes`` (``{id: {"width", "color": (r,g,b,a), "pattern"?, "rgbspace"?}}``),
+    single-member rewrite of ``Index/DocumentStylesheet.iwa`` via ``_rewrite_members``.
+
+    Unlike ``patch_stroke_widths``, an id with no OWN stroke is not refused: its
+    ``mediaProperties.stroke`` is CREATED (shaped like a real solid stroke) and the id
+    is reported under ``created`` rather than ``patched``. Refuses (deck untouched) if
+    an id is absent, not a ``TSD.MediaStyleArchive``, lives in a different member, the
+    stylesheet member is missing, or fewer ids matched an archive than requested.
+    """
+    deck = Path(deck)
+    target_member = _STROKE_STYLESHEET_MEMBER
+    strokes = {str(k): dict(v) for k, v in strokes.items()}
+    objects, id_to_file, _file_ids = _load_deck(deck)
+
+    for sid in strokes:
+        obj = objects.get(sid)
+        if obj is None:
+            return {"refused": True, "reason": f"style {sid} not found in deck"}
+        if obj.get("_pbtype") != "TSD.MediaStyleArchive":
+            return {"refused": True, "reason": f"style {sid} is {obj.get('_pbtype')!r}, not TSD.MediaStyleArchive"}
+        if id_to_file.get(sid) != target_member:
+            return {"refused": True,
+                    "reason": f"style {sid} lives in {id_to_file.get(sid)!r}, not {target_member!r}"}
+
+    with zipfile.ZipFile(deck) as zf:
+        if target_member not in zf.namelist():
+            return {"refused": True, "reason": f"member {target_member} missing from deck"}
+        buf = zf.read(target_member)
+
+    decoded = IWAFile.from_buffer(buf, target_member).to_dict()
+    patched = copy.deepcopy(decoded)
+    applied = 0
+    created: list[str] = []
+    for ch in patched["chunks"]:
+        for arch in ch["archives"]:
+            aid = str(arch["header"]["identifier"])
+            if aid not in strokes:
+                continue
+            for o in arch.get("objects") or []:
+                media = o.setdefault("mediaProperties", {})
+                if media.get("stroke") is None:
+                    created.append(aid)
+                media["stroke"] = _stroke_submessage(strokes[aid])
+                applied += 1
+                break
+
+    if applied != len(strokes):
+        return {"refused": True,
+                "reason": f"only {applied}/{len(strokes)} styles matched an archive in {target_member}"}
+
+    new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
+    reparsed = IWAFile.from_buffer(new_member, target_member).to_dict()
+    obj_diffs = 0
+    header_diffs = 0
+    for c0, c1 in zip(decoded["chunks"], reparsed["chunks"]):
+        for a0, a1 in zip(c0["archives"], c1["archives"]):
+            if (a0.get("objects") or []) != (a1.get("objects") or []):
+                obj_diffs += 1
+            if a0["header"] != a1["header"]:
+                header_diffs += 1
+    value_clean = obj_diffs <= len(strokes) and header_diffs == 0
+
+    if applied != len(strokes) or not value_clean:
+        return {"refused": True, "reason": "partial apply on reparse"}
+
+    try:
+        _rewrite_members(deck, {target_member: new_member})
+    except OfflineWriteCorrupted:
+        raise  # deck IS truncated: must reach the caller, never a refused result
+    except Exception as exc:  # noqa: BLE001 — every result refuses, deck left untouched
+        return {"refused": True, "reason": f"rewrite failed: {exc}"}
+
+    return {
+        "patched": sorted(strokes, key=str),
+        "created": sorted(created, key=str),
+        "refused": False,
+        "notes": [],
+        "target_member": target_member,
+        "applied": applied,
+        "obj_diffs": obj_diffs,
+        "header_diffs": header_diffs,
+        "value_clean": value_clean,
+    }
+
+
 def _archives_by_id(decoded: dict) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for ch in decoded["chunks"]:
