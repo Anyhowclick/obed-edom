@@ -77,6 +77,7 @@ PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-r
 - `ee1494f` fixed the Watercolour band rendering opaque white: the grain overlay had been nested in `.maps-map-band`, whose stacking context isolated the multiply blend; now a sibling of the host, band-sized via the same CSS formula.
 - `89f9749` shipped the poster-frame route (see todo `poster-frame` and Pointers below); two Codex passes (REQUEST-CHANGES then APPROVE-WITH-NITS, nit applied); tests `test_iwa_movies.py`, `test_probe_movie_poster.py`; the `iwa` extra (`keynote-parser`) is now installed in `.venv` via `uv sync --extra iwa`.
 - `8edaed3` "painted keep mask is the cut-out": owner reported the cut-out kept the HDB flats behind the building even though the green overlay was tight; cause was `grabcut_mask` using `keepMask`/`removeMask` only as GrabCut seeds. Now a painted keep mask (any pixel > 127) defines the alpha directly minus the remove mask, bilinear-upscaled so the feather grows with the upscale factor; GrabCut only runs when nothing is painted, and rect is optional on that path; validation happens before mode selection; `_fill_hidden` weights by alpha. Codex REQUEST-CHANGES then APPROVE. Poster probe result (owner ran dump/patch 2026-09-10): a manual poster set changes only `posterTime` 0.00→1.20 (= endTime), no image fields; offline patch applied to 3 archives; reopen step is still pending (must be run on the `_poster.key` copy). Owner QA still owed: re-render the cut-out after restart.
+- `462f0cd` flight profile for hop movies: `flight: "arc" | "phases"` on `MapsLink` (missing ⇒ arc, no legacy inference by owner decision); new `maps/flight.ts` van Wijk closed form (asinh-stable r0/r1, w0-relative pure-zoom guard, exact endpoints, rho = existing `curve`); arc defaults to linear easing (constant perceived velocity across uniform 30 fps frames); bearing/pitch follow progress; routes still honoured under arc; inspector gets a "Flight" select (phases controls + HopTimeline only shown under phases; "Curve" scrub shown under arc); Reset hop no longer forces ease-in-out; server Literal validation + non-movie strip; phases branch pinned by baked fixtures. Two Codex passes: REQUEST-CHANGES then APPROVE.
 
 ### Owner decisions 2026-09-10
 - No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
@@ -100,6 +101,7 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 1. Reveal-as-slide-movie playback in Keynote.
 2. Keynote re-render of restored (reordered) pairs.
 3. Poster-frame probe: run `scripts/probe_movie_poster.py` (dump hand-set deck vs untouched export; patch; reopen) to learn whether Keynote regenerates the poster from `posterTime` or keeps cached `posterImageData`; only then flip `OBED_MAPS_POSTER_FRAME` on (see todo `poster-frame`).
+4. Preview and export a long hop (e.g. SEA overview → downtown) under Arc, compare feel vs Zoom-out/move/zoom-in; check bearing changes on a pitched hop.
 
 ## Open backlog
 
@@ -108,7 +110,7 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 - **Conflict freeze is incomplete**: MapView gestures and callback paths stay live while form controls are locked.
 - **Real concurrent-race tests**: Studio append vs stale state save, two appends, stale thumbnail writer after append, asset revision handoff, session import vs stale save, delete/edit conflict.
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
-- **Fly easing arc** and **3D terrain** remain unstarted.
+- **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Honest preview, options 2 / 2a / 2b** — see the toner plan. 2b also removes the export hairline problem.
 - **Watercolour lifecycle leftovers**: mask JSON bounds/duplicate-filename semantics, running-cancellation retained results, Add-to-map ACK reconciliation and network-error/asset rollback, and an active-tab refresh for Maps destinations (Watercolour stays mounted while hidden).
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
