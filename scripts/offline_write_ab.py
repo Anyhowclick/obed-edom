@@ -527,6 +527,11 @@ def tol_for_bucket(bucket: str, sig_type: str | None, tols: Tolerances) -> float
 
 # ==========================================================================
 # compare_units_multiset / compare_units_by_addr — kept as INFORMATIONAL cross-checks.
+# Positional pairing (each arm sorted independently by its own box, then zipped by
+# index) is unprovable without object ids -- a mis-pairing can look exactly like a real
+# displacement -- so compare_units_multiset's deltas are reported only as upper bounds
+# and never gate; only its population count, which is order-independent, gates here.
+# compare_units_identity (id-matched) is the primary gate.
 # ==========================================================================
 def _unit_box(u: dict[str, Any]) -> tuple[float, float, float, float]:
     """``(x, y, w, h)`` box for one ``write_gate_ab.slide_units`` render unit, any sig type."""
@@ -547,27 +552,6 @@ def _sort_key(u: dict[str, Any]) -> tuple[float, float, float, float]:
     return (round(x, 1), round(y, 1), round(w, 1), round(h, 1))
 
 
-def _order_unstable(
-    a_list: list[dict[str, Any]], b_list: list[dict[str, Any]], tol: float
-) -> bool:
-    """Positional pairing (each arm independently sorted by its own rounded box, then
-    zipped by index) is trustworthy only when, in BOTH arms, every adjacent pair is
-    separated by more than ``tol`` along the first :func:`_sort_key` (rounded) component
-    where they differ -- and by no more than ``tol`` where they are identical in all four
-    rounded components, since then nothing distinguishes them at all. No cross-arm shift
-    is consulted: a genuine mis-pairing can mimic a uniform translation, so a translation
-    is never treated as proof that pairing is safe -- conservative by design (never assert
-    pairing is safe when it might not be)."""
-    for arm in (a_list, b_list):
-        arm_sorted = sorted(arm, key=_sort_key)
-        for u, v in zip(arm_sorted, arm_sorted[1:]):
-            ku, kv = _sort_key(u), _sort_key(v)
-            idx = next((i for i in range(4) if ku[i] != kv[i]), None)
-            if idx is None or abs(kv[idx] - ku[idx]) <= tol:
-                return True
-    return False
-
-
 def compare_units_multiset(
     a_units: list[dict[str, Any]],
     b_units: list[dict[str, Any]],
@@ -580,19 +564,17 @@ def compare_units_multiset(
 
     ``write_gate_ab.slide_units`` already flattens a group's own union box AND every
     recursive child into the same flat list; bucketing by :func:`unit_bucket` (not raw
-    ``kind``) keeps a group CHILD out of its parent's top-level bucket (D8). Shape/line
-    gate at ``tol_hard``; everything else at ``tol_soft``; text is INFORMATIONAL
-    (x-delta only, never gates the overall pass/fail) -- kept as a cross-check against
-    the identity compare, never the primary gate itself (D1). A bucket is also demoted to
-    informational when positional pairing is ambiguous (:func:`_order_unstable`): some
-    adjacent pair, in either arm, is closer than the compared tolerance along the first
-    rounded ``_sort_key`` component where they differ (or is tied in all four), so a
-    sub-tolerance swap could have crossed two units. No cross-arm shift is ever consulted
-    to override that -- conservative by design, a false FAIL beats a hidden delta here.
-    Its count mismatch still gates, but its per-unit delta does not.
+    ``kind``) keeps a group CHILD out of its parent's top-level bucket (D8).
 
-    Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worst, reasons,
-    informational?, ambiguous?}}}``.
+    Without object ids, positional pairing can never be proven correct — a mis-pairing
+    is indistinguishable from a real displacement of the same size — so a per-unit delta
+    is reported only as an upper bound and never fails the bucket or the overall report.
+    The population count is order-independent and trustworthy, so it keeps gating, before
+    any delta work and immune to ``zip`` truncation. :func:`compare_units_identity`
+    (id-matched) is the primary gate.
+
+    Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worstUpperBound,
+    reasons, informational?}}}``.
     """
     a_by_kind: dict[str, list[dict[str, Any]]] = {}
     b_by_kind: dict[str, list[dict[str, Any]]] = {}
@@ -610,7 +592,7 @@ def compare_units_multiset(
             "n_a": len(a_list),
             "n_b": len(b_list),
             "pass": True,
-            "worst": 0.0,
+            "worstUpperBound": 0.0,
             "reasons": [],
         }
         if len(a_list) != len(b_list):
@@ -620,7 +602,6 @@ def compare_units_multiset(
             overall = False
             continue
         tol = tol_hard if bucket in _HARD_KINDS else tol_soft
-        ambiguous = bucket not in _TEXT_BUCKETS and _order_unstable(a_list, b_list, tol)
         x_only = bucket in _TEXT_BUCKETS
         worst = 0.0
         for ua, ub in zip(a_list, b_list):
@@ -632,19 +613,13 @@ def compare_units_multiset(
                 else max(abs(ax - bx), abs(ay - by), abs(aw - bw), abs(ah - bh))
             )
             worst = max(worst, delta)
-        entry["worst"] = worst
-        if bucket in _TEXT_BUCKETS:
-            entry["informational"] = True
-        elif ambiguous:
-            entry["ambiguous"] = True
-            entry["informational"] = True
-            if worst > tol:
-                entry["reasons"].append(f"worst Δ{worst:.2f}px > {tol}px")
-        else:
-            if worst > tol:
-                entry["pass"] = False
-                entry["reasons"].append(f"worst Δ{worst:.2f}px > {tol}px")
-                overall = False
+        entry["worstUpperBound"] = worst
+        entry["informational"] = True
+        if worst > tol:
+            entry["reasons"].append(
+                f"upper bound from positional pairing (unproven), not a measured "
+                f"displacement: worst Δ{worst:.2f}px > {tol}px"
+            )
         per_kind[bucket] = entry
     return {"pass": overall, "per_kind": per_kind}
 
@@ -654,20 +629,14 @@ def _log_multiset_report(report: dict[str, Any]) -> None:
         if kind in _TEXT_BUCKETS:
             _log(
                 f"    {kind:8} n_a={entry['n_a']:<4} n_b={entry['n_b']:<4} "
-                f"worst={entry['worst']:.2f}px  "
+                f"worstUpperBound={entry['worstUpperBound']:.2f}px  "
                 "text: informational only — UNVERIFIED by this gate"
             )
             continue
         tag = "info" if entry.get("informational") else ("PASS" if entry["pass"] else "FAIL")
-        note = (
-            "  (ordering ambiguous: sorted-position pairing is unreliable on this bucket; "
-            "worst is an upper bound, not a displacement)"
-            if entry.get("ambiguous") else ""
-        )
         _log(
             f"    {kind:8} n_a={entry['n_a']:<4} n_b={entry['n_b']:<4} "
-            f"worst={entry['worst']:.2f}px  {tag}"
-            + note
+            f"worstUpperBound={entry['worstUpperBound']:.2f}px  {tag}"
             + (f"  {entry['reasons']}" if entry.get("reasons") else "")
         )
 
