@@ -141,13 +141,13 @@ Media items taller than 150pt (the band content):
 | slide | kind | x | y | w | h | aspect |
 |---|---|---|---|---|---|---|
 | 1 | image | 352 | 704 | 405 | 350 | 1.157 |
-| 2 | image | 1315 | 704 | 579 | 350 | 1.654 |
-| 4 | image | 1312 | 704 | 579 | 350 | 1.654 |
-| 4 | image | 396 | 894 | 1102 | 163 | 6.761 |
+| 2 (skipped) | image | 1315 | 704 | 579 | 350 | 1.654 |
+| 4 (skipped) | image | 1312 | 704 | 579 | 350 | 1.654 |
+| 4 (skipped) | image | 396 | 894 | 1102 | 163 | 6.761 |
 | 12 | image | 529 | 704 | 861 | 350 | 2.460 |
 | **13** | **movie** | **258** | **670** | **1405** | **395** | **3.557** |
 | 18 | image | 43 | 704 | 1832 | 350 | 5.234 |
-| 31 | image | 1312 | 704 | 579 | 350 | 1.654 |
+| 31 (skipped) | image | 1312 | 704 | 579 | 350 | 1.654 |
 | 32 | image | 1516 | 704 | 376 | 350 | 1.074 |
 | 33/34 | image | 26 | 788 | 1867 | 267 | 6.993 |
 | 43 | image | 117 | 725 | 1685 | 326 | 5.169 |
@@ -163,6 +163,19 @@ full-bleed. Widths follow the source aspect at that height **only for
 whole-panel items**; the 405/579/861-wide items at h=350 are **cropped regions**
 of a 3840-wide panel (a whole centre panel at h=350 would be 1244 wide), so
 width is set by the owner's crop, not by the source aspect.
+
+**Correction (measured against the modal (bottom=1054, height=350) pair only,
+`dsk_plan.py` `d1`/`d2`, 2026-09-10):** `read_band` skips `skipped` slides and
+excludes backdrops/invisible items, and slides 2, 4 and 31 are `skipped` in the
+hand-built DSK deck, so those three rows drop out of the sample — the modal
+pair sample is **4 items**, not 7. The x envelope over the remaining items
+matching the modal pair is **x_min = 43** (slide 18, the full-bleed image),
+**x_max = 1892** (slide 32's image, 1516+376), width **1849**,
+**sample_count = 4**. Of slide 4's two band items neither now contributes
+(slide 4 is skipped); when it did count, only the 579×350 panel matched the
+modal pair, since the 1102×163 strip is non-modal height. The earlier **26**
+came from the slide 33/34 items (h=267, non-modal) and was wrong to fold into
+the envelope.
 
 **Border, measured:** `iwa_write.card_styles` on the sample returns three white
 `TSDSolidPattern` strokes of **width 5.0** — id `3812378` (9 refs across 7
@@ -191,7 +204,7 @@ for `movie codec` to apply at all**, so it is a precondition of ProRes 4444.
 
 `DSK_WIDTH=1920, DSK_HEIGHT=1080, DSK_SCALE=0.5, DSK_Y=540` maps the centre panel
 to **1920×540 at y=540 — the bottom half**. That does not match the owner's DSK
-(1868×350 envelope with a 1054 baseline), and it also *scales* every item rather
+(1849×350 envelope, x 43…1892, with a 1054 baseline), and it also *scales* every item rather
 than masking anything: `_emit_item` (`:1104-1181`) only sets position/width/height.
 So the claim that the Maps DSK export "masks images" is inaccurate — it scales
 them, and the same scale is applied to movies. Conclusion: **do not hardcode a band.
@@ -299,6 +312,27 @@ to the centre panel with `map_remap.CENTRE_PANEL_RECT` (`map_remap.py:439`) and
 (There is no `is_side_panel_only`; the earlier name was wrong.
 `CENTRE_ORIGIN_X` lives in `maps_geo.py:33`, not `map_remap`.)
 
+**Movies nested inside groups.** The offline payload omits group children, so a
+movie archived inside a `TSD.GroupArchive` would be invisible to a flat item-kind
+scan. `movie` detection therefore walks a **`TSD.GroupArchive` descendant
+census** rather than trusting the offline item list. On `Sermon_PK (GW).key`
+this is what makes **slides 32 and 33** classify as `mixed`: each holds one
+movie plus one build, so both fall to the `mixed` row (treat as `movie`, flag
+for operator override) rather than `movie` or `built` alone.
+
+**Build records are filtered to kept owners before categorising** — a build
+whose owning object was dropped (e.g. by the side-panel or `skipped`-slide
+filter) does not count toward `builds != []` for that slide, so a slide is
+never classified `built`/`mixed` on the strength of a build record for content
+the plan has already discarded.
+
+**`connection_line_builds`.** `KIND_ORDER` (`iwa_kindindex.py`) has no
+connection-line kind, so `derive_kind_index` never addresses a top-level
+`TSD.ConnectionLineArchive` drawable and `deck_builds` drops its builds
+outright; `dsk_plan` counts them separately as `SlideClass.connection_line_builds`
+and folds them into `build_count` unconditionally as centre content (no
+side-panel geometry test exists for a line).
+
 | category | test | default action |
 |---|---|---|
 | `empty` | no centre-panel item above the backdrop | skip (no DSK slide) |
@@ -348,8 +382,12 @@ movie" would be wrong.
 
 **Fixture.** `~/Desktop/Diff-Checker/Sermon_PK (GW).key` (669MB, **7680×1080,
 63 slides**) is the FW companion of the DSK sample and is the fixture for `d1`
-and `d2`: builds on slides {2, 3, 5, 6, 7, 17, 20, 32, 33, 37, 44, 54}, movies
-on 32 and 33, side-panel-only items on 62 of 63 slides, 21 groups.
+and `d2`. **Corrected (`dsk_plan.py`, 2026-09-10):** slides 3 and 6 carry builds
+in the raw IWA graph — the raw `deck_builds` set is {2, 3, 5, 6, 7, 17, 20, 32,
+33, 37, 44, 54} — but both are `skipped` slides, and `classify_slide` maps a
+`skipped` slide to `empty` regardless of its build content. The **classifier's**
+built set therefore excludes them: **{2, 5, 7, 17, 20, 32, 33, 37, 44, 54}**.
+Movies on 32 and 33, side-panel-only items on 62 of 63 slides, 21 groups.
 Note the count mismatch: **63 FW slides → 43 DSK slides**. The DSK is *not* a
 subset of the FW deck — it is FW-derived media **plus template verse slides**.
 Insert mode (`d7`) stays stretch per the owner (Open question 9).
@@ -405,6 +443,13 @@ deliberately cropped framing. The scratch-deck export **bakes that crop**, so th
 current design stands unchanged. The owner's wish to apply an image mask to the
 movie beforehand is **future work under the crop workstream** (blocked today: the
 sdef exposes no mask on `movie`).
+
+**Measured (`dsk_plan.py`, 2026-09-10):** against the DSK sample's band (h=350,
+bottom=1054, x envelope 43…1892, width 1849 — `read_band` skips `skipped`
+slides and backdrops/invisible items, which drops slides 2, 4 and 31 from the
+sample), slide 32's visible rect (3840×1080, after intersecting with the
+centre panel) fits, centre-anchored, to **x ≈ 345.3, y = 704.0, w ≈ 1244.4,
+h = 350.0** — height-bound, confirming the fix above.
 
 ## Blocker: layouts and masters
 
@@ -738,9 +783,17 @@ trade-off is deck size — see Risks.
 
 **Band affine (`d2`).** Read a band rect from a `--dsk-reference` deck (the
 sample, or a future template slide) rather than hardcoding: take media items with
-h > 150pt, use the **modal bottom edge** (1054 here) and **modal height** (350) as
-the band baseline and height, and the observed min/max x as the width envelope
-(26 … 1894). Per item: compute the **visible** rect as
+h > 150pt, group by `(bottom, height)` pair, use the **modal bottom edge**
+(1054 here) and **modal height** (350) as the band baseline and height, and the
+observed min/max x **over items matching the modal pair only** as the width
+envelope — **measured (`dsk_plan.py`, 2026-09-10): x_min = 43, x_max = 1892,
+width 1849, sample_count = 4**. `read_band` skips `skipped` slides and excludes
+backdrops/invisible items; slides 2, 4 and 31 are `skipped` in the hand-built
+DSK deck, which drops the modal-pair sample from 7 items to 4 and moves x_max
+to slide 32's image (1516+376 = 1892). (Items with a non-modal height, e.g. the
+slides 33/34 items at h=267, are excluded from the envelope — they are what
+produced the earlier, wrong, x_min of 26.) Per item: compute the **visible**
+rect as
 `item_rect ∩ map_remap.CENTRE_PANEL_RECT`, then `s = band_h / visible_h`,
 contain-fit to the envelope width, horizontal anchor from the operator's
 per-slide choice (centre / left / right, defaulting to centre — the sample's modal
@@ -752,20 +805,24 @@ three band items. **This is a scale, not a crop** — see the crop blocker.
 Classification), the visible rect is `item_rect ∩ (0,0,7680,1080)` and the fit is
 taken over the **union** of every kept item's visible rect: `s` is computed once
 and applied to all of them, so their relative positions survive. A full-wall
-union at h = 350 would be 2489pt wide — wider than the 26…1894 envelope — so the
-fit is **width-bound** on those slides (`s = min(band_h/union_h,
+union at h = 350 would be 2489pt wide — wider than the 43…1892 envelope (width
+1849) — so the fit is **width-bound** on those slides (`s = min(band_h/union_h,
 envelope_w/union_w)`) and the result is shorter than the band. That is expected;
 surface it in the review page so the operator can switch back to centre-only.
 
 **Owner (2026-09-10):** accepted — an include-side slide is width-bound to the
-full band envelope and therefore comes out shorter than the 350pt band height
-(roughly 263pt for a full-wall union); the review page shows the resulting
-height before apply.
+full band envelope and therefore comes out shorter than the 350pt band height.
+**Measured (`dsk_plan.py`, 2026-09-10):** a full 7680-wide wall union is
+width-bound at `s = 1849/7680 ≈ 0.2408`, giving `h ≈ 260.0`pt (not the earlier
+"roughly 263pt" estimate); the review page shows the resulting height before
+apply. On the GW fixture, slide 32's 3840×2160 movie at (1920, −763) fits
+(centre anchor) to **x ≈ 345.3, y = 704.0, w ≈ 1244.4, h = 350.0** — height-bound,
+not width-bound, since its visible rect is 3840×1080.
 
 **Owner (Q6, 2026-09-10):** a real band placeholder **should** exist in the DSK
 template, but it must be agreed with church staff. Tracked as an **external
 dependency**; until it lands, the measured values (h 350, bottom 1054, envelope
-26…1894) are the **default placeholder** and the reference-deck read stays.
+43…1892, width 1849) are the **default placeholder** and the reference-deck read stays.
 
 **Groups.** The GW fixture has **21 groups**. A Keynote 15.3.1 group resize is an
 aspect-locked uniform scale about the group's live frame and permanently freezes
@@ -1032,25 +1089,42 @@ CG-specific. `cd dashboard && npm install && npm run build` after any
 Each tranche is a PR. "Offline" = no Keynote, testable in CI. "Live" = an
 operator-run, hands-off Keynote window on a **copy**.
 
-1. **`d1` classifier — offline.** Acceptance: on `Sermon_PK (GW).key` the
-   classifier reports builds on {2, 3, 5, 6, 7, 17, 20, 32, 33, 37, 44, 54} and
-   `movie` on {32, 33} (measured); on `Sermon_PK (DSK)_with mistakes.key`,
-   `deck_builds` reports builds on {5, 13, 14, 17, 26, 29, 30}; categories match a
-   checked-in expectation; no Keynote process starts (assert in the test, per the
-   `resizer-operator-rules` under-mocking trap).
+1. **`d1` classifier — offline.** Acceptance: on `Sermon_PK (GW).key` the raw
+   `deck_builds` set is {2, 3, 5, 6, 7, 17, 20, 32, 33, 37, 44, 54} and `movie`
+   is on {32, 33} (measured), but slides 3 and 6 are `skipped`, so the
+   **classifier's** built set is {2, 5, 7, 17, 20, 32, 33, 37, 44, 54} — record
+   both facts; on `Sermon_PK (DSK)_with mistakes.key`, `deck_builds` reports
+   builds on {5, 13, 14, 17, 26, 29, 30}; categories match a checked-in
+   expectation; no Keynote process starts (assert in the test, per the
+   `resizer-operator-rules` under-mocking trap). **Status (2026-09-10):** `d1`
+   and `d2` landed as `src/obed_edom/dsk_plan.py` + `tests/test_dsk_plan.py`
+   (44 tests; Codex review 4 rounds → APPROVE-WITH-NITS (nits applied);
+   real-deck facts: GW slides 7/37 carry 2/1 builds on
+   `TSD.ConnectionLineArchive` drawables which `iwa_kindindex` cannot
+   address — counted in `dsk_plan` as `connection_line_builds`; adding a
+   connection-line kind to `KIND_ORDER` is a W1-gated follow-up because
+   kindIndex numbering is the live resizer's pairing key).
 2. **`d2` band affine — offline.** Acceptance: reading
    `Sermon_PK (DSK)_with mistakes.key` yields band `h = 350`, bottom `= 1054`,
-   envelope `x ∈ [26, 1894]`, and finds **both** slide-4 items; a 3840×1080 source
-   item maps to a 1868×350-contained rect; **`Sermon_PK (GW).key` slide 32's
+   envelope (over items matching the modal (bottom=1054, height=350) pair only,
+   with `read_band` skipping `skipped` slides and backdrops/invisible items —
+   slides 2, 4 and 31 are `skipped` in this deck) `x_min = 43`, `x_max = 1892`,
+   width 1849, `sample_count = 4`; of slide 4's two band items neither
+   contributes (slide 4 is skipped) — when it did count, only the 579×350 panel
+   matched the modal pair, since the 1102×163 strip is non-modal height and
+   excluded; a 3840×1080 source item maps to a
+   1244.4×350-contained rect (height-bound); **`Sermon_PK (GW).key` slide 32's
    3840×2160 movie at (1920, −763) fits from its visible rect, not its declared
-   rect** (the naive `band_h/src_h` answer is rejected); a reference with <3 band
+   rect**, to `x ≈ 345.3, y = 704.0, w ≈ 1244.4, h = 350.0` (centre anchor;
+   the naive `band_h/src_h` answer is rejected); a reference with <3 band
    items refuses. **Side content:** with `keepSideContent` off (the default) a
    side-panel-only item contributes nothing to the fit; with it on for that slide
    only, the fit is taken over the union rect against the full 7680×1080 wall, the
-   result is width-bound inside the 26…1894 envelope, every kept item shares one
-   scale, and the neighbouring slides are **unchanged** (the whitelist does not
-   propagate, per `church-list-keep-side-panel-spec`); the reported height for a
-   full-wall union is < band height (width-bound).
+   result is width-bound inside the 43…1892 envelope (width 1849; a full-wall
+   union is width-bound at `s = 1849/7680 ≈ 0.2408`, giving `h ≈ 260.0`), every
+   kept item shares one scale, and the neighbouring slides are **unchanged**
+   (the whitelist does not propagate, per `church-list-keep-side-panel-spec`);
+   the reported height for a full-wall union is < band height (width-bound).
 3. **`d3` movie crop — live, feature-flagged.** The alpha probe is **done** (see
    "Alpha probe results"), so `d3` is now scoped to the **opaque** movie path plus
    the plumbing every alpha route needs. Acceptance (operator): one FW movie
@@ -1179,13 +1253,15 @@ operator-run, hands-off Keynote window on a **copy**.
    source stroke style." → plan change: 5.0pt white is the house value, but the
    **primary behaviour is to keep the SOURCE object's stroke**; refuse is no
    longer the primary path (the shared-style guard survives).
-6. Band spec: measured **h = 350, bottom = 1054, x envelope 26…1894**, horizontal
+6. Band spec: measured **h = 350, bottom = 1054, x envelope 43…1892 (width 1849, sample_count 4 —
+   `read_band` skips `skipped` slides and backdrops/invisible items, which drops slides 2, 4 and 31
+   from the hand-built DSK sample)**, horizontal
    anchor varying (centred, right-anchored, full-bleed). Should the DSK template gain
    a real band placeholder so the band stops being inferred from a sample?
    **Owner (2026-09-10):** "There should be, need church staff for this. note it
    as something to be tied down. assume current values as the default
    placeholder." → **STAYS OPEN** as an external dependency (church staff). The
-   measured values (h 350, bottom 1054, x 26…1894) are the default placeholder
+   measured values (h 350, bottom 1054, x 43…1892) are the default placeholder
    until then.
 7. **Cropping.** 88 of 131 masked images in the sample are real crops of the FW
    panel. The pipeline **cannot create crops** (no sdef mask, offline crop writes
