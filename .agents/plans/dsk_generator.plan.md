@@ -104,10 +104,14 @@ the cue-palette item there is unaffected.
   toggling `skipped` on a scratch copy and exporting with `skipped slides:false`.
   There is no per-slide export command.
 - `slide` names the transition property **`transition properties`** (code `strn`,
-  type `transition settings`) at sdef `:328`, while the sdef's own example at
-  `:548` writes `set the transition settings of the current slide to {…}`.
-  The live probe used **`transition settings`** successfully from AppleScript;
-  use that spelling and treat `:328` as the class/property-name mismatch it is.
+  type `transition settings`) at sdef `:328`. `transition settings` is only the
+  *record type name* (`xset`) — it is not a settable property, and the sdef's
+  own example at `:548`, which writes `set the transition settings of the
+  current slide to {…}`, uses the wrong spelling: it never actually sets that
+  property in the live probe, only reads/uses the record name in an example.
+  Use `transition properties` (`strn`) to set it. The "no transition" enumerator
+  is `no transition effect` (`tnil`); `none` (`mvrn`) belongs to `repetition
+  method` on movies, not to transitions.
 - `document` `width` (`sitw`) / `height` (`sith`) are **rw** and this is not
   theoretical: `maps_keynote.build_deck_script` (`:1262-1265`) already does
   `make new document` → `set width of theDoc to N` → `set height of theDoc to N`
@@ -469,6 +473,16 @@ and set the **base layout on every kept slide**. `d4` acceptance line: no kept
 slide's base layout is an FW/7680-wide layout, and no exported clip shows wall
 background art.
 
+**Correction from the layout alpha probe (2026-09-10 — see "Layout alpha probe"
+under Alpha probe results).** Layout import via donor-slide `move` **dedupes by
+name, case-insensitively** — importing a same-named layout from the template into
+a deck that already has that name silently resolves to the deck's **own** layout,
+which is not guaranteed alpha-safe. `d4` imports **`Blank Black`** specifically
+(never `Blank`, never an FW-owned layout by name) and runs the offline
+full-canvas-drawable gate (`KN.SlideArchive.ownedDrawables`, no drawable covering
+the full canvas) on the **resolved** layout before trusting it. `d5` does **not**
+rewrite `base layout` at all — layouts stay untouched through stage export.
+
 ## Movie-crop pipeline — options and decision
 
 **(a) Scratch centre-panel deck → QuickTime export → ffmpeg. (chosen)**
@@ -483,7 +497,9 @@ off-canvas media for free, and quarters the intermediate file size.
 7680×1080** with no translation (the wall-width native export is proven by the
 live probe), and the crop to the kept-item union rect is done in ffmpeg instead
 of by the canvas. Import the
-Lower-Thirds/black layout here too (see the layouts blocker). Then:
+Lower-Thirds/black layout here too (see the layouts blocker) — `Blank Black` by
+name, gated by the offline full-canvas-drawable check, never a same-named layout
+the deck already owns (layout import dedupes by name). Then:
 `export theDoc to <file> as QuickTime movie with properties {movie format:native
 size, movie codec:AppleProRes422LT, movie framerate:FPS30, skipped slides:false}`
 — with `<file>` ending in **`.m4v`** (`.mov` is rejected, error `".mov" (6)`).
@@ -688,6 +704,50 @@ closed.
   (`rss.log`) — above the 1.18 GB seen earlier, so set the watchdog threshold
   with headroom over 1.5 GB.
 
+### Layout alpha probe
+
+Measured 2026-09-10 (layout-alpha probe), evidence
+`~/Desktop/dsk-d5-work/layoutprobe/results.csv`.
+
+Opacity in `export … as slide images` comes from a **full-canvas drawable on the
+layout** — a `TSD.ImageArchive` covering the canvas — **never** from a slide/layout
+fill: `KN.SlideStyleArchive.slideProperties.fill` is `{}` and
+`backgroundIsNoFillOrColorFillWithAlpha` is `True` for every node, so neither
+predicts alpha. Every layout named `Blank`/`BLANK` in all three probed decks (DSK
+sample: two layouts both named `Blank`, near-black gradient image; Lower-Thirds
+template: same; FW deck: `BLANK` = full-canvas WHITE image, `BLACK BLANK` =
+full-canvas BLACK image) exports **opaque**. `Blank Black` (DSK sample and
+Lower-Thirds template) has **zero drawables** → exports transparent (alpha ~0.99).
+The original `Verse Standard (Variation 2)` layout exports with ~0.80 transparent
+(only lower-third band art). Slide deletion alone preserves alpha (V1).
+
+**Layout import dedupes by name.** Importing a layout via donor-slide `move`
+**dedupes by name, case-insensitively** — importing the Lower-Thirds template's
+`Blank` into a deck that already has `Blank`/`BLANK` silently resolves to the
+deck's own (opaque) layout. Only a name **absent** from the destination genuinely
+imports (LT `Blank Black` into the FW deck did). Slide/layout backgrounds are not
+scriptable (-1700/-10000).
+
+**Offline gate that works.** Resolve the layout by name → walk
+`KN.SlideArchive.ownedDrawables` → compose frames (`iwa_geometry`) → the layout is
+alpha-safe **iff no drawable satisfies** `x≤0, y≤0, x+w≥W, y+h≥H` (i.e. no drawable
+covers the full canvas).
+
+**Decisions.**
+- `d5` (stage export) does **not** rewrite `base layout` — default **preserve**.
+  Today's opaque PNGs were caused solely by the `Blank` reassignment, not by `d5`
+  itself.
+- `d4` (assembly) imports **`Blank Black`** from the Lower-Thirds template —
+  **never** `Blank`, and **never** an FW-owned layout by name — and runs the
+  offline full-canvas-drawable gate on the **resolved** layout before trusting it.
+  `dsk_live.DEFAULT_BLACK_LAYOUT_NAMES` stays as-is for the `d3` movie clips
+  (opaque black **is** wanted there); `d4` gets its own
+  `DEFAULT_TRANSPARENT_LAYOUT_NAMES = ("Blank Black",)`.
+- **Consequence:** switching a slide to `Blank Black` drops layout-supplied
+  lower-third artwork (0.80 → 0.99 transparent) — layout reassignment is **not
+  content-neutral**. The operator must know the DSK deck's own layouts are
+  already alpha-safe for its verse slides.
+
 ## Fallback probe (difference matte) — only if (ii) fidelity fails
 
 Gates route **(iv)** in the Decision above. Runs only if (ii)'s player fidelity
@@ -762,7 +822,11 @@ pass 2, with nothing else changed between passes.
 1. **copy** (`ditto`) — carries builds, masks, media, presenter notes, styles;
 2. set `width`/`height` to 1920×1080 (proven writable —
    `maps_keynote.build_deck_script:1263`);
-3. **import + apply the DSK layout** on every kept slide (see the layouts blocker);
+3. **import + apply the DSK layout** on every kept slide (see the layouts
+   blocker) — import `Blank Black` from the Lower-Thirds template by name
+   (dedupe-by-name means a same-named layout already in the deck would silently
+   win instead), and run the offline full-canvas-drawable gate on the resolved
+   layout before applying it;
 4. **live geometry writes** — band affine per kept item (below);
 5. **live deletes** — dropped items (side panels, FW movie objects, non-band
    content) *and* the `empty` slides;
@@ -865,9 +929,9 @@ refs**, and only if that is not possible fall back to refuse-and-report. Option
 (2), the white rectangle shape, stays rejected (it needs a GUI z-order raise).
 
 **Transitions.** `movie`-category slides get their slide transition set to
-**`none`** (via `set transition settings of slide N to {transition effect:none}`
-— the working spelling per the live probe), because the exported clip owns the
-timing and the transition on slide N fires when *leaving* N.
+**no transition** (via `set transition properties of slide N to {transition
+effect:no transition effect}`), because the exported clip owns the timing and
+the transition on slide N fires when *leaving* N.
 
 **Inserted clip behaviour (owner Q11, 2026-09-10).** The DSK deck holds the
 **exported clip, never the original FW movie**. Golden rule: **keep to source deck
@@ -1164,12 +1228,19 @@ operator-run, hands-off Keynote window on a **copy**.
    Keynote quit cleanly with no leftovers after every run.
 4. **`d4` deck assembly — live.** Acceptance: DSK deck opens; a `static` slide's
    media sits in the band; **no kept slide's base layout is an FW/7680-wide
-   layout**; `card_styles` on the output reports the kept media styles as
+   layout**; the **resolved layout passes the offline full-canvas-drawable
+   gate**; `card_styles` on the output reports the kept media styles as
    white/`TSDSolidPattern`/5.0, and any style whose refs escape the kept band media
    is **refused and reported** rather than patched; `verify_builds` reports **0
-   surplus** on kept slides; `movie` slides have transition `none`; presenter notes
-   are present; a masked image's mask scales with its frame after the live
-   width/height write (no content revealed or clipped);
+   surplus** on kept slides; `movie` slides have transition `no transition effect`;
+   presenter notes are present; a masked image's mask scales with its frame
+   after the live width/height write (no content revealed or clipped).
+   **Status (2026-09-10):** core + orchestration landed as `dsk_assemble.py` +
+   CLI `dsk-assemble` (46 tests); Codex round 1 REVISE (11 findings) fix in
+   progress; layout policy parameterised `preserve|import`; live acceptance 1:
+   clip export PASS (32.mov 35.63 s); assembly reached the clip insert
+   (`make new image {file:.mov}` DID create a movie object — confirmed) then
+   failed on the transition line; fix pending; items b–e still unverified.
 5. **`d5` PP7 export folder — offline (naming) + live (content).** Acceptance:
    `built` slides yield **one asset per build step** (N builds → N+1 stages → the
    route's asset count, each showing only that step, verified by frame- or
@@ -1185,10 +1256,15 @@ operator-run, hands-off Keynote window on a **copy**.
    refuses on mismatch** (the exported `<basename>.NNN.png` names carry no slide
    number); inserted clips carry the FW movie's `repetition method` and
    `movie volume`; the stat-overlay bake/no-bake choice from the review page is
-   honoured; a manifest JSON lists slide → build index → asset **and records which
-   alpha route produced each one**. Per-build asset generation and the
-   naming/manifest work are separate PRs, and the alpha route is not started until
-   Open question 13 is answered.
+   honoured; **layouts are untouched — `alpha_ok` on all stages**; a manifest JSON
+   lists slide → build index → asset **and records which alpha route produced
+   each one**. Per-build asset generation and the naming/manifest work are
+   separate PRs, and the alpha route is not started until Open question 13 is
+   answered.
+   **Status (2026-09-10):** engine landed as `dsk_stage_export.py` (30 tests);
+   first live run was opaque due to the `Blank` layout reassignment → fixed
+   (layouts untouched, folder-basename glob, 1-based stages); Codex round 1
+   fixes applied; live re-run pending.
 6. **`d5b` Exporter — offline (classify/selection) + live (export).** Acceptance:
    pointed at `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`, the
    classifier reports its **7 built slides {5, 13, 14, 17, 26, 29, 30}** and its
@@ -1417,6 +1493,12 @@ operator-run, hands-off Keynote window on a **copy**.
   intersection is used everywhere. Covered by a `d2` acceptance line.
 - **Layout/master leakage** into both the DSK deck and every exported clip unless
   the CG layout-import step runs on both decks.
+- **Layout import dedupes by name.** Importing a layout via donor-slide `move`
+  silently resolves to a **same-named layout the destination deck already owns**
+  (case-insensitive) instead of genuinely importing — measured on `Blank` in all
+  three probed decks. `d4`/`d3` must import `Blank Black` specifically (a name
+  absent from the FW/DSK decks) and run the offline full-canvas-drawable gate on
+  the resolved layout before trusting it; trusting a name alone is not sufficient.
 - **Export-time / hands-off window.** Measured 2026-09-10 live acceptance:
   8.23–35.63 s per clip, 27–41 s wall time per batch (3 batches / 7 clips), but
   the 6.7GB `Full_Report_Card_Wall.key` case is still unmeasured, and the
