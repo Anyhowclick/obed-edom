@@ -4,9 +4,10 @@ overview: >-
   Automate the owner's hand-built FW→DSK lower-third workflow. Input: a finished
   LW/FW wall Keynote (7680×1080, centre panel 3840×1080 at x=1920). Output: an
   editable 1920×1080 DSK Keynote whose FW content sits in the lower-third band
-  with a white 5pt border, plus an export folder of movies/PNGs for
-  ProPresenter7, because Keynote can mask an image but not a movie and emits no
-  alpha in live playback. Slides are classified offline (`iwa_builds.deck_builds`
+  with a white 5pt border, plus an export folder of true-alpha (ProRes 4444)
+  clips for ProPresenter7 — one clip per build step on built slides — because
+  Keynote can mask an image but not a movie and emits no alpha in live
+  playback. Slides are classified offline (`iwa_builds.deck_builds`
   + kind counts), the operator confirms per slide in a review page (resizer/
   checker pairing pattern), and apply runs the movie-crop pipeline and the deck
   assembly. The movie-crop utility is shared so `maps_keynote.export_maps_job
@@ -25,13 +26,13 @@ todos:
     content: "Read the DSK band rect from a reference DSK deck/template; contain-fit affine per item, clipped to the centre panel; no hardcoded band."
     status: pending
   - id: d3-movie-crop
-    content: "Shared `dsk_movie_export.py`: scratch centre-panel deck → QuickTime export → ffmpeg crop/scale; display-poke + RSS watchdog."
+    content: "Shared `dsk_movie_export.py`: scratch centre-panel deck (3840×1080) → native-size ProRes 4444 export → ffmpeg crop/scale; display-poke + RSS watchdog; includes the alpha probe and the (i)/(ii) mechanic decision."
     status: pending
   - id: d4-deck-assembly
     content: "Assemble the DSK deck by copy-and-transform of the FW deck (copy carries builds), live geometry, live deletes, CG-style layout import, white 5pt stroke."
     status: pending
   - id: d5-pp7-export
-    content: "Export folder for PP7: per-slide movie and/or PNG stages, deterministic naming."
+    content: "Export folder for PP7: true-alpha ProRes 4444, one clip per build step on `built` slides, Keynote slide-number naming, manifest."
     status: pending
   - id: d6-api-ui
     content: "Replace the `POST /api/dsk` 501 stub with propose→review→apply mirroring `/api/resize`; extend `DskTab.tsx`."
@@ -43,8 +44,8 @@ todos:
     content: "Follow-up: point `maps_keynote.dsk_ops`/`dsk_item` movie items at the shared crop utility."
     status: pending
   - id: d9-open-questions
-    content: "Get the owner's answers to the numbered Open questions before d3/d4 land."
-    status: pending
+    content: "MOSTLY DONE (2026-09-10): owner answered Q1-Q6, Q8-Q12; folded into the body. STILL OPEN: (i) band placeholder in the DSK template — needs church staff; (ii) alpha-for-builds mechanics — pending the live probe."
+    status: completed
 ---
 
 ## Context
@@ -56,6 +57,10 @@ exports it as a movie (which bakes the crop), imports that movie into the DSK
 deck and applies a white border by hand. Keynote emits no alpha in live
 playback, so build slides and movie slides must additionally be handed to PP7 as
 pre-rendered assets rather than played live from Keynote.
+
+Owner direction 2026-09-10: those pre-rendered assets must carry **true alpha**,
+and a built slide is handed to PP7 as **one clip per animation**, so the PP7
+operator clicks through the build exactly as they would in Keynote.
 
 `dashboard/src/tabs/DskTab.tsx` (126 lines) already has the LW/DSK pickers and an
 inspect flow and calls only `stubDsk` (`dashboard/src/api.ts:233`); `POST
@@ -163,6 +168,12 @@ preset applied to a 3840×1080 document** (fit-width 1920 → 540 tall). So the
 owner's scratch deck is the centre panel at 3840×1080 exported at the **1080p
 preset**, not native size. This partially answers Open question 1 (the "1920"
 in "3840×1920" is the *export width*, not a canvas dimension).
+
+**Superseded by the owner (Q1, 2026-09-10):** the 1080p preset was the owner's
+convenience, not a requirement. The pipeline exports the 3840×1080 scratch deck
+at **`native size`** (which the live probe confirmed emits the document size
+exactly) and does the DSK downscale afterwards. Native size is also **required
+for `movie codec` to apply at all**, so it is a precondition of ProRes 4444.
 
 ### Cross-check against `maps_keynote.dsk_item` (`:689-698`)
 
@@ -280,7 +291,7 @@ to the centre panel with `map_remap.CENTRE_PANEL_RECT` (`map_remap.py:439`) and
 |---|---|---|
 | `empty` | no centre-panel item above the backdrop | skip (no DSK slide) |
 | `static` | items, no `movie` kind, `builds == []` | **in-deck**: contain-fit into the band, white 5pt stroke. No export. |
-| `built` | `builds != []`, no `movie` kind | **both**: in-deck copy (builds ride along with the copy), **and** exported for PP7 (movie or per-stage PNGs — Open question 2) |
+| `built` | `builds != []`, no `movie` kind | **both**: in-deck copy (builds ride along and stay live for editing) **and** one exported alpha clip **per build step** (on-click per animation) |
 | `movie` | any `TSD.MovieArchive` in the centre panel | **export-crop**: scratch-deck movie export → ffmpeg → insert the exported clip into the DSK deck, stroke 5pt; the FW movie object is **deleted**, which clears its builds; the slide's own transition is set to `none` (the clip owns the timing) |
 | `mixed` | movie **and** builds/other content | treat as `movie` (the export bakes everything), flag in the review page for operator override |
 
@@ -298,8 +309,7 @@ and `d2`: builds on slides {2, 3, 5, 6, 7, 17, 20, 32, 33, 37, 44, 54}, movies
 on 32 and 33, side-panel-only items on 62 of 63 slides, 21 groups.
 Note the count mismatch: **63 FW slides → 43 DSK slides**. The DSK is *not* a
 subset of the FW deck — it is FW-derived media **plus template verse slides**.
-That makes `d7` (insert mode) closer to core than to stretch; flagged for the
-owner as Open question 9.
+Insert mode (`d7`) stays stretch per the owner (Open question 9).
 
 ## Blocker: images are cropped, not scaled
 
@@ -347,8 +357,11 @@ for free, so the exported clip already *is* the visible rect. For static images
 it needs a crop, which lands us back in the mask blocker above; for those,
 contain-fit the intersection and flag the slide for operator review.
 
-**Open question 3:** was the centre-cropped 4K movie on slide 32 intentional
-(deliberate framing) or an accident in the FW deck?
+**Resolved by the owner (2026-09-10):** intentional — the top and bottom are
+deliberately cropped framing. The scratch-deck export **bakes that crop**, so the
+current design stands unchanged. The owner's wish to apply an image mask to the
+movie beforehand is **future work under the crop workstream** (blocked today: the
+sdef exposes no mask on `movie`).
 
 ## Blocker: layouts and masters
 
@@ -415,13 +428,85 @@ background image does not go transparent even after the strip** — for the DSK
 lower-third slides (no full-bleed backing) it does. It also adds a headless
 Chromium/Playwright dependency the repo does not have (no `playwright` in `src/`).
 
-**Decision.** First tranche: **(a)** for `movie` slides, plus **per-stage PNGs via
-(c)** only if Open question 2 answers "stages, not video". Default first-tranche
-behaviour for `built` slides: keep builds live in the DSK deck (free, because the
-deck is a copy) and export an **opaque** movie via (a) as the PP7 fallback.
-(b) and full alpha video from (c) are **stretch**, gated on Open question 2;
-(c) is the better of the two if alpha is required, being alpha-native rather than
-matte-solved.
+**Decision (revised after the owner's Q2/Q4/Q10 answers, 2026-09-10).**
+
+PP7 assets are **true-alpha ProRes 4444 movies**, and on `built` slides there is
+**one clip per build step**: asset *k* renders the animation of build *k* only, so
+the PP7 operator clicks through the build. `built` slides **also stay live in the
+DSK deck** — the `ditto` copy carries the builds for free, and the owner edits
+them there. The alpha route is therefore **core, not stretch**; (b), the
+difference matte, is dropped to a last resort.
+
+Two candidate mechanics remain, and **both are pending the live probe below**:
+
+**(i) Keynote native ProRes 4444 export.** `export … as QuickTime movie with
+properties {movie format:native size, movie codec:AppleProRes4444, movie
+framerate:FPS30, skipped slides:false}` from a scratch deck whose slide
+backgrounds are set to **No Fill**. Keynote's *GUI* advertises a
+transparent-background ProRes 4444 export — but the KPF measurement showed **No
+Fill still emits an opaque black fill rect**, and the sdef carries **no
+transparency key at all**, so alpha in the `.mov` is **UNVERIFIED**. Per-build
+splitting would have to lean on the 5.0 s hold / 2.0 s build-delay defaults, or
+on frame-diff cut detection — neither is deterministic.
+
+**(ii) KPF/HTML export + fill strip + headless Chromium player.** Export as HTML,
+strip the lead fill op (proven to yield real alpha on lower-third slides), drive
+Apple's player **build by build** (`advanceToNextBuild(`) in headless Chromium,
+capturing the transparent canvas per frame into
+`maps_reveal._run_ffmpeg_stdin`'s ProRes 4444 pipe (`prores_ks -profile:v 4444
+-pix_fmt yuva444p10le -vendor apl0`, `maps_reveal.py:303-330`). Segmentation is
+**deterministic** — we own the clicks — but it needs a Playwright/Chromium
+dependency the repo does not have, and inherits the KPF player's fidelity limits
+(unsupported builds/transitions simplified).
+
+**KPF exports embedded movies separately**, so they are absent from the canvas
+capture: `movie` slides go through **(i)** (or the opaque QuickTime path) in
+either world, and if alpha is needed *around* a movie it must be composited.
+
+**Decision rule.** If probe (i) yields real alpha, **(i) is the movie-slide path**
+and the fallback for builds. **(ii) is chosen for per-build segmentation** unless
+(i) can be cut deterministically at build boundaries.
+
+## Next live probe (alpha)
+
+**Subject.** A copy of `~/Desktop/Diff-Checker/Sermon_PK (GW).key`, or (cheaper and
+preferred) a synthetic **3840×1080** deck with two slides:
+- slide A: background **No Fill**, one object with **2–3 builds** (an Appear and a
+  Sparkle-like ramp, matching the builds already characterised in the live probe);
+- slide B: an embedded movie.
+
+**Export.** `export theDoc to POSIX file "…/alpha.mov" as QuickTime movie with
+properties {movie format:native size, movie codec:AppleProRes4444, movie
+framerate:FPS30, skipped slides:false}`. Operator rules apply in full: work dir
+under `~/Desktop`, process lock, display poke (`caffeinate -u -t 2`), RSS watchdog.
+
+**Measurements.**
+1. `ffprobe -show_streams` → **`pix_fmt`**; expect **`yuva444p10le`** if alpha
+   survived, `yuv444p10le` if it did not.
+2. Per-frame alpha stats: decode `-pix_fmt rgba` raw frames and take numpy
+   min/mean/max of the A channel, plus the fraction of fully-opaque pixels, on a
+   background region and on the object region.
+3. Build segmentation: per-frame diff over the object region; are there flat hold
+   segments separable at the **2.0 s** build delay, with the 5.0 s slide hold at
+   the ends?
+4. Record what the **sdef** and the **GUI export sheet** actually say about
+   "transparent background" — the sdef has **no transparency key**, so this is a
+   GUI-only claim until measured.
+
+**Acceptance.** Alpha is REAL if the background region's mean alpha is ≈0 across
+all frames while the object region shows non-trivial alpha, and `pix_fmt` is
+`yuva444p10le`. Builds are DETERMINISTICALLY CUTTABLE if the hold segments are
+frame-exact at the 2.0 s delay across all builds on slide A.
+
+**What each outcome decides.**
+- **Alpha real + builds cuttable** → mechanic **(i)** for everything; no Chromium
+  dependency; `d3`/`d5` are a scratch-deck export plus an ffmpeg split.
+- **Alpha real + builds NOT cleanly cuttable** → **(i)** for `movie` slides,
+  **(ii)** for per-build clips on `built` slides; Playwright/Chromium enters the
+  dependency set.
+- **Alpha NOT real** → **(ii)** is the only alpha route; `movie` slides fall back
+  to the opaque QuickTime path plus compositing where alpha is needed around the
+  movie, and this is escalated to the owner because it changes the PP7 handoff.
 
 ## DSK deck assembly
 
@@ -461,6 +546,11 @@ per-slide choice (centre / left / right, defaulting to centre — the sample's m
 `cx = 960`). Refuse rather than guess if the reference deck yields fewer than
 three band items. **This is a scale, not a crop** — see the crop blocker.
 
+**Owner (Q6, 2026-09-10):** a real band placeholder **should** exist in the DSK
+template, but it must be agreed with church staff. Tracked as an **external
+dependency**; until it lands, the measured values (h 350, bottom 1054, envelope
+26…1894) are the **default placeholder** and the reference-deck read stays.
+
 **Groups.** The GW fixture has **21 groups**. A Keynote 15.3.1 group resize is an
 aspect-locked uniform scale about the group's live frame and permanently freezes
 an autosize text child at its wrapped height (SKILL.md:285-288). Groups are
@@ -487,24 +577,36 @@ geometry-write/layout-import machinery, not `map_remap`'s planner.
    z-order write), which drags in Accessibility permission;
 3. offline media-style patch.
 
-**Chosen: (3), with a hard refusal guard.** Because the DSK deck is a *copy of the
-FW deck*, its `DocumentStylesheet.iwa` inherits the FW deck's media styles. Add a
-`patch_media_stroke` sibling to `patch_stroke_widths` that can **set colour,
-pattern and width** on a media style archive, selected by ref-count/colour exactly
-as `match_card_stroke_styles` does — never by id (SKILL.md).
-**Guard: patch a style only if `refs(style) ⊆ kept band media`.** The sample shows
-why: style `3812378` is shared by **9 refs across 7 slides**, and `15185477`
-covers slide 19, which has **no band item** — patching either would recolour
-borders on objects we do not own. If a style's refs are not a subset,
-**refuse and report** that slide for manual bordering. Prefer refuse-and-report
-over the option-(2) rectangle fallback, because that fallback needs the GUI
-z-order raise. Target value from the measurement: white `TSDSolidPattern`,
-width **5.0**.
+**Chosen: keep the SOURCE object's stroke (owner, Q5, 2026-09-10).** The DSK deck
+is a *copy* of the FW deck, so the LW image/movie's own stroke style travels with
+it — preserve it untouched wherever it exists. Only where the source object has
+**no** stroke do we apply the **house white `TSDSolidPattern` 5.0pt** via a
+`patch_media_stroke` sibling to `patch_stroke_widths`, selected by
+ref-count/colour exactly as `match_card_stroke_styles` does — never by id.
+
+"Refuse" is no longer the primary behaviour, but the **shared-style guard
+stays**: never recolour a style whose refs escape the kept band media. The sample
+shows why — style `3812378` has 9 refs across 7 slides, and `15185477` covers
+slide 19, which has no band item. In that case **duplicate the style for the kept
+refs**, and only if that is not possible fall back to refuse-and-report. Option
+(2), the white rectangle shape, stays rejected (it needs a GUI z-order raise).
 
 **Transitions.** `movie`-category slides get their slide transition set to
 **`none`** (via `set transition settings of slide N to {transition effect:none}`
 — the working spelling per the live probe), because the exported clip owns the
 timing and the transition on slide N fires when *leaving* N.
+
+**Inserted clip behaviour (owner Q11, 2026-09-10).** The DSK deck holds the
+**exported clip, never the original FW movie**. Golden rule: **keep to source deck
+behaviour** — read `repetition method` and `movie volume` off the FW `movie`
+object (both exposed in the sdef) and write the same values onto the inserted
+clip. If the source loops, the clip loops; if the source plays at full volume, so
+does the clip. The operator may copy anything else over by hand.
+
+**Stat overlay (owner Q8, 2026-09-10).** The overlay ("1.9% Christians") is
+**baked into the clip by default** — that matches the owner's own practice — but
+the review page offers a per-slide choice: **"bake overlay into clip"** (default)
+vs **"clip only, operator adds the text manually in PP7"**.
 
 **Presenter notes** survive the `ditto` copy untouched; nothing to do, and
 nothing is lost (unlike a KPF export, where notes are not exported).
@@ -543,6 +645,15 @@ that ffmpeg splits at slide boundaries is now **computable** — per-slide hold 
 still unvalidated end-to-end; park it. Launch with `nohup … &` and Monitor the
 log; background Bash is capped at 10 minutes.
 
+**Naming (owner Q12).** Assets are named **per slide number**, following Keynote's
+own "export slide images with individual builds ticked" convention. The sdef does
+**not** document that convention (`export options` has `image format`, `all
+stages` and `skipped slides` but **no naming/prefix/numbering key**, and `slide
+images` is listed with extension `N/A` — a folder destination). Assume
+`<deckStem>.<NNN>.<ext>` zero-padded from `001`, one sequential index per build
+stage; **verify against a real `as slide images … {all stages:true}` export in
+`d5`** and correct this line.
+
 **Codec.** ProRes 422HQ at 3840×1080/30fps runs roughly **5GB per 30 s**. Default
 the intermediate to **AppleProRes422LT** or **h264**; 422HQ only on request.
 `native size` is required for any codec choice to apply at all.
@@ -557,11 +668,13 @@ the intermediate to **AppleProRes422LT** or **h264**; 422HQ only on request.
 - Watch RSS; abort on threshold.
 - Always operate on a copy; never the owner's deck.
 
-## Insert mode (`d7`)
+## Insert mode (stretch, `d7`)
 
-Accept `--dsk-existing <deck.key>` — the reformatted verse slides the generator
-already produced (Open question 9). Because the DSK is FW-derived media **plus**
-template verse slides (63 FW → 43 DSK), this is closer to core than to stretch.
+**Owner (Q9, 2026-09-10):** the primary output is a **NEW DSK deck**. Verse slides
+are produced manually (before or after) for now, and should eventually come from
+the sermon generator. `d7` therefore **stays a stretch** — the "closer to core"
+reading above is withdrawn. Accept `--dsk-existing <deck.key>` when it ships.
+
 Propose returns the existing deck's slide list plus the new FW-derived slides;
 the operator drags each new slide to its position. Reuse the interaction, not the
 model: `dashboard/src/tabs/MapsTab.tsx:752-789` (`handleSlideDragStart` /
@@ -594,7 +707,7 @@ Mirror `/api/resize`'s three phases in `src/obed_edom/web/app.py`:
 Frontend: extend `dashboard/src/tabs/DskTab.tsx` (drop `stubDsk`,
 `dashboard/src/api.ts:233`) with a **new lighter per-slide review list** — thumbnail,
 category chip, build/movie counts, an action select (in-deck / export / both / skip),
-a horizontal-anchor select, an include toggle. Do **not** reuse
+a horizontal-anchor select, an include toggle, **and a stat-overlay select (bake into clip [default] / clip only)**. Do **not** reuse
 `components/FramingReview.tsx` (1013 lines): its affine/anchor-pairing UI is
 CG-specific. `cd dashboard && npm install && npm run build` after any
 `dashboard/src/**` change (SKILL.md).
@@ -623,7 +736,11 @@ operator-run, hands-off Keynote window on a **copy**.
    build delay 2.0 s per build + the measured transition duration, or the embedded
    movie's own length where longer); QuickTime opens it; the crop matches the
    centre panel; the runner refuses on a locked display or pokes it; the RSS
-   watchdog fires on a synthetic threshold.
+   watchdog fires on a synthetic threshold; plus **the alpha probe result is recorded** (see "Next live probe (alpha)"):
+   `pix_fmt`, per-frame alpha stats, and whether build boundaries are frame-exact
+   at the 2.0 s delay. `d3` does not close until the mechanic (i)/(ii) decision is
+   written into the plan. The probe + decision is its own small PR ahead of the
+   export implementation.
 4. **`d4` deck assembly — live.** Acceptance: DSK deck opens; a `static` slide's
    media sits in the band; **no kept slide's base layout is an FW/7680-wide
    layout**; `card_styles` on the output reports the kept media styles as
@@ -633,7 +750,17 @@ operator-run, hands-off Keynote window on a **copy**.
    are present; a masked image's mask scales with its frame after the live
    width/height write (no content revealed or clipped);
 5. **`d5` PP7 export folder — offline (naming) + live (content).** Acceptance:
-   deterministic names per Open question 8; a manifest JSON listing slide → asset.
+   `built` slides yield **one clip per build step** (N builds → N clips, each
+   showing only that animation, verified by frame-diff); clips are **ProRes 4444
+   with real alpha** (`ffprobe pix_fmt = yuva444p10le`) via whichever mechanic
+   `d3` selected; names follow the Keynote slide-images-with-individual-builds
+   convention per slide number, **with the real pattern confirmed by one live
+   `as slide images {all stages:true}` export** and this plan corrected if it
+   differs from the assumed `<stem>.<NNN>.<ext>`; inserted clips carry the FW
+   movie's `repetition method` and `movie volume`; the stat-overlay bake/no-bake
+   choice from the review page is honoured; a manifest JSON lists
+   slide → build index → asset. Per-build clip generation and the naming/manifest
+   work are separate PRs.
 6. **`d6` API/UI — offline.** Acceptance: propose/review/apply round-trips against a
    stubbed runner; `npm run build` clean; `POST /api/dsk` no longer returns 501.
 7. **`d7` insert mode — offline UI + live splice.**
@@ -648,22 +775,49 @@ operator-run, hands-off Keynote window on a **copy**.
    not at native size. Confirm the scratch deck is 3840×1080 and that "1920" was
    the export width. Should we keep the 1080p preset (matching the owner's current
    output) or move to native size for a sharper master?
+   **Owner (2026-09-10):** "Yeah, 3840x1080 is LW, then scaled down. Exporting
+   native size would be good." → plan change: the scratch deck is **3840×1080**
+   and export is **`movie format:native size`**, not the 1080p preset; the
+   downscale to the DSK band happens afterwards in ffmpeg/geometry.
 2. Does PP7 need **true alpha** movies, or are opaque movies (+ PNG stages for build
    slides) enough? This decides whether option (b)/(c) ships at all.
+   **Owner (2026-09-10):** "True alpha movies. Exporting as Apple ProRes 4444 is
+   an option. Not sure how it works for builds, but it should be 'on-click' per
+   animation." → plan change: alpha is **core, not stretch**; PP7 assets are
+   ProRes 4444 with alpha, and `built` slides export **one clip per build step**.
+   The mechanics stay **open pending the probe in "Next live probe (alpha)"**.
 3. **Slide 32 of `Sermon_PK (GW).key`** holds a 3840×2160 movie at (1920, −763),
    centre-cropped by the canvas. Intentional framing, or an accident to flag?
+   **Owner (2026-09-10):** "Intentional. top & bottom are 'cropped'. would be
+   nice to apply image mask for this beforehand I suppose, but damn Apple
+   restriction, ugh." → plan change: off-canvas framing is deliberate; the
+   scratch-deck export bakes the crop (current design unchanged). The wish for a
+   pre-applied mask is logged as future work under the crop workstream.
 4. **Timing.** QuickTime export has no duration keys; Keynote's self-playing
    defaults are 5.0 s per slide and 2.0 s per build. Is that the wanted pacing for
    PP7 assets, or should the pipeline re-time clips in ffmpeg — and to what
    seconds-per-build / seconds-per-slide?
+   **Owner (2026-09-10):** "Links to (2)?" → plan change: yes — timing is
+   subsumed by the per-build "on-click" answer. Each asset covers **one** build
+   step, so Keynote's 5.0 s hold / 2.0 s build delay become **cut points**, not
+   pacing to preserve; trailing/leading hold is trimmed in ffmpeg.
 5. Border spec: measured **white, solid, 5.0pt** on the sample (including the movie).
    Confirm 5.0pt is the intended house value and not one deck's drift — two other
    white 5.0pt styles exist with slightly different white (0.99994, 0.99999, 0.99988).
    Also: slides whose stroke style is shared with non-band objects will be
    **refused and reported** — is manual bordering on those acceptable?
+   **Owner (2026-09-10):** "Yes, house value. Instead of refusing, try keeping to
+   source stroke style." → plan change: 5.0pt white is the house value, but the
+   **primary behaviour is to keep the SOURCE object's stroke**; refuse is no
+   longer the primary path (the shared-style guard survives).
 6. Band spec: measured **h = 350, bottom = 1054, x envelope 26…1894**, horizontal
    anchor varying (centred, right-anchored, full-bleed). Should the DSK template gain
    a real band placeholder so the band stops being inferred from a sample?
+   **Owner (2026-09-10):** "There should be, need church staff for this. note it
+   as something to be tied down. assume current values as the default
+   placeholder." → **STAYS OPEN** as an external dependency (church staff). The
+   measured values (h 350, bottom 1054, x 26…1894) are the default placeholder
+   until then.
 7. **Cropping.** 88 of 131 masked images in the sample are real crops of the FW
    panel. The pipeline **cannot create crops** (no sdef mask, offline crop writes
    refused) — it will scale to the band and leave editorial cropping to you in the
@@ -675,19 +829,45 @@ operator-run, hands-off Keynote window on a **copy**.
    converter.
 8. The stat overlay ("1.9% Christians", top-right of the band) — is it FW wall content
    that should flow through automatically, or DSK-side text typed after import?
+   **Owner (2026-09-10):** "What I did was to bake it in together with the video.
+   Flag it in the review stage, give operator both options (bake vs just video,
+   manually add)." → plan change: the review page gains a per-slide overlay
+   choice, defaulting to **bake**.
 9. **Insert mode is closer to core than stretch**: 63 FW slides → 43 DSK slides,
    because the DSK is FW-derived media *plus* template verse slides. Do those verse
    slides come from this repo's existing `generate --dsk-template` output, or from a
    deck you build separately? Should `d7` move ahead of `d5`/`d6`?
+   **Owner (2026-09-10):** "it should eventually come from the sermon generator,
+   but now assume it will be done manually either before or after. (so might be
+   creating a totally new deck)" → plan change: primary output is a **NEW DSK
+   deck**; verse slides are manual for now; `d7` insert-mode stays stretch.
 10. `built` slides: keep builds live in the DSK deck (as your sample does on 7
     slides) **and** also export them, or export only?
+    **Owner (2026-09-10):** "live in the DSK deck for edits" → plan change:
+    `built` slides are **both** — builds stay live in the DSK deck (the copy
+    carries them) **and** per-build-step clips are exported for PP7.
 11. Movie slides in the DSK deck: the sample holds the **exported** clip (aspect
     3.5556, no mask). Confirm the DSK deck should never hold the original FW movie.
     For inserted clips, what `movie volume` and `repetition method` do you want —
     muted/loop for a background plate, or full volume/none for a played-through
     clip? (The sample's clip carries an AAC track from the export.)
+    **Owner (2026-09-10):** "Confirm. op can manually copy over if needed. golden
+    rule is to keep to source deck behaviour. so if vid loops, loop. if full
+    volume, follow." → plan change: the DSK deck holds only the exported clip, and
+    `repetition method` + `movie volume` are **copied from the FW movie object**
+    onto the inserted clip.
 12. Export-folder naming for PP7 import: per slide number, per cue, or per outline
     point? Movie vs PNG suffix convention?
+    **Owner (2026-09-10):** "per slide number, as per 'export as image with
+    individual builds ticked option' keynote export" → plan change: names follow
+    Keynote's slide-images-with-individual-builds convention, keyed by slide
+    number. **sdef finding:** `export options` exposes `image format` (`Kxif`),
+    `all stages` (`Kxpa`) and `skipped slides` (`Kxps`) but **no naming, prefix or
+    numbering key**, and the `export` command's own table gives `slide images` the
+    file extension **`N/A`** (the destination is a folder). The sdef therefore does
+    **not** state the pattern. Assume `<deckStem>.<NNN>.<ext>` zero-padded from
+    001, with each build stage emitted as its own sequential frame when
+    `all stages:true` — **flagged for a one-minute live check in `d5`**.
 
 ## Risks
 
