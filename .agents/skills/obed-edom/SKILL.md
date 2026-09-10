@@ -465,6 +465,19 @@ Load-bearing rules:
   Keynote permutes on save, so never read `builds` order as reveal order (measured:
   chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
 
+### External reference: KeynoteKit
+
+https://github.com/memfrag/KeynoteKit — Swift 6 offline `.key` reader/writer on the
+same keynote-parser 14.4 schemas; evaluated 2026-09-09 as REFERENCE ONLY, not
+imported or vendored. Corroborates the surgical design (records/zip entries kept
+verbatim except mutated ones) and covers all five path-source kinds with
+`naturalSize` on resize; does NOT do group-child scaling, mask `originalSize`, or
+baseline/superscript style writes. Its `reorderDrawables` permutes
+`drawablesZOrder` only (we patch `ownedDrawables` identically — unmeasured whether
+the lighter write opens cleanly). Its writer creates a NEW file, crossing our
+in-place/inode rule. Consult its Swift when a record's semantics are unclear and
+for the parked `iwa-surgical-write-generator` feature.
+
 ---
 
 ## LW deck facts

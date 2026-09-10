@@ -531,6 +531,8 @@ whose number disagrees with the run either side of it. Ships at `warning`.
 - An autosize text box's stored y is the visual TOP for `kFrameAlignTop` and the visual CENTRE
   only for `kFrameAlignMiddle`; Keynote's AppleScript/JXA `position` (read and write) is always
   the visual top-left. Never re-add write-side `±h/2` compensation for a read-side anchor bug.
+- KeynoteKit (Swift, same 14.4 schemas) is a reference only — it does not unblock W2 (evaluated
+  2026-09-09).
 
 **The operator loop**
 - Confirmation only bites where the template has a framing worth picking; pages with no
