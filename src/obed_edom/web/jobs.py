@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -77,6 +78,8 @@ class JobRunner:
         self._queue: deque[str] = deque()
         self._running: set[str] = set()
         self._lock = threading.Lock()
+        self._job_locks: dict[str, threading.Lock] = {}
+        self._deleted_ids: set[str] = set()
         self._cv = threading.Condition(self._lock)
         self._load_sessions()
         self._worker = threading.Thread(target=self._loop, daemon=True)
@@ -90,13 +93,24 @@ class JobRunner:
         feature: str | None = None,
         result: dict[str, Any] | None = None,
     ) -> Job:
-        job = Job(id=str(uuid.uuid4())[:8], kind=kind, feature=feature or kind, result=result)
         with self._cv:
+            job_id = self._new_job_id()
+            job = Job(id=job_id, kind=kind, feature=feature or kind, result=result)
             self._jobs[job.id] = job
             self._fns[job.id] = fn
             self._queue.append(job.id)
             self._cv.notify()
         return job
+
+    def _new_job_id(self) -> str:
+        while True:
+            job_id = self._generate_job_id()
+            if job_id not in self._jobs and job_id not in self._deleted_ids:
+                return job_id
+
+    @staticmethod
+    def _generate_job_id() -> str:
+        return str(uuid.uuid4())[:8]
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
@@ -135,7 +149,8 @@ class JobRunner:
                 job.log("Cancelling.")
             self._cv.notify_all()
         if job.status == "error":
-            self.save(job)
+            with self._job_lock(job_id):
+                self.save(job)
         return job
 
     def list(self, kind: str | None = None, feature: str | None = None) -> list[Job]:
@@ -152,20 +167,42 @@ class JobRunner:
         data["artifacts"] = artifact_status(job, self._output_root)
         return data
 
+    def _job_lock(self, job_id: str) -> threading.Lock:
+        with self._lock:
+            lock = self._job_locks.get(job_id)
+            if lock is None:
+                lock = self._job_locks[job_id] = threading.Lock()
+            return lock
+
     def save(self, job: Job) -> None:
         if job.status not in {"done", "error"}:
             return
+        with self._lock:
+            if job.id in self._deleted_ids:
+                return
         self._session_dir.mkdir(parents=True, exist_ok=True)
         path = self._session_file(job.id)
-        path.write_text(json.dumps(job.to_dict(), indent=2), encoding="utf-8")
+        temp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp.write_text(json.dumps(job.to_dict(), indent=2), encoding="utf-8")
+            os.replace(temp, path)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
 
     def update_result(self, job_id: str, result: dict[str, Any]) -> Job | None:
         job = self._jobs.get(job_id)
         if not job:
             return None
-        job.result = result
-        job.updated_at = time.time()
-        self.save(job)
+        with self._job_lock(job_id):
+            previous_result, previous_updated_at = job.result, job.updated_at
+            job.result = result
+            job.updated_at = time.time()
+            try:
+                self.save(job)
+            except Exception:
+                job.result, job.updated_at = previous_result, previous_updated_at
+                raise
         return job
 
     def relocate(
@@ -201,11 +238,14 @@ class JobRunner:
         return self.update_result(job_id, result)
 
     def delete(self, job_id: str, *, purge: bool = True) -> bool:
-        with self._lock:
-            job = self._jobs.pop(job_id, None)
-        if not job:
-            return False
-        self._session_file(job_id).unlink(missing_ok=True)
+        with self._job_lock(job_id):
+            with self._lock:
+                job = self._jobs.pop(job_id, None)
+                if job is not None:
+                    self._deleted_ids.add(job_id)
+            if not job:
+                return False
+            self._session_file(job_id).unlink(missing_ok=True)
         if purge:
             self._purge_artifacts(job)
         return True
@@ -318,7 +358,8 @@ class JobRunner:
                         job.log("Finished.")
                     self._running.discard(job_id)
                     job.updated_at = time.time()
-            self.save(job)
+            with self._job_lock(job_id):
+                self.save(job)
 
 
 def serialize_flags(flags) -> list[dict]:

@@ -14,6 +14,7 @@ const compile = spawnSync(runtime, [
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const { rebaseMapsDocument } = require(path.join(out, "rebase.js"));
+const { nextPinId, shouldFocusAddedLandmark } = require(path.join(out, "types.js"));
 
 const camera = (zoom = 8) => ({ lat: 1, lon: 2, zoom, bearing: 0, pitch: 0 });
 const church = (id, extra = {}) => ({ id, name: id, lat: 1, lon: 2, kind: "dot", color: "#fff", ...extra });
@@ -112,4 +113,28 @@ test("production rebase retains local appended slides, links, and churches durin
   assert.deepEqual(result.value.slides.map((item) => item.id), ["s1", "s2"]);
   assert.equal(result.value.slides[0].churches[0].id, "p1");
   assert.equal(result.value.links[0].to, "s2");
+});
+
+test("remote-only server-minted church merges without conflict while local edits an unrelated pin", () => {
+  const base = doc({ slides: [slide({ churches: [church("p1")] })] });
+  const local = doc({ slides: [slide({ churches: [church("p1", { name: "Renamed" })] })] });
+  const remote = doc({ slides: [slide({ churches: [church("p1"), church("w1234abcd", { kind: "landmark" })] })] });
+  const result = rebaseMapsDocument(base, local, remote);
+  assert.deepEqual(result.conflicts, []);
+  const ids = result.value.slides[0].churches.map((item) => item.id);
+  assert.ok(ids.includes("w1234abcd"));
+  const p1 = result.value.slides[0].churches.find((item) => item.id === "p1");
+  assert.equal(p1.name, "Renamed");
+});
+
+test("nextPinId skips the server's w-namespace and mints the first free p-id", () => {
+  assert.equal(nextPinId([{ id: "w1234abcd" }]), "p1");
+});
+
+test("shouldFocusAddedLandmark only focuses when the slide+audience the upload targeted is still active", () => {
+  const target = { slideId: "s1", audience: "lw" };
+  assert.equal(shouldFocusAddedLandmark(target, { slideId: "s1", audience: "lw" }), true);
+  assert.equal(shouldFocusAddedLandmark(target, { slideId: "s2", audience: "lw" }), false);
+  assert.equal(shouldFocusAddedLandmark(target, { slideId: "s1", audience: "cg" }), false);
+  assert.equal(shouldFocusAddedLandmark(target, { slideId: null, audience: "lw" }), false);
 });

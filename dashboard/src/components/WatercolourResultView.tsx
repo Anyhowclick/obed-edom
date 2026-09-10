@@ -18,7 +18,7 @@ export type Item = {
   width?: number;
   height?: number;
   transparent?: boolean;
-  status: "done" | "error";
+  status: "done" | "error" | "cancelled";
   error?: string;
 };
 
@@ -150,6 +150,8 @@ export function WatercolourResultView({
               <figcaption className="err">
                 {item.name}: {item.error}
               </figcaption>
+            ) : item.status === "cancelled" ? (
+              <figcaption className="note">{item.name}: cancelled</figcaption>
             ) : (
               <>
                 <div className="wash-pair">

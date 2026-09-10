@@ -269,8 +269,8 @@ const MaskEditor = forwardRef<MaskEditorHandle, {
   function point(event: React.PointerEvent<HTMLImageElement>): [number, number] {
     const box = event.currentTarget.getBoundingClientRect();
     return [
-      Math.max(0, Math.min(event.currentTarget.naturalWidth, ((event.clientX - box.left) / box.width) * event.currentTarget.naturalWidth)),
-      Math.max(0, Math.min(event.currentTarget.naturalHeight, ((event.clientY - box.top) / box.height) * event.currentTarget.naturalHeight)),
+      Math.max(0, Math.min(event.currentTarget.naturalWidth - 1, ((event.clientX - box.left) / box.width) * event.currentTarget.naturalWidth)),
+      Math.max(0, Math.min(event.currentTarget.naturalHeight - 1, ((event.clientY - box.top) / box.height) * event.currentTarget.naturalHeight)),
     ];
   }
 
@@ -1069,7 +1069,7 @@ export function WatercolourTab() {
         () => cancelWatercolour(created.id)
       );
       upsert(done);
-      if (done.status === "error") setError(done.error || "Watercolour batch failed.");
+      if (done.status === "error" && !done.result?.cancelled) setError(done.error || "Watercolour batch failed.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

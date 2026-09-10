@@ -17,7 +17,7 @@ import {
   previewUrl,
   saveMapsState,
   startMaps,
-  uploadMapsAsset,
+  addMapsLandmark,
   MapsStateConflictError,
   addWatercolourToMap,
   watercolourImageUrl,
@@ -50,6 +50,7 @@ import {
   authoredSurfaceWidth,
   captureWidth,
   showCgBand,
+  shouldFocusAddedLandmark,
   slideForAudience,
   clampCgShift,
   clampZoom,
@@ -1002,35 +1003,15 @@ export function MapsTab() {
     const targetAudience = activeAudience;
     if (!targetSlideId) return;
     try {
-      const uploaded = await uploadMapsAsset(targetJobId, file);
-      if (jobRef.current?.id !== targetJobId || activeRef.current !== targetSlideId || activeAudienceRef.current !== targetAudience) return;
-      reconcileServerJob({
-        ...job,
-        result: { ...(job.result || {}), ...uploaded.document, stateRevision: uploaded.stateRevision },
-      });
-      const latest = docRef.current;
-      const target = latest?.slides.find((slide) => slide.id === targetSlideId);
-      const targetView = target ? slideForAudience(target, targetAudience) : null;
-      if (!targetView) return;
-      const asset = uploaded.asset;
-      const landmark: MapsChurch = {
-        id: nextPinId(targetView.churches),
-        name: file.name.replace(/\.[^.]+$/, "") || "Landmark",
-        lat: targetView.camera.lat,
-        lon: targetView.camera.lon,
-        kind: "landmark",
-        color: "#c44a42",
-        assetId: asset.id,
-        assetVersion: asset.version,
-        assetWidth: asset.width,
-        assetHeight: asset.height,
-        size: 180,
-        opacity: 1,
-        showLabel: true,
-      };
-      updateActive({ churches: [...targetView.churches, landmark] });
-      setSelectedPin(landmark.id);
-      setInspTab("pins");
+      await flushAndSave(true);
+      if (jobRef.current?.id !== targetJobId) return;
+      const { job: updated, churchId } = await addMapsLandmark(targetJobId, targetSlideId, targetAudience, file);
+      if (jobRef.current?.id !== targetJobId) return;
+      reconcileServerJob(updated);
+      if (shouldFocusAddedLandmark({ slideId: targetSlideId, audience: targetAudience }, { slideId: activeRef.current, audience: activeAudienceRef.current })) {
+        setSelectedPin(churchId);
+        setInspTab("pins");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1057,18 +1038,14 @@ export function MapsTab() {
     if (!job || !active || locked || activeAudience !== "lw") return;
     const targetJobId = job.id;
     const targetSlideId = active.id;
-    const before = new Set((activeView?.churches || []).map((c) => c.id));
     try {
       await flushAndSave(true);
       if (jobRef.current?.id !== targetJobId) return;
-      const updated = await addWatercolourToMap(wcJobId, itemId, targetJobId, targetSlideId);
+      const { job: updated, churchId } = await addWatercolourToMap(wcJobId, itemId, targetJobId, targetSlideId);
       if (jobRef.current?.id !== targetJobId) return;
       reconcileServerJob(updated);
-      const target = docRef.current?.slides.find((slide) => slide.id === targetSlideId);
-      const targetView = target ? slideForAudience(target, "lw") : null;
-      const newChurch = targetView?.churches.find((c) => !before.has(c.id));
-      if (newChurch) {
-        setSelectedPin(newChurch.id);
+      if (shouldFocusAddedLandmark({ slideId: targetSlideId, audience: "lw" }, { slideId: activeRef.current, audience: activeAudienceRef.current })) {
+        setSelectedPin(churchId);
         setInspTab("pins");
       }
       setLandmarkPicker(false);

@@ -177,3 +177,34 @@ test("a stale acknowledgement cannot move the base revision backwards", async ()
   assert.equal(calls[0].revision, 5);
   assert.equal(live.slides[0].title, "Current");
 });
+
+test("a transport failure leaves the queue dirty, fires onError, skips publish, and a later flush resends the same document", async () => {
+  const live = doc("Local");
+  let publishCalls = 0;
+  let errorSeen = null;
+  const calls = [];
+  let failNext = true;
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: () => { publishCalls += 1; },
+    transport: async (sent, revision) => {
+      calls.push(sent);
+      if (failNext) {
+        failNext = false;
+        throw new Error("network down");
+      }
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: (error) => { errorSeen = error; },
+  });
+  queue.setAcknowledged({ document: live, revision: 0 });
+  queue.markDirty();
+  await assert.rejects(queue.flush(), /network down/);
+  assert.equal(publishCalls, 0);
+  assert.ok(errorSeen && String(errorSeen).includes("network down"));
+  assert.equal(calls.length, 1);
+  await queue.flush();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], calls[0]);
+});

@@ -88,6 +88,48 @@ def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict
         if not saved:
             raise HTTPException(404, "Unknown maps job")
         return _runner().public_dict(saved)
+
+
+def _mutate_document_with_asset(job_id: str, expected_revision: int | None, asset_id: str, payload: bytes, mutate) -> dict[str, Any]:
+    """Like _mutate_document, but commits a new asset file in lockstep with the document.
+
+    Ordering: `mutate` builds and validates the new document in memory first (it can 404
+    before anything touches disk). The asset is then written to a `.tmp` path and
+    atomically promoted (`os.replace`) onto its final path *before* the document is
+    published — so no reader can ever observe a church whose asset 404s. Only once the
+    asset is durably on disk is the document handed to `update_result`, which publishes
+    it (in-memory) and persists it (to disk) together. If that fails, the now-unreferenced
+    asset is removed and the error re-raised; the document was never mutated, so there is
+    nothing to roll back.
+    """
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        _require_idle(job)
+        result = copy.deepcopy(job.result or {})
+        revision = int(result.get("stateRevision") or 0)
+        if expected_revision is not None and expected_revision != revision:
+            raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
+        updated = mutate(result)
+        updated["stateRevision"] = revision + 1
+        path = _asset_path(updated, asset_id)
+        temp = path.with_suffix(".tmp")
+        try:
+            temp.write_bytes(payload)
+            temp.replace(path)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
+        try:
+            saved = _runner().update_result(job_id, updated)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        if not saved:
+            path.unlink(missing_ok=True)
+            raise HTTPException(404, "Unknown maps job")
+        return _runner().public_dict(saved)
+
+
 STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour")
 MapsStyleId = Literal["positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour"]
 MapsCropId = Literal["wall", "center+cg"]
@@ -402,6 +444,26 @@ def _decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
         raise HTTPException(400, "Invalid image upload") from exc
     payload = output.getvalue()
     return payload, converted.width, converted.height, hashlib.sha256(payload).hexdigest()
+
+
+def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw", "cg"], name: str, width: int, height: int, version: str, asset_id: str) -> dict[str, Any]:
+    from obed_edom.web.watercolour import _default_landmark_size
+
+    slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
+    if not slide:
+        raise HTTPException(404, "Unknown Maps slide")
+    view = slide["cg"] if audience == "cg" and slide.get("cg") else slide
+    churches = list(view.get("churches") or [])
+    used = {str(church.get("id") or "") for church in churches}
+    church_id = f"w{asset_id[:8]}"
+    while church_id in used:
+        church_id = f"w{uuid.uuid4().hex[:8]}"
+    camera = view.get("camera") or {}
+    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1})
+    view["churches"] = churches
+    result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
+    view.pop("stillPng", None)
+    return result
 
 
 def _read_limited(stream, limit: int = 20 * 1024 * 1024) -> bytes:
@@ -1016,6 +1078,21 @@ async def upload_asset(job_id: str, file: UploadFile = File(...)) -> dict[str, A
         "stateRevision": result.get("stateRevision"),
         "document": _dump_document(_parse_document(result)),
     }
+
+
+@router.post("/{job_id}/slides/{slide_id}/landmark")
+async def add_landmark(job_id: str, slide_id: str, file: UploadFile = File(...), audience: Literal["lw", "cg"] = Query("lw")) -> dict[str, Any]:
+    payload, width, height, version = _decode_png(_read_limited(file.file))
+    asset_id = uuid.uuid4().hex
+    name = Path(file.filename or "Landmark").stem
+    def apply(result: dict[str, Any]) -> dict[str, Any]:
+        return append_landmark(result, slide_id, audience, name, width, height, version, asset_id)
+    updated = _mutate_document_with_asset(job_id, None, asset_id, payload, apply)
+    result = dict(updated["result"] or {})
+    slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
+    view = (slide.get("cg") if audience == "cg" and slide and slide.get("cg") else slide) or {}
+    church_id = next((str(church.get("id")) for church in reversed(view.get("churches") or []) if church.get("assetId") == asset_id), None)
+    return {**updated, "churchId": church_id}
 
 
 @router.get("/{job_id}/assets/{asset_id}.png")

@@ -544,6 +544,13 @@ export function nextPinId(churches: MapsChurch[]): string {
   return `p${n}`;
 }
 
+export function shouldFocusAddedLandmark(
+  target: { slideId: string; audience: MapsAudience },
+  active: { slideId: string | null; audience: MapsAudience }
+): boolean {
+  return active.slideId === target.slideId && active.audience === target.audience;
+}
+
 export function parseRoute(raw: unknown): MapsRoute | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const points = (raw as { points?: unknown }).points;

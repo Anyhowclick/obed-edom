@@ -601,21 +601,14 @@ def test_start_watercolour_rejects_malformed_masks_field():
     assert response.status_code == 400
 
 
-def test_batch_out_of_bounds_mask_becomes_item_error_not_500():
-    from obed_edom.web.app import app, RUNNER
+def test_batch_out_of_bounds_mask_rejected_at_submit_not_500():
+    from obed_edom.web.app import app
     from fastapi.testclient import TestClient
     client=TestClient(app)
     masks=json.dumps({'0': _rect_mask_spec((380,280,100,100))})
     response=client.post('/api/watercolour', files=[('files',('good.png',_landmark_png(),'image/png'))], data={'masks':masks})
-    assert response.status_code == 200, response.text
-    job_id=response.json()['id']
-    import time
-    for _ in range(80):
-        job=client.get(f'/api/jobs/{job_id}').json()
-        if job['status'] in {'done','error'}: break
-        time.sleep(.03)
-    items=job['result']['items']
-    assert items[0]['status'] == 'error'
+    assert response.status_code == 400, response.text
+    assert 'good.png' in response.json()['detail']
 
 
 def test_batch_duplicate_filenames_processed_independently():
@@ -638,6 +631,7 @@ def test_batch_duplicate_filenames_processed_independently():
     items=job['result']['items']
     assert [item['status'] for item in items] == ['done','done']
     assert items[0]['transparent'] is False
+    assert items[1]['transparent'] is True
     assert items[0]['result'] != items[1]['result']
     assert client.get(f"/api/watercolour/{job_id}/items/{items[0]['id']}/result").status_code == 200
     assert client.get(f"/api/watercolour/{job_id}/items/{items[1]['id']}/result").status_code == 200
@@ -834,3 +828,294 @@ def test_default_landmark_size_boundaries():
     assert _default_landmark_size(900) == 900
     assert _default_landmark_size(5000) == 1280
     assert _default_landmark_size(3000) == 1280
+
+
+def test_grabcut_mask_cancels_between_iterations():
+    import time
+    import pytest
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    calls={'n':0}
+    def cancel():
+        calls['n']+=1
+        return calls['n']>=2
+    start=time.time()
+    with pytest.raises(watercolour.WatercolourCancelled):
+        watercolour.grabcut_mask(image,(110.0,66.0,178.0,166.0),cancel=cancel)
+    assert time.time()-start<1.0
+    assert calls['n']==2
+
+
+def test_render_stops_at_a_stage_boundary():
+    import pytest
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    calls={'n':0}
+    def cancel():
+        calls['n']+=1
+        return calls['n']>=3
+    with pytest.raises(watercolour.WatercolourCancelled):
+        render(image,WatercolourOptions(),cancel=cancel)
+    assert calls['n']==3
+
+
+def test_non_index_mask_key_rejected_at_submit():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    masks=json.dumps({'landmark.png':_rect_mask_spec()})
+    response=client.post('/api/watercolour', files=[('files',('landmark.png',_landmark_png(),'image/png'))], data={'masks':masks})
+    assert response.status_code == 400, response.text
+
+
+def test_out_of_bounds_mask_leaves_no_staged_upload_dir():
+    from pathlib import Path
+    from obed_edom.paths import output_root
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    uploads_dir = output_root() / '.watercolour' / '.uploads'
+    before = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
+    masks=json.dumps({'0':_rect_mask_spec((380,280,100,100))})
+    response=client.post('/api/watercolour', files=[('files',('good.png',_landmark_png(),'image/png'))], data={'masks':masks})
+    assert response.status_code == 400
+    after = set(uploads_dir.glob('*')) if uploads_dir.is_dir() else set()
+    assert after == before
+
+
+def test_cancel_mid_batch_keeps_finished_discards_inflight_and_marks_remaining_cancelled():
+    import threading, time
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from obed_edom.web import watercolour as web_watercolour
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    real_convert=web_watercolour.convert
+    started=threading.Event()
+    calls={'n':0}
+    def fake_convert(raw, options, mask=None, *, cancel=None):
+        calls['n']+=1
+        if calls['n']==2:
+            started.set()
+            deadline=time.time()+5
+            while time.time()<deadline and not (cancel and cancel()):
+                time.sleep(0.01)
+        return real_convert(raw, options, mask, cancel=cancel)
+    web_watercolour.convert=fake_convert
+    try:
+        files=[('files',(f'{i}.png',png((80+i,90,100,255)),'image/png')) for i in range(3)]
+        response=client.post('/api/watercolour', files=files)
+        assert response.status_code == 200, response.text
+        job_id=response.json()['id']
+        assert started.wait(5)
+        cancel_response=client.post(f'/api/watercolour/{job_id}/cancel')
+        assert cancel_response.status_code == 200
+        job=None
+        for _ in range(200):
+            job=client.get(f'/api/jobs/{job_id}').json()
+            if job['status'] in {'done','error'}: break
+            time.sleep(0.03)
+        assert job['status'] == 'error'
+        assert job['error'] == 'Export cancelled.'
+        items=job['result']['items']
+        assert items[0]['status'] == 'done'
+        assert items[1]['status'] == 'cancelled'
+        assert items[2]['status'] == 'cancelled'
+        assert job['result']['partial'] is True
+        assert job['result']['cancelled'] is True
+        result_dir=Path(job['result']['resultDir'])
+        assert not list(result_dir.glob('01-*'))
+        assert (result_dir / items[0]['result']).is_file()
+    finally:
+        web_watercolour.convert=real_convert
+
+
+def test_cancelling_a_queued_job_still_cleans_staging():
+    import threading, time
+    from pathlib import Path
+    from obed_edom.web.app import app, RUNNER
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    release=threading.Event()
+    blocker=RUNNER.submit('watercolour', lambda job: (release.wait(5), {})[1], feature='watercolour')
+    try:
+        response=client.post('/api/watercolour', files=[('files',('good.png',png((90,140,210,255)),'image/png'))])
+        assert response.status_code == 200, response.text
+        job_id=response.json()['id']
+        job=None
+        for _ in range(100):
+            job=RUNNER.get(job_id)
+            if job.status == 'queued': break
+            time.sleep(0.01)
+        assert job.status == 'queued'
+        staging_dir=Path(job.result['stagingDir'])
+        assert staging_dir.is_dir()
+        cancel_response=client.post(f'/api/watercolour/{job_id}/cancel')
+        assert cancel_response.status_code == 200
+        payload=cancel_response.json()
+        assert payload['status'] == 'error'
+        assert not staging_dir.exists()
+        assert payload['result']['cancelled'] is True
+        assert payload['result']['partial'] is False
+        assert 'stagingDir' not in payload['result']
+
+        saved=json.loads(RUNNER._session_file(job_id).read_text())
+        assert saved['result']['cancelled'] is True
+        assert 'stagingDir' not in saved['result']
+    finally:
+        release.set()
+        for _ in range(200):
+            if RUNNER.get(blocker.id).status in {'done','error'}: break
+            time.sleep(0.01)
+
+
+def test_grabcut_split_iterations_match_monolithic_reference():
+    # keep_mask paint takes the _painted_alpha shortcut (no GrabCut at all), so the
+    # mask-correction pass is only reachable through remove_mask/foreground/background;
+    # this exercises both split points: 5 vs 1+4xGC_EVAL, then 3 vs 1+2xGC_EVAL.
+    import cv2
+    image=Image.open(BytesIO(_landmark_with_intruder_png())).convert('RGBA')
+    rect=(110.0,66.0,178.0,166.0)
+    remove=Image.new('L',image.size,0)
+    for y in range(110,140):
+        for x in range(240,300): remove.putpixel((x,y),255)
+    rgb=cv2.cvtColor(np.asarray(image.convert('RGB')),cv2.COLOR_RGB2BGR)
+    x,y,w,h=round(rect[0]),round(rect[1]),round(rect[2]),round(rect[3])
+
+    mono_mask=np.zeros((image.height,image.width),np.uint8)
+    mono_bg=np.zeros((1,65),np.float64)
+    mono_fg=np.zeros((1,65),np.float64)
+    # GMM initialisation draws from OpenCV's global RNG, so pin it before each
+    # pipeline to make the split-vs-monolithic comparison order-independent.
+    cv2.setRNGSeed(0)
+    cv2.grabCut(rgb,mono_mask,(x,y,w,h),mono_bg,mono_fg,5,cv2.GC_INIT_WITH_RECT)
+    resized=remove.resize(image.size,Image.NEAREST)
+    flag=np.asarray(resized.convert('L'))>127
+    mono_mask[flag]=cv2.GC_BGD
+    cv2.grabCut(rgb,mono_mask,None,mono_bg,mono_fg,3,cv2.GC_INIT_WITH_MASK)
+    mono_alpha=np.where((mono_mask==cv2.GC_FGD)|(mono_mask==cv2.GC_PR_FGD),255,0).astype(np.uint8)
+
+    cv2.setRNGSeed(0)
+    split_alpha=np.asarray(watercolour.grabcut_mask(image,rect,remove_mask=remove))
+    assert np.array_equal(split_alpha,mono_alpha)
+
+
+def test_unicode_digit_and_zero_padded_mask_keys_rejected_at_submit():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    for bad_key in ('00', '٠'):
+        masks=json.dumps({bad_key: _rect_mask_spec()})
+        response=client.post('/api/watercolour', files=[('files',('good.png',_landmark_png(),'image/png'))], data={'masks':masks})
+        assert response.status_code == 400, (bad_key, response.text)
+
+
+def test_truncated_png_rejected_at_submit_not_delayed_to_render():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    truncated=_landmark_png()[:200]
+    masks=json.dumps({'0':_rect_mask_spec((10,10,20,20))})
+    response=client.post('/api/watercolour', files=[('files',('bad.png',truncated,'image/png'))], data={'masks':masks})
+    assert response.status_code == 400, response.text
+    assert 'bad.png' in response.json()['detail']
+
+
+def test_rotated_exif_image_bounds_computed_on_transposed_size():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    exif=Image.Exif(); exif[274]=6
+    out=BytesIO()
+    Image.new('RGB',(300,400),(80,140,210)).save(out,'JPEG',exif=exif.tobytes())
+    raw=out.getvalue()
+    # Native pixels are 300x400; orientation 6 transposes to 400x300.
+    only_valid_transposed=json.dumps({'0':_rect_mask_spec((310,10,50,20))})
+    response=client.post('/api/watercolour', files=[('files',('rotated.jpg',raw,'image/jpeg'))], data={'masks':only_valid_transposed})
+    assert response.status_code == 200, response.text
+    only_valid_native=json.dumps({'0':_rect_mask_spec((10,310,20,50))})
+    response_native=client.post('/api/watercolour', files=[('files',('rotated.jpg',raw,'image/jpeg'))], data={'masks':only_valid_native})
+    assert response_native.status_code == 400, response_native.text
+
+
+def test_cancel_after_png_encoding_still_discards_the_item():
+    import threading, time
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from obed_edom.web import watercolour as web_watercolour
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    real_convert=web_watercolour.convert
+    started=threading.Event()
+    calls={'n':0}
+    def fake_convert(raw, options, mask=None, *, cancel=None):
+        calls['n']+=1
+        if calls['n']==2:
+            payload,size=real_convert(raw, options, mask, cancel=None)
+            started.set()
+            deadline=time.time()+5
+            while time.time()<deadline and not (cancel and cancel()):
+                time.sleep(0.01)
+            from obed_edom.watercolour import WatercolourCancelled
+            if cancel and cancel():
+                raise WatercolourCancelled()
+            return payload, size
+        return real_convert(raw, options, mask, cancel=cancel)
+    web_watercolour.convert=fake_convert
+    try:
+        files=[('files',(f'{i}.png',png((80+i,90,100,255)),'image/png')) for i in range(3)]
+        response=client.post('/api/watercolour', files=files)
+        assert response.status_code == 200, response.text
+        job_id=response.json()['id']
+        assert started.wait(5)
+        cancel_response=client.post(f'/api/watercolour/{job_id}/cancel')
+        assert cancel_response.status_code == 200
+        job=None
+        for _ in range(200):
+            job=client.get(f'/api/jobs/{job_id}').json()
+            if job['status'] in {'done','error'}: break
+            time.sleep(0.03)
+        items=job['result']['items']
+        assert items[0]['status'] == 'done'
+        assert items[1]['status'] == 'cancelled'
+        result_dir=Path(job['result']['resultDir'])
+        assert not list(result_dir.glob('01-*'))
+    finally:
+        web_watercolour.convert=real_convert
+
+
+def test_cancel_immediately_after_result_replace_discards_the_committed_file():
+    import threading, time
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    committed=threading.Event()
+    release=threading.Event()
+    original_replace=Path.replace
+    calls={'n':0}
+    def spying_replace(self, target):
+        result=original_replace(self, target)
+        if str(target).endswith('-watercolour.png'):
+            calls['n']+=1
+            if calls['n']==1:
+                committed.set()
+                release.wait(5)
+        return result
+    import unittest.mock as mock
+    with mock.patch.object(Path, 'replace', spying_replace):
+        files=[('files',(f'{i}.png',png((80+i,90,100,255)),'image/png')) for i in range(2)]
+        response=client.post('/api/watercolour', files=files)
+        assert response.status_code == 200, response.text
+        job_id=response.json()['id']
+        assert committed.wait(5)
+        cancel_response=client.post(f'/api/watercolour/{job_id}/cancel')
+        assert cancel_response.status_code == 200
+        release.set()
+        job=None
+        for _ in range(200):
+            job=client.get(f'/api/jobs/{job_id}').json()
+            if job['status'] in {'done','error'}: break
+            time.sleep(0.03)
+        items=job['result']['items']
+        assert items[0]['status'] == 'cancelled'
+        result_dir=Path(job['result']['resultDir'])
+        assert not list(result_dir.glob('00-*'))

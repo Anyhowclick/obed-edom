@@ -1602,3 +1602,223 @@ def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
     church = slide["churches"][-1]
     assert church["size"] == _default_landmark_size(church["assetWidth"])
     assert church["size"] != 180
+    import re
+    assert re.fullmatch(r"w[0-9a-f]{8}", church["id"])
+
+
+def test_studio_add_clears_only_that_slides_still_png():
+    map_job = _seed()
+    doc = _doc(map_job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Second"
+    doc["slides"] = [slide, other]
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    saved = _save(map_job, doc)
+    assert saved.status_code == 200, saved.text
+    map_job = {**map_job, "result": saved.json()["result"]}
+    slide_id, other_slide_id = "s1", "s2"
+
+    for sid in (slide_id, other_slide_id):
+        thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={sid}&kind=thumb", content=_landmark_png())
+        assert thumb.status_code == 200, thumb.text
+
+    wash_response = client.post(
+        "/api/watercolour",
+        files=[("files", ("landmark.png", _landmark_png(), "image/png"))],
+        data={"masks": json.dumps({"0": {"transparent": True, "rect": [4, 2, 30, 14]}})},
+    )
+    assert wash_response.status_code == 200, wash_response.text
+    wash_job = _wait(wash_response.json()["id"])
+    item = wash_job["result"]["items"][0]
+
+    added = client.post(f"/api/watercolour/{wash_job['id']}/items/{item['id']}/add-to-map/{map_job['id']}/{slide_id}")
+    assert added.status_code == 200, added.text
+    doc = added.json()["result"]
+    touched = next(s for s in doc["slides"] if s["id"] == slide_id)
+    untouched = next(s for s in doc["slides"] if s["id"] == other_slide_id)
+    assert touched.get("stillPng") is None
+    assert untouched.get("stillPng") is not None
+
+
+def test_add_landmark_endpoint_appends_asset_and_church_in_one_revision():
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    before_revision = int(map_job["result"].get("stateRevision") or 0)
+
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    church_id = body["churchId"]
+    result = body["result"]
+    assert result["stateRevision"] == before_revision + 1
+    slide = next(s for s in result["slides"] if s["id"] == slide_id)
+    church = next(c for c in slide["churches"] if c["id"] == church_id)
+    assert church["kind"] == "landmark"
+    assert church["assetId"] in {row["id"] for row in result["assets"]}
+
+    asset_response = client.get(f"/api/maps/{map_job['id']}/assets/{church['assetId']}.png")
+    assert asset_response.status_code == 200
+    assert asset_response.headers["content-type"] == "image/png"
+
+
+def test_add_landmark_unknown_slide_404s_and_writes_no_asset():
+    map_job = _seed()
+    before_assets = list(map_job["result"].get("assets") or [])
+
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/nope/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 404
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert latest["result"]["assets"] == before_assets
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    pngs_after = set(asset_dir.glob("*.png")) if asset_dir.is_dir() else set()
+    assert not pngs_after
+
+
+def test_add_landmark_persist_failure_leaves_no_asset_and_no_document_change(monkeypatch):
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    before_revision = int(map_job["result"].get("stateRevision") or 0)
+
+    def boom(_job_id, _result):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(RUNNER, "update_result", boom)
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    monkeypatch.undo()
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert int(latest["result"].get("stateRevision") or 0) == before_revision
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    pngs_after = set(asset_dir.glob("*.png")) if asset_dir.is_dir() else set()
+    tmp_after = set(asset_dir.glob("*.tmp")) if asset_dir.is_dir() else set()
+    assert not pngs_after
+    assert not tmp_after
+
+
+def test_add_landmark_promotes_asset_before_publishing_document(monkeypatch):
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+
+    real_update_result = RUNNER.update_result
+    seen: dict[str, bool] = {}
+
+    def spy(job_id, result):
+        assets = result.get("assets") or []
+        if assets:
+            asset_id = assets[-1]["id"]
+            asset_dir = Path(result["outputDir"]) / "assets"
+            seen["asset_on_disk"] = (asset_dir / f"{asset_id}.png").is_file()
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", spy)
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    assert seen.get("asset_on_disk") is True
+
+
+def test_add_landmark_rolls_back_document_and_leaves_no_asset_on_persistence_failure(monkeypatch):
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    before_assets = list(map_job["result"].get("assets") or [])
+    before_churches = list(map_job["result"]["slides"][0]["churches"])
+
+    calls = {"n": 0}
+    real_save = RUNNER.save
+
+    def flaky_save(job):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("disk full")
+        return real_save(job)
+
+    monkeypatch.setattr(RUNNER, "save", flaky_save)
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert latest["result"]["assets"] == before_assets
+    slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+    assert slide["churches"] == before_churches
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    leftover = set(asset_dir.glob("*")) if asset_dir.is_dir() else set()
+    assert not leftover
+
+
+def test_append_landmark_church_id_collision_loops_until_a_free_id(monkeypatch):
+    from obed_edom.web import maps
+
+    result = {
+        "slides": [
+            {
+                "id": "s1",
+                "camera": {"lat": 1.0, "lon": 2.0},
+                "churches": [{"id": "wdeadbeef"}, {"id": "waaaaaaaa"}],
+            }
+        ],
+    }
+    sequence = iter(["aaaaaaaa", "cccccccc"])
+
+    class FakeUuid:
+        def __init__(self, hex_value):
+            self.hex = hex_value
+
+    monkeypatch.setattr(maps.uuid, "uuid4", lambda: FakeUuid(next(sequence)))
+    updated = maps.append_landmark(result, "s1", "lw", "Landmark", 10, 10, "a" * 40, "deadbeef")
+    church = updated["slides"][0]["churches"][-1]
+    assert church["id"] == "wcccccccc"
+
+
+def test_add_landmark_places_on_the_cg_view_and_invalidates_only_its_still_png():
+    map_job = _seed()
+    doc = _doc(map_job)
+    slide = dict(doc["slides"][0])
+    slide["cg"] = {
+        "camera": slide["camera"],
+        "style": slide["style"],
+        "highlights": [],
+        "churches": [],
+    }
+    doc["slides"] = [slide]
+    saved = _save(map_job, doc)
+    assert saved.status_code == 200, saved.text
+    map_job = {**map_job, "result": saved.json()["result"]}
+    slide_id = slide["id"]
+
+    lw_thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&kind=thumb", content=_landmark_png())
+    assert lw_thumb.status_code == 200, lw_thumb.text
+    cg_thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&audience=cg&kind=thumb", content=_landmark_png())
+    assert cg_thumb.status_code == 200, cg_thumb.text
+
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark?audience=cg",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    result = body["result"]
+    updated_slide = next(s for s in result["slides"] if s["id"] == slide_id)
+    assert updated_slide["churches"] == []
+    cg_view = updated_slide["cg"]
+    church = next(c for c in cg_view["churches"] if c["id"] == body["churchId"])
+    assert church["kind"] == "landmark"
+    assert cg_view.get("stillPng") is None
+    assert updated_slide.get("stillPng") is not None

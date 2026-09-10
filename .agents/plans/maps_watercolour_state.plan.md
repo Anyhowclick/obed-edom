@@ -92,7 +92,9 @@ PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-r
 - **Slide ids ending `__landing` are rejected.**
 - **Blur isolate not built** — only `mode: "darken"`; `"erase"` is migrated to darken on load, any other mode 400s.
 - **Wand / pen are not a live-wire.** Magnetic pen is gradient snap of auto-anchors (Photoshop magnetic lasso approximately); a Dijkstra live-wire was explicitly out of scope.
-- **Mid-render cancellation deferred** (first review, finding 8): Watercolour cancellation is only checked between files, so one 24 MP GrabCut/render runs to completion while the job shows `running`.
+- **Cancellation lands at stage boundaries, not just between files**: GrabCut and render check the job's cancel flag between iterations/stages, so the worst uninterruptible chunk on a 24 MP photo is one GrabCut iteration or one large blur (~10-30 s), not the whole file.
+- **Mask specs are keyed by photo index only** — the old filename-key fallback (a duplicate-filename hazard) is gone; `start_watercolour` 400s if a mask key isn't a valid in-range index.
+- **Server-minted landmarks use the `w<hex8>` namespace** (`w` + first 8 hex chars of the asset id, deduped against a fallback random hex8) — disjoint from the client's `p<n>` namespace, so Studio-add and local-paste landmarks never collide on id.
 
 ## Owner QA owed
 
@@ -102,6 +104,10 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 2. Keynote re-render of restored (reordered) pairs.
 3. Poster-frame probe: run `scripts/probe_movie_poster.py` (dump hand-set deck vs untouched export; patch; reopen) to learn whether Keynote regenerates the poster from `posterTime` or keeps cached `posterImageData`; only then flip `OBED_MAPS_POSTER_FRAME` on (see todo `poster-frame`).
 4. Preview and export a long hop (e.g. SEA overview → downtown) under Arc, compare feel vs Zoom-out/move/zoom-in; check bearing changes on a pitched hop.
+5. Cancellation latency on a real 24 MP photo (painted mask, and rect-only so GrabCut runs); if GrabCut per-iteration is the long pole, follow-up = GrabCut on a downscaled image (separate decision).
+6. Cancelled-batch UX: finished tiles usable, cancelled tiles muted, no red banner, Download batch returns finished files only.
+7. Add-to-map to a non-active Maps slide → Maps shows placeholder thumbnail, selecting recaptures with the landmark, objects list already lists it.
+8. Race: Studio add while a Maps edit is pending → no conflict dialog, both present.
 
 ## Open backlog
 
@@ -112,7 +118,6 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Honest preview, options 2 / 2a / 2b** — see the toner plan. 2b also removes the export hairline problem.
-- **Watercolour lifecycle leftovers**: mask JSON bounds/duplicate-filename semantics, running-cancellation retained results, Add-to-map ACK reconciliation and network-error/asset rollback, and an active-tab refresh for Maps destinations (Watercolour stays mounted while hidden).
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
 
 ## Pointers
