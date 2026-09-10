@@ -547,15 +547,34 @@ def _sort_key(u: dict[str, Any]) -> tuple[float, float, float, float]:
     return (round(x, 1), round(y, 1), round(w, 1), round(h, 1))
 
 
-def _order_unstable(units: list[dict[str, Any]], tol: float) -> bool:
-    """Positional pairing is only meaningful when the sort key separates the population by
-    more than the compared delta: two units whose leading key differs by less than ``tol``
-    can swap between arms and pair the wrong boxes."""
-    ordered = sorted(units, key=_sort_key)
-    for u, v in zip(ordered, ordered[1:]):
-        bu, bv = _unit_box(u), _unit_box(v)
-        if abs(bv[0] - bu[0]) <= tol and max(abs(a - b) for a, b in zip(bu, bv)) > tol:
-            return True
+def _cross_shift(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, float, float]:
+    ax, ay, aw, ah = _unit_box(a)
+    bx, by, bw, bh = _unit_box(b)
+    return (bx - ax, by - ay, bw - aw, bh - ah)
+
+
+def _order_unstable(
+    a_list: list[dict[str, Any]], b_list: list[dict[str, Any]], tol: float
+) -> bool:
+    """Positional pairing (each arm independently sorted by its own box, then zipped by
+    index) is trustworthy when either: the cross-arm displacement is a single translation
+    within ``tol`` -- a translation preserves relative order, so no swap could have
+    happened -- or every adjacent pair, in each arm, is separated by more than ``tol``
+    along the coordinate that actually distinguishes them, so no sub-tolerance jitter could
+    swap them. Otherwise a sub-tolerance swap is plausible and pairing is ambiguous."""
+    a_sorted = sorted(a_list, key=_sort_key)
+    b_sorted = sorted(b_list, key=_sort_key)
+    shifts = [_cross_shift(u, v) for u, v in zip(a_sorted, b_sorted)]
+    if shifts:
+        ref = shifts[0]
+        if all(max(abs(s[i] - ref[i]) for i in range(4)) <= tol for s in shifts):
+            return False
+    for arm in (a_sorted, b_sorted):
+        for u, v in zip(arm, arm[1:]):
+            bu, bv = _unit_box(u), _unit_box(v)
+            idx = next((i for i in range(4) if abs(bv[i] - bu[i]) > 1e-6), None)
+            if idx is not None and abs(bv[idx] - bu[idx]) <= tol:
+                return True
     return False
 
 
@@ -574,10 +593,12 @@ def compare_units_multiset(
     ``kind``) keeps a group CHILD out of its parent's top-level bucket (D8). Shape/line
     gate at ``tol_hard``; everything else at ``tol_soft``; text is INFORMATIONAL
     (x-delta only, never gates the overall pass/fail) -- kept as a cross-check against
-    the identity compare, never the primary gate itself (D1). A bucket whose sort key
-    does not separate the population by more than the compared tolerance (positional
-    pairing is then ambiguous -- adjacent units can swap between arms) is also demoted to
-    informational: its count mismatch still gates, but its per-unit delta does not.
+    the identity compare, never the primary gate itself (D1). A bucket is also demoted to
+    informational when positional pairing is ambiguous (:func:`_order_unstable`): the
+    cross-arm displacement isn't a single translation AND some adjacent pair, in either
+    arm, is closer than the compared tolerance along its distinguishing coordinate, so a
+    sub-tolerance swap could have crossed two units. Its count mismatch still gates, but
+    its per-unit delta does not.
 
     Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worst, reasons,
     informational?, ambiguous?}}}``.
@@ -608,9 +629,7 @@ def compare_units_multiset(
             overall = False
             continue
         tol = tol_hard if bucket in _HARD_KINDS else tol_soft
-        ambiguous = bucket not in _TEXT_BUCKETS and (
-            _order_unstable(a_list, tol) or _order_unstable(b_list, tol)
-        )
+        ambiguous = bucket not in _TEXT_BUCKETS and _order_unstable(a_list, b_list, tol)
         x_only = bucket in _TEXT_BUCKETS
         worst = 0.0
         for ua, ub in zip(a_list, b_list):

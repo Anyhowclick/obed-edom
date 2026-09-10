@@ -1197,22 +1197,26 @@ def test_compare_units_multiset_pass_and_fail():
 
 
 def test_compare_units_multiset_demotes_ambiguous_ordering_but_keeps_count_gating():
-    # T7 -- fix 2: a bucket whose sort key doesn't separate the population by more than
-    # the tolerance is demoted to informational (positional pairing is unreliable), but a
-    # count mismatch under the same geometry still gates, and a resolvable-order delta
-    # still gates too.
+    # T7 -- fix 2: a bucket whose positional pairing is genuinely ambiguous is demoted to
+    # informational, but a count mismatch under the same geometry still gates, and a
+    # resolvable-order delta still gates too.
     def _u(x, y):
         return _unit("shape", x, y, 10, 10)
 
-    # (a) x constant, y gaps of 1.6px (well under tol=1.0) -> ordering ambiguous: demoted
-    # to informational even though the arms differ by 3px.
+    # (a) x constant, y gaps of 1.6px, arms related by a uniform +3px y translation. A
+    # translation preserves relative order exactly -- it cannot reorder anything -- so
+    # this is NOT ambiguous even though the within-arm gap (1.6px) is under tol (1.0):
+    # _order_unstable must read the actual cross-arm displacement, not just the gap.
+    # (Originally this fixture pinned the opposite behaviour -- the reviewer-confirmed
+    # bug: the old predicate checked only the within-arm X gap, which is 0 here since x
+    # is constant, and never looked at the cross-arm relationship at all.)
     a = [_u(16.0, 0.0), _u(16.0, 1.6), _u(16.0, 3.2)]
     b = [_u(16.0, 3.0), _u(16.0, 4.6), _u(16.0, 6.2)]
     report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
     entry = report["per_kind"]["shape"]
-    assert entry["ambiguous"] is True
-    assert entry["informational"] is True
-    assert report["pass"] is True
+    assert entry.get("ambiguous") is not True
+    assert entry.get("informational") is not True
+    assert report["pass"] is False
     assert entry["worst"] == pytest.approx(3.0)
 
     # (b) x gaps of 100px (well over tol) -> ordering resolvable: a real displacement
@@ -1223,11 +1227,50 @@ def test_compare_units_multiset_demotes_ambiguous_ordering_but_keeps_count_gatin
     assert report2["per_kind"]["shape"].get("ambiguous") is not True
     assert report2["pass"] is False
 
-    # (c) count mismatch under the SAME ambiguous geometry as (a): the population check
-    # survives the ordering demotion.
+    # (c) count mismatch under the SAME (non-ambiguous) geometry as (a): the population
+    # check gates regardless.
     report3 = compare_units_multiset(a, b[:2], tol_hard=1.0, tol_soft=1.0)
     assert report3["pass"] is False
     assert report3["per_kind"]["shape"]["pass"] is False
+
+
+def test_compare_units_multiset_uniform_translation_never_ambiguous():
+    # A pure translation -- every unit shifted by the SAME amount -- can never reorder a
+    # population, no matter how tight the within-arm spacing is, so it must always gate as
+    # a real displacement rather than being demoted. Reproduces the second case from the
+    # reviewer's finding: a real 10px translation across a near-tied-in-x pair.
+    def _u(x, y):
+        return _unit("shape", x, y, 10, 10)
+
+    a = [_u(0.0, 0.0), _u(0.5, 100.0)]
+    b = [_u(10.0, 0.0), _u(10.5, 100.0)]
+    report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
+    entry = report["per_kind"]["shape"]
+    assert entry.get("ambiguous") is not True
+    assert report["pass"] is False
+    assert entry["worst"] == pytest.approx(10.0)
+
+
+def test_compare_units_multiset_demotes_genuine_cross_arm_reordering():
+    # Reconstructs the slide-144 shape that motivated fix 2: many units sharing a
+    # constant leading sort key (x), packed at sub-tolerance y-gaps (0.3px, tol=1.0px),
+    # with an INDEPENDENT per-unit y perturbation (+-3px, alternating sign) between arms
+    # -- on the order of the plan's own measured "+-3px reorders 68 of 68" perturbation.
+    # This is NOT a translation (the cross-arm shift alternates sign, so it is never
+    # uniform within tol), and the sub-tolerance within-arm gap means sorted-position
+    # pairing genuinely crosses units after each arm is independently re-sorted. Must
+    # still be demoted to informational, not treated as a real displacement.
+    def _u(y):
+        return _unit("shape", 16.0, y, 10, 10)
+
+    a = [_u(0.0), _u(0.3), _u(0.6), _u(0.9), _u(1.2)]
+    perturb = [3.0, -3.0, 3.0, -3.0, 3.0]
+    b = [_u(y + dy) for y, dy in zip((0.0, 0.3, 0.6, 0.9, 1.2), perturb)]
+    report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
+    entry = report["per_kind"]["shape"]
+    assert entry["ambiguous"] is True
+    assert entry["informational"] is True
+    assert report["pass"] is True
 
 
 def test_compare_units_multiset_text_is_informational():
