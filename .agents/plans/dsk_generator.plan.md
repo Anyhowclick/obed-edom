@@ -4,10 +4,11 @@ overview: >-
   Automate the owner's hand-built FW→DSK lower-third workflow. Input: a finished
   LW/FW wall Keynote (7680×1080, centre panel 3840×1080 at x=1920). Output: an
   editable 1920×1080 DSK Keynote whose FW content sits in the lower-third band
-  with a white 5pt border, plus an export folder of true-alpha (ProRes 4444)
-  clips for ProPresenter7 — one clip per build step on built slides — because
-  Keynote can mask an image but not a movie and emits no alpha in live
-  playback. Slides are classified offline (`iwa_builds.deck_builds`
+  with a white 5pt border, plus an export folder of true-alpha assets
+  for ProPresenter7 — one asset per build step on built slides — because
+  Keynote can mask an image but not a movie, emits no alpha in live playback,
+  and (measured 2026-09-10) emits no alpha in its ProRes 4444 movie export
+  either, so the alpha route is an owner decision (Open question 13). Slides are classified offline (`iwa_builds.deck_builds`
   + kind counts), the operator picks which slides convert (the
   resizer's `range_from`/`range_to`/`slides` pre-filter plus per-slide include
   toggles in a review page — resizer/checker pairing pattern) and confirms each
@@ -31,16 +32,19 @@ todos:
     content: "Read the DSK band rect from a reference DSK deck/template; contain-fit affine per item, clipped to the centre panel — or to the full 7680×1080 wall on slides the operator marks \"include side content\"; no hardcoded band."
     status: pending
   - id: d3-movie-crop
-    content: "Shared `dsk_movie_export.py`: scratch centre-panel deck (3840×1080) → native-size ProRes 4444 export → ffmpeg crop/scale; display-poke + RSS watchdog; includes the alpha probe and the (i)/(ii) mechanic decision."
+    content: "Shared `dsk_movie_export.py`: scratch centre-panel deck (3840×1080) → native-size export to a **`.m4v`** destination (`.mov` is rejected) → ffmpeg crop/scale; display-poke + RSS watchdog (>1.5GB). The alpha probe is DONE — mechanic (i) is dead; `d3` now carries only the opaque movie path plus the owner's chosen alpha route (Open question 13)."
     status: pending
   - id: d4-deck-assembly
     content: "Assemble the DSK deck by copy-and-transform of the FW deck (copy carries builds), live geometry, live deletes, CG-style layout import, white 5pt stroke."
     status: pending
   - id: d5-pp7-export
-    content: "Export folder for PP7: true-alpha ProRes 4444, one clip per build step on `built` slides, Keynote slide-number naming, manifest."
+    content: "Export folder for PP7: one true-alpha asset per build step on `built` slides via the owner's chosen route (Open question 13) — stage PNGs (iii), difference-matte ProRes 4444 (iv), or KPF/Chromium (ii); opaque `.m4v` clips for `movie` slides and as fallback; slide attribution reconstructed from per-slide stage counts; manifest."
     status: pending
   - id: d5b-exporter
-    content: "Standalone **Exporter**: classify ANY DSK deck offline, operator picks slides, emit the PP7 asset folder (per-build alpha clips, movie clips, alpha PNGs) with d5's naming/manifest. Reuses `dsk_movie_export.py` + `dsk_plan.py`; no band affine, no scratch centre-panel deck."
+    content: "Standalone **Exporter**: classify ANY DSK deck offline, operator picks slides, emit the PP7 asset folder (per-build alpha assets, opaque movie clips, alpha stage PNGs) with d5's naming/manifest. Reuses `dsk_movie_export.py` + `dsk_plan.py`; no band affine, no scratch centre-panel deck."
+    status: pending
+  - id: d5c-kpf-alpha
+    content: "KPF alpha pipeline (shared with alpha playback): export → strip → player driver → per-build capture → ProRes 4444; fidelity check vs build inventory."
     status: pending
   - id: d6-api-ui
     content: "Replace the `POST /api/dsk` 501 stub with propose→review→apply mirroring `/api/resize` (incl. `range_from`/`range_to`/`slides`), add `POST /api/dsk/export`; split `DskTab.tsx` into Generator/Exporter sub-tabs and rename the tab label to \"DSK\"."
@@ -52,7 +56,7 @@ todos:
     content: "Follow-up: point `maps_keynote.dsk_ops`/`dsk_item` movie items at the shared crop utility."
     status: pending
   - id: d9-open-questions
-    content: "MOSTLY DONE (2026-09-10): owner answered Q1-Q6, Q8-Q12; folded into the body. STILL OPEN: (i) band placeholder in the DSK template — needs church staff; (ii) alpha-for-builds mechanics — pending the live probe."
+    content: "MOSTLY DONE (2026-09-10): owner answered Q1-Q6, Q8-Q12; folded into the body. Q13 (alpha route choice) is now ANSWERED: (iii) stage PNGs ship first as automation of today's manual practice, (ii) KPF/Chromium is the strategic route shared with the alpha-playback app. STILL OPEN: (i) band placeholder in the DSK template — needs church staff."
     status: completed
 ---
 
@@ -265,7 +269,7 @@ separate pages that already carry real alpha (one measured at 40% transparent).
 **But** a slide with a full-bleed background image stays **opaque** after
 stripping. The strip is **necessary, not sufficient**: alpha falls out only for
 slides with no full-bleed backing — which is exactly the DSK lower-third case,
-so option (c) remains viable for this plan's slides.
+so option (c) — route **(ii)** below — remains viable for this plan's slides.
 
 **C. Builds and `skipped` — CONFIRMED.** Setting `skipped:true` on every slide
 but one, plus `skipped slides:false` in the export options, yields a movie of
@@ -299,8 +303,8 @@ to the centre panel with `map_remap.CENTRE_PANEL_RECT` (`map_remap.py:439`) and
 |---|---|---|
 | `empty` | no centre-panel item above the backdrop | skip (no DSK slide) |
 | `static` | items, no `movie` kind, `builds == []` | **in-deck**: contain-fit into the band, white 5pt stroke. No export. |
-| `built` | `builds != []`, no `movie` kind | **both**: in-deck copy (builds ride along and stay live for editing) **and** one exported alpha clip **per build step** (on-click per animation) |
-| `movie` | any `TSD.MovieArchive` in the centre panel | **export-crop**: scratch-deck movie export → ffmpeg → insert the exported clip into the DSK deck, stroke 5pt; the FW movie object is **deleted**, which clears its builds; the slide's own transition is set to `none` (the clip owns the timing) |
+| `built` | `builds != []`, no `movie` kind | **both**: in-deck copy (builds ride along and stay live for editing) **and** one exported alpha **asset per build step** (on-click per animation). The asset is a stage PNG (route iii) or an animated ProRes 4444 clip (route iv/ii) — see Open question 13; an opaque per-build clip cut at the measured frame-61 boundaries is the fallback. |
+| `movie` | any `TSD.MovieArchive` in the centre panel | **export-crop**: scratch-deck movie export (**opaque** QuickTime, `.m4v` destination — `.mov` is rejected by the exporter) → ffmpeg → insert the exported clip into the DSK deck, stroke 5pt; the FW movie object is **deleted**, which clears its builds; the slide's own transition is set to `none` (the clip owns the timing). Movie slides never take an alpha route: (ii) omits embedded movies from the canvas capture, and (iv) can only matte an opaque movie region. |
 | `mixed` | movie **and** builds/other content | treat as `movie` (the export bakes everything), flag in the review page for operator override |
 
 **Side-panel content (owner revision, 2026-09-10).** Side-panel items (outside
@@ -436,7 +440,8 @@ live probe), and the crop to the kept-item union rect is done in ffmpeg instead
 of by the canvas. Import the
 Lower-Thirds/black layout here too (see the layouts blocker). Then:
 `export theDoc to <file> as QuickTime movie with properties {movie format:native
-size, movie codec:AppleProRes422LT, movie framerate:FPS30, skipped slides:false}`.
+size, movie codec:AppleProRes422LT, movie framerate:FPS30, skipped slides:false}`
+— with `<file>` ending in **`.m4v`** (`.mov` is rejected, error `".mov" (6)`).
 Then `maps_movie.ffmpeg_exe()` → `scale`/`crop` to the band pixel size and
 re-encode. Insert with `make new image with properties {file:…}` (the Keynote 15
 quirk documented at `maps_keynote.py:1119`; `make new movie` no longer imports).
@@ -449,7 +454,10 @@ alpha from a supported export, at 2× export cost, needing the scratch deck's
 slide background flipped twice. Encode with the existing
 `maps_reveal._run_ffmpeg_stdin` ProRes 4444 pipe (`prores_ks -profile:v 4444
 -pix_fmt yuva444p10le -vendor apl0`, `maps_reveal.py:303-330`) fed numpy RGBA.
-**Stretch**, only if Open question 2 comes back "PP7 needs real alpha".
+**Promoted 2026-09-10:** with mechanic (i) dead, this *is* route **(iv)** in the
+Decision below — no longer a stretch, but the leading candidate for animated
+alpha, made scriptable by flipping `base layout` (the slide background itself is
+not scriptable). Export to **`.m4v`**; see "Next live probe (difference matte)".
 
 **(c) KPF/HTML export rendered headless.** The draft's claim that this "cannot
 capture builds because `all stages` is not honoured" conflated two exporters and
@@ -471,85 +479,235 @@ background image does not go transparent even after the strip** — for the DSK
 lower-third slides (no full-bleed backing) it does. It also adds a headless
 Chromium/Playwright dependency the repo does not have (no `playwright` in `src/`).
 
-**Decision (revised after the owner's Q2/Q4/Q10 answers, 2026-09-10).**
+**Decision (revised after the alpha probe, 2026-09-10).**
 
-PP7 assets are **true-alpha ProRes 4444 movies**, and on `built` slides there is
-**one clip per build step**: asset *k* renders the animation of build *k* only, so
-the PP7 operator clicks through the build. `built` slides **also stay live in the
-DSK deck** — the `ditto` copy carries the builds for free, and the owner edits
-them there. The alpha route is therefore **core, not stretch**; (b), the
-difference matte, is dropped to a last resort.
+PP7 assets must carry **true alpha**, and on `built` slides there is **one asset
+per build step** (owner Q2/Q4/Q10). `built` slides **also stay live in the DSK
+deck** — the `ditto` copy carries the builds for free.
 
-Two candidate mechanics remain, and **both are pending the live probe below**:
+**Mechanic (i), Keynote's own ProRes 4444 export, is DEAD.** The probe above
+shows the alpha plane is constant 255. Do not spend further effort on No Fill,
+theme choice, or the images-only `AllowsSlideBackgroundAlpha` default.
 
-**(i) Keynote native ProRes 4444 export.** `export … as QuickTime movie with
-properties {movie format:native size, movie codec:AppleProRes4444, movie
-framerate:FPS30, skipped slides:false}` from a scratch deck whose slide
-backgrounds are set to **No Fill**. Keynote's *GUI* advertises a
-transparent-background ProRes 4444 export — but the KPF measurement showed **No
-Fill still emits an opaque black fill rect**, and the sdef carries **no
-transparency key at all**, so alpha in the `.mov` is **UNVERIFIED**. Per-build
-splitting would have to lean on the 5.0 s hold / 2.0 s build-delay defaults, or
-on frame-diff cut detection — neither is deterministic.
+The **opaque** QuickTime path (option (a)) is unaffected and still ships: it is
+the route for **`movie`-category slides** — the clip inserted into the DSK deck —
+and it is the PP7 **fallback** wherever alpha cannot be produced.
 
-**(ii) KPF/HTML export + fill strip + headless Chromium player.** Export as HTML,
-strip the lead fill op (proven to yield real alpha on lower-third slides), drive
-Apple's player **build by build** (`advanceToNextBuild(`) in headless Chromium,
-capturing the transparent canvas per frame into
-`maps_reveal._run_ffmpeg_stdin`'s ProRes 4444 pipe (`prores_ks -profile:v 4444
--pix_fmt yuva444p10le -vendor apl0`, `maps_reveal.py:303-330`). Segmentation is
-**deterministic** — we own the clicks — but it needs a Playwright/Chromium
-dependency the repo does not have, and inherits the KPF player's fidelity limits
-(unsupported builds/transitions simplified).
+Three alpha routes remain. None is free; the choice changes the dependency set
+and the fidelity of the PP7 handoff, so it is **ESCALATED to the owner as Open
+question 13**.
 
-**KPF exports embedded movies separately**, so they are absent from the canvas
-capture: `movie` slides go through **(i)** (or the opaque QuickTime path) in
-either world, and if alpha is needed *around* a movie it must be composited.
+**(ii) KPF/HTML + fill strip + headless Chromium capture.** Export as HTML, strip
+the lead fill op from the base-texture page of `global/shared.pdf` (pypdf is
+already a dependency), patch the two black body styles, drive Apple's player in
+headless Chromium (`jumpToSlide(`, `advanceToNextBuild(`,
+`goBackToPreviousBuild(`) and capture the transparent canvas frame-by-frame into
+`maps_reveal._run_ffmpeg_stdin` (`prores_ks -profile:v 4444 -pix_fmt
+yuva444p10le -vendor apl0`, `maps_reveal.py:303-330`).
+*Gives:* animated builds, true alpha, **deterministic** per-build segmentation
+(we own the clicks).
+*Costs:* a Playwright/Chromium dependency the repo does not have; the KPF
+player's fidelity limits (unsupported builds/transitions are simplified);
+**KPF exports embedded movies separately**, so movie slides are never in the
+canvas capture and always fall back to (a); slides with a full-bleed background
+image stay opaque even after the strip.
 
-**Decision rule.** If probe (i) yields real alpha, **(i) is the movie-slide path**
-and the fallback for builds. **(ii) is chosen for per-build segmentation** unless
-(i) can be cut deterministically at build boundaries.
+**(iii) NEW — Keynote-native PNG build stages.** Run
+`export … as slide images {image format:PNG, all stages:true}` on the scratch
+deck. **Proven above** to emit one **RGBA 1920×1080 PNG per build stage** with
+real alpha. PP7 then gets **one alpha PNG per click**, or a short ProRes 4444
+still-clip per stage assembled by ffmpeg from that PNG.
+*Gives:* zero new dependencies, **exact Keynote rendering**, real alpha, and the
+cheapest possible route to "on-click per animation".
+*Costs:* **stages, not animated builds** — the motion between stages is lost, and
+Magic Move becomes two stills; a short cross-dissolve in PP7 approximates it.
+Naming must be reconstructed from per-slide stage counts (see above).
 
-## Next live probe (alpha)
+**(iv) NEW — difference matte, made scriptable via `base layout`.** The slide
+background is not scriptable (-1700), but `base layout` is. Import a **solid
+black** and a **solid white** blank layout into the scratch deck; export the
+target slides **twice**, once with each base layout applied, as ProRes 422LT (or
+h264) `.m4v`. The probe showed exports are **frame-deterministic** — byte-identical
+hold frames and a frame-exact build start at frame 61 on both build slides — so
+the two passes align frame-for-frame. Then solve per pixel:
+`alpha = 1 - (white - black)`, `colour = black / alpha` (premultiplied-over-black),
+and encode via `maps_reveal._run_ffmpeg_stdin`'s ProRes 4444 pipe. Cut per build
+at the measured boundaries.
+*Gives:* **animated** builds with true alpha, rendered by **Keynote's own
+renderer** (full fidelity), **no Chromium**.
+*Costs:* 2× export cost; needs **its own probe** (frame alignment + matte
+accuracy on anti-aliased edges) before it can be trusted; content that itself
+depends on the background — **drop shadows, blend modes** — mattes imperfectly;
+movies inside slides matte fine provided the movie region is opaque.
 
-**Subject.** A copy of `~/Desktop/Diff-Checker/Sermon_PK (GW).key`, or (cheaper and
-preferred) a synthetic **3840×1080** deck with two slides:
-- slide A: background **No Fill**, one object with **2–3 builds** (an Appear and a
-  Sparkle-like ramp, matching the builds already characterised in the live probe);
-- slide B: an embedded movie.
+**Recommendation (owner decision, 2026-09-10 — see Open question 13).**
 
-**Export.** `export theDoc to POSIX file "…/alpha.mov" as QuickTime movie with
-properties {movie format:native size, movie codec:AppleProRes4444, movie
-framerate:FPS30, skipped slides:false}`. Operator rules apply in full: work dir
-under `~/Desktop`, process lock, display poke (`caffeinate -u -t 2`), RSS watchdog.
+1. **(iii) ships in the first alpha tranche.** It is cheap and automates the
+   owner's existing manual practice: stage PNGs, zero new dependencies,
+   pixel-exact Keynote rendering. The owner loses in-build motion, which for a
+   lower-third build is often acceptable.
+2. **(ii) is the PRIMARY, strategic alpha route** — not a fallback. It is the
+   *same* KPF pipeline as the alpha-playback app (see
+   `keynote-alpha-output-via-kpf` memory / `ALPHA_KEYNOTE_PLAN.md` if present),
+   so one build serves both the PP7 asset export here and live alpha playback
+   there. Shared core: `export … as HTML` → strip the lead fill op in
+   `global/shared.pdf` → patch the two black body styles → drive Apple's KPF
+   player (`jumpToSlide(`, `advanceToNextBuild(`). From that shared core, PP7
+   export does a headless per-build capture encoded to ProRes 4444 via
+   `maps_reveal._run_ffmpeg_stdin`; live playback drives a transparent Electron
+   host (fill+key sink).
+
+   Shared caveats, solved once by the shared core:
+   - **Player fidelity for unsupported builds** — needs a fidelity check against
+     the deck's build inventory from `iwa_builds.deck_builds` (flag any build
+     effect the player simplifies rather than silently shipping a degraded
+     asset/playback).
+   - **Movies are exported separately by KPF** — composite them back in, or hand
+     them to PP7 as their own clip via the existing opaque path (a).
+   - **Chromium dependency** — already implied by the alpha-playback app, so
+     adopting it here adds no *new* project-level dependency, only a repo one
+     (Playwright).
+3. **(iv) difference matte is demoted to a fallback/footnote** — only pursued if
+   (ii)'s player fidelity fails (see the renamed probe section below).
+
+**The trade-off, stated plainly:** (iii) is cheap, exact, and still — ships now
+as automation of current practice. (ii) is animated, true alpha, and shares one
+build with the alpha-playback app, at the cost of a Chromium dependency and the
+KPF player's own fidelity limits (checked against the build inventory). Movie
+slides go through (a) in all worlds.
+
+## Alpha probe results (2026-09-10)
+
+Measured on the owner's machine, Keynote 15.3.1. Evidence:
+`~/Desktop/mm-probe-work/alpha/` (decks, AppleScripts, `.m4v` exports, PNGs,
+`measure.py`, `seg.py`) and scratchpad copies of the CSVs at
+`.../scratchpad/mm-probe/alpha/*.csv`. Alpha was sampled by decoding each export
+to raw `rgba` and taking numpy min/mean/max of the A channel over a background
+region, a content region and the full frame.
+
+| # | export / asset | subject | command | result |
+|---|---|---|---|---|
+| 1 | `alpha_white.m4v` | synthetic 3840×1080 deck, **Basic White** theme, blank slide + built object, background left at theme default | `as QuickTime movie {native size, AppleProRes4444, FPS30}` | `pix_fmt yuva444p12le`; A = **255 everywhere, every frame** (`alpha_white.csv`: bg/ct/full min=mean=max=255, `opaque_frac 1.0`) |
+| 2 | `alpha_black.m4v` | same deck re-themed **Basic Black** | same | identical: `alpha_black.csv` all-255 |
+| 3 | `pk13_alpha.csv` | `Sermon_PK (GW)` slide 13 (movie slide), 53 sampled frames | same | A = 255 in every frame, background region included |
+| 4 | `pk14_seg.csv` | PK slide 14, **Appear** build, 212 frames | same | A = 255 throughout; segmentation usable (below) |
+| 5 | `pk17_seg.csv` | PK slide 17, **Sparkle** build, 253 frames | same | A = 255 throughout; segmentation usable (below) |
+| 6 | `pkimgs/pkimgs.00N.png` | PK slides 14 + 17, `as slide images {image format:PNG, all stages:true}` | AppleScript `export … as slide images` | **4 RGBA PNGs, 1920×1080, REAL alpha** — `png_alpha.csv` A mean ≈ 47.8, `opaque_frac` 0.014–0.022 |
+| 7 | `pkimgs_nostages/` | same two slides, `all stages:false` | same | **2 PNGs** — so `all stages` is honoured by the slide-images exporter |
+
+**Verdict: alpha via mechanic (i) is NOT real — settled.** Keynote's ProRes 4444
+QuickTime export *allocates* an alpha plane (`pix_fmt yuva444p12le`) but fills it
+with a **constant 255** in every frame, for Basic White and Basic Black alike,
+and for PK slides whose **PNG slide-image export of the same pixels is
+RGBA(0,0,0,0)**. The movie exporter flattens transparency to opaque black. The
+GUI's "transparent background" claim does not reach the scripted movie exporter,
+and the sdef has no transparency key (confirmed again here). Mechanic (i) is
+closed.
+
+**Corrections and operational facts.**
+
+- **`all stages` memory correction.** The 2026-09-08 memory line "`all stages` is
+  not honoured" is **wrong for the slide-images exporter** (rows 6/7 above: 4
+  files with it on, 2 with it off, consecutive diffs confirming distinct stages).
+  It remains inert for the **QuickTime** exporter, as measured in the earlier live
+  probe. Treat the older measurement as wrong or deck-specific.
+- **Naming.** Stage PNGs are `<basename>.NNN.png`, **flat 1-based sequential
+  across the whole export**. The filename encodes **neither slide number nor
+  stage index**. Attribution must be **reconstructed** from per-slide stage
+  counts: `stage_count(slide) = build_count(slide) + 1`, with `build_count` from
+  `iwa_builds.deck_builds`, walked in slide order over the non-`skipped` slides.
+  This supersedes the assumed `<deckStem>.<NNN>.<ext>` "one index per build stage,
+  keyed by slide number" line under "Naming (owner Q12)" — the index is global,
+  not per slide, so the mapping is derived, and **the derivation must be verified
+  against the stage counts on every export** (mismatch ⇒ refuse, do not guess).
+- **Slide background is NOT scriptable.** `background of slide` and
+  `background of document` both raise **-1700**, and the sdef's `slide` class has
+  no `background` property. `base layout` **is** scriptable — the existing layout
+  import in `d4`/`d3` is unaffected, and it is the only handle we have on what a
+  slide sits on (this is what makes route (iv) below possible at all).
+- **`defaults read com.apple.iWork.Keynote`** carries
+  `KNMacExportImagesOptionsDefaultAllowsSlideBackgroundAlphaKey = 0`. It is an
+  **images-only** key, and the PNG export produced real alpha anyway via script,
+  so it does not gate us. **There is no movie counterpart.**
+- **`.mov` destination is REJECTED** by the exporter — AppleScript error
+  `".mov" (6)`. **`.m4v` works** and yields a `qt`-branded ProRes file. Use
+  `.m4v` everywhere in `d3`/`d5`/`d5b`; rename after ffmpeg if a `.mov` extension
+  is wanted downstream.
+- **Build segmentation in the movie export is DETERMINISTICALLY CUTTABLE.**
+  Frames 0–60 are **byte-identical** hold (2.000 s); the first differing frame is
+  **61** on both build slides. Appear = **1 frame at t = 2.033**; Sparkle motion
+  runs frames 61–~102 (≈1.4 s) then **exactly 150 frames (5.000 s)** of hold.
+  Cut boundaries are unambiguous, which is what makes route (iv) viable and also
+  means the *opaque* path can already be split per build.
+- **Cost.** Wall times **6–21 s** per export; peak Keynote RSS **1.41 GB**
+  (`rss.log`) — above the 1.18 GB seen earlier, so set the watchdog threshold
+  with headroom over 1.5 GB.
+
+## Fallback probe (difference matte) — only if (ii) fidelity fails
+
+Gates route **(iv)** in the Decision above. Runs only if (ii)'s player fidelity
+fails (Open question 13 owner decision, 2026-09-10). Operator rules apply in full: work dir
+under `~/Desktop`, process lock, display poke (`caffeinate -u -t 2`), RSS
+watchdog above 1.5 GB, always on a copy.
+
+**Spec.** One scratch deck (3840×1080) built by `ditto` from
+`~/Desktop/Diff-Checker/Sermon_PK (GW).key`, holding four slides:
+- **A** — the Sparkle build slide (PK 17), anti-aliased text over nothing;
+- **B** — the Appear build slide (PK 14);
+- **C** — a slide carrying a **drop shadow** (the background-dependent worst case);
+- **D** — a **Magic Move** pair (the transition the KPF player simplifies).
+
+Import **two blank layouts**, one solid black and one solid white, into the deck
+(`base layout` is scriptable; slide background is not — see the alpha probe).
+Export the deck twice at `{movie format:native size, movie codec:AppleProRes422LT,
+movie framerate:FPS30, skipped slides:false}` to **`.m4v`** (`.mov` is rejected),
+setting every kept slide's `base layout` to black for pass 1 and to white for
+pass 2, with nothing else changed between passes.
 
 **Measurements.**
-1. `ffprobe -show_streams` → **`pix_fmt`**; expect **`yuva444p10le`** if alpha
-   survived, `yuv444p10le` if it did not.
-2. Per-frame alpha stats: decode `-pix_fmt rgba` raw frames and take numpy
-   min/mean/max of the A channel, plus the fraction of fully-opaque pixels, on a
-   background region and on the object region.
-3. Build segmentation: per-frame diff over the object region; are there flat hold
-   segments separable at the **2.0 s** build delay, with the 5.0 s slide hold at
-   the ends?
-4. Record what the **sdef** and the **GUI export sheet** actually say about
-   "transparent background" — the sdef has **no transparency key**, so this is a
-   GUI-only claim until measured.
+1. **Frame alignment.** Decode both passes to raw frames and byte-diff the known
+   **hold** segments (frames 0–60, and the 150-frame post-Sparkle hold). Alignment
+   holds if each pass's hold segments are internally byte-identical **and** start
+   and end on the **same frame indices** across the two passes; report the first
+   differing frame index per pass and require they match (61 on A and B, per the
+   alpha probe).
+2. **Matte residual on edges.** Compute `alpha = 1 - (white - black)` and
+   `colour = black / alpha` per pixel, recomposite over black and over white, and
+   report per-frame **max and 99.9th-percentile absolute error** against the
+   corresponding source pass, split into an **interior** mask and a **1–3 px edge
+   band** dilated from the alpha gradient.
+3. **Anti-aliased edge quality.** On slide A, report the alpha histogram in the
+   edge band: a good matte shows a smooth 0→255 ramp; a bad one shows clamping at
+   0/255 or negative/`>1` alpha (count those pixels — they are the failure
+   signature).
+4. **Background-dependent content.** On slide C, report the same residual over the
+   shadow region specifically. Expect this to be the worst number in the run.
+5. **Magic Move.** On slide D, confirm the transition's motion frames align across
+   passes (measurement 1 applied to the 1.0 s transition window) and report the
+   residual there.
 
-**Acceptance.** Alpha is REAL if the background region's mean alpha is ≈0 across
-all frames while the object region shows non-trivial alpha, and `pix_fmt` is
-`yuva444p10le`. Builds are DETERMINISTICALLY CUTTABLE if the hold segments are
-frame-exact at the 2.0 s delay across all builds on slide A.
+**Acceptance.**
+- Alignment: **every** hold segment byte-identical within a pass and frame-index
+  identical across passes; first-change frames equal. Any drift ⇒ (iv) fails
+  outright.
+- Matte: interior 99.9th-percentile error **≤ 1/255**; edge-band 99.9th-percentile
+  error **≤ 4/255** with **zero** out-of-range alpha pixels after clamping is
+  accounted for.
+- Shadow region (slide C): reported, not gated — the number decides whether
+  shadowed slides are routed to (iii)/(ii) per-slide rather than failing the run.
 
 **What each outcome decides.**
-- **Alpha real + builds cuttable** → mechanic **(i)** for everything; no Chromium
-  dependency; `d3`/`d5` are a scratch-deck export plus an ffmpeg split.
-- **Alpha real + builds NOT cleanly cuttable** → **(i)** for `movie` slides,
-  **(ii)** for per-build clips on `built` slides; Playwright/Chromium enters the
-  dependency set.
-- **Alpha NOT real** → **(ii)** is the only alpha route; `movie` slides fall back
-  to the opaque QuickTime path plus compositing where alpha is needed around the
-  movie, and this is escalated to the owner because it changes the PP7 handoff.
+- **Alignment + matte both pass** → **(iv) is the animated alpha path**, cut per
+  build at the measured boundaries; no Chromium dependency ever enters the repo;
+  `d5`/`d5b` gain a two-pass export plus a numpy matte stage feeding
+  `maps_reveal._run_ffmpeg_stdin`.
+- **Alignment passes, matte fails only on edges/shadows** → (iv) ships with a
+  **per-slide guard**: slides whose measured residual exceeds the gate are routed
+  to (iii) stills (or (ii) if the owner has funded it) and **reported**, never
+  silently emitted.
+- **Alignment fails** → (iv) is dead; **(ii)** becomes the animated route and the
+  Playwright/Chromium dependency is accepted, with (iii) remaining the
+  zero-dependency stills path.
 
 ## DSK deck assembly
 
@@ -703,14 +861,24 @@ that ffmpeg splits at slide boundaries is now **computable** — per-slide hold 
 still unvalidated end-to-end; park it. Launch with `nohup … &` and Monitor the
 log; background Bash is capped at 10 minutes.
 
-**Naming (owner Q12).** Assets are named **per slide number**, following Keynote's
-own "export slide images with individual builds ticked" convention. The sdef does
-**not** document that convention (`export options` has `image format`, `all
-stages` and `skipped slides` but **no naming/prefix/numbering key**, and `slide
-images` is listed with extension `N/A` — a folder destination). Assume
-`<deckStem>.<NNN>.<ext>` zero-padded from `001`, one sequential index per build
-stage; **verify against a real `as slide images … {all stages:true}` export in
-`d5`** and correct this line.
+**Naming (owner Q12) — MEASURED 2026-09-10.** The sdef documents no naming,
+prefix or numbering key, and `slide images` is listed with extension `N/A` (a
+folder destination). The live export settles it: files are
+**`<basename>.NNN.png`, zero-padded from `001`, flat 1-based sequential across
+the whole export**. The filename encodes **neither the slide number nor the stage
+index**.
+
+**Reconstruction rule (normative).** Attribution is derived, not read: walk the
+exported slides in slide order, skipping any slide with `skipped:true`, and
+consume `stage_count(slide) = build_count(slide) + 1` filenames per slide, with
+`build_count` from `iwa_builds.deck_builds`. Emit PP7 names keyed by **Keynote
+slide number** and stage ordinal. **Verify** that the total consumed equals the
+number of files produced; on any mismatch **refuse and report** — never guess an
+alignment. (The `+1` — one stage for the pre-build state plus one per build — was
+confirmed on PK slides 14 and 17: 4 files with `all stages:true`, 2 with it off.)
+
+**Destination extension.** Movie exports must target **`.m4v`**; a `.mov`
+destination is rejected by the exporter with error `".mov" (6)`.
 
 **Codec.** ProRes 422HQ at 3840×1080/30fps runs roughly **5GB per 30 s**. Default
 the intermediate to **AppleProRes422LT** or **h264**; 422HQ only on request.
@@ -883,17 +1051,20 @@ operator-run, hands-off Keynote window on a **copy**.
    scale, and the neighbouring slides are **unchanged** (the whitelist does not
    propagate, per `church-list-keep-side-panel-spec`); the reported height for a
    full-wall union is < band height (width-bound).
-3. **`d3` movie crop — live, feature-flagged.** Acceptance (operator): one FW movie
-   slide → scratch deck → exported `.mov` → **ffprobe reports the expected
-   dimensions *and* a duration matching the model** (per-slide hold 5.0 s +
-   build delay 2.0 s per build + the measured transition duration, or the embedded
-   movie's own length where longer); QuickTime opens it; the crop matches the
-   centre panel; the runner refuses on a locked display or pokes it; the RSS
-   watchdog fires on a synthetic threshold; plus **the alpha probe result is recorded** (see "Next live probe (alpha)"):
-   `pix_fmt`, per-frame alpha stats, and whether build boundaries are frame-exact
-   at the 2.0 s delay. `d3` does not close until the mechanic (i)/(ii) decision is
-   written into the plan. The probe + decision is its own small PR ahead of the
-   export implementation.
+3. **`d3` movie crop — live, feature-flagged.** The alpha probe is **done** (see
+   "Alpha probe results"), so `d3` is now scoped to the **opaque** movie path plus
+   the plumbing every alpha route needs. Acceptance (operator): one FW movie
+   slide → scratch deck → exported **`.m4v`** (a `.mov` destination must be
+   rejected by our own path check before Keynote sees it) → **ffprobe reports the
+   expected dimensions *and* a duration matching the model** (per-slide hold 5.0 s
+   + build delay 2.0 s per build + the measured transition duration, or the
+   embedded movie's own length where longer); QuickTime opens it; the crop matches
+   the centre panel; the runner refuses on a locked display or pokes it; the RSS
+   watchdog fires on a synthetic threshold **and its default threshold is above
+   the measured 1.41 GB peak**; and a per-build cut at the measured boundaries
+   (first change at frame 61 / t = 2.033 s) reproduces on a `built` slide.
+   `d3` does **not** implement an alpha route — that is gated on Open question 13,
+   and route (iv) additionally on "Next live probe (difference matte)".
 4. **`d4` deck assembly — live.** Acceptance: DSK deck opens; a `static` slide's
    media sits in the band; **no kept slide's base layout is an FW/7680-wide
    layout**; `card_styles` on the output reports the kept media styles as
@@ -903,28 +1074,49 @@ operator-run, hands-off Keynote window on a **copy**.
    are present; a masked image's mask scales with its frame after the live
    width/height write (no content revealed or clipped);
 5. **`d5` PP7 export folder — offline (naming) + live (content).** Acceptance:
-   `built` slides yield **one clip per build step** (N builds → N clips, each
-   showing only that animation, verified by frame-diff); clips are **ProRes 4444
-   with real alpha** (`ffprobe pix_fmt = yuva444p10le`) via whichever mechanic
-   `d3` selected; names follow the Keynote slide-images-with-individual-builds
-   convention per slide number, **with the real pattern confirmed by one live
-   `as slide images {all stages:true}` export** and this plan corrected if it
-   differs from the assumed `<stem>.<NNN>.<ext>`; inserted clips carry the FW
-   movie's `repetition method` and `movie volume`; the stat-overlay bake/no-bake
-   choice from the review page is honoured; a manifest JSON lists
-   slide → build index → asset. Per-build clip generation and the naming/manifest
-   work are separate PRs.
+   `built` slides yield **one asset per build step** (N builds → N+1 stages → the
+   route's asset count, each showing only that step, verified by frame- or
+   pixel-diff); assets carry **real alpha** — route (iii) stage PNGs are RGBA with
+   a non-trivial transparent fraction (measured 0.014–0.022 opaque on the probe
+   slides), routes (ii)/(iv) produce ProRes 4444 with
+   `ffprobe pix_fmt = yuva444p10le` **and a background region whose mean alpha is
+   ≈0** (the plane existing is **not** sufficient — Keynote's own ProRes 4444
+   passed the `pix_fmt` check while being fully opaque, so this acceptance line
+   MUST assert alpha statistics, not the pixel format); `movie` slides yield an
+   **opaque `.m4v`** clip and that is expected, not a failure; **slide/stage
+   attribution is reconstructed by the normative rule above and the count check
+   refuses on mismatch** (the exported `<basename>.NNN.png` names carry no slide
+   number); inserted clips carry the FW movie's `repetition method` and
+   `movie volume`; the stat-overlay bake/no-bake choice from the review page is
+   honoured; a manifest JSON lists slide → build index → asset **and records which
+   alpha route produced each one**. Per-build asset generation and the
+   naming/manifest work are separate PRs, and the alpha route is not started until
+   Open question 13 is answered.
 6. **`d5b` Exporter — offline (classify/selection) + live (export).** Acceptance:
    pointed at `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`, the
    classifier reports its **7 built slides {5, 13, 14, 17, 26, 29, 30}** and its
    **1 movie slide (13)** with no Keynote process started; selecting all of them
-   yields **N clips for the build slides** (one per build step, N = the deck's
-   total build count), **1 movie clip**, and an alpha PNG per selected `static`
-   slide (or an explicit "stayed opaque" report), plus the `d5` manifest; the
+   yields **N assets for the build slides** (one per build step, N = the deck's
+   total build count, cross-checked against the `stage_count = build_count + 1`
+   reconstruction), **1 opaque `.m4v` movie clip**, and an alpha PNG per selected
+   `static` slide (route (iii) gives this for free from the same
+   `all stages:true` export; the KPF lead-fill strip remains the fallback and
+   slides that stay opaque are reported, not silently emitted), plus the `d5`
+   manifest; the
    export deck is a `ditto` copy with non-selected slides deleted/`skipped`, and
    **no band affine and no scratch centre-panel deck run at all** (assert in the
    test); the owner's input deck is byte-unchanged.
-7. **`d6` API/UI — offline.** Acceptance: propose/review/apply round-trips against a
+7. **`d5c` KPF alpha pipeline — live, shared with alpha playback.** Acceptance:
+   on a copy of the PK DSK deck, the export → strip → player-driver → per-build
+   capture pipeline produces **per-build clips for the 7 build slides** with real
+   alpha statistics (background region mean alpha ≈ 0, per the `d5` acceptance
+   rule — `pix_fmt` alone is not sufficient); the **Magic Move slide from
+   Sermon_GW is captured with motion** (not two stills); a **fidelity report**
+   lists any build effect the player simplified against `iwa_builds.deck_builds`
+   for that deck; movie slides fall back to the opaque `.m4v` path (a); Playwright
+   is pinned in an optional extra (matching the `iwa` extra in `pyproject.toml`),
+   not a hard dependency.
+8. **`d6` API/UI — offline.** Acceptance: propose/review/apply round-trips against a
    stubbed runner for **both** `/api/dsk` and `/api/dsk/export`; the
    `range_from`/`range_to`/`slides` pre-filter narrows the proposed page list and
    the review page's include toggles override it (a slide inside the range but
@@ -933,8 +1125,8 @@ operator-run, hands-off Keynote window on a **copy**.
    `side_content_slides`-style set; the tab reads **"DSK"** with working
    **Generator** / **Exporter** sub-tabs; `npm run build` clean; `POST /api/dsk`
    no longer returns 501.
-8. **`d7` insert mode — offline UI + live splice.**
-9. **`d8` maps reuse.** Acceptance: a Maps job with a movie item and `export_dsk=True`
+9. **`d7` insert mode — offline UI + live splice.**
+10. **`d8` maps reuse.** Acceptance: a Maps job with a movie item and `export_dsk=True`
    produces a cropped clip instead of a scaled full-panel one; image behaviour
    byte-identical to today. Once `d5b` has shipped, the Maps DSK deck is handed to
    the **Exporter** for PP7 assets rather than growing a second export path.
@@ -952,11 +1144,17 @@ operator-run, hands-off Keynote window on a **copy**.
    downscale to the DSK band happens afterwards in ffmpeg/geometry.
 2. Does PP7 need **true alpha** movies, or are opaque movies (+ PNG stages for build
    slides) enough? This decides whether option (b)/(c) ships at all.
+   (Both did, in a sense: (b) became route (iv) and (c) route (ii) — see Q13.)
    **Owner (2026-09-10):** "True alpha movies. Exporting as Apple ProRes 4444 is
    an option. Not sure how it works for builds, but it should be 'on-click' per
-   animation." → plan change: alpha is **core, not stretch**; PP7 assets are
-   ProRes 4444 with alpha, and `built` slides export **one clip per build step**.
-   The mechanics stay **open pending the probe in "Next live probe (alpha)"**.
+   animation." → plan change: alpha is **core, not stretch**; `built` slides
+   export **one asset per build step**.
+   **ANSWERED by the alpha probe (2026-09-10): "ProRes 4444 is an option" is
+   FALSE.** Keynote's own ProRes 4444 export carries **no alpha** — the plane is
+   present (`yuva444p12le`) but constant 255 in every frame, on both Basic White
+   and Basic Black, and on PK slides whose PNG export of the same pixels is
+   RGBA(0,0,0,0). The remaining routes and the recommendation move to **Open
+   question 13**.
 3. **Slide 32 of `Sermon_PK (GW).key`** holds a 3840×2160 movie at (1920, −763),
    centre-cropped by the canvas. Intentional framing, or an accident to flag?
    **Owner (2026-09-10):** "Intentional. top & bottom are 'cropped'. would be
@@ -1042,8 +1240,68 @@ operator-run, hands-off Keynote window on a **copy**.
     001, with each build stage emitted as its own sequential frame when
     `all stages:true` — **flagged for a one-minute live check in `d5`**.
 
+13. **Alpha route choice — OPEN, escalated 2026-09-10.** The alpha probe closed
+    mechanic (i): Keynote's ProRes 4444 export has no real alpha. Three routes
+    remain (full detail under "Movie-crop pipeline — options and decision"):
+    - **(ii) KPF/HTML + fill strip + headless Chromium capture** → ProRes 4444.
+      Animated, true alpha, deterministic per-build via `advanceToNextBuild(`.
+      Costs a Playwright/Chromium dependency the repo does not have, inherits the
+      KPF player's fidelity limits, and never covers movie slides (KPF exports
+      embedded movies separately).
+    - **(iii) Keynote-native PNG build stages** — `as slide images {PNG, all
+      stages:true}` on the scratch deck, one **RGBA** PNG per stage (proven), fed
+      to PP7 as one alpha PNG per click, or as a short ProRes 4444 still-clip per
+      stage via ffmpeg. **Zero new dependencies, exact Keynote rendering, real
+      alpha.** Limitation: **stages, not animated builds** — Magic Move becomes two
+      stills; a cross-dissolve in PP7 approximates the motion.
+    - **(iv) Difference matte via `base layout`** — import solid-black and
+      solid-white blank layouts, export each target slide twice as ProRes
+      422LT/h264 `.m4v`, solve `alpha = 1 - (white - black)` and
+      `colour = black / alpha`, encode ProRes 4444 through
+      `maps_reveal._run_ffmpeg_stdin`, cut per build at the measured boundaries.
+      The probe's frame-determinism (byte-identical holds, frame-exact build
+      starts) is what makes the two passes alignable. Animated, true alpha,
+      Keynote's own renderer, no Chromium. Costs 2× export, needs its own probe,
+      and mattes **background-dependent effects (drop shadows, blend modes)**
+      imperfectly.
+
+    **Recommendation:** **(iii) for a first tranche** — it unblocks the PP7
+    handoff with zero dependencies and exact rendering; **(iv) as the animated
+    upgrade**, gated on "Next live probe (difference matte)"; **(ii) only as a
+    fallback** if (iv)'s matte quality fails. The trade-off the owner is being
+    asked to make: **stills now with no new dependencies (iii)**, vs **animation
+    at 2× export cost and a matte that is imperfect on shadows (iv)**, vs
+    **animation at the cost of a second renderer and a browser dependency (ii)**.
+    Movie slides go through the opaque path in all three worlds.
+
+    **Owner (2026-09-10):** (iii) is today's manual practice — automate it first.
+    (ii) is the strategic route: it is the same KPF pipeline as the alpha-playback
+    app, so one build serves both PP7 asset export and live alpha playback.
+
 ## Risks
 
+- **`.mov` destination is rejected — use `.m4v`.** `export … as QuickTime movie`
+  to a path ending `.mov` fails with error `".mov" (6)`; `.m4v` works and yields a
+  qt-branded ProRes file. Any hardcoded `.mov` in `d3`/`d5`/`d5b` is a run-killer
+  discovered only at export time, so validate the destination extension before
+  handing the path to Keynote and rename after ffmpeg if a `.mov` is wanted.
+- **`all stages` memory correction.** The 2026-09-08 memory recorded `all stages`
+  as not honoured. That is now known to be **wrong for the slide-images
+  exporter** (4 files with it on vs 2 with it off, distinct stages confirmed by
+  consecutive diffs). It stays inert for the **QuickTime** exporter. Route (iii)
+  depends entirely on the corrected reading, so re-confirm it on the real deck
+  before building on it, and do not let the stale memory line be re-imported.
+- **Alpha "present" is not alpha "real".** Keynote's ProRes 4444 export passes a
+  naive `pix_fmt` check (`yuva444p12le`) while being fully opaque. Every alpha
+  acceptance line in this plan must assert **per-frame alpha statistics on a
+  background region**, never the pixel format alone.
+- **Matte assumptions (route iv).** The matte solve assumes the two passes are
+  **frame-aligned** and that content is composited **premultiplied over black**.
+  Neither is guaranteed for **background-dependent effects — drop shadows, blend
+  modes, translucent fills** — which will matte imperfectly, nor for embedded
+  movies unless the movie region is opaque. Anti-aliased edges are the sharpest
+  test. Gate the route on its own probe, and keep a per-slide fallback to (iii)
+  for slides whose residual exceeds the gate rather than shipping a bad matte.
 - **Locked display stalls Keynote's exporter.** 208 s vs 11 s on the same export;
   `caffeinate -dimsu` is insufficient, only a real display poke resumes it. An
   unattended overnight run will appear hung. Mitigation in Operator rules.
@@ -1076,7 +1334,7 @@ operator-run, hands-off Keynote window on a **copy**.
   does not shrink, the only known remedy is *File → Reduce File Size*, which is
   **GUI-only** (no sdef command), so it becomes an operator step or an
   Accessibility-driven GUI pass.
-- **KPF fidelity (if (c) ships).** Unsupported builds/transitions are simplified by
+- **KPF fidelity (if route (ii) ships).** Unsupported builds/transitions are simplified by
   Apple's player, movies are not in the canvas capture at all, and slides with a
   full-bleed background image stay opaque even after the lead-fill strip.
 - **Offline write remains default-off** (`OBED_OFFLINE_WRITE`, W1 still RED). Every
