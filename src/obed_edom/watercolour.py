@@ -170,14 +170,16 @@ def _wash_layers(rgb: np.ndarray, busy: np.ndarray, rng: np.random.Generator, sc
 
 
 def _fill_hidden(rgb: np.ndarray, alpha: np.ndarray, scale: float) -> np.ndarray:
-    inside = (alpha > 0).astype(np.float32)
-    if not inside.any():
+    weight = alpha.astype(np.float32) / 255.0
+    if not (weight > 0).any():
         return rgb
     sigma = 12 * scale
-    weight = _blur(inside, sigma)
-    filled = _blur(rgb.astype(np.float32) * inside[:, :, None], sigma) / np.maximum(weight, 1e-4)[:, :, None]
-    filled = np.where(weight[:, :, None] > 1e-3, filled, rgb[alpha > 0].mean(axis=0))
-    return np.where(alpha[:, :, None] > 0, rgb, np.clip(filled, 0, 255)).astype(np.uint8)
+    blurred_weight = _blur(weight, sigma)
+    filled = _blur(rgb.astype(np.float32) * weight[:, :, None], sigma) / np.maximum(blurred_weight, 1e-4)[:, :, None]
+    filled = np.where(blurred_weight[:, :, None] > 1e-3, filled, rgb[alpha > 0].mean(axis=0))
+    filled = np.clip(filled, 0, 255)
+    opaque = alpha[:, :, None] >= 255
+    return np.where(opaque, rgb, filled).astype(np.uint8)
 
 
 def _feather_mask(mask: np.ndarray, amount: float = 0.8) -> np.ndarray:
@@ -186,22 +188,46 @@ def _feather_mask(mask: np.ndarray, amount: float = 0.8) -> np.ndarray:
     return cv2.GaussianBlur(mask, (0, 0), amount)
 
 
+def _has_paint(mask: Image.Image | None) -> bool:
+    if mask is None:
+        return False
+    return bool((np.asarray(mask.convert("L")) > 127).any())
+
+
+def _painted_alpha(image: Image.Image, keep_mask: Image.Image | None, remove_mask: Image.Image | None) -> Image.Image:
+    keep = np.asarray(keep_mask.convert("L").resize(image.size, Image.BILINEAR), dtype=np.float32) if keep_mask is not None else np.zeros((image.height, image.width), np.float32)
+    remove = np.asarray(remove_mask.convert("L").resize(image.size, Image.BILINEAR), dtype=np.float32) if remove_mask is not None else np.zeros((image.height, image.width), np.float32)
+    alpha = np.minimum(keep, 255 - remove)
+    return Image.fromarray(np.clip(alpha, 0, 255).astype(np.uint8), "L")
+
+
 def grabcut_mask(
     image: Image.Image,
-    rect: tuple[float, float, float, float],
+    rect: tuple[float, float, float, float] | None,
     *,
     foreground: list[tuple[float, float]] | None = None,
     background: list[tuple[float, float]] | None = None,
     keep_mask: Image.Image | None = None,
     remove_mask: Image.Image | None = None,
 ) -> Image.Image:
-    x, y, width, height = rect
-    if not all(math.isfinite(v) for v in rect) or width <= 0 or height <= 0:
+    painted = _has_paint(keep_mask)
+    if rect is not None:
+        x, y, width, height = rect
+        if not all(math.isfinite(v) for v in rect) or width <= 0 or height <= 0:
+            raise WatercolourError("Foreground rectangle must be finite and non-empty")
+        if not (0 <= x < image.width and 0 <= y < image.height and x + width <= image.width and y + height <= image.height):
+            raise WatercolourError("Foreground rectangle is outside the image")
+    elif not painted:
         raise WatercolourError("Foreground rectangle must be finite and non-empty")
-    if not (0 <= x < image.width and 0 <= y < image.height and x + width <= image.width and y + height <= image.height):
-        raise WatercolourError("Foreground rectangle is outside the image")
     if len(foreground or []) + len(background or []) > 500:
         raise WatercolourError("Too many mask correction points")
+    for points in (foreground or [], background or []):
+        for px, py in points:
+            if not (math.isfinite(px) and math.isfinite(py) and 0 <= px < image.width and 0 <= py < image.height):
+                raise WatercolourError("Mask correction point is outside the image")
+    if painted:
+        return _painted_alpha(image, keep_mask, remove_mask)
+    keep_mask = None
     rgb = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
     mask = np.zeros((image.height, image.width), np.uint8)
     model_bg = np.zeros((1, 65), np.float64)
@@ -209,13 +235,11 @@ def grabcut_mask(
     cv2.grabCut(rgb, mask, (round(x), round(y), round(width), round(height)), model_bg, model_fg, 5, cv2.GC_INIT_WITH_RECT)
     for points, kind in ((foreground or [], cv2.GC_FGD), (background or [], cv2.GC_BGD)):
         for px, py in points:
-            if not (math.isfinite(px) and math.isfinite(py) and 0 <= px < image.width and 0 <= py < image.height):
-                raise WatercolourError("Mask correction point is outside the image")
             cv2.circle(mask, (round(px), round(py)), 6, kind, -1)
-    for painted, kind in ((remove_mask, cv2.GC_BGD), (keep_mask, cv2.GC_FGD)):
-        if painted is None:
+    for painted_mask, kind in ((remove_mask, cv2.GC_BGD), (keep_mask, cv2.GC_FGD)):
+        if painted_mask is None:
             continue
-        resized = painted.resize(image.size, Image.NEAREST)
+        resized = painted_mask.resize(image.size, Image.NEAREST)
         flag = np.asarray(resized.convert("L")) > 127
         mask[flag] = kind
     if foreground or background or keep_mask is not None or remove_mask is not None:

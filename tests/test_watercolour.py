@@ -225,6 +225,250 @@ def test_preview_rejects_transparent_without_a_rect():
     assert 'foreground rectangle' in response.text.lower()
 
 
+def _landmark_with_intruder_png():
+    rng=np.random.default_rng(5); width,height=400,300
+    pixels=np.clip(np.array([60,90,160],np.float32)+rng.normal(0,12,(height,width,3)),0,255).astype(np.uint8)
+    pixels[66:232,110:288]=np.array([230,90,40],np.uint8)
+    pixels[80:140,240:300]=np.array([180,60,60],np.uint8)
+    out=BytesIO(); Image.fromarray(pixels,'RGB').convert('RGBA').save(out,'PNG'); return out.getvalue()
+
+
+def _painted_keep_mask(size=(400,300)):
+    mask=Image.new('L',size,0)
+    for y in range(66,232):
+        for x in range(110,288):
+            if not (80<=y<140 and 240<=x<300):
+                mask.putpixel((x,y),255)
+    return mask
+
+
+def test_painted_keep_mask_is_authoritative_over_the_intruder():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_with_intruder_png())).convert('RGBA')
+    rect=(110.0,66.0,178.0,166.0)
+    alpha=np.asarray(watercolour.grabcut_mask(image,rect,keep_mask=_painted_keep_mask()))
+    assert alpha[149,199] == 255
+    assert alpha[110,270] == 0
+    assert alpha[10,10] == 0
+
+
+def test_painted_keep_mask_control_without_painting_keeps_the_intruder():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_with_intruder_png())).convert('RGBA')
+    rect=(110.0,66.0,178.0,166.0)
+    alpha=np.asarray(watercolour.grabcut_mask(image,rect,keep_mask=None))
+    assert alpha[110,270] > 0
+
+
+def test_painted_remove_mask_beats_keep_on_overlap():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    size=image.size
+    keep=Image.new('L',size,0)
+    for y in range(80,180):
+        for x in range(150,250): keep.putpixel((x,y),255)
+    remove=Image.new('L',size,0)
+    for y in range(80,180):
+        for x in range(150,250): remove.putpixel((x,y),255)
+    alpha=np.asarray(watercolour.grabcut_mask(image,(110.0,66.0,178.0,166.0),keep_mask=keep,remove_mask=remove))
+    assert alpha[130,200] == 0
+
+
+def test_all_black_keep_mask_with_rect_matches_keep_mask_none():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    rect=(110.0,66.0,178.0,166.0)
+    black_keep=Image.new('L',image.size,0)
+    with_black=watercolour.grabcut_mask(image,rect,keep_mask=black_keep)
+    without=watercolour.grabcut_mask(image,rect,keep_mask=None)
+    assert with_black.tobytes() == without.tobytes()
+
+
+def test_max_value_127_keep_mask_matches_keep_mask_none():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    rect=(110.0,66.0,178.0,166.0)
+    grey_keep=Image.new('L',image.size,127)
+    with_grey=watercolour.grabcut_mask(image,rect,keep_mask=grey_keep)
+    without=watercolour.grabcut_mask(image,rect,keep_mask=None)
+    assert with_grey.tobytes() == without.tobytes()
+
+
+def test_unpainted_keep_mask_matches_none_on_a_textured_adversarial_image():
+    from obed_edom import watercolour
+    rng=np.random.default_rng(11)
+    width,height=200,150
+    pixels=(rng.random((height,width,3))*255).astype(np.uint8)
+    image=Image.fromarray(pixels,'RGB').convert('RGBA')
+    rect=(20.0,20.0,150.0,110.0)
+    unpainted_keep=Image.new('L',image.size,100)
+    with_keep=watercolour.grabcut_mask(image,rect,keep_mask=unpainted_keep)
+    without=watercolour.grabcut_mask(image,rect,keep_mask=None)
+    assert with_keep.tobytes() == without.tobytes()
+
+
+def test_upscaled_painted_keep_mask_gives_a_soft_transition_edge():
+    from obed_edom import watercolour
+    image=Image.new('RGBA',(640,480),(200,120,60,255))
+    small=Image.new('L',(64,48),0)
+    for y in range(0,24):
+        for x in range(0,32): small.putpixel((x,y),255)
+    alpha=np.asarray(watercolour.grabcut_mask(image,None,keep_mask=small))
+    row=alpha[120,:].astype(np.int32)
+    mid=np.flatnonzero((row>0)&(row<255))
+    assert mid.size > 0
+    band=mid.max()-mid.min()+1
+    assert 4 <= band <= 24
+
+
+def test_preview_endpoint_agrees_with_direct_mask_for_on_the_full_image():
+    from obed_edom.web.app import app
+    from obed_edom.web import watercolour as web_watercolour
+    from fastapi.testclient import TestClient
+    from PIL import Image as PILImage
+    client=TestClient(app)
+    raw=_landmark_with_intruder_png()
+    keep_mask_b64=base64_of(_painted_keep_mask())
+    spec={'transparent':True,'keepMask':keep_mask_b64,'maskSize':[400,300]}
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',raw,'image/png')},
+        data={'mask':json.dumps(spec)},
+    )
+    assert response.status_code == 200, response.text
+    preview_alpha=np.asarray(PILImage.open(BytesIO(response.content)).convert('RGBA'))[:,:,3]
+    full_image=Image.open(BytesIO(raw)).convert('RGBA')
+    full_mask=web_watercolour._mask_for(full_image, spec)
+    full_payload,_=watercolour.convert(raw, WatercolourOptions(transparent=True,paper=False), full_mask)
+    full_alpha=np.asarray(PILImage.open(BytesIO(full_payload)).convert('RGBA'))[:,:,3]
+    factor=preview_alpha.shape[1]/full_alpha.shape[1]
+    resized=np.asarray(Image.fromarray(full_alpha).resize((preview_alpha.shape[1],preview_alpha.shape[0]),Image.LANCZOS)).astype(np.float32)
+    preview_f=preview_alpha.astype(np.float32)
+    edge=((preview_f>5)&(preview_f<250))|((resized>5)&(resized<250))
+    assert edge.any()
+    assert np.abs(resized[edge]-preview_f[edge]).mean() < 40
+    intruder_x,intruder_y=round(270*factor),round(110*factor)
+    assert preview_alpha[intruder_y,intruder_x] == 0
+    assert full_alpha[110,270] == 0
+
+
+def _rgba_with_transparent_border(size=(400,300)):
+    width,height=size
+    rng=np.random.default_rng(5)
+    pixels=np.clip(np.array([60,90,160],np.float32)+rng.normal(0,12,(height,width,3)),0,255).astype(np.uint8)
+    pixels[66:232,110:288]=np.array([230,90,40],np.uint8)
+    image=Image.fromarray(pixels,'RGB').convert('RGBA')
+    alpha=np.full((height,width),255,np.uint8)
+    alpha[:20,:]=0
+    arr=np.asarray(image).copy(); arr[:,:,3]=alpha
+    return Image.fromarray(arr,'RGBA')
+
+
+def test_mask_for_honours_painted_keep_mask_on_rgba_with_transparency_and_no_rect():
+    from obed_edom.web import watercolour as web_watercolour
+    image=_rgba_with_transparent_border()
+    keep=Image.new('L',image.size,0)
+    for y in range(180,220):
+        for x in range(50,90): keep.putpixel((x,y),255)
+    out=BytesIO(); keep.save(out,'PNG'); import base64
+    spec={'transparent':True,'keepMask':base64.b64encode(out.getvalue()).decode('ascii'),'maskSize':list(image.size)}
+    mask=web_watercolour._mask_for(image,spec)
+    alpha=np.asarray(mask.convert('L'))
+    assert alpha[200,70] == 255
+    assert alpha[0,0] == 0
+
+
+def test_grabcut_mask_rejects_non_positive_rect_on_painted_path():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    keep=_painted_keep_mask()
+    import pytest
+    with pytest.raises(watercolour.WatercolourError):
+        watercolour.grabcut_mask(image,(110.0,66.0,0.0,166.0),keep_mask=keep)
+
+
+def test_grabcut_mask_rejects_out_of_bounds_point_on_painted_path():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    keep=_painted_keep_mask()
+    import pytest
+    with pytest.raises(watercolour.WatercolourError):
+        watercolour.grabcut_mask(image,None,foreground=[(1000.0,1000.0)],keep_mask=keep)
+
+
+def test_grabcut_mask_rejects_too_many_points_on_painted_path():
+    from obed_edom import watercolour
+    image=Image.open(BytesIO(_landmark_png())).convert('RGBA')
+    keep=_painted_keep_mask()
+    import pytest
+    with pytest.raises(watercolour.WatercolourError):
+        watercolour.grabcut_mask(image,None,foreground=[(1.0,1.0)]*501,keep_mask=keep)
+
+
+def test_preview_rejects_non_positive_rect_dimensions():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'rect':[110,66,0,166]})},
+    )
+    assert response.status_code == 400
+
+
+def test_preview_rejects_out_of_bounds_foreground_point_on_painted_path():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({
+            'transparent':True,
+            'keepMask':base64_of(_painted_keep_mask()),
+            'maskSize':[400,300],
+            'foreground':[[10000,10000]],
+        })},
+    )
+    assert response.status_code == 400
+
+
+def test_preview_rejects_too_many_points_on_painted_path():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({
+            'transparent':True,
+            'keepMask':base64_of(_painted_keep_mask()),
+            'maskSize':[400,300],
+            'foreground':[[1,1]]*501,
+        })},
+    )
+    assert response.status_code == 400
+
+
+def test_preview_post_with_keep_mask_and_no_rect_succeeds():
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client=TestClient(app)
+    response=client.post(
+        '/api/watercolour/preview',
+        files={'file':('landmark.png',_landmark_png(),'image/png')},
+        data={'mask':json.dumps({'transparent':True,'keepMask':base64_of(_painted_keep_mask()),'maskSize':[400,300]})},
+    )
+    assert response.status_code == 200, response.text
+    alpha=np.asarray(Image.open(BytesIO(response.content)).convert('RGBA'))[:,:,3]
+    assert (alpha == 0).any() and (alpha == 255).any()
+
+
+def base64_of(mask):
+    out=BytesIO(); mask.save(out,'PNG'); import base64; return base64.b64encode(out.getvalue()).decode('ascii')
+
+
 def test_slider_gains_are_exactly_neutral_at_the_defaults():
     assert watercolour._slider_gain(0.42, 0.42, 0.60, 0.435) == 1.0
     assert watercolour._slider_gain(0.65, 0.65, -0.30, -0.85) == 1.0
@@ -244,6 +488,27 @@ def test_wash_softness_extremes_change_luminance():
     crisp=np.asarray(render(_sample(), WatercolourOptions(wash_softness=0.0)),dtype=np.float32)
     airy=np.asarray(render(_sample(), WatercolourOptions(wash_softness=1.0)),dtype=np.float32)
     assert np.abs(crisp-airy).mean() > 28 and airy.mean() > crisp.mean() + 20
+
+
+def test_fill_hidden_decontaminates_soft_alpha_fringe_against_a_contrasting_background():
+    from obed_edom import watercolour
+    size=64
+    object_colour=np.array([20,200,20],np.float32)
+    background_colour=np.array([220,20,220],np.float32)
+    rgb=np.broadcast_to(background_colour,(size,size,3)).copy()
+    rgb[16:48,16:48]=object_colour
+    alpha=np.zeros((size,size),np.float32)
+    alpha[16:48,16:48]=255
+    yy,xx=np.mgrid[0:size,0:size]
+    ring=(np.maximum(np.abs(yy-31.5),np.abs(xx-31.5))>15)&(np.maximum(np.abs(yy-31.5),np.abs(xx-31.5))<=17)
+    alpha[ring]=128
+    rgb[ring]=(object_colour+background_colour)/2
+    filled=watercolour._fill_hidden(rgb.astype(np.uint8),alpha.astype(np.uint8),scale=1.0)
+    fringe=filled[ring].astype(np.float32)
+    dist_object=np.abs(fringe-object_colour).mean()
+    dist_background=np.abs(fringe-background_colour).mean()
+    assert dist_object < 60
+    assert dist_object < dist_background
 
 
 def test_transparent_hard_edge_stays_crisp():

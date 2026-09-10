@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 
 from obed_edom.paths import output_root
-from obed_edom.watercolour import MAX_ENCODED_BYTES, WatercolourError, WatercolourOptions, convert, decode_image, grabcut_mask, render
+from obed_edom.watercolour import MAX_ENCODED_BYTES, WatercolourError, WatercolourOptions, _has_paint, convert, decode_image, grabcut_mask, render
 
 router = APIRouter(prefix="/api/watercolour", tags=["watercolour"])
 MAX_BATCH_FILES = 20
@@ -86,20 +86,32 @@ def _validate_spec(spec: dict[str, Any] | None, size: tuple[int, int] | None = N
     rect = spec.get("rect")
     if rect is not None and (not isinstance(rect, list) or len(rect) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect)):
         raise WatercolourError("Mask settings are invalid")
-    if rect is not None and size is not None:
+    if rect is not None:
         x, y, w, h = rect
-        width, height = size
-        if not (0 <= x < width and 0 <= y < height and x + w <= width and y + h <= height):
+        if w <= 0 or h <= 0:
             raise WatercolourError("Mask settings are invalid")
+        if size is not None:
+            width, height = size
+            if not (0 <= x < width and 0 <= y < height and x + w <= width and y + h <= height):
+                raise WatercolourError("Mask settings are invalid")
+    total_points = 0
     for key in ("foreground", "background"):
         points = spec.get(key)
         if points is None:
             continue
         if not isinstance(points, list):
             raise WatercolourError("Mask settings are invalid")
+        total_points += len(points)
         for point in points:
             if not isinstance(point, list) or len(point) != 2 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in point):
                 raise WatercolourError("Mask settings are invalid")
+            if size is not None:
+                px, py = point
+                width, height = size
+                if not (0 <= px < width and 0 <= py < height):
+                    raise WatercolourError("Mask settings are invalid")
+    if total_points > 500:
+        raise WatercolourError("Too many mask correction points")
     for key in ("keepMask", "removeMask"):
         value = spec.get(key)
         if value is not None and not isinstance(value, str):
@@ -111,17 +123,19 @@ def _mask_for(image, spec: dict[str, Any] | None):
         return None
     _validate_spec(spec, image.size)
     rect = spec.get("rect")
-    if rect is None and image.getchannel("A").getextrema()[0] < 255:
-        return image.getchannel("A")
-    if not isinstance(rect, list) or len(rect) != 4:
-        raise WatercolourError("Transparent landmark output needs a foreground rectangle")
-    foreground = spec.get("foreground") if isinstance(spec.get("foreground"), list) else []
-    background = spec.get("background") if isinstance(spec.get("background"), list) else []
     keep_mask = _decode_mask_field(spec, "keepMask")
     remove_mask = _decode_mask_field(spec, "removeMask")
+    painted = _has_paint(keep_mask)
+    if rect is None and not painted and image.getchannel("A").getextrema()[0] < 255:
+        return image.getchannel("A")
+    if not painted:
+        if not isinstance(rect, list) or len(rect) != 4:
+            raise WatercolourError("Transparent landmark output needs a foreground rectangle")
+    foreground = spec.get("foreground") if isinstance(spec.get("foreground"), list) else []
+    background = spec.get("background") if isinstance(spec.get("background"), list) else []
     return grabcut_mask(
         image,
-        tuple(float(value) for value in rect),
+        tuple(float(value) for value in rect) if isinstance(rect, list) and len(rect) == 4 else None,
         foreground=foreground,
         background=background,
         keep_mask=keep_mask,
