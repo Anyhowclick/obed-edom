@@ -11,8 +11,8 @@ todos:
     content: "Done: PR #70 Codex reviews — UX round 3a14021 got 2x REQUEST-CHANGES then APPROVE-WITH-NITS; QA round aac2807 got 3x REQUEST-CHANGES then APPROVE. Reports in the session scratchpad codex-review*.md."
     status: done
   - id: poster-frame
-    content: "Parked, awaiting owner go: reveal movie poster frame on the last frame via offline IWA patch of TSD.MovieArchive.posterTime, gated by OBED_MAPS_POSTER_FRAME. Plan in the session scratchpad qa-round-plan.md Part A."
-    status: pending
+    content: "Shipped in 89f9749: offline IWA patch of TSD.MovieArchive.posterTime via src/obed_edom/iwa_movies.py (movie_archives / plan_movie_posters / patch_movie_posters, one-to-one 1px frame match, refuse-not-guess), wired into maps_keynote.py's _apply_poster_frames per deck after _run_one_deck, gated OBED_MAPS_POSTER_FRAME=off|on|verify (default off). Probe script scripts/probe_movie_poster.py (dump/patch/reopen). Owner QA owed: run the probe to learn whether Keynote regenerates the poster from posterTime or keeps cached posterImageData; only then flip the gate on."
+    status: probe owed
   - id: backlog
     content: Pick the next bounded package from "Open backlog" and plan it before touching code
     status: pending
@@ -74,6 +74,11 @@ PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-r
 ### PR #70 (feat/maps-ux-round): UX round + reorder memory
 - `3a14021` UX round: "+" dropdown, icon-only objects toolbar, label-off glyph replaces "Hidden", bounding box + four corner handles (`resizeFromCorner` in `maps/objects.ts`), CG frame snap-to-centre (`snapCgShift`), paper grain at 1024px without mottle anchored to the band (`paperGrainCss`), revealed landmarks excluded from hop movies unless the destination is a movie source (`withoutRevealed` / `hasOutgoingMovie` mirrors Python `build_slide_items`).
 - `aac2807` `retiredLinks` memory for reorders (`restitchWithMemory`, `MAX_RETIRED_LINKS` 200, persisted through state/`.obedmaps`/export plan); isolate darken default 0.65 with a one-shot legacy bump keyed by manifest `isolateDefaultVersion`; also fixes the reorder revert bug found in owner QA.
+- `ee1494f` fixed the Watercolour band rendering opaque white: the grain overlay had been nested in `.maps-map-band`, whose stacking context isolated the multiply blend; now a sibling of the host, band-sized via the same CSS formula.
+- `89f9749` shipped the poster-frame route (see todo `poster-frame` and Pointers below); two Codex passes (REQUEST-CHANGES then APPROVE-WITH-NITS, nit applied); tests `test_iwa_movies.py`, `test_probe_movie_poster.py`; the `iwa` extra (`keynote-parser`) is now installed in `.venv` via `uv sync --extra iwa`.
+
+### Owner decisions 2026-09-10
+- No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
 
 ## Known limits / assumptions
 
@@ -93,7 +98,7 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 
 1. Reveal-as-slide-movie playback in Keynote.
 2. Keynote re-render of restored (reordered) pairs.
-3. Poster-frame patch (parked, awaiting owner go — see todo `poster-frame`).
+3. Poster-frame probe: run `scripts/probe_movie_poster.py` (dump hand-set deck vs untouched export; patch; reopen) to learn whether Keynote regenerates the poster from `posterTime` or keeps cached `posterImageData`; only then flip `OBED_MAPS_POSTER_FRAME` on (see todo `poster-frame`).
 
 ## Open backlog
 
@@ -111,7 +116,7 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 
 - **PR #63** (merged) and **PR #68** (merged) carried the earlier branch. PR #63 first review: verdict REQUEST-CHANGES, 11 findings, all addressed in `6c4c62f`; report and the posted comment are in the session scratchpad (`codex-review.md`, `pr-comment.md`). Second review (on `0644d97`): verdict REQUEST-CHANGES, 8 findings, 7 fixed in `290d4f7`, finding 2 rejected on purpose (country cut-out stays plain, no orange); see `codex-review2.md` in the scratchpad and the PR review comments.
 - **PR #70** (open, `feat/maps-ux-round`) carries this state. Codex ran three passes on the UX round (`3a14021`): 2x REQUEST-CHANGES then APPROVE-WITH-NITS; four passes on the QA round (`aac2807`): 3x REQUEST-CHANGES then APPROVE. Reports in the session scratchpad `codex-review*.md`.
-- **Poster-frame plan**: Keynote AppleScript cannot set the movie's poster frame (movie class has no `poster` property). Recommended route is an offline IWA patch of `TSD.MovieArchive.posterTime` (field 5) after export, gated by env `OBED_MAPS_POSTER_FRAME` (default off), with a probe script `scripts/probe_movie_poster.py` to confirm Keynote regenerates the poster from `posterTime`. Full plan in the session scratchpad `qa-round-plan.md` Part A. `keynote-parser` is not installed in `.venv`.
+- **Poster-frame patch (shipped `89f9749`)**: Keynote AppleScript cannot set the movie's poster frame (movie class has no `poster` property), so the route is an offline IWA patch of `TSD.MovieArchive.posterTime` (field 5) via `src/obed_edom/iwa_movies.py` (`movie_archives` / `plan_movie_posters` / `patch_movie_posters`, one-to-one 1px frame match, refuse-not-guess), invoked from `_apply_poster_frames` in `maps_keynote.py` per deck after `_run_one_deck`, gated by env `OBED_MAPS_POSTER_FRAME=off|on|verify` (default off). Failures are contained: `OfflineWriteCorrupted` triggers deck regeneration unpatched and removal of the `.obedwrite.tmp` recovery file; `result["posterFrame"]` carries a per-deck record. Probe script `scripts/probe_movie_poster.py` (dump/patch/reopen, `--yes-open-keynote`, copies under `output/movie-poster-probe`, exact POSIX path check) is still owed a run before flipping the gate on — see Owner QA owed. `REVEAL_FPS=30` is now shared. `keynote-parser` (the `iwa` extra) is installed in `.venv` via `uv sync --extra iwa`. Two Codex passes: REQUEST-CHANGES then APPROVE-WITH-NITS, nit applied. Full original plan in the session scratchpad `qa-round-plan.md` Part A.
 - Shipped-plan details live in the session scratchpad as `mask-upgrades-plan.md`, `isolate-round2-plan.md`, `round3-plan.md`, `landing-plan.md`, `picker-reorder-plan.md`, `preview-band-plan.md`, `reveal-plan.md`, `reveal2-plan.md`.
 - Memory: `maps-p2-film-route`, `browser-pane-maplibre-hidden` (a hidden Browser pane freezes MapLibre's rAF — drive `map.resize()` via `javascript_tool`; never use port 8765).
 - Commands (dashboard needs the bundled Node): `PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`, then `npm run test:maps` and `npm run build` from `dashboard`. Python: `.venv/bin/python -m pytest tests/test_maps_api.py tests/test_maps_keynote.py tests/test_maps_reveal.py tests/test_watercolour.py -q`. Restart: `.venv/bin/python -m obed_edom dashboard --no-browser --port 8766`.
