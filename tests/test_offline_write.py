@@ -1197,26 +1197,28 @@ def test_compare_units_multiset_pass_and_fail():
 
 
 def test_compare_units_multiset_demotes_ambiguous_ordering_but_keeps_count_gating():
-    # T7 -- fix 2: a bucket whose positional pairing is genuinely ambiguous is demoted to
-    # informational, but a count mismatch under the same geometry still gates, and a
-    # resolvable-order delta still gates too.
+    # T7 -- fix 3 (conservative, never assert pairing is safe): a bucket whose positional
+    # pairing is ambiguous under the ROUNDED _sort_key is demoted to informational, but a
+    # count mismatch under the same geometry still gates, and a resolvable-order delta
+    # still gates too.
     def _u(x, y):
         return _unit("shape", x, y, 10, 10)
 
-    # (a) x constant, y gaps of 1.6px, arms related by a uniform +3px y translation. A
-    # translation preserves relative order exactly -- it cannot reorder anything -- so
-    # this is NOT ambiguous even though the within-arm gap (1.6px) is under tol (1.0):
-    # _order_unstable must read the actual cross-arm displacement, not just the gap.
-    # (Originally this fixture pinned the opposite behaviour -- the reviewer-confirmed
-    # bug: the old predicate checked only the within-arm X gap, which is 0 here since x
-    # is constant, and never looked at the cross-arm relationship at all.)
-    a = [_u(16.0, 0.0), _u(16.0, 1.6), _u(16.0, 3.2)]
-    b = [_u(16.0, 3.0), _u(16.0, 4.6), _u(16.0, 6.2)]
+    # (a) x constant, y gaps of 0.3px (<= tol 1.0), arms related by a uniform +3px y
+    # translation. Fix 2 treated a provable cross-arm translation as proof pairing was
+    # safe -- a translation alone cannot reorder anything -- and reported this as a real
+    # 3px delta. A reviewer showed a genuine MIS-PAIRING can mimic a uniform translation,
+    # so fix 3 deletes that escape hatch entirely: this tightly-packed bucket (0.3px <=
+    # tol) is ambiguous by the rounded-key rule alone, like any other tight bucket, and
+    # its worst reads as an upper bound rather than a gating displacement. This is the
+    # owner-accepted conservative cost, not an oversight.
+    a = [_u(16.0, 0.0), _u(16.0, 0.3), _u(16.0, 0.6)]
+    b = [_u(16.0, 3.0), _u(16.0, 3.3), _u(16.0, 3.6)]
     report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
     entry = report["per_kind"]["shape"]
-    assert entry.get("ambiguous") is not True
-    assert entry.get("informational") is not True
-    assert report["pass"] is False
+    assert entry["ambiguous"] is True
+    assert entry["informational"] is True
+    assert report["pass"] is True
     assert entry["worst"] == pytest.approx(3.0)
 
     # (b) x gaps of 100px (well over tol) -> ordering resolvable: a real displacement
@@ -1227,18 +1229,23 @@ def test_compare_units_multiset_demotes_ambiguous_ordering_but_keeps_count_gatin
     assert report2["per_kind"]["shape"].get("ambiguous") is not True
     assert report2["pass"] is False
 
-    # (c) count mismatch under the SAME (non-ambiguous) geometry as (a): the population
-    # check gates regardless.
+    # (c) count mismatch under the SAME (ambiguous) geometry as (a): the population check
+    # is order-independent and gates regardless of pairing ambiguity.
     report3 = compare_units_multiset(a, b[:2], tol_hard=1.0, tol_soft=1.0)
     assert report3["pass"] is False
     assert report3["per_kind"]["shape"]["pass"] is False
 
 
-def test_compare_units_multiset_uniform_translation_never_ambiguous():
-    # A pure translation -- every unit shifted by the SAME amount -- can never reorder a
-    # population, no matter how tight the within-arm spacing is, so it must always gate as
-    # a real displacement rather than being demoted. Reproduces the second case from the
-    # reviewer's finding: a real 10px translation across a near-tied-in-x pair.
+def test_compare_units_multiset_uniform_translation_now_demoted_conservatively():
+    # Fix 2 treated a provable cross-arm uniform translation as proof that positional
+    # pairing was safe -- a pure translation cannot reorder a population, so it gated as a
+    # real displacement no matter how tight the within-arm spacing was. A reviewer showed
+    # a genuine MIS-PAIRING can mimic a uniform translation, so fix 3 deletes that escape
+    # hatch entirely: pairing safety is judged from the rounded _sort_key alone, with no
+    # exceptions. This bucket's 0.5px x-gap is <= tol, so it is ambiguous like any other
+    # tight bucket, and its 10px worst is now an upper bound, not a gating delta. This
+    # reversal is the owner's explicit, signed-off conservative choice -- never assert
+    # pairing is safe -- not an oversight.
     def _u(x, y):
         return _unit("shape", x, y, 10, 10)
 
@@ -1246,8 +1253,9 @@ def test_compare_units_multiset_uniform_translation_never_ambiguous():
     b = [_u(10.0, 0.0), _u(10.5, 100.0)]
     report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
     entry = report["per_kind"]["shape"]
-    assert entry.get("ambiguous") is not True
-    assert report["pass"] is False
+    assert entry["ambiguous"] is True
+    assert entry["informational"] is True
+    assert report["pass"] is True
     assert entry["worst"] == pytest.approx(10.0)
 
 
@@ -1266,6 +1274,60 @@ def test_compare_units_multiset_demotes_genuine_cross_arm_reordering():
     a = [_u(0.0), _u(0.3), _u(0.6), _u(0.9), _u(1.2)]
     perturb = [3.0, -3.0, 3.0, -3.0, 3.0]
     b = [_u(y + dy) for y, dy in zip((0.0, 0.3, 0.6, 0.9, 1.2), perturb)]
+    report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
+    entry = report["per_kind"]["shape"]
+    assert entry["ambiguous"] is True
+    assert entry["informational"] is True
+    assert report["pass"] is True
+
+
+def test_compare_units_multiset_mispairing_mimics_translation_is_ambiguous():
+    # Reviewer case 1 (false-FAIL avoidance): fix 2's cross-arm "uniform translation"
+    # escape hatch read this as a single translation and declared pairing safe, then
+    # reported the mis-pair distance as a real displacement -- a false FAIL. Arm A's own
+    # rounded x-order (1.0, 2.0) is separated by exactly tol, so a sub-tolerance swap with
+    # arm B's near-identical pair can't be ruled out; fix 3 must call it ambiguous with no
+    # cross-arm exception.
+    def _u(x, y):
+        return _unit("shape", x, y, 10, 10)
+
+    a = [_u(2.0, 6.0), _u(1.0, 7.0)]
+    b = [_u(1.5, 6.5), _u(1.4, 7.5)]
+    report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
+    entry = report["per_kind"]["shape"]
+    assert entry["ambiguous"] is True
+    assert entry["informational"] is True
+    assert report["pass"] is True
+
+
+def test_compare_units_multiset_ambiguity_uses_rounded_key_not_raw_coordinates():
+    # Reviewer case 2 (rounded-key consistency): fix 2 picked the "first distinguishing
+    # coordinate" from RAW coordinates while _sort_key rounds to 1dp, so it picked the
+    # raw 0.04px x-gap and called this ambiguous, demoting a real 3px shift. Both arms'
+    # x values round to 0.0 (tied), so y is what actually orders them -- arm A's y-gap is
+    # 100px and arm B's is 94px, both well over tol -- so this must NOT be ambiguous and
+    # the 3px delta must gate.
+    def _u(x, y):
+        return _unit("shape", x, y, 10, 10)
+
+    a = [_u(0.0, 0.0), _u(0.04, 100.0)]
+    b = [_u(0.0, 3.0), _u(0.04, 97.0)]
+    report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
+    entry = report["per_kind"]["shape"]
+    assert entry.get("ambiguous") is not True
+    assert entry.get("informational") is not True
+    assert report["pass"] is False
+    assert entry["worst"] == pytest.approx(3.0)
+
+
+def test_compare_units_multiset_exact_duplicate_rounded_box_is_ambiguous():
+    # Two units tied in all four rounded _sort_key components can never be told apart by
+    # position, independent of tol.
+    def _u(x, y):
+        return _unit("shape", x, y, 10, 10)
+
+    a = [_u(5.0, 5.0), _u(5.0, 5.0)]
+    b = [_u(5.0, 5.0), _u(5.0, 5.0)]
     report = compare_units_multiset(a, b, tol_hard=1.0, tol_soft=1.0)
     entry = report["per_kind"]["shape"]
     assert entry["ambiguous"] is True

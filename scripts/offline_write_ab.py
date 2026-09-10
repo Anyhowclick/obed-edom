@@ -547,33 +547,23 @@ def _sort_key(u: dict[str, Any]) -> tuple[float, float, float, float]:
     return (round(x, 1), round(y, 1), round(w, 1), round(h, 1))
 
 
-def _cross_shift(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float, float, float]:
-    ax, ay, aw, ah = _unit_box(a)
-    bx, by, bw, bh = _unit_box(b)
-    return (bx - ax, by - ay, bw - aw, bh - ah)
-
-
 def _order_unstable(
     a_list: list[dict[str, Any]], b_list: list[dict[str, Any]], tol: float
 ) -> bool:
-    """Positional pairing (each arm independently sorted by its own box, then zipped by
-    index) is trustworthy when either: the cross-arm displacement is a single translation
-    within ``tol`` -- a translation preserves relative order, so no swap could have
-    happened -- or every adjacent pair, in each arm, is separated by more than ``tol``
-    along the coordinate that actually distinguishes them, so no sub-tolerance jitter could
-    swap them. Otherwise a sub-tolerance swap is plausible and pairing is ambiguous."""
-    a_sorted = sorted(a_list, key=_sort_key)
-    b_sorted = sorted(b_list, key=_sort_key)
-    shifts = [_cross_shift(u, v) for u, v in zip(a_sorted, b_sorted)]
-    if shifts:
-        ref = shifts[0]
-        if all(max(abs(s[i] - ref[i]) for i in range(4)) <= tol for s in shifts):
-            return False
-    for arm in (a_sorted, b_sorted):
-        for u, v in zip(arm, arm[1:]):
-            bu, bv = _unit_box(u), _unit_box(v)
-            idx = next((i for i in range(4) if abs(bv[i] - bu[i]) > 1e-6), None)
-            if idx is not None and abs(bv[idx] - bu[idx]) <= tol:
+    """Positional pairing (each arm independently sorted by its own rounded box, then
+    zipped by index) is trustworthy only when, in BOTH arms, every adjacent pair is
+    separated by more than ``tol`` along the first :func:`_sort_key` (rounded) component
+    where they differ -- and by no more than ``tol`` where they are identical in all four
+    rounded components, since then nothing distinguishes them at all. No cross-arm shift
+    is consulted: a genuine mis-pairing can mimic a uniform translation, so a translation
+    is never treated as proof that pairing is safe -- conservative by design (never assert
+    pairing is safe when it might not be)."""
+    for arm in (a_list, b_list):
+        arm_sorted = sorted(arm, key=_sort_key)
+        for u, v in zip(arm_sorted, arm_sorted[1:]):
+            ku, kv = _sort_key(u), _sort_key(v)
+            idx = next((i for i in range(4) if ku[i] != kv[i]), None)
+            if idx is None or abs(kv[idx] - ku[idx]) <= tol:
                 return True
     return False
 
@@ -594,11 +584,12 @@ def compare_units_multiset(
     gate at ``tol_hard``; everything else at ``tol_soft``; text is INFORMATIONAL
     (x-delta only, never gates the overall pass/fail) -- kept as a cross-check against
     the identity compare, never the primary gate itself (D1). A bucket is also demoted to
-    informational when positional pairing is ambiguous (:func:`_order_unstable`): the
-    cross-arm displacement isn't a single translation AND some adjacent pair, in either
-    arm, is closer than the compared tolerance along its distinguishing coordinate, so a
-    sub-tolerance swap could have crossed two units. Its count mismatch still gates, but
-    its per-unit delta does not.
+    informational when positional pairing is ambiguous (:func:`_order_unstable`): some
+    adjacent pair, in either arm, is closer than the compared tolerance along the first
+    rounded ``_sort_key`` component where they differ (or is tied in all four), so a
+    sub-tolerance swap could have crossed two units. No cross-arm shift is ever consulted
+    to override that -- conservative by design, a false FAIL beats a hidden delta here.
+    Its count mismatch still gates, but its per-unit delta does not.
 
     Returns ``{"pass": bool, "per_kind": {bucket: {n_a, n_b, pass, worst, reasons,
     informational?, ambiguous?}}}``.
