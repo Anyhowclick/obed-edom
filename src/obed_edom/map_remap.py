@@ -887,12 +887,13 @@ CENTRE_PANEL_CENTRE_TOLERANCE = 0.25
 CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION = 0.25
 
 
-def centre_panel_image(
+def _centre_panel_item(
     items: Iterable[dict], wall_w: float, wall_h: float, dest_w: float, dest_h: float
-) -> Rect | None:
+) -> dict | None:
     if dest_w <= 0 or dest_h <= 0 or wall_w <= 0 or wall_h <= 0:
         return None
-    best: Rect | None = None
+    best: dict | None = None
+    best_rect: Rect | None = None
     for item in items:
         if not is_pairable_image(item):
             continue
@@ -903,9 +904,16 @@ def centre_panel_image(
             continue
         if abs((r.x + r.w / 2) - wall_w / 2) > wall_w * CENTRE_PANEL_CENTRE_TOLERANCE:
             continue
-        if best is None or r.w * r.h > best.w * best.h:
-            best = r
+        if best_rect is None or r.w * r.h > best_rect.w * best_rect.h:
+            best, best_rect = item, r
     return best
+
+
+def centre_panel_image(
+    items: Iterable[dict], wall_w: float, wall_h: float, dest_w: float, dest_h: float
+) -> Rect | None:
+    item = _centre_panel_item(items, wall_w, wall_h, dest_w, dest_h)
+    return item_rect(item) if item is not None else None
 
 
 def _slide_for_panel_framing(slide: dict, panel: Rect) -> dict:
@@ -3873,11 +3881,16 @@ def _recipe_reusing_affine(
     """Re-anchor this recipe on an adjacent same-pin sibling's affine so a magic-move map stays 1:1."""
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
-    panel = centre_panel_image(slide.get("items") or [], wall_w, wall_h, dest_w, dest_h)
+    panel_item = _centre_panel_item(slide.get("items") or [], wall_w, wall_h, dest_w, dest_h)
+    panel = item_rect(panel_item) if panel_item is not None else None
     src = panel or _rect_from_dict(recipe.get("mapSrc"))
     if src is None or src.w <= 0 or src.h <= 0 or affine.s <= 0:
         return None
-    affine = _cover_clamp(affine, src, dest_w, dest_h)
+    # Offline geometry reports a rotated item's AABB top-left with its UNROTATED w/h (iwa_geometry
+    # `_frame_rect`), so `_cover_clamp`'s axis-aligned covers-the-frame test is meaningless for it —
+    # refuse the clamp rather than move an already-valid rotated crop on bad arithmetic.
+    if panel_item is None or _f(panel_item.get("rotation")) % 360 == 0:
+        affine = _cover_clamp(affine, src, dest_w, dest_h)
     dst = affine.apply_rect(src)
     out = dict(recipe)
     out["mapSrc"] = src.as_dict()
@@ -3888,6 +3901,16 @@ def _recipe_reusing_affine(
         {**affine.as_dict(), "src": src.as_dict(), "dst": dst.as_dict(), "members": 0}
     ]
     return out
+
+
+# A recipe may seed (or continue) a sibling-reuse chain only if its affine actually came from
+# g_slide's own geometry: "template"/"template-layout"/"template-cover" (learn_recipe fit map_dst
+# against the template slide) or "sibling-affine" (a continuation of an already-qualified link).
+# "cover-fallback" can carry a templateSlide too, but that affine is a crop of the WALL panel with
+# no template geometry behind it, so it must not qualify — despite looking like "landed on template N".
+_TEMPLATE_FRAMED_SOURCES = frozenset(
+    {"template", "template-layout", "template-cover", "sibling-affine"}
+)
 
 
 ROSTER_MIN_NAMES = 8
@@ -4105,7 +4128,11 @@ def plan_payload_transforms(
             else None
         )
         prev_number = number
-        prev_template = slide_recipe.get("templateSlide")
+        prev_template = (
+            slide_recipe.get("templateSlide")
+            if slide_recipe.get("source") in _TEMPLATE_FRAMED_SOURCES
+            else None
+        )
     return transforms
 
 
