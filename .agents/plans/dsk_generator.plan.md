@@ -8,9 +8,14 @@ overview: >-
   clips for ProPresenter7 — one clip per build step on built slides — because
   Keynote can mask an image but not a movie and emits no alpha in live
   playback. Slides are classified offline (`iwa_builds.deck_builds`
-  + kind counts), the operator confirms per slide in a review page (resizer/
-  checker pairing pattern), and apply runs the movie-crop pipeline and the deck
-  assembly. The movie-crop utility is shared so `maps_keynote.export_maps_job
+  + kind counts), the operator picks which slides convert (the
+  resizer's `range_from`/`range_to`/`slides` pre-filter plus per-slide include
+  toggles in a review page — resizer/checker pairing pattern) and confirms each
+  one, and apply runs the movie-crop pipeline and the deck assembly. Side-panel
+  content is dropped by default but can be kept per slide, exactly like the
+  resizer's `keepSideContent`. The dashboard tab becomes **DSK** with two
+  sub-tabs: **Generator** (this FW→DSK flow) and **Exporter** (the d5 PP7-asset
+  machinery exposed standalone, over any DSK deck — hand-built or generated). The movie-crop utility is shared so `maps_keynote.export_maps_job
   (export_dsk=True)` can stop leaving movies at wall geometry. Offline probe
   numbers are 2026-09-10 read-only; the live probe of the same date (Keynote
   15.3.1, owner's machine) is recorded separately and supersedes several
@@ -23,7 +28,7 @@ todos:
     content: "Offline slide classifier (`dsk_plan.py`) over `iwa_builds.deck_builds` + offline kinds; no Keynote. Fixture: `Sermon_PK (GW).key`."
     status: pending
   - id: d2-band-affine
-    content: "Read the DSK band rect from a reference DSK deck/template; contain-fit affine per item, clipped to the centre panel; no hardcoded band."
+    content: "Read the DSK band rect from a reference DSK deck/template; contain-fit affine per item, clipped to the centre panel — or to the full 7680×1080 wall on slides the operator marks \"include side content\"; no hardcoded band."
     status: pending
   - id: d3-movie-crop
     content: "Shared `dsk_movie_export.py`: scratch centre-panel deck (3840×1080) → native-size ProRes 4444 export → ffmpeg crop/scale; display-poke + RSS watchdog; includes the alpha probe and the (i)/(ii) mechanic decision."
@@ -34,8 +39,11 @@ todos:
   - id: d5-pp7-export
     content: "Export folder for PP7: true-alpha ProRes 4444, one clip per build step on `built` slides, Keynote slide-number naming, manifest."
     status: pending
+  - id: d5b-exporter
+    content: "Standalone **Exporter**: classify ANY DSK deck offline, operator picks slides, emit the PP7 asset folder (per-build alpha clips, movie clips, alpha PNGs) with d5's naming/manifest. Reuses `dsk_movie_export.py` + `dsk_plan.py`; no band affine, no scratch centre-panel deck."
+    status: pending
   - id: d6-api-ui
-    content: "Replace the `POST /api/dsk` 501 stub with propose→review→apply mirroring `/api/resize`; extend `DskTab.tsx`."
+    content: "Replace the `POST /api/dsk` 501 stub with propose→review→apply mirroring `/api/resize` (incl. `range_from`/`range_to`/`slides`), add `POST /api/dsk/export`; split `DskTab.tsx` into Generator/Exporter sub-tabs and rename the tab label to \"DSK\"."
     status: pending
   - id: d7-insert-mode
     content: "Accept an existing incomplete DSK deck and choose insertion positions (MapsTab drag-drop pattern). Promoted toward core — see Open question 9."
@@ -283,7 +291,7 @@ One classifier, `src/obed_edom/dsk_plan.py`, offline only. Inputs per slide:
 `iwa_builds.deck_builds(fw_deck)` (`{number: {slideId, builds, transition, ...}}`)
 and the offline item kinds from `offline_inspect.offline_wall_payload`, filtered
 to the centre panel with `map_remap.CENTRE_PANEL_RECT` (`map_remap.py:439`) and
-`map_remap.is_side_panel_item(item, wall_w, wall_h)` (`map_remap.py:445`).
+`map_remap.is_side_panel_item(item, wall_w, wall_h)` (`map_remap.py:446`).
 (There is no `is_side_panel_only`; the earlier name was wrong.
 `CENTRE_ORIGIN_X` lives in `maps_geo.py:33`, not `map_remap`.)
 
@@ -295,8 +303,39 @@ to the centre panel with `map_remap.CENTRE_PANEL_RECT` (`map_remap.py:439`) and
 | `movie` | any `TSD.MovieArchive` in the centre panel | **export-crop**: scratch-deck movie export → ffmpeg → insert the exported clip into the DSK deck, stroke 5pt; the FW movie object is **deleted**, which clears its builds; the slide's own transition is set to `none` (the clip owns the timing) |
 | `mixed` | movie **and** builds/other content | treat as `movie` (the export bakes everything), flag in the review page for operator override |
 
-Side-panel items (outside the centre panel) are dropped unconditionally —
-owner decision 2026-09-10; no per-slide whitelist as in the CG resizer.
+**Side-panel content (owner revision, 2026-09-10).** Side-panel items (outside
+`map_remap.CENTRE_PANEL_RECT`, i.e. `is_side_panel_item(item, wall_w, wall_h)`
+true at `map_remap.py:446`) are dropped **by default**, but the operator may keep
+them **per slide**, exactly as the CG resizer's `keepSideContent` works
+(`FramingReview.tsx:419` `toggleSideContent`, the bulk buttons at `:519`/`:528`,
+the per-page checkbox at `:964`; server side `_side_content_slides_from_result`
+at `app.py:1212`). The earlier "dropped unconditionally — no per-slide whitelist"
+line is withdrawn.
+
+Semantics, per memory `church-list-keep-side-panel-spec`: the **centre wall is
+always kept**; off-centre objects appear **only** on slides explicitly marked,
+per slide, and the mark is **never carried forward by reuse** or by neighbouring
+slides. Scope is positional, not by object kind (text, image, shape, group all
+count).
+
+What "include side content" means for the DSK:
+
+- **Band affine (`d2`).** The item's visible rect becomes
+  `item_rect ∩ FULL_WALL_RECT` (0,0,7680,1080 — `map_remap.LW_WALL_SIZE` at
+  `map_remap.py:438`) instead of `item_rect ∩ map_remap.CENTRE_PANEL_RECT`, and
+  the contain-fit is computed over the **union** of the kept items' visible
+  rects, so the whole composed group lands in the band at one scale (never
+  per-item scales, which would break the relative layout).
+- **Movie path (`d3`).** The scratch deck stays **7680×1080** for that slide
+  rather than being cut to 3840×1080 — the live probe exported `Sermon_GW` at
+  7680×1080 at `native size`, so the wall-width native export is proven — and
+  **ffmpeg crops to the union rect** afterwards. Centre-only slides keep the
+  cheaper 3840×1080 scratch deck, so the scratch-deck width is a **per-slide**
+  property; a mixed run needs two scratch decks (or one 7680 deck with
+  centre-only slides cropped by ffmpeg — measure before choosing).
+- **Grouping edge case** (same memory): a group whose bbox straddles centre and
+  side is deemed centre content. That is a **source-deck mistake**, already
+  surfaced as a dashboard warning; the DSK generator must not auto-split it.
 
 Keep `deck_builds`'s per-slide-number dict as the primary key so slide-number
 bookkeeping stays consistent downstream. `built` is a genuine both-ways case:
@@ -390,7 +429,11 @@ owner's deck. Set `width`/`height` to **3840×1080** on the open document and
 translate every item by `-maps_geo.CENTRE_ORIGIN_X`, so the centre panel becomes
 the canvas. This is now a **preference, not a requirement** — the live probe
 exported a 7680×1080 document at native size — but it bakes the crop, clips
-off-canvas media for free, and quarters the intermediate file size. Import the
+off-canvas media for free, and quarters the intermediate file size.
+**Exception: slides marked "include side content" keep the scratch deck at
+7680×1080** with no translation (the wall-width native export is proven by the
+live probe), and the crop to the kept-item union rect is done in ffmpeg instead
+of by the canvas. Import the
 Lower-Thirds/black layout here too (see the layouts blocker). Then:
 `export theDoc to <file> as QuickTime movie with properties {movie format:native
 size, movie codec:AppleProRes422LT, movie framerate:FPS30, skipped slides:false}`.
@@ -546,6 +589,21 @@ per-slide choice (centre / left / right, defaulting to centre — the sample's m
 `cx = 960`). Refuse rather than guess if the reference deck yields fewer than
 three band items. **This is a scale, not a crop** — see the crop blocker.
 
+**Include-side-content variant.** When the slide's review decision sets
+`keepSideContent` (same field name and semantics as the resizer — see
+Classification), the visible rect is `item_rect ∩ (0,0,7680,1080)` and the fit is
+taken over the **union** of every kept item's visible rect: `s` is computed once
+and applied to all of them, so their relative positions survive. A full-wall
+union at h = 350 would be 2489pt wide — wider than the 26…1894 envelope — so the
+fit is **width-bound** on those slides (`s = min(band_h/union_h,
+envelope_w/union_w)`) and the result is shorter than the band. That is expected;
+surface it in the review page so the operator can switch back to centre-only.
+
+**Owner (2026-09-10):** accepted — an include-side slide is width-bound to the
+full band envelope and therefore comes out shorter than the 350pt band height
+(roughly 263pt for a full-wall union); the review page shows the resulting
+height before apply.
+
 **Owner (Q6, 2026-09-10):** a real band placeholder **should** exist in the DSK
 template, but it must be agreed with church staff. Tracked as an **external
 dependency**; until it lands, the measured values (h 350, bottom 1054, envelope
@@ -658,6 +716,48 @@ stage; **verify against a real `as slide images … {all stages:true}` export in
 the intermediate to **AppleProRes422LT** or **h264**; 422HQ only on request.
 `native size` is required for any codec choice to apply at all.
 
+## Exporter (standalone)
+
+`d5b`. The **Exporter** is `d5`'s asset machinery pointed at a DSK deck instead of
+at the generator's output — a first-class feature, because the owner has
+hand-built DSK decks that never came from this pipeline and still need PP7 assets.
+
+**Input.** Any 1920×1080 DSK Keynote — hand-built (e.g.
+`~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`) or produced by the
+Generator, or by the Maps tab (`d8`).
+
+**Output.** The same PP7 asset folder as `d5`: true-alpha ProRes 4444 clips
+**one per build step** on `built` slides, a movie clip per `movie` slide, an
+**alpha PNG** per `static` slide where the slide goes transparent (the KPF
+lead-fill strip is proven to work only where there is no full-bleed backing — see
+the live probe; slides that stay opaque are reported, not silently emitted), and
+the same naming convention and manifest JSON as `d5`.
+
+**What it reuses.** `dsk_plan.py`'s classifier (`d1`) runs unchanged — its inputs
+are `iwa_builds.deck_builds` plus offline item kinds, neither of which cares about
+canvas width — except that the centre-panel filter is **skipped**: a DSK deck is
+not an LW wall, `map_remap.is_lw_wall(1920, 1080)` is false and
+`is_side_panel_item` (`map_remap.py:446`) correctly returns `False` for every
+item, so the whole slide is in scope. `dsk_movie_export.py` (`d3`) is reused for
+the export batch, the `skipped`-toggle per-slide mechanic, the display poke, the
+process lock and the RSS watchdog.
+
+**What it does NOT do.** No band affine (`d2`) — the deck is already at DSK
+geometry. No scratch centre-panel deck and no `-CENTRE_ORIGIN_X` translation —
+the export deck is a plain **`ditto` copy with the non-selected slides deleted or
+`skipped:true`**, which is strictly simpler than the generator's scratch deck. No
+deck assembly (`d4`), no stroke patch, no layout import: the input deck's layouts
+are already 1920-wide.
+
+**Selection.** Same surface as the Generator: `range_from`/`range_to`/`slides`
+as the pre-filter on propose, per-slide include toggles in the review page as the
+authority.
+
+**Relationship to `d8`.** The Maps tab's DSK export produces a DSK deck; once the
+Exporter exists, `d8` can simply **hand that deck to the Exporter** for PP7
+assets rather than growing its own export path. `d8`'s own scope stays the shared
+movie-crop utility.
+
 ## Operator rules (live runs)
 
 - Work dir under `~/Desktop` or repo `output/` — **never `/private/tmp`**.
@@ -691,7 +791,17 @@ rewrite, since offline write is still default-off.
 
 Mirror `/api/resize`'s three phases in `src/obed_edom/web/app.py`:
 
-- `POST /api/dsk` — replaces the 501 stub at `:494`. **Propose is live,
+- `POST /api/dsk` — replaces the 501 stub at `:494`. It takes the resizer's
+  **slide-selection form fields verbatim**: `range_from: int | None = Form(None)`,
+  `range_to: int | None = Form(None)`, `slides: str = Form("")`, resolved through
+  `map_remap.resolve_slides(spec=slides or None, range_from=…, range_to=…)`
+  (`map_remap.py:2953`) exactly as `resize_keynote` does (`app.py:506-531`), and
+  persisted on the job result as `slideRange` so apply re-reads it the way
+  `apply_resize` does (`app.py:607-608`). This is a **pre-filter only**: propose
+  classifies just the selected slides, and the **review page's per-slide include
+  toggles are authoritative** — apply converts exactly the slides whose decision
+  says include, so the operator can drop a slide the range let through, but
+  cannot add one the range excluded without re-proposing. **Propose is live,
   read-only and short**, not offline: `_run_resize_propose` (`:1266`) calls
   `acquire_wall_payload`, which combines the IWA read with a **bulk Keynote
   geometry pass**, and it renders live slide-image thumbnails. Only the
@@ -700,14 +810,51 @@ Mirror `/api/resize`'s three phases in `src/obed_edom/web/app.py`:
   `{pages: [{index, thumb, category, buildCount, movieCount, action, anchor}]}`.
 - `POST /api/dsk/{job_id}/review` — a `DskDecisionsBody` shaped like `FramingsBody`
   (`:115`, `{decisions: [{wallIndex, ...}]}`) and persisted the same way
-  `save_resize_framings` (`:564`) does, so a re-propose keeps the answers.
+  `save_resize_framings` (`:564`) does, so a re-propose keeps the answers. Each
+  decision carries `{wallIndex, include, action, anchor, overlay, keepSideContent}`.
+  `keepSideContent` **reuses the resizer's field name and semantics**; read it
+  back with a `_side_content_slides_from_result` sibling (`app.py:1212`) so the
+  per-slide whitelist is derived identically on both features.
 - `POST /api/dsk/{job_id}/apply` — runs crop + assembly, polled through the existing
   `GET /api/jobs/{id}`; accepts a decisions body like `apply_resize` (`:592`).
+- `POST /api/dsk/export` + `POST /api/dsk/export/{job_id}/review` +
+  `POST /api/dsk/export/{job_id}/apply` — the **Exporter** (`d5b`), mirroring the
+  three generator phases exactly: propose classifies the given DSK deck's slides
+  (offline classify, live thumbnails, same `range_from`/`range_to`/`slides`
+  pre-filter), review persists the per-slide include/action decisions, apply runs
+  the export batch. Feature tag `dsk-export`, so History/sessions
+  (`dashboard/src/sessions.ts:29`, `HistoryTab.tsx:38`) keep it separate from the
+  generator's `dsk` runs.
+
+**Dashboard tab: "DSK Generator" → "DSK", with two sub-tabs.** The label lives in
+two places and both must change: `dashboard/src/App.tsx:24`
+(`{ id: "dsk", label: "DSK Generator" }` in the `TABS` array) and
+`dashboard/src/nav.ts:10` (`FEATURE_LABELS.dsk`); `nav.ts:20`
+(`OPEN_IN_LABELS.dsk`, "Open in DSK Generator") becomes "Open in DSK". The
+`FeatureId`/`TabId` union stays `"dsk"` (`nav.ts:3`) — this is a label and
+sub-navigation change, not a new top-level tab, so `App.tsx:115`, `sessions.ts:29`
+and `HistoryTab.tsx:38`/`:136` keep working.
+
+**No sub-tab pattern exists in the tab registry** — `App.tsx`'s `TABS` array is
+flat and neither `MapsTab` nor `SettingsTab` has sub-navigation. Use the repo's
+existing **segmented control** instead, inside `DskTab.tsx`: a
+`<div className="seg">` of `<button className={sub === "…" ? "on" : ""}>`, styled
+by `dashboard/src/styles.css:901-911` and already used at
+`components/GenerateResultView.tsx:91-103` and `tabs/MapsTab.tsx:2347`. Sub-tab
+state is local `useState<"generator" | "exporter">("generator")`; persist the last
+choice via `dashboard/src/prefs.ts` if that is cheap, otherwise default to
+Generator. Split the current 126-line `DskTab.tsx` body into
+`tabs/dsk/DskGenerator.tsx` and `tabs/dsk/DskExporter.tsx`, leaving `DskTab.tsx`
+as the segmented shell.
 
 Frontend: extend `dashboard/src/tabs/DskTab.tsx` (drop `stubDsk`,
 `dashboard/src/api.ts:233`) with a **new lighter per-slide review list** — thumbnail,
 category chip, build/movie counts, an action select (in-deck / export / both / skip),
-a horizontal-anchor select, an include toggle, **and a stat-overlay select (bake into clip [default] / clip only)**. Do **not** reuse
+a horizontal-anchor select, an include toggle, **a "keep side panels" checkbox
+(default off, mirroring `FramingReview.tsx:964` and its bulk keep/drop buttons at
+`:519`/`:528`)**, **and a stat-overlay select (bake into clip [default] / clip
+only)**. Above the list, a range/slides input feeding `range_from`/`range_to`/
+`slides` on the propose call. Do **not** reuse
 `components/FramingReview.tsx` (1013 lines): its affine/anchor-pairing UI is
 CG-specific. `cd dashboard && npm install && npm run build` after any
 `dashboard/src/**` change (SKILL.md).
@@ -729,7 +876,13 @@ operator-run, hands-off Keynote window on a **copy**.
    item maps to a 1868×350-contained rect; **`Sermon_PK (GW).key` slide 32's
    3840×2160 movie at (1920, −763) fits from its visible rect, not its declared
    rect** (the naive `band_h/src_h` answer is rejected); a reference with <3 band
-   items refuses.
+   items refuses. **Side content:** with `keepSideContent` off (the default) a
+   side-panel-only item contributes nothing to the fit; with it on for that slide
+   only, the fit is taken over the union rect against the full 7680×1080 wall, the
+   result is width-bound inside the 26…1894 envelope, every kept item shares one
+   scale, and the neighbouring slides are **unchanged** (the whitelist does not
+   propagate, per `church-list-keep-side-panel-spec`); the reported height for a
+   full-wall union is < band height (width-bound).
 3. **`d3` movie crop — live, feature-flagged.** Acceptance (operator): one FW movie
    slide → scratch deck → exported `.mov` → **ffprobe reports the expected
    dimensions *and* a duration matching the model** (per-slide hold 5.0 s +
@@ -761,12 +914,30 @@ operator-run, hands-off Keynote window on a **copy**.
    choice from the review page is honoured; a manifest JSON lists
    slide → build index → asset. Per-build clip generation and the naming/manifest
    work are separate PRs.
-6. **`d6` API/UI — offline.** Acceptance: propose/review/apply round-trips against a
-   stubbed runner; `npm run build` clean; `POST /api/dsk` no longer returns 501.
-7. **`d7` insert mode — offline UI + live splice.**
-8. **`d8` maps reuse.** Acceptance: a Maps job with a movie item and `export_dsk=True`
+6. **`d5b` Exporter — offline (classify/selection) + live (export).** Acceptance:
+   pointed at `~/Desktop/Diff-Checker/Sermon_PK (DSK)_with mistakes.key`, the
+   classifier reports its **7 built slides {5, 13, 14, 17, 26, 29, 30}** and its
+   **1 movie slide (13)** with no Keynote process started; selecting all of them
+   yields **N clips for the build slides** (one per build step, N = the deck's
+   total build count), **1 movie clip**, and an alpha PNG per selected `static`
+   slide (or an explicit "stayed opaque" report), plus the `d5` manifest; the
+   export deck is a `ditto` copy with non-selected slides deleted/`skipped`, and
+   **no band affine and no scratch centre-panel deck run at all** (assert in the
+   test); the owner's input deck is byte-unchanged.
+7. **`d6` API/UI — offline.** Acceptance: propose/review/apply round-trips against a
+   stubbed runner for **both** `/api/dsk` and `/api/dsk/export`; the
+   `range_from`/`range_to`/`slides` pre-filter narrows the proposed page list and
+   the review page's include toggles override it (a slide inside the range but
+   toggled off is not converted); a per-slide "keep side panels" toggle
+   round-trips through the decisions body and reaches the runner as a
+   `side_content_slides`-style set; the tab reads **"DSK"** with working
+   **Generator** / **Exporter** sub-tabs; `npm run build` clean; `POST /api/dsk`
+   no longer returns 501.
+8. **`d7` insert mode — offline UI + live splice.**
+9. **`d8` maps reuse.** Acceptance: a Maps job with a movie item and `export_dsk=True`
    produces a cropped clip instead of a scaled full-panel one; image behaviour
-   byte-identical to today.
+   byte-identical to today. Once `d5b` has shipped, the Maps DSK deck is handed to
+   the **Exporter** for PP7 assets rather than growing a second export path.
 
 ## Open questions for the owner
 
@@ -825,8 +996,10 @@ operator-run, hands-off Keynote window on a **copy**.
    a separate mask-authoring workstream?
    **Owner (2026-09-10):** scale-only is acceptable. Copy the image together with
    its existing mask from the LW deck into the DSK deck and scale it; the operator
-   adjusts the crop manually afterwards. Side panels are ignored entirely by this
-   converter.
+   adjusts the crop manually afterwards. (The same day, the owner **revised** the
+   "side panels are ignored entirely" half of this answer: side content is dropped
+   by **default**, with a per-slide "include side content" toggle mirroring the
+   resizer's `keepSideContent` — see Classification.)
 8. The stat overlay ("1.9% Christians", top-right of the band) — is it FW wall content
    that should flow through automatically, or DSK-side text typed after import?
    **Owner (2026-09-10):** "What I did was to bake it in together with the video.
