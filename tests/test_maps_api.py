@@ -175,6 +175,7 @@ def test_fly_opts_stripped_unless_movie():
             "easeIn": 0.4,
             "easeOut": 0.4,
             "flyZoom": 5.0,
+            "flight": "phases",
         }
     ]
     saved = _save(job, doc)
@@ -183,6 +184,7 @@ def test_fly_opts_stripped_unless_movie():
     assert "easeIn" not in links[0]
     assert "easeOut" not in links[0]
     assert "flyZoom" not in links[0]
+    assert "flight" not in links[0]
 
 
 def test_movie_fly_opts_roundtrip():
@@ -214,6 +216,56 @@ def test_movie_fly_opts_roundtrip():
     assert link["easeIn"] == 0.6
     assert link["easeOut"] == 0.5
     assert link["flyZoom"] == 6.2
+
+
+def test_movie_flight_roundtrips_with_curve():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["camera"] = {**slide["camera"], "pitch": 40}
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 2.0,
+            "playWithoutClick": False,
+            "flight": "arc",
+            "curve": 1.8,
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    link = saved.json()["result"]["links"][0]
+    assert link["flight"] == "arc"
+    assert link["curve"] == 1.8
+
+
+def test_movie_flight_rejects_invalid_value():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["camera"] = {**slide["camera"], "pitch": 40}
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 2.0,
+            "playWithoutClick": False,
+            "flight": "spiral",
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 400, saved.text
 
 
 def test_dissolve_roundtrip():

@@ -837,6 +837,15 @@ def test_coerce_uses_strictest_cg_transition_requirement():
     assert dissolve["duration"] == 1.7
 
 
+def test_coerce_strips_flight_when_kind_stays_morph():
+    a = _slide("s1", _camera(3.0, 101.0, 8))
+    b = _slide("s2", _camera(3.0, 101.01, 8))
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7, "flight": "phases"}]
+    next_links = coerce_link_kinds([a, b], links)
+    assert next_links[0]["kind"] == "morph"
+    assert "flight" not in next_links[0]
+
+
 def test_coerce_demotes_morph_on_hidden_layers_mismatch():
     a = _slide("s1", _camera(3.0, 101.0, 8), hiddenLayers=["roadnames"])
     b = _slide("s2", _camera(3.0, 102.0, 8), hiddenLayers=["roadnames", "pois"])

@@ -96,6 +96,8 @@ export function authoredSurfaceWidth(slide: MapsSlide, audience: MapsAudience): 
   return captureWidth(slide);
 }
 
+export type MapsFlight = "arc" | "phases";
+
 export type MapsRoutePoint = { lat: number; lon: number };
 
 export type MapsRoute = { points: MapsRoutePoint[] };
@@ -113,6 +115,7 @@ export type MapsLink = {
   easeOut?: number;
   flyZoom?: number;
   curve?: number;
+  flight?: MapsFlight;
   objectTransition?: "fade" | "hold";
 };
 
@@ -246,6 +249,7 @@ export function coerceHopKinds(doc: MapsDocument): MapsDocument {
         delete next.easeOut;
         delete next.flyZoom;
         delete next.curve;
+        delete next.flight;
         delete next.objectTransition;
       }
       return next;
@@ -321,7 +325,7 @@ export function restitchLinks(nextSlides: MapsSlide[], prevLinks: MapsLink[]): M
         kind,
         duration: 1.0,
         playWithoutClick: false,
-        ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
+        ...(kind === "movie" ? { flight: "arc" as const, objectTransition: "fade" as const } : {}),
       }
     );
   }
@@ -364,7 +368,7 @@ export function restitchWithMemory(
         kind,
         duration: 1.0,
         playWithoutClick: false,
-        ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
+        ...(kind === "movie" ? { flight: "arc" as const, objectTransition: "fade" as const } : {}),
       });
     }
   }
@@ -610,6 +614,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     if (typeof next.easeOut !== "number" || !Number.isFinite(next.easeOut)) delete next.easeOut;
     if (typeof next.flyZoom !== "number" || !Number.isFinite(next.flyZoom)) delete next.flyZoom;
     if (typeof next.curve !== "number" || !Number.isFinite(next.curve)) delete next.curve;
+    if (next.flight !== "arc" && next.flight !== "phases") delete next.flight;
     if (next.objectTransition !== "fade" && next.objectTransition !== "hold") delete next.objectTransition;
     return next;
   }

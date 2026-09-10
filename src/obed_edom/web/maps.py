@@ -231,11 +231,12 @@ class MapsLink(BaseModel):
     easeOut: float | None = None
     flyZoom: float | None = None
     curve: float | None = Field(default=None, ge=0.5, le=3)
+    flight: Literal["arc", "phases"] | None = None
     objectTransition: Literal["fade", "hold"] | None = None
 
     def dumped(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True)
-        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom", "curve", "objectTransition")
+        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom", "curve", "flight", "objectTransition")
         if data.get("kind") != "movie":
             for key in movie_only:
                 data.pop(key, None)

@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { reorderSlides, restitchLinks, restitchWithMemory, moveSlideTo, documentFromResult } = require(path.join(out, "types.js"));
+const { reorderSlides, restitchLinks, restitchWithMemory, moveSlideTo, documentFromResult, coerceHopKinds } = require(path.join(out, "types.js"));
 
 const baseCamera = { lat: 0, lon: 0, zoom: 4, bearing: 0, pitch: 0 };
 function slide(id, overrides) {
@@ -372,6 +372,66 @@ test("restitchWithMemory keys are collision-free across slide ids containing sep
   assert.ok(restored);
   assert.notEqual(restored.kind, "movie");
   assert.notEqual(restored.duration, 5);
+});
+
+test("documentFromResult round-trips flight, drops invalid values, leaves missing absent", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const links = [
+    { from: "s1", to: "s2", kind: "movie", duration: 1, playWithoutClick: false, flight: "arc" },
+  ];
+  const d = doc([s1, s2], links);
+  const kept = documentFromResult(JSON.parse(JSON.stringify(d)));
+  assert.equal(kept.links[0].flight, "arc");
+
+  const bogus = doc([s1, s2], [{ ...links[0], flight: "spiral" }]);
+  const droppedBogus = documentFromResult(JSON.parse(JSON.stringify(bogus)));
+  assert.equal(droppedBogus.links[0].flight, undefined);
+
+  const missing = doc([s1, s2], [{ from: "s1", to: "s2", kind: "movie", duration: 1, playWithoutClick: false, easeIn: 0.3 }]);
+  const stillMissing = documentFromResult(JSON.parse(JSON.stringify(missing)));
+  assert.equal(stillMissing.links[0].flight, undefined);
+  assert.equal(stillMissing.links[0].easeIn, 0.3);
+});
+
+const movieCamera = { ...baseCamera, bearing: 90 };
+
+test("restitchLinks/restitchWithMemory default new movie links to flight arc, retired links keep their own", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2", { camera: movieCamera });
+  const s3 = slide("s3", { camera: movieCamera });
+  const links = restitchLinks([s1, s2, s3], []);
+  assert.equal(links[0].flight, "arc");
+
+  const s4 = slide("s4");
+  const phasesLink = { from: "s1", to: "s2", kind: "movie", duration: 2, playWithoutClick: false, flight: "phases" };
+  const d = doc([s1, s2, s3, s4], [
+    phasesLink,
+    { from: "s2", to: "s3", kind: "cut", duration: 0, playWithoutClick: false },
+    { from: "s3", to: "s4", kind: "cut", duration: 0, playWithoutClick: false },
+  ]);
+  const away = moveSlideTo(d, "s4", 1); // s1, s4, s2, s3 — s1->s2 pair displaced
+  assert.ok((away.retiredLinks || []).some((l) => l.from === "s1" && l.to === "s2" && l.flight === "phases"));
+  const back = moveSlideTo(away, "s4", 3); // restores s1, s2, s3, s4
+  const restored = back.links.find((l) => l.from === "s1" && l.to === "s2");
+  assert.equal(restored.flight, "phases");
+});
+
+test("coerceHopKinds strips flight from any non-movie link", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const links = [{ from: "s1", to: "s2", kind: "cut", duration: 0, playWithoutClick: false, flight: "phases" }];
+  const next = coerceHopKinds(doc([s1, s2], links));
+  assert.equal(next.links[0].flight, undefined);
+});
+
+test("coerceHopKinds keeps flight on a link coerced from morph to movie", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2", { camera: movieCamera });
+  const links = [{ from: "s1", to: "s2", kind: "morph", duration: 1, playWithoutClick: false, flight: "phases" }];
+  const next = coerceHopKinds(doc([s1, s2], links));
+  assert.equal(next.links[0].kind, "movie");
+  assert.equal(next.links[0].flight, "phases");
 });
 
 test("links.length is always slides.length - 1 and endpoints exist", () => {

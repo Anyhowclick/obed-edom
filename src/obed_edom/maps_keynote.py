@@ -379,6 +379,7 @@ def coerce_link_kinds(slides: list[dict[str, Any]], links: list[dict[str, Any]])
             item.pop("easeIn", None)
             item.pop("easeOut", None)
             item.pop("flyZoom", None)
+            item.pop("flight", None)
         next_links.append(item)
     return next_links
 

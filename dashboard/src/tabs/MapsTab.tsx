@@ -71,6 +71,7 @@ import {
   type MapsChurch,
   type MapsDocument,
   type MapsEasing,
+  type MapsFlight,
   type MapsHopKind,
   type MapsIsolate,
   type MapsLayerFilterId,
@@ -886,6 +887,7 @@ export function MapsTab() {
           delete next.easeOut;
           delete next.flyZoom;
           delete next.curve;
+          delete next.flight;
           delete next.objectTransition;
         } else if (opts?.resetFly) {
           delete next.easeIn;
@@ -1155,6 +1157,7 @@ export function MapsTab() {
         flyZoom: link.flyZoom,
         easeIn: link.easeIn,
         easeOut: link.easeOut,
+        flight: link.flight,
         fromObjects: fromView.churches,
         toObjects: toView.churches,
         objectTransition: link.objectTransition,
@@ -1558,6 +1561,7 @@ export function MapsTab() {
             flyZoom: link.flyZoom,
             easeIn: link.easeIn,
             easeOut: link.easeOut,
+            flight: link.flight,
             duration: link.duration,
             width,
           })
@@ -1605,6 +1609,7 @@ export function MapsTab() {
           flyZoom: link.flyZoom,
           easeIn: link.easeIn,
           easeOut: link.easeOut,
+          flight: link.flight,
           isCancelled: () => exportAbort.current,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
@@ -1637,6 +1642,7 @@ export function MapsTab() {
               flyZoom: link.flyZoom,
               easeIn: link.easeIn,
               easeOut: link.easeOut,
+              flight: link.flight,
               duration: link.duration,
               width,
             })
@@ -1683,6 +1689,7 @@ export function MapsTab() {
             flyZoom: link.flyZoom,
             easeIn: link.easeIn,
             easeOut: link.easeOut,
+            flight: link.flight,
             outputCrop: {
               width: 1920,
               height: 1080,
@@ -1774,6 +1781,7 @@ export function MapsTab() {
         )
       : 0;
   const zoomFloor = minZoomForView();
+  const flight = outgoing?.flight ?? "arc";
   const wrapWarn = activeView ? worldCopyWarning(activeView.camera.zoom) : null;
 
   if (!job) {
@@ -2770,7 +2778,7 @@ export function MapsTab() {
                       setHop(
                         {
                           kind: suggested,
-                          easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined,
+                          easing: suggested === "movie" ? outgoing.easing : undefined,
                         },
                         { dropRoute: true, resetFly: true }
                       )
@@ -2787,7 +2795,7 @@ export function MapsTab() {
                     disabled={locked}
                     onChange={(duration) => {
                       const prev = Math.max(0.15, outgoing.duration);
-                      if (outgoing.kind === "movie" && (outgoing.easeIn != null || outgoing.easeOut != null)) {
+                      if (outgoing.kind === "movie" && flight === "phases" && (outgoing.easeIn != null || outgoing.easeOut != null)) {
                         const scale = duration / prev;
                         setHop({
                           duration,
@@ -2821,9 +2829,18 @@ export function MapsTab() {
                   )}
                   {outgoing.kind === "movie" && (
                     <>
-                      {outgoing.easeIn != null || outgoing.easeOut != null || outgoing.flyZoom != null ? <>
-                      <p className="note">Legacy flight timing is preserved for this link.</p>
-                      <button className="btn secondary" type="button" disabled={locked} onClick={() => setHop({}, { resetFly: true })}>Use smooth arc</button>
+                      <label>
+                        Flight:
+                        <select
+                          value={flight}
+                          disabled={locked}
+                          onChange={(event) => setHop({ flight: event.target.value as MapsFlight })}
+                        >
+                          <option value="arc">Arc (smooth zoom & pan)</option>
+                          <option value="phases">Zoom-out, move, zoom-in</option>
+                        </select>
+                      </label>
+                      {flight === "phases" ? <>
                       <HopTimeline
                         duration={outgoing.duration}
                         easeIn={outgoing.easeIn}
@@ -2848,7 +2865,7 @@ export function MapsTab() {
                         </button>
                       )}
                       </> : <>
-                      <AeScrub label="Arc" value={outgoing.curve ?? 1.42} min={0.5} max={3} step={0.01} slider disabled={locked} onChange={(curve) => setHop({ curve })} />
+                      <AeScrub label="Curve" value={outgoing.curve ?? 1.42} min={0.5} max={3} step={0.01} slider disabled={locked} onChange={(curve) => setHop({ curve })} />
                       </>}
                       <label className="maps-check">
                         <select value={outgoing.objectTransition || "hold"} disabled={locked} onChange={(event) => setHop({ objectTransition: event.target.value as "fade" | "hold" })}>
@@ -2859,7 +2876,7 @@ export function MapsTab() {
                       <label>
                         Move easing:
                         <select
-                          value={outgoing.easing || "ease-in-out"}
+                          value={outgoing.easing || (flight === "arc" ? "linear" : "ease-in-out")}
                           disabled={locked}
                           onChange={(event) => setHop({ easing: event.target.value as MapsEasing })}
                         >

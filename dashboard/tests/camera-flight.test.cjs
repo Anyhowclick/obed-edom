@@ -24,6 +24,8 @@ Module._resolveFilename = function(request, parent, main, options) {
 };
 spawnSync(runtime, [path.join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "false", "--noEmitOnError", "false", "--module", "commonjs", "--moduleResolution", "node", "--target", "ES2020", "--skipLibCheck", "true", "--outDir", out, path.join(root, "src/maps/captureFly.ts")], { cwd: root, stdio: "ignore" });
 const flight = require(path.join(out, "captureFly.js"));
+spawnSync(runtime, [path.join(root, "node_modules/typescript/bin/tsc"), "--noEmit", "false", "--noEmitOnError", "false", "--module", "commonjs", "--moduleResolution", "node", "--target", "ES2020", "--skipLibCheck", "true", "--outDir", out, path.join(root, "src/maps/flight.ts")], { cwd: root, stdio: "ignore" });
+const arcModule = require(path.join(out, "flight.js"));
 const KL = { lat: 3.139, lon: 101.6869, zoom: 8, bearing: 0, pitch: 0 };
 const LA = { lat: 34.0522, lon: -118.2437, zoom: 8, bearing: 0, pitch: 0 };
 
@@ -56,6 +58,134 @@ test("same-center zoom, antimeridian, duplicate routes, and surface widths stay 
     assert.deepEqual(flight.cameraAtHop(from, to, 0, { width, routePoints: route }), from);
     assert.deepEqual(flight.cameraAtHop(from, to, 1, { width, routePoints: route }), to);
     assert.deepEqual(flight.cameraAtHop(from, to, .25, { width, easing: "linear", routePoints: route }), samples[3]);
+  }
+});
+
+test("flight \"arc\" is identical to omitting flight", () => {
+  for (const t of [0, .1, .25, .5, .75, 1]) {
+    const withFlight = flight.cameraAtHop(KL, LA, t, { width: 3840, flight: "arc" });
+    const omitted = flight.cameraAtHop(KL, LA, t, { width: 3840 });
+    assert.deepEqual(withFlight, omitted);
+  }
+});
+
+test("endpoints are exact at t=0/1 for both flight profiles, with and without a route", () => {
+  const route = [{ lat: 20, lon: 20 }];
+  for (const opts of [{ width: 3840 }, { width: 3840, flight: "phases" }, { width: 3840, routePoints: route }, { width: 3840, flight: "phases", routePoints: route }]) {
+    assert.deepEqual(flight.cameraAtHop(KL, LA, 0, opts), KL);
+    assert.deepEqual(flight.cameraAtHop(KL, LA, 1, opts), LA);
+  }
+});
+
+test("KL to LA zoom dips then climbs, bottoming out well below either endpoint", () => {
+  const samples = Array.from({ length: 200 }, (_, i) => flight.cameraAtHop(KL, LA, i / 199, { width: 3840, easing: "linear" }).zoom);
+  let minIndex = 0;
+  for (let i = 1; i < samples.length; i++) if (samples[i] < samples[minIndex]) minIndex = i;
+  for (let i = 1; i <= minIndex; i++) assert.ok(samples[i] <= samples[i - 1] + 1e-9);
+  for (let i = minIndex + 1; i < samples.length; i++) assert.ok(samples[i] >= samples[i - 1] - 1e-9);
+  assert.ok(samples[minIndex] < Math.min(KL.zoom, LA.zoom) - 1);
+});
+
+test("arc holds constant perceived velocity; phases does not", () => {
+  const fps = 30, duration = 3, n = fps * duration;
+  function maxMinRatio(opts) {
+    const cams = Array.from({ length: n }, (_, i) => flight.cameraAtHop(KL, LA, i / (n - 1), opts));
+    const speeds = [];
+    for (let i = 1; i < n - 2; i++) {
+      const midZoom = (cams[i].zoom + cams[i + 1].zoom) / 2;
+      speeds.push(flight.hopDistancePx(cams[i], cams[i + 1]) * 2 ** (midZoom - KL.zoom));
+    }
+    return Math.max(...speeds) / Math.min(...speeds);
+  }
+  assert.ok(maxMinRatio({ width: 3840 }) < 1.15);
+  assert.ok(maxMinRatio({ width: 3840, flight: "phases", duration, flyZoom: 3 }) > 3);
+});
+
+test("omitted easing equals explicit linear for arc", () => {
+  for (const t of [0, .1, .25, .5, .75, .9, 1]) {
+    const omitted = flight.cameraAtHop(KL, LA, t, { width: 3840 });
+    const explicit = flight.cameraAtHop(KL, LA, t, { width: 3840, easing: "linear" });
+    assert.deepEqual(omitted, explicit);
+  }
+});
+
+test("near-degenerate zoom-plus-pan stays numerically stable and completes exactly at f=1", () => {
+  const w0 = 7680, w1 = 122880, u1 = 0.008, rho = 1.42;
+  const path = arcModule.arcPath(w0, w1, u1, rho);
+  const end = path.at(1);
+  assert.ok(Math.abs(end.scale - 16) < 1e-9);
+  assert.equal(end.pan, 1);
+  const start = path.at(0);
+  assert.equal(start.pan, 0);
+  assert.equal(start.scale, 1);
+  let prevPan = -1;
+  for (const f of [0, .1, .25, .4, .5, .6, .75, .9, 1]) {
+    const { pan } = path.at(f);
+    assert.ok(pan >= prevPan - 1e-12);
+    prevPan = pan;
+  }
+  assert.ok(prevPan < 1 - 1e-9 || prevPan === 1);
+  assert.ok(path.at(.999).pan < 1);
+});
+
+test("pure zoom (same center) is monotone, exact at the midpoint, and keeps the center fixed", () => {
+  const from = { lat: 10, lon: 10, zoom: 8, bearing: 0, pitch: 0 };
+  const to = { ...from, zoom: 14 };
+  let prev = from.zoom;
+  for (const t of [0, .1, .25, .5, .75, .9, 1]) {
+    const cam = flight.cameraAtHop(from, to, t, { width: 3840, easing: "linear" });
+    assert.ok(Number.isFinite(cam.zoom));
+    assert.ok(cam.zoom >= prev - 1e-9);
+    prev = cam.zoom;
+    assert.ok(Math.abs(cam.lat - from.lat) < 1e-9);
+    assert.ok(Math.abs(cam.lon - from.lon) < 1e-9);
+  }
+  const mid = flight.cameraAtHop(from, to, .5, { width: 3840, easing: "linear" });
+  assert.ok(Math.abs(mid.zoom - 11) < 1e-9);
+});
+
+test("cameraAtHop is symmetric under endpoint swap and time reversal", () => {
+  for (const t of [.1, .25, .5, .75, .9]) {
+    const forward = flight.cameraAtHop(KL, LA, t, { width: 3840, easing: "linear" });
+    const backward = flight.cameraAtHop(LA, KL, 1 - t, { width: 3840, easing: "linear" });
+    assert.ok(Math.abs(forward.zoom - backward.zoom) < 1e-9);
+  }
+});
+
+test("curve (rho) is clamped to [0.5, 3], with NaN/undefined defaulting to 1.42", () => {
+  for (const [curve, expected] of [[0.01, 0.5], [99, 3], [NaN, 1.42], [undefined, 1.42]]) {
+    const cam = flight.cameraAtHop(KL, LA, .5, { width: 3840, easing: "linear", curve: expected });
+    const clamped = flight.cameraAtHop(KL, LA, .5, { width: 3840, easing: "linear", curve });
+    assert.ok(Math.abs(cam.zoom - clamped.zoom) < 1e-9);
+    for (const value of Object.values(clamped)) assert.ok(Number.isFinite(value));
+  }
+});
+
+test("bearing lerps linearly: 0 to 90 at t=.5 is 45", () => {
+  const from = { lat: 0, lon: 0, zoom: 8, bearing: 0, pitch: 0 };
+  const to = { ...from, bearing: 90 };
+  const cam = flight.cameraAtHop(from, to, .5, { width: 3840, easing: "linear" });
+  assert.ok(Math.abs(cam.bearing - 45) < 1e-9);
+});
+
+test("phases flight still honours a flyZoom plateau mid-hop", () => {
+  const cam = flight.cameraAtHop(KL, LA, .5, { width: 3840, flight: "phases", duration: 1, flyZoom: 3, easeIn: 0.25, easeOut: 0.25 });
+  assert.ok(Math.abs(cam.zoom - 3) < 1e-6);
+});
+
+test("phases branch matches precomputed fixtures for flyZoom/easeIn/easeOut, a route, and omitted easing", () => {
+  const route = [{ lat: 20, lon: 20 }, { lat: 28, lon: -40 }];
+  const ts = [0,0.15,0.3,0.5,0.7,0.85,1];
+  const cases = [
+    { opts: { width: 3840, duration: 3, flyZoom: 3, easeIn: 0.25, easeOut: 0.25 }, fixtures: [{"lat":3.139,"lon":101.6869,"zoom":8,"bearing":0,"pitch":0},{"lat":3.2067130132292023,"lon":101.97376213119992,"zoom":3,"bearing":0,"pitch":0},{"lat":5.460316935696255,"lon":111.53433909759997,"zoom":3,"bearing":0,"pitch":0},{"lat":19.3205331557289,"lon":171.72160000000002,"zoom":3,"bearing":0,"pitch":0},{"lat":32.10162810803637,"lon":-128.09113909760006,"zoom":3,"bearing":0,"pitch":0},{"lat":33.99599313872796,"lon":-118.5305621312,"zoom":3,"bearing":0,"pitch":0},{"lat":34.0522,"lon":-118.2437,"zoom":8,"bearing":0,"pitch":0}] },
+    { opts: { width: 1920, duration: 2, flyZoom: 5, easeIn: 0.1, easeOut: 0.4, routePoints: route }, fixtures: [{"lat":3.139,"lon":101.6869,"zoom":8,"bearing":0,"pitch":0},{"lat":3.575198694576446,"lon":99.62113984119321,"zoom":5,"bearing":0,"pitch":0},{"lat":9.918003456644488,"lon":69.40939751864403,"zoom":5,"bearing":0,"pitch":0},{"lat":29.698354485657205,"lon":-61.46531663863486,"zoom":5,"bearing":0,"pitch":0},{"lat":33.89465863776589,"lon":-116.14079691254206,"zoom":5,"bearing":0,"pitch":0},{"lat":34.05219999999999,"lon":-118.24370000000002,"zoom":5.187499999999999,"bearing":0,"pitch":0},{"lat":34.0522,"lon":-118.2437,"zoom":8,"bearing":0,"pitch":0}] },
+    { opts: { width: 1920, duration: 2, flyZoom: 5, easeIn: 0.1, easeOut: 0.4, routePoints: route, easing: undefined }, fixtures: [{"lat":3.139,"lon":101.6869,"zoom":8,"bearing":0,"pitch":0},{"lat":3.575198694576446,"lon":99.62113984119321,"zoom":5,"bearing":0,"pitch":0},{"lat":9.918003456644488,"lon":69.40939751864403,"zoom":5,"bearing":0,"pitch":0},{"lat":29.698354485657205,"lon":-61.46531663863486,"zoom":5,"bearing":0,"pitch":0},{"lat":33.89465863776589,"lon":-116.14079691254206,"zoom":5,"bearing":0,"pitch":0},{"lat":34.05219999999999,"lon":-118.24370000000002,"zoom":5.187499999999999,"bearing":0,"pitch":0},{"lat":34.0522,"lon":-118.2437,"zoom":8,"bearing":0,"pitch":0}] },
+  ];
+  for (const { opts, fixtures } of cases) {
+    ts.forEach((t, i) => {
+      const phases = flight.cameraAtHop(KL, LA, t, { ...opts, flight: "phases" });
+      assert.deepEqual(phases, fixtures[i]);
+    });
   }
 });
 

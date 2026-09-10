@@ -23,6 +23,7 @@ import {
   type MapsChurch,
   type MapsCropId,
   type MapsEasing,
+  type MapsFlight,
   type MapsIsolate,
   type MapsLayerFilterId,
   type MapsRoutePoint,
@@ -182,6 +183,7 @@ export type MapViewHandle = {
     flyZoom?: number;
     easeIn?: number;
     easeOut?: number;
+    flight?: MapsFlight;
     width?: number;
     fromObjects?: MapsChurch[];
     toObjects?: MapsChurch[];
@@ -341,7 +343,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         });
       });
     },
-    animateHop({ from, to, durationMs, easing = "ease-in-out", routePoints, curve, flyZoom, easeIn, easeOut, width, fromObjects, toObjects, objectTransition, destinationPaintsReveal = true }) {
+    animateHop({ from, to, durationMs, easing, routePoints, curve, flyZoom, easeIn, easeOut, flight, width, fromObjects, toObjects, objectTransition, destinationPaintsReveal = true }) {
       const map = mapRef.current;
       if (!map) return Promise.resolve();
       hopAbort.current = false;
@@ -356,6 +358,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             flyZoom,
             easeIn,
             easeOut,
+            flight,
             duration: durationMs / 1000,
             width,
           });
