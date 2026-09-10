@@ -707,6 +707,13 @@ def _preserve_raw_name(zi: zipfile.ZipInfo) -> zipfile.ZipInfo:
     return info
 
 
+def recovery_tmp_path(deck: Path) -> Path:
+    """Path of the same-volume temp file ``_rewrite_members`` leaves behind on
+    ``OfflineWriteCorrupted`` -- the only recoverable copy of ``deck``'s intended contents."""
+    deck = Path(deck)
+    return deck.parent / f".{deck.name}.obedwrite.tmp"
+
+
 def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
     """Stream every zip member into a same-volume temp file (peak RAM = largest member,
     not the whole deck), then copy the bytes back INTO THE ORIGINAL INODE via ``open(deck,
@@ -720,7 +727,7 @@ def _rewrite_members(deck: Path, edits: dict[str, bytes]) -> None:
     would be sub-second but leaves orphaned bytes Keynote has never been probed on.
     """
     deck = Path(deck)
-    tmp_path = deck.parent / f".{deck.name}.obedwrite.tmp"
+    tmp_path = recovery_tmp_path(deck)
     # temp zip + full copy-back reallocation (worst case: deck is an APFS clone source).
     required = deck.stat().st_size * 2.1
     if shutil.disk_usage(deck.parent).free < required:

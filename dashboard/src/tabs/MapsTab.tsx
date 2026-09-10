@@ -17,7 +17,7 @@ import {
   previewUrl,
   saveMapsState,
   startMaps,
-  uploadMapsAsset,
+  addMapsLandmark,
   MapsStateConflictError,
   addWatercolourToMap,
   watercolourImageUrl,
@@ -42,6 +42,7 @@ import { StylePicker } from "../maps/StylePicker";
 import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
+  DEFAULT_ISOLATE_STRENGTH,
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
@@ -49,11 +50,13 @@ import {
   authoredSurfaceWidth,
   captureWidth,
   showCgBand,
+  shouldFocusAddedLandmark,
   slideForAudience,
   clampCgShift,
   clampZoom,
   coerceHopKinds,
   documentFromResult,
+  hasOutgoingMovie,
   minZoomForView,
   movieAppearanceMismatch,
   worldCopyWarning,
@@ -61,7 +64,7 @@ import {
   nextSlideId,
   reorderSlides,
   moveSlideTo,
-  restitchLinks,
+  restitchWithMemory,
   slideHiddenLayers,
   suggestedHopKind,
   type MapsCamera,
@@ -69,6 +72,7 @@ import {
   type MapsChurch,
   type MapsDocument,
   type MapsEasing,
+  type MapsFlight,
   type MapsHopKind,
   type MapsIsolate,
   type MapsLayerFilterId,
@@ -140,6 +144,59 @@ function IconRelief() {
   return (
     <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 17 8.5 8l4 6.5L15 10l6 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconLabelOff() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M4 20 20 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconPlus() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconLabel() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconCopy() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function IconPaste() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="5.5" y="5.5" width="13" height="15" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="9" y="3.5" width="6" height="3.5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function IconPasteSlides() {
+  return (
+    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="5.5" width="11" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <rect x="7" y="3.5" width="4" height="3" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M15.5 12h5M17.5 9.5 20.5 12l-3 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -725,8 +782,10 @@ export function MapsTab() {
     const created = cloneSlide(active, nextSlideId(current.slides));
     const index = current.slides.findIndex((s) => s.id === active.id);
     const slidesNext = [...current.slides.slice(0, index + 1), created, ...current.slides.slice(index + 1)];
-    const links = restitch(slidesNext, current.links);
-    const next = { ...current, slides: slidesNext, links };
+    const { links, retired } = restitch(slidesNext, current.links, current.retiredLinks);
+    const next: MapsDocument = { ...current, slides: slidesNext, links };
+    if (retired.length) next.retiredLinks = retired;
+    else delete next.retiredLinks;
     patchDoc(next);
     void (async () => {
       await flushAndSave(true).catch(() => undefined);
@@ -735,8 +794,12 @@ export function MapsTab() {
     })();
   }
 
-  function restitch(nextSlides: MapsSlide[], prevLinks: MapsLink[]): MapsLink[] {
-    return restitchLinks(nextSlides, prevLinks);
+  function restitch(
+    nextSlides: MapsSlide[],
+    prevLinks: MapsLink[],
+    prevRetired: MapsLink[] | undefined
+  ): { links: MapsLink[]; retired: MapsLink[] } {
+    return restitchWithMemory(nextSlides, prevLinks, prevRetired);
   }
 
   function moveSlide(delta: number) {
@@ -794,9 +857,12 @@ export function MapsTab() {
     if (!current || !active || current.slides.length < 2 || locked) return;
     if (!window.confirm(`Remove slide “${active.title}”?`)) return;
     const slidesNext = current.slides.filter((s) => s.id !== active.id);
-    const links = restitch(slidesNext, current.links);
+    const { links, retired } = restitch(slidesNext, current.links, current.retiredLinks);
     const fallback = slidesNext[Math.max(0, activeIndex - 1)] || slidesNext[0];
-    patchDoc({ ...current, slides: slidesNext, links });
+    const next: MapsDocument = { ...current, slides: slidesNext, links };
+    if (retired.length) next.retiredLinks = retired;
+    else delete next.retiredLinks;
+    patchDoc(next);
     const audience: MapsAudience = activeAudienceRef.current === "cg" && fallback.cg ? "cg" : "lw";
     activeRef.current = fallback.id;
     activeAudienceRef.current = audience;
@@ -822,6 +888,7 @@ export function MapsTab() {
           delete next.easeOut;
           delete next.flyZoom;
           delete next.curve;
+          delete next.flight;
           delete next.objectTransition;
         } else if (opts?.resetFly) {
           delete next.easeIn;
@@ -936,35 +1003,15 @@ export function MapsTab() {
     const targetAudience = activeAudience;
     if (!targetSlideId) return;
     try {
-      const uploaded = await uploadMapsAsset(targetJobId, file);
-      if (jobRef.current?.id !== targetJobId || activeRef.current !== targetSlideId || activeAudienceRef.current !== targetAudience) return;
-      reconcileServerJob({
-        ...job,
-        result: { ...(job.result || {}), ...uploaded.document, stateRevision: uploaded.stateRevision },
-      });
-      const latest = docRef.current;
-      const target = latest?.slides.find((slide) => slide.id === targetSlideId);
-      const targetView = target ? slideForAudience(target, targetAudience) : null;
-      if (!targetView) return;
-      const asset = uploaded.asset;
-      const landmark: MapsChurch = {
-        id: nextPinId(targetView.churches),
-        name: file.name.replace(/\.[^.]+$/, "") || "Landmark",
-        lat: targetView.camera.lat,
-        lon: targetView.camera.lon,
-        kind: "landmark",
-        color: "#c44a42",
-        assetId: asset.id,
-        assetVersion: asset.version,
-        assetWidth: asset.width,
-        assetHeight: asset.height,
-        size: 180,
-        opacity: 1,
-        showLabel: true,
-      };
-      updateActive({ churches: [...targetView.churches, landmark] });
-      setSelectedPin(landmark.id);
-      setInspTab("pins");
+      await flushAndSave(true);
+      if (jobRef.current?.id !== targetJobId) return;
+      const { job: updated, churchId } = await addMapsLandmark(targetJobId, targetSlideId, targetAudience, file);
+      if (jobRef.current?.id !== targetJobId) return;
+      reconcileServerJob(updated);
+      if (shouldFocusAddedLandmark({ slideId: targetSlideId, audience: targetAudience }, { slideId: activeRef.current, audience: activeAudienceRef.current })) {
+        setSelectedPin(churchId);
+        setInspTab("pins");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -991,18 +1038,14 @@ export function MapsTab() {
     if (!job || !active || locked || activeAudience !== "lw") return;
     const targetJobId = job.id;
     const targetSlideId = active.id;
-    const before = new Set((activeView?.churches || []).map((c) => c.id));
     try {
       await flushAndSave(true);
       if (jobRef.current?.id !== targetJobId) return;
-      const updated = await addWatercolourToMap(wcJobId, itemId, targetJobId, targetSlideId);
+      const { job: updated, churchId } = await addWatercolourToMap(wcJobId, itemId, targetJobId, targetSlideId);
       if (jobRef.current?.id !== targetJobId) return;
       reconcileServerJob(updated);
-      const target = docRef.current?.slides.find((slide) => slide.id === targetSlideId);
-      const targetView = target ? slideForAudience(target, "lw") : null;
-      const newChurch = targetView?.churches.find((c) => !before.has(c.id));
-      if (newChurch) {
-        setSelectedPin(newChurch.id);
+      if (shouldFocusAddedLandmark({ slideId: targetSlideId, audience: "lw" }, { slideId: activeRef.current, audience: activeAudienceRef.current })) {
+        setSelectedPin(churchId);
         setInspTab("pins");
       }
       setLandmarkPicker(false);
@@ -1091,9 +1134,11 @@ export function MapsTab() {
         flyZoom: link.flyZoom,
         easeIn: link.easeIn,
         easeOut: link.easeOut,
+        flight: link.flight,
         fromObjects: fromView.churches,
         toObjects: toView.churches,
         objectTransition: link.objectTransition,
+        destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
         width: Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience)),
       });
       if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
@@ -1493,6 +1538,7 @@ export function MapsTab() {
             flyZoom: link.flyZoom,
             easeIn: link.easeIn,
             easeOut: link.easeOut,
+            flight: link.flight,
             duration: link.duration,
             width,
           })
@@ -1528,6 +1574,7 @@ export function MapsTab() {
           isolate: from.isolate,
           churches: from.churches,
           destinationChurches: to.churches,
+          destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
           objectTransition: link.objectTransition,
           assetBaseUrl: `/api/maps/${id}/assets`,
           numberPins: true,
@@ -1539,6 +1586,7 @@ export function MapsTab() {
           flyZoom: link.flyZoom,
           easeIn: link.easeIn,
           easeOut: link.easeOut,
+          flight: link.flight,
           isCancelled: () => exportAbort.current,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
@@ -1571,6 +1619,7 @@ export function MapsTab() {
               flyZoom: link.flyZoom,
               easeIn: link.easeIn,
               easeOut: link.easeOut,
+              flight: link.flight,
               duration: link.duration,
               width,
             })
@@ -1605,6 +1654,7 @@ export function MapsTab() {
             isolate: from.isolate,
             churches: from.churches,
             destinationChurches: to.churches,
+            destinationPaintsReveal: !hasOutgoingMovie((plan.cg?.links as MapsLink[] | undefined) || [], baseTo.id),
             objectTransition: link.objectTransition,
             assetBaseUrl: `/api/maps/${id}/assets`,
             numberPins: true,
@@ -1616,6 +1666,7 @@ export function MapsTab() {
             flyZoom: link.flyZoom,
             easeIn: link.easeIn,
             easeOut: link.easeOut,
+            flight: link.flight,
             outputCrop: {
               width: 1920,
               height: 1080,
@@ -1707,6 +1758,7 @@ export function MapsTab() {
         )
       : 0;
   const zoomFloor = minZoomForView();
+  const flight = outgoing?.flight ?? "arc";
   const wrapWarn = activeView ? worldCopyWarning(activeView.camera.zoom) : null;
 
   if (!job) {
@@ -2512,7 +2564,9 @@ export function MapsTab() {
                         onChange={(event) => {
                           const checked = event.target.checked;
                           updateActive({
-                            isolate: checked ? { mode: "darken", strength: activeView?.isolate?.strength ?? 0.6 } : undefined,
+                            isolate: checked
+                              ? { mode: "darken", strength: activeView?.isolate?.strength ?? DEFAULT_ISOLATE_STRENGTH }
+                              : undefined,
                           });
                         }}
                       />{" "}
@@ -2555,8 +2609,10 @@ export function MapsTab() {
                   />
                   <div className="style-picker" ref={landmarkPickerRef}>
                     <button
-                      className="btn secondary style-picker-trigger"
+                      className="btn secondary icon-btn style-picker-trigger"
                       type="button"
+                      title="Add transparent landmark"
+                      aria-label="Add transparent landmark"
                       aria-haspopup="true"
                       aria-expanded={landmarkPicker}
                       disabled={locked}
@@ -2570,7 +2626,7 @@ export function MapsTab() {
                         void loadWcJobs();
                       }}
                     >
-                      Add transparent landmark ▾
+                      <IconPlus />
                     </button>
                     {landmarkPicker && (
                       <div className="style-picker-pop maps-landmark-pop">
@@ -2619,17 +2675,23 @@ export function MapsTab() {
                   ) : (
                     <>
                       <div className="maps-pin-bulk" role="group" aria-label="Selected objects">
-                        <span className="note">{selectedPins.length ? `${selectedPins.length} selected` : "Select objects"}</span>
-                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })}>
-                          Show labels
+                        {selectedPins.length > 0 && <span className="note">{selectedPins.length} selected</span>}
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: true })} title="Show labels" aria-label="Show labels">
+                          <IconLabel />
                         </button>
-                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: false })}>
-                          Hide labels
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={() => updateSelectedPins({ showLabel: false })} title="Hide labels" aria-label="Hide labels">
+                          <IconLabelOff />
                         </button>
-                        <button className="btn secondary" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins}>Copy</button>
-                        <button className="btn secondary" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)}>Paste</button>
-                        <button className="btn secondary" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)}>Paste to slides</button>
-                        <button className="btn maps-delete maps-pin-bulk-delete" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins} title="Copy" aria-label="Copy">
+                          <IconCopy />
+                        </button>
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
+                          <IconPaste />
+                        </button>
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
+                          <IconPasteSlides />
+                        </button>
+                        <button className="btn maps-delete maps-pin-bulk-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
@@ -2649,7 +2711,7 @@ export function MapsTab() {
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
-                              {church.showLabel === false && <span className="maps-pin-hidden">Hidden</span>}
+                              {church.showLabel === false && <span className="maps-pin-hidden icon" title="Label hidden" aria-label="Label hidden"><IconLabelOff /></span>}
                             </button>
                           </div>
                         ))}
@@ -2693,7 +2755,7 @@ export function MapsTab() {
                       setHop(
                         {
                           kind: suggested,
-                          easing: suggested === "movie" ? outgoing.easing || "ease-in-out" : undefined,
+                          easing: suggested === "movie" ? outgoing.easing : undefined,
                         },
                         { dropRoute: true, resetFly: true }
                       )
@@ -2710,7 +2772,7 @@ export function MapsTab() {
                     disabled={locked}
                     onChange={(duration) => {
                       const prev = Math.max(0.15, outgoing.duration);
-                      if (outgoing.kind === "movie" && (outgoing.easeIn != null || outgoing.easeOut != null)) {
+                      if (outgoing.kind === "movie" && flight === "phases" && (outgoing.easeIn != null || outgoing.easeOut != null)) {
                         const scale = duration / prev;
                         setHop({
                           duration,
@@ -2744,9 +2806,18 @@ export function MapsTab() {
                   )}
                   {outgoing.kind === "movie" && (
                     <>
-                      {outgoing.easeIn != null || outgoing.easeOut != null || outgoing.flyZoom != null ? <>
-                      <p className="note">Legacy flight timing is preserved for this link.</p>
-                      <button className="btn secondary" type="button" disabled={locked} onClick={() => setHop({}, { resetFly: true })}>Use smooth arc</button>
+                      <label>
+                        Flight:
+                        <select
+                          value={flight}
+                          disabled={locked}
+                          onChange={(event) => setHop({ flight: event.target.value as MapsFlight })}
+                        >
+                          <option value="arc">Arc (smooth zoom & pan)</option>
+                          <option value="phases">Zoom-out, move, zoom-in</option>
+                        </select>
+                      </label>
+                      {flight === "phases" ? <>
                       <HopTimeline
                         duration={outgoing.duration}
                         easeIn={outgoing.easeIn}
@@ -2771,7 +2842,7 @@ export function MapsTab() {
                         </button>
                       )}
                       </> : <>
-                      <AeScrub label="Arc" value={outgoing.curve ?? 1.42} min={0.5} max={3} step={0.01} slider disabled={locked} onChange={(curve) => setHop({ curve })} />
+                      <AeScrub label="Curve" value={outgoing.curve ?? 1.42} min={0.5} max={3} step={0.01} slider disabled={locked} onChange={(curve) => setHop({ curve })} />
                       </>}
                       <label className="maps-check">
                         <select value={outgoing.objectTransition || "hold"} disabled={locked} onChange={(event) => setHop({ objectTransition: event.target.value as "fade" | "hold" })}>
@@ -2782,7 +2853,7 @@ export function MapsTab() {
                       <label>
                         Move easing:
                         <select
-                          value={outgoing.easing || "ease-in-out"}
+                          value={outgoing.easing || (flight === "arc" ? "linear" : "ease-in-out")}
                           disabled={locked}
                           onChange={(event) => setHop({ easing: event.target.value as MapsEasing })}
                         >

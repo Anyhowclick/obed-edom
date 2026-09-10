@@ -175,6 +175,7 @@ def test_fly_opts_stripped_unless_movie():
             "easeIn": 0.4,
             "easeOut": 0.4,
             "flyZoom": 5.0,
+            "flight": "phases",
         }
     ]
     saved = _save(job, doc)
@@ -183,6 +184,7 @@ def test_fly_opts_stripped_unless_movie():
     assert "easeIn" not in links[0]
     assert "easeOut" not in links[0]
     assert "flyZoom" not in links[0]
+    assert "flight" not in links[0]
 
 
 def test_movie_fly_opts_roundtrip():
@@ -214,6 +216,56 @@ def test_movie_fly_opts_roundtrip():
     assert link["easeIn"] == 0.6
     assert link["easeOut"] == 0.5
     assert link["flyZoom"] == 6.2
+
+
+def test_movie_flight_roundtrips_with_curve():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["camera"] = {**slide["camera"], "pitch": 40}
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 2.0,
+            "playWithoutClick": False,
+            "flight": "arc",
+            "curve": 1.8,
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    link = saved.json()["result"]["links"][0]
+    assert link["flight"] == "arc"
+    assert link["curve"] == 1.8
+
+
+def test_movie_flight_rejects_invalid_value():
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Closer"
+    other["camera"] = {**slide["camera"], "pitch": 40}
+    doc["slides"] = [slide, other]
+    doc["links"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 2.0,
+            "playWithoutClick": False,
+            "flight": "spiral",
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 400, saved.text
 
 
 def test_dissolve_roundtrip():
@@ -1302,6 +1354,224 @@ def test_isolate_erase_mode_migrates_to_darken():
     assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
 
 
+def test_isolate_default_strength_is_065():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "darken"}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.65}
+
+
+def test_legacy_session_isolate_060_bumps_once():
+    # A legacy archive (no isolateDefaultVersion marker) loaded into a fresh job is bumped.
+    legacy_job = _seed()
+    legacy_doc = _doc(legacy_job)
+    legacy_doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.6}
+    assert _save(legacy_job, legacy_doc).status_code == 200
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "manifest.json", json.dumps({"format": "obed-edom-maps", "version": 1, "document": legacy_doc})
+        )
+    fresh_job = _seed()
+    loaded = client.post(
+        f"/api/maps/{fresh_job['id']}/session",
+        files={"file": ("legacy.obedmaps", buffer.getvalue(), "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    result = loaded.json()["result"]
+    assert result["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.65}
+    assert result["isolateDefaultVersion"] == 1
+
+    # A migrated archive (isolateDefaultVersion already 1) carrying a user-chosen 0.60
+    # loaded into a different, fresh job must not be bumped again.
+    migrated_job = fresh_job
+    migrated_doc = _doc(migrated_job)
+    migrated_doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.6}
+    assert _save(migrated_job, migrated_doc).status_code == 200
+    session = client.get(f"/api/maps/{migrated_job['id']}/session")
+    assert session.status_code == 200, session.text
+    manifest = json.loads(zipfile.ZipFile(BytesIO(session.content)).read("manifest.json"))
+    assert manifest["isolateDefaultVersion"] == 1
+
+    other_job = _seed()
+    loaded2 = client.post(
+        f"/api/maps/{other_job['id']}/session",
+        files={"file": ("already-migrated.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded2.status_code == 200, loaded2.text
+    result2 = loaded2.json()["result"]
+    assert result2["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.6}
+    assert result2["isolateDefaultVersion"] == 1
+
+
+def test_fresh_job_is_seeded_with_current_isolate_default_version():
+    job = _seed()
+    assert job["result"]["isolateDefaultVersion"] == 1
+
+
+def test_fresh_job_isolate_060_survives_session_roundtrip():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.6}
+    assert _save(job, doc).status_code == 200
+
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    other_job = _seed()
+    loaded = client.post(
+        f"/api/maps/{other_job['id']}/session",
+        files={"file": ("saved.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    result = loaded.json()["result"]
+    assert result["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.6}
+    assert result["isolateDefaultVersion"] == 1
+
+
+def test_maps_session_rejects_invalid_isolate_default_version_before_replacing_state(tmp_path, monkeypatch):
+    tile_root = tmp_path / "tile-cache"
+    tile_root.mkdir()
+    monkeypatch.setattr("obed_edom.web.maps.cache_root", lambda: tile_root)
+    job = _seed()
+    existing_preview = _landmark_png()
+    assert client.post(f"/api/maps/{job['id']}/png?slideId=s1", content=existing_preview).status_code == 200
+    preview = Path(job["result"]["previewDir"]) / "s1.png"
+    original_title = job["result"]["slides"][0]["title"]
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": "obed-edom-maps",
+                    "version": 1,
+                    "document": _doc(job),
+                    "isolateDefaultVersion": "invalid",
+                }
+            ),
+        )
+    response = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("bad.obedmaps", buffer.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 400
+    assert preview.read_bytes() == existing_preview
+    fetched = client.get(f"/api/jobs/{job['id']}")
+    assert fetched.json()["result"]["slides"][0]["title"] == original_title
+    assert fetched.json()["result"]["isolateDefaultVersion"] == 1
+
+    for index, bad_value in enumerate([-1, False, "", 0.0, None], start=2):
+        buffer_bad = BytesIO()
+        with zipfile.ZipFile(buffer_bad, "w") as archive:
+            archive.writestr(
+                "manifest.json",
+                json.dumps(
+                    {
+                        "format": "obed-edom-maps",
+                        "version": 1,
+                        "document": _doc(job),
+                        "isolateDefaultVersion": bad_value,
+                    }
+                ),
+            )
+        response_bad = client.post(
+            f"/api/maps/{job['id']}/session",
+            files={"file": (f"bad{index}.obedmaps", buffer_bad.getvalue(), "application/zip")},
+        )
+        assert response_bad.status_code == 400, bad_value
+        assert preview.read_bytes() == existing_preview
+        fetched_bad = client.get(f"/api/jobs/{job['id']}")
+        assert fetched_bad.json()["result"]["slides"][0]["title"] == original_title
+        assert fetched_bad.json()["result"]["isolateDefaultVersion"] == 1
+
+
+def test_retired_links_round_trip_on_save():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    doc["slides"].append(slide2)
+    doc["retiredLinks"] = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 3.5, "playWithoutClick": False}]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["retiredLinks"] == [
+        {"from": "s1", "to": "s2", "kind": "movie", "duration": 3.5, "playWithoutClick": False}
+    ]
+
+
+def test_retired_links_with_unknown_slide_are_pruned_not_rejected():
+    job = _seed()
+    doc = _doc(job)
+    doc["retiredLinks"] = [{"from": "s1", "to": "missing", "kind": "cut", "duration": 1, "playWithoutClick": False}]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["retiredLinks"] == []
+
+
+def test_retired_links_do_not_break_export_plan():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+    doc["retiredLinks"] = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 3.5, "playWithoutClick": False}]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    plan = client.get(f"/api/maps/{job['id']}/export-plan")
+    assert plan.status_code == 200, plan.text
+    kinds = {(row["from"], row["to"]): row["kind"] for row in plan.json()["links"]}
+    assert kinds[("s1", "s2")] == "morph"
+
+
+def test_retired_links_survive_obedmaps_save_and_load_into_fresh_job():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    doc["retiredLinks"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 3.5,
+            "playWithoutClick": False,
+            "objectTransition": "fade",
+        }
+    ]
+    assert _save(job, doc).status_code == 200
+
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    fresh_job = _seed()
+    loaded = client.post(
+        f"/api/maps/{fresh_job['id']}/session",
+        files={"file": ("retired-links.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    result = loaded.json()["result"]
+    assert result["retiredLinks"] == [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 3.5,
+            "playWithoutClick": False,
+            "objectTransition": "fade",
+        }
+    ]
+    assert result["links"] == [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+
+
 def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
     map_job = _seed()
     slide_id = map_job["result"]["slides"][0]["id"]
@@ -1332,3 +1602,223 @@ def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
     church = slide["churches"][-1]
     assert church["size"] == _default_landmark_size(church["assetWidth"])
     assert church["size"] != 180
+    import re
+    assert re.fullmatch(r"w[0-9a-f]{8}", church["id"])
+
+
+def test_studio_add_clears_only_that_slides_still_png():
+    map_job = _seed()
+    doc = _doc(map_job)
+    slide = dict(doc["slides"][0])
+    other = dict(slide)
+    other["id"] = "s2"
+    other["title"] = "Second"
+    doc["slides"] = [slide, other]
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    saved = _save(map_job, doc)
+    assert saved.status_code == 200, saved.text
+    map_job = {**map_job, "result": saved.json()["result"]}
+    slide_id, other_slide_id = "s1", "s2"
+
+    for sid in (slide_id, other_slide_id):
+        thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={sid}&kind=thumb", content=_landmark_png())
+        assert thumb.status_code == 200, thumb.text
+
+    wash_response = client.post(
+        "/api/watercolour",
+        files=[("files", ("landmark.png", _landmark_png(), "image/png"))],
+        data={"masks": json.dumps({"0": {"transparent": True, "rect": [4, 2, 30, 14]}})},
+    )
+    assert wash_response.status_code == 200, wash_response.text
+    wash_job = _wait(wash_response.json()["id"])
+    item = wash_job["result"]["items"][0]
+
+    added = client.post(f"/api/watercolour/{wash_job['id']}/items/{item['id']}/add-to-map/{map_job['id']}/{slide_id}")
+    assert added.status_code == 200, added.text
+    doc = added.json()["result"]
+    touched = next(s for s in doc["slides"] if s["id"] == slide_id)
+    untouched = next(s for s in doc["slides"] if s["id"] == other_slide_id)
+    assert touched.get("stillPng") is None
+    assert untouched.get("stillPng") is not None
+
+
+def test_add_landmark_endpoint_appends_asset_and_church_in_one_revision():
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    before_revision = int(map_job["result"].get("stateRevision") or 0)
+
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    church_id = body["churchId"]
+    result = body["result"]
+    assert result["stateRevision"] == before_revision + 1
+    slide = next(s for s in result["slides"] if s["id"] == slide_id)
+    church = next(c for c in slide["churches"] if c["id"] == church_id)
+    assert church["kind"] == "landmark"
+    assert church["assetId"] in {row["id"] for row in result["assets"]}
+
+    asset_response = client.get(f"/api/maps/{map_job['id']}/assets/{church['assetId']}.png")
+    assert asset_response.status_code == 200
+    assert asset_response.headers["content-type"] == "image/png"
+
+
+def test_add_landmark_unknown_slide_404s_and_writes_no_asset():
+    map_job = _seed()
+    before_assets = list(map_job["result"].get("assets") or [])
+
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/nope/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 404
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert latest["result"]["assets"] == before_assets
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    pngs_after = set(asset_dir.glob("*.png")) if asset_dir.is_dir() else set()
+    assert not pngs_after
+
+
+def test_add_landmark_persist_failure_leaves_no_asset_and_no_document_change(monkeypatch):
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    before_revision = int(map_job["result"].get("stateRevision") or 0)
+
+    def boom(_job_id, _result):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(RUNNER, "update_result", boom)
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    monkeypatch.undo()
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert int(latest["result"].get("stateRevision") or 0) == before_revision
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    pngs_after = set(asset_dir.glob("*.png")) if asset_dir.is_dir() else set()
+    tmp_after = set(asset_dir.glob("*.tmp")) if asset_dir.is_dir() else set()
+    assert not pngs_after
+    assert not tmp_after
+
+
+def test_add_landmark_promotes_asset_before_publishing_document(monkeypatch):
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+
+    real_update_result = RUNNER.update_result
+    seen: dict[str, bool] = {}
+
+    def spy(job_id, result):
+        assets = result.get("assets") or []
+        if assets:
+            asset_id = assets[-1]["id"]
+            asset_dir = Path(result["outputDir"]) / "assets"
+            seen["asset_on_disk"] = (asset_dir / f"{asset_id}.png").is_file()
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", spy)
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    assert seen.get("asset_on_disk") is True
+
+
+def test_add_landmark_rolls_back_document_and_leaves_no_asset_on_persistence_failure(monkeypatch):
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    before_assets = list(map_job["result"].get("assets") or [])
+    before_churches = list(map_job["result"]["slides"][0]["churches"])
+
+    calls = {"n": 0}
+    real_save = RUNNER.save
+
+    def flaky_save(job):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("disk full")
+        return real_save(job)
+
+    monkeypatch.setattr(RUNNER, "save", flaky_save)
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert latest["result"]["assets"] == before_assets
+    slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+    assert slide["churches"] == before_churches
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    leftover = set(asset_dir.glob("*")) if asset_dir.is_dir() else set()
+    assert not leftover
+
+
+def test_append_landmark_church_id_collision_loops_until_a_free_id(monkeypatch):
+    from obed_edom.web import maps
+
+    result = {
+        "slides": [
+            {
+                "id": "s1",
+                "camera": {"lat": 1.0, "lon": 2.0},
+                "churches": [{"id": "wdeadbeef"}, {"id": "waaaaaaaa"}],
+            }
+        ],
+    }
+    sequence = iter(["aaaaaaaa", "cccccccc"])
+
+    class FakeUuid:
+        def __init__(self, hex_value):
+            self.hex = hex_value
+
+    monkeypatch.setattr(maps.uuid, "uuid4", lambda: FakeUuid(next(sequence)))
+    updated = maps.append_landmark(result, "s1", "lw", "Landmark", 10, 10, "a" * 40, "deadbeef")
+    church = updated["slides"][0]["churches"][-1]
+    assert church["id"] == "wcccccccc"
+
+
+def test_add_landmark_places_on_the_cg_view_and_invalidates_only_its_still_png():
+    map_job = _seed()
+    doc = _doc(map_job)
+    slide = dict(doc["slides"][0])
+    slide["cg"] = {
+        "camera": slide["camera"],
+        "style": slide["style"],
+        "highlights": [],
+        "churches": [],
+    }
+    doc["slides"] = [slide]
+    saved = _save(map_job, doc)
+    assert saved.status_code == 200, saved.text
+    map_job = {**map_job, "result": saved.json()["result"]}
+    slide_id = slide["id"]
+
+    lw_thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&kind=thumb", content=_landmark_png())
+    assert lw_thumb.status_code == 200, lw_thumb.text
+    cg_thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&audience=cg&kind=thumb", content=_landmark_png())
+    assert cg_thumb.status_code == 200, cg_thumb.text
+
+    response = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark?audience=cg",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    result = body["result"]
+    updated_slide = next(s for s in result["slides"] if s["id"] == slide_id)
+    assert updated_slide["churches"] == []
+    cg_view = updated_slide["cg"]
+    church = next(c for c in cg_view["churches"] if c["id"] == body["churchId"])
+    assert church["kind"] == "landmark"
+    assert cg_view.get("stillPng") is None
+    assert updated_slide.get("stillPng") is not None

@@ -3,6 +3,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from obed_edom.web.jobs import Job, JobRunner, artifact_status
 
 
@@ -154,6 +156,35 @@ def test_delete_does_not_purge_preview_cache(tmp_path: Path, monkeypatch):
     runner.delete(job.id, purge=True)
     assert marker.is_file()
     assert not work.exists()
+
+
+def test_save_write_failure_leaves_no_partial_or_temp_session_file(tmp_path: Path, monkeypatch):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    _wait(runner, job.id)
+    session_file = sessions / f"{job.id}.json"
+    before = session_file.read_text()
+
+    from pathlib import Path as PathType
+
+    real_replace = PathType.write_text
+
+    def flaky_write_text(self, *args, **kwargs):
+        if self.suffix == ".tmp":
+            raise OSError("disk full")
+        return real_replace(self, *args, **kwargs)
+
+    monkeypatch.setattr(PathType, "write_text", flaky_write_text)
+    job.status = "done"
+    job.result = {"stem": "Changed"}
+    with pytest.raises(OSError):
+        runner.save(job)
+
+    monkeypatch.undo()
+    assert session_file.read_text() == before
+    assert not (sessions / f"{job.id}.tmp").exists()
 
 
 def test_artifact_status_missing_and_suggested(tmp_path: Path):
@@ -374,3 +405,199 @@ def test_artifact_status_maps_labels(tmp_path: Path):
         result={"destPath": str(map_key)},
     )
     assert "CG Keynote" not in artifact_status(resize_ok, output)["missing"]
+
+
+def test_concurrent_update_result_race_leaves_valid_state(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    _wait(runner, job.id)
+
+    ready = threading.Event()
+    release = threading.Event()
+    real_save = runner.save
+
+    def slow_save(j):
+        ready.set()
+        release.wait(timeout=2)
+        real_save(j)
+
+    runner.save = slow_save
+    errors: list[Exception] = []
+
+    def first_writer():
+        try:
+            runner.update_result(job.id, {"stem": "Sermon_BC", "n": 1})
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def second_writer():
+        ready.wait(timeout=2)
+        try:
+            runner.update_result(job.id, {"stem": "Sermon_BC", "n": 2})
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=first_writer), threading.Thread(target=second_writer)]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not errors
+    saved = sessions / f"{job.id}.json"
+    payload = json.loads(saved.read_text())
+    assert payload["result"]["n"] in {1, 2}
+    assert not list(sessions.glob(f"{job.id}.json.*.tmp"))
+    assert runner.get(job.id).result["n"] == payload["result"]["n"]
+
+
+def test_worker_finalization_races_update_result(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    release = threading.Event()
+    job = runner.submit("generate", lambda j: (release.wait(2), {"stem": "worker"})[1], feature="generate")
+
+    for _ in range(100):
+        if runner.get(job.id).status == "running":
+            break
+        time.sleep(0.01)
+
+    def racer():
+        release.wait(1)
+        time.sleep(0.005)
+        runner.update_result(job.id, {"stem": "worker", "raced": True})
+
+    racer_thread = threading.Thread(target=racer)
+    racer_thread.start()
+    release.set()
+    done = _wait(runner, job.id)
+    racer_thread.join(timeout=5)
+
+    assert done.status == "done"
+    saved = sessions / f"{job.id}.json"
+    payload = json.loads(saved.read_text())
+    assert payload["result"]["stem"] == "worker"
+    assert not list(sessions.glob(f"{job.id}.json.*.tmp"))
+
+
+def test_failed_save_leaves_no_temp_file(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    _wait(runner, job.id)
+
+    class Unserializable:
+        pass
+
+    with pytest.raises(TypeError):
+        runner.update_result(job.id, {"bad": Unserializable()})
+
+    assert not list(sessions.glob(f"{job.id}.json.*.tmp"))
+    assert runner.get(job.id).result == {"stem": "Sermon_BC"}
+
+
+def test_delete_races_with_inflight_update_result(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    _wait(runner, job.id)
+
+    entered_save = threading.Event()
+    release_save = threading.Event()
+    original_save = runner.save
+
+    def blocking_save(j):
+        entered_save.set()
+        release_save.wait(2)
+        original_save(j)
+
+    runner.save = blocking_save
+
+    update_thread = threading.Thread(
+        target=runner.update_result, args=(job.id, {"stem": "Sermon_BC", "raced": True})
+    )
+    update_thread.start()
+    assert entered_save.wait(1)
+
+    delete_thread = threading.Thread(target=runner.delete, args=(job.id,))
+    delete_thread.start()
+
+    release_save.set()
+    update_thread.join(timeout=5)
+    delete_thread.join(timeout=5)
+
+    assert not update_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert not (sessions / f"{job.id}.json").exists()
+
+
+def test_delete_then_update_result_leaves_no_file(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    _wait(runner, job.id)
+
+    assert runner.delete(job.id) is True
+    assert runner.update_result(job.id, {"stem": "Sermon_BC", "late": True}) is None
+    assert not (sessions / f"{job.id}.json").exists()
+
+    # save() itself must be a no-op for a deleted job even if called directly.
+    runner.save(job)
+    assert not (sessions / f"{job.id}.json").exists()
+
+
+def test_delete_does_not_deadlock_with_concurrent_save(tmp_path: Path):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {"stem": "Sermon_BC"}, feature="generate")
+    _wait(runner, job.id)
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    def save_racer():
+        barrier.wait()
+        try:
+            runner.update_result(job.id, {"stem": "Sermon_BC", "racer": True})
+        except Exception:
+            pass
+
+    def delete_racer():
+        barrier.wait()
+        runner.delete(job.id)
+
+    threads = [threading.Thread(target=save_racer), threading.Thread(target=delete_racer)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+        assert not t.is_alive()
+
+    assert not (sessions / f"{job.id}.json").exists()
+
+
+def test_submit_does_not_reuse_deleted_job_id(tmp_path: Path, monkeypatch):
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    old = runner.submit("generate", lambda _j: {"stem": "Old"}, feature="generate")
+    _wait(runner, old.id)
+    assert runner.delete(old.id)
+
+    ids = iter([old.id, "fresh123"])
+    monkeypatch.setattr(runner, "_generate_job_id", lambda: next(ids))
+
+    job = runner.submit("generate", lambda _j: {"stem": "New"}, feature="generate")
+    assert job.id == "fresh123"
+    done = _wait(runner, job.id)
+    assert done.status == "done"
+    assert (sessions / f"{job.id}.json").is_file()
+    assert not (sessions / f"{old.id}.json").exists()

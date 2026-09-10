@@ -13,10 +13,46 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { showCgBand } = require(path.join(out, "types.js"));
+const { showCgBand, snapCgShift, hasOutgoingMovie } = require(path.join(out, "types.js"));
 
 test("showCgBand is true unless the slide itself is the CG slide", () => {
   assert.equal(showCgBand({}), true);
   assert.equal(showCgBand({ cg: undefined }), true);
   assert.equal(showCgBand({ cg: true }), false);
+});
+
+test("snapCgShift snaps to 0 within the threshold", () => {
+  assert.equal(snapCgShift(0), 0);
+  assert.equal(snapCgShift(10), 0);
+  assert.equal(snapCgShift(-10), 0);
+  assert.equal(snapCgShift(24), 0);
+  assert.equal(snapCgShift(-24), 0);
+});
+
+test("snapCgShift leaves values outside the threshold alone", () => {
+  assert.equal(snapCgShift(25), 25);
+  assert.equal(snapCgShift(-25), -25);
+  assert.equal(snapCgShift(200), 200);
+});
+
+test("snapCgShift honours a custom threshold", () => {
+  assert.equal(snapCgShift(5, 10), 0);
+  assert.equal(snapCgShift(11, 10), 11);
+});
+
+test("hasOutgoingMovie mirrors _outgoing: the first outgoing link's kind, not any outgoing link", () => {
+  const cutThenMovie = [
+    { from: "a", to: "b", kind: "cut" },
+    { from: "a", to: "c", kind: "movie" },
+  ];
+  assert.equal(hasOutgoingMovie(cutThenMovie, "a"), false);
+
+  const movieFirst = [
+    { from: "a", to: "b", kind: "movie" },
+    { from: "a", to: "c", kind: "cut" },
+  ];
+  assert.equal(hasOutgoingMovie(movieFirst, "a"), true);
+
+  assert.equal(hasOutgoingMovie([], "a"), false);
+  assert.equal(hasOutgoingMovie([{ from: "x", to: "y", kind: "movie" }], "a"), false);
 });

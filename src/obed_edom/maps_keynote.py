@@ -379,6 +379,7 @@ def coerce_link_kinds(slides: list[dict[str, Any]], links: list[dict[str, Any]])
             item.pop("easeIn", None)
             item.pop("easeOut", None)
             item.pop("flyZoom", None)
+            item.pop("flight", None)
         next_links.append(item)
     return next_links
 
@@ -793,6 +794,7 @@ def _place_churches(
                                 path=str(reveal_mov),
                                 fallback=str(landmark),
                                 landmark=True,
+                                revealKey=(reveal_audience, sid, church_id),
                             )
                         )
                     else:
@@ -1453,6 +1455,101 @@ def _log(job: Any, message: str) -> None:
         log(message)
 
 
+def maps_poster_frame_mode(explicit: str | None = None) -> str:
+    """`off` (default), `on` (surgical offline posterTime patch), or `verify` (patch +
+    read-back log). Env `OBED_MAPS_POSTER_FRAME`."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_POSTER_FRAME", "")).strip().lower()
+    return raw if raw in {"on", "verify"} else "off"
+
+
+def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[str, str, str], float]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for op in ops:
+        for item in op.get("items") or []:
+            if not (item.get("landmark") and item.get("kind") == "movie"):
+                continue
+            key = item.get("revealKey")
+            if key is None or tuple(key) not in reveal_poster_times:
+                continue
+            targets.append(
+                {
+                    "x": float(item["x"]),
+                    "y": float(item["y"]),
+                    "w": float(item["w"]),
+                    "h": float(item["h"]),
+                    "posterTime": reveal_poster_times[tuple(key)],
+                    "name": item.get("path"),
+                }
+            )
+    return targets
+
+
+def _apply_poster_frames(
+    dest: Path,
+    ops: list[dict[str, Any]],
+    reveal_poster_times: dict[tuple[str, str, str], float],
+    job: Any,
+    deck_label: str,
+    *,
+    width: int,
+    height: int,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any] | None:
+    """Patch reveal-movie ``posterTime`` in ``dest`` to last-frame. Gated behind
+    `OBED_MAPS_POSTER_FRAME` (default off); a refusal is never fatal to export --
+    the deck simply keeps today's first-frame posters. Every failure mode of the
+    optional patch (decode, planning, patch, verify reread) is contained here and
+    turned into a refusal; if the deck may have been left truncated (an
+    ``OfflineWriteCorrupted`` raised once ``_rewrite_members`` began truncating the
+    real inode), the deck is regenerated unpatched before returning."""
+    mode = maps_poster_frame_mode()
+    from obed_edom.offline_write import probe_iwa_extra
+
+    mode = probe_iwa_extra(mode, lambda m: _log(job, m))
+    if mode == "off":
+        return None
+    targets = _poster_targets(ops, reveal_poster_times)
+    if not targets:
+        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": False, "reason": None}
+
+    from obed_edom.iwa_movies import movie_archives, patch_movie_posters, plan_movie_posters
+    from obed_edom.iwa_write import OfflineWriteCorrupted
+
+    try:
+        plan = plan_movie_posters(dest, targets)
+        if plan["refused"]:
+            _log(job, f"posterFrame {deck_label}: refused ({plan['reason']})")
+            return {"deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": plan["reason"]}
+
+        patched = patch_movie_posters(dest, plan["posters"])
+        if patched["refused"]:
+            _log(job, f"posterFrame {deck_label}: refused ({patched['reason']})")
+            return {"deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": patched["reason"]}
+
+        _log(job, f"posterFrame {deck_label}: patched {patched['applied']} reveal movie(s)")
+        if mode == "verify":
+            by_id = {a["id"]: a["posterTime"] for a in movie_archives(dest)}
+            for oid in patched["touched"]:
+                _log(job, f"posterFrame {deck_label}: {oid} posterTime={by_id.get(oid)}")
+        return {"deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None}
+    except OfflineWriteCorrupted as exc:
+        _log(job, f"posterFrame {deck_label}: deck truncated during patch ({exc}); regenerating unpatched…")
+        _run_one_deck(ops, dest, width=width, height=height, is_cancelled=is_cancelled)
+        from obed_edom.iwa_write import recovery_tmp_path
+
+        recovery_tmp_path(dest).unlink(missing_ok=True)
+        return {
+            "deck": deck_label,
+            "mode": mode,
+            "applied": 0,
+            "refused": True,
+            "reason": f"deck truncated during patch, regenerated unpatched: {exc}",
+        }
+    except Exception as exc:  # noqa: BLE001 — every optional-patch failure refuses, never fatal
+        _log(job, f"posterFrame {deck_label}: refused (unexpected error: {exc})")
+        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": f"unexpected error: {exc}"}
+
+
 def _run_one_deck(
     ops: list[dict[str, Any]],
     dest: Path,
@@ -1485,14 +1582,17 @@ def _render_reveals(
     links: list[dict[str, Any]],
     log: Callable[[str], None],
     is_cancelled: Callable[[], bool] | None,
-) -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
+) -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str], dict[tuple[str, str, str], float]]:
     """Render paint-on reveal movies without mutating the job's stored slides/churches.
 
-    Returns (reveals, reveal_movies): reveals is keyed (audience, slideId, churchId) -> movie path,
-    used for per-landmark reveal items; reveal_movies is keyed (audience, slideId) -> movie path,
-    used for the "Reveal as slide movie" bg movie.
+    Returns (reveals, reveal_movies, reveal_poster_times): reveals is keyed (audience,
+    slideId, churchId) -> movie path, used for per-landmark reveal items; reveal_movies is
+    keyed (audience, slideId) -> movie path, used for the "Reveal as slide movie" bg movie;
+    reveal_poster_times mirrors reveals' keys with each movie's last-frame start time
+    (seconds), for the OBED_MAPS_POSTER_FRAME offline patch.
     """
     from obed_edom.maps_reveal import (
+        REVEAL_FPS,
         render_reveal,
         render_slide_reveal_movie,
         reveal_fingerprint,
@@ -1506,6 +1606,7 @@ def _render_reveals(
     asset_root = output_dir / "assets"
     reveals: dict[tuple[str, str, str], str] = {}
     reveal_movies: dict[tuple[str, str], str] = {}
+    reveal_poster_times: dict[tuple[str, str, str], float] = {}
     for slide in slides:
         sid = str(slide.get("id") or "")
         outgoing = _outgoing(sid, links)
@@ -1552,6 +1653,7 @@ def _render_reveals(
                         is_cancelled=is_cancelled,
                     )
                 reveals[(audience, sid, church_id)] = str(dest)
+                reveal_poster_times[(audience, sid, church_id)] = (max(2, round(duration * REVEAL_FPS)) - 1) / float(REVEAL_FPS)
             if not view.get("revealMovie"):
                 continue
             landmark_churches = [
@@ -1624,7 +1726,7 @@ def _render_reveals(
                     is_cancelled=is_cancelled,
                 )
             reveal_movies[(audience, sid)] = str(movie_dest)
-    return reveals, reveal_movies
+    return reveals, reveal_movies, reveal_poster_times
 
 
 def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True, export_dsk: bool = False) -> dict[str, Any]:
@@ -1654,8 +1756,11 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
     _raise_if_cancelled(is_cancelled)
     reveals: dict[tuple[str, str, str], str] = {}
     reveal_movies: dict[tuple[str, str], str] = {}
+    reveal_poster_times: dict[tuple[str, str, str], float] = {}
     try:
-        reveals, reveal_movies = _render_reveals(output_dir, slides, links, lambda m: _log(job, m), is_cancelled)
+        reveals, reveal_movies, reveal_poster_times = _render_reveals(
+            output_dir, slides, links, lambda m: _log(job, m), is_cancelled
+        )
     except ImportError:
         pass
     _raise_if_cancelled(is_cancelled)
@@ -1667,6 +1772,7 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
     stem = str(result.get("stem") or f"maps-{getattr(job, 'id', 'maps')}")
     flags: list[Any] = []
     flags_cg: list[Any] = []
+    poster_frame: list[dict[str, Any]] = []
     if export_lw:
         dest = output_dir / f"{stem}.key"
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")
@@ -1677,6 +1783,12 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         _run_one_deck(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled)
         result["destPath"] = str(dest)
         _raise_if_cancelled(is_cancelled)
+        record = _apply_poster_frames(
+            dest, ops, reveal_poster_times, job, "lw",
+            width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled,
+        )
+        if record is not None:
+            poster_frame.append(record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
         dest_dsk = output_dir / f"{stem}_DSK.key"
@@ -1689,6 +1801,12 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         )
         _run_one_deck(ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled)
         result["destPathDsk"] = str(dest_dsk)
+        record = _apply_poster_frames(
+            dest_dsk, ops_dsk, reveal_poster_times, job, "dsk",
+            width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled,
+        )
+        if record is not None:
+            poster_frame.append(record)
     if export_cg:
         dest_cg = output_dir / f"{stem}_CG.key"
         _log(job, f"Exporting CG deck {dest_cg.name} (1920×1080)…")
@@ -1725,10 +1843,22 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         _run_one_deck(ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled)
         result["destPathCg"] = str(dest_cg)
         _raise_if_cancelled(is_cancelled)
+        record = _apply_poster_frames(
+            dest_cg, ops_cg, reveal_poster_times, job, "cg",
+            width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled,
+        )
+        if record is not None:
+            poster_frame.append(record)
         flags_cg = _inspect_dest(dest_cg, job, is_cancelled=is_cancelled)
     result["exportLw"] = bool(export_lw)
     result["exportCg"] = bool(export_cg)
     result["exportDsk"] = bool(export_dsk)
+    if poster_frame:
+        result["posterFrame"] = poster_frame
+    else:
+        # Gate off (or no reveal movies to patch): never let a stale record from a
+        # prior on/verify run survive in `result`, which starts as a copy of it.
+        result.pop("posterFrame", None)
     from obed_edom.validate import flag_dict
 
     if export_lw:

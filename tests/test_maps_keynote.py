@@ -15,6 +15,7 @@ from obed_edom.maps_keynote import (
     PANEL_EDGES,
     WALL_HEIGHT,
     WALL_WIDTH,
+    _place_churches,
     _render_reveals,
     assign_morph_plates,
     avoid_straddle,
@@ -27,6 +28,7 @@ from obed_edom.maps_keynote import (
     export_maps_job,
     hop_capture_size,
     maps_export_plan,
+    maps_poster_frame_mode,
     morph_plate_geom,
     plate_filename,
     plate_id_for,
@@ -36,6 +38,7 @@ from obed_edom.maps_keynote import (
     project_into_plate,
     split_cg_export_plan,
 )
+from obed_edom.maps_reveal import REVEAL_FPS
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
 
@@ -400,7 +403,7 @@ def test_render_reveals_returns_mapping_without_mutating_church(tmp_path: Path, 
     _dummy_png(output_dir / "assets" / "asset1.png")
     church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
     slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
-    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals, _, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert reveals[("lw", "s1", "lm")].endswith(".mov")
     assert "revealMov" not in church
     assert "revealMov" not in slide["churches"][0]
@@ -423,13 +426,13 @@ def test_render_reveals_regenerates_when_duration_or_opacity_changes(tmp_path: P
     church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
     slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
 
-    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals, _, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert len(calls) == 1
     dest = Path(reveals[("lw", "s1", "lm")])
     first_bytes = dest.read_bytes()
 
     # Unchanged inputs must reuse the cached movie.
-    reveals_again, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals_again, _, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert len(calls) == 1
     assert reveals_again[("lw", "s1", "lm")] == reveals[("lw", "s1", "lm")]
     assert dest.read_bytes() == first_bytes
@@ -459,7 +462,7 @@ def test_render_reveals_uses_separate_lw_and_cg_paths(tmp_path: Path, monkeypatc
         "s1", _camera(3.0, 101.0, 8), churches=[lw_church],
         cg={"camera": _camera(3.0, 101.0, 8), "style": "positron", "churches": [cg_church]},
     )
-    reveals, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    reveals, _, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert reveals[("lw", "s1", "lm")] != reveals[("cg", "s1", "lm")]
 
 
@@ -499,7 +502,7 @@ def test_reveal_movie_skipped_when_slide_is_a_fly_source(tmp_path: Path):
     slide = _slide("s1", camera, churches=[church], revealMovie=True)
     slide2 = _slide("s2", camera)
     link = {"from": "s1", "to": "s2", "kind": "movie"}
-    reveals, reveal_movies = _render_reveals(output_dir, [slide, slide2], [link], lambda _m: None, None)
+    reveals, reveal_movies, _ = _render_reveals(output_dir, [slide, slide2], [link], lambda _m: None, None)
     assert reveal_movies == {}
     assert reveals == {}
 
@@ -832,6 +835,15 @@ def test_coerce_uses_strictest_cg_transition_requirement():
     dissolve = coerce_link_kinds([a, b], [{"from": "s1", "to": "s2", "kind": "dissolve", "duration": 1.7}])[0]
     assert dissolve["kind"] == "dissolve"
     assert dissolve["duration"] == 1.7
+
+
+def test_coerce_strips_flight_when_kind_stays_morph():
+    a = _slide("s1", _camera(3.0, 101.0, 8))
+    b = _slide("s2", _camera(3.0, 101.01, 8))
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.7, "flight": "phases"}]
+    next_links = coerce_link_kinds([a, b], links)
+    assert next_links[0]["kind"] == "morph"
+    assert "flight" not in next_links[0]
 
 
 def test_coerce_demotes_morph_on_hidden_layers_mismatch():
@@ -1361,3 +1373,280 @@ def test_split_cg_export_plan_keeps_landing_still_for_affected_slide():
     links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 1.0}]
     plan = split_cg_export_plan([a, b], links)
     assert "s2__landing" in {row["slideId"] for row in plan["stills"]}
+
+
+def test_render_reveals_returns_poster_times_matching_shared_formula(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    for duration in (0.5, 1.2, 3.0):
+        church = _landmark_church(reveal={"kind": "brush", "duration": duration})
+        slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+        _, _, poster_times = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+        expected = (max(2, round(duration * REVEAL_FPS)) - 1) / float(REVEAL_FPS)
+        assert poster_times[("lw", "s1", "lm")] == pytest.approx(expected)
+
+
+def test_place_churches_stamps_reveal_key_only_on_reveal_movie_items(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    reveal_mov = tmp_path / "reveal" / "s1-lm.mov"
+    reveal_mov.parent.mkdir(parents=True, exist_ok=True)
+    reveal_mov.write_bytes(b"mov")
+    camera = _camera(3.0, 101.0, 8)
+    dot = {"id": "d1", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}
+    churches = [_landmark_church(), dot]
+
+    with_reveal = _place_churches(
+        churches, plate=None, placement=None, camera=camera, wall=True, movie=None,
+        asset_root=asset_root, reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
+    )
+    revealed_item = next(item for item in with_reveal if item.get("landmark"))
+    assert revealed_item["revealKey"] == ("lw", "s1", "lm")
+    assert not any(item.get("revealKey") for item in with_reveal if item is not revealed_item)
+
+    without_reveal = _place_churches(
+        churches, plate=None, placement=None, camera=camera, wall=True, movie=None, asset_root=asset_root,
+    )
+    assert not any("revealKey" in item for item in without_reveal)
+
+
+def test_maps_poster_frame_mode_defaults_off(monkeypatch):
+    monkeypatch.delenv("OBED_MAPS_POSTER_FRAME", raising=False)
+    assert maps_poster_frame_mode() == "off"
+    assert maps_poster_frame_mode("on") == "on"
+    assert maps_poster_frame_mode("verify") == "verify"
+    assert maps_poster_frame_mode("bogus") == "off"
+
+
+def test_export_maps_job_never_calls_patcher_when_gate_unset(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OBED_MAPS_POSTER_FRAME", raising=False)
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+
+    def _boom(*_a, **_k):
+        raise AssertionError("patch_movie_posters must not be called with the gate off")
+
+    monkeypatch.setattr("obed_edom.iwa_movies.patch_movie_posters", _boom)
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert "posterFrame" not in result
+
+
+def test_export_maps_job_records_refusal_reason_when_gated_on(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": True, "reason": "x", "posters": {}},
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert result["posterFrame"]
+    assert result["posterFrame"][0]["refused"] is True
+    assert result["posterFrame"][0]["reason"] == "x"
+
+
+def _gated_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+    return job
+
+
+def test_export_maps_job_contains_planning_exception_as_refusal(tmp_path: Path, monkeypatch):
+    job = _gated_export(tmp_path, monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("planning blew up")
+
+    monkeypatch.setattr("obed_edom.iwa_movies.plan_movie_posters", _boom)
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert result["posterFrame"][0]["refused"] is True
+    assert "planning blew up" in result["posterFrame"][0]["reason"]
+    # export itself must not have raised/aborted -- destPath was recorded regardless
+    assert result["destPath"]
+
+
+def test_export_maps_job_contains_patch_exception_as_refusal(tmp_path: Path, monkeypatch):
+    job = _gated_export(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": False, "reason": None, "posters": {"300": 1.0}},
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("patch blew up")
+
+    monkeypatch.setattr("obed_edom.iwa_movies.patch_movie_posters", _boom)
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert result["posterFrame"][0]["refused"] is True
+    assert "patch blew up" in result["posterFrame"][0]["reason"]
+
+
+def test_export_maps_job_contains_verify_reread_exception_as_refusal(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "verify")
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": False, "reason": None, "posters": {"300": 1.0}},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.patch_movie_posters",
+        lambda deck, posters: {"refused": False, "reason": None, "touched": ["300"], "applied": 1},
+    )
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("reread blew up")
+
+    monkeypatch.setattr("obed_edom.iwa_movies.movie_archives", _boom)
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert result["posterFrame"][0]["refused"] is True
+    assert "reread blew up" in result["posterFrame"][0]["reason"]
+
+
+def test_export_maps_job_regenerates_deck_after_offline_write_corrupted(tmp_path: Path, monkeypatch):
+    from obed_edom.iwa_write import OfflineWriteCorrupted, recovery_tmp_path
+
+    job = _gated_export(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": False, "reason": None, "posters": {"300": 1.0}},
+    )
+
+    def _boom(deck, posters):
+        Path(deck).write_bytes(b"truncated")
+        recovery_tmp_path(Path(deck)).write_bytes(b"recovery")
+        raise OfflineWriteCorrupted("simulated truncation")
+
+    monkeypatch.setattr("obed_edom.iwa_movies.patch_movie_posters", _boom)
+
+    run_calls: list[str] = []
+    real_ok = _ok_osascript
+    tmp_paths: list[Path] = []
+
+    def _counting_osascript(script: str, **_k):
+        run_calls.append(script)
+        return real_ok(script)
+
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _counting_osascript)
+
+    import obed_edom.maps_keynote as mod
+
+    real_run_one_deck = mod._run_one_deck
+
+    def _capturing_run_one_deck(ops, dest, **kw):
+        tmp_paths.append(recovery_tmp_path(Path(dest)))
+        return real_run_one_deck(ops, dest, **kw)
+
+    monkeypatch.setattr("obed_edom.maps_keynote._run_one_deck", _capturing_run_one_deck)
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert result["posterFrame"][0]["refused"] is True
+    assert "truncated" in result["posterFrame"][0]["reason"]
+    # _run_one_deck was invoked a second time to regenerate the (truncated) deck:
+    # once for the initial export, once more after OfflineWriteCorrupted.
+    assert len(run_calls) == 2
+    # the recovery tmp file left behind by the (simulated) truncated rewrite is
+    # cleaned up once regeneration succeeds.
+    assert tmp_paths and not tmp_paths[-1].exists()
+
+
+def test_export_maps_job_keeps_recovery_tmp_when_regeneration_fails(tmp_path: Path, monkeypatch):
+    from obed_edom.iwa_write import OfflineWriteCorrupted, recovery_tmp_path
+
+    job = _gated_export(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": False, "reason": None, "posters": {"300": 1.0}},
+    )
+
+    recovery_holder: dict[str, Path] = {}
+
+    def _boom(deck, posters):
+        Path(deck).write_bytes(b"truncated")
+        tmp = recovery_tmp_path(Path(deck))
+        tmp.write_bytes(b"recovery")
+        recovery_holder["path"] = tmp
+        raise OfflineWriteCorrupted("simulated truncation")
+
+    monkeypatch.setattr("obed_edom.iwa_movies.patch_movie_posters", _boom)
+
+    import obed_edom.maps_keynote as mod
+
+    real_run_one_deck = mod._run_one_deck
+    calls = {"n": 0}
+
+    def _run_one_deck_boom(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("regeneration blew up")
+        return real_run_one_deck(*a, **kw)
+
+    monkeypatch.setattr("obed_edom.maps_keynote._run_one_deck", _run_one_deck_boom)
+
+    with pytest.raises(RuntimeError, match="regeneration blew up"):
+        export_maps_job(job, export_lw=True, export_cg=False)
+
+    assert recovery_holder["path"].exists()
+
+
+def test_export_maps_job_removes_stale_poster_frame_when_gate_off(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OBED_MAPS_POSTER_FRAME", raising=False)
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    job.result["posterFrame"] = [{"deck": "lw", "mode": "on", "applied": 1, "refused": False, "reason": None}]
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert "posterFrame" not in result

@@ -552,24 +552,15 @@ export async function bootstrapMapsPinsCsv(id: string, file: File, slideId: stri
   return res.json();
 }
 
-export type UploadedMapsAsset = {
-  asset: { id: string; version: string; width: number; height: number };
-  stateRevision: number;
-  document: Record<string, unknown>;
-};
-
-export async function uploadMapsAsset(id: string, file: File): Promise<UploadedMapsAsset> {
+export async function addMapsLandmark(id: string, slideId: string, audience: "lw" | "cg", file: File): Promise<{ job: Job; churchId: string }> {
   const body = new FormData();
   body.append("file", file);
-  const response = await fetch(`/api/maps/${encodeURIComponent(id)}/assets`, { method: "POST", body });
-  if (!response.ok) throw new Error(await response.text());
+  const response = await fetch(`/api/maps/${encodeURIComponent(id)}/slides/${encodeURIComponent(slideId)}/landmark?audience=${audience}`, { method: "POST", body });
+  if (!response.ok) throw new Error(await readError(response));
   const data = await response.json();
-  const { asset, stateRevision, document } = data as Record<string, unknown>;
-  const { id: assetId, version, width, height } = (asset || {}) as Record<string, unknown>;
-  if (typeof assetId !== "string" || typeof version !== "string" || typeof width !== "number" || typeof height !== "number" || typeof stateRevision !== "number" || !document || typeof document !== "object") {
-    throw new Error("The uploaded landmark response was incomplete.");
-  }
-  return { asset: { id: assetId, version, width, height }, stateRevision, document: document as Record<string, unknown> };
+  const { churchId, ...job } = data as Record<string, unknown>;
+  if (typeof churchId !== "string") throw new Error("The uploaded landmark response was incomplete.");
+  return { job: job as Job, churchId };
 }
 
 export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean }): Promise<Job> {
@@ -627,10 +618,13 @@ export async function cancelWatercolour(id: string): Promise<Job> {
   return res.json();
 }
 
-export async function addWatercolourToMap(jobId: string, itemId: string, mapsJobId: string, slideId: string): Promise<Job> {
+export async function addWatercolourToMap(jobId: string, itemId: string, mapsJobId: string, slideId: string): Promise<{ job: Job; churchId: string }> {
   const res = await fetch(`/api/watercolour/${jobId}/items/${itemId}/add-to-map/${mapsJobId}/${slideId}`, { method: "POST" });
   if (!res.ok) throw new Error(await readError(res));
-  return res.json();
+  const data = await res.json();
+  const { churchId, ...job } = data as Record<string, unknown>;
+  if (typeof churchId !== "string") throw new Error("The Watercolour add-to-map response was incomplete.");
+  return { job: job as Job, churchId };
 }
 
 export function watercolourImageUrl(jobId: string, itemId: string, kind: "original" | "result"): string {

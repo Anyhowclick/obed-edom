@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 
 from obed_edom.paths import output_root
-from obed_edom.watercolour import MAX_ENCODED_BYTES, WatercolourError, WatercolourOptions, convert, decode_image, grabcut_mask, render
+from obed_edom.watercolour import MAX_ENCODED_BYTES, Cancel, WatercolourCancelled, WatercolourError, WatercolourOptions, _has_paint, convert, decode_image, grabcut_mask, render
 
 router = APIRouter(prefix="/api/watercolour", tags=["watercolour"])
 MAX_BATCH_FILES = 20
@@ -86,46 +86,61 @@ def _validate_spec(spec: dict[str, Any] | None, size: tuple[int, int] | None = N
     rect = spec.get("rect")
     if rect is not None and (not isinstance(rect, list) or len(rect) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in rect)):
         raise WatercolourError("Mask settings are invalid")
-    if rect is not None and size is not None:
+    if rect is not None:
         x, y, w, h = rect
-        width, height = size
-        if not (0 <= x < width and 0 <= y < height and x + w <= width and y + h <= height):
+        if w <= 0 or h <= 0:
             raise WatercolourError("Mask settings are invalid")
+        if size is not None:
+            width, height = size
+            if not (0 <= x < width and 0 <= y < height and x + w <= width and y + h <= height):
+                raise WatercolourError("Mask settings are invalid")
+    total_points = 0
     for key in ("foreground", "background"):
         points = spec.get(key)
         if points is None:
             continue
         if not isinstance(points, list):
             raise WatercolourError("Mask settings are invalid")
+        total_points += len(points)
         for point in points:
             if not isinstance(point, list) or len(point) != 2 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in point):
                 raise WatercolourError("Mask settings are invalid")
+            if size is not None:
+                px, py = point
+                width, height = size
+                if not (0 <= px < width and 0 <= py < height):
+                    raise WatercolourError("Mask settings are invalid")
+    if total_points > 500:
+        raise WatercolourError("Too many mask correction points")
     for key in ("keepMask", "removeMask"):
         value = spec.get(key)
         if value is not None and not isinstance(value, str):
             raise WatercolourError("Mask settings are invalid")
 
 
-def _mask_for(image, spec: dict[str, Any] | None):
+def _mask_for(image, spec: dict[str, Any] | None, cancel: Cancel = None):
     if not spec or not spec.get("transparent"):
         return None
     _validate_spec(spec, image.size)
     rect = spec.get("rect")
-    if rect is None and image.getchannel("A").getextrema()[0] < 255:
-        return image.getchannel("A")
-    if not isinstance(rect, list) or len(rect) != 4:
-        raise WatercolourError("Transparent landmark output needs a foreground rectangle")
-    foreground = spec.get("foreground") if isinstance(spec.get("foreground"), list) else []
-    background = spec.get("background") if isinstance(spec.get("background"), list) else []
     keep_mask = _decode_mask_field(spec, "keepMask")
     remove_mask = _decode_mask_field(spec, "removeMask")
+    painted = _has_paint(keep_mask)
+    if rect is None and not painted and image.getchannel("A").getextrema()[0] < 255:
+        return image.getchannel("A")
+    if not painted:
+        if not isinstance(rect, list) or len(rect) != 4:
+            raise WatercolourError("Transparent landmark output needs a foreground rectangle")
+    foreground = spec.get("foreground") if isinstance(spec.get("foreground"), list) else []
+    background = spec.get("background") if isinstance(spec.get("background"), list) else []
     return grabcut_mask(
         image,
-        tuple(float(value) for value in rect),
+        tuple(float(value) for value in rect) if isinstance(rect, list) and len(rect) == 4 else None,
         foreground=foreground,
         background=background,
         keep_mask=keep_mask,
         remove_mask=remove_mask,
+        cancel=cancel,
     )
 
 
@@ -171,7 +186,7 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
       for index, (name, path) in enumerate(staged):
         if job.cancelled():
             for remaining_name, _remaining_path in staged[index:]:
-                rows.append({"id": uuid.uuid4().hex, "name": remaining_name, "status": "error", "error": "Cancelled."})
+                rows.append({"id": uuid.uuid4().hex, "name": remaining_name, "status": "cancelled"})
             break
         stem = f"{index:02d}-{Path(name).stem or 'photo'}"
         original_path = originals / f"{stem}.png"; original_tmp = original_path.with_suffix(".tmp")
@@ -179,13 +194,21 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
         try:
             raw = path.read_bytes(); image = decode_image(raw)
             image.save(original_tmp, "PNG", optimize=False); original_tmp.replace(original_path)
-            spec = masks.get(str(index)) or masks.get(name)
+            spec = masks.get(str(index))
             transparent = bool(spec and spec.get("transparent"))
-            payload, size = convert(raw, WatercolourOptions(**{**options.__dict__, "transparent": transparent, "paper": not transparent}), _mask_for(image, spec))
+            payload, size = convert(raw, WatercolourOptions(**{**options.__dict__, "transparent": transparent, "paper": not transparent}), _mask_for(image, spec, cancel=job.cancelled), cancel=job.cancelled)
             result_tmp.write_bytes(payload); result_tmp.replace(result_path)
+            if job.cancelled():
+                raise WatercolourCancelled()
             item_id = uuid.uuid4().hex
             item_specs[item_id] = spec
             rows.append({"id": item_id, "name": name, "original": original_path.name, "result": result_path.name, "width": size[0], "height": size[1], "transparent": transparent, "status": "done"})
+        except WatercolourCancelled:
+            original_path.unlink(missing_ok=True); original_tmp.unlink(missing_ok=True); result_tmp.unlink(missing_ok=True); result_path.unlink(missing_ok=True)
+            rows.append({"id": uuid.uuid4().hex, "name": name, "status": "cancelled"})
+            for remaining_name, _remaining_path in staged[index + 1:]:
+                rows.append({"id": uuid.uuid4().hex, "name": remaining_name, "status": "cancelled"})
+            break
         except (OSError, WatercolourError, ValueError, TypeError, cv2.error) as exc:
             original_path.unlink(missing_ok=True); original_tmp.unlink(missing_ok=True); result_tmp.unlink(missing_ok=True)
             rows.append({"id": uuid.uuid4().hex, "name": name, "status": "error", "error": str(exc)})
@@ -197,6 +220,8 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
       sidecar = root / "masks.json"; sidecar_tmp = sidecar.with_suffix(".tmp")
       sidecar_tmp.write_text(json.dumps({"washSoftness": options.wash_softness, "inkAmount": options.ink_amount, "items": item_specs}))
       sidecar_tmp.replace(sidecar)
+      job.result["cancelled"] = job.cancelled()
+      job.result["partial"] = job.cancelled() and any(row.get("status") == "done" for row in rows)
     return dict(job.result)
 
 
@@ -214,6 +239,9 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
         raise HTTPException(400, "Mask settings are invalid")
     if any(not isinstance(value, dict) for value in mask_specs.values()):
         raise HTTPException(400, "Mask settings are invalid")
+    valid_keys = {str(i) for i in range(len(files))}
+    if any(key not in valid_keys for key in mask_specs):
+        raise HTTPException(400, "Mask settings must be keyed by photo index")
     staged_root = output_root() / ".watercolour" / ".uploads" / uuid.uuid4().hex
     staged_root.mkdir(parents=True, exist_ok=False)
     staged: list[tuple[str, Path]] = []
@@ -226,7 +254,14 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
                 raise HTTPException(413, "This batch exceeds the 100 MB upload limit")
             path = staged_root / f"{index:02d}.upload"
             path.write_bytes(payload)
-            staged.append((Path(upload.filename or f"photo-{index + 1}").name, path))
+            name = Path(upload.filename or f"photo-{index + 1}").name
+            staged.append((name, path))
+            spec = mask_specs.get(str(index))
+            if spec and spec.get("transparent"):
+                try:
+                    _validate_spec(spec, decode_image(payload).size)
+                except WatercolourError as exc:
+                    raise HTTPException(400, f"{name}: {exc}") from exc
         options = WatercolourOptions(wash_softness=wash_softness, ink_amount=ink_amount)
         job = _runner().submit(
             "watercolour",
@@ -301,8 +336,10 @@ def cancel_watercolour(job_id: str) -> dict:
         raise HTTPException(404, "Unknown Watercolour job")
     cancelled = _runner().cancel(job_id)
     result = cancelled.result if cancelled else None
-    if cancelled and cancelled.status == "error" and result and not result.get("items") and result.get("stagingDir"):
+    if cancelled and cancelled.status == "error" and result and "items" not in result and result.get("stagingDir"):
         shutil.rmtree(result["stagingDir"], ignore_errors=True)
+        _runner().update_result(job_id, {"cancelled": True, "partial": False, "items": []})
+        cancelled = _runner().get(job_id)
     return _runner().public_dict(cancelled)
 
 
@@ -325,18 +362,13 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
     payload, width, height, version = maps._decode_png(source.read_bytes())
     asset_id = uuid.uuid4().hex
     def append(result: dict[str, Any]) -> dict[str, Any]:
-        slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
-        if not slide: raise HTTPException(404, "Unknown Maps slide")
-        path = maps._asset_path(result, asset_id)
-        temp = path.with_suffix(".tmp")
-        temp.write_bytes(payload)
-        temp.replace(path)
-        churches = list(slide.get("churches") or []); used = {str(church.get("id") or "") for church in churches}; n = 1
-        while f"p{n}" in used: n += 1
-        camera = slide.get("camera") or {}
-        churches.append({"id": f"p{n}", "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1})
-        slide["churches"] = churches; result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]; return result
-    return maps._mutate_document(maps_job_id, None, append)
+        return maps.append_landmark(result, slide_id, "lw", name, width, height, version, asset_id)
+    updated = maps._mutate_document_with_asset(maps_job_id, None, asset_id, payload, append)
+    result = dict(updated["result"] or {})
+    slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
+    churches = (slide or {}).get("churches") or []
+    church_id = next((str(church.get("id")) for church in reversed(churches) if church.get("assetId") == asset_id), None)
+    return {**updated, "churchId": church_id}
 
 
 def _job_root(job_id: str) -> Path:

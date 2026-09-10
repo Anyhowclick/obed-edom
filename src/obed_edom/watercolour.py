@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import cv2
@@ -19,6 +20,18 @@ PENCIL = np.array([0.40, 0.29, 0.21], np.float32)
 
 class WatercolourError(ValueError):
     pass
+
+
+class WatercolourCancelled(Exception):
+    pass
+
+
+Cancel = Callable[[], bool] | None
+
+
+def _check(cancel: Cancel) -> None:
+    if cancel and cancel():
+        raise WatercolourCancelled()
 
 
 @dataclass(frozen=True)
@@ -170,14 +183,16 @@ def _wash_layers(rgb: np.ndarray, busy: np.ndarray, rng: np.random.Generator, sc
 
 
 def _fill_hidden(rgb: np.ndarray, alpha: np.ndarray, scale: float) -> np.ndarray:
-    inside = (alpha > 0).astype(np.float32)
-    if not inside.any():
+    weight = alpha.astype(np.float32) / 255.0
+    if not (weight > 0).any():
         return rgb
     sigma = 12 * scale
-    weight = _blur(inside, sigma)
-    filled = _blur(rgb.astype(np.float32) * inside[:, :, None], sigma) / np.maximum(weight, 1e-4)[:, :, None]
-    filled = np.where(weight[:, :, None] > 1e-3, filled, rgb[alpha > 0].mean(axis=0))
-    return np.where(alpha[:, :, None] > 0, rgb, np.clip(filled, 0, 255)).astype(np.uint8)
+    blurred_weight = _blur(weight, sigma)
+    filled = _blur(rgb.astype(np.float32) * weight[:, :, None], sigma) / np.maximum(blurred_weight, 1e-4)[:, :, None]
+    filled = np.where(blurred_weight[:, :, None] > 1e-3, filled, rgb[alpha > 0].mean(axis=0))
+    filled = np.clip(filled, 0, 255)
+    opaque = alpha[:, :, None] >= 255
+    return np.where(opaque, rgb, filled).astype(np.uint8)
 
 
 def _feather_mask(mask: np.ndarray, amount: float = 0.8) -> np.ndarray:
@@ -186,45 +201,75 @@ def _feather_mask(mask: np.ndarray, amount: float = 0.8) -> np.ndarray:
     return cv2.GaussianBlur(mask, (0, 0), amount)
 
 
+def _has_paint(mask: Image.Image | None) -> bool:
+    if mask is None:
+        return False
+    return bool((np.asarray(mask.convert("L")) > 127).any())
+
+
+def _painted_alpha(image: Image.Image, keep_mask: Image.Image | None, remove_mask: Image.Image | None) -> Image.Image:
+    keep = np.asarray(keep_mask.convert("L").resize(image.size, Image.BILINEAR), dtype=np.float32) if keep_mask is not None else np.zeros((image.height, image.width), np.float32)
+    remove = np.asarray(remove_mask.convert("L").resize(image.size, Image.BILINEAR), dtype=np.float32) if remove_mask is not None else np.zeros((image.height, image.width), np.float32)
+    alpha = np.minimum(keep, 255 - remove)
+    return Image.fromarray(np.clip(alpha, 0, 255).astype(np.uint8), "L")
+
+
 def grabcut_mask(
     image: Image.Image,
-    rect: tuple[float, float, float, float],
+    rect: tuple[float, float, float, float] | None,
     *,
     foreground: list[tuple[float, float]] | None = None,
     background: list[tuple[float, float]] | None = None,
     keep_mask: Image.Image | None = None,
     remove_mask: Image.Image | None = None,
+    cancel: Cancel = None,
 ) -> Image.Image:
-    x, y, width, height = rect
-    if not all(math.isfinite(v) for v in rect) or width <= 0 or height <= 0:
+    painted = _has_paint(keep_mask)
+    if rect is not None:
+        x, y, width, height = rect
+        if not all(math.isfinite(v) for v in rect) or width <= 0 or height <= 0:
+            raise WatercolourError("Foreground rectangle must be finite and non-empty")
+        if not (0 <= x < image.width and 0 <= y < image.height and x + width <= image.width and y + height <= image.height):
+            raise WatercolourError("Foreground rectangle is outside the image")
+    elif not painted:
         raise WatercolourError("Foreground rectangle must be finite and non-empty")
-    if not (0 <= x < image.width and 0 <= y < image.height and x + width <= image.width and y + height <= image.height):
-        raise WatercolourError("Foreground rectangle is outside the image")
     if len(foreground or []) + len(background or []) > 500:
         raise WatercolourError("Too many mask correction points")
+    for points in (foreground or [], background or []):
+        for px, py in points:
+            if not (math.isfinite(px) and math.isfinite(py) and 0 <= px < image.width and 0 <= py < image.height):
+                raise WatercolourError("Mask correction point is outside the image")
+    if painted:
+        return _painted_alpha(image, keep_mask, remove_mask)
+    keep_mask = None
     rgb = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
     mask = np.zeros((image.height, image.width), np.uint8)
     model_bg = np.zeros((1, 65), np.float64)
     model_fg = np.zeros((1, 65), np.float64)
-    cv2.grabCut(rgb, mask, (round(x), round(y), round(width), round(height)), model_bg, model_fg, 5, cv2.GC_INIT_WITH_RECT)
+    _check(cancel)
+    cv2.grabCut(rgb, mask, (round(x), round(y), round(width), round(height)), model_bg, model_fg, 1, cv2.GC_INIT_WITH_RECT)
+    for _ in range(4):
+        _check(cancel)
+        cv2.grabCut(rgb, mask, None, model_bg, model_fg, 1, cv2.GC_EVAL)
     for points, kind in ((foreground or [], cv2.GC_FGD), (background or [], cv2.GC_BGD)):
         for px, py in points:
-            if not (math.isfinite(px) and math.isfinite(py) and 0 <= px < image.width and 0 <= py < image.height):
-                raise WatercolourError("Mask correction point is outside the image")
             cv2.circle(mask, (round(px), round(py)), 6, kind, -1)
-    for painted, kind in ((remove_mask, cv2.GC_BGD), (keep_mask, cv2.GC_FGD)):
-        if painted is None:
+    for painted_mask, kind in ((remove_mask, cv2.GC_BGD), (keep_mask, cv2.GC_FGD)):
+        if painted_mask is None:
             continue
-        resized = painted.resize(image.size, Image.NEAREST)
+        resized = painted_mask.resize(image.size, Image.NEAREST)
         flag = np.asarray(resized.convert("L")) > 127
         mask[flag] = kind
     if foreground or background or keep_mask is not None or remove_mask is not None:
-        cv2.grabCut(rgb, mask, None, model_bg, model_fg, 3, cv2.GC_INIT_WITH_MASK)
+        cv2.grabCut(rgb, mask, None, model_bg, model_fg, 1, cv2.GC_INIT_WITH_MASK)
+        for _ in range(2):
+            _check(cancel)
+            cv2.grabCut(rgb, mask, None, model_bg, model_fg, 1, cv2.GC_EVAL)
     alpha = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
     return Image.fromarray(alpha, "L")
 
 
-def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | None = None) -> Image.Image:
+def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | None = None, *, cancel: Cancel = None) -> Image.Image:
     if not 0 <= options.wash_softness <= 1 or not 0 <= options.ink_amount <= 1:
         raise WatercolourError("Watercolour controls must be between zero and one")
     rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8)
@@ -238,11 +283,14 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
     scale = max(0.5, min(h, w) / BASE_MIN_SIDE)
     if options.transparent:
         rgb = _fill_hidden(rgb, alpha, scale)
+    _check(cancel)
     rng = np.random.default_rng(options.seed)
     paper, height = _paper((h, w), rng, scale)
+    _check(cancel)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
     ink = _pencil_edges(gray, scale)
     busy = np.clip(_blur((ink > 0.35).astype(np.float32), 5 * scale) / 0.45, 0, 1)
+    _check(cancel)
     edge_gain = _slider_gain(options.ink_amount, 0.42, 0.40, 0.55)
     drawn = ink if edge_gain == 1.0 else _pencil_edges(gray, scale, 1.5 / edge_gain)
     factor = min(1.0, WORK_MIN_SIDE / min(h, w))
@@ -252,6 +300,7 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
         wash, cover, pool, smooth = (cv2.resize(layer, (w, h), interpolation=cv2.INTER_LINEAR) for layer in layers)
     else:
         wash, cover, pool, smooth = _wash_layers(rgb, busy, rng, scale, options)
+    _check(cancel)
     wash_gain = _slider_gain(options.wash_softness, 0.65, -0.30, -0.85)
     cover = cover * ((0.90 - 0.18 * options.wash_softness) * wash_gain) * np.clip(1 - 0.22 * np.maximum(height - 0.4, 0), 0.5, 1)
     dark_source = _blur(gray, 0.6 * scale)
@@ -259,6 +308,7 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
     pigment_floor = pigment_floor * pigment_floor * (3 - 2 * pigment_floor)
     floor_gain = min(max(wash_gain, 0.55), 1.15)
     cover = np.maximum(cover, (0.78 * floor_gain) * pigment_floor)
+    _check(cancel)
     transmit = np.clip(1 - (1 - wash) * cover[:, :, None], 0, 1) ** (1 + 0.35 * pool)[:, :, None]
     result = paper * transmit
     strength = _gradient(gray, 1.2 * scale)
@@ -270,6 +320,7 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
     ink = np.clip(ink, 0, 1)[:, :, None]
     line = 0.45 * PENCIL[None, None] + 0.55 * wash * 0.75
     result = result * (1 - ink) + line * ink
+    _check(cancel)
     if options.transparent:
         return Image.fromarray(np.dstack((np.clip(result * 255, 0, 255).astype(np.uint8), out_alpha)), "RGBA")
     background = paper if options.paper else np.broadcast_to(PAPER, (h, w, 3))
@@ -282,9 +333,12 @@ def render(image: Image.Image, options: WatercolourOptions, mask: Image.Image | 
     return Image.fromarray(np.clip(composited * 255, 0, 255).astype(np.uint8), "RGB")
 
 
-def convert(raw: bytes, options: WatercolourOptions, mask: Image.Image | None = None) -> tuple[bytes, tuple[int, int]]:
+def convert(raw: bytes, options: WatercolourOptions, mask: Image.Image | None = None, *, cancel: Cancel = None) -> tuple[bytes, tuple[int, int]]:
     image = decode_image(raw)
-    result = render(image, replace(options, seed=_seed(raw, options.seed)), mask)
+    _check(cancel)
+    result = render(image, replace(options, seed=_seed(raw, options.seed)), mask, cancel=cancel)
+    _check(cancel)
     output = io.BytesIO()
     result.save(output, "PNG", optimize=False)
+    _check(cancel)
     return output.getvalue(), result.size

@@ -200,14 +200,28 @@ export function churchesGeo(
   };
 }
 
-export function movieObjectsAt(from: MapsChurch[], to: MapsChurch[], t: number, transition: "fade" | "hold" | undefined): MapsChurch[] {
+const painted = (c: MapsChurch) => c.kind === "landmark" && Boolean(c.reveal);
+
+/** Landmarks with a paint-on reveal are captured into the slide still; hop movies must not double them. */
+export function withoutRevealed(list: MapsChurch[]): MapsChurch[] {
+  return list.filter((c) => !painted(c));
+}
+
+/**
+ * `destinationPaintsReveal` mirrors maps_keynote.build_slide_items's `bg_movie is None` gate: the
+ * destination slide only places (paints on) its revealed landmarks when it has no outgoing movie
+ * link of its own. When it does (an A→B→C movie chain), B never paints the landmark on its own
+ * slide, so the incoming A→B movie must keep carrying it through to avoid the landmark popping in.
+ */
+export function movieObjectsAt(from: MapsChurch[], to: MapsChurch[], t: number, transition: "fade" | "hold" | undefined, destinationPaintsReveal = true): MapsChurch[] {
   const clamped = Math.max(0, Math.min(1, t));
-  if ((transition || "hold") === "hold") return clamped < 1 ? from.map((item) => ({ ...item, opacity: item.opacity ?? 1 })) : to.map((item) => ({ ...item, opacity: item.opacity ?? 1 }));
-  const source = Math.max(0, 1 - 2 * clamped);
-  const destination = Math.max(0, 2 * clamped - 1);
+  const destination = destinationPaintsReveal ? withoutRevealed(to) : to;
+  if ((transition || "hold") === "hold") return clamped < 1 ? from.map((item) => ({ ...item, opacity: item.opacity ?? 1 })) : destination.map((item) => ({ ...item, opacity: item.opacity ?? 1 }));
+  const sourceAlpha = Math.max(0, 1 - 2 * clamped);
+  const destAlpha = Math.max(0, 2 * clamped - 1);
   return [
-    ...from.map((item) => ({ ...item, opacity: (item.opacity ?? 1) * source })),
-    ...to.map((item) => ({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destination })),
+    ...from.map((item) => ({ ...item, opacity: (item.opacity ?? 1) * sourceAlpha })),
+    ...destination.map((item) => ({ ...item, id: `to-${item.id}`, opacity: (item.opacity ?? 1) * destAlpha })),
   ];
 }
 

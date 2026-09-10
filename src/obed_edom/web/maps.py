@@ -63,6 +63,9 @@ SESSION_VERSION = 2
 SESSION_MAX_FILES = 100_000
 SESSION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
+DEFAULT_ISOLATE_STRENGTH = 0.65
+MAX_RETIRED_LINKS = 200
+
 DIR_KEYS = {"outputDir", "workDir", "previewDir", "stem", "previews", "previewFiles"}
 _MUTATION_LOCKS: dict[str, threading.RLock] = {}
 
@@ -85,6 +88,48 @@ def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict
         if not saved:
             raise HTTPException(404, "Unknown maps job")
         return _runner().public_dict(saved)
+
+
+def _mutate_document_with_asset(job_id: str, expected_revision: int | None, asset_id: str, payload: bytes, mutate) -> dict[str, Any]:
+    """Like _mutate_document, but commits a new asset file in lockstep with the document.
+
+    Ordering: `mutate` builds and validates the new document in memory first (it can 404
+    before anything touches disk). The asset is then written to a `.tmp` path and
+    atomically promoted (`os.replace`) onto its final path *before* the document is
+    published — so no reader can ever observe a church whose asset 404s. Only once the
+    asset is durably on disk is the document handed to `update_result`, which publishes
+    it (in-memory) and persists it (to disk) together. If that fails, the now-unreferenced
+    asset is removed and the error re-raised; the document was never mutated, so there is
+    nothing to roll back.
+    """
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        _require_idle(job)
+        result = copy.deepcopy(job.result or {})
+        revision = int(result.get("stateRevision") or 0)
+        if expected_revision is not None and expected_revision != revision:
+            raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
+        updated = mutate(result)
+        updated["stateRevision"] = revision + 1
+        path = _asset_path(updated, asset_id)
+        temp = path.with_suffix(".tmp")
+        try:
+            temp.write_bytes(payload)
+            temp.replace(path)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
+        try:
+            saved = _runner().update_result(job_id, updated)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        if not saved:
+            path.unlink(missing_ok=True)
+            raise HTTPException(404, "Unknown maps job")
+        return _runner().public_dict(saved)
+
+
 STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour")
 MapsStyleId = Literal["positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour"]
 MapsCropId = Literal["wall", "center+cg"]
@@ -115,7 +160,7 @@ class MapsCamera(BaseModel):
 class MapsIsolate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["darken"] = "darken"
-    strength: float = Field(default=0.6, ge=0, le=1)
+    strength: float = Field(default=DEFAULT_ISOLATE_STRENGTH, ge=0, le=1)
 
 
 class MapsReveal(BaseModel):
@@ -228,11 +273,12 @@ class MapsLink(BaseModel):
     easeOut: float | None = None
     flyZoom: float | None = None
     curve: float | None = Field(default=None, ge=0.5, le=3)
+    flight: Literal["arc", "phases"] | None = None
     objectTransition: Literal["fade", "hold"] | None = None
 
     def dumped(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True)
-        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom", "curve", "objectTransition")
+        movie_only = ("easing", "route", "easeIn", "easeOut", "flyZoom", "curve", "flight", "objectTransition")
         if data.get("kind") != "movie":
             for key in movie_only:
                 data.pop(key, None)
@@ -286,6 +332,7 @@ class MapsDocument(BaseModel):
         return out
     slides: list[MapsSlide]
     links: list[MapsLink]
+    retiredLinks: list[MapsLink] = Field(default_factory=list)
 
     @field_validator("exportLw", "exportCg", "exportDsk")
     @classmethod
@@ -313,6 +360,20 @@ class MapsDocument(BaseModel):
             raise ValueError("Map links must be unique")
         if any(source not in slide_ids or target not in slide_ids for source, target in links):
             raise ValueError("Map links must reference slides in this document")
+        slide_id_set = set(slide_ids)
+        pruned: list[MapsLink] = []
+        seen_retired: set[tuple[str, str]] = set()
+        for link in self.retiredLinks:
+            key = (link.from_, link.to)
+            if link.from_ not in slide_id_set or link.to not in slide_id_set:
+                continue
+            if key in seen_retired:
+                continue
+            seen_retired.add(key)
+            pruned.append(link)
+        if len(pruned) > MAX_RETIRED_LINKS:
+            pruned = pruned[-MAX_RETIRED_LINKS:]
+        self.retiredLinks = pruned
         return self
 
 
@@ -383,6 +444,26 @@ def _decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
         raise HTTPException(400, "Invalid image upload") from exc
     payload = output.getvalue()
     return payload, converted.width, converted.height, hashlib.sha256(payload).hexdigest()
+
+
+def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw", "cg"], name: str, width: int, height: int, version: str, asset_id: str) -> dict[str, Any]:
+    from obed_edom.web.watercolour import _default_landmark_size
+
+    slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
+    if not slide:
+        raise HTTPException(404, "Unknown Maps slide")
+    view = slide["cg"] if audience == "cg" and slide.get("cg") else slide
+    churches = list(view.get("churches") or [])
+    used = {str(church.get("id") or "") for church in churches}
+    church_id = f"w{asset_id[:8]}"
+    while church_id in used:
+        church_id = f"w{uuid.uuid4().hex[:8]}"
+    camera = view.get("camera") or {}
+    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1})
+    view["churches"] = churches
+    result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
+    view.pop("stillPng", None)
+    return result
 
 
 def _read_limited(stream, limit: int = 20 * 1024 * 1024) -> bytes:
@@ -496,6 +577,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "assets": [asset.model_dump() for asset in doc.assets],
         "slides": [slide.model_dump() for slide in doc.slides],
         "links": [link.dumped() for link in doc.links],
+        "retiredLinks": [link.dumped() for link in doc.retiredLinks],
     }
 
 
@@ -512,6 +594,7 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "assets",
         "slides",
         "links",
+        "retiredLinks",
     )
     body = {key: cleaned[key] for key in keep if key in cleaned}
     for slide in body.get("slides") or []:
@@ -545,6 +628,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "exportCg": True,
         "exportDsk": False,
         "stateRevision": 0,
+        "isolateDefaultVersion": 1,
         "defaultStyle": "positron",
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
@@ -565,6 +649,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
             }
         ],
         "links": [],
+        "retiredLinks": [],
     }
 
 
@@ -743,6 +828,7 @@ def _write_session_archive(job) -> Path:
     manifest = {
         "format": "obed-edom-maps",
         "version": SESSION_VERSION,
+        "isolateDefaultVersion": int(result.get("isolateDefaultVersion") or 0),
         "document": _dump_document(doc),
     }
     preview_dir = Path(str(result.get("previewDir") or ""))
@@ -782,6 +868,21 @@ def _valid_session_member(name: str) -> PurePosixPath:
     if member.is_absolute() or not member.parts or ".." in member.parts or "\\" in name:
         raise HTTPException(400, "Invalid Maps session archive path")
     return member
+
+
+def _bump_legacy_isolate(result: dict[str, Any]) -> None:
+    if int(result.get("isolateDefaultVersion") or 0) >= 1:
+        return
+    for slide in result.get("slides") or []:
+        for view in [slide, *([slide["cg"]] if isinstance(slide.get("cg"), dict) else [])]:
+            isolate = view.get("isolate")
+            if (
+                isinstance(isolate, dict)
+                and isolate.get("mode") == "darken"
+                and abs(float(isolate.get("strength", 0)) - 0.60) < 1e-6
+            ):
+                isolate["strength"] = DEFAULT_ISOLATE_STRENGTH
+    result["isolateDefaultVersion"] = 1
 
 
 def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
@@ -827,6 +928,10 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             raise HTTPException(400, "Maps session manifest is missing or invalid") from exc
         if manifest.get("format") != "obed-edom-maps" or manifest.get("version") not in {1, SESSION_VERSION}:
             raise HTTPException(400, "Unsupported Maps session format")
+        isolate_default_version_raw = manifest.get("isolateDefaultVersion", 0)
+        if isinstance(isolate_default_version_raw, bool) or not isinstance(isolate_default_version_raw, int) or isolate_default_version_raw < 0:
+            raise HTTPException(400, "Invalid Maps session isolateDefaultVersion")
+        isolate_default_version = isolate_default_version_raw
         doc = _parse_document(manifest.get("document") or {})
         if len({asset.id for asset in doc.assets}) != len(doc.assets):
             raise HTTPException(400, "Maps session has duplicate asset metadata ids")
@@ -940,6 +1045,8 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
     dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
     result.update(dumped)
     result["previewFiles"] = {"maps": sorted(imported_previews)}
+    result["isolateDefaultVersion"] = isolate_default_version
+    _bump_legacy_isolate(result)
     return result, {"tiles": len(tile_entries), "previews": len(imported_previews)}
 
 
@@ -971,6 +1078,21 @@ async def upload_asset(job_id: str, file: UploadFile = File(...)) -> dict[str, A
         "stateRevision": result.get("stateRevision"),
         "document": _dump_document(_parse_document(result)),
     }
+
+
+@router.post("/{job_id}/slides/{slide_id}/landmark")
+async def add_landmark(job_id: str, slide_id: str, file: UploadFile = File(...), audience: Literal["lw", "cg"] = Query("lw")) -> dict[str, Any]:
+    payload, width, height, version = _decode_png(_read_limited(file.file))
+    asset_id = uuid.uuid4().hex
+    name = Path(file.filename or "Landmark").stem
+    def apply(result: dict[str, Any]) -> dict[str, Any]:
+        return append_landmark(result, slide_id, audience, name, width, height, version, asset_id)
+    updated = _mutate_document_with_asset(job_id, None, asset_id, payload, apply)
+    result = dict(updated["result"] or {})
+    slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
+    view = (slide.get("cg") if audience == "cg" and slide and slide.get("cg") else slide) or {}
+    church_id = next((str(church.get("id")) for church in reversed(view.get("churches") or []) if church.get("assetId") == asset_id), None)
+    return {**updated, "churchId": church_id}
 
 
 @router.get("/{job_id}/assets/{asset_id}.png")
@@ -1148,6 +1270,7 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
         "assets",
         "slides",
         "links",
+        "retiredLinks",
       )
       merged = {key: result.get(key) for key in keep}
       for key in keep:

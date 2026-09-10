@@ -15,6 +15,13 @@ const compile = spawnSync(runtime, [
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 const { isolateMaskGeometry, countryClipRings } = require(path.join(out, "isolate.js"));
 
+const compileTypes = spawnSync(runtime, [
+  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
+  "--outDir", out, path.join(root, "src/maps/types.ts"),
+], { cwd: root, encoding: "utf8" });
+assert.equal(compileTypes.status, 0, compileTypes.stderr || compileTypes.stdout);
+const { parseIsolate, DEFAULT_ISOLATE_STRENGTH } = require(path.join(out, "types.js"));
+
 const WORLD_RING = [[-180, -85.05], [180, -85.05], [180, 85.05], [-180, 85.05], [-180, -85.05]];
 
 function polygon(code, rings) {
@@ -76,4 +83,12 @@ test("countryClipRings returns empty on no match", () => {
   const features = [polygon("USA", [[[0, 0], [1, 0], [1, 1], [0, 0]]])];
   assert.deepEqual(countryClipRings(features, ["GBR"]), []);
   assert.deepEqual(countryClipRings(features, []), []);
+});
+
+test("parseIsolate falls back to the default strength when missing", () => {
+  assert.equal(parseIsolate({ mode: "darken" }).strength, DEFAULT_ISOLATE_STRENGTH);
+});
+
+test("parseIsolate preserves an explicit strength", () => {
+  assert.equal(parseIsolate({ mode: "darken", strength: 0.35 }).strength, 0.35);
 });

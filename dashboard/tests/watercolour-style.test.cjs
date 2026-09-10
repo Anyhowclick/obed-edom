@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/watercolourStyle.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { buildWatercolourStyle, WATERCOLOUR_PATTERN_IDS, scribbleStrokes, paperGrainPixels } = require(path.join(out, "watercolourStyle.js"));
+const { buildWatercolourStyle, WATERCOLOUR_PATTERN_IDS, scribbleStrokes, paperGrainPixels, paperGrainCss } = require(path.join(out, "watercolourStyle.js"));
 
 const base = {
   version: 8,
@@ -173,4 +173,50 @@ test("paperGrainPixels is deterministic, seed-sensitive, and seamless at the til
   const seamMeanY = seamSumY / n;
   assert.ok(seamMeanX <= interiorMeanX * 1.4, `x-wrap seam ${seamMeanX} exceeds 1.4x interior ${interiorMeanX}`);
   assert.ok(seamMeanY <= interiorMeanY * 1.4, `y-wrap seam ${seamMeanY} exceeds 1.4x interior ${interiorMeanY}`);
+});
+
+test("paperGrainPixels has no low-frequency mottle: block means barely vary vs per-pixel noise", () => {
+  const n = 128;
+  const pixels = paperGrainPixels(n, 7);
+  const red = (x, y) => pixels[(y * n + x) * 4];
+  const values = [];
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) values.push(red(x, y));
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const pixelSpread = Math.sqrt(values.reduce((sum, v) => sum + (v - mean) * (v - mean), 0) / values.length);
+
+  const block = 16;
+  const blockMeans = [];
+  for (let by = 0; by < n; by += block) {
+    for (let bx = 0; bx < n; bx += block) {
+      let sum = 0;
+      for (let y = by; y < by + block; y++) for (let x = bx; x < bx + block; x++) sum += red(x, y);
+      blockMeans.push(sum / (block * block));
+    }
+  }
+  const blockMean = blockMeans.reduce((sum, v) => sum + v, 0) / blockMeans.length;
+  const blockSpread = Math.sqrt(blockMeans.reduce((sum, v) => sum + (v - blockMean) * (v - blockMean), 0) / blockMeans.length);
+
+  assert.ok(blockSpread < pixelSpread * 0.35, `block spread ${blockSpread} not well below pixel spread ${pixelSpread}`);
+});
+
+test("paperGrainCss scales the 1024 authored-px tile by the preview/authored ratio", () => {
+  assert.deepEqual(paperGrainCss(7680, 7680), { backgroundSize: "1024px 1024px", backgroundPosition: "0px 0px" });
+  assert.deepEqual(paperGrainCss(3840, 7680), { backgroundSize: "512px 512px", backgroundPosition: "0px 0px" });
+  assert.deepEqual(paperGrainCss(1920, 1920), { backgroundSize: "1024px 1024px", backgroundPosition: "0px 0px" });
+});
+
+// Every export path (full wall, centre-only, CG crop) composites the grain onto its own output
+// canvas starting at that canvas's local (0,0), regardless of the authored-space region it depicts.
+// The preview must therefore always anchor at "0px 0px" too, never at an authored offset like
+// CG_ORIGIN — only the tile's scale (ratio of preview to authored width) differs per surface.
+test("paperGrainCss anchors at local (0,0) for full-wall, centre-only, and CG-crop surfaces alike", () => {
+  const fullWall = paperGrainCss(7680, 7680);
+  const centreOnly = paperGrainCss(3840, 3840);
+  const cgCrop = paperGrainCss(1920, 1920);
+  assert.equal(fullWall.backgroundPosition, "0px 0px");
+  assert.equal(centreOnly.backgroundPosition, "0px 0px");
+  assert.equal(cgCrop.backgroundPosition, "0px 0px");
+  assert.equal(fullWall.backgroundSize, "1024px 1024px");
+  assert.equal(centreOnly.backgroundSize, "1024px 1024px");
+  assert.equal(cgCrop.backgroundSize, "1024px 1024px");
 });
