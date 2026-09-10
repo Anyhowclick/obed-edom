@@ -8,6 +8,7 @@ from PIL import Image
 
 from obed_edom.maps_movie import ffmpeg_exe
 from obed_edom.maps_reveal import (
+    REVEAL_FPS,
     _run_ffmpeg_stdin,
     render_reveal,
     render_slide_reveal_movie,
@@ -322,3 +323,25 @@ def test_reveal_frames_timing_smoke(tmp_path: Path):
     t0 = time.time()
     list(reveal_frames(rgba, count=20, seed=reveal_seed("timing"), strokes=4))
     assert time.time() - t0 < 5.0
+
+
+def test_reveal_fps_is_30():
+    assert REVEAL_FPS == 30
+
+
+@pytest.mark.parametrize("duration", [0.5, 1.2, 3.0])
+def test_render_reveal_frame_count_matches_shared_formula(tmp_path: Path, monkeypatch, duration: float):
+    asset = tmp_path / "a.png"
+    Image.new("RGBA", (20, 10), (10, 20, 30, 255)).save(asset)
+    dest = tmp_path / "out.mov"
+    tmp_dest = dest.with_name(f".{dest.stem}.tmp{dest.suffix}")
+    tmp_dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dest.touch()
+    captured: dict = {}
+
+    def fake_run(cmd, frames, is_cancelled):
+        captured["count"] = sum(1 for _ in frames)
+
+    monkeypatch.setattr("obed_edom.maps_reveal._run_ffmpeg_stdin", fake_run)
+    render_reveal(asset, dest, duration=duration, seed=1)
+    assert captured["count"] == max(2, round(duration * REVEAL_FPS))

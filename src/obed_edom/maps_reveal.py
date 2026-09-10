@@ -21,6 +21,7 @@ from obed_edom.watercolour import _blur, _noise
 MAX_LONG_SIDE = 1600
 REVEAL_DIR = "reveal"
 REVEAL_ALGO_VERSION = 3
+REVEAL_FPS = 30
 DEFAULT_STROKES = 4
 STROKE_SPAN = 0.18
 STROKE_EDGE = 0.06
@@ -276,7 +277,7 @@ def render_reveal(
     *,
     duration: float,
     seed: int,
-    fps: int = 30,
+    fps: int = REVEAL_FPS,
     opacity: float = 1.0,
     strokes: int = DEFAULT_STROKES,
     fingerprint: str | None = None,
