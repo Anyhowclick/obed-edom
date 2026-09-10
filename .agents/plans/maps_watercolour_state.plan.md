@@ -1,13 +1,18 @@
 ---
 name: Maps + Watercolour branch state
-overview: State of branch codex/maps-watercolour-objects at HEAD 0644d97 (PR #63). Replaces maps-watercolour-handover-2026-09-08.md, whose "Remaining work" is mostly shipped. Records what landed on 2026-09-09, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63 and PR #68 are merged into main. New branch feat/maps-ux-round (PR #70, open, HEAD aac2807) carries the UX round and the reorder-memory/isolate-default follow-up. Records what landed on 2026-09-09, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
-    content: Owner runs the QA list below (Keynote checks especially); nothing here is owner-verified
-    status: pending
+    content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie and Keynote re-render of restored pairs."
   - id: review2
-    content: "Done: round 2 (on 0644d97) returned REQUEST-CHANGES with 8 findings; 7 fixed in 290d4f7, finding 2 rejected on purpose (country cut-out stays plain, no orange)."
+    content: "Done: PR #63 review round 2 (on 0644d97) returned REQUEST-CHANGES with 8 findings; 7 fixed in 290d4f7, finding 2 rejected on purpose (country cut-out stays plain, no orange). PR #63 and #68 both merged into main."
     status: done
+  - id: pr70-reviews
+    content: "Done: PR #70 Codex reviews — UX round 3a14021 got 2x REQUEST-CHANGES then APPROVE-WITH-NITS; QA round aac2807 got 3x REQUEST-CHANGES then APPROVE. Reports in the session scratchpad codex-review*.md."
+    status: done
+  - id: poster-frame
+    content: "Parked, awaiting owner go: reveal movie poster frame on the last frame via offline IWA patch of TSD.MovieArchive.posterTime, gated by OBED_MAPS_POSTER_FRAME. Plan in the session scratchpad qa-round-plan.md Part A."
+    status: pending
   - id: backlog
     content: Pick the next bounded package from "Open backlog" and plan it before touching code
     status: pending
@@ -16,7 +21,7 @@ isProject: false
 
 # Maps + Watercolour branch state
 
-Branch `codex/maps-watercolour-objects`, HEAD `0644d97`, PR **#63**. Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
+PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-round`, PR **#70** (open), HEAD `aac2807`. Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
 
 ## Shipped 2026-09-09
 
@@ -66,6 +71,10 @@ Branch `codex/maps-watercolour-objects`, HEAD `0644d97`, PR **#63**. Workspace `
 - `69c8da6` stroke-based paint-on reveal + "Reveal as slide movie" — background movie built from the still plus the reveal (`render_slide_reveal_movie`).
 - `0aa585e` Strokes control (default 4, fewer = broader strokes), reveal render ~12× faster (≈3 s per 1600 px landmark), nav margins restored via `compensatedFov` in `maps/types.ts` (full-frame canvas, fov widened so the band projects like the export), style thumbnails recaptured at downtown SG z16.7 bearing 52, deck default reverted to the SEA overview.
 
+### PR #70 (feat/maps-ux-round): UX round + reorder memory
+- `3a14021` UX round: "+" dropdown, icon-only objects toolbar, label-off glyph replaces "Hidden", bounding box + four corner handles (`resizeFromCorner` in `maps/objects.ts`), CG frame snap-to-centre (`snapCgShift`), paper grain at 1024px without mottle anchored to the band (`paperGrainCss`), revealed landmarks excluded from hop movies unless the destination is a movie source (`withoutRevealed` / `hasOutgoingMovie` mirrors Python `build_slide_items`).
+- `aac2807` `retiredLinks` memory for reorders (`restitchWithMemory`, `MAX_RETIRED_LINKS` 200, persisted through state/`.obedmaps`/export plan); isolate darken default 0.65 with a one-shot legacy bump keyed by manifest `isolateDefaultVersion`; also fixes the reorder revert bug found in owner QA.
+
 ## Known limits / assumptions
 
 - **Province tile floor.** `admin_level` 4 geometry starts at map z1; nothing renders provinces below it. Preview runs `previewZoomDelta` below authored, so low-zoom previews stay silent about provinces even though the 7680 export shows them.
@@ -80,16 +89,11 @@ Branch `codex/maps-watercolour-objects`, HEAD `0644d97`, PR **#63**. Workspace `
 
 ## Owner QA owed
 
-Nothing below has been owner-verified; the implementer was barred from Keynote.
+Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazing"), objects PASS, pitched framing PASS, ink slider + darken PASS (darken now +5%, i.e. the 0.65 default), reorder revert bug FOUND and fixed in `aac2807`. Still owed:
 
-1. Watercolour: ink slider at its extreme, and the darken look overall — does it read as intended?
-2. Keynote: cut-out still stacking, the synthetic landing slide sequence (plain → 1 s dissolve → isolated), and the paint-on reveal (does it autoplay?). Check the `_CG.key` too.
-3. Pitched preview vs export: same roads framed, landmark base at the same fraction of frame height; pitch 0 unchanged; FW / centre-only / CG-split alignment; window resize with no drift.
-4. Slide reorder: drag-and-drop and Cmd-[ / Cmd-], gates and gutter badges recompute, order survives reload, movies re-render for the new pairs.
-5. Objects: drag-to-move without hijacking pan, corner resize past the old 600 cap, slider/number agreement, and Keynote size matching preview.
-6. Stroke look: default 4 strokes vs more strokes, does the reveal read as intended.
-7. Reveal-as-slide-movie playback in Keynote.
-8. Fov-compensated preview vs export on a pitched slide.
+1. Reveal-as-slide-movie playback in Keynote.
+2. Keynote re-render of restored (reordered) pairs.
+3. Poster-frame patch (parked, awaiting owner go — see todo `poster-frame`).
 
 ## Open backlog
 
@@ -105,7 +109,9 @@ Nothing below has been owner-verified; the implementer was barred from Keynote.
 
 ## Pointers
 
-- **PR #63** carries this branch. First review: verdict REQUEST-CHANGES, 11 findings, all addressed in `6c4c62f`; report and the posted comment are in the session scratchpad (`codex-review.md`, `pr-comment.md`). Second review (on `0644d97`): verdict REQUEST-CHANGES, 8 findings, 7 fixed in `290d4f7`, finding 2 rejected on purpose (country cut-out stays plain, no orange); see `codex-review2.md` in the scratchpad and the PR review comments.
+- **PR #63** (merged) and **PR #68** (merged) carried the earlier branch. PR #63 first review: verdict REQUEST-CHANGES, 11 findings, all addressed in `6c4c62f`; report and the posted comment are in the session scratchpad (`codex-review.md`, `pr-comment.md`). Second review (on `0644d97`): verdict REQUEST-CHANGES, 8 findings, 7 fixed in `290d4f7`, finding 2 rejected on purpose (country cut-out stays plain, no orange); see `codex-review2.md` in the scratchpad and the PR review comments.
+- **PR #70** (open, `feat/maps-ux-round`) carries this state. Codex ran three passes on the UX round (`3a14021`): 2x REQUEST-CHANGES then APPROVE-WITH-NITS; four passes on the QA round (`aac2807`): 3x REQUEST-CHANGES then APPROVE. Reports in the session scratchpad `codex-review*.md`.
+- **Poster-frame plan**: Keynote AppleScript cannot set the movie's poster frame (movie class has no `poster` property). Recommended route is an offline IWA patch of `TSD.MovieArchive.posterTime` (field 5) after export, gated by env `OBED_MAPS_POSTER_FRAME` (default off), with a probe script `scripts/probe_movie_poster.py` to confirm Keynote regenerates the poster from `posterTime`. Full plan in the session scratchpad `qa-round-plan.md` Part A. `keynote-parser` is not installed in `.venv`.
 - Shipped-plan details live in the session scratchpad as `mask-upgrades-plan.md`, `isolate-round2-plan.md`, `round3-plan.md`, `landing-plan.md`, `picker-reorder-plan.md`, `preview-band-plan.md`, `reveal-plan.md`, `reveal2-plan.md`.
 - Memory: `maps-p2-film-route`, `browser-pane-maplibre-hidden` (a hidden Browser pane freezes MapLibre's rAF — drive `map.resize()` via `javascript_tool`; never use port 8765).
 - Commands (dashboard needs the bundled Node): `PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`, then `npm run test:maps` and `npm run build` from `dashboard`. Python: `.venv/bin/python -m pytest tests/test_maps_api.py tests/test_maps_keynote.py tests/test_maps_reveal.py tests/test_watercolour.py -q`. Restart: `.venv/bin/python -m obed_edom dashboard --no-browser --port 8766`.
