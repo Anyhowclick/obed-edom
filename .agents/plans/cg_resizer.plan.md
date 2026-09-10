@@ -230,6 +230,37 @@ todos:
       on-canvas fraction of the ORIGINAL framing's own content rather than raw off-canvas count) before
       it can be trusted; do not re-derive this reasoning from scratch if rediscovered."
     status: pending
+  - id: rotation-provenance-rounded
+    content: "BUG BACKLOG (B), NEW 2026-09-10, OWNER-ACCEPTED (owner, 2026-09-10: \"seems like an
+      edge case, if it bites me in the future then so be it\") — banked deliberately, not
+      fixed, deferred out of `framing-pin-continuity` on purpose. `_recipe_reusing_affine`'s
+      cover clamp (`map_remap.py:3894-3896`) fires only when the centre-panel item's
+      rotation is \"known and zero\", but independent review (Codex gpt-5.6-sol, round 3)
+      showed `rotation == 0` does not prove unrotated. Two provenance holes feed that field
+      a rounded or defaulted zero, both verified: `offline_inspect.py:214` stamps
+      `\"rotation\": _round_pt(angle) % 360` — whole-degree rounding, deliberate per its own
+      comment (\"fractional rotation churns the reuse fingerprint\"), so a real 0.4-degree
+      panel is emitted as `rotation=0`; `inspect_keynote.js:121` separately prefills
+      `rotation: 0` in the record literal, so that zero survives if `obj.rotation()` throws.
+      Measured impact: a 3840x1080 panel rotated 0.4 degrees has a true AABB height of
+      1106.8px (0.5 degrees -> 1113.5px) against the reported 1080, so the clamp can shift a
+      valid crop by up to ~33.5px. It bites only on the sibling-reuse path, which requires a
+      slide that was explicitly pinned AND whose own pinned recipe collapsed, AND a
+      sub-0.5-degree rotated source that wins `_centre_panel_item`. Fix if it ever bites: do
+      NOT un-round `rotation` (load-bearing for the reuse fingerprint); add a separate
+      positive fact instead — e.g. the reader stamping `angle % 360 == 0` computed BEFORE
+      rounding, omitted where the read failed — and have the guard at `map_remap.py:3895`
+      consult that; contained to `offline_inspect.py`, `inspect_keynote.js` and the one
+      guard. Pattern worth recording, since it recurred three times in one session on this
+      branch: a field that looks like proof but is not. `prev_pin` looked like provenance
+      for which template the previous slide used (it was the pin, not the result — see
+      `framing-pin-continuity`). `templateSlide` looked like lineage on a `cover-fallback`
+      recipe (the number recorded which slide was matched by name; none of its geometry
+      entered the affine). `rotation == 0` looks like \"unrotated\" (it is a rounded or
+      defaulted value). Each was found by independent review after the previous one was
+      closed. When a guard turns on a value meaning what its name suggests, verify that at
+      the point the value is PRODUCED, not where it is consumed."
+    status: pending
 isProject: false
 ---
 
