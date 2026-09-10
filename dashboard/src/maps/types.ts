@@ -29,6 +29,8 @@ export type MapsCamera = {
 
 export type MapsIsolate = { mode: "darken"; strength: number };
 
+export const DEFAULT_ISOLATE_STRENGTH = 0.65;
+
 export type MapsChurch = {
   id: string;
   name: string;
@@ -132,7 +134,10 @@ export type MapsDocument = {
   assets: MapsAsset[];
   slides: MapsSlide[];
   links: MapsLink[];
+  retiredLinks?: MapsLink[];
 };
+
+export const MAX_RETIRED_LINKS = 200;
 
 export const LAYER_FILTERS: { id: MapsLayerFilterId; label: string }[] = [
   { id: "roads", label: "Roads" },
@@ -323,6 +328,58 @@ export function restitchLinks(nextSlides: MapsSlide[], prevLinks: MapsLink[]): M
   return links;
 }
 
+function linkKey(from: string, to: string): string {
+  return JSON.stringify([from, to]);
+}
+
+/** Like `restitchLinks`, but remembers links displaced by a reorder so a pair re-adjacent later regains its hop instead of falling back to `suggestedHopKind`. */
+export function restitchWithMemory(
+  nextSlides: MapsSlide[],
+  prevLinks: MapsLink[],
+  prevRetired: MapsLink[] | undefined
+): { links: MapsLink[]; retired: MapsLink[] } {
+  const pool = new Map<string, MapsLink>();
+  for (const link of prevRetired || []) pool.set(linkKey(link.from, link.to), link);
+  for (const link of prevLinks) {
+    const key = linkKey(link.from, link.to);
+    pool.delete(key);
+    pool.set(key, link);
+  }
+
+  const links: MapsLink[] = [];
+  for (let i = 0; i < nextSlides.length - 1; i++) {
+    const from = nextSlides[i];
+    const to = nextSlides[i + 1];
+    const key = linkKey(from.id, to.id);
+    const pooled = pool.get(key);
+    if (pooled) {
+      pool.delete(key);
+      const fromPrevLinks = prevLinks.some((link) => link.from === from.id && link.to === to.id);
+      links.push(fromPrevLinks ? pooled : { ...pooled, from: from.id, to: to.id });
+    } else {
+      const kind = suggestedHopKind(from, to);
+      links.push({
+        from: from.id,
+        to: to.id,
+        kind,
+        duration: 1.0,
+        playWithoutClick: false,
+        ...(kind === "movie" ? { objectTransition: "fade" as const } : {}),
+      });
+    }
+  }
+
+  const slideIds = new Set(nextSlides.map((slide) => slide.id));
+  const retiredByKey = new Map<string, MapsLink>();
+  for (const link of pool.values()) {
+    if (!slideIds.has(link.from) || !slideIds.has(link.to)) continue;
+    retiredByKey.set(linkKey(link.from, link.to), link);
+  }
+  let retired = [...retiredByKey.values()];
+  if (retired.length > MAX_RETIRED_LINKS) retired = retired.slice(retired.length - MAX_RETIRED_LINKS);
+  return { links, retired };
+}
+
 function clearMovieFields(slide: MapsSlide): MapsSlide {
   const next: MapsSlide = { ...slide };
   delete next.movieMov;
@@ -357,8 +414,11 @@ export function moveSlideTo(doc: MapsDocument, id: string, toIndex: number): Map
     if (prevPairs.get(from) !== nextPairs.get(from)) clearIds.add(from);
   }
   const nextSlides = slides.map((slide) => (clearIds.has(slide.id) ? clearMovieFields(slide) : slide));
-  const links = restitchLinks(nextSlides, doc.links);
-  return { ...doc, slides: nextSlides, links };
+  const { links, retired } = restitchWithMemory(nextSlides, doc.links, doc.retiredLinks);
+  const next: MapsDocument = { ...doc, slides: nextSlides, links };
+  if (retired.length) next.retiredLinks = retired;
+  else delete next.retiredLinks;
+  return next;
 }
 
 /** Swap the slide at `id` with its neighbour `delta` away, restitch links, and drop stale movie renders on the affected outgoing hops. Returns `doc` unchanged if the move is out of range. */
@@ -500,7 +560,9 @@ export function parseIsolate(raw: unknown): MapsIsolate | undefined {
   const mode = (raw as { mode?: unknown }).mode;
   if (mode !== undefined && mode !== "darken" && mode !== "erase") return undefined;
   const strengthRaw = Number((raw as { strength?: unknown }).strength);
-  const strength = Number.isFinite(strengthRaw) ? Math.max(0, Math.min(1, strengthRaw)) : 0.6;
+  const strength = Number.isFinite(strengthRaw)
+    ? Math.max(0, Math.min(1, strengthRaw))
+    : DEFAULT_ISOLATE_STRENGTH;
   return { mode: "darken", strength };
 }
 
@@ -539,7 +601,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
       lon: wrapLon(slide.camera.lon),
     },
   }));
-  const links = ((result.links as MapsLink[]) || []).map((link) => {
+  function normaliseLink(link: MapsLink): MapsLink {
     const route = parseRoute(link.route);
     const next: MapsLink = { ...link };
     if (route) next.route = route;
@@ -550,8 +612,13 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     if (typeof next.curve !== "number" || !Number.isFinite(next.curve)) delete next.curve;
     if (next.objectTransition !== "fade" && next.objectTransition !== "hold") delete next.objectTransition;
     return next;
-  });
-  return coerceHopKinds({
+  }
+  const links = ((result.links as MapsLink[]) || []).map(normaliseLink);
+  const slideIds = new Set(slides.map((slide) => slide.id));
+  const retiredLinks = ((result.retiredLinks as MapsLink[]) || [])
+    .map(normaliseLink)
+    .filter((link) => slideIds.has(link.from) && slideIds.has(link.to));
+  const coerced = coerceHopKinds({
     defaultStyle: (result.defaultStyle as MapsStyleId) || "positron",
     crop: (result.crop as MapsCropId) || "center+cg",
     exportLw: result.exportLw !== false,
@@ -567,4 +634,6 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     slides,
     links,
   });
+  if (retiredLinks.length) coerced.retiredLinks = retiredLinks;
+  return coerced;
 }

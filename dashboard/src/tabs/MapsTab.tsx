@@ -42,6 +42,7 @@ import { StylePicker } from "../maps/StylePicker";
 import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
+  DEFAULT_ISOLATE_STRENGTH,
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
@@ -62,7 +63,7 @@ import {
   nextSlideId,
   reorderSlides,
   moveSlideTo,
-  restitchLinks,
+  restitchWithMemory,
   slideHiddenLayers,
   suggestedHopKind,
   type MapsCamera,
@@ -779,8 +780,10 @@ export function MapsTab() {
     const created = cloneSlide(active, nextSlideId(current.slides));
     const index = current.slides.findIndex((s) => s.id === active.id);
     const slidesNext = [...current.slides.slice(0, index + 1), created, ...current.slides.slice(index + 1)];
-    const links = restitch(slidesNext, current.links);
-    const next = { ...current, slides: slidesNext, links };
+    const { links, retired } = restitch(slidesNext, current.links, current.retiredLinks);
+    const next: MapsDocument = { ...current, slides: slidesNext, links };
+    if (retired.length) next.retiredLinks = retired;
+    else delete next.retiredLinks;
     patchDoc(next);
     void (async () => {
       await flushAndSave(true).catch(() => undefined);
@@ -789,8 +792,12 @@ export function MapsTab() {
     })();
   }
 
-  function restitch(nextSlides: MapsSlide[], prevLinks: MapsLink[]): MapsLink[] {
-    return restitchLinks(nextSlides, prevLinks);
+  function restitch(
+    nextSlides: MapsSlide[],
+    prevLinks: MapsLink[],
+    prevRetired: MapsLink[] | undefined
+  ): { links: MapsLink[]; retired: MapsLink[] } {
+    return restitchWithMemory(nextSlides, prevLinks, prevRetired);
   }
 
   function moveSlide(delta: number) {
@@ -848,9 +855,12 @@ export function MapsTab() {
     if (!current || !active || current.slides.length < 2 || locked) return;
     if (!window.confirm(`Remove slide “${active.title}”?`)) return;
     const slidesNext = current.slides.filter((s) => s.id !== active.id);
-    const links = restitch(slidesNext, current.links);
+    const { links, retired } = restitch(slidesNext, current.links, current.retiredLinks);
     const fallback = slidesNext[Math.max(0, activeIndex - 1)] || slidesNext[0];
-    patchDoc({ ...current, slides: slidesNext, links });
+    const next: MapsDocument = { ...current, slides: slidesNext, links };
+    if (retired.length) next.retiredLinks = retired;
+    else delete next.retiredLinks;
+    patchDoc(next);
     const audience: MapsAudience = activeAudienceRef.current === "cg" && fallback.cg ? "cg" : "lw";
     activeRef.current = fallback.id;
     activeAudienceRef.current = audience;
@@ -2569,7 +2579,9 @@ export function MapsTab() {
                         onChange={(event) => {
                           const checked = event.target.checked;
                           updateActive({
-                            isolate: checked ? { mode: "darken", strength: activeView?.isolate?.strength ?? 0.6 } : undefined,
+                            isolate: checked
+                              ? { mode: "darken", strength: activeView?.isolate?.strength ?? DEFAULT_ISOLATE_STRENGTH }
+                              : undefined,
                           });
                         }}
                       />{" "}

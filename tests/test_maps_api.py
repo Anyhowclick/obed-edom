@@ -1302,6 +1302,224 @@ def test_isolate_erase_mode_migrates_to_darken():
     assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.35}
 
 
+def test_isolate_default_strength_is_065():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "darken"}
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.65}
+
+
+def test_legacy_session_isolate_060_bumps_once():
+    # A legacy archive (no isolateDefaultVersion marker) loaded into a fresh job is bumped.
+    legacy_job = _seed()
+    legacy_doc = _doc(legacy_job)
+    legacy_doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.6}
+    assert _save(legacy_job, legacy_doc).status_code == 200
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "manifest.json", json.dumps({"format": "obed-edom-maps", "version": 1, "document": legacy_doc})
+        )
+    fresh_job = _seed()
+    loaded = client.post(
+        f"/api/maps/{fresh_job['id']}/session",
+        files={"file": ("legacy.obedmaps", buffer.getvalue(), "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    result = loaded.json()["result"]
+    assert result["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.65}
+    assert result["isolateDefaultVersion"] == 1
+
+    # A migrated archive (isolateDefaultVersion already 1) carrying a user-chosen 0.60
+    # loaded into a different, fresh job must not be bumped again.
+    migrated_job = fresh_job
+    migrated_doc = _doc(migrated_job)
+    migrated_doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.6}
+    assert _save(migrated_job, migrated_doc).status_code == 200
+    session = client.get(f"/api/maps/{migrated_job['id']}/session")
+    assert session.status_code == 200, session.text
+    manifest = json.loads(zipfile.ZipFile(BytesIO(session.content)).read("manifest.json"))
+    assert manifest["isolateDefaultVersion"] == 1
+
+    other_job = _seed()
+    loaded2 = client.post(
+        f"/api/maps/{other_job['id']}/session",
+        files={"file": ("already-migrated.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded2.status_code == 200, loaded2.text
+    result2 = loaded2.json()["result"]
+    assert result2["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.6}
+    assert result2["isolateDefaultVersion"] == 1
+
+
+def test_fresh_job_is_seeded_with_current_isolate_default_version():
+    job = _seed()
+    assert job["result"]["isolateDefaultVersion"] == 1
+
+
+def test_fresh_job_isolate_060_survives_session_roundtrip():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["isolate"] = {"mode": "darken", "strength": 0.6}
+    assert _save(job, doc).status_code == 200
+
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    other_job = _seed()
+    loaded = client.post(
+        f"/api/maps/{other_job['id']}/session",
+        files={"file": ("saved.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    result = loaded.json()["result"]
+    assert result["slides"][0]["isolate"] == {"mode": "darken", "strength": 0.6}
+    assert result["isolateDefaultVersion"] == 1
+
+
+def test_maps_session_rejects_invalid_isolate_default_version_before_replacing_state(tmp_path, monkeypatch):
+    tile_root = tmp_path / "tile-cache"
+    tile_root.mkdir()
+    monkeypatch.setattr("obed_edom.web.maps.cache_root", lambda: tile_root)
+    job = _seed()
+    existing_preview = _landmark_png()
+    assert client.post(f"/api/maps/{job['id']}/png?slideId=s1", content=existing_preview).status_code == 200
+    preview = Path(job["result"]["previewDir"]) / "s1.png"
+    original_title = job["result"]["slides"][0]["title"]
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": "obed-edom-maps",
+                    "version": 1,
+                    "document": _doc(job),
+                    "isolateDefaultVersion": "invalid",
+                }
+            ),
+        )
+    response = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("bad.obedmaps", buffer.getvalue(), "application/zip")},
+    )
+    assert response.status_code == 400
+    assert preview.read_bytes() == existing_preview
+    fetched = client.get(f"/api/jobs/{job['id']}")
+    assert fetched.json()["result"]["slides"][0]["title"] == original_title
+    assert fetched.json()["result"]["isolateDefaultVersion"] == 1
+
+    for index, bad_value in enumerate([-1, False, "", 0.0, None], start=2):
+        buffer_bad = BytesIO()
+        with zipfile.ZipFile(buffer_bad, "w") as archive:
+            archive.writestr(
+                "manifest.json",
+                json.dumps(
+                    {
+                        "format": "obed-edom-maps",
+                        "version": 1,
+                        "document": _doc(job),
+                        "isolateDefaultVersion": bad_value,
+                    }
+                ),
+            )
+        response_bad = client.post(
+            f"/api/maps/{job['id']}/session",
+            files={"file": (f"bad{index}.obedmaps", buffer_bad.getvalue(), "application/zip")},
+        )
+        assert response_bad.status_code == 400, bad_value
+        assert preview.read_bytes() == existing_preview
+        fetched_bad = client.get(f"/api/jobs/{job['id']}")
+        assert fetched_bad.json()["result"]["slides"][0]["title"] == original_title
+        assert fetched_bad.json()["result"]["isolateDefaultVersion"] == 1
+
+
+def test_retired_links_round_trip_on_save():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    doc["slides"].append(slide2)
+    doc["retiredLinks"] = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 3.5, "playWithoutClick": False}]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    result = saved.json()["result"]
+    assert result["retiredLinks"] == [
+        {"from": "s1", "to": "s2", "kind": "movie", "duration": 3.5, "playWithoutClick": False}
+    ]
+
+
+def test_retired_links_with_unknown_slide_are_pruned_not_rejected():
+    job = _seed()
+    doc = _doc(job)
+    doc["retiredLinks"] = [{"from": "s1", "to": "missing", "kind": "cut", "duration": 1, "playWithoutClick": False}]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["retiredLinks"] == []
+
+
+def test_retired_links_do_not_break_export_plan():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+    doc["retiredLinks"] = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 3.5, "playWithoutClick": False}]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    plan = client.get(f"/api/maps/{job['id']}/export-plan")
+    assert plan.status_code == 200, plan.text
+    kinds = {(row["from"], row["to"]): row["kind"] for row in plan.json()["links"]}
+    assert kinds[("s1", "s2")] == "morph"
+
+
+def test_retired_links_survive_obedmaps_save_and_load_into_fresh_job():
+    job = _seed()
+    doc = _doc(job)
+    slide2 = dict(doc["slides"][0])
+    slide2["id"] = "s2"
+    doc["slides"].append(slide2)
+    doc["links"] = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    doc["retiredLinks"] = [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 3.5,
+            "playWithoutClick": False,
+            "objectTransition": "fade",
+        }
+    ]
+    assert _save(job, doc).status_code == 200
+
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    fresh_job = _seed()
+    loaded = client.post(
+        f"/api/maps/{fresh_job['id']}/session",
+        files={"file": ("retired-links.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    result = loaded.json()["result"]
+    assert result["retiredLinks"] == [
+        {
+            "from": "s1",
+            "to": "s2",
+            "kind": "movie",
+            "duration": 3.5,
+            "playWithoutClick": False,
+            "objectTransition": "fade",
+        }
+    ]
+    assert result["links"] == [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+
+
 def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
     map_job = _seed()
     slide_id = map_job["result"]["slides"][0]["id"]

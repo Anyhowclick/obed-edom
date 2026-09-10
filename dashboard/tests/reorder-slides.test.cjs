@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { reorderSlides, restitchLinks, moveSlideTo } = require(path.join(out, "types.js"));
+const { reorderSlides, restitchLinks, restitchWithMemory, moveSlideTo, documentFromResult } = require(path.join(out, "types.js"));
 
 const baseCamera = { lat: 0, lon: 0, zoom: 4, bearing: 0, pitch: 0 };
 function slide(id, overrides) {
@@ -244,6 +244,134 @@ test("moveSlideTo clears movieMov exactly on slides whose outgoing pair changed"
   assert.equal(byId.s4.movieMov, undefined);
   // s5 had no outgoing pair before or after: unchanged
   assert.equal(byId.s5.movieMov, "s5.mov");
+});
+
+test("moveSlideTo away and back restores a displaced movie hop via retiredLinks", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2", { highlights: ["USA"], isolate: { mode: "darken", strength: 0.65 } });
+  const s3 = slide("s3");
+  const s4 = slide("s4");
+  const links = [
+    { from: "s1", to: "s2", kind: "movie", duration: 3.5, playWithoutClick: false, objectTransition: "fade" },
+    { from: "s2", to: "s3", kind: "cut", duration: 0, playWithoutClick: false },
+    { from: "s3", to: "s4", kind: "cut", duration: 0, playWithoutClick: false },
+  ];
+  const d = doc([s1, s2, s3, s4], links);
+
+  const away = moveSlideTo(d, "s4", 1); // s1, s4, s2, s3
+  assert.equal(away.links.find((l) => l.from === "s1" && l.to === "s2"), undefined);
+  assert.ok((away.retiredLinks || []).some((l) => l.from === "s1" && l.to === "s2" && l.kind === "movie"));
+
+  const back = moveSlideTo(away, "s4", 3); // s1, s2, s3, s4
+  const restored = back.links.find((l) => l.from === "s1" && l.to === "s2");
+  assert.ok(restored);
+  assert.equal(restored.kind, "movie");
+  assert.equal(restored.duration, 3.5);
+  assert.equal(restored.objectTransition, "fade");
+  assert.ok(!(back.retiredLinks || []).some((l) => l.from === "s1" && l.to === "s2"));
+});
+
+test("moveSlideTo away and back survives a save/reload round-trip", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2", { highlights: ["USA"], isolate: { mode: "darken", strength: 0.65 } });
+  const s3 = slide("s3");
+  const s4 = slide("s4");
+  const links = [
+    { from: "s1", to: "s2", kind: "movie", duration: 3.5, playWithoutClick: false, objectTransition: "fade" },
+    { from: "s2", to: "s3", kind: "cut", duration: 0, playWithoutClick: false },
+    { from: "s3", to: "s4", kind: "cut", duration: 0, playWithoutClick: false },
+  ];
+  const d = doc([s1, s2, s3, s4], links);
+  const away = moveSlideTo(d, "s4", 1);
+  const reloaded = documentFromResult(JSON.parse(JSON.stringify(away)));
+  const back = moveSlideTo(reloaded, "s4", 3);
+  const restored = back.links.find((l) => l.from === "s1" && l.to === "s2");
+  assert.ok(restored);
+  assert.equal(restored.kind, "movie");
+  assert.equal(restored.duration, 3.5);
+});
+
+test("restitchWithMemory prunes retired entries naming a missing slide", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const prevRetired = [{ from: "s1", to: "gone", kind: "movie", duration: 2, playWithoutClick: false }];
+  const { retired } = restitchWithMemory([s1, s2], [], prevRetired);
+  assert.equal(retired.length, 0);
+});
+
+test("restitchWithMemory caps retired entries at 200, keeping the newest", () => {
+  const prevRetired = [];
+  const froms = [];
+  const tos = [];
+  for (let i = 0; i < 250; i++) {
+    const from = `a${i}`;
+    const to = `b${i}`;
+    prevRetired.push({ from, to, kind: "cut", duration: 0, playWithoutClick: false });
+    froms.push(slide(from));
+    tos.push(slide(to));
+  }
+  // Put all `a*` slides before all `b*` slides so no (a_i,b_i) pair is ever adjacent in
+  // `allSlides` — every retired pair stays unconsumed and eligible for the cap.
+  const allSlides = [...froms, ...tos];
+  const { retired } = restitchWithMemory(allSlides, [], prevRetired);
+  assert.equal(retired.length, 200);
+  assert.deepEqual(
+    retired.map((l) => l.from),
+    prevRetired.slice(50).map((l) => l.from)
+  );
+});
+
+test("moveSlideTo does not leak retired memory across a different pair", () => {
+  const s1 = slide("s1");
+  const s2 = slide("s2");
+  const s3 = slide("s3");
+  const links = [
+    { from: "s1", to: "s2", kind: "movie", duration: 3.5, playWithoutClick: false },
+    { from: "s2", to: "s3", kind: "cut", duration: 0, playWithoutClick: false },
+  ];
+  const d = doc([s1, s2, s3], links);
+  const next = reorderSlides(d, "s2", 1); // -> s1, s3, s2; s1->s3 is a new pair
+  const s1s3 = next.links.find((l) => l.from === "s1" && l.to === "s3");
+  assert.ok(s1s3);
+  assert.notEqual(s1s3.kind, "movie");
+});
+
+test("restitchWithMemory refreshes insertion order for a live link sharing an early retired key, so it survives the 200 cap", () => {
+  const froms = [];
+  const tos = [];
+  const prevRetired = [];
+  for (let i = 0; i < 201; i++) {
+    const from = `a${i}`;
+    const to = `b${i}`;
+    prevRetired.push({ from, to, kind: "cut", duration: 0, playWithoutClick: false });
+    froms.push(slide(from));
+    tos.push(slide(to));
+  }
+  const liveLink = { from: "a0", to: "b0", kind: "movie", duration: 4.25, playWithoutClick: false, objectTransition: "hold" };
+  // Put all `a*` slides before all `b*` slides so no (a_i,b_i) pair is ever adjacent —
+  // every entry (retired or live) stays unconsumed and eligible for the cap.
+  const allSlides = [...froms, ...tos];
+  const { retired } = restitchWithMemory(allSlides, [liveLink], prevRetired);
+  assert.equal(retired.length, 200);
+  const survivor = retired.find((l) => l.from === "a0" && l.to === "b0");
+  assert.ok(survivor, "live link sharing an early retired key must survive the cap");
+  assert.equal(survivor.kind, "movie");
+  assert.equal(survivor.duration, 4.25);
+  assert.equal(survivor.objectTransition, "hold");
+});
+
+test("restitchWithMemory keys are collision-free across slide ids containing separator-like characters", () => {
+  const sA = slide("a");
+  const sBC = slide("b c");
+  const prevRetired = [{ from: "a b", to: "c", kind: "movie", duration: 5, playWithoutClick: false }];
+  // ("a b","c") and ("a","b c") must not collide even though naive concatenation
+  // (e.g. joining with a separator character legal inside a slide id) would produce
+  // the same key for both pairs.
+  const { links } = restitchWithMemory([sA, sBC], [], prevRetired);
+  const restored = links.find((l) => l.from === "a" && l.to === "b c");
+  assert.ok(restored);
+  assert.notEqual(restored.kind, "movie");
+  assert.notEqual(restored.duration, 5);
 });
 
 test("links.length is always slides.length - 1 and endpoints exist", () => {

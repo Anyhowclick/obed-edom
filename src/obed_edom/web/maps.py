@@ -63,6 +63,9 @@ SESSION_VERSION = 2
 SESSION_MAX_FILES = 100_000
 SESSION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
+DEFAULT_ISOLATE_STRENGTH = 0.65
+MAX_RETIRED_LINKS = 200
+
 DIR_KEYS = {"outputDir", "workDir", "previewDir", "stem", "previews", "previewFiles"}
 _MUTATION_LOCKS: dict[str, threading.RLock] = {}
 
@@ -115,7 +118,7 @@ class MapsCamera(BaseModel):
 class MapsIsolate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["darken"] = "darken"
-    strength: float = Field(default=0.6, ge=0, le=1)
+    strength: float = Field(default=DEFAULT_ISOLATE_STRENGTH, ge=0, le=1)
 
 
 class MapsReveal(BaseModel):
@@ -286,6 +289,7 @@ class MapsDocument(BaseModel):
         return out
     slides: list[MapsSlide]
     links: list[MapsLink]
+    retiredLinks: list[MapsLink] = Field(default_factory=list)
 
     @field_validator("exportLw", "exportCg", "exportDsk")
     @classmethod
@@ -313,6 +317,20 @@ class MapsDocument(BaseModel):
             raise ValueError("Map links must be unique")
         if any(source not in slide_ids or target not in slide_ids for source, target in links):
             raise ValueError("Map links must reference slides in this document")
+        slide_id_set = set(slide_ids)
+        pruned: list[MapsLink] = []
+        seen_retired: set[tuple[str, str]] = set()
+        for link in self.retiredLinks:
+            key = (link.from_, link.to)
+            if link.from_ not in slide_id_set or link.to not in slide_id_set:
+                continue
+            if key in seen_retired:
+                continue
+            seen_retired.add(key)
+            pruned.append(link)
+        if len(pruned) > MAX_RETIRED_LINKS:
+            pruned = pruned[-MAX_RETIRED_LINKS:]
+        self.retiredLinks = pruned
         return self
 
 
@@ -496,6 +514,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "assets": [asset.model_dump() for asset in doc.assets],
         "slides": [slide.model_dump() for slide in doc.slides],
         "links": [link.dumped() for link in doc.links],
+        "retiredLinks": [link.dumped() for link in doc.retiredLinks],
     }
 
 
@@ -512,6 +531,7 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "assets",
         "slides",
         "links",
+        "retiredLinks",
     )
     body = {key: cleaned[key] for key in keep if key in cleaned}
     for slide in body.get("slides") or []:
@@ -545,6 +565,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
         "exportCg": True,
         "exportDsk": False,
         "stateRevision": 0,
+        "isolateDefaultVersion": 1,
         "defaultStyle": "positron",
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
@@ -565,6 +586,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
             }
         ],
         "links": [],
+        "retiredLinks": [],
     }
 
 
@@ -743,6 +765,7 @@ def _write_session_archive(job) -> Path:
     manifest = {
         "format": "obed-edom-maps",
         "version": SESSION_VERSION,
+        "isolateDefaultVersion": int(result.get("isolateDefaultVersion") or 0),
         "document": _dump_document(doc),
     }
     preview_dir = Path(str(result.get("previewDir") or ""))
@@ -782,6 +805,21 @@ def _valid_session_member(name: str) -> PurePosixPath:
     if member.is_absolute() or not member.parts or ".." in member.parts or "\\" in name:
         raise HTTPException(400, "Invalid Maps session archive path")
     return member
+
+
+def _bump_legacy_isolate(result: dict[str, Any]) -> None:
+    if int(result.get("isolateDefaultVersion") or 0) >= 1:
+        return
+    for slide in result.get("slides") or []:
+        for view in [slide, *([slide["cg"]] if isinstance(slide.get("cg"), dict) else [])]:
+            isolate = view.get("isolate")
+            if (
+                isinstance(isolate, dict)
+                and isolate.get("mode") == "darken"
+                and abs(float(isolate.get("strength", 0)) - 0.60) < 1e-6
+            ):
+                isolate["strength"] = DEFAULT_ISOLATE_STRENGTH
+    result["isolateDefaultVersion"] = 1
 
 
 def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
@@ -827,6 +865,10 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             raise HTTPException(400, "Maps session manifest is missing or invalid") from exc
         if manifest.get("format") != "obed-edom-maps" or manifest.get("version") not in {1, SESSION_VERSION}:
             raise HTTPException(400, "Unsupported Maps session format")
+        isolate_default_version_raw = manifest.get("isolateDefaultVersion", 0)
+        if isinstance(isolate_default_version_raw, bool) or not isinstance(isolate_default_version_raw, int) or isolate_default_version_raw < 0:
+            raise HTTPException(400, "Invalid Maps session isolateDefaultVersion")
+        isolate_default_version = isolate_default_version_raw
         doc = _parse_document(manifest.get("document") or {})
         if len({asset.id for asset in doc.assets}) != len(doc.assets):
             raise HTTPException(400, "Maps session has duplicate asset metadata ids")
@@ -940,6 +982,8 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
     dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
     result.update(dumped)
     result["previewFiles"] = {"maps": sorted(imported_previews)}
+    result["isolateDefaultVersion"] = isolate_default_version
+    _bump_legacy_isolate(result)
     return result, {"tiles": len(tile_entries), "previews": len(imported_previews)}
 
 
@@ -1148,6 +1192,7 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
         "assets",
         "slides",
         "links",
+        "retiredLinks",
       )
       merged = {key: result.get(key) for key in keep}
       for key in keep:
