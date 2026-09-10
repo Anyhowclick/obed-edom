@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -96,6 +97,19 @@ def main(argv: list[str] | None = None) -> int:
             "badges). Bare flag = every slide; '4,7' or '4-9' = those slides only."
         ),
     )
+    dsk_export = sub.add_parser(
+        "dsk-export-clips",
+        help="Export per-slide movie clips from a wall Keynote for the DSK generator.",
+    )
+    dsk_export.add_argument("keynote", type=Path, help="Source FW/LW .key (7680x1080 or 3840x1080).")
+    dsk_export.add_argument("--slides", required=True, help="Slides to export, e.g. 32,33 or 32-34.")
+    dsk_export.add_argument("--out", type=Path, required=True, help="Destination folder for .mov clips.")
+    dsk_export.add_argument(
+        "--include-side",
+        help="Slides to export at full wall width with side content kept, e.g. 44 or 44,46.",
+    )
+    dsk_export.add_argument("--codec", default="AppleProRes422LT", help="Keynote movie codec for the export.")
+    dsk_export.add_argument("--fps", type=float, default=30, help="Export framerate.")
     remap.add_argument(
         "--source-previews",
         help=(
@@ -143,7 +157,60 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "remap":
         return _run_remap(args)
+
+    if args.command == "dsk-export-clips":
+        return _run_dsk_export_clips(args)
     return 2
+
+
+def _run_dsk_export_clips(args: argparse.Namespace) -> int:
+    from obed_edom.dsk_movie_export import CODECS, export_slide_clips, fps_enum_name
+
+    source = Path(args.keynote).expanduser()
+    if not source.exists():
+        print(f"File not found: {source}", file=sys.stderr)
+        return 1
+    if args.codec not in CODECS:
+        print(f"Unsupported --codec {args.codec!r}; expected one of {sorted(CODECS)}", file=sys.stderr)
+        return 1
+    try:
+        fps_enum_name(args.fps)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    try:
+        slide_numbers = sorted(parse_slide_spec(args.slides) or ())
+        include_side = set(parse_slide_spec(args.include_side) or ()) if args.include_side else set()
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    if not slide_numbers:
+        print("No slides given (--slides).", file=sys.stderr)
+        return 1
+
+    out_dir = Path(args.out).expanduser()
+    t0 = time.monotonic()
+    try:
+        results = export_slide_clips(
+            source,
+            slide_numbers,
+            out_dir,
+            include_side=include_side,
+            codec=args.codec,
+            fps=args.fps,
+            log=print,
+        )
+    except Exception as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        return 1
+
+    for r in results:
+        print(
+            f"slide {r.slide}: {r.path} {r.width}x{r.height} @ {r.duration_s:.2f}s "
+            f"(scratch {r.scratch_width}px, {r.wall_s:.1f}s wall)"
+        )
+    print(f"Total wall time: {time.monotonic() - t0:.1f}s")
+    return 0
 
 
 def _run_remap(args: argparse.Namespace) -> int:

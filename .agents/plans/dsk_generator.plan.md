@@ -32,8 +32,8 @@ todos:
     content: "Read the DSK band rect from a reference DSK deck/template; contain-fit affine per item, clipped to the centre panel — or to the full 7680×1080 wall on slides the operator marks \"include side content\"; no hardcoded band."
     status: pending
   - id: d3-movie-crop
-    content: "Shared `dsk_movie_export.py`: scratch centre-panel deck (3840×1080) → native-size export to a **`.m4v`** destination (`.mov` is rejected) → ffmpeg crop/scale; display-poke + RSS watchdog (>1.5GB). The alpha probe is DONE — mechanic (i) is dead; `d3` now carries only the opaque movie path plus the owner's chosen alpha route (Open question 13)."
-    status: pending
+    content: "DONE (2026-09-10): landed as `src/obed_edom/dsk_movie_export.py` + CLI `dsk-export-clips`; live acceptance PASSED on `Sermon_PK (GW).key` copy (3 batches / 7 clips). Codex review 5 rounds → round 6 pending."
+    status: completed
   - id: d4-deck-assembly
     content: "Assemble the DSK deck by copy-and-transform of the FW deck (copy carries builds), live geometry, live deletes, CG-style layout import, white 5pt stroke."
     status: pending
@@ -886,6 +886,19 @@ nothing is lost (unlike a KPF export, where notes are not exported).
 
 ## Per-slide export mechanics and cost
 
+**Measured facts (2026-09-10 live acceptance).** Published clips are `.mov`
+(QuickTime) — Keynote rejects `.mov` as its own export destination, so the
+pipeline exports to `.m4v` then ffmpeg-remuxes to `.mov`; ProRes cannot be
+stream-copied into the `.m4v`/ipod muxer. A clip is content + 5.0 s hold +
+outgoing transition (movie slides: movie length + 5.63 s). Canvas groups must
+be processed **widest-first** — document width only shrinks between exports,
+and exporting a slide right after growing the width from 3840 back to 7680
+produced a pillarboxed clip. Slide addressing after a deletion must use
+**post-deletion ordinals** (the original bug that exported slides 47/62/63).
+Keynote process detection must use `CFBundleExecutable` (`Keynote`), not the
+app name (`Keynote Creator Studio`). The lock is an `fcntl.flock` held for the
+whole batch. The RSS watchdog default is 3.0 GB (measured peak 2.22 GB).
+
 Pick **one** scratch deck holding only the target slides (build it by **deleting**
 the non-targets, so Keynote holds a small deck), open it **once**, then per target
 toggle `skipped` (rw, sdef `:310`) so only that slide is visible and export.
@@ -1139,6 +1152,16 @@ operator-run, hands-off Keynote window on a **copy**.
    (first change at frame 61 / t = 2.033 s) reproduces on a `built` slide.
    `d3` does **not** implement an alpha route — that is gated on Open question 13,
    and route (iv) additionally on "Next live probe (difference matte)".
+   **Status (2026-09-10):** landed as `src/obed_edom/dsk_movie_export.py` +
+   `tests/test_dsk_movie_export.py` + CLI `dsk-export-clips` (plus
+   `keynote_app.executable_name()` and `dsk_plan.visible_union`); Codex review
+   5 rounds → round 6 pending. **Live acceptance PASSED** on a copy of
+   `Sermon_PK (GW).key`: 3 batches / 7 clips (slides 17, 32, 33, 8 include-side;
+   mixed canvas; reverse CLI order) — slide 17 3840×1080, 8.23 s (build frames
+   61–78, dissolve frames 232–243); slide 32 35.63 s; slide 33 25.20 s (+AAC
+   audio retained); slide 8 7680×1080, 5.63 s with side content included. Wall
+   time was 27–41 s per batch; peak Keynote RSS was 2.03–2.22 GB across runs;
+   Keynote quit cleanly with no leftovers after every run.
 4. **`d4` deck assembly — live.** Acceptance: DSK deck opens; a `static` slide's
    media sits in the band; **no kept slide's base layout is an FW/7680-wide
    layout**; `card_styles` on the output reports the kept media styles as
@@ -1394,12 +1417,17 @@ operator-run, hands-off Keynote window on a **copy**.
   intersection is used everywhere. Covered by a `d2` acceptance line.
 - **Layout/master leakage** into both the DSK deck and every exported clip unless
   the CG layout-import step runs on both decks.
-- **Export-time / hands-off window.** Measured at 11–18 s per slide, so far
-  cheaper than feared, but the 6.7GB `Full_Report_Card_Wall.key` case is still
-  unmeasured, and the machine must be untouched throughout.
-- **Native-size cap is only partly known.** 7680×1080 exports fine, so the sdef's
+- **Export-time / hands-off window.** Measured 2026-09-10 live acceptance:
+  8.23–35.63 s per clip, 27–41 s wall time per batch (3 batches / 7 clips), but
+  the 6.7GB `Full_Report_Card_Wall.key` case is still unmeasured, and the
+  machine must be untouched throughout.
+- **Native-size cap is only partly known.** 7680×1080 exports fine (confirmed
+  again on slide 8, 7680×1080 with side content included), so the sdef's
   "up to 4096×2160" is not enforced there; behaviour **above 2160 height is
   unverified**. Assert and refuse on tall canvases rather than assume.
+- **Keynote self-playing timing.** A 5.0 s hold plus the outgoing transition is
+  appended to every clip by Keynote's own export, so `d5`'s per-build cutting
+  must trim it.
 - **Media-style stroke write is new code.** `patch_stroke_widths` is proven for width
   only; setting colour/pattern is an untested extension of a probed-safe single-member
   patch. Gate it behind read-back verification, and refuse-and-report rather than

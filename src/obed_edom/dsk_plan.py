@@ -384,6 +384,49 @@ def fit_item(
     return _place(visible, scale, band, anchor)
 
 
+def _visibles_by_kept(
+    items: Sequence[dict], kept: Iterable[ItemId], *, include_side: bool
+) -> dict[ItemId, Rect]:
+    wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
+    kept_set = set(kept)
+    visibles: dict[ItemId, Rect] = {}
+    for item in items:
+        item_id: ItemId = (item["kind"], item["kindIndex"])
+        if item_id not in kept_set:
+            continue
+        visible = _intersect(item_rect(item), wall_rect)
+        if visible is not None:
+            visibles[item_id] = visible
+    return visibles
+
+
+def _visibles_by_wall(
+    items: Sequence[dict], wall_w: float, wall_h: float, *, include_side: bool
+) -> dict[ItemId, Rect]:
+    wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
+    filtered_items, _dropped_side = _filter_kept_items(items, wall_w, wall_h, include_side=include_side)
+    visibles: dict[ItemId, Rect] = {}
+    for item in filtered_items:
+        item_id: ItemId = (item["kind"], item["kindIndex"])
+        visible = _intersect(item_rect(item), wall_rect)
+        if visible is not None:
+            visibles[item_id] = visible
+    return visibles
+
+
+def visible_union(
+    items: Sequence[dict], *, include_side: bool, wall: tuple[float, float]
+) -> Rect | None:
+    """Wall-space union of kept visible item rects -- backdrops, off-canvas items and
+    (unless ``include_side``) side-panel-only items dropped via ``_filter_kept_items`` --
+    or ``None`` if nothing is kept/visible. Used by the DSK movie export's include_side
+    crop rect (``dsk_movie_export.py``)."""
+    visibles = _visibles_by_wall(items, wall[0], wall[1], include_side=include_side)
+    if not visibles:
+        return None
+    return _union_rect(visibles.values())
+
+
 def fit_slide(
     items: Sequence[dict],
     band: Band,
@@ -399,23 +442,10 @@ def fit_slide(
     backdrops included, which is never what a caller wants."""
     if (kept is None) == (wall is None):
         raise ValueError("fit_slide requires exactly one of `kept` or `wall`")
-    wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
     if kept is not None:
-        kept_set = set(kept)
-        filtered_items: Sequence[dict] = [
-            item for item in items if (item["kind"], item["kindIndex"]) in kept_set
-        ]
+        visibles = _visibles_by_kept(items, kept, include_side=include_side)
     else:
-        filtered_items, _dropped_side = _filter_kept_items(
-            items, wall[0], wall[1], include_side=include_side
-        )
-
-    visibles: dict[ItemId, Rect] = {}
-    for item in filtered_items:
-        item_id: ItemId = (item["kind"], item["kindIndex"])
-        visible = _intersect(item_rect(item), wall_rect)
-        if visible is not None:
-            visibles[item_id] = visible
+        visibles = _visibles_by_wall(items, wall[0], wall[1], include_side=include_side)
 
     if not visibles:
         return {}

@@ -88,7 +88,25 @@ def app_version(identifier: str | None = None) -> str:
     return str(info.get("CFBundleShortVersionString") or UNKNOWN_VERSION)
 
 
+@lru_cache(maxsize=None)
+def executable_name(identifier: str | None = None) -> str | None:
+    """`CFBundleExecutable` for the resolved app, or `None` if the app itself is not
+    found. Raises if the app is found but its Info.plist is missing or malformed --
+    callers must fail closed rather than assume Keynote is not running."""
+    path = app_path(identifier or bundle_id())
+    if path is None:
+        return None
+    info = _bundle_info(path)
+    if not isinstance(info, dict):
+        raise RuntimeError(f"Unreadable or malformed Info.plist for {path}")
+    exe = info.get("CFBundleExecutable")
+    if not isinstance(exe, str) or not exe:
+        raise RuntimeError(f"Missing or invalid CFBundleExecutable in {path}'s Info.plist")
+    return exe
+
+
 def clear_cache() -> None:
     app_path.cache_clear()
     bundle_id.cache_clear()
     app_version.cache_clear()
+    executable_name.cache_clear()
