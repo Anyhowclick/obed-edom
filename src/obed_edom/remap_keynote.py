@@ -804,7 +804,7 @@ def restore_source_builds(
 
 
 _DETAIL_LOG_CAP = 40
-_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown")
+_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown", "raiseBlind", "raiseVacuous")
 _RESOLVE_RARE_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip")
 
 
