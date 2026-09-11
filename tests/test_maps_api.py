@@ -2024,7 +2024,10 @@ def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
 
     release_thumb.set()
     thread.join(5)
-    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert outcome["response"].status_code == 409, outcome["response"].text
+    detail = outcome["response"].json()["detail"]
+    assert detail["staleThumbnail"] is True
+    assert detail["stateRevision"] == before_revision + 1
 
     latest = client.get(f"/api/jobs/{job['id']}").json()
     slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
@@ -2036,6 +2039,28 @@ def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
     assert leftover_pngs == [thumb_path]
     assert not list(preview_dir.glob("*.tmp"))
     assert int(latest["result"]["stateRevision"] or 0) == before_revision + 1
+
+
+def test_thumb_post_with_stale_revision_conflicts_then_succeeds():
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    revision = int(job["result"].get("stateRevision") or 0)
+
+    stale = client.post(
+        f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=thumb&revision={revision + 1}",
+        content=_landmark_png(),
+    )
+    assert stale.status_code == 409, stale.text
+    detail = stale.json()["detail"]
+    assert detail["staleThumbnail"] is True
+    assert detail["stateRevision"] == revision
+
+    fresh = client.post(
+        f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=thumb&revision={revision}",
+        content=_landmark_png(),
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert int(fresh.json()["result"]["stateRevision"] or 0) == revision + 1
 
 
 def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypatch):

@@ -74,10 +74,6 @@ def _mutation_lock(job_id: str) -> threading.RLock:
     return _MUTATION_LOCKS.setdefault(job_id, threading.RLock())
 
 
-class _NoMutation(Exception):
-    """Raised by a mutate callback to publish nothing and return the current job."""
-
-
 def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict[str, Any]:
     with _mutation_lock(job_id):
         job = _job_or_404(job_id)
@@ -86,10 +82,7 @@ def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict
         revision = int(result.get("stateRevision") or 0)
         if expected_revision is not None and expected_revision != revision:
             raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
-        try:
-            updated = mutate(result)
-        except _NoMutation:
-            return _runner().public_dict(job)
+        updated = mutate(result)
         updated["stateRevision"] = revision + 1
         saved = _runner().update_result(job_id, updated)
         if not saved:
@@ -1351,7 +1344,7 @@ async def post_png(
     def publish(latest: dict[str, Any]) -> dict[str, Any]:
         current_revision = int(latest.get("stateRevision") or 0)
         if revision is not None and revision != current_revision:
-            raise _NoMutation
+            raise HTTPException(409, {"staleThumbnail": True, "stateRevision": current_revision})
         _write_atomic(path, body)
         fresh_slides = []
         for slide in latest.get("slides") or []:

@@ -426,6 +426,15 @@ export type MapsExportPlan = {
   };
 };
 
+export class MapsStaleThumbnailError extends Error {
+  readonly stateRevision: number;
+
+  constructor(stateRevision: number) {
+    super("Thumbnail revision is stale.");
+    this.stateRevision = stateRevision;
+  }
+}
+
 export async function postMapsPng(
   id: string,
   blob: Blob,
@@ -442,6 +451,13 @@ export async function postMapsPng(
     method: "POST",
     body: blob,
   });
+  if (res.status === 409) {
+    const data = await res.json().catch(() => null);
+    const detail = data?.detail;
+    if (detail && typeof detail === "object" && detail.staleThumbnail && typeof detail.stateRevision === "number") {
+      throw new MapsStaleThumbnailError(detail.stateRevision);
+    }
+  }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }

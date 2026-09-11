@@ -12,6 +12,7 @@ import {
   planMapsTiles,
   pollJob,
   postMapsFrame,
+  MapsStaleThumbnailError,
   postMapsPng,
   prefetchMapsTiles,
   previewUrl,
@@ -617,33 +618,39 @@ export function MapsTab() {
     return applyLocalDoc(withSlideCamera(current, slideId, activeAudienceRef.current, cam)) ?? current;
   }
 
-  async function captureThumb(slideId: string, retriesLeft = 1) {
+  async function captureThumb(slideId: string, retriesLeft = 1, revisionOverride?: number) {
     if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
-    const startRevision = saveQueue.current?.revision ?? undefined;
+    const startRevision = revisionOverride ?? saveQueue.current?.revision ?? undefined;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
     if (!view) return;
     const token = ++thumbnailToken.current;
+    const gate = () => shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id });
     const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade, isolate: view.isolate });
     await mapRef.current?.waitUntilIdle(view.style);
-    if (!shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id })) return;
+    if (!gate()) return;
     const blob = await mapRef.current?.captureBlob();
-    if (!blob || !shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id })) return;
+    if (!blob || !gate()) return;
     const latest = docRef.current?.slides.find((item) => item.id === slideId);
     if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade, isolate: slideForAudience(latest, audience).isolate }) !== fingerprint) return;
     const hillshade = view?.hillshade === true;
     const stamped = await stampOsm(blob, hillshade, view?.style);
-    if (!shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id })) return;
-    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: startRevision });
-    if (!shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id })) return;
-    const revisionMovedDuringCapture = startRevision !== undefined && saveQueue.current?.revision !== startRevision;
-    reconcileServerJob(updated);
-    if (revisionMovedDuringCapture && retriesLeft > 0) {
-      void captureThumb(slideId, retriesLeft - 1).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    if (!gate()) return;
+    let updated;
+    try {
+      updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: startRevision });
+    } catch (err) {
+      if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
+        void captureThumb(slideId, retriesLeft - 1, err.stateRevision).catch((retryErr) => setError(retryErr instanceof Error ? retryErr.message : String(retryErr)));
+        return;
+      }
+      throw err;
     }
+    if (!gate()) return;
+    reconcileServerJob(updated);
   }
 
   async function flushAndSave(immediate = true) {
