@@ -297,7 +297,10 @@ template.
 
 Run the Full gate on copies with `--mode verify --no-validate`; use
 `--pass2-bar parity` only to expose and compare a known pre-existing pass-2
-problem. Require Accessibility, refuse any already-open Keynote document, run
+problem. The dead-raise cause was the not-ready Arrange menu, fixed by the
+readiness poll (`OBED_RAISE_SETTLE_MAX`, default 1.5s; `0` disables and
+reproduces the defect) — live-verified 2026-09-11. Require Accessibility,
+refuse any already-open Keynote document, run
 serially, and quit Keynote between A and B. This workflow is viable on the
 16GB host when guarded this way; the memory caution is not a blanket ban on
 full-deck work. Run it from an unlocked working copy of the deck — `ditto`
