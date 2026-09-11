@@ -622,7 +622,11 @@ export function MapsTab() {
     if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
-    const startRevision = revisionOverride ?? saveQueue.current?.revision ?? undefined;
+    const queueRevision = saveQueue.current?.revision ?? undefined;
+    const startRevision =
+      typeof revisionOverride === "number" && typeof queueRevision === "number"
+        ? Math.max(revisionOverride, queueRevision)
+        : revisionOverride ?? queueRevision;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
@@ -639,12 +643,15 @@ export function MapsTab() {
     const hillshade = view?.hillshade === true;
     const stamped = await stampOsm(blob, hillshade, view?.style);
     if (!gate()) return;
-    let updated;
+    let updated: Job;
     try {
       updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: startRevision });
     } catch (err) {
       if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
-        void captureThumb(slideId, retriesLeft - 1, err.stateRevision).catch((retryErr) => setError(retryErr instanceof Error ? retryErr.message : String(retryErr)));
+        void captureThumb(slideId, retriesLeft - 1, err.stateRevision).catch((retryErr) => {
+          if (retryErr instanceof MapsStaleThumbnailError) return;
+          setError(retryErr instanceof Error ? retryErr.message : String(retryErr));
+        });
         return;
       }
       throw err;
