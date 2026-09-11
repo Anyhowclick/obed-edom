@@ -262,7 +262,7 @@ def _run_dsk_export_clips(args: argparse.Namespace) -> int:
     for r in results:
         print(
             f"slide {r.slide}: {r.path} {r.width}x{r.height} @ {r.duration_s:.2f}s "
-            f"(scratch {r.scratch_width}px, {r.wall_s:.1f}s wall)"
+            f"(crop {r.crop_width}px, {r.wall_s:.1f}s wall)"
         )
     print(f"Total wall time: {time.monotonic() - t0:.1f}s")
     return 0

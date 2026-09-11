@@ -5,15 +5,14 @@ module's own `_run_osascript`/`_ffprobe`/`_keynote_running` seams.
 """
 from __future__ import annotations
 
-import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
 import obed_edom.dsk_movie_export as dme
+from obed_edom.dsk_plan import SlideClass
 from obed_edom.map_remap import Rect
-from obed_edom.maps_geo import CENTRE_ORIGIN_X
 
 
 def _set(monkeypatch, name, value):
@@ -45,21 +44,6 @@ def test_ordinal_map_ranks_kept_slides():
 def test_ordinal_map_unaffected_by_deck_size():
     # slides {17, 32, 33} of a 63-slide deck map to ordinals {1, 2, 3}
     assert dme.ordinal_map({17, 32, 33}) == {17: 1, 32: 2, 33: 3}
-
-
-# --- scratch_canvas ----------------------------------------------------------
-
-
-def test_scratch_canvas_centre_only():
-    assert dme.scratch_canvas(5, include_side=()) == (3840, 1080, -float(CENTRE_ORIGIN_X))
-
-
-def test_scratch_canvas_include_side():
-    assert dme.scratch_canvas(5, include_side={5}) == (7680, 1080, 0.0)
-
-
-def test_scratch_canvas_include_side_other_slide_unaffected():
-    assert dme.scratch_canvas(6, include_side={5}) == (3840, 1080, -float(CENTRE_ORIGIN_X))
 
 
 # --- clip_name / require_m4v --------------------------------------------------
@@ -119,6 +103,24 @@ def test_crop_filter_explicit_degenerate_off_frame_raises():
         dme.crop_filter(rect, 1920, 1080)
 
 
+def test_ffmpeg_process_centre_panel_crop_reaches_shipped_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(dme, "_ffprobe", lambda path: (7680, 1080, 30.0, 8.0))
+    captured = {}
+
+    def fake_stage(cmd):
+        captured["cmd"] = cmd
+
+    monkeypatch.setattr(dme, "_run_ffmpeg_stage", fake_stage)
+    raw = tmp_path / "raw.m4v"
+    dest = tmp_path / "out.mov"
+    w, h = dme._ffmpeg_process(
+        raw, dest, crop_rect=dme.CENTRE_PANEL_RECT, wall_w=7680, wall_h=1080, codec="AppleProRes422LT"
+    )
+    assert (w, h) == (3840, 1080)
+    assert "crop=3840:1080:1920:0" in captured["cmd"]
+
+
 # --- fps_enum_name / CODECS --------------------------------------------------
 
 
@@ -160,9 +162,16 @@ def test_expected_duration_removed():
 
 def _jobs():
     return [
-        dme._SlideJob(17, 1, 3840, 1080, -float(CENTRE_ORIGIN_X), Path("/out/Sermon.017.m4v"), Path("/work/tmp.0017.m4v")),
-        dme._SlideJob(32, 2, 3840, 1080, -float(CENTRE_ORIGIN_X), Path("/out/Sermon.032.m4v"), Path("/work/tmp.0032.m4v")),
-        dme._SlideJob(44, 3, 7680, 1080, 0.0, Path("/out/Sermon.044.m4v"), Path("/work/tmp.0044.m4v")),
+        dme._SlideJob(17, 1, dme.CENTRE_PANEL_RECT, Path("/out/Sermon.017.m4v"), Path("/work/tmp.0017.m4v")),
+        dme._SlideJob(
+            32,
+            2,
+            dme.CENTRE_PANEL_RECT,
+            Path("/out/Sermon.032.m4v"),
+            Path("/work/tmp.0032.m4v"),
+            delete_ids=(("image", 1),),
+        ),
+        dme._SlideJob(44, 3, Rect(0, 0, 7680, 1080), Path("/out/Sermon.044.m4v"), Path("/work/tmp.0044.m4v")),
     ]
 
 
@@ -235,68 +244,47 @@ def test_script_verifies_base_layout_before_deleting_donor():
     assert verify_idx < delete_donor_idx
 
 
-def test_script_translates_centre_only_slides_by_new_ordinal():
+def test_script_never_resizes_document():
+    # D0/B1: the coal-slide bug was a Keynote canvas resize that rescaled content while the
+    # compensating translate stayed in unscaled wall points. The document is now always
+    # exported at its own native size; ffmpeg does all cropping afterwards.
     script = _sample_script()
-    assert f"repeat with itm in iWork items of slide 1 of theDoc" in script
-    assert f"repeat with itm in iWork items of slide 2 of theDoc" in script
-    assert f"ix + (-{float(CENTRE_ORIGIN_X)})" in script
+    assert "set width of theDoc" not in script
+    assert "set height of theDoc" not in script
 
 
-def test_script_unlocks_and_relocks_items_around_translation():
+def test_script_deletes_non_content_drawables():
+    # B2: the scratch slide keeps every drawable the classifier dropped unless the export
+    # script deletes them too -- this is what stripped the GW-32 side panel from the clip.
     script = _sample_script()
-    assert "set wasLocked to locked of itm" in script
-    assert "if wasLocked then set locked of itm to false" in script
-    assert "if wasLocked then set locked of itm to true" in script
+    assert "      set theObj to image 2 of slide 2" in script
+    assert "        if locked of theObj then set locked of theObj to false" in script
+    assert "      delete theObj" in script
+    delete_idx = script.index("image 2 of slide 2")
+    export_idx = script.index("tmp.0032.m4v")
+    assert delete_idx < export_idx
 
 
-def test_script_sets_canvas_width_before_each_group_export():
-    script = _sample_script()
-    lines = script.splitlines()
-    canvas_order = []
-    for i, line in enumerate(lines):
-        m = re.search(r"set width of theDoc to (\d+)", line)
-        if m:
-            canvas_order.append(("width", int(m.group(1)), i))
-        if "export theDoc" in line:
-            canvas_order.append(("export", None, i))
-    # every export must be preceded (within its own group) by that group's own width-set,
-    # and canvas groups are processed widest-first (7680, then 3840) so the document width
-    # only ever shrinks between exports, never grows back up right before one.
-    widths_seen = [w for kind, w, _ in canvas_order if kind == "width"]
-    assert widths_seen == [7680, 3840]
-    last_width = None
-    for kind, val, _ in canvas_order:
-        if kind == "width":
-            last_width = val
-        else:
-            assert last_width is not None
-
-
-def test_script_groups_process_widest_canvas_first_no_grow_back_up():
-    # regression for the d10 defect: a mixed batch with a 3840 (centre-only) group and a 7680
-    # (include-side) group must export the 7680 group before ever narrowing to 3840 -- the
-    # document width must never grow from 3840 back up to 7680 right before an export.
+def test_script_raises_on_unaddressable_delete_kind():
     jobs = [
-        dme._SlideJob(8, 1, 7680, 1080, 0.0, Path("/out/Sermon.008.m4v"), Path("/work/tmp.0008.m4v")),
-        dme._SlideJob(17, 2, 3840, 1080, -float(CENTRE_ORIGIN_X), Path("/out/Sermon.017.m4v"), Path("/work/tmp.0017.m4v")),
+        dme._SlideJob(
+            17,
+            1,
+            dme.CENTRE_PANEL_RECT,
+            Path("/out/Sermon.017.m4v"),
+            Path("/work/tmp.0017.m4v"),
+            delete_ids=(("bogus-kind", 0),),
+        )
     ]
-    script = dme._build_export_script(
-        scratch_path=Path("/Users/x/Desktop/dsk-d3-work/.dsk-export-Sermon/Sermon.key"),
-        stem="Sermon",
-        layout_template=None,
-        per_slide=jobs,
-        codec="AppleProRes422LT",
-        fps=30,
-    )
-    lines = script.splitlines()
-    width_7680_idx = next(i for i, l in enumerate(lines) if "set width of theDoc to 7680" in l)
-    width_3840_idx = next(i for i, l in enumerate(lines) if "set width of theDoc to 3840" in l)
-    export_8_idx = next(i for i, l in enumerate(lines) if "export theDoc" in l and "tmp.0008.m4v" in l)
-    export_17_idx = next(i for i, l in enumerate(lines) if "export theDoc" in l and "tmp.0017.m4v" in l)
-    assert width_7680_idx < export_8_idx < width_3840_idx < export_17_idx
-
-    translation_lines = [l for l in lines if "iWork items of slide" in l]
-    assert translation_lines == ["      repeat with itm in iWork items of slide 2 of theDoc"]
+    with pytest.raises(ValueError, match="bogus-kind"):
+        dme._build_export_script(
+            scratch_path=Path("/Users/x/Desktop/dsk-d3-work/.dsk-export-Sermon/Sermon.key"),
+            stem="Sermon",
+            layout_template=None,
+            per_slide=jobs,
+            codec="AppleProRes422LT",
+            fps=30,
+        )
 
 
 def test_script_no_literal_mov_extension_used_for_export():
@@ -443,6 +431,7 @@ def test_export_slide_clips_refuses_at_preflight_when_keynote_unresolvable(monke
     out_dir.mkdir()
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
+    _stub_offline_payload(monkeypatch)
     lock_path = tmp_path / "keynote.lock"
     _set(monkeypatch, "LOCK_PATH", lock_path)
     monkeypatch.setattr(dme.keynote_app, "executable_name", lambda identifier: None)
@@ -543,7 +532,30 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
-def _stub_live(monkeypatch, tmp_path, *, keynote_running=False):
+_DEFAULT_PAYLOAD_SLIDES = [
+    {"number": 17, "items": [{"kind": "shape", "kindIndex": 0}]},
+    {"number": 32, "items": [{"kind": "shape", "kindIndex": 0}]},
+]
+
+
+def _stub_offline_payload(monkeypatch, *, slides=None):
+    if slides is None:
+        slides = _DEFAULT_PAYLOAD_SLIDES
+    payload = {"slideWidth": 7680.0, "slideHeight": 1080.0, "slides": list(slides)}
+    classes = [
+        SlideClass(
+            s["number"], "static", 0, 0, tuple((i["kind"], i["kindIndex"]) for i in s["items"]), (), (), None, 0, ()
+        )
+        for s in slides
+    ]
+    monkeypatch.setattr(dme, "offline_wall_payload", lambda path: payload)
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: classes)
+    monkeypatch.setattr(dme, "attach_group_content_signature", lambda path, payload, **k: None)
+    return payload
+
+
+def _stub_live(monkeypatch, tmp_path, *, keynote_running=False, stub_content_assert=True, payload_slides=None):
+    _stub_offline_payload(monkeypatch, slides=payload_slides)
     # Preflight sees `keynote_running`; once we copy the scratch and are about to run the
     # export AppleScript (which `activate`s Keynote), the process is genuinely running --
     # so the teardown quit-guard (which re-checks `_keynote_running`) fires as it would live.
@@ -592,6 +604,8 @@ def _stub_live(monkeypatch, tmp_path, *, keynote_running=False):
         return 1920, 1080
 
     monkeypatch.setattr(dme, "_ffmpeg_process", fake_ffmpeg_process)
+    if stub_content_assert:
+        monkeypatch.setattr(dme, "_assert_clip_covers_frame", lambda *a, **k: None)
     calls["state"] = state
     return calls
 
@@ -627,6 +641,44 @@ def test_export_slide_clips_happy_path(monkeypatch, tmp_path):
         assert r.path.exists()
         assert r.path.suffix == ".mov"
         assert r.path.parent == out_dir
+
+
+def test_export_slide_clips_runs_content_assert_for_real(monkeypatch, tmp_path):
+    # F5: the content assert must actually execute inside export_slide_clips, not be
+    # stubbed out of the call path -- exercise it for real with a fake full-frame bbox.
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    calls = _stub_live(monkeypatch, tmp_path, stub_content_assert=False)
+    _patch_build_export_script_capture(monkeypatch)
+    seen_paths = []
+
+    def fake_stats(path, *, at_s=1.0):
+        seen_paths.append(path)
+        return (0, 0, 1920, 1080), 1.0
+
+    monkeypatch.setattr(dme, "_non_black_stats", fake_stats)
+
+    results = dme.export_slide_clips(fw, [17], out_dir, log=lambda *_: None)
+
+    assert seen_paths, "content assert never sampled a frame"
+    assert {r.slide for r in results} == {17}
+
+
+def test_export_slide_clips_content_assert_refuses_quadrant_clip(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, stub_content_assert=False)
+    _patch_build_export_script_capture(monkeypatch)
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: ((0, 0, 960, 935), 1.0))
+
+    with pytest.raises(RuntimeError, match="coal-slide"):
+        dme.export_slide_clips(fw, [17], out_dir, log=lambda *_: None)
 
 
 def test_export_slide_clips_refuses_when_keynote_running(monkeypatch, tmp_path):
@@ -674,6 +726,7 @@ def test_export_slide_clips_cleanup_on_exception(monkeypatch, tmp_path):
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
 
+    _stub_offline_payload(monkeypatch)
     running_state = {"running": False}
     _set(monkeypatch, "_keynote_running", lambda: running_state["running"])
 
@@ -831,18 +884,185 @@ def test_derive_include_side_crop_uses_visible_union(monkeypatch, tmp_path):
         "slideHeight": 1080,
         "slides": [{"number": 1, "items": []}, {"number": 44, "items": [{"kind": "shape", "kindIndex": 0}]}],
     }
-    monkeypatch.setattr(dme, "offline_wall_payload", lambda path: fake_payload)
-    monkeypatch.setattr(dme, "visible_union", lambda items, *, include_side, wall: Rect(10, 20, 100, 200))
-    crops = dme._derive_include_side_crop(tmp_path / "Sermon.key", [44])
+    monkeypatch.setattr(dme, "visible_union", lambda items, *, include_side, wall, **k: Rect(10, 20, 100, 200))
+    crops = dme._derive_include_side_crop(fake_payload, [44])
     assert crops == {44: Rect(10, 20, 100, 200)}
 
 
 def test_derive_include_side_crop_refuses_degenerate_union(monkeypatch, tmp_path):
     fake_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 44, "items": []}]}
-    monkeypatch.setattr(dme, "offline_wall_payload", lambda path: fake_payload)
-    monkeypatch.setattr(dme, "visible_union", lambda items, *, include_side, wall: None)
+    monkeypatch.setattr(dme, "visible_union", lambda items, *, include_side, wall, **k: None)
     with pytest.raises(ValueError, match="degenerate"):
-        dme._derive_include_side_crop(tmp_path / "Sermon.key", [44])
+        dme._derive_include_side_crop(fake_payload, [44])
+
+
+# --- delete-id derivation -----------------------------------------------------
+
+
+def test_derive_delete_ids_matches_classification():
+    slides_by_number = {
+        7: {
+            "number": 7,
+            "items": [
+                {"kind": "image", "kindIndex": 0},
+                {"kind": "image", "kindIndex": 1},
+                {"kind": "text", "kindIndex": 2},
+                {"kind": "text", "kindIndex": 3},
+            ],
+        }
+    }
+    cls = SlideClass(
+        number=7,
+        category="static",
+        build_count=0,
+        movie_count=0,
+        kept=(("image", 0),),
+        dropped_side=(("text", 3),),
+        dropped_backdrop=(),
+        transition=None,
+        connection_line_builds=0,
+        dropped_duplicate=(("image", 1),),
+    )
+
+    derived = dme._derive_delete_ids({7: cls}, slides_by_number, [7])
+
+    expected_ids = {("text", 3), ("image", 1), ("text", 2)}
+    assert set(derived[7]) == expected_ids
+    assert derived[7] == dme._delete_order(list(expected_ids))
+
+
+def test_derive_delete_ids_unknown_slide_raises():
+    with pytest.raises(ValueError, match="not found"):
+        dme._derive_delete_ids({}, {}, [9])
+
+
+def test_derive_delete_ids_refuses_empty_slide():
+    slides_by_number = {9: {"number": 9, "items": [{"kind": "image", "kindIndex": 0}]}}
+    cls = SlideClass(9, "empty", 0, 0, (), (), (), None, 0, ())
+
+    with pytest.raises(ValueError, match="empty"):
+        dme._derive_delete_ids({9: cls}, slides_by_number, [9])
+
+
+def test_validate_delete_ids_refuses_id_not_present_on_slide():
+    slide = {"items": [{"kind": "image", "kindIndex": 0}, {"kind": "image", "kindIndex": 1}]}
+    cls = SlideClass(17, "static", 0, 0, (("image", 0),), (), (), None, 0, ())
+
+    with pytest.raises(ValueError, match="not present"):
+        dme._validate_delete_ids(17, (("image", 9),), cls, slide)
+
+
+def test_export_slide_clips_refuses_supplied_delete_id_that_is_kept(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    fake_payload = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [
+            {
+                "number": 17,
+                "items": [{"kind": "image", "kindIndex": 0}, {"kind": "image", "kindIndex": 1}],
+            }
+        ],
+    }
+    monkeypatch.setattr(dme, "offline_wall_payload", lambda path: fake_payload)
+    monkeypatch.setattr(dme, "attach_group_content_signature", lambda path, payload, **k: None)
+    cls = SlideClass(17, "static", 0, 0, (("image", 0),), (), (), None, 0, ())
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: [cls])
+
+    with pytest.raises(ValueError, match="kept content"):
+        dme.export_slide_clips(fw, [17], out_dir, delete_ids={17: (("image", 0),)})
+
+
+def test_export_slide_clips_refuses_supplied_delete_ids_for_empty_slide(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    fake_payload = {
+        "slideWidth": 7680,
+        "slideHeight": 1080,
+        "slides": [{"number": 9, "items": [{"kind": "image", "kindIndex": 0}]}],
+    }
+    monkeypatch.setattr(dme, "offline_wall_payload", lambda path: fake_payload)
+    monkeypatch.setattr(dme, "attach_group_content_signature", lambda path, payload, **k: None)
+    cls = SlideClass(9, "empty", 0, 0, (), (), (), None, 0, ())
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: [cls])
+
+    with pytest.raises(ValueError, match="empty"):
+        dme.export_slide_clips(fw, [9], out_dir, delete_ids={9: ()})
+
+
+def test_export_slide_clips_logs_mirror_warnings_when_delete_ids_supplied_for_every_slide(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    payload_slides = [
+        {"number": 17, "items": [{"kind": "image", "kindIndex": 0}, {"kind": "image", "kindIndex": 1}]}
+    ]
+    _stub_live(monkeypatch, tmp_path, payload_slides=payload_slides)
+    _patch_build_export_script_capture(monkeypatch)
+    cls = SlideClass(
+        number=17,
+        category="static",
+        build_count=0,
+        movie_count=0,
+        kept=(("image", 0),),
+        dropped_side=(),
+        dropped_backdrop=(),
+        transition=None,
+        connection_line_builds=0,
+        dropped_duplicate=(("image", 1),),
+        mirror_warnings=("mirror-pair survivor side chosen by a single vote: 'right'",),
+    )
+    monkeypatch.setattr(dme, "classify_deck", lambda path, **k: [cls])
+
+    logged: list[str] = []
+    dme.export_slide_clips(fw, [17], out_dir, delete_ids={17: (("image", 1),)}, log=logged.append)
+
+    assert "slide 17: mirror-pair survivor side chosen by a single vote: 'right'" in logged
+
+
+def test_export_slide_clips_unknown_slide_raises(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    _stub_live(monkeypatch, tmp_path, payload_slides=[])
+
+    with pytest.raises(ValueError, match="not found"):
+        dme.export_slide_clips(fw, [17], out_dir)
+
+
+def test_export_slide_clips_deletefail_raises(monkeypatch, tmp_path):
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    calls = _stub_live(monkeypatch, tmp_path)
+
+    def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
+        text = script_path.read_text()
+        calls["osascript"] += 1
+        if "export theDoc" in text:
+            return _FakeCompleted(
+                returncode=0,
+                stderr="DELETEFAIL\t17\timage 2 of slide 1\t-1728\tCan't delete.",
+            )
+        return _FakeCompleted(returncode=0)
+
+    _set(monkeypatch, "_run_osascript", fake_run_osascript)
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        dme.export_slide_clips(fw, [17], out_dir)
 
 
 # --- quit-and-wait before a -1712 retry --------------------------------------
@@ -1062,7 +1282,7 @@ def test_ffmpeg_process_crop_uses_libx264_for_h264_codec(monkeypatch, tmp_path):
     assert "prores_ks" not in captured["cmd"]
 
 
-def test_ffmpeg_process_rejects_raw_dims_mismatching_scratch_canvas(monkeypatch, tmp_path):
+def test_ffmpeg_process_rejects_raw_dims_mismatching_native_wall_size(monkeypatch, tmp_path):
     monkeypatch.setattr(dme, "ffmpeg_exe", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(dme, "_ffprobe", lambda path: (1920, 1080, 30.0, 8.0))
 
@@ -1072,7 +1292,7 @@ def test_ffmpeg_process_rejects_raw_dims_mismatching_scratch_canvas(monkeypatch,
     monkeypatch.setattr(dme, "_run_ffmpeg_stage", _forbidden)
     raw = tmp_path / "raw.m4v"
     dest = tmp_path / "out.mov"
-    with pytest.raises(RuntimeError, match="scratch canvas"):
+    with pytest.raises(RuntimeError, match="native wall size"):
         dme._ffmpeg_process(raw, dest, crop_rect=None, wall_w=3840, wall_h=1080, codec="AppleProRes422LT")
 
 
@@ -1107,12 +1327,72 @@ def test_normalize_even_crop_degenerate_raises():
         dme._normalize_even_crop(4, 4, 1, 1, 5, 5)
 
 
+# --- clip content assert (coal-slide signature) -------------------------------
+
+
+def test_clip_content_assert_rejects_quadrant_clip(monkeypatch, tmp_path):
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: ((0, 0, 1920, 935), 1.0))
+    with pytest.raises(RuntimeError, match="coal-slide"):
+        dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0)
+
+
+def test_clip_content_assert_passes_full_frame(monkeypatch, tmp_path):
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: ((0, 0, 3840, 1080), 1.0))
+    dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0)
+
+
+def test_clip_content_assert_allows_expected_top_left_content(monkeypatch, tmp_path):
+    # A slide whose own expected content genuinely lives in the top-left (e.g. --include-side
+    # content anchored left) must not trip the quadrant heuristic.
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: ((0, 0, 1920, 935), 1.0))
+    expected = Rect(0, 0, 1900, 900)
+    dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0, expected=expected)
+
+
+def test_clip_content_assert_refuses_under_covered_expected(monkeypatch, tmp_path):
+    # Not confined to the top-left quadrant, but far short of the expected content rect.
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: ((3700, 1000, 3800, 1080), 1.0))
+    expected = Rect(0, 0, 3840, 1080)
+    with pytest.raises(RuntimeError, match="covers less than"):
+        dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0, expected=expected)
+
+
+def test_clip_content_assert_all_black_frames_warn(monkeypatch, tmp_path):
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: (None, 0.0))
+    logged = []
+    dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0, log=logged.append)
+    assert logged and "content assert skipped" in logged[0]
+
+
+def test_clip_content_assert_sparse_dark_frames_warn_not_refuse(monkeypatch, tmp_path):
+    # A few ember pixels in the top-left corner: non-zero non-black bbox but density far
+    # below the low-information threshold -- a genuinely dark clip, not a coal-slide crop.
+    monkeypatch.setattr(dme, "_non_black_stats", lambda path, **k: ((0, 0, 20, 20), 0.001))
+    logged = []
+    dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0, log=logged.append)
+    assert any("low-information" in m for m in logged)
+
+
+def test_clip_content_assert_samples_quarter_half_three_quarter_duration(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_stats(path, *, at_s=1.0):
+        seen.append(at_s)
+        return (0, 0, 3840, 1080), 1.0
+
+    monkeypatch.setattr(dme, "_non_black_stats", fake_stats)
+    dme._assert_clip_covers_frame(tmp_path / "clip.mov", 3840, 1080, duration=8.0)
+    assert seen == sorted(seen)
+    assert seen == [2.0, 4.0, 6.0]
+
+
 def test_export_slide_clips_cleans_up_work_dir_on_failure(monkeypatch, tmp_path):
     out_dir = tmp_path / "clips"
     out_dir.mkdir()
     fw = tmp_path / "Sermon.key"
     fw.write_bytes(b"source")
 
+    _stub_offline_payload(monkeypatch)
     _set(monkeypatch, "_keynote_running", lambda: False)
     monkeypatch.setattr(
         dme,

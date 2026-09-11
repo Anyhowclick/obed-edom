@@ -32,6 +32,7 @@ from obed_edom.iwa_runs import (
     attach_group_captions,
     attach_group_child_text,
     attach_group_children,
+    attach_group_content_signature,
     attach_runs,
     attach_slide_builds,
     resolve_para_style,
@@ -433,6 +434,138 @@ def test_group_child_text_absent_when_no_groups(monkeypatch):
     payload = {"slides": [{"index": 5, "items": []}]}  # index with no matching slide
     attach_group_child_text("ignored.key", payload)
     assert "groupChildText" not in payload["slides"][0]
+
+
+def _grouped_deck_with_image():
+    """``_grouped_deck`` plus an ImageArchive leaf in the top-level group, DFS-last."""
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": "520"})
+    objects["520"] = {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "700"}}
+    id_to_file["520"] = "g0"
+    file_ids["g0"].append("520")
+    return objects, id_to_file, file_ids
+
+
+def test_group_content_signature_resolves_media_file_name_in_dfs_order():
+    objects, _id_to_file, _file_ids = _grouped_deck_with_image()
+    data_index = {"700": "photo.jpg"}
+    sig = iwa._group_content_signature("500", objects, {}, data_index)
+    assert sig == "text:Countries\ntext:CHC Churches\nimage:photo.jpg"
+
+
+def test_group_content_signature_none_when_media_id_unresolved():
+    objects, _id_to_file, _file_ids = _grouped_deck_with_image()
+    sig = iwa._group_content_signature("500", objects, {}, {})
+    assert sig is None
+
+
+def _grouped_deck_with_textless_shape():
+    """``_grouped_deck`` plus a textless shape in the top-level group, DFS-last."""
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": "530"})
+    objects["530"] = {"_pbtype": "TSWP.ShapeInfoArchive"}
+    id_to_file["530"] = "g0"
+    file_ids["g0"].append("530")
+    return objects, id_to_file, file_ids
+
+
+def test_group_content_signature_none_when_shape_has_no_path_source():
+    extra_objects, _id_to_file, _file_ids = _grouped_deck_with_textless_shape()
+    extra_sig = iwa._group_content_signature("500", extra_objects, {}, {})
+    assert extra_sig is None
+
+
+def _grouped_deck_with_decorative_shape(width):
+    """``_grouped_deck`` plus a textless shape with a resolvable path source, DFS-last."""
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": "530"})
+    objects["530"] = {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "pathsource": {
+            "bezierPathSource": {"type": "kTSDRoundedRectangle", "naturalSize": {"width": width, "height": 10.0}}
+        },
+    }
+    id_to_file["530"] = "g0"
+    file_ids["g0"].append("530")
+    return objects, id_to_file, file_ids
+
+
+def test_group_content_signature_distinguishes_decorative_shape_size():
+    same_caption_objects, _id_to_file, _file_ids = _grouped_deck_with_decorative_shape(37.35)
+    other_size_objects, _id_to_file, _file_ids = _grouped_deck_with_decorative_shape(41.75)
+    sig_a = iwa._group_content_signature("500", same_caption_objects, {}, {})
+    sig_b = iwa._group_content_signature("500", other_size_objects, {}, {})
+    assert sig_a != sig_b
+    assert sig_a.startswith("text:Countries\ntext:CHC Churches\nshape:bezierPathSource:kTSDRoundedRectangle:37.4x10.0:")
+
+
+def _grouped_deck_with_decorative_shape_points(points):
+    """``_grouped_deck`` plus a same-size textless shape whose path points differ."""
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": "530"})
+    objects["530"] = {
+        "_pbtype": "TSWP.ShapeInfoArchive",
+        "pathsource": {
+            "bezierPathSource": {
+                "type": "kTSDRoundedRectangle",
+                "naturalSize": {"width": 37.35, "height": 10.0},
+                "points": points,
+            }
+        },
+    }
+    id_to_file["530"] = "g0"
+    file_ids["g0"].append("530")
+    return objects, id_to_file, file_ids
+
+
+def test_group_content_signature_distinguishes_decorative_shape_path():
+    # Same size, different Bezier points: the digest must still tell them apart.
+    objects_a, _id_to_file, _file_ids = _grouped_deck_with_decorative_shape_points([[0, 0], [1, 1]])
+    objects_b, _id_to_file, _file_ids = _grouped_deck_with_decorative_shape_points([[0, 0], [2, 2]])
+    sig_a = iwa._group_content_signature("500", objects_a, {}, {})
+    sig_b = iwa._group_content_signature("500", objects_b, {}, {})
+    assert sig_a != sig_b
+    assert sig_a.rsplit(":", 1)[0] == sig_b.rsplit(":", 1)[0]  # same size prefix, digest differs
+
+
+def test_group_content_signature_none_for_unrepresentable_child():
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": "540"})
+    objects["540"] = {"_pbtype": "TSD.SomeOtherArchive"}
+    id_to_file["540"] = "g0"
+    file_ids["g0"].append("540")
+    sig = iwa._group_content_signature("500", objects, {}, {})
+    assert sig is None
+
+
+def test_group_content_signature_none_for_missing_child_identifier():
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": None})
+    sig = iwa._group_content_signature("500", objects, {}, {})
+    assert sig is None
+
+
+def test_group_content_signature_none_for_missing_child_object():
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": "999"})  # no such object
+    sig = iwa._group_content_signature("500", objects, {}, {})
+    assert sig is None
+
+
+def test_group_child_text_skips_missing_child_identifier():
+    # Text-only mode (data_index=None via _collect_group_text) keeps silently skipping.
+    objects, id_to_file, file_ids = _grouped_deck()
+    objects["500"]["children"].append({"identifier": None})
+    leaves: list[dict] = []
+    iwa._collect_group_text("500", objects, {}, set(), leaves)
+    assert [leaf["text"] for leaf in leaves] == ["Countries", "CHC Churches"]
+
+
+def test_attach_group_content_signature_raises_for_unreadable_key_path(monkeypatch):
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _grouped_deck())
+    payload = {"slides": [{"index": 0, "items": []}]}
+    with pytest.raises(OSError):
+        attach_group_content_signature("does-not-exist.key", payload)
 
 
 def test_attach_slide_builds_addresses_targets_by_kind_and_kindindex(tmp_path):

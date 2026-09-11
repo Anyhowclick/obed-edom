@@ -18,6 +18,8 @@ from obed_edom.dsk_plan import (
     classify_slide,
     fit_item,
     fit_slide,
+    is_panel_backdrop,
+    mirror_duplicates,
     read_band,
 )
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect
@@ -129,6 +131,15 @@ def test_classify_mixed_slide():
     assert out.build_count == 1
 
 
+def test_classify_slide_surfaces_mirror_warnings():
+    image_a = _image_item(2, 1954, 27, 1381, 921, "wheelchair.jpeg")
+    image_b = _image_item(3, 2400, 27, 1381, 921, "wheelchair.jpeg")
+    slide = _slide(9, [image_a, image_b])
+    out = classify_slide(slide, _builds([]), CENTRE_WALL)
+    assert len(out.mirror_warnings) == 1
+    assert "not a L/R mirror" in out.mirror_warnings[0]
+
+
 # --------------------------------------------------------------------------
 # side-panel drop — never propagated across slides.
 # --------------------------------------------------------------------------
@@ -169,6 +180,302 @@ def test_group_straddling_centre_and_side_is_centre_content():
     out = classify_slide(slide, None, CENTRE_WALL, include_side=False)
     assert out.kept == (("group", 0),)
     assert out.dropped_side == ()
+
+
+# --------------------------------------------------------------------------
+# panel-backdrop drop (D1/F3) — the verse-slide scrim that fills the centre
+# panel but not the whole wall, so `is_backdrop` alone never catches it.
+# --------------------------------------------------------------------------
+def _shape_item(kind_index, x, y, w, h, text=""):
+    return {"kind": "shape", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h, "text": text}
+
+
+def test_panel_backdrop_dropped_on_verse_slides():
+    # shaped like GW 28's kept scrim (951,0,3840x1080) and GW 57's (2530,0,4482x1080).
+    scrim_28 = _shape_item(0, x=951, y=0, w=3840, h=1080)
+    badge = _text_item(0, x=2000, y=900, w=400, h=100)
+    out_28 = classify_slide(_slide(28, [scrim_28, badge]), None, CENTRE_WALL, include_side=False)
+    assert out_28.dropped_backdrop == (("shape", 0),)
+    assert ("shape", 0) not in out_28.kept
+
+    scrim_57 = _shape_item(0, x=2530, y=0, w=4482, h=1080)
+    out_57 = classify_slide(_slide(57, [scrim_57, badge]), None, CENTRE_WALL, include_side=False)
+    assert out_57.dropped_backdrop == (("shape", 0),)
+    assert ("shape", 0) not in out_57.kept
+
+
+def test_panel_backdrop_kept_when_sole_content():
+    # GW 33's lone movie (1920,0,3840x1080) -- panel-sized but the slide's only content.
+    movie = _movie_item(0, x=1920, y=0, w=3840, h=1080)
+    out = classify_slide(_slide(33, [movie]), None, CENTRE_WALL, include_side=False)
+    assert out.dropped_backdrop == ()
+    assert out.kept == (("movie", 0),)
+
+
+def test_is_panel_backdrop_tests_wall_frame_under_include_side():
+    # Finding 5: include_side no longer skips the scrim test outright -- it tests against
+    # the full wall frame instead of the centre panel.
+    panel_scrim = _shape_item(0, x=951, y=0, w=3840, h=1080)
+    assert is_panel_backdrop(panel_scrim, CENTRE_WALL, include_side=False) is True
+    # panel-sized only -- doesn't cover the wider wall frame once side content is kept.
+    assert is_panel_backdrop(panel_scrim, CENTRE_WALL, include_side=True) is False
+
+    wall_scrim = _shape_item(0, x=40, y=0, w=7600, h=1080)
+    assert is_panel_backdrop(wall_scrim, CENTRE_WALL, include_side=True) is True
+
+
+# --------------------------------------------------------------------------
+# mirror_duplicates (D1/F2) -- symmetric L/R authored pairs, survivor = lowest kindIndex.
+# --------------------------------------------------------------------------
+def _image_item(kind_index, x, y, w, h, file_name):
+    return {"kind": "image", "kindIndex": kind_index, "x": x, "y": y, "w": w, "h": h, "fileName": file_name}
+
+
+def test_mirror_duplicates_text_pair():
+    # GW 17 text1/text4 (John 17:21 body): (1965,89,1468x193) / (4262,89,1468x193), on
+    # opposite halves of the 7680 wall.
+    same_text = "21 That all of them may be one..."
+    text1 = _text_item(1, x=1965, y=89, w=1468, h=193)
+    text1["text"] = same_text
+    text4 = _text_item(4, x=4262, y=89, w=1468, h=193)
+    text4["text"] = same_text
+    dropped, warnings = mirror_duplicates([text1, text4], CENTRE_WALL)
+    assert dropped == {("text", 4): ("text", 1)}
+    assert len(warnings) == 1 and "single vote" in warnings[0]
+
+    # GW 18 text1/text3 (Acts 4:31 body): exact mirror about the midline.
+    text1b = _text_item(1, x=1965, y=89, w=1468, h=193)
+    text1b["text"] = "31 After they prayed..."
+    text3b = _text_item(3, x=4262, y=89, w=1468, h=193)
+    text3b["text"] = "31 After they prayed..."
+    dropped_b, warnings_b = mirror_duplicates([text1b, text3b], CENTRE_WALL)
+    assert dropped_b == {("text", 3): ("text", 1)}
+    assert len(warnings_b) == 1 and "single vote" in warnings_b[0]
+
+
+def test_mirror_duplicates_image_pair():
+    # GW 48 image2/image3 (wheelchair jpeg), measured: (1954,27,1381x921) / (4348,27,1381x921),
+    # same fileName, opposite halves of the wall (F2/F4).
+    image2 = _image_item(2, 1954, 27, 1381, 921, "WhatsApp Image 2026-08-14 at 09.17.25.jpeg")
+    image3 = _image_item(3, 4348, 27, 1381, 921, "WhatsApp Image 2026-08-14 at 09.17.25.jpeg")
+    dropped, warnings = mirror_duplicates([image2, image3], CENTRE_WALL)
+    assert dropped == {("image", 3): ("image", 2)}
+    assert len(warnings) == 1 and "single vote" in warnings[0]
+
+    # GW 24-shaped: two same-file pairs at the deck's real image2/3 widths (504x919), each
+    # placed as a mirror about the 3840 midline (synthetic positions -- the real GW 24
+    # four-image "2x2 photo compare" swaps fileNames between its geometrically-mirrored
+    # slots rather than repeating one file L/R, so it doesn't exercise this same-fileName
+    # rule; see test_mirror_duplicates_gw24_cluster for the real cluster shape).
+    image_a1 = _image_item(10, 1944, 23, 504, 919, "1.png")
+    image_a2 = _image_item(11, 5232, 23, 504, 919, "1.png")
+    image_b1 = _image_item(12, 2484, 23, 504, 919, "2.png")
+    image_b2 = _image_item(13, 4692, 23, 504, 919, "2.png")
+    dropped_24, warnings_24 = mirror_duplicates(
+        [image_a1, image_a2, image_b1, image_b2], CENTRE_WALL
+    )
+    assert dropped_24 == {("image", 11): ("image", 10), ("image", 13): ("image", 12)}
+    assert warnings_24 == ()
+
+
+def test_mirror_duplicates_keeps_non_mirror_pair_with_warning():
+    # same content, both on the same half of the wall -- not a L/R duplicate.
+    image_a = _image_item(2, 1954, 27, 1381, 921, "wheelchair.jpeg")
+    image_b = _image_item(3, 2400, 27, 1381, 921, "wheelchair.jpeg")
+    dropped, warnings = mirror_duplicates([image_a, image_b], CENTRE_WALL)
+    assert dropped == {}
+    assert len(warnings) == 1
+    assert "not a L/R mirror" in warnings[0]
+
+
+def test_mirror_duplicates_gw24_cluster():
+    # GW 24's real cluster, measured (content-rules-plan D1 finding 3): fileName "1.png"
+    # is image2 (left) / image5 (right); fileName "2.png" is image3 (left) / image4
+    # (right). Both same-fileName groups sit on opposite halves of the wall, so both
+    # dedupe -- 4 items in, 2 survive, one of each file (kindIndex 2 and 3).
+    image2 = _image_item(2, 1944, 23, 504, 919, "1.png")
+    image3 = _image_item(3, 2484, 23, 504, 919, "2.png")
+    image4 = _image_item(4, 5233, 23, 504, 919, "2.png")
+    image5 = _image_item(5, 4693, 23, 504, 919, "1.png")
+    dropped, warnings = mirror_duplicates([image2, image3, image4, image5], CENTRE_WALL)
+    assert dropped == {("image", 5): ("image", 2), ("image", 4): ("image", 3)}
+    assert warnings == ()
+
+
+def test_mirror_duplicates_gw20_shaped_tail_survives_body_side():
+    # GW 20-shaped (review round-2 finding 2): title text + title shape mirror pairs both
+    # vote for the left copy (lower kindIndex is on the left in both), but the overflow
+    # tail pair's own lowest kindIndex happens to sit on the right. Per-pair kindIndex alone
+    # would let the tail survive from the opposite side of the body -- the slide-wide
+    # majority vote must instead pull the tail survivor onto the same (left) side as the body.
+    title_text_left = _text_item(0, x=2385, y=21, w=100, h=50)
+    title_text_left["text"] = "Acts 4"
+    title_text_right = _text_item(3, x=5355, y=21, w=100, h=50)
+    title_text_right["text"] = "Acts 4"
+
+    title_shape_left = _shape_item(0, x=2385, y=21, w=100, h=50, text="Acts 4 shape")
+    title_shape_right = _shape_item(3, x=5355, y=21, w=100, h=50, text="Acts 4 shape")
+
+    tail_right = _text_item(4, x=5389, y=413, w=100, h=50)
+    tail_right["text"] = "in them all."
+    tail_left = _text_item(5, x=3092, y=413, w=100, h=50)
+    tail_left["text"] = "in them all."
+
+    dropped, warnings = mirror_duplicates(
+        [title_text_left, title_text_right, title_shape_left, title_shape_right, tail_right, tail_left],
+        CENTRE_WALL,
+    )
+    assert dropped[("text", 3)] == ("text", 0)
+    assert dropped[("shape", 3)] == ("shape", 0)
+    # the tail survives from the left, matching the body -- not text4 (its own lower
+    # kindIndex), which would detach it onto the opposite side of the wall from the verse.
+    assert dropped[("text", 4)] == ("text", 5)
+    assert len(warnings) == 1 and "margin of 1" in warnings[0]
+
+
+def test_mirror_duplicates_gw7_shaped_keyless_pair():
+    # GW 7-shaped (review round-3 finding 1): a text-keyed title pair and a group-keyed
+    # badge pair both translate by 2446pt; a textless shape pair at the same translation
+    # carries no content key and must be matched geometrically off that modal offset.
+    text0 = _text_item(0, x=2385, y=21, w=100, h=50)
+    text0["text"] = "Acts 7"
+    text2 = _text_item(2, x=4831, y=21, w=100, h=50)
+    text2["text"] = "Acts 7"
+
+    group0 = _group_item(0, x=2640, y=100, w=526, h=98)
+    group1 = _group_item(1, x=5086, y=100, w=526, h=98)
+
+    shape1 = _shape_item(1, x=2813, y=200, w=187, h=83)
+    shape3 = _shape_item(3, x=5259, y=200, w=187, h=83)
+
+    dropped, warnings = mirror_duplicates(
+        [text0, text2, group0, group1, shape1, shape3],
+        CENTRE_WALL,
+        group_child_text={0: "badge", 1: "badge"},
+    )
+    assert dropped[("text", 2)] == ("text", 0)
+    assert dropped[("group", 1)] == ("group", 0)
+    assert dropped[("shape", 3)] == ("shape", 1)
+    assert warnings == ()
+
+
+def test_mirror_duplicates_gw24_shaped_keyless_pairs():
+    # GW 24-shaped (review round-3 finding 1): two same-file image pairs establish a modal
+    # 2749pt translation; two textless shape pairs at that same translation are keyless and
+    # must be matched geometrically, not dropped as unresolved duplicates.
+    image2 = _image_item(2, 1944, 27, 504, 919, "1.png")
+    image3 = _image_item(3, 2484, 27, 504, 919, "2.png")
+    image4 = _image_item(4, 5233, 27, 504, 919, "2.png")
+    image5 = _image_item(5, 4693, 27, 504, 919, "1.png")
+
+    shape0 = _shape_item(0, x=2536, y=27, w=388, h=325)
+    shape2 = _shape_item(2, x=5285, y=27, w=388, h=325)
+    shape1 = _shape_item(1, x=2536, y=400, w=388, h=140)
+    shape3 = _shape_item(3, x=5285, y=400, w=388, h=140)
+
+    dropped, warnings = mirror_duplicates(
+        [image2, image3, image4, image5, shape0, shape1, shape2, shape3], CENTRE_WALL
+    )
+    assert dropped[("image", 5)] == ("image", 2)
+    assert dropped[("image", 4)] == ("image", 3)
+    assert dropped[("shape", 2)] == ("shape", 0)
+    assert dropped[("shape", 3)] == ("shape", 1)
+    assert warnings == ()
+
+
+def test_mirror_duplicates_gw50_shaped_right_survivor_keyless_pair():
+    # GW 50-shaped (review round-4 finding 1): the confirmed pair's survivor is on the
+    # right, so off = dupe_cx - survivor_cx is negative; the keyless pass must still match
+    # a shape pair whose kindIndex order runs left-to-right (a positive geometric delta).
+    group0 = _group_item(0, x=4642, y=100, w=526, h=98)
+    group1 = _group_item(1, x=2393, y=100, w=526, h=98)
+
+    shape1 = _shape_item(1, x=2562.5, y=200, w=187, h=83)
+    shape3 = _shape_item(3, x=4811.5, y=200, w=187, h=83)
+
+    dropped, warnings = mirror_duplicates(
+        [group0, group1, shape1, shape3],
+        CENTRE_WALL,
+        group_child_text={0: "badge", 1: "badge"},
+    )
+    assert dropped[("group", 1)] == ("group", 0)
+    assert dropped[("shape", 1)] == ("shape", 3)
+    assert len(warnings) == 1 and "single vote" in warnings[0]
+
+
+def test_mirror_duplicates_group_same_text_differing_media_not_deduped():
+    # Review round-2 finding 1: same caption, different child imagery must not dedupe --
+    # the group identity has to be a complete content signature, not text alone.
+    group0 = _group_item(0, x=2640, y=100, w=526, h=98)
+    group1 = _group_item(1, x=5086, y=100, w=526, h=98)
+
+    dropped, warnings = mirror_duplicates(
+        [group0, group1],
+        CENTRE_WALL,
+        group_child_text={0: "text:badge\nimage:left.png", 1: "text:badge\nimage:right.png"},
+    )
+    assert dropped == {}
+    assert warnings == ()
+
+
+def test_mirror_duplicates_group_unresolved_signature_keeps_and_warns():
+    # Review round-2 finding 1: when a group's content signature can't be established
+    # (e.g. unresolved child media), both items are kept and a warning is raised.
+    group0 = _group_item(0, x=2640, y=100, w=526, h=98)
+    group1 = _group_item(1, x=5086, y=100, w=526, h=98)
+
+    dropped, warnings = mirror_duplicates(
+        [group0, group1],
+        CENTRE_WALL,
+        group_child_text={0: None, 1: None},
+    )
+    assert dropped == {}
+    assert len(warnings) == 2
+    assert all("unresolved" in w for w in warnings)
+
+
+def test_mirror_duplicates_group_empty_signature_map_still_warns():
+    # Review round-3 finding 2: an empty/absent mapping must still warn per missing group,
+    # not silently keep everything.
+    group0 = _group_item(0, x=2640, y=100, w=526, h=98)
+    group1 = _group_item(1, x=5086, y=100, w=526, h=98)
+
+    dropped, warnings = mirror_duplicates([group0, group1], CENTRE_WALL, group_child_text={})
+    assert dropped == {}
+    assert len(warnings) == 2
+    assert all("missing content signature" in w for w in warnings)
+
+
+def test_mirror_duplicates_keyless_pass_keeps_same_side_pair():
+    # Finding 3: two identical textless shapes on the same side of the wall, separated by
+    # the slide's modal translation, must not be treated as a mirror -- only cross-wall
+    # keyless pairs are dedupe candidates.
+    text0 = _text_item(0, x=2385, y=21, w=100, h=50)
+    text0["text"] = "Acts 7"
+    text2 = _text_item(2, x=4831, y=21, w=100, h=50)
+    text2["text"] = "Acts 7"
+
+    shape1 = _shape_item(1, x=2813, y=200, w=187, h=83)
+    shape2 = _shape_item(2, x=5259, y=200, w=187, h=83)
+    same_side_a = _shape_item(3, x=100, y=400, w=187, h=83)
+    same_side_b = _shape_item(4, x=2546, y=400, w=187, h=83)
+
+    dropped, _ = mirror_duplicates(
+        [text0, text2, shape1, shape2, same_side_a, same_side_b], CENTRE_WALL
+    )
+    assert dropped[("shape", 2)] == ("shape", 1)
+    assert ("shape", 4) not in dropped
+    assert ("shape", 3) not in dropped
+
+
+def test_mirror_duplicates_keyless_pair_needs_confirmed_pairs():
+    # negative: no keyed pairs at all -- the geometric pass never runs, so two equal-sized
+    # textless shapes at a plausible separation are kept, not invented as a mirror pair.
+    shape_a = _shape_item(0, x=2536, y=27, w=388, h=325)
+    shape_b = _shape_item(1, x=5285, y=27, w=388, h=325)
+    dropped, warnings = mirror_duplicates([shape_a, shape_b], CENTRE_WALL)
+    assert dropped == {}
+    assert warnings == ()
 
 
 # --------------------------------------------------------------------------
@@ -310,7 +617,7 @@ def test_classify_deck_nested_group_build(monkeypatch):
         dsk_plan, "deck_builds", lambda *a, **k: {1: {"slideId": "slide1", "builds": [], "transition": None}}
     )
 
-    classes = {c.number: c for c in dsk_plan.classify_deck("unused.key", deck=(objects, {}, {}))}
+    classes = {c.number: c for c in dsk_plan.classify_deck("unused.key", deck=(objects, {}, {}), payload=payload)}
     assert classes[1].category == "built"
     assert classes[1].build_count == 1
 
@@ -343,7 +650,7 @@ def test_classify_deck_connection_line_only_slide_is_built(monkeypatch):
         dsk_plan, "deck_builds", lambda *a, **k: {1: {"slideId": "slide1", "builds": [], "transition": None}}
     )
 
-    classes = {c.number: c for c in dsk_plan.classify_deck("unused.key", deck=(objects, {}, {}))}
+    classes = {c.number: c for c in dsk_plan.classify_deck("unused.key", deck=(objects, {}, {}), payload=payload)}
     assert classes[1].category == "built"
     assert classes[1].kept == ()
     assert classes[1].connection_line_builds == 1
@@ -571,6 +878,35 @@ def test_fit_slide_kept_param_restricts_items():
     assert set(placed) == {("movie", 0)}
 
 
+def test_fit_slide_wall_and_kept_agree_after_dedupe_gw17_shaped():
+    # Review round-2 finding 1: `fit_slide(wall=...)` must see the same deduped kept set as
+    # `fit_slide(kept=classify_slide(...).kept)` -- GW17-shaped mirrored verse body, one
+    # authored copy left, one right, identical text.
+    text1 = _text_item(1, x=1965, y=169, w=1468, h=193)
+    text1["text"] = "21 That all of them may be one..."
+    text4 = _text_item(4, x=4262, y=169, w=1468, h=193)
+    text4["text"] = "21 That all of them may be one..."
+    items = [text1, text4]
+
+    cls = classify_slide(_slide(17, items), None, CENTRE_WALL)
+    assert cls.kept == (("text", 1),)
+    assert cls.dropped_duplicate == (("text", 4),)
+
+    fit_wall = fit_slide(items, BAND, include_side=False, wall=CENTRE_WALL)
+    fit_kept = fit_slide(items, BAND, include_side=False, kept=cls.kept)
+    assert fit_wall == fit_kept
+
+    # Fitted from the surviving copy's own 1468x193 extent alone -- not the duplicate
+    # union (which would span the whole wall and squeeze the verse into its left third) --
+    # so it lands exactly where a single unmirrored copy would, centred in the band.
+    rect = fit_wall[("text", 1)]
+    expected = fit_item(Rect(1965.0, 169.0, 1468.0, 193.0), BAND)
+    assert rect.x == pytest.approx(expected.x, abs=0.1)
+    assert rect.y == pytest.approx(expected.y, abs=0.1)
+    assert rect.w == pytest.approx(expected.w, abs=0.1)
+    assert rect.h == pytest.approx(expected.h, abs=0.1)
+
+
 def test_fit_slide_wall_param_applies_classifier_filter():
     side_item = _movie_item(0, x=100, y=100, w=200, h=50)  # side panel only
     centre_item = _movie_item(1, x=3000, y=100, w=500, h=300)
@@ -606,6 +942,8 @@ def test_fit_slide_line_only_keeps_zero_thickness():
 
 def test_fit_slide_line_and_image_shared_scale():
     line = _line_item(0, x=2000, y=500, w=400, h=0)
+    # GW 33's panel-filling movie rect; is_panel_backdrop only ever matches shapes (D1),
+    # so a panel-sized movie is never dropped alongside other kept content.
     image = _movie_item(1, x=1920, y=0, w=3840, h=1080)
     placed = fit_slide([line, image], BAND, include_side=False, wall=CENTRE_WALL)
     r_line, r_image = placed[("line", 0)], placed[("movie", 1)]
@@ -668,8 +1006,10 @@ def test_gw_deck_builds_and_categories():
     assert built_numbers == {2, 5, 7, 17, 20, 32, 33, 37, 44, 54}
     # Slides 7 and 37 each carry TSD.ConnectionLineArchive builds -- a kind
     # derive_kind_index never addresses, so deck_builds drops them; build_count
-    # must still equal the raw per-slide build total via connection_line_builds.
-    GW_BUILD_COUNTS = {2: 3, 5: 1, 7: 6, 17: 2, 20: 2, 32: 1, 33: 1, 37: 3, 44: 1, 54: 1}
+    # must still equal the raw per-slide build total via connection_line_builds, minus
+    # any build whose drawable is dropped as a mirror duplicate (7, 17, 20; F2), including
+    # slide 7's keyless shape3 badge (round-3 finding 1).
+    GW_BUILD_COUNTS = {2: 3, 5: 1, 7: 4, 17: 1, 20: 1, 32: 1, 33: 1, 37: 3, 44: 1, 54: 1}
     assert {n: c.build_count for n, c in classes.items() if c.build_count > 0} == GW_BUILD_COUNTS
     GW_CONNECTION_LINE_BUILDS = {7: 2, 37: 1}
     assert {

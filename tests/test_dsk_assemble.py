@@ -85,6 +85,23 @@ def test_ordinal_remapping_across_skips():
     assert plan.ordinals == {5: 1, 12: 2}
 
 
+def test_mirror_warnings_reach_plan_warnings():
+    image2 = {
+        "kind": "image", "kindIndex": 2, "x": 1954, "y": 27, "w": 1381, "h": 921,
+        "fileName": "wheelchair.jpeg",
+    }
+    image3 = {
+        "kind": "image", "kindIndex": 3, "x": 4348, "y": 27, "w": 1381, "h": 921,
+        "fileName": "wheelchair.jpeg",
+    }
+    slide = _slide(9, [image2, image3])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {9: SlideDecision(9, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert any("slide 9: " in w and "single vote" in w for w in plan.warnings)
+
+
 def test_export_clip_action_excluded():
     slide = _slide(1, [_movie_item(0, x=1920, y=-763, w=3840, h=2160)])
     payload = _payload([slide])
@@ -308,6 +325,8 @@ def test_fit_slide_13_text():
 
 def test_fit_slide_8_include_side_images():
     # Two images whose full-wall union is (0, 0, 7680, 1080): width-bound fit at h=260.
+    # item1 is a full centre-panel-sized image; is_panel_backdrop only ever matches shapes
+    # (D1), so it is real content here, never dropped as a scrim.
     item1 = _image_item(0, x=0, y=0, w=3840, h=1080)
     item2 = _image_item(1, x=5760, y=0, w=1920, h=1080)
     slide = _slide(8, [item1, item2])

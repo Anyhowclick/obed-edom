@@ -27,11 +27,21 @@ from obed_edom.dsk_live import (
     layout_import_lines,
     ordinal_map,
 )
-from obed_edom.dsk_plan import Band, ItemId, SlideClass, classify_deck, fit_slide, read_band, visible_union
+from obed_edom.dsk_plan import (
+    Band,
+    ItemId,
+    SlideClass,
+    _delete_order,
+    classify_deck,
+    fit_slide,
+    read_band,
+    visible_union,
+)
 from obed_edom.iwa_runs import (
     _load_deck,
     attach_group_captions,
     attach_group_child_text,
+    attach_group_content_signature,
     attach_runs,
     slide_order,
 )
@@ -102,10 +112,6 @@ def _intersect(a: Rect, b: Rect) -> Rect | None:
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
-def _delete_order(ids: Sequence[ItemId]) -> tuple[ItemId, ...]:
-    return tuple(sorted(ids, key=lambda iid: (iid[0], -iid[1])))
-
-
 def _union_rect(rects: Sequence[Rect]) -> Rect:
     """Mirrors ``dsk_plan._union_rect`` (private there); kept local rather than editing
     dsk_plan.py."""
@@ -123,15 +129,18 @@ def slide_affine_scale(
     include_side: bool,
     anchor: str,
     wall: tuple[float, float],
+    group_child_text: Mapping[int, str | None] | None = None,
 ) -> float | None:
     """The one shared uniform scale ``fit_slide`` applies across a slide, recomputed from
     its two public results rather than as a private ``fit_slide`` attribute. ``None`` when
     the slide has no visible/fit content. Used for group children -- never derive a
     group's scale from a live group width, which is wrong once the fit has clipped it."""
-    union = visible_union(items, include_side=include_side, wall=wall)
+    union = visible_union(items, include_side=include_side, wall=wall, group_child_text=group_child_text)
     if union is None:
         return None
-    fit = fit_slide(items, band, include_side=include_side, anchor=anchor, wall=wall)
+    fit = fit_slide(
+        items, band, include_side=include_side, anchor=anchor, wall=wall, group_child_text=group_child_text
+    )
     if not fit:
         return None
     fitted_union = _union_rect(list(fit.values()))
@@ -181,9 +190,16 @@ def plan_assembly(
         slide = slides_by_number[number]
         items = slide.get("items") or []
         items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
+        group_child_text = slide.get("groupChildSignature")
+        warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
         fit = fit_slide(
-            items, band, include_side=decision.keep_side, anchor=decision.anchor, wall=wall
+            items,
+            band,
+            include_side=decision.keep_side,
+            anchor=decision.anchor,
+            wall=wall,
+            group_child_text=group_child_text,
         )
         fits[number] = fit
 
@@ -194,7 +210,12 @@ def plan_assembly(
         group_ids = [iid for iid in cls.kept if iid[0] == "group"]
         if group_ids:
             scale = slide_affine_scale(
-                items, band, include_side=decision.keep_side, anchor=decision.anchor, wall=wall
+                items,
+                band,
+                include_side=decision.keep_side,
+                anchor=decision.anchor,
+                wall=wall,
+                group_child_text=group_child_text,
             )
             if scale is not None:
                 group_scale[number] = scale
@@ -440,8 +461,9 @@ def load_assembly_inputs(
     attach_runs(fw_deck, payload, deck=deck)
     _attach_full_group_children(fw_deck, payload, deck=deck)
     attach_group_child_text(fw_deck, payload, deck=deck)
+    attach_group_content_signature(fw_deck, payload, deck=deck)
     attach_group_captions(fw_deck, payload, deck=deck)
-    classes = classify_deck(fw_deck, include_side=include_side, deck=deck)
+    classes = classify_deck(fw_deck, include_side=include_side, deck=deck, payload=payload)
 
     runs: dict[int, dict[ItemId, list[float]]] = {}
     for slide in payload.get("slides") or []:

@@ -1,4 +1,4 @@
-"""Movie-crop pipeline for the DSK generator (d3): scratch centre-panel deck ->
+"""Movie-crop pipeline for the DSK generator (d3): native-wall Keynote export ->
 per-slide QuickTime `.m4v` export -> ffmpeg crop/remux, with the operator safety
 rails the live probes required (process lock, display poke, RSS watchdog).
 
@@ -14,11 +14,14 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from PIL import Image
 
 from obed_edom import dsk_live, keynote_app
 from obed_edom.dsk_live import (
@@ -57,12 +60,14 @@ from obed_edom.dsk_live import (
     release_lock,
     run_osascript,
 )
-from obed_edom.dsk_plan import visible_union
-from obed_edom.map_remap import Rect
-from obed_edom.maps_geo import CENTRE_ORIGIN_X
+from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
+from obed_edom.iwa_runs import attach_group_content_signature
+from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall
 from obed_edom.maps_movie import ffmpeg_exe
 from obed_edom.offline_inspect import offline_wall_payload
-from obed_edom.remap_keynote import copy_keynote
+from obed_edom.remap_keynote import _AS_KIND_NAMES, copy_keynote
+
+_DELETEFAIL_RE = re.compile(r"^DELETEFAIL\t(\d+)\t([^\t]*)\t(-?\d+)\t(.*)$")
 
 _FPS_TOLERANCE = 0.01
 
@@ -144,27 +149,17 @@ class ClipResult:
     height: int
     duration_s: float
     wall_s: float
-    scratch_width: int
+    crop_width: int
 
 
 @dataclass(frozen=True)
 class _SlideJob:
     slide: int
     ordinal: int
-    width: int
-    height: int
-    dx: float
+    crop_rect: Rect
     dest: Path
     tmp: Path
-
-
-def scratch_canvas(slide: int, include_side: Collection[int]) -> tuple[int, int, float]:
-    """`(width, height, dx)` for the scratch canvas serving `slide`: centre-panel-only
-    3840x1080 translated by `-CENTRE_ORIGIN_X`, or the full 7680x1080 wall untranslated
-    when `slide` is marked include_side."""
-    if slide in include_side:
-        return (7680, 1080, 0.0)
-    return (3840, 1080, -float(CENTRE_ORIGIN_X))
+    delete_ids: tuple[ItemId, ...] = ()
 
 
 def clip_name(stem: str, slide: int) -> str:
@@ -236,9 +231,8 @@ def _build_export_script(
     fps: float,
     black_layout_names: Sequence[str] = DEFAULT_BLACK_LAYOUT_NAMES,
 ) -> str:
-    """One AppleScript, one document open for the whole batch. Canvas groups are processed
-    widest-first so the document width only ever shrinks between exports, never grows back up
-    right before one (observed to leave the export pillarboxed at the narrower width)."""
+    """One AppleScript, one document open for the whole batch, exported at its own native
+    size; the clip is always cropped afterwards by ffmpeg, never by a Keynote resize."""
     keep = sorted({j.slide for j in per_slide})
     stem_name = _as_escape(scratch_path.stem)
     doc_name = _as_escape(scratch_path.name)
@@ -303,37 +297,33 @@ def _build_export_script(
         "        set skipped of s to true",
         "      end repeat",
     ]
-    groups = sorted({(j.width, j.height, j.dx) for j in per_slide}, key=lambda g: g[0], reverse=True)
-    for group_w, group_h, dx in groups:
-        group_jobs = [j for j in per_slide if (j.width, j.height, j.dx) == (group_w, group_h, dx)]
-        lines += [
-            f"      set width of theDoc to {group_w}",
-            f"      set height of theDoc to {group_h}",
-        ]
-        if dx != 0:
-            for j in group_jobs:
-                lines += [
-                    f"      repeat with itm in iWork items of slide {j.ordinal} of theDoc",
-                    "        set wasLocked to locked of itm",
-                    "        if wasLocked then set locked of itm to false",
-                    "        set {ix, iy} to (position of itm)",
-                    f"        set position of itm to {{ix + ({dx}), iy}}",
-                    "        if wasLocked then set locked of itm to true",
-                    "      end repeat",
-                ]
-        for j in group_jobs:
+    for j in sorted(per_slide, key=lambda j: j.ordinal):
+        lines.append(f"      set skipped of slide {j.ordinal} of theDoc to false")
+        for kind, kind_index in _delete_order(j.delete_ids):
+            name = _AS_KIND_NAMES.get(kind)
+            if not name:
+                raise ValueError(f"Slide {j.slide}: no AppleScript class name for delete kind {kind!r}")
+            addr = f"{name} {kind_index + 1} of slide {j.ordinal}"
             lines += [
-                f"      set skipped of slide {j.ordinal} of theDoc to false",
                 "      try",
-                f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
-                f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
+                f"        set theObj to {addr}",
+                "        if locked of theObj then set locked of theObj to false",
+                "        delete theObj",
                 "      on error errMsg number errNum",
-                f'        log ("ERR" & tab & "{j.slide}" & tab & errNum & tab & errMsg)',
-                "        error errMsg number errNum",
+                f'        log ("DELETEFAIL" & tab & "{j.slide}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
                 "      end try",
-                f'      log ("OBED" & tab & "{j.slide}" & tab & ((current date) as string))',
-                f"      set skipped of slide {j.ordinal} of theDoc to true",
             ]
+        lines += [
+            "      try",
+            f'        export theDoc to POSIX file "{_as_escape(str(j.tmp))}" as QuickTime movie with properties '
+            f"{{movie format:native size, movie codec:{codec}, movie framerate:{fps_name}, skipped slides:false}}",
+            "      on error errMsg number errNum",
+            f'        log ("ERR" & tab & "{j.slide}" & tab & errNum & tab & errMsg)',
+            "        error errMsg number errNum",
+            "      end try",
+            f'      log ("OBED" & tab & "{j.slide}" & tab & ((current date) as string))',
+            f"      set skipped of slide {j.ordinal} of theDoc to true",
+        ]
     lines += [
         "    end tell",
         "    try",
@@ -418,16 +408,14 @@ def _ffmpeg_process(
     raw: Path, dest: Path, *, crop_rect: Rect | None, wall_w: int, wall_h: int, codec: str
 ) -> tuple[int, int]:
     """Publishes `raw` to `dest` (a `.mov`): `-c copy` remux when there's no crop, else an
-    even-normalised crop + re-encode via `_crop_encoder_args`. Probes `raw` first and asserts
-    it matches the scratch canvas. Returns the expected `(width, height)` of `dest` so the
-    caller can validate the ffprobe result against it."""
+    even-normalised crop + re-encode. Returns the expected `(width, height)` of `dest`."""
     exe = ffmpeg_exe()
     if not exe:
         raise RuntimeError("ffmpeg executable not found")
     dest.parent.mkdir(parents=True, exist_ok=True)
     raw_w, raw_h, _raw_fps, _raw_duration = _ffprobe(raw)
     if (raw_w, raw_h) != (wall_w, wall_h):
-        raise RuntimeError(f"Raw export {raw} is {raw_w}x{raw_h}, expected scratch canvas {wall_w}x{wall_h}")
+        raise RuntimeError(f"Raw export {raw} is {raw_w}x{raw_h}, expected native wall size {wall_w}x{wall_h}")
     if crop_rect is None:
         _run_ffmpeg_stage([exe, "-y", "-i", str(raw), "-c", "copy", str(dest)])
         return wall_w, wall_h
@@ -436,7 +424,7 @@ def _ffmpeg_process(
         _run_ffmpeg_stage([exe, "-y", "-i", str(raw), "-c", "copy", str(dest)])
         return wall_w, wall_h
     x, y, w, h = _normalize_even_crop(x, y, w, h, wall_w, wall_h)
-    flt = f"crop={w}:{h}:{x}:{y}"
+    flt = crop_filter(Rect(x, y, w, h), wall_w, wall_h)
     encoder, *extra = _crop_encoder_args(codec)
     _run_ffmpeg_stage(
         [
@@ -461,20 +449,161 @@ def _ffmpeg_process(
     return w, h
 
 
-def _derive_include_side_crop(fw_deck: Path, slides: Collection[int]) -> dict[int, Rect]:
-    payload = offline_wall_payload(fw_deck)
+_BLACK_LEVEL = 16
+_QUADRANT_W_FRAC = 0.55
+_QUADRANT_H_FRAC = 0.95
+_SAMPLE_FRACTIONS = (0.25, 0.5, 0.75)
+_MIN_EXPECTED_COVERAGE = 0.5
+_LOW_INFO_DENSITY = 0.02
+
+
+def _non_black_stats(path: Path, *, at_s: float = 1.0) -> tuple[tuple[int, int, int, int] | None, float]:
+    """Non-black pixel bbox and density (fraction of pixels above `_BLACK_LEVEL`) of the
+    frame at `at_s` seconds into `path`, via an ffmpeg frame grab + PIL."""
+    exe = ffmpeg_exe()
+    if not exe:
+        raise RuntimeError("ffmpeg executable not found")
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.png"
+        proc = subprocess.run(
+            [exe, "-y", "-ss", str(at_s), "-i", str(path), "-frames:v", "1", str(frame_path)],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0 or not frame_path.exists():
+            raise RuntimeError(f"ffmpeg frame extraction failed for {path}:\n{proc.stderr[-2000:]}")
+        with Image.open(frame_path) as img:
+            gray = img.convert("L")
+            mask = gray.point(lambda p: 255 if p > _BLACK_LEVEL else 0)
+            histogram = mask.histogram()
+            total = sum(histogram)
+            density = (histogram[255] / total) if total else 0.0
+            return mask.getbbox(), density
+
+
+def _clip_sample_times(duration: float) -> tuple[float, ...]:
+    hi = max(duration - 0.05, 0.0)
+    return tuple(sorted({min(max(duration * f, 0.0), hi) for f in _SAMPLE_FRACTIONS}))
+
+
+def _assert_clip_covers_frame(
+    path: Path,
+    width: int,
+    height: int,
+    *,
+    duration: float,
+    expected: Rect | None = None,
+    log: Callable[[str], None] = print,
+) -> None:
+    """Refuses `path` when non-black content over sampled frames is confined to a quadrant
+    of `width`x`height` or covers too little of `expected`; low-density samples warn instead."""
+    boxes = []
+    for t in _clip_sample_times(duration):
+        bbox, density = _non_black_stats(path, at_s=t)
+        if bbox is None:
+            continue
+        if density < _LOW_INFO_DENSITY:
+            log(f"Clip {path} at {t:.2f}s: non-black density {density:.2%} is low-information; excluded from content assert.")
+            continue
+        boxes.append(bbox)
+    if not boxes:
+        log(f"Clip {path}: no sample had enough non-black content; content assert skipped.")
+        return
+    x0 = min(b[0] for b in boxes)
+    y0 = min(b[1] for b in boxes)
+    x1 = max(b[2] for b in boxes)
+    y1 = max(b[3] for b in boxes)
+    bbox_w, bbox_h = x1 - x0, y1 - y0
+
+    top_left_confined = x1 <= _QUADRANT_W_FRAC * width and y1 <= _QUADRANT_H_FRAC * height
+    expected_top_left = (
+        expected is not None
+        and expected.x + expected.w <= _QUADRANT_W_FRAC * width
+        and expected.y + expected.h <= _QUADRANT_H_FRAC * height
+    )
+    if top_left_confined and not expected_top_left:
+        raise RuntimeError(
+            f"Clip {path}: non-black content confined to {bbox_w}x{bbox_h} of a {width}x{height} "
+            f"frame ({(x0, y0, x1, y1)}); refusing the coal-slide signature."
+        )
+
+    if expected is not None and expected.w > 0 and expected.h > 0:
+        inter_w = max(0.0, min(x1, expected.x + expected.w) - max(x0, expected.x))
+        inter_h = max(0.0, min(y1, expected.y + expected.h) - max(y0, expected.y))
+        expected_area = expected.w * expected.h
+        if (inter_w * inter_h) < _MIN_EXPECTED_COVERAGE * expected_area:
+            raise RuntimeError(
+                f"Clip {path}: non-black content {(x0, y0, x1, y1)} covers less than "
+                f"{_MIN_EXPECTED_COVERAGE:.0%} of the expected content rect {expected}."
+            )
+
+
+def _derive_include_side_crop(payload: dict, slides: Collection[int]) -> dict[int, Rect]:
     wall = (float(payload["slideWidth"]), float(payload["slideHeight"]))
     by_number = {s["number"]: s for s in payload["slides"]}
     derived: dict[int, Rect] = {}
     for n in slides:
         slide = by_number.get(n)
         if slide is None:
-            raise ValueError(f"Slide {n} not found in {fw_deck} for include_side crop derivation")
-        union = visible_union(slide["items"], include_side=True, wall=wall)
+            raise ValueError(f"Slide {n} not found for include_side crop derivation")
+        union = visible_union(
+            slide["items"], include_side=True, wall=wall, group_child_text=slide.get("groupChildSignature")
+        )
         if union is None or union.w <= 0 or union.h <= 0:
             raise ValueError(f"Slide {n}: degenerate visible union for include_side crop; pass crop_rects explicitly.")
         derived[n] = union
     return derived
+
+
+def _expected_content_rect(
+    payload: dict, slide_number: int, *, include_side: bool, crop_origin: tuple[int, int], wall: tuple[float, float]
+) -> Rect | None:
+    """The slide's offline `visible_union`, remapped from wall space into the exported
+    clip's own frame pixels (the clip's origin is `crop_origin` in wall space)."""
+    by_number = {s["number"]: s for s in payload["slides"]}
+    slide = by_number.get(slide_number)
+    if slide is None:
+        return None
+    union = visible_union(
+        slide["items"], include_side=include_side, wall=wall, group_child_text=slide.get("groupChildSignature")
+    )
+    if union is None:
+        return None
+    ox, oy = crop_origin
+    return Rect(union.x - ox, union.y - oy, union.w, union.h)
+
+
+def _derive_delete_ids(
+    classes: Mapping[int, SlideClass],
+    slides_by_number: Mapping[int, dict],
+    slides: Collection[int],
+) -> dict[int, tuple[ItemId, ...]]:
+    """Non-content drawable ids for each of ``slides`` -- side/backdrop/duplicate drops plus
+    anything else the classifier excludes. Refuses an empty/skipped slide outright."""
+    derived: dict[int, tuple[ItemId, ...]] = {}
+    for n in slides:
+        cls = classes.get(n)
+        slide = slides_by_number.get(n)
+        if cls is None or slide is None:
+            raise ValueError(f"Slide {n} not found in classified deck")
+        if cls.category == "empty":
+            raise ValueError(f"Slide {n} is empty/skipped; refusing to derive delete ids for it")
+        all_ids = {(item["kind"], item["kindIndex"]) for item in slide.get("items") or []}
+        excluded_ids = all_ids - set(cls.kept) - set(cls.dropped_side)
+        derived[n] = _delete_order(list(cls.dropped_side) + list(excluded_ids))
+    return derived
+
+
+def _validate_delete_ids(number: int, ids: Collection[ItemId], cls: SlideClass, slide: dict) -> None:
+    """Refuses a supplied delete id absent from the slide, or one that is part of ``cls.kept``."""
+    all_ids = {(item["kind"], item["kindIndex"]) for item in slide.get("items") or []}
+    supplied = set(ids)
+    invalid = supplied - all_ids
+    if invalid:
+        raise ValueError(f"Slide {number}: delete_ids {sorted(invalid)} not present on the slide")
+    overlap = supplied & set(cls.kept)
+    if overlap:
+        raise ValueError(f"Slide {number}: delete_ids {sorted(overlap)} are kept content; refusing")
 
 
 def export_slide_clips(
@@ -486,6 +615,7 @@ def export_slide_clips(
     codec: str = "AppleProRes422LT",
     fps: float = 30,
     crop_rects: Mapping[int, Rect] | None = None,
+    delete_ids: Mapping[int, Collection[ItemId]] | None = None,
     log: Callable[[str], None] = print,
     rss_limit_bytes: int = DEFAULT_RSS_LIMIT_BYTES,
     layout_template: Path | None = None,
@@ -499,11 +629,39 @@ def export_slide_clips(
     expected_fps = fps_rational(fps)
     dsk_live.guard_out_dir(out_dir, fw_deck)
 
+    payload = offline_wall_payload(fw_deck)
+    attach_group_content_signature(fw_deck, payload)
+    wall_w, wall_h = int(payload["slideWidth"]), int(payload["slideHeight"])
+    if not is_lw_wall(wall_w, wall_h):
+        raise ValueError(f"{fw_deck} is {wall_w}x{wall_h}, not a 7680x1080 LW wall deck.")
+
     include_side = set(include_side)
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    classes = {
+        c.number: c
+        for c in classify_deck(fw_deck, include_side=frozenset(include_side), payload=payload)
+    }
+
     crop_rects = dict(crop_rects or {})
     missing_crop = [n for n in include_side if n in slides and n not in crop_rects]
     if missing_crop:
-        crop_rects.update(_derive_include_side_crop(fw_deck, missing_crop))
+        crop_rects.update(_derive_include_side_crop(payload, missing_crop))
+
+    delete_ids = dict(delete_ids or {})
+    for n in slides:
+        cls = classes.get(n)
+        slide = slides_by_number.get(n)
+        if cls is None or slide is None:
+            raise ValueError(f"Slide {n} not found in {fw_deck}")
+        for w in cls.mirror_warnings:
+            log(f"slide {n}: {w}")
+        if cls.category == "empty":
+            raise ValueError(f"Slide {n} is empty/skipped; refusing to export it")
+        if n in delete_ids:
+            _validate_delete_ids(n, delete_ids[n], cls, slide)
+    missing_deletes = [n for n in slides if n not in delete_ids]
+    if missing_deletes:
+        delete_ids.update(_derive_delete_ids(classes, slides_by_number, missing_deletes))
 
     dests = {n: out_dir / clip_name(fw_deck.stem, n) for n in slides}
 
@@ -532,16 +690,15 @@ def export_slide_clips(
         ordinals = ordinal_map(keep)
         per_slide: list[_SlideJob] = []
         for n in keep:
-            w, h, dx = scratch_canvas(n, include_side)
+            crop_rect = crop_rects[n] if n in include_side else CENTRE_PANEL_RECT
             per_slide.append(
                 _SlideJob(
                     slide=n,
                     ordinal=ordinals[n],
-                    width=w,
-                    height=h,
-                    dx=dx,
+                    crop_rect=crop_rect,
                     dest=dests[n],
                     tmp=require_m4v(work / f"tmp.{n:04d}.m4v"),
+                    delete_ids=tuple(delete_ids.get(n, ())),
                 )
             )
 
@@ -589,10 +746,25 @@ def export_slide_clips(
             _quit_and_wait_for_exit(stem_name, doc_name, out_dir)
 
         last_error: tuple[int, str] | None = None
+        delete_fail: tuple[int, str, int, str] | None = None
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
                 last_error = (int(error_m.group(2)), error_m.group(3))
+            delete_fail_m = _DELETEFAIL_RE.match(line)
+            if delete_fail_m and delete_fail is None:
+                delete_fail = (
+                    int(delete_fail_m.group(1)),
+                    delete_fail_m.group(2),
+                    int(delete_fail_m.group(3)),
+                    delete_fail_m.group(4),
+                )
+
+        if delete_fail is not None:
+            slide, addr, errnum, errmsg = delete_fail
+            raise RuntimeError(
+                f"Keynote delete failed on slide {slide} ({addr}, errNum {errnum}): {errmsg}"
+            )
 
         if proc.returncode != 0:
             if last_error is not None:
@@ -604,10 +776,9 @@ def export_slide_clips(
         for job in per_slide:
             if not job.tmp.exists():
                 raise RuntimeError(f"Expected export missing for slide {job.slide}: {job.tmp}")
-            crop_rect = crop_rects.get(job.slide) if job.slide in include_side else None
             publish_tmp = work / f"pub.{job.slide:04d}.mov"
             expected_w, expected_h = _ffmpeg_process(
-                job.tmp, publish_tmp, crop_rect=crop_rect, wall_w=job.width, wall_h=job.height, codec=codec
+                job.tmp, publish_tmp, crop_rect=job.crop_rect, wall_w=wall_w, wall_h=wall_h, codec=codec
             )
             width, height, fps_out, duration = _ffprobe(publish_tmp)
             if (width, height) != (expected_w, expected_h):
@@ -617,6 +788,16 @@ def export_slide_clips(
                 )
             if abs(fps_out - expected_fps) > _FPS_TOLERANCE:
                 raise RuntimeError(f"Slide {job.slide}: exported fps {fps_out} does not match requested {fps}")
+            crop_x, crop_y, crop_w, crop_h = _clamp_crop(job.crop_rect, wall_w, wall_h)
+            crop_x, crop_y, crop_w, crop_h = _normalize_even_crop(crop_x, crop_y, crop_w, crop_h, wall_w, wall_h)
+            expected_rect = _expected_content_rect(
+                payload,
+                job.slide,
+                include_side=job.slide in include_side,
+                crop_origin=(crop_x, crop_y),
+                wall=(float(wall_w), float(wall_h)),
+            )
+            _assert_clip_covers_frame(publish_tmp, width, height, duration=duration, expected=expected_rect, log=log)
             job.dest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(publish_tmp, job.dest)
             results.append(
@@ -627,7 +808,7 @@ def export_slide_clips(
                     height=height,
                     duration_s=duration,
                     wall_s=elapsed_by_slide.get(job.slide, time.monotonic() - t0),
-                    scratch_width=job.width,
+                    crop_width=crop_w,
                 )
             )
 

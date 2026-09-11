@@ -9,9 +9,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
-from obed_edom.iwa_builds import _ref_id, _transition_effect_duration, deck_builds
+from obed_edom.iwa_builds import _ref_id, _transition_effect_duration, build_identity, deck_builds
 from obed_edom.iwa_kindindex import derive_kind_index
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.map_remap import (
@@ -20,6 +20,7 @@ from obed_edom.map_remap import (
     Affine,
     Rect,
     is_backdrop,
+    is_lw_wall,
     is_side_panel_item,
     is_visible,
     item_rect,
@@ -29,13 +30,37 @@ from obed_edom.offline_inspect import _round_pt, offline_wall_payload
 ItemId = tuple[str, int]
 
 
+def _delete_order(ids: Sequence[ItemId]) -> tuple[ItemId, ...]:
+    return tuple(sorted(ids, key=lambda iid: (iid[0], -iid[1])))
+
+
+def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bool = False) -> bool:
+    """True for a textless ``shape`` filling the reference frame -- the verse-slide scrim
+    (F3). See ``content-rules-plan.md`` D1 for the ``include_side`` frame rationale."""
+    if (item.get("kind") or "") != "shape":
+        return False
+    if (item.get("text") or "").strip():
+        return False
+    if not is_lw_wall(*wall):
+        return False
+    rect = item_rect(item)
+    frame = Rect(0.0, 0.0, *wall) if include_side else CENTRE_PANEL_RECT
+    return rect.w >= 0.98 * frame.w and rect.h >= 0.98 * frame.h
+
+
 def _filter_kept_items(
-    items: Sequence[dict], wall_w: float, wall_h: float, *, include_side: bool
-) -> tuple[list[dict], list[ItemId]]:
-    """Shared classify_slide/fit_slide filter: drop backdrops, off-canvas items, and
-    (unless ``include_side``) side-panel-only items. Returns (kept items, dropped side ids)."""
+    items: Sequence[dict],
+    wall_w: float,
+    wall_h: float,
+    *,
+    include_side: bool,
+    group_child_text: Mapping[int, str | None] | None = None,
+) -> tuple[list[dict], list[ItemId], tuple[ItemId, ...], tuple[ItemId, ...], tuple[str, ...]]:
+    """Shared filter for every geometry/classification consumer: drops backdrops, off-canvas,
+    side-panel, scrim, and mirror-duplicate items. One kept set for every consumer."""
     kept: list[dict] = []
     dropped_side: list[ItemId] = []
+    panel_backdrops: list[dict] = []
     for item in items:
         item_id: ItemId = (item["kind"], item["kindIndex"])
         if is_backdrop(item, wall_w, wall_h):
@@ -45,8 +70,25 @@ def _filter_kept_items(
         if not include_side and is_side_panel_item(item, wall_w, wall_h):
             dropped_side.append(item_id)
             continue
+        if is_panel_backdrop(item, (wall_w, wall_h), include_side=include_side):
+            panel_backdrops.append(item)
+            continue
         kept.append(item)
-    return kept, dropped_side
+    if kept:
+        dropped_backdrop = tuple((i["kind"], i["kindIndex"]) for i in panel_backdrops)
+    else:
+        kept.extend(panel_backdrops)
+        dropped_backdrop = ()
+
+    duplicate_map, mirror_warnings = mirror_duplicates(
+        kept, (wall_w, wall_h), group_child_text=group_child_text
+    )
+    dropped_duplicate = tuple(duplicate_map)
+    if dropped_duplicate:
+        dup_set = set(dropped_duplicate)
+        kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in dup_set]
+
+    return kept, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings
 
 
 def _group_movie_descendants(group_obj: dict, objects: dict[str, dict], _depth: int = 0) -> int:
@@ -222,8 +264,11 @@ class SlideClass:
     movie_count: int
     kept: tuple[ItemId, ...]
     dropped_side: tuple[ItemId, ...]
+    dropped_backdrop: tuple[ItemId, ...]
     transition: str | None
     connection_line_builds: int = 0
+    dropped_duplicate: tuple[ItemId, ...] = ()
+    mirror_warnings: tuple[str, ...] = ()
 
 
 def classify_slide(
@@ -235,14 +280,15 @@ def classify_slide(
     group_movie_counts: dict[int, int] | None = None,
     group_build_counts: dict[int, int] | None = None,
     connection_line_builds: int = 0,
+    group_child_text: Mapping[int, str | None] | None = None,
 ) -> SlideClass:
     number = slide["number"]
     wall_w, wall_h = wall
     if slide.get("skipped"):
-        return SlideClass(number, "empty", 0, 0, (), (), None, 0)
+        return SlideClass(number, "empty", 0, 0, (), (), (), None, 0, (), ())
 
-    kept_kinds, dropped_side = _filter_kept_items(
-        slide.get("items") or [], wall_w, wall_h, include_side=include_side
+    kept_kinds, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings = _filter_kept_items(
+        slide.get("items") or [], wall_w, wall_h, include_side=include_side, group_child_text=group_child_text
     )
     kept: list[ItemId] = [(item["kind"], item["kindIndex"]) for item in kept_kinds]
     kept_set = set(kept)
@@ -288,16 +334,28 @@ def classify_slide(
         movie_count,
         tuple(kept),
         tuple(dropped_side),
+        dropped_backdrop,
         transition,
         connection_line_builds,
+        dropped_duplicate,
+        mirror_warnings,
     )
 
 
 def classify_deck(
-    deck_path: str | Path, *, include_side: frozenset[int] = frozenset(), deck: Any = None
+    deck_path: str | Path,
+    *,
+    include_side: frozenset[int] = frozenset(),
+    deck: Any = None,
+    payload: dict | None = None,
 ) -> list[SlideClass]:
+    """Classify every slide in ``payload`` (built from ``deck_path``/``deck`` if omitted)."""
+    from obed_edom.iwa_runs import attach_group_content_signature  # noqa: PLC0415
+
     graph = deck if deck is not None else _load_deck(deck_path)
-    payload = offline_wall_payload(deck_path, deck=graph)
+    if payload is None:
+        payload = offline_wall_payload(deck_path, deck=graph)
+        attach_group_content_signature(deck_path, payload, deck=graph)
     builds_by_number = deck_builds(deck_path, deck=graph)
     group_movie_by_number = _deck_group_movie_counts(deck_path, deck=graph)
     group_build_by_number = _deck_group_build_counts(deck_path, deck=graph)
@@ -315,6 +373,7 @@ def classify_deck(
                 group_movie_counts=group_movie_by_number.get(number),
                 group_build_counts=group_build_by_number.get(number),
                 connection_line_builds=connection_line_by_number.get(number, 0),
+                group_child_text=slide.get("groupChildSignature"),
             )
         )
     return out
@@ -335,6 +394,163 @@ class Band:
 
 class BandRefusal(ValueError):
     pass
+
+
+_MIRROR_SIZE_TOLERANCE_PT = 1.0
+_MIRROR_GEOM_X_TOLERANCE_PT = 6.0
+_MIRROR_GEOM_Y_TOLERANCE_PT = 2.0
+_MIRROR_GEOM_SIZE_TOLERANCE_PT = 2.0
+
+
+def mirror_duplicates(
+    items: Sequence[dict],
+    wall: tuple[float, float],
+    *,
+    group_child_text: Mapping[int, str | None] | None = None,
+) -> tuple[dict[ItemId, ItemId], tuple[str, ...]]:
+    """``({dropped ItemId: kept ItemId}, warnings)`` for L/R mirror duplicates (F2), keyed
+    by content then, for keyless items, by the slide's own L/R translation (D1)."""
+    wall_w = wall[0]
+    mid = wall_w / 2.0
+    no_map = group_child_text is None
+    group_child_text = group_child_text or {}
+    groups: dict[tuple[Any, ...], list[dict]] = {}
+    keyless: list[dict] = []
+    warnings: list[str] = []
+    for item in items:
+        kind = item.get("kind") or ""
+        if kind in ("text", "shape"):
+            if not (item.get("text") or "").strip():
+                keyless.append(item)
+                continue
+            key = build_identity(kind, item.get("text"), None, None)
+        elif kind in ("image", "movie"):
+            file_name = item.get("fileName") or ""
+            if not file_name:
+                continue
+            key = build_identity(kind, None, file_name, None)
+        elif kind == "group":
+            kind_index = item.get("kindIndex")
+            if kind_index not in group_child_text:
+                if not no_map:
+                    warnings.append(f"group {kind_index} missing content signature; keeping")
+                continue
+            child_sig = group_child_text[kind_index]
+            if child_sig is None:
+                warnings.append(f"group {kind_index} content signature unresolved; keeping")
+                continue
+            if not child_sig:
+                continue
+            key = build_identity(kind, None, None, child_sig)
+        else:
+            continue
+        groups.setdefault(key, []).append(item)
+
+    valid_pairs: list[tuple[ItemId, ItemId, float, float]] = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        ids = [(m["kind"], m["kindIndex"]) for m in members]
+        if len(members) != 2:
+            warnings.append(f"{len(members)} items share content key {key!r}: {ids}; keeping all")
+            continue
+        a, b = members
+        rect_a, rect_b = item_rect(a), item_rect(b)
+        cx_a = rect_a.x + rect_a.w / 2.0 - mid
+        cx_b = rect_b.x + rect_b.w / 2.0 - mid
+        opposite_sides = cx_a * cx_b < 0
+        sizes_agree = True
+        if a["kind"] in ("image", "movie"):
+            sizes_agree = (
+                abs(rect_a.w - rect_b.w) <= _MIRROR_SIZE_TOLERANCE_PT
+                and abs(rect_a.h - rect_b.h) <= _MIRROR_SIZE_TOLERANCE_PT
+            )
+        if not opposite_sides or not sizes_agree:
+            warnings.append(f"identical-content pair {ids} is not a L/R mirror; keeping all")
+            continue
+        id_a, id_b = ids
+        valid_pairs.append((id_a, id_b, cx_a, cx_b))
+
+    if not valid_pairs:
+        return {}, tuple(warnings)
+
+    def _pair_low_kind_index_side(id_a: ItemId, id_b: ItemId, cx_a: float, cx_b: float) -> str:
+        low_cx = cx_a if id_a[1] < id_b[1] else cx_b
+        return "right" if low_cx > 0 else "left"
+
+    side_votes = Counter(_pair_low_kind_index_side(*p) for p in valid_pairs)
+    global_side: str | None
+    if len(side_votes) == 1:
+        global_side = next(iter(side_votes))
+        if len(valid_pairs) == 1:
+            warnings.append(f"mirror-pair survivor side chosen by a single vote: {global_side!r}")
+    else:
+        ranked = side_votes.most_common()
+        if ranked[0][1] > ranked[1][1]:
+            global_side = ranked[0][0]
+            if ranked[0][1] - ranked[1][1] == 1:
+                warnings.append(
+                    f"mirror-pair survivor side chosen by a margin of 1 ({dict(side_votes)}): {global_side!r}"
+                )
+        else:
+            global_side = None
+            warnings.append(
+                f"mirror-pair survivor sides disagree with no majority ({dict(side_votes)}); "
+                "falling back to per-pair lowest kindIndex"
+            )
+
+    dropped: dict[ItemId, ItemId] = {}
+    offsets: list[float] = []
+    for id_a, id_b, cx_a, cx_b in valid_pairs:
+        if global_side is not None:
+            side_a = "right" if cx_a > 0 else "left"
+            survivor, dupe = (id_a, id_b) if side_a == global_side else (id_b, id_a)
+            survivor_cx, dupe_cx = (cx_a, cx_b) if survivor == id_a else (cx_b, cx_a)
+        else:
+            survivor, dupe = (id_a, id_b) if id_a[1] < id_b[1] else (id_b, id_a)
+            survivor_cx, dupe_cx = (cx_a, cx_b) if survivor == id_a else (cx_b, cx_a)
+        dropped[dupe] = survivor
+        offsets.append(dupe_cx - survivor_cx)
+
+    if keyless and offsets:
+        off = Counter(round(o) for o in offsets).most_common(1)[0][0]
+        used: set[int] = set()
+        for i, a in enumerate(keyless):
+            if i in used:
+                continue
+            id_a = (a["kind"], a["kindIndex"])
+            rect_a = item_rect(a)
+            for j in range(i + 1, len(keyless)):
+                if j in used:
+                    continue
+                b = keyless[j]
+                if b.get("kind") != a.get("kind"):
+                    continue
+                rect_b = item_rect(b)
+                cx_a = rect_a.x + rect_a.w / 2.0 - mid
+                cx_b = rect_b.x + rect_b.w / 2.0 - mid
+                if cx_a * cx_b >= 0:
+                    continue
+                if abs(abs(cx_b - cx_a) - abs(off)) > _MIRROR_GEOM_X_TOLERANCE_PT:
+                    continue
+                if abs(rect_b.y - rect_a.y) > _MIRROR_GEOM_Y_TOLERANCE_PT:
+                    continue
+                if abs(rect_b.w - rect_a.w) > _MIRROR_GEOM_SIZE_TOLERANCE_PT:
+                    continue
+                if abs(rect_b.h - rect_a.h) > _MIRROR_GEOM_SIZE_TOLERANCE_PT:
+                    continue
+                id_b = (b["kind"], b["kindIndex"])
+                if global_side is not None:
+                    side_a = "right" if cx_a > 0 else "left"
+                    survivor, dupe = (id_a, id_b) if side_a == global_side else (id_b, id_a)
+                else:
+                    survivor, dupe = (id_a, id_b) if id_a[1] < id_b[1] else (id_b, id_a)
+                dropped[dupe] = survivor
+                used.add(i)
+                used.add(j)
+                break
+
+    return dropped, tuple(warnings)
 
 
 def read_band(reference_deck_path: str | Path, *, deck: Any = None, min_h: float = 150.0) -> Band:
@@ -401,10 +617,17 @@ def _visibles_by_kept(
 
 
 def _visibles_by_wall(
-    items: Sequence[dict], wall_w: float, wall_h: float, *, include_side: bool
+    items: Sequence[dict],
+    wall_w: float,
+    wall_h: float,
+    *,
+    include_side: bool,
+    group_child_text: Mapping[int, str | None] | None = None,
 ) -> dict[ItemId, Rect]:
     wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
-    filtered_items, _dropped_side = _filter_kept_items(items, wall_w, wall_h, include_side=include_side)
+    filtered_items, _dropped_side, _dropped_backdrop, _dropped_duplicate, _mirror_warnings = _filter_kept_items(
+        items, wall_w, wall_h, include_side=include_side, group_child_text=group_child_text
+    )
     visibles: dict[ItemId, Rect] = {}
     for item in filtered_items:
         item_id: ItemId = (item["kind"], item["kindIndex"])
@@ -415,13 +638,17 @@ def _visibles_by_wall(
 
 
 def visible_union(
-    items: Sequence[dict], *, include_side: bool, wall: tuple[float, float]
+    items: Sequence[dict],
+    *,
+    include_side: bool,
+    wall: tuple[float, float],
+    group_child_text: Mapping[int, str | None] | None = None,
 ) -> Rect | None:
-    """Wall-space union of kept visible item rects -- backdrops, off-canvas items and
-    (unless ``include_side``) side-panel-only items dropped via ``_filter_kept_items`` --
-    or ``None`` if nothing is kept/visible. Used by the DSK movie export's include_side
-    crop rect (``dsk_movie_export.py``)."""
-    visibles = _visibles_by_wall(items, wall[0], wall[1], include_side=include_side)
+    """Wall-space union of kept visible item rects (per ``_filter_kept_items``), or ``None``
+    if nothing is kept/visible. Used by the DSK movie export's include_side crop rect."""
+    visibles = _visibles_by_wall(
+        items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text
+    )
     if not visibles:
         return None
     return _union_rect(visibles.values())
@@ -435,17 +662,18 @@ def fit_slide(
     anchor: str = "centre",
     kept: Iterable[ItemId] | None = None,
     wall: tuple[float, float] | None = None,
+    group_child_text: Mapping[int, str | None] | None = None,
 ) -> dict[ItemId, Rect]:
-    """``kept`` (explicit item ids) or ``wall`` (apply the classifier's own backdrop/
-    visibility/side filter via ``_filter_kept_items``) restrict which items are fit --
-    exactly one of the two must be given; omitting both would fit every raw item,
-    backdrops included, which is never what a caller wants."""
+    """``kept`` (explicit item ids) or ``wall`` (apply ``_filter_kept_items``) restrict which
+    items are fit -- exactly one of the two must be given."""
     if (kept is None) == (wall is None):
         raise ValueError("fit_slide requires exactly one of `kept` or `wall`")
     if kept is not None:
         visibles = _visibles_by_kept(items, kept, include_side=include_side)
     else:
-        visibles = _visibles_by_wall(items, wall[0], wall[1], include_side=include_side)
+        visibles = _visibles_by_wall(
+            items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text
+        )
 
     if not visibles:
         return {}
