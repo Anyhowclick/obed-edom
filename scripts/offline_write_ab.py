@@ -875,6 +875,11 @@ def plan_oracle_slide(
     always emits one) is a RED ``missing_ids`` entry too, reason ``"spec carries no
     kindIndex"`` — never silently dropped.
 
+    For arm A's aspect-locked childless image/movie/group specs, the predicted width is
+    compared against both the float aspect-lock ``h * ar`` and its integer rounding (Keynote
+    stores the integer when the frame aspect differs from the media aspect), at
+    ``TOL_ASPECT``.
+
     Returns ``{"pass": bool, "per_kind": {kind: {n, worst, pass, fails}}, "missing_ids":
     [...], "skipped": int, "compared": int, "approx": [...]}`` where ``compared`` is the
     total number of specs actually compared (``sum`` of every ``per_kind[kind]["n"]``) —
@@ -926,9 +931,15 @@ def plan_oracle_slide(
         ar = (aspects or {}).get(obj_id) if (kind in _ASPECT_LOCKED and not spec.get("children")) else None
         if ar:
             h = round(planned[3])
-            planned = (round(planned[0]), round(planned[1]), h * ar, float(h))
+            w_pred = h * ar
+            planned = (round(planned[0]), round(planned[1]), w_pred, float(h))
             tol = TOL_ASPECT
-        worst = max(abs(a - b) for a, b in zip(planned, actual))
+            diffs = [abs(planned[0] - actual[0]), abs(planned[1] - actual[1]),
+                     min(abs(planned[2] - actual[2]), abs(round(planned[2]) - actual[2])),
+                     abs(planned[3] - actual[3])]
+            worst = max(diffs)
+        else:
+            worst = max(abs(a - b) for a, b in zip(planned, actual))
         entry["n"] += 1
         entry["worst"] = max(entry["worst"], worst)
         if worst > tol:

@@ -2777,6 +2777,47 @@ def test_plan_oracle_aspect_bar_is_quarter_pixel():
     assert report["pass"] is True
 
 
+def test_plan_oracle_aspect_accepts_stretched_integer_width():
+    ar = 3.7433
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 374.0, "h": 100.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is True
+
+
+def test_plan_oracle_aspect_still_accepts_float_lock_width():
+    ar = 1.339245
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 1268.26, "h": 947.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 947.0 * ar, "h": 947.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is True
+
+
+def test_plan_oracle_aspect_rejects_width_matching_neither():
+    ar = 3.7433
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 373.6, "h": 100.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is False
+    assert report["per_kind"]["image"]["worst"] == pytest.approx(0.4)
+
+
+def test_plan_oracle_stretched_integer_width_ignored_for_shape():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+    id_by_addr = {("shape", 0): "s1"}
+    recs_by_id = {"s1": {"id": "s1", "kind": "shape", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 374.0, "h": 100.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5), aspects={"s1": 3.7433})
+    assert report["pass"] is True
+    assert report["per_kind"]["shape"]["worst"] == pytest.approx(0.33)
+
+
 def test_plan_oracle_without_aspects_is_unchanged():
     specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 10.0, "h": 10.0}]
     id_by_addr = {("group", 0): "g1"}
