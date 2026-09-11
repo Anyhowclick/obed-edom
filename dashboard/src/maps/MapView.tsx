@@ -12,7 +12,9 @@ import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyAuthoredZoomGates } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
+import { BandOverlays } from "./BandOverlays";
 import {
+  BASE_FOV_DEG,
   cgDragDx,
   clampMapZoom,
   clampZoom,
@@ -21,6 +23,7 @@ import {
   minZoomForView,
   ML_MAX_ZOOM,
   ML_MIN_ZOOM,
+  previewLayout,
   snapCgShift,
   surfaceWidthOf,
   wrapLon,
@@ -34,6 +37,7 @@ import {
   type MapsLayerFilterId,
   type MapsRoutePoint,
   type MapsStyleId,
+  type PreviewLayout,
 } from "./types";
 
 const WALL_W = 7680;
@@ -51,17 +55,6 @@ const COUNTRY_PICK_MAX_ZOOM = 7;
  * on-screen width ÷ inner's own CSS width) then scales that fixed-density surface to fit the band. */
 function objectLayoutScale(authoredWidth: number): number {
   return 1 / exportScale(authoredWidth);
-}
-
-function sizeInner(innerEl: HTMLDivElement, authoredWidth: number, surfaceWidth: number): void {
-  const scale = objectLayoutScale(authoredWidth);
-  innerEl.style.width = `${surfaceWidth * scale}px`;
-  innerEl.style.height = `${1080 * scale}px`;
-}
-
-/** Live CSS transform scale (k): band's on-screen width ÷ inner's own (unscaled) CSS width. */
-function transformScaleOf(bandWidth: number, innerWidth: number): number {
-  return innerWidth > 0 && bandWidth > 0 ? bandWidth / innerWidth : 1;
 }
 
 /** Converts a client-space pointer position into the map's own (untransformed) layout space,
@@ -83,8 +76,29 @@ function objectDragScale(map: MapLibreMap, authoredWidth: number): number {
   return k * objectLayoutScale(authoredWidth);
 }
 
-function captureCanvas(canvas: HTMLCanvasElement) {
-  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
+  if (!rect) {
+    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  }
+  const scaleX = canvas.width / canvas.clientWidth;
+  const scaleY = canvas.height / canvas.clientHeight;
+  const output = document.createElement("canvas");
+  output.width = Math.max(1, Math.round(rect.width * scaleX));
+  output.height = Math.max(1, Math.round(rect.height * scaleY));
+  const ctx = output.getContext("2d");
+  if (!ctx) return Promise.resolve(null);
+  ctx.drawImage(
+    canvas,
+    rect.x * scaleX,
+    rect.y * scaleY,
+    rect.width * scaleX,
+    rect.height * scaleY,
+    0,
+    0,
+    output.width,
+    output.height
+  );
+  return new Promise<Blob | null>((resolve) => output.toBlob(resolve, "image/png"));
 }
 
 function authoredZoomOf(map: MapLibreMap, delta: number, minZoom: number, peggedAuthored?: number): number {
@@ -128,6 +142,16 @@ function silentJump(map: MapLibreMap, suppress: { current: boolean }, view: Para
   }
 }
 
+function silently(suppress: { current: boolean }, fn: () => void): void {
+  const prev = suppress.current;
+  suppress.current = true;
+  try {
+    fn();
+  } finally {
+    suppress.current = prev;
+  }
+}
+
 function applyPreviewZoomLimits(map: MapLibreMap, minZoom: number, delta: number): void {
   const minZ = clampMapZoom(minZoom + delta);
   const maxZ = Math.max(minZ, clampMapZoom(22 + delta));
@@ -153,7 +177,6 @@ function applyAuthoredWidth(
 ) {
   const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
   const delta = exportZoomDelta(authoredWidth);
-  map.resize();
   applyPreviewZoomLimits(map, minZoom, delta);
   deltaRef.current = delta;
   applyAuthoredZoomGates(map, delta);
@@ -255,9 +278,16 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   },
   ref
 ) {
+  const frame = useRef<HTMLDivElement>(null);
   const band = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
+  const layoutRef = useRef<PreviewLayout>({ innerW: 0, innerH: 0, bandW: 0, bandH: 0, bandTop: 0, bandInnerH: 0, k: 1, fov: BASE_FOV_DEG });
+  const [view, setView] = useState<{ k: number; bandTop: number; bandInnerH: number }>({
+    k: layoutRef.current.k,
+    bandTop: layoutRef.current.bandTop,
+    bandInnerH: layoutRef.current.bandInnerH,
+  });
   const mapRef = useRef<MapLibreMap | null>(null);
   const suppress = useRef(false);
   const styleUrl = useRef(OPENFREEMAP_STYLES[styleId]);
@@ -317,36 +347,59 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins };
 
-  function applyTransform() {
-    const bandEl = band.current;
+  /** Sizes/positions `.maps-map-inner` to fill the whole frame (not just the band) at the
+   * export-exact density and widens MapLibre's fov to match (`previewLayout`), so the margins
+   * above/below the band render live map instead of a dimmed void (regression: nav context). */
+  function applyTransform(authoredW = authoredWidthRef.current, sidePanelsOn = sidePanelsRef.current) {
+    const frameEl = frame.current;
     const innerEl = inner.current;
     const map = mapRef.current;
-    if (!bandEl || !innerEl) return;
-    const k = transformScaleOf(bandEl.clientWidth, innerEl.offsetWidth);
-    innerEl.style.transform = `scale(${k})`;
+    if (!frameEl || !innerEl) return;
+    const surfaceWidth = surfaceWidthOf(authoredW, sidePanelsOn);
+    const L = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth, exportScale(authoredW));
+    if (L.innerW <= 0 || L.innerH <= 0) return;
+    innerEl.style.width = `${L.innerW}px`;
+    innerEl.style.height = `${L.innerH}px`;
+    innerEl.style.transform = `translateY(${-L.bandTop * L.k}px) scale(${L.k})`;
+    layoutRef.current = L;
+    setView((prev) =>
+      Math.abs(prev.k - L.k) < 1e-4 && Math.abs(prev.bandTop - L.bandTop) < 1e-4 && Math.abs(prev.bandInnerH - L.bandInnerH) < 1e-4
+        ? prev
+        : { k: L.k, bandTop: L.bandTop, bandInnerH: L.bandInnerH }
+    );
     if (map) {
-      const requested = k * (window.devicePixelRatio || 1);
-      try {
-        map.setPixelRatio(requested);
-      } catch (err) {
-        console.warn("maplibre setPixelRatio", err);
-      }
-      const canvas = map.getCanvas();
-      const honoured = canvas.clientWidth ? canvas.width / canvas.clientWidth : requested;
-      if (Math.abs(honoured - requested) > 0.01) {
-        const message = `Preview pixel ratio clamped to ${honoured.toFixed(2)} (wanted ${requested.toFixed(2)}); this band is not capture-exact.`;
-        console.warn(message);
-        setTexWarn(message);
-      } else {
-        setTexWarn(null);
-      }
+      silently(suppress, () => {
+        try {
+          map.resize();
+        } catch (err) {
+          console.warn("maplibre resize", err);
+        }
+        map.setVerticalFieldOfView(L.fov);
+        const requested = L.k * (window.devicePixelRatio || 1);
+        try {
+          map.setPixelRatio(requested);
+        } catch (err) {
+          console.warn("maplibre setPixelRatio", err);
+        }
+        const canvas = map.getCanvas();
+        const honoured = canvas.clientWidth ? canvas.width / canvas.clientWidth : requested;
+        if (Math.abs(honoured - requested) > 0.01) {
+          const message = `Preview pixel ratio clamped to ${honoured.toFixed(2)} (wanted ${requested.toFixed(2)}); this band is not capture-exact.`;
+          console.warn(message);
+          setTexWarn(message);
+        } else {
+          setTexWarn(null);
+        }
+      });
     }
   }
 
-  function resizeInner(authoredW: number, sidePanelsOn: boolean) {
-    const innerEl = inner.current;
-    if (!innerEl) return;
-    sizeInner(innerEl, authoredW, surfaceWidthOf(authoredW, sidePanelsOn));
+  function captureBand() {
+    const map = mapRef.current;
+    if (!map) return Promise.resolve(null);
+    const canvas = map.getCanvas();
+    const L = layoutRef.current;
+    return captureCanvas(canvas, { x: 0, y: L.bandTop, width: canvas.clientWidth, height: L.bandInnerH });
   }
 
   useImperativeHandle(ref, () => ({
@@ -397,13 +450,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         hopWidthRef.current = next;
         setHopWidth(next);
         authoredWidthRef.current = w;
-        resizeInner(w, sidePanelsRef.current);
-        map.resize();
         const delta = exportZoomDelta(w);
         deltaRef.current = delta;
         applyPreviewZoomLimits(map, minZoomRef.current, delta);
         applyAuthoredZoomGates(map, delta);
-        applyTransform();
+        applyTransform(w, sidePanelsRef.current);
         silentJump(map, suppress, cameraView(map, authored, delta, minZoomRef.current));
       };
       if (hopSurfaceW !== priorWidth) {
@@ -505,12 +556,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       return { ...current, lat: shifted.lat, lon: wrapLon(shifted.lng) };
     },
     captureBlob() {
-      const map = mapRef.current;
-      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
+      return captureBand();
     },
     capturePreviewBlob() {
-      const map = mapRef.current;
-      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
+      return captureBand();
     },
     waitUntilIdle(expectedStyleId, timeoutMs = 15000) {
       const map = mapRef.current;
@@ -549,7 +598,6 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     resize() {
       const map = mapRef.current;
       if (!map) return;
-      map.resize();
       applyTransform();
       if (map.getSource("churches")) {
         (map.getSource("churches") as GeoJSONSource).setData(
@@ -560,10 +608,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   }));
 
   useEffect(() => {
-    if (!host.current || !band.current || !inner.current) return;
+    if (!host.current || !band.current || !inner.current || !frame.current) return;
     const hostEl = host.current;
-    const bandEl = band.current;
     const innerEl = inner.current;
+    const frameEl = frame.current;
     let cancelled = false;
     let map: MapLibreMap | null = null;
     const onPointerUp = () => {
@@ -616,7 +664,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     };
 
     const createMap = (wantedStyle: MapsStyleId) => {
-      resizeInner(authoredWidthRef.current, sidePanelsRef.current);
+      const surfaceWidth0 = surfaceWidthOf(authoredWidthRef.current, sidePanelsRef.current);
+      const L0 = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth0, exportScale(authoredWidthRef.current));
+      innerEl.style.width = `${L0.innerW}px`;
+      innerEl.style.height = `${L0.innerH}px`;
+      layoutRef.current = L0;
+      setView({ k: L0.k, bandTop: L0.bandTop, bandInnerH: L0.bandInnerH });
       const d0 = exportZoomDelta(authoredWidthRef.current);
       void resolveOpenFreeMapStyle(wantedStyle, d0).then((style) => {
         if (cancelled) return;
@@ -624,9 +677,18 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           createMap(overlay.current.styleId);
           return;
         }
+        const surfaceWidth = surfaceWidthOf(authoredWidthRef.current, sidePanelsRef.current);
+        const L = previewLayout(frameEl.clientWidth, frameEl.clientHeight, surfaceWidth, exportScale(authoredWidthRef.current));
+        const d = exportZoomDelta(authoredWidthRef.current);
+        if (L.innerW > 0 && L.innerH > 0) {
+          innerEl.style.width = `${L.innerW}px`;
+          innerEl.style.height = `${L.innerH}px`;
+        }
+        layoutRef.current = L;
+        setView({ k: L.k, bandTop: L.bandTop, bandInnerH: L.bandInnerH });
         const zMin = minZoomRef.current;
-        deltaRef.current = d0;
-        const k0 = transformScaleOf(bandEl.clientWidth, innerEl.offsetWidth);
+        deltaRef.current = d;
+        const k0 = L.k;
         let gpuCap = 4096;
         try {
           gpuCap = exportGpuCap();
@@ -637,11 +699,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           container: hostEl,
           style,
           center: [camera.lon, camera.lat],
-          zoom: mapZoomOf(camera.zoom, d0, zMin),
+          zoom: mapZoomOf(camera.zoom, d, zMin),
           bearing: camera.bearing,
           pitch: camera.pitch,
           renderWorldCopies: true,
-          transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
           doubleClickZoom: false,
           boxZoom: false,
           minZoom: ML_MIN_ZOOM,
@@ -651,11 +712,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           attributionControl: { compact: true },
           transformRequest: (url) => mapsTransformRequest(url),
           canvasContextAttributes: { preserveDrawingBuffer: true },
+          transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
         });
         mapRef.current = map;
         styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
         styleIdentity.current = wantedStyle;
-        innerEl.style.transform = `scale(${k0})`;
+        innerEl.style.transform = `translateY(${-L.bandTop * L.k}px) scale(${L.k})`;
+        map.setVerticalFieldOfView(L.fov);
 
         function probeTex() {
           if (!map) return;
@@ -711,7 +774,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.on("load", () => {
           probeTex();
           try {
-            map?.resize();
+            if (map) silently(suppress, () => map!.resize());
             if (map) {
               const zMin = minZoomRef.current;
               applyPreviewZoomLimits(map, zMin, deltaRef.current);
@@ -731,7 +794,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           });
         });
         map.on("style.load", () => {
-          map?.resize();
+          if (map) silently(suppress, () => map!.resize());
           if (map) {
             ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
             installPatterns(map, stylePatterns(overlay.current.styleId));
@@ -786,7 +849,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     };
     createMap(styleId);
     const ro = new ResizeObserver(() => applyTransform());
-    ro.observe(bandEl);
+    ro.observe(frameEl);
 
     return () => {
       cancelled = true;
@@ -817,7 +880,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (mapRef.current !== map || styleIdentity.current !== styleId) return;
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
-        map.resize();
+        silently(suppress, () => {
+          map.resize();
+          map.setVerticalFieldOfView(layoutRef.current.fov);
+        });
         applyAuthoredZoomGates(map, deltaRef.current);
         ensureLowZoomRaster(map, styleId, deltaRef.current);
         applyLayerFilters(map, overlay.current.hiddenLayers);
@@ -846,9 +912,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const map = mapRef.current;
     if (!map) return;
     if (hopWidthRef.current != null) return;
-    resizeInner(authoredWidth, sidePanels);
+    applyTransform(authoredWidth, sidePanels);
     applyAuthoredWidth(map, authoredWidth, minZoomRef.current, deltaRef, suppress, cameraRef.current.zoom);
-    applyTransform();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authoredWidth, sidePanels]);
 
@@ -1003,6 +1068,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     <div
       className={`maps-map-frame ${surfaceClass}`}
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
+      ref={frame}
     >
       <div className="maps-map-band" ref={band}>
         <div className="maps-map-inner" ref={inner}>
@@ -1010,49 +1076,32 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           {styleId === "watercolour" && (
             <div
               className="maps-paper-grain"
-              style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(surfaceWidth * objectLayoutScale(effectiveWidth), surfaceWidth) }}
+              style={{
+                top: view.bandTop,
+                height: view.bandInnerH,
+                backgroundImage: `url(${paperGrainUrl()})`,
+                ...paperGrainCss(surfaceWidth * objectLayoutScale(effectiveWidth), surfaceWidth),
+              }}
             />
           )}
-          {boxPos && (
-            <div className="maps-object-box" style={{ left: boxPos.x, top: boxPos.y, width: boxPos.w, height: boxPos.h }}>
-              {(["nw", "ne", "sw", "se"] as ObjectCorner[]).map((corner) => (
-                <div
-                  key={corner}
-                  className={`maps-object-handle ${corner}`}
-                  onPointerDown={onHandlePointerDown(corner)}
-                  onPointerMove={onHandlePointerMove}
-                  onPointerUp={onHandlePointerUp}
-                  onPointerCancel={onHandlePointerUp}
-                />
-              ))}
-            </div>
-          )}
         </div>
-        <div className="maps-crop-overlay">
-          {splitCg ? (
-            <div className="maps-crop-frame cg">
-              <span className="maps-crop-cg-label">CG</span>
-            </div>
-          ) : fullWall ? (
-            <div className="maps-crop-frame fw">
-              <span className="maps-crop-fw-label">FW</span>
-            </div>
-          ) : (
-            <div className="maps-crop-frame center" style={{ inset: 0 }} />
-          )}
-          {exportCg && !splitCg && (
-            <div
-              className={`maps-crop-cg${cgSnapped ? " snapped" : ""}`}
-              style={{ left: `${cgLeft}%`, width: `${cgWidth}%` }}
-              onPointerDown={onCgPointerDown}
-              onPointerMove={onCgPointerMove}
-              onPointerUp={onCgPointerUp}
-              onPointerCancel={onCgPointerUp}
-            >
-              <span className="maps-crop-cg-label">CG</span>
-            </div>
-          )}
-        </div>
+        <BandOverlays
+          splitCg={splitCg}
+          fullWall={fullWall}
+          exportCg={exportCg}
+          cgLeft={cgLeft}
+          cgWidth={cgWidth}
+          cgSnapped={cgSnapped}
+          box={boxPos}
+          k={view.k}
+          bandTop={view.bandTop}
+          onCgPointerDown={onCgPointerDown}
+          onCgPointerMove={onCgPointerMove}
+          onCgPointerUp={onCgPointerUp}
+          onHandlePointerDown={onHandlePointerDown}
+          onHandlePointerMove={onHandlePointerMove}
+          onHandlePointerUp={onHandlePointerUp}
+        />
       </div>
       <div className="maps-nav-margin top" />
       <div className="maps-nav-margin bottom" />

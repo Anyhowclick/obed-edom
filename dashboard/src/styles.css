@@ -2036,7 +2036,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   position: absolute;
   left: 0;
   right: 0;
-  z-index: 1;
+  z-index: 3;
   pointer-events: none;
   background: rgba(7, 7, 10, 0.55);
 }
@@ -2109,11 +2109,16 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 }
 .maps-crop-cg:active { cursor: grabbing; }
 .maps-crop-cg.snapped { border-color: var(--accent-primary); }
+.maps-object-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
 .maps-object-box {
   position: absolute;
   box-sizing: border-box;
   border: 1px solid var(--accent-primary);
-  z-index: 3;
   pointer-events: none;
 }
 .maps-object-handle {

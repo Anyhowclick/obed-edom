@@ -203,6 +203,63 @@ export function exportZoomDelta(surfaceWidth: number): number {
   return -Math.log2(exportScale(surfaceWidth)) || 0;
 }
 
+/** MapLibre's cameraToCenterDistance = 0.5*canvasHeight/tan(fov/2). Widening the render canvas
+ * past the band (full-frame preview host) needs a matching fov widening so the band region
+ * projects exactly as the export while the margins around it show live map for nav context. */
+export const BASE_FOV_DEG = 36.87;
+
+export function compensatedFov(canvasHeight: number, bandHeight: number, baseFovDeg = BASE_FOV_DEG): number {
+  if (!bandHeight) return baseFovDeg;
+  const baseFovRad = (baseFovDeg * Math.PI) / 180;
+  const fovRad = 2 * Math.atan((Math.tan(baseFovRad / 2) * canvasHeight) / bandHeight);
+  return (fovRad * 180) / Math.PI;
+}
+
+/** Cap on how much taller than the band the preview host is allowed to grow, so an
+ * extreme window aspect doesn't widen the fov to a degenerate angle. */
+export const PREVIEW_NAV_MAX = 3;
+
+export type PreviewLayout = {
+  innerW: number;
+  innerH: number;
+  bandW: number;
+  bandH: number;
+  bandTop: number;
+  bandInnerH: number;
+  k: number;
+  fov: number;
+};
+
+/** Sizes and positions the pinned preview surface for one frame: `inner` fills the whole frame
+ * (not just the band) at the same CSS-px-per-authored-px density, so the margins above/below the
+ * band render live map instead of a dimmed void. `scale` is `exportScale(authoredWidth)`; the
+ * band itself always mirrors the CSS `min(100cqw, 100cqh*W/1080)` sizing. */
+export function previewLayout(frameW: number, frameH: number, surfaceWidth: number, scale: number): PreviewLayout {
+  if (frameW <= 0 || frameH <= 0 || surfaceWidth <= 0 || scale <= 0) {
+    return { innerW: 0, innerH: 0, bandW: 0, bandH: 0, bandTop: 0, bandInnerH: 0, k: 1, fov: BASE_FOV_DEG };
+  }
+  const s = 1 / scale;
+  const innerW = surfaceWidth * s;
+  const bandInnerH = 1080 * s;
+  const bandW = Math.min(frameW, (frameH * surfaceWidth) / 1080);
+  const bandH = (bandW * 1080) / surfaceWidth;
+  const k = innerW > 0 ? bandW / innerW : 1;
+  const innerH = k > 0 ? Math.min(Math.max(frameH / k, bandInnerH), bandInnerH * PREVIEW_NAV_MAX) : bandInnerH;
+  const bandTop = (innerH - bandInnerH) / 2;
+  const fov = compensatedFov(innerH, bandInnerH);
+  return { innerW, innerH, bandW, bandH, bandTop, bandInnerH, k, fov };
+}
+
+/** Maps a band-local object box (authored px) to inner-local CSS px, the same way the inner
+ * transform (`translateY(-bandTop*k) scale(k)`) maps the band row into view. */
+export function objectBoxStyle(
+  box: { x: number; y: number; w: number; h: number },
+  k: number,
+  bandTop: number
+): { left: number; top: number; width: number; height: number } {
+  return { left: box.x * k, top: (box.y - bandTop) * k, width: box.w * k, height: box.h * k };
+}
+
 export type ExportSurface = {
   cssWidth: number;
   cssHeight: number;
