@@ -82,6 +82,10 @@ PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-r
 
 - `8b4341a` honest preview option 2b: every surface renders as a 1920 CSS px screen magnified (FW 7680 scale 4, LW 3840 scale 2, CG 1920 scale 1 unchanged; camera `log2(scale)` below authored; output px == authored px; plates keep ceil/centred crop via `plateSurfaceWidth` from slideIds), preview pinned to the same inner element scaled to the band (`compensatedFov`/`previewHostRect` removed), zoom clamps/object scale/isolate projection/CG crop/prefetch/toner+relief gates follow the render camera (relief keyed off authored zoom everywhere), movie hops preview at `hopSurfaceWidth = max(from,to)` with MapView override restored on every exit path (`hopRestore`/`hopSeq`/`silentJump`); toner hairline limit resolved (toner plan updated). Reviews: Codex R1 5 findings → fix → opus 5 rounds (APPROVE-WITH-NITS ×3 with fixes applied) interleaved with Codex R2/R3 one High each → Codex R4 APPROVE. Known limits: tiles are fetched 1-2 zoom levels coarser than before on FW/LW (deliberate; dense downtown slides look softer; hillshade/NE2 raster upscaled), and `createExportMap` has no node test (Vite worker import).
 
+## Shipped 2026-09-11
+
+- `1fc4039` preview shows map above and below the band again; object controls draw over the crop overlay. Owner QA of honest preview 2b found two regressions that had happened before: (a) no map above/below the band for navigation (pinned inner = band only); (b) object box/handles hidden behind the CG/LW crop overlay. Fixed in `previewLayout(frameW, frameH, surfaceWidth, scale)` (`types.ts`): pinned-density inner element up to `PREVIEW_NAV_MAX = 3` bands tall, band centred via `translateY(-bandTop·k) scale(k)`, fov re-compensated (`compensatedFov` restored) so the band projects like the export, thumbnails/dissolve frames crop to the band; one `applyTransform` folds size/transform/fov/pixelRatio under suppress (MapLibre `resize`/`setPixelRatio`/`setVerticalFieldOfView` fire `moveend` synchronously); passthrough `transformConstrain` constructor option kept; new `BandOverlays.tsx` renders the crop overlay then a band-space object layer above it; nav margins z-index 3. Regression tests that fail on the old structure: `dashboard/tests/preview-layout.test.cjs` and `dashboard/tests/band-overlays.test.cjs` — any preview-surface rework must keep them green. Reviews: five opus rounds (one overturned a prior reviewer's band-height-constrain finding — the constructor option already bypassed the default constrain), Codex two passes → APPROVE.
+
 ### Owner decisions 2026-09-10
 - No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
 
@@ -120,6 +124,12 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 14. Honest preview 2b: a centre→FW mixed movie hop preview vs export.
 15. Honest preview 2b: "Show side panels" on a centre-only slide (density unchanged, CG frame aligned).
 16. FW slide with the display toggle off shows the full wall with the CG frame aligned.
+
+Round from 2026-09-11 (honest preview 2b owner QA): cut-out PASS, flight PASS, reorder PASS, darken PASS, add-to-map PASS. Toolbar/handles reported as regressed (hidden behind the CG/LW crop overlay) and no map above/below the band for navigation — both fixed in `1fc4039` (see Shipped 2026-09-11), re-check owed. Watercolour cancel not yet tested. Poster frame: reopen was run on an unpatched export — owner to rerun on the `_poster.key` copy. Add:
+
+17. Navigation context visible above/below the band (post-`1fc4039`).
+18. Object handles above the CG/LW frame (post-`1fc4039`).
+19. Window resize does not dirty the document.
 
 ## Open backlog
 
