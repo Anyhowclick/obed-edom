@@ -205,6 +205,11 @@ def _item_from_record(
         "y": _round_pt(rec["y"]),
         "w": _round_pt(rec["w"]),
         "h": _round_pt(rec["h"]),
+        "aspect": (
+            (rec["w"] / rec["h"])
+            if (rec["h"] and rec["w"] and rec.get("geom_source") != "mask")
+            else None
+        ),
         "text": rec.get("text") or "",
         "size": 0,
         "font": "",

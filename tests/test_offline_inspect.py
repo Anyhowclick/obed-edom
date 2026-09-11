@@ -314,6 +314,55 @@ def test_geometry_is_rounded_to_integers_like_jxa():
     assert all(isinstance(v, int) for v in item["start"] + item["end"])
 
 
+def test_aspect_is_the_unrounded_composed_ratio_not_the_rounded_wh():
+    objects: dict = {}
+    item, _reason = _item_from_record(
+        _record("g", "group", 0, x=10.0, y=20.0, w=205.871, h=71.462),
+        objects, {}, {})
+    assert item["w"] == 206 and item["h"] == 71
+    assert item["aspect"] == pytest.approx(205.871 / 71.462, abs=1e-9)
+    assert item["aspect"] != pytest.approx(item["w"] / item["h"], abs=1e-4)
+
+
+def test_aspect_is_none_when_a_dimension_is_zero():
+    objects: dict = {}
+    item, _reason = _item_from_record(
+        _record("L", "line", 0, x=0.0, y=0.0, w=99.6, h=0.0), objects, {}, {})
+    assert item["aspect"] is None
+
+
+def test_aspect_is_none_for_masked_geometry():
+    objects: dict = {}
+    item, _reason = _item_from_record(
+        _record("m", "image", 0, x=0.0, y=0.0, w=100.0, h=50.0, geom_source="mask"),
+        objects, {}, {})
+    assert item["aspect"] is None
+
+
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_offline_wall_payload_emits_aspect_on_every_item():
+    off = offline_wall_payload(FULL_DECK)
+    for slide in off["slides"]:
+        for item in slide["items"]:
+            assert "aspect" in item
+
+
+@pytest.mark.skipif(not FULL_DECK.exists(), reason="local gold deck only")
+def test_two_tier_bulk_splice_leaves_aspect_untouched():
+    template = offline_wall_payload(FULL_DECK)
+    aspects_before = {
+        (s["index"], it["kind"], it["kindIndex"]): it["aspect"]
+        for s in template["slides"] for it in s["items"]
+    }
+    bulk = _bulk_double_from_jxa(template)
+    payload = two_tier_wall_payload(FULL_DECK, bulk_geometry_fn=bulk)
+    assert payload["_offline"]["spliced"] > 0
+    for slide in payload["slides"]:
+        for item in slide["items"]:
+            key = (slide["index"], item["kind"], item["kindIndex"])
+            assert item["aspect"] == aspects_before[key]
+
+
 # --------------------------------------------------------------------------
 # locked passthrough up the super chain.
 # --------------------------------------------------------------------------

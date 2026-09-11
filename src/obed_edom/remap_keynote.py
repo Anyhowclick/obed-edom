@@ -21,6 +21,7 @@ from obed_edom.inspect import (
     inspect_keynote_checker,
     preview_pngs,
     store_inspect_payload,
+    wall_payload_carries_aspect,
 )
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
 from obed_edom.map_remap import (
@@ -154,9 +155,19 @@ def _merge_legacy_slides(
         repl = by_number.get(number)
         if repl is None:
             continue
+        prior = {
+            (it.get("kind"), it.get("kindIndex")): it.get("aspect")
+            for it in (slide.get("items") or [])
+            if "aspect" in it
+        }
         for key in ("items", "groupedText", "master", "skipped"):
             if key in repl:
                 slide[key] = repl[key]
+        for it in slide.get("items") or []:
+            if it.get("kind") in {"image", "movie"}:
+                key = (it.get("kind"), it.get("kindIndex"))
+                if key in prior:
+                    it["aspect"] = prior[key]
 
 
 def acquire_wall_payload(
@@ -173,7 +184,9 @@ def acquire_wall_payload(
     cached = cached_payload(source)
     allowed_readers = {"jxa", "offline"} if mode == "on" else {"jxa"}
     rejected_cache = cached is not None
-    if complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers:
+    usable = complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers
+    carries = mode != "on" or wall_payload_carries_aspect(cached)
+    if usable and carries:
         bulk_errors = cached.get("bulkErrors") or []
         if bulk_errors:
             say(f"WARN: cached {cached['reader']} read for {source.name} carries "
@@ -181,6 +194,10 @@ def acquire_wall_payload(
         say(f"Read {source.name} from cached {cached['reader']} payload — "
             "skipped the Keynote source read.")
         return cached
+
+    if rejected_cache and mode == "on" and usable and not carries:
+        say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
+            "re-reading.")
 
     legacy_cache_arg = {"use_cache": False} if rejected_cache else {}
     if mode == "off":
@@ -1044,6 +1061,27 @@ def remap_keynote(
         card_grid_report=card_grid,
         roster_report=roster,
     )
+    hidden_addresses = {
+        (t.slide_number, t.kind, t.kind_index) for t in transforms if t.role == "hide"
+    }
+    aspectless_count = 0
+    aspectless_slides: set[int] = set()
+    for slide in wall.get("slides") or []:
+        if slide.get("skipped"):
+            continue
+        number = int(slide.get("number") or (int(slide.get("index") or 0) + 1))
+        for item in slide.get("items") or []:
+            address = (number, str(item.get("kind") or ""), item.get("kindIndex"))
+            if (
+                item.get("kind") in {"image", "movie", "group"}
+                and address not in hidden_addresses
+                and "aspect" not in item
+            ):
+                aspectless_count += 1
+                aspectless_slides.add(number)
+    if aspectless_count:
+        say(f"WARN: aspect-snap unavailable for {aspectless_count} item(s) on {len(aspectless_slides)} slide(s) "
+            "(no per-item aspect; legacy Keynote-read items) — those rects keep the raw affine.")
     confirmed = [r for r in framing_rows if r.get("confirmed")]
     if confirmed:
         overruled = [r for r in confirmed if r.get("fitted")]

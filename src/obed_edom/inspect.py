@@ -920,6 +920,17 @@ def complete_cached_wall_payload(payload: dict[str, Any] | None) -> bool:
     return True
 
 
+def wall_payload_carries_aspect(payload: dict[str, Any] | None) -> bool:
+    """Every image/movie/group item carries the `aspect` key (value may be None for masked)."""
+    if not isinstance(payload, dict):
+        return True
+    for slide in payload.get("slides") or []:
+        for item in slide.get("items") or []:
+            if item.get("kind") in {"image", "movie", "group"} and "aspect" not in item:
+                return False
+    return True
+
+
 def preview_media_type(path: Path | str) -> str:
     ext = Path(path).suffix.lower()
     return _PREVIEW_MEDIA_TYPES.get(ext, "application/octet-stream")

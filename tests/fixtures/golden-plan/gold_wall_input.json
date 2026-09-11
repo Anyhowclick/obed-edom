@@ -16,8 +16,8 @@
   "OBED_WRITE_TIMING": null
  },
  "goldenVersion": 1,
- "inspectVersion": 4,
- "planSha256": "a0e805b7f678dd038daa4b593fbda81657cfb4cb17c2ffe190546249e24d5504",
+ "inspectVersion": 5,
+ "planSha256": "3443be78e3f9343fe54fdbe7fe7168abfd54049f4d68310db6a7eb213073c649",
  "plannerEnv": {
   "faces": {
    "Amplitude-Bold|True|False": "Amplitude-Bold|Amplitude",
@@ -117,7 +117,7 @@
   },
   {
    "asGeomLines": 337,
-   "asGeomSha": "e2938eaa367b",
+   "asGeomSha": "b3d005d12214",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 27,
@@ -133,7 +133,7 @@
   },
   {
    "asGeomLines": 369,
-   "asGeomSha": "36247d488981",
+   "asGeomSha": "68d2644468e0",
    "badgeRaises": 7,
    "groupRemoves": 0,
    "n": 28,
@@ -149,7 +149,7 @@
   },
   {
    "asGeomLines": 248,
-   "asGeomSha": "8488bde2b8a0",
+   "asGeomSha": "3cdbf682c9ea",
    "badgeRaises": 6,
    "groupRemoves": 0,
    "n": 14,
@@ -191,7 +191,7 @@
   },
   {
    "asGeomLines": 694,
-   "asGeomSha": "4e797413ed5d",
+   "asGeomSha": "bb4316e59c7d",
    "badgeRaises": 6,
    "groupRemoves": 0,
    "n": 36,
@@ -207,7 +207,7 @@
   },
   {
    "asGeomLines": 1471,
-   "asGeomSha": "f26316f0441b",
+   "asGeomSha": "b3182e3247c7",
    "badgeRaises": 6,
    "groupRemoves": 0,
    "n": 73,
@@ -223,7 +223,7 @@
   },
   {
    "asGeomLines": 25,
-   "asGeomSha": "bcc0d4c0f4c5",
+   "asGeomSha": "44abbcf775c4",
    "badgeRaises": 0,
    "groupRemoves": 0,
    "n": 4,
@@ -236,7 +236,7 @@
   },
   {
    "asGeomLines": 3511,
-   "asGeomSha": "f5531157886e",
+   "asGeomSha": "f51c125094e3",
    "badgeRaises": 3,
    "groupRemoves": 0,
    "n": 173,
@@ -253,7 +253,7 @@
   },
   {
    "asGeomLines": 5170,
-   "asGeomSha": "5f9092b3bfe4",
+   "asGeomSha": "5b0fc7c1cb03",
    "badgeRaises": 3,
    "groupRemoves": 0,
    "n": 360,
@@ -270,7 +270,7 @@
   },
   {
    "asGeomLines": 3646,
-   "asGeomSha": "b69a7dc96707",
+   "asGeomSha": "3f78dd337e95",
    "badgeRaises": 3,
    "groupRemoves": 0,
    "n": 367,
@@ -287,7 +287,7 @@
   },
   {
    "asGeomLines": 4512,
-   "asGeomSha": "1c3cd57bb577",
+   "asGeomSha": "102c5cbf0fef",
    "badgeRaises": 3,
    "groupRemoves": 3,
    "n": 214,
@@ -304,7 +304,7 @@
   },
   {
    "asGeomLines": 4197,
-   "asGeomSha": "3f9214ca89a1",
+   "asGeomSha": "7ed497f5abd8",
    "badgeRaises": 3,
    "groupRemoves": 47,
    "n": 199,
@@ -321,7 +321,7 @@
   },
   {
    "asGeomLines": 3651,
-   "asGeomSha": "99cdfd26a2b1",
+   "asGeomSha": "08b791786c75",
    "badgeRaises": 3,
    "groupRemoves": 76,
    "n": 174,
@@ -338,7 +338,7 @@
   },
   {
    "asGeomLines": 3703,
-   "asGeomSha": "615f860cf4ce",
+   "asGeomSha": "18211afe5ebe",
    "badgeRaises": 3,
    "groupRemoves": 80,
    "n": 172,
@@ -369,7 +369,7 @@
   },
   {
    "asGeomLines": 5197,
-   "asGeomSha": "8c804819b364",
+   "asGeomSha": "86b2b0ef69eb",
    "badgeRaises": 0,
    "groupRemoves": 0,
    "n": 259,
