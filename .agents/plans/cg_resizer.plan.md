@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-09 (later same day), main is `a555f24` after PR #60 (parity round + R0.4), #61 `surface-raise-tokens`, #62 dead-code removal, #64 the Keynote-free golden plan gate, and #65 R2b `r-propose-two-tier`; the current branch `chore/golden-gate-hard-parity` carries one commit `20feac0` on top making propose/apply parity a hard gate. R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens` and a six-survey refactor assessment are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. Open sequence: `stat-raise-dead-4` from the gate's log, `as-geometry-rounding` (arm A's rounding vs. the plan oracle bar), a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: finish localising/fixing `stat-raise-dead-4`, `as-geometry-rounding` (arm A's rounding vs. the plan oracle bar), a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2; new bug-backlog item `badge-width-collapse-gold-slide-2` (Gold slide 2 badge groups collapsed ~12x narrower) queued after `stat-raise-dead-4`/`as-geometry-rounding`. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -36,7 +36,7 @@ todos:
     content: "BUG (B) - CLOSED 2026-09-09. On the Full report deck, pass 2 left 134 stat groups unresolved (wall font size, buried) with 6 dedup shortfalls and 145 skips; the driver turned out to be the reuse-chain paste no-op fixed in `f76e8d3` (D6), not stat-finalize addressing. The 2026-09-09 parity remap measured the full counter table against THIS item's own 2026-09-04 originals: done 245 -> 381, skipped 145 -> 11, unresolved 134 -> 0, dedupShortfall 6 -> 0, jobs 390 -> 392, sigFallback 108 -> 110 (also recorded: sized 413, badgeMoved 319, dedupDeleted 206, raiseMoved 377). Two things did NOT close with it: `-1719`/`frontErr` stays unverifiable by CLI (`keynote.py:1421`/`:1508` keep it only in `result[\"raw\"]`, see `surface-raise-tokens`), and the run raised a new anomaly tracked as `stat-raise-dead-4`. Evidence: `output/bank/2026-09-09/parity-run/run.log`."
     status: completed
   - id: stat-raise-dead-4
-    content: "BUG BACKLOG (B), NEW 2026-09-09, found in the parity remap (`output/bank/2026-09-09/parity-run/run.log`): `WARNING stat-finalize: 4 stat group(s) did not move on Bring to Front (0 abandoned mid-slide)` — raiseMoved 377 / raiseDead 4 / raiseUnknown 0 of 381 done groups, deck-wide, on `8a7b4bb`'s ascending gated raise. Offline localisation this round (`probes/find_raise_dead.py`, same run) found 2 of 4 by non-contiguous-group-block analysis: slide 106 group `18386827` ('Keiko', z=15, buried while siblings 'Daniel'/'Grace' raised to 18/19) and slide 110 group `19010920` ('Sunday Service', z=2, buried while siblings 'Children's Church'/'Bible Study' raised to 6/7) — both non-reuse, and both were CONTIGUOUS in the banked 2026-09-08 healthy run (`output/bank/2026-09-08/twin-zorder/PREFIX2.json`), so both are regressions against that baseline, not pre-existing. The other 2 raiseDead are unlocatable offline: a lone stat group on its slide leaves no z-order contiguity signal to test against. The reuse band 123-128 is internally contiguous on every slide with groups (self-consistency check, not a source comparison). Slide 42's own 2-group gap was checked and ruled out — identical in this run and the 2026-09-08 healthy run, pre-existing and unrelated. Facts only, no cause yet: the machine was hands-off by the owner's own timestamped ack (`ENV.txt`: 'I'm already hands off, out for breakfast. start!', 09:40:44) so the stolen-GUI-interaction story that explained the 2026-09-07 arm-A card loss does not apply by default here — but per 'measure before attributing', this is still n=1 on a single run and needs a second measurement before ruling it out formally. Precondition / first step: `surface-raise-tokens` below — the per-slide `raiseDead(s=,idx=)`/`raiseUnknown(s=,idx=)` tokens are not currently logged, so this round's localisation needed an offline z-order probe instead of reading the log directly; the next run should localise all 4 by log alone."
+    content: "BUG BACKLOG (B), NEW 2026-09-09, found in the parity remap (`output/bank/2026-09-09/parity-run/run.log`): `WARNING stat-finalize: 4 stat group(s) did not move on Bring to Front (0 abandoned mid-slide)` — raiseMoved 377 / raiseDead 4 / raiseUnknown 0 of 381 done groups, deck-wide, on `8a7b4bb`'s ascending gated raise. Offline localisation this round (`probes/find_raise_dead.py`, same run) found 2 of 4 by non-contiguous-group-block analysis: slide 106 group `18386827` ('Keiko', z=15, buried while siblings 'Daniel'/'Grace' raised to 18/19) and slide 110 group `19010920` ('Sunday Service', z=2, buried while siblings 'Children's Church'/'Bible Study' raised to 6/7) — both non-reuse, and both were CONTIGUOUS in the banked 2026-09-08 healthy run (`output/bank/2026-09-08/twin-zorder/PREFIX2.json`), so both are regressions against that baseline, not pre-existing. The other 2 raiseDead are unlocatable offline: a lone stat group on its slide leaves no z-order contiguity signal to test against. The reuse band 123-128 is internally contiguous on every slide with groups (self-consistency check, not a source comparison). Slide 42's own 2-group gap was checked and ruled out — identical in this run and the 2026-09-08 healthy run, pre-existing and unrelated. Facts only, no cause yet: the machine was hands-off by the owner's own timestamped ack (`ENV.txt`: 'I'm already hands off, out for breakfast. start!', 09:40:44) so the stolen-GUI-interaction story that explained the 2026-09-07 arm-A card loss does not apply by default here — but per 'measure before attributing', this is still n=1 on a single run and needs a second measurement before ruling it out formally. Precondition / first step: `surface-raise-tokens` below — the per-slide `raiseDead(s=,idx=)`/`raiseUnknown(s=,idx=)` tokens are not currently logged, so this round's localisation needed an offline z-order probe instead of reading the log directly; the next run should localise all 4 by log alone. UPDATE 2026-09-10 gate: `output/bank/2026-09-10/w1-gate/gate.log` (lines 33 and 238) localised the dead raises BY LOG ALONE for the first time — `raiseDead(s=40,idx=1) raiseDead(s=106,idx=1)`, 2 dead not 4, IDENTICAL in arm A and arm B, with arm A additionally carrying `frontErr='[-1719]'` and arm B none, so `-1719` and `raiseDead` are dissociable; `-1719` is `errAEIllegalIndex`, NOT an Accessibility denial (Accessibility was probed granted before launch; `-1743`/`-25211` are the denial codes). Slide 106 has now reproduced in four runs; slide 40 in two. Every dead raise is idx=1 = the FIRST raise processed on its slide (ascending order). Operational rule: `--pass2-bar parity` is mandatory for W1 gating until this is fixed, because the strict bar aborts on any `frontErr`. Next step unchanged: thread (s=,idx=,phase) into `obedFront`'s `frontErr`, add a `raiseBlind(s=)` token, then pass 2 ×3 on a 10-slide copy — now with a deterministic target."
     status: pending
   - id: as-geometry-rounding
     content: "BUG BACKLOG (B), NEW 2026-09-10, opened from the 2026-09-10 W1 whole-deck gate
@@ -138,8 +138,9 @@ todos:
     content: "FEATURE (generator). Use the offline IWA writer (ec20f4b) to set cyan superscript verse numbers offline and retire generate's GUI Copy/Paste-Style pass 2 (Accessibility, silent-fail). Style-table patch = a harder byte class than geometry floats; own spike + per-deck openability test."
     status: pending
   - id: framing-pin-continuity
-    content: "BUG (code implemented, pending review), 2026-09-10 on branch `fix/framing-pin-continuity`
-      @ `02e16c5`. The sibling-reuse gate in `plan_payload_transforms` (`map_remap.py`) tracked
+    content: "DONE 2026-09-10, merged main in PR #74 (`fcf6c15` merge commit). BUG — DONE, 2026-09-10 on branch `fix/framing-pin-continuity`
+      @ `02e16c5`. Codex review ran 3 rounds; round-3's finding is banked as
+      `rotation-provenance-rounded` (owner-accepted). The sibling-reuse gate in `plan_payload_transforms` (`map_remap.py`) tracked
       `prev_pin` — the OPERATOR'S requested template slide on the previous page — as the condition
       for reusing that page's affine when the current page's own pin collapses to a sliver. That
       meant an UNPINNED predecessor that still landed on the wanted template by pairing could never
@@ -181,9 +182,9 @@ todos:
       `test_reused_affine_clamps_to_cover_the_frame_only_where_the_panel_is_big_enough`,
       `test_gold_pin_continuity_reuses_slide_5s_affine_with_ty_clamped` (skip-if-missing, offline via
       `offline_wall_payload`)."
-    status: pending
+    status: completed
   - id: framing-coverage-report
-    content: "FEATURE (report-only, code implemented, pending review), 2026-09-10, same branch as
+    content: "DONE 2026-09-10, merged main in PR #74 (`fcf6c15` merge commit). FEATURE (report-only) — DONE, 2026-09-10, same branch as
       `framing-pin-continuity`. Owner ruled slide 7's thumbnail-overlay stranding ACCEPTED (see
       `framing-pin-continuity`'s R2), so this is measurement honesty only — it does NOT gate or touch
       `_framing_unusable`. `on_canvas_fraction` gained a 5th optional out-param
@@ -212,7 +213,7 @@ todos:
       `tests/test_golden_plan.py` passed with NO regeneration. Dashboard/TS
       (`dashboard/src/tabs/ResizeTab.tsx`) intentionally NOT touched (would drag in `npm install &&
       npm run build`); the extra report keys are additive."
-    status: pending
+    status: completed
   - id: framing-auto-fallback-uncompared
     content: "BUG BACKLOG (B), NEW 2026-09-10, deferred out of `framing-pin-continuity` on purpose.
       `plan_payload_transforms`'s unconstrained fallback (`map_remap.py` ~:3993-3997, inside the
@@ -261,6 +262,42 @@ todos:
       closed. When a guard turns on a value meaning what its name suggests, verify that at
       the point the value is PRODUCED, not where it is consumed."
     status: pending
+  - id: badge-width-collapse-gold-slide-2
+    content: "BUG BACKLOG (B), owner-reported from the 2026-09-10 16:31 Gold CG run
+      (`obed-edom-wt-maps-tab` worktree, `feat/maps-ux-round` @ `5acc709`, PRODUCTION AppleScript
+      path, `OBED_OFFLINE_WRITE` off). Slide 2's two yellow badge groups ('Ps George'/'Ps Joanna',
+      Amplitude-Bold, [255,251,0]) collapsed from group 278x88 to 23x88 (text-box stored width
+      268.2 -> 22.6, ~12x narrower, height untouched, text 55->54pt normal caption step-down,
+      STRING INTACT byte-for-byte — NOT the owner's stray typing). Both badges shrank by the same
+      ratio independently = systematic. Region: `src/obed_edom/map_remap.py:100-152`
+      (`ItemTransform` / `_child_payload`), whose own docstring names this object ('union of a
+      word-wrapped autosize child (measured 278x88 -> 69x261 on Gold slide 2)'); `_child_payload`
+      refuses a child-level write unless sx~=sy (+-1%), and what landed is sx~=0.083, sy=1.0. The
+      observed failure (width collapse) differs from the docstring's historical one (height
+      explosion), so the region is certain but the branch is not — needs a live trace or an
+      offline replay of the plan for slide 2 to see which spec produced w=22.6. Evidence:
+      `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab/output/.resize/646073cf/Gold_Wall_Input_CG.key`
+      and session `output/.sessions/646073cf.json` in that worktree (may be gone). Queue: bug
+      backlog, after `stat-raise-dead-4`/`as-geometry-rounding`."
+    status: pending
+  - id: kindindex-guard-test-vacuous
+    content: "HOUSEKEEPING, small, can ride any branch. VERIFIED 2026-09-11 (orchestrator
+      re-ran: fails in 7.7s, `flagged == []` where `[73]` expected) that
+      `tests/test_iwa_kindindex.py::test_integration_full_deck_guard_trips_on_dual_slide` is
+      NOT tripped by deck drift. The test reads its oracle via `_cached_exact_payload`, the
+      shared inspect-cache slot for the current deck digest
+      (`.cache/inspect/2992d8c0….v4.k15.3.1.json`); since R2b that slot is stamped
+      `reader: offline`, so IWA-derived kind counts are compared against an offline-reader
+      payload and agree by construction — the JXA-only dual listing on slide 73 (a
+      filled/variation text box JXA reports as both text and shape) can never trip the guard.
+      Same equal-by-construction vacuity the JXA digest bank (PR #73,
+      `tests/fixtures/jxa-slide-digests/`) fixed for `deck_slide_digests`. Sibling
+      `test_integration_map_deck_reconstructs_addressing` (same file, `MAP_DECK`) reads the
+      same oracle source and needs the same guard. Fix options: (1) skip unless
+      `payload.get(\"reader\") == \"jxa\"` — honest short-term fix, since Full is deliberately
+      unbanked in the digest bank (see that reasoning in the jxa-digest-bank work); (2) bank a
+      JXA per-slide kind-count fixture next to the digest bank."
+    status: pending
 isProject: false
 ---
 
@@ -303,18 +340,32 @@ the banked deck, one clean Keynote process, no concurrent automation, one deck a
 memory-pressure monitoring. Stop if pressure climbs or Keynote stops responding. A larger-memory
 Mac is preferred, not mandatory policy. Historical reviews retain their original stronger wording.
 
-## Current state (2026-09-09 evening, branch `chore/golden-gate-hard-parity` @ `20feac0`)
+## Current state (2026-09-11 morning, main `86c41f5`)
 
-- `main` is `a555f24`. Merged today, in order: PR #60 (parity round + R0.4), #61
-  `fix/surface-raise-tokens` (`c5e9c34`), #62 `chore/resizer-dead-code` (`7e0d517`), #64
-  `chore/golden-plan-gate` (`4651b7b`), #65 `feat/r2b-propose-two-tier` (`4627497`). The current
-  branch carries one commit on top of `a555f24` — `20feac0`, making propose/apply parity a hard
-  gate now that R2b is merged.
-- `surface-raise-tokens` and R2b `r-propose-two-tier` are both DONE (see their todos); their
-  shared precondition/successor `stat-raise-dead-4` is next, unblocked, and should localise all 4
-  `raiseDead` occurrences by log alone on the next production run.
+- `main` is `86c41f5`, a merge of PR #70 (maps-ux-round) on top of PR #74. Merged 2026-09-10, in
+  order: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes, six commits
+  including the golden re-bank, the JXA digest bank, and deletion of the multiset comparator), and
+  PR #74 (`fix/framing-pin-continuity`, commits `6cd2088`/`6f2a7ce`/`0b11586`/`2093594`) at
+  `fcf6c15` merge commit 14:15Z. The `chore/golden-gate-hard-parity` propose/apply hard-parity gate
+  is on main via PR #73's lineage (no separate `20feac0`/`a555f24` branch state remains — that
+  wording is stale and is corrected here).
+- `surface-raise-tokens` and R2b `r-propose-two-tier` are both DONE (see their todos);
+  `stat-raise-dead-4` is now log-localised (2026-09-10 gate: slides 40/106, both idx=1,
+  deterministic across arms — see that todo) and still open pending the fix.
+- `framing-pin-continuity` and `framing-coverage-report` are DONE, merged in PR #74; the round-3
+  Codex finding is banked as `rotation-provenance-rounded` (owner-accepted, still open as backlog).
+  New bug-backlog item `badge-width-collapse-gold-slide-2` opened from the owner's 2026-09-10 16:31
+  Gold CG run.
 - `resizer-refactor-assessment` is DONE: no rewrite, six read-only surveys banked, and the defects
   found reorder the sequence ahead of W1/W2 — see that todo and "Order of work" below.
+- **Open housekeeping item:** PR #74 reported one pre-existing failure on main,
+  `tests/test_iwa_kindindex.py::test_integration_full_deck_guard_trips_on_dual_slide`; suite at
+  merge was 1693 passed / 16 skipped plus this one failure. Re-verified 2026-09-11 (fails in
+  7.7s, `flagged == []` where `[73]` expected) — NOT deck drift: the test's oracle
+  (`_cached_exact_payload`, the shared inspect-cache slot for the current deck digest) is
+  stamped `reader: offline` since R2b, so IWA-derived kind counts agree with it by construction
+  and the JXA-only dual listing on slide 73 can never trip the guard. See new todo
+  `kindindex-guard-test-vacuous`.
 - **W1 default flip stays ON HOLD** (`w-offline-write-stabilise`: universal naturalSize writer +
   a healthy whole-deck gate are its bar). The 2026-09-10 nap-window whole-deck gate ran
   (`output/bank/2026-09-10/w1-gate/`) and came back RED: arm B (offline writer) is now clean bar
@@ -434,7 +485,8 @@ cleanup and golden-plan gate; the refactor assessment.
    2026-09-10 (`output/bank/2026-09-10/w1-gate/`): RED, arm B now clean bar slide 36, arm A now the
    larger RED source — see `as-geometry-rounding`.
 2. **`stat-raise-dead-4`** from that gate's `raiseDead(s=,idx=)` log lines — localise all 4 by log
-   alone, now that `surface-raise-tokens` is merged.
+   alone, now that `surface-raise-tokens` is merged. (2026-09-10 gate: 2 dead, slides 40/106, both
+   idx=1, deterministic across arms — see the todo)
 2b. **`as-geometry-rounding`**, NEW 2026-09-10 — decide whether the plan-oracle bar widens for the
    AppleScript arm, or the AppleScript geometry writer compensates for Keynote's rounding, or the
    14 slides hide a real defect distinct from rounding; blocks the W1 default flip either way.
@@ -467,7 +519,7 @@ Standing: re-run `scripts/e2e_run_parity.py` after R0.4 (needs an owner-acked Ke
 | **R2** | `r-readback-two-tier` → `r-propose-two-tier` | output-deck A/B | both DONE — readback 2.4–2.6x; R2b PR #65 (`4627497`), cold propose 96s vs 269s legacy |
 | B (merged) | `w1-build-order-nondeterminism`, z-order raise-order fix | owner playback + parity remap | both DONE and CLOSED — `59111fc` and `8a7b4bb`, PR #59 |
 | B (merged) | `surface-raise-tokens` | none (log surfacing) | DONE — PR #61 (`c5e9c34`); precondition for `stat-raise-dead-4` |
-| B (new) | `stat-raise-dead-4` | a second production run | OPEN, NEXT — `raiseDead=4/381`; 2 of 4 located offline on non-reuse slides 106/110; localise all 4 by log now |
+| B (new) | `stat-raise-dead-4` | a second production run | OPEN, NEXT — `raiseDead=4/381`; log-localised 2026-09-10: slides 40/106 idx=1, deterministic |
 | B (branch) | `builds-follow-source`, `side-panels-positional`, `autosize-rect-alignment-fix`, `pack-lists-gate-widen`, `reuse-chain-preadd-duplicate` | Gold builds | all DONE + Gold-verified; backlog spin-off `reuse-chain-parked-snapshot` open |
 | B / features | reuse framing fallback, cluster affine, stat/photo/label residuals | mixed | open, independent — see "Order of work" 6–7 |
 | drop | `w-hides-offline`, skipped-slide option (2), Stage B / batch z-order / batch delete | | closed with reasons (see Insights) |
