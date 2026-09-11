@@ -410,6 +410,7 @@ export type MapsExportPlan = {
     plateId: string;
     plateW: number;
     plateH: number;
+    slideIds: string[];
     camera: { lat: number; lon: number; zoom: number; bearing: number; pitch: number };
     style: string;
     highlights: string[];

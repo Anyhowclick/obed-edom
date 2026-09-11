@@ -96,6 +96,14 @@ export function authoredSurfaceWidth(slide: MapsSlide, audience: MapsAudience): 
   return captureWidth(slide);
 }
 
+/** Export render surface for a movie hop: the wider of the two endpoints' own capture surfaces
+ * (mirrors the export's captureFlyFrames call — a mixed-surface hop renders, both in export and
+ * in preview, at the denser of the two). Used by both the export call sites and MapView's preview
+ * so they cannot drift. */
+export function hopSurfaceWidth(from: MapsSlide, to: MapsSlide, audience: MapsAudience): number {
+  return Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience));
+}
+
 export type MapsFlight = "arc" | "phases";
 
 export type MapsRoutePoint = { lat: number; lon: number };
@@ -182,6 +190,52 @@ export const HOP_TIPS: Record<MapsHopKind, string> = {
   cut: "Instant cut. Used when the map style or region highlights change.",
 };
 
+/** Reference CSS width for export rendering: every surface renders as if it were an
+ * EXPORT_REF_WIDTH-px-wide screen, at pixelRatio = its own scale, so tiles/relief/text are
+ * fetched at the same density everywhere and output px still equals authored px. */
+export const EXPORT_REF_WIDTH = 1920;
+
+export function exportScale(surfaceWidth: number): number {
+  return 2 ** Math.max(0, Math.round(Math.log2(surfaceWidth / EXPORT_REF_WIDTH)));
+}
+
+export function exportZoomDelta(surfaceWidth: number): number {
+  return -Math.log2(exportScale(surfaceWidth)) || 0;
+}
+
+export type ExportSurface = {
+  cssWidth: number;
+  cssHeight: number;
+  pixelRatio: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  cropX: number;
+  cropY: number;
+};
+
+/** `surfaceWidth` defaults to `width` (stills, movies, CG); morph plates pass the slide's
+ * surface width explicitly since the plate itself can be larger than one authored surface. */
+export function exportSurface(width: number, height: number, surfaceWidth = width): ExportSurface {
+  const scale = exportScale(surfaceWidth);
+  const cssWidth = Math.ceil(width / scale);
+  const cssHeight = Math.ceil(height / scale);
+  const canvasWidth = cssWidth * scale;
+  const canvasHeight = cssHeight * scale;
+  return {
+    cssWidth,
+    cssHeight,
+    pixelRatio: scale,
+    canvasWidth,
+    canvasHeight,
+    cropX: Math.floor((canvasWidth - width) / 2),
+    cropY: Math.floor((canvasHeight - height) / 2),
+  };
+}
+
+export function exportCamera(camera: MapsCamera, surfaceWidth: number): MapsCamera {
+  return { ...camera, zoom: camera.zoom + exportZoomDelta(surfaceWidth) };
+}
+
 export const MORPH_MAX_PITCH = 0.5;
 export const MORPH_MAX_DBEARING = 0.05;
 export const MORPH_MAX_DZOOM = 2;
@@ -192,34 +246,37 @@ export const WALL_H = 1080;
 export const CENTRE_W = 3840;
 export const CENTRE_ORIGIN_X = 1920;
 export const CG_W = 1920;
+export const FW_W = 1920;
 
 export function captureWidth(slide: { includeSidePanels?: boolean }): number {
   return slide.includeSidePanels ? WALL_W : CENTRE_W;
 }
 
+/** Displayed band width in authored px: the CG split shows only the CG crop; a centre-only slide
+ * (authoredWidth === CENTRE_W) shows just the centre unless "Show side panels" widens the visible
+ * band to the full wall for context — density (authoredWidth) is unchanged either way. */
+export function surfaceWidthOf(authoredWidth: number, sidePanels: boolean): number {
+  const splitCg = authoredWidth <= CG_W;
+  const fullWall = sidePanels && !splitCg;
+  return splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
+}
+
+/** Widest capture surface among a plate's constituent slides — this picks the render scale
+ * (exportScale/exportSurface) for the plate, since one plate's slides can mix FW and centre-only.
+ * When no slideIds resolve, falls back to a guess from the plate's own pixel width rather than
+ * silently assuming centre-only. */
+export function plateSurfaceWidth(
+  slideIds: string[],
+  slidesById: Map<string, { includeSidePanels?: boolean }>,
+  plateW?: number
+): number {
+  const resolved = slideIds.map((sid) => slidesById.get(sid)).filter((s): s is { includeSidePanels?: boolean } => Boolean(s));
+  if (!resolved.length) return plateW !== undefined && plateW > CENTRE_W ? WALL_W : CENTRE_W;
+  return resolved.reduce((max, slide) => Math.max(max, captureWidth(slide)), CENTRE_W);
+}
+
 export function showCgBand(slide: { cg?: unknown }): boolean {
   return !slide.cg;
-}
-
-/** Band the preview canvas occupies inside the frame, at the authored aspect ratio (surfaceWidth × surfaceHeight). Matches the `.maps-map-band` CSS sizing. */
-export function previewHostRect(
-  frameWidth: number,
-  frameHeight: number,
-  surfaceWidth: number,
-  surfaceHeight = 1080
-): { x: number; y: number; width: number; height: number } {
-  if (!frameWidth || !frameHeight) return { x: 0, y: 0, width: 0, height: 0 };
-  const width = Math.min(frameWidth, (frameHeight * surfaceWidth) / surfaceHeight);
-  const height = (width * surfaceHeight) / surfaceWidth;
-  return { x: (frameWidth - width) / 2, y: (frameHeight - height) / 2, width, height };
-}
-
-/** MapLibre's cameraToCenterDistance = 0.5*canvasHeight/tan(fov/2). Widening the canvas past the band (full-frame host) needs a matching fov widening so the band region projects the same as an export sized to the band alone. */
-export function compensatedFov(canvasHeight: number, bandHeight: number, baseFovDeg = 36.87): number {
-  if (!bandHeight) return baseFovDeg;
-  const baseFovRad = (baseFovDeg * Math.PI) / 180;
-  const fovRad = 2 * Math.atan((Math.tan(baseFovRad / 2) * canvasHeight) / bandHeight);
-  return (fovRad * 180) / Math.PI;
 }
 
 export function coerceHopKinds(doc: MapsDocument): MapsDocument {
@@ -528,6 +585,24 @@ export function wrapLon(lon: number): number {
 
 export function clampZoom(zoom: number, minZoom = 0): number {
   return Math.max(minZoom, Math.min(22, zoom));
+}
+
+/** MapLibre map-zoom bounds for the render map (preview and, via exportZoomDelta, export):
+ * authored zoom 0 at the deepest export scale (exportZoomDelta(WALL_W) === -2) must stay
+ * unclamped, so the floor sits at -2, not 0. */
+export const ML_MIN_ZOOM = -2;
+export const ML_MAX_ZOOM = 22;
+
+export function clampMapZoom(zoom: number): number {
+  return Math.max(ML_MIN_ZOOM, Math.min(ML_MAX_ZOOM, zoom));
+}
+
+/** Converts a raw CG-crop pointer-drag delta (client px) into an authored-px shift: the drag
+ * spans `bandWidth` client px across `surfaceWidth` authored px — the DISPLAYED surface width,
+ * not the density-driving authoredWidth (those differ when "Show side panels" widens the band
+ * without changing capture density). */
+export function cgDragDx(clientDx: number, surfaceWidth: number, bandWidth: number): number {
+  return bandWidth > 0 ? (clientDx * surfaceWidth) / bandWidth : 0;
 }
 
 export function nextSlideId(slides: MapsSlide[]): string {

@@ -6,17 +6,23 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
+import { exportGpuCap } from "./captureExport";
 import { resizeFromCorner, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
-import { applyBoundaryZoomOffset } from "./tonerBoundaries";
+import { applyAuthoredZoomGates } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
 import { mapsTransformRequest } from "./tileProxy";
 import {
+  cgDragDx,
+  clampMapZoom,
   clampZoom,
-  compensatedFov,
+  exportScale,
+  exportZoomDelta,
   minZoomForView,
-  previewHostRect,
+  ML_MAX_ZOOM,
+  ML_MIN_ZOOM,
   snapCgShift,
+  surfaceWidthOf,
   wrapLon,
   worldCopyWarning,
   type MapsCamera,
@@ -31,65 +37,54 @@ import {
 } from "./types";
 
 const WALL_W = 7680;
-const FW_W = 1920;
 const CG_W = 1920;
 const CG_ORIGIN = 2880;
 const PIN_LAYERS = ["churches-dots", "churches-drops", "churches-landmarks", "churches-labels"];
 const COUNTRY_PICK_MAX_ZOOM = 7;
-const ML_MIN_ZOOM = -2;
-const ML_PREVIEW_MIN_ZOOM = -8;
-const ML_MAX_ZOOM = 22;
 
-function previewSurfaceRect(map: MapLibreMap, authoredWidth = WALL_W) {
-  const container = map.getContainer();
-  return previewHostRect(container.clientWidth, container.clientHeight, authoredWidth);
+/** Pinned preview: CSS-px-per-authored-px is fixed at 1/exportScale(authoredWidth) — the same
+ * density the export renders that slide's own capture surface at, so the captured region is
+ * always 1920 CSS px wide (EXPORT_REF_WIDTH) at that density. "Show side panels" can still widen
+ * the *visible* band beyond the capture (`surfaceWidth` > `authoredWidth`, framing context around
+ * a centre-only slide) — the inner element then grows wider at the SAME density rather than
+ * changing it, exactly like the old fov-widened full-frame host did. A CSS transform (k = band's
+ * on-screen width ÷ inner's own CSS width) then scales that fixed-density surface to fit the band. */
+function objectLayoutScale(authoredWidth: number): number {
+  return 1 / exportScale(authoredWidth);
 }
 
-function previewZoomDelta(map: MapLibreMap, authoredWidth = WALL_W): number {
-  const width = previewSurfaceRect(map, authoredWidth).width;
-  if (!width) return 0;
-  return Math.log2(width / authoredWidth);
+function sizeInner(innerEl: HTMLDivElement, authoredWidth: number, surfaceWidth: number): void {
+  const scale = objectLayoutScale(authoredWidth);
+  innerEl.style.width = `${surfaceWidth * scale}px`;
+  innerEl.style.height = `${1080 * scale}px`;
 }
 
-function objectPreviewScale(map: MapLibreMap, authoredWidth = WALL_W): number {
-  const width = previewSurfaceRect(map, authoredWidth).width;
-  return width > 0 ? width / authoredWidth : 1;
+/** Live CSS transform scale (k): band's on-screen width ÷ inner's own (unscaled) CSS width. */
+function transformScaleOf(bandWidth: number, innerWidth: number): number {
+  return innerWidth > 0 && bandWidth > 0 ? bandWidth / innerWidth : 1;
 }
 
-function captureCanvas(canvas: HTMLCanvasElement, rect?: { x: number; y: number; width: number; height: number }) {
-  if (!rect) {
-    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-  }
-  const scaleX = canvas.width / canvas.clientWidth;
-  const scaleY = canvas.height / canvas.clientHeight;
-  const output = document.createElement("canvas");
-  output.width = Math.max(1, Math.round(rect.width * scaleX));
-  output.height = Math.max(1, Math.round(rect.height * scaleY));
-  const ctx = output.getContext("2d");
-  if (!ctx) return Promise.resolve(null);
-  ctx.drawImage(
-    canvas,
-    rect.x * scaleX,
-    rect.y * scaleY,
-    rect.width * scaleX,
-    rect.height * scaleY,
-    0,
-    0,
-    output.width,
-    output.height
-  );
-  return new Promise<Blob | null>((resolve) => output.toBlob(resolve, "image/png"));
+/** Converts a client-space pointer position into the map's own (untransformed) layout space,
+ * so `map.project`/`map.unproject`/`queryRenderedFeatures` see the same coordinates MapLibre's
+ * own internal event handling would (MapLibre's DOM.getScale already does this for native events;
+ * this mirrors it for our own manual `getBoundingClientRect()` math). */
+function toLayoutPoint(map: MapLibreMap, clientX: number, clientY: number): [number, number] {
+  const canvas = map.getCanvas();
+  const rect = canvas.getBoundingClientRect();
+  const k = canvas.clientWidth ? rect.width / canvas.clientWidth : 1;
+  return [(clientX - rect.left) / k, (clientY - rect.top) / k];
 }
 
-function applyFovCompensation(map: MapLibreMap, authoredWidth: number) {
-  const container = map.getContainer();
-  const band = previewHostRect(container.clientWidth, container.clientHeight, authoredWidth);
-  const setFov = (map as unknown as { setVerticalFieldOfView?: (deg: number) => void }).setVerticalFieldOfView;
-  if (typeof setFov === "function") setFov.call(map, compensatedFov(container.clientHeight, band.height));
+/** Screen-px-per-authored-px, for interpreting a raw pointer drag delta (object resize handles). */
+function objectDragScale(map: MapLibreMap, authoredWidth: number): number {
+  const canvas = map.getCanvas();
+  const rect = canvas.getBoundingClientRect();
+  const k = canvas.clientWidth ? rect.width / canvas.clientWidth : 1;
+  return k * objectLayoutScale(authoredWidth);
 }
 
-function clampMapZoom(zoom: number): number {
-  return Math.max(ML_PREVIEW_MIN_ZOOM, Math.min(ML_MAX_ZOOM, zoom));
+function captureCanvas(canvas: HTMLCanvasElement) {
+  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
 }
 
 function authoredZoomOf(map: MapLibreMap, delta: number, minZoom: number, peggedAuthored?: number): number {
@@ -124,49 +119,45 @@ function cameraView(_map: MapLibreMap, camera: MapsCamera, delta: number, minZoo
   };
 }
 
-function applyPreviewZoomLimits(map: MapLibreMap, minZoom: number, delta = previewZoomDelta(map)): number {
-  if (!map.getContainer().clientWidth) return delta;
+function silentJump(map: MapLibreMap, suppress: { current: boolean }, view: Parameters<MapLibreMap["jumpTo"]>[0]): void {
+  suppress.current = true;
+  try {
+    map.jumpTo(view);
+  } finally {
+    suppress.current = false;
+  }
+}
+
+function applyPreviewZoomLimits(map: MapLibreMap, minZoom: number, delta: number): void {
   const minZ = clampMapZoom(minZoom + delta);
   const maxZ = Math.max(minZ, clampMapZoom(22 + delta));
   try {
-    if (map.getMinZoom() !== minZ) {
-      if (minZ < ML_MIN_ZOOM) {
-        (map as unknown as { transform: { setMinZoom: (zoom: number) => void } }).transform.setMinZoom(minZ);
-      }
-      else map.setMinZoom(minZ);
-    }
+    if (map.getMinZoom() !== minZ) map.setMinZoom(minZ);
     if (map.getMaxZoom() !== maxZ) map.setMaxZoom(maxZ);
   } catch (err) {
     console.warn("maplibre zoom limits", err);
   }
-  return delta;
 }
 
-function recastPreviewCamera(
+/** Re-derives the map's zoom/limits/relief gates for a (possibly new) authored surface width.
+ * Only needed when `authoredWidth` itself changes — window resizes only touch the CSS transform
+ * and pixelRatio, never the camera, since the authored↔map zoom delta is now a pure function of
+ * authoredWidth rather than the live container size. */
+function applyAuthoredWidth(
   map: MapLibreMap,
+  authoredWidth: number,
+  minZoom: number,
   deltaRef: { current: number },
   suppress: { current: boolean },
-  minZoom: number,
-  authoredHint?: number,
-  authoredWidth = WALL_W
+  authoredHint?: number
 ) {
-  if (!map.getContainer().clientWidth) return;
-  try {
-    const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
-    map.resize();
-    applyFovCompensation(map, authoredWidth);
-    const d = applyPreviewZoomLimits(map, minZoom, previewZoomDelta(map, authoredWidth));
-    deltaRef.current = d;
-    applyBoundaryZoomOffset(map, d);
-    suppress.current = true;
-    map.jumpTo(cameraView(map, authored, d, minZoom));
-    map.once("moveend", () => {
-      suppress.current = false;
-    });
-  } catch (err) {
-    suppress.current = false;
-    console.warn("maplibre recast", err);
-  }
+  const authored = readCamera(map, deltaRef.current, minZoom, authoredHint);
+  const delta = exportZoomDelta(authoredWidth);
+  map.resize();
+  applyPreviewZoomLimits(map, minZoom, delta);
+  deltaRef.current = delta;
+  applyAuthoredZoomGates(map, delta);
+  silentJump(map, suppress, cameraView(map, authored, delta, minZoom));
 }
 
 export type MapViewHandle = {
@@ -241,7 +232,6 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     highlights,
     churches,
     numberPins = false,
-    crop,
     sidePanels,
     exportCg,
     hiddenLayers,
@@ -265,6 +255,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   },
   ref
 ) {
+  const band = useRef<HTMLDivElement>(null);
+  const inner = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const suppress = useRef(false);
@@ -275,20 +267,31 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const previewingRef = useRef(previewing);
   const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
   const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins });
-  const cgDrag = useRef<{ x: number; shift: number; width: number } | null>(null);
+  const cgDrag = useRef<{ x: number; shift: number; width: number; surfaceWidth: number } | null>(null);
   const objDrag = useRef<{ id: string; grabDx: number; grabDy: number; pointerId: number } | null>(null);
   const handleDrag = useRef<{ pointerId: number; startX: number; startY: number; startSize: number; corner: ObjectCorner; aspect: number } | null>(null);
   const [boxPos, setBoxPos] = useState<{ x: number; y: number; w: number; h: number; size: number } | null>(null);
-  const [grainPreviewWidth, setGrainPreviewWidth] = useState<number>(authoredWidth);
   const [cgSnapped, setCgSnapped] = useState(false);
   const hopAbort = useRef(false);
   const hopRaf = useRef(0);
   const hopResolve = useRef<(() => void) | null>(null);
+  const hopRestore = useRef<(() => void) | null>(null);
+  const hopSeq = useRef(0);
   const deltaRef = useRef(0);
   const cameraRef = useRef(camera);
   const minZoomRef = useRef(minZoomForView());
   const authoredWidthRef = useRef(authoredWidth);
+  // The live authoredWidth prop, synced every render — animateHop's restore reads this rather
+  // than a value closed over at call time, so it restores to whatever is current even if the
+  // prop changed mid-hop.
+  const propWidthRef = useRef(authoredWidth);
+  // While a movie hop is animating, the render surface is pinned to the hop's own (wider) export
+  // surface rather than the active slide's authoredWidth prop — see animateHop.
+  const hopWidthRef = useRef<number | null>(null);
+  const [hopWidth, setHopWidth] = useState<number | null>(null);
+  const sidePanelsRef = useRef(sidePanels);
   const [texWarn, setTexWarn] = useState<string | null>(null);
+  const [gpuWarn, setGpuWarn] = useState<string | null>(null);
 
   function finishHop() {
     if (hopRaf.current) {
@@ -296,6 +299,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       hopRaf.current = 0;
     }
     suppress.current = false;
+    hopSeq.current += 1;
+    const restore = hopRestore.current;
+    hopRestore.current = null;
+    restore?.();
     const resolve = hopResolve.current;
     hopResolve.current = null;
     resolve?.();
@@ -304,19 +311,49 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   previewingRef.current = previewing;
   cameraRef.current = camera;
   minZoomRef.current = minZoomForView();
-  authoredWidthRef.current = authoredWidth;
+  propWidthRef.current = authoredWidth;
+  authoredWidthRef.current = hopWidthRef.current ?? authoredWidth;
+  sidePanelsRef.current = sidePanels;
   callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins };
+
+  function applyTransform() {
+    const bandEl = band.current;
+    const innerEl = inner.current;
+    const map = mapRef.current;
+    if (!bandEl || !innerEl) return;
+    const k = transformScaleOf(bandEl.clientWidth, innerEl.offsetWidth);
+    innerEl.style.transform = `scale(${k})`;
+    if (map) {
+      const requested = k * (window.devicePixelRatio || 1);
+      try {
+        map.setPixelRatio(requested);
+      } catch (err) {
+        console.warn("maplibre setPixelRatio", err);
+      }
+      const canvas = map.getCanvas();
+      const honoured = canvas.clientWidth ? canvas.width / canvas.clientWidth : requested;
+      if (Math.abs(honoured - requested) > 0.01) {
+        const message = `Preview pixel ratio clamped to ${honoured.toFixed(2)} (wanted ${requested.toFixed(2)}); this band is not capture-exact.`;
+        console.warn(message);
+        setTexWarn(message);
+      } else {
+        setTexWarn(null);
+      }
+    }
+  }
+
+  function resizeInner(authoredW: number, sidePanelsOn: boolean) {
+    const innerEl = inner.current;
+    if (!innerEl) return;
+    sizeInner(innerEl, authoredW, surfaceWidthOf(authoredW, sidePanelsOn));
+  }
 
   useImperativeHandle(ref, () => ({
     jumpTo(next) {
       const map = mapRef.current;
       if (!map) return;
-      suppress.current = true;
-      map.jumpTo(cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current));
-      map.once("moveend", () => {
-        suppress.current = false;
-      });
+      silentJump(map, suppress, cameraView(map, next, deltaRef.current, minZoomRef.current));
     },
     easeTo(next, durationMs) {
       const map = mapRef.current;
@@ -324,7 +361,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       return new Promise((resolve) => {
         suppress.current = true;
         // MapsTab passes milliseconds (duration * 1000); MapLibre easeTo is ms.
-        map.easeTo({ ...cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current), duration: Math.max(0, durationMs) });
+        map.easeTo({ ...cameraView(map, next, deltaRef.current, minZoomRef.current), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
@@ -336,7 +373,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (!map) return Promise.resolve();
       return new Promise((resolve) => {
         suppress.current = true;
-        map.flyTo({ ...cameraView(map, next, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current), duration: Math.max(0, durationMs) });
+        map.flyTo({ ...cameraView(map, next, deltaRef.current, minZoomRef.current), duration: Math.max(0, durationMs) });
         map.once("moveend", () => {
           suppress.current = false;
           resolve();
@@ -348,52 +385,104 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (!map) return Promise.resolve();
       hopAbort.current = false;
       finishHop();
+      // Render the hop at its own export surface (mirrors captureFlyFrames), not the active
+      // slide's authoredWidth prop, so a mixed-surface hop previews at the export's density.
+      const priorWidth = authoredWidthRef.current;
+      const hopSurfaceW = width || priorWidth;
+      // Idempotent against the LIVE prop, not a value closed over at call time, so a restore
+      // that fires after the prop has since changed still lands on the current surface.
+      const applyHopWidth = (w: number) => {
+        const authored = readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom);
+        const next = w === propWidthRef.current ? null : w;
+        hopWidthRef.current = next;
+        setHopWidth(next);
+        authoredWidthRef.current = w;
+        resizeInner(w, sidePanelsRef.current);
+        map.resize();
+        const delta = exportZoomDelta(w);
+        deltaRef.current = delta;
+        applyPreviewZoomLimits(map, minZoomRef.current, delta);
+        applyAuthoredZoomGates(map, delta);
+        applyTransform();
+        silentJump(map, suppress, cameraView(map, authored, delta, minZoomRef.current));
+      };
+      if (hopSurfaceW !== priorWidth) {
+        // Armed before applying the override so a synchronous throw inside applyHopWidth
+        // still leaves finishHop() something to restore.
+        hopRestore.current = () => applyHopWidth(propWidthRef.current);
+        applyHopWidth(hopSurfaceW);
+      }
       const toObjectsPainted = destinationPaintsReveal ? withoutRevealed(toObjects || []) : toObjects || [];
-      return Promise.all([ensureLandmarkImages(map, [...(fromObjects || []), ...toObjectsPainted], assetBaseUrl), Promise.resolve(ensureDropPinImages(map, [...(fromObjects || []), ...toObjectsPainted]))]).then(() => new Promise((resolve) => {
-        const apply = (t: number) => {
-          const cam = cameraAtHop(from, to, t, {
-            easing,
-            routePoints,
-            curve,
-            flyZoom,
-            easeIn,
-            easeOut,
-            flight,
-            duration: durationMs / 1000,
-            width,
-          });
-          if (fromObjects && map.getSource("churches")) {
-            const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition, destinationPaintsReveal) : fromObjects;
-            (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(objects, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current)));
-          }
-          map.jumpTo({
-            center: [cam.lon, cam.lat],
-            zoom: mapZoomOf(cam.zoom, deltaRef.current, minZoomRef.current),
-            bearing: cam.bearing,
-            pitch: cam.pitch,
-          });
-        };
-        const duration = Math.max(0, durationMs);
-        hopResolve.current = resolve;
-        suppress.current = true;
-        if (duration === 0) {
-          apply(1);
-          finishHop();
-          return;
-        }
-        const start = performance.now();
-        const step = (now: number) => {
-          if (hopAbort.current) {
+      const seq = ++hopSeq.current;
+      return Promise.all([
+        ensureLandmarkImages(map, [...(fromObjects || []), ...toObjectsPainted], assetBaseUrl),
+        Promise.resolve().then(() => ensureDropPinImages(map, [...(fromObjects || []), ...toObjectsPainted])),
+      ])
+        .then(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              if (hopSeq.current !== seq) return resolve();
+              const apply = (t: number) => {
+                const cam = cameraAtHop(from, to, t, {
+                  easing,
+                  routePoints,
+                  curve,
+                  flyZoom,
+                  easeIn,
+                  easeOut,
+                  flight,
+                  duration: durationMs / 1000,
+                  width,
+                });
+                if (fromObjects && map.getSource("churches")) {
+                  const objects = toObjects ? movieObjectsAt(fromObjects, toObjects, t, objectTransition, destinationPaintsReveal) : fromObjects;
+                  (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(objects, overlay.current.selectedPinId, overlay.current.numberPins, objectLayoutScale(authoredWidthRef.current)));
+                }
+                map.jumpTo({
+                  center: [cam.lon, cam.lat],
+                  zoom: mapZoomOf(cam.zoom, deltaRef.current, minZoomRef.current),
+                  bearing: cam.bearing,
+                  pitch: cam.pitch,
+                });
+              };
+              const duration = Math.max(0, durationMs);
+              hopResolve.current = resolve;
+              suppress.current = true;
+              if (duration === 0) {
+                try {
+                  apply(1);
+                } catch (err) {
+                  reject(err);
+                  return;
+                }
+                finishHop();
+                return;
+              }
+              const start = performance.now();
+              const step = (now: number) => {
+                if (hopAbort.current) {
+                  finishHop();
+                  return;
+                }
+                const t = Math.min(1, (now - start) / duration);
+                try {
+                  apply(t);
+                } catch (err) {
+                  reject(err);
+                  return;
+                }
+                if (t < 1) hopRaf.current = requestAnimationFrame(step);
+                else finishHop();
+              };
+              hopRaf.current = requestAnimationFrame(step);
+            })
+        )
+        .catch((err) => {
+          if (hopSeq.current === seq) {
             finishHop();
-            return;
+            throw err;
           }
-          const t = Math.min(1, (now - start) / duration);
-          apply(t);
-          if (t < 1) hopRaf.current = requestAnimationFrame(step);
-          else finishHop();
-        };
-        hopRaf.current = requestAnimationFrame(step);
-      }));
+        });
     },
     stop() {
       hopAbort.current = true;
@@ -402,29 +491,22 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     },
     getCamera() {
       const map = mapRef.current;
-      return map ? readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom) : null;
+      return map ? readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom) : null;
     },
     getCgCamera(cgShiftX) {
       const map = mapRef.current;
       if (!map) return null;
-      const current = readCamera(
-        map,
-        previewZoomDelta(map, authoredWidthRef.current),
-        minZoomRef.current,
-        cameraRef.current.zoom
-      );
+      const current = readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom);
       const canvas = map.getCanvas();
-      const surface = previewSurfaceRect(map, authoredWidthRef.current);
       const shifted = map.unproject([
-        canvas.clientWidth / 2 + (cgShiftX * surface.width) / authoredWidthRef.current,
+        canvas.clientWidth / 2 + cgShiftX * objectLayoutScale(authoredWidthRef.current),
         canvas.clientHeight / 2,
       ]);
       return { ...current, lat: shifted.lat, lon: wrapLon(shifted.lng) };
     },
     captureBlob() {
       const map = mapRef.current;
-      if (!map) return Promise.resolve(null);
-      return captureCanvas(map.getCanvas(), previewSurfaceRect(map, authoredWidthRef.current));
+      return map ? captureCanvas(map.getCanvas()) : Promise.resolve(null);
     },
     capturePreviewBlob() {
       const map = mapRef.current;
@@ -467,43 +549,26 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     resize() {
       const map = mapRef.current;
       if (!map) return;
-      recastPreviewCamera(
-        map,
-        deltaRef,
-        suppress,
-        minZoomRef.current,
-        cameraRef.current.zoom,
-        authoredWidthRef.current
-      );
+      map.resize();
+      applyTransform();
       if (map.getSource("churches")) {
         (map.getSource("churches") as GeoJSONSource).setData(
-          churchesGeo(overlay.current.churches, overlay.current.selectedPinId, overlay.current.numberPins, objectPreviewScale(map, authoredWidthRef.current))
+          churchesGeo(overlay.current.churches, overlay.current.selectedPinId, overlay.current.numberPins, objectLayoutScale(authoredWidthRef.current))
         );
       }
     },
   }));
 
   useEffect(() => {
-    if (!host.current) return;
+    if (!host.current || !band.current || !inner.current) return;
     const hostEl = host.current;
+    const bandEl = band.current;
+    const innerEl = inner.current;
     let cancelled = false;
     let map: MapLibreMap | null = null;
-    const recast = () => {
-      if (!map) return;
-      recastPreviewCamera(
-        map,
-        deltaRef,
-        suppress,
-        minZoomRef.current,
-        cameraRef.current.zoom,
-        authoredWidthRef.current
-      );
-      setGrainPreviewWidth(previewSurfaceRect(map, authoredWidthRef.current).width || authoredWidthRef.current);
-    };
-    const ro = new ResizeObserver(() => recast());
     const onPointerUp = () => {
       if (!map || suppress.current || previewingRef.current) return;
-      callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
+      callbacks.current.onCameraCommit(readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom));
     };
 
     const onCanvasMouseMove = (event: MapMouseEvent) => {
@@ -522,8 +587,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
     const onObjPointerDown = (event: PointerEvent) => {
       if (!map || previewingRef.current || event.shiftKey) return;
-      const rect = map.getCanvas().getBoundingClientRect();
-      const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+      const point = toLayoutPoint(map, event.clientX, event.clientY);
       const layers = PIN_LAYERS.filter((id) => map!.getLayer(id));
       const id = String((layers.length ? map.queryRenderedFeatures(point, { layers }) : [])[0]?.properties?.id || "");
       const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
@@ -531,14 +595,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const anchor = map.project([church.lon, church.lat]);
       map.dragPan.disable();
       map.getCanvas().setPointerCapture(event.pointerId);
-      objDrag.current = { id, grabDx: point[0] - anchor.x, grabDy: point[1] - anchor.y, pointerId: event.pointerId };
+      objDrag.current = { id: church.id, grabDx: point[0] - anchor.x, grabDy: point[1] - anchor.y, pointerId: event.pointerId };
     };
 
     const onObjPointerMove = (event: PointerEvent) => {
       const drag = objDrag.current;
       if (!map || !drag || drag.pointerId !== event.pointerId) return;
-      const rect = map.getCanvas().getBoundingClientRect();
-      const lngLat = map.unproject([event.clientX - rect.left - drag.grabDx, event.clientY - rect.top - drag.grabDy]);
+      const point = toLayoutPoint(map, event.clientX, event.clientY);
+      const lngLat = map.unproject([point[0] - drag.grabDx, point[1] - drag.grabDy]);
       callbacks.current.onMoveObject(drag.id, lngLat.lat, lngLat.lng);
     };
 
@@ -552,7 +616,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     };
 
     const createMap = (wantedStyle: MapsStyleId) => {
-      const d0 = hostEl.clientWidth ? Math.log2(hostEl.clientWidth / authoredWidthRef.current) : 0;
+      resizeInner(authoredWidthRef.current, sidePanelsRef.current);
+      const d0 = exportZoomDelta(authoredWidthRef.current);
       void resolveOpenFreeMapStyle(wantedStyle, d0).then((style) => {
         if (cancelled) return;
         if (overlay.current.styleId !== wantedStyle) {
@@ -561,6 +626,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         }
         const zMin = minZoomRef.current;
         deltaRef.current = d0;
+        const k0 = transformScaleOf(bandEl.clientWidth, innerEl.offsetWidth);
+        let gpuCap = 4096;
+        try {
+          gpuCap = exportGpuCap();
+        } catch (err) {
+          console.warn("exportGpuCap", err);
+        }
         map = new MapLibreMap({
           container: hostEl,
           style,
@@ -574,6 +646,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           boxZoom: false,
           minZoom: ML_MIN_ZOOM,
           maxZoom: ML_MAX_ZOOM,
+          pixelRatio: k0 * (window.devicePixelRatio || 1),
+          maxCanvasSize: [gpuCap, gpuCap],
           attributionControl: { compact: true },
           transformRequest: (url) => mapsTransformRequest(url),
           canvasContextAttributes: { preserveDrawingBuffer: true },
@@ -581,6 +655,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         mapRef.current = map;
         styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
         styleIdentity.current = wantedStyle;
+        innerEl.style.transform = `scale(${k0})`;
 
         function probeTex() {
           if (!map) return;
@@ -590,7 +665,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           if (typeof max === "number" && max < WALL_W) {
             const message = `GPU MAX_TEXTURE_SIZE is ${max}; 7680 plates will fail.`;
             console.warn(message);
-            setTexWarn(message);
+            setGpuWarn(message);
           }
         }
 
@@ -599,7 +674,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           const currentMap = map;
           const generation = ++overlayGeneration.current;
           styleReady.current = false;
-          ensureLowZoomRaster(currentMap, overlay.current.styleId);
+          ensureLowZoomRaster(currentMap, overlay.current.styleId, deltaRef.current);
           installPatterns(currentMap, stylePatterns(overlay.current.styleId));
           applyLayerFilters(currentMap, overlay.current.hiddenLayers);
           applyHillshade(currentMap, overlay.current.hillshade);
@@ -611,7 +686,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             overlay.current.styleId,
             overlay.current.numberPins,
             assetBaseUrl,
-            objectPreviewScale(currentMap, authoredWidthRef.current),
+            objectLayoutScale(authoredWidthRef.current),
             overlay.current.isolate
           ).then(() => {
             if (mapRef.current === currentMap && overlayGeneration.current === generation) {
@@ -623,7 +698,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
         function commitCamera() {
           if (!map || suppress.current || previewingRef.current) return;
-          callbacks.current.onCameraCommit(readCamera(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current, cameraRef.current.zoom));
+          callbacks.current.onCameraCommit(readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom));
         }
 
         map.on("error", (event) => {
@@ -638,17 +713,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           try {
             map?.resize();
             if (map) {
-              applyFovCompensation(map, authoredWidthRef.current);
               const zMin = minZoomRef.current;
-              const d = applyPreviewZoomLimits(map, zMin, previewZoomDelta(map, authoredWidthRef.current));
-              deltaRef.current = d;
-              applyBoundaryZoomOffset(map, d);
-              suppress.current = true;
-              map.jumpTo(cameraView(map, cameraRef.current, d, zMin));
-              map.once("moveend", () => {
-                suppress.current = false;
-              });
-              ensureLowZoomRaster(map, overlay.current.styleId);
+              applyPreviewZoomLimits(map, zMin, deltaRef.current);
+              applyAuthoredZoomGates(map, deltaRef.current);
+              silentJump(map, suppress, cameraView(map, cameraRef.current, deltaRef.current, zMin));
+              ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
               installPatterns(map, stylePatterns(overlay.current.styleId));
               applyLayerFilters(map, overlay.current.hiddenLayers);
               applyHillshade(map, overlay.current.hillshade);
@@ -664,8 +733,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.on("style.load", () => {
           map?.resize();
           if (map) {
-            applyFovCompensation(map, authoredWidthRef.current);
-            ensureLowZoomRaster(map, overlay.current.styleId);
+            ensureLowZoomRaster(map, overlay.current.styleId, deltaRef.current);
             installPatterns(map, stylePatterns(overlay.current.styleId));
             applyLayerFilters(map, overlay.current.hiddenLayers);
             applyHillshade(map, overlay.current.hillshade);
@@ -695,7 +763,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             return;
           }
           callbacks.current.onSelectPin(null);
-          if (authoredZoomOf(map, previewZoomDelta(map, authoredWidthRef.current), minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
+          if (authoredZoomOf(map, deltaRef.current, minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
           if (!map.getLayer("admin0-fill")) return;
           const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
           const code = String(hits[0]?.properties?.ADM0_A3 || "");
@@ -714,13 +782,16 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         map.getCanvas().addEventListener("pointermove", onObjPointerMove);
         map.getCanvas().addEventListener("pointerup", onObjPointerUp);
         map.getCanvas().addEventListener("pointercancel", onObjPointerUp);
-        ro.observe(hostEl);
       });
     };
     createMap(styleId);
+    const ro = new ResizeObserver(() => applyTransform());
+    ro.observe(bandEl);
 
     return () => {
       cancelled = true;
+      hopAbort.current = true;
+      finishHop();
       ro.disconnect();
       map?.getCanvas().removeEventListener("pointerup", onPointerUp);
       map?.getCanvas().removeEventListener("pointerdown", onObjPointerDown);
@@ -742,14 +813,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     styleUrl.current = url;
     styleIdentity.current = styleId;
     styleReady.current = false;
-    void resolveOpenFreeMapStyle(styleId, previewZoomDelta(map, authoredWidthRef.current)).then((style) => {
+    void resolveOpenFreeMapStyle(styleId, deltaRef.current).then((style) => {
       if (mapRef.current !== map || styleIdentity.current !== styleId) return;
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
         map.resize();
-        applyFovCompensation(map, authoredWidthRef.current);
-        applyBoundaryZoomOffset(map, previewZoomDelta(map, authoredWidthRef.current));
-        ensureLowZoomRaster(map, styleId);
+        applyAuthoredZoomGates(map, deltaRef.current);
+        ensureLowZoomRaster(map, styleId, deltaRef.current);
         applyLayerFilters(map, overlay.current.hiddenLayers);
         applyHillshade(map, overlay.current.hillshade);
       });
@@ -761,8 +831,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!map?.getSource("churches")) return;
     void ensureLandmarkImages(map, churches, assetBaseUrl).then(() => {
       ensureDropPinImages(map, churches);
-      (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins, objectPreviewScale(map, authoredWidthRef.current)));
-    });
+      (map.getSource("churches") as GeoJSONSource).setData(churchesGeo(churches, selectedPinId, numberPins, objectLayoutScale(authoredWidthRef.current)));
+    }).catch((err) => console.warn("landmark images", err));
   }, [churches, selectedPinId, numberPins, assetBaseUrl]);
 
   useEffect(() => {
@@ -775,16 +845,12 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    recastPreviewCamera(
-      map,
-      deltaRef,
-      suppress,
-      minZoomRef.current,
-      cameraRef.current.zoom,
-      authoredWidthRef.current
-    );
-    setGrainPreviewWidth(previewSurfaceRect(map, authoredWidthRef.current).width || authoredWidthRef.current);
-  }, [crop, authoredWidth]);
+    if (hopWidthRef.current != null) return;
+    resizeInner(authoredWidth, sidePanels);
+    applyAuthoredWidth(map, authoredWidth, minZoomRef.current, deltaRef, suppress, cameraRef.current.zoom);
+    applyTransform();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authoredWidth, sidePanels]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -810,7 +876,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         setBoxPos(null);
         return;
       }
-      const scale = objectPreviewScale(map, authoredWidthRef.current);
+      const scale = objectLayoutScale(authoredWidthRef.current);
       const size = church.size || 120;
       const w = size * scale;
       const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
@@ -849,7 +915,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const drag = handleDrag.current;
     const map = mapRef.current;
     if (!drag || !map || !selectedPinId) return;
-    const scale = objectPreviewScale(map, authoredWidthRef.current);
+    const scale = objectDragScale(map, authoredWidthRef.current);
     const size = resizeFromCorner(
       { x: drag.startX, y: drag.startY },
       { x: event.clientX, y: event.clientY },
@@ -870,16 +936,15 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   function eventToLngLat(event: { clientX: number; clientY: number }): { lat: number; lon: number } | null {
     const map = mapRef.current;
     if (!map) return null;
-    const rect = map.getCanvas().getBoundingClientRect();
-    const lngLat = map.unproject([event.clientX - rect.left, event.clientY - rect.top]);
+    const point = toLayoutPoint(map, event.clientX, event.clientY);
+    const lngLat = map.unproject(point);
     return { lat: lngLat.lat, lon: lngLat.lng };
   }
 
   function onCgPointerDown(event: React.PointerEvent<HTMLElement>) {
     const map = mapRef.current;
     if (map && !event.shiftKey) {
-      const rect = map.getCanvas().getBoundingClientRect();
-      const point: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];
+      const point = toLayoutPoint(map, event.clientX, event.clientY);
       const layers = PIN_LAYERS.filter((id) => map.getLayer(id));
       const hitId = String((layers.length ? map.queryRenderedFeatures(point, { layers }) : [])[0]?.properties?.id || "");
       const church = hitId ? overlay.current.churches.find((c) => c.id === hitId) : undefined;
@@ -898,16 +963,16 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (at) callbacks.current.onAddPin(at.lat, at.lon);
       return;
     }
-    const band = event.currentTarget.closest(".maps-map-band");
-    const width = band?.clientWidth || 1;
+    const bandEl = event.currentTarget.closest(".maps-map-band");
+    const width = bandEl?.clientWidth || 1;
     event.currentTarget.setPointerCapture(event.pointerId);
-    cgDrag.current = { x: event.clientX, shift: cgShiftX, width };
+    cgDrag.current = { x: event.clientX, shift: cgShiftX, width, surfaceWidth: surfaceWidthOf(authoredWidth, sidePanels) };
   }
 
   function onCgPointerMove(event: React.PointerEvent<HTMLElement>) {
     const drag = cgDrag.current;
     if (!drag) return;
-    const dx = ((event.clientX - drag.x) * authoredWidthRef.current) / drag.width;
+    const dx = cgDragDx(event.clientX - drag.x, drag.surfaceWidth, drag.width);
     const next = snapCgShift(drag.shift + dx);
     setCgSnapped(next === 0);
     callbacks.current.onCgShift(next);
@@ -921,10 +986,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     setCgSnapped(false);
   }
 
+  // A movie hop overrides the render surface via refs only (see animateHop); mirror it into
+  // state so the band/grain/crop overlay re-render at the hop's own surface too, instead of
+  // staying pinned to the (possibly mismatched) authoredWidth prop for the hop's duration.
+  const effectiveWidth = hopWidth ?? authoredWidth;
   const wrapWarn = worldCopyWarning(camera.zoom);
-  const splitCg = authoredWidth <= CG_W;
+  const splitCg = effectiveWidth <= CG_W;
   const fullWall = sidePanels && !splitCg;
-  const surfaceWidth = splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
+  const surfaceWidth = surfaceWidthOf(effectiveWidth, sidePanels);
   const surfaceOrigin = fullWall ? 0 : CG_ORIGIN - CG_W / 2;
   const cgLeft = ((CG_ORIGIN + cgShiftX - surfaceOrigin) / surfaceWidth) * 100;
   const cgWidth = (CG_W / surfaceWidth) * 100;
@@ -935,16 +1004,30 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       className={`maps-map-frame ${surfaceClass}`}
       style={{ "--maps-surface-width": surfaceWidth } as React.CSSProperties}
     >
-      <div className="maps-map-host" ref={host} />
-      {styleId === "watercolour" && (
-        <div
-          className="maps-paper-grain"
-          style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(grainPreviewWidth, surfaceWidth) }}
-        />
-      )}
-      <div className="maps-nav-margin top" />
-      <div className="maps-nav-margin bottom" />
-      <div className="maps-map-band">
+      <div className="maps-map-band" ref={band}>
+        <div className="maps-map-inner" ref={inner}>
+          <div className="maps-map-host" ref={host} />
+          {styleId === "watercolour" && (
+            <div
+              className="maps-paper-grain"
+              style={{ backgroundImage: `url(${paperGrainUrl()})`, ...paperGrainCss(surfaceWidth * objectLayoutScale(effectiveWidth), surfaceWidth) }}
+            />
+          )}
+          {boxPos && (
+            <div className="maps-object-box" style={{ left: boxPos.x, top: boxPos.y, width: boxPos.w, height: boxPos.h }}>
+              {(["nw", "ne", "sw", "se"] as ObjectCorner[]).map((corner) => (
+                <div
+                  key={corner}
+                  className={`maps-object-handle ${corner}`}
+                  onPointerDown={onHandlePointerDown(corner)}
+                  onPointerMove={onHandlePointerMove}
+                  onPointerUp={onHandlePointerUp}
+                  onPointerCancel={onHandlePointerUp}
+                />
+              ))}
+            </div>
+          )}
+        </div>
         <div className="maps-crop-overlay">
           {splitCg ? (
             <div className="maps-crop-frame cg">
@@ -971,22 +1054,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           )}
         </div>
       </div>
-      {boxPos && (
-        <div className="maps-object-box" style={{ left: boxPos.x, top: boxPos.y, width: boxPos.w, height: boxPos.h }}>
-          {(["nw", "ne", "sw", "se"] as ObjectCorner[]).map((corner) => (
-            <div
-              key={corner}
-              className={`maps-object-handle ${corner}`}
-              onPointerDown={onHandlePointerDown(corner)}
-              onPointerMove={onHandlePointerMove}
-              onPointerUp={onHandlePointerUp}
-              onPointerCancel={onHandlePointerUp}
-            />
-          ))}
-        </div>
-      )}
+      <div className="maps-nav-margin top" />
+      <div className="maps-nav-margin bottom" />
       {wrapWarn && <p className="maps-wrap-warn">{wrapWarn}</p>}
       {texWarn && <p className="maps-tex-warn">{texWarn}</p>}
+      {gpuWarn && <p className="maps-tex-warn">{gpuWarn}</p>}
     </div>
   );
 });

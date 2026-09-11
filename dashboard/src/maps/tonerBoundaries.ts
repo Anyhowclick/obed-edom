@@ -1,4 +1,5 @@
 import type { LayerSpecification, LineLayerSpecification, Map as MapLibreMap } from "maplibre-gl";
+import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID } from "./types";
 
 const COUNTRY_LOW_ID = "boundary_country_z0-4";
 const COUNTRY_HIGH_ID = "boundary_country_z5-";
@@ -6,9 +7,14 @@ const STATE_ID = "boundary_state";
 const STATE_LOW_ID = "boundary_state_z1-4";
 const PROVINCE_AUTHORED_MIN = 4;
 const PROVINCE_AUTHORED_MAX = 5;
+const PROVINCE_AUTHORED_UPPER_GATE = 14;
 const COUNTRY_AUTHORED_GATE = 5;
+const NE2_FALLBACK_ID = "ne2-shaded-fallback";
+export const HILLSHADE_AUTHORED_MINZOOM = 6;
+export const NE2_AUTHORED_MAXZOOM = 6;
+export const NE2_FALLBACK_AUTHORED_MAXZOOM = 8;
 
-const shift = (z: number, offset: number) => Math.min(24, Math.max(0, z + offset));
+export const shift = (z: number, offset: number) => Math.min(24, Math.max(0, z + offset));
 
 function findLine(layers: LayerSpecification[], id: string): LineLayerSpecification | null {
   const layer = layers.find((candidate) => candidate.id === id);
@@ -54,6 +60,7 @@ export function withLowZoomBoundaries(
   const raisedState: LineLayerSpecification = {
     ...state,
     minzoom: shift(PROVINCE_AUTHORED_MAX, zoomOffset),
+    maxzoom: shift(PROVINCE_AUTHORED_UPPER_GATE, zoomOffset),
     paint: raisedPaint,
   };
 
@@ -65,8 +72,10 @@ export function withLowZoomBoundaries(
   });
 }
 
-/** Converts the authored zoom gate into the preview map's shifted zoom range. */
-export function applyBoundaryZoomOffset(map: MapLibreMap, zoomOffset: number): void {
+/** Converts every authored zoom gate (toner boundaries + relief layers, all vendored as
+ * map-zoom gates) into the render map's shifted zoom range, so relief keys off authored
+ * zoom in both preview and export. */
+export function applyAuthoredZoomGates(map: MapLibreMap, zoomOffset: number): void {
   if (map.getLayer(STATE_LOW_ID)) {
     map.setLayerZoomRange(
       STATE_LOW_ID,
@@ -75,12 +84,35 @@ export function applyBoundaryZoomOffset(map: MapLibreMap, zoomOffset: number): v
     );
   }
   if (map.getLayer(STATE_ID)) {
-    map.setLayerZoomRange(STATE_ID, shift(PROVINCE_AUTHORED_MAX, zoomOffset), 14);
+    map.setLayerZoomRange(STATE_ID, shift(PROVINCE_AUTHORED_MAX, zoomOffset), shift(PROVINCE_AUTHORED_UPPER_GATE, zoomOffset));
   }
   if (map.getLayer(COUNTRY_LOW_ID)) {
     map.setLayerZoomRange(COUNTRY_LOW_ID, 0, shift(COUNTRY_AUTHORED_GATE, zoomOffset));
   }
   if (map.getLayer(COUNTRY_HIGH_ID)) {
     map.setLayerZoomRange(COUNTRY_HIGH_ID, shift(COUNTRY_AUTHORED_GATE, zoomOffset), 24);
+  }
+  if (map.getLayer(HILLSHADE_LAYER_ID)) {
+    map.setLayerZoomRange(HILLSHADE_LAYER_ID, shift(HILLSHADE_AUTHORED_MINZOOM, zoomOffset), 24);
+  }
+  if (map.getLayer(HILLSHADE_NE2_LAYER_ID)) {
+    map.setLayerZoomRange(HILLSHADE_NE2_LAYER_ID, 0, shift(NE2_AUTHORED_MAXZOOM, zoomOffset));
+  }
+  if (map.getLayer(NE2_FALLBACK_ID)) {
+    map.setLayerZoomRange(NE2_FALLBACK_ID, 0, shift(NE2_FALLBACK_AUTHORED_MAXZOOM, zoomOffset));
+    const ramp = map.getPaintProperty(NE2_FALLBACK_ID, "raster-opacity") as unknown[] | undefined;
+    const v0 = typeof ramp?.[4] === "number" ? ramp[4] : 1;
+    const v6 = typeof ramp?.[6] === "number" ? ramp[6] : 0.7;
+    map.setPaintProperty(NE2_FALLBACK_ID, "raster-opacity", [
+      "interpolate",
+      ["linear"],
+      ["zoom"],
+      shift(0, zoomOffset),
+      v0,
+      shift(6, zoomOffset),
+      v6,
+      shift(8, zoomOffset),
+      0,
+    ]);
   }
 }

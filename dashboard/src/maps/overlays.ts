@@ -1,5 +1,6 @@
 import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
+import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
 
 export type Admin0 = {
@@ -38,7 +39,7 @@ export async function loadAdmin0(): Promise<Admin0 | null> {
 }
 
 /** Positron/Bright/Dark/Fiord ship the NE raster source but no layer; Liberty shows land at SEA zoom because it does. */
-export function ensureLowZoomRaster(map: MapLibreMap, styleId?: string): void {
+export function ensureLowZoomRaster(map: MapLibreMap, styleId?: string, zoomOffset = 0): void {
   if (styleId === "watercolour") return;
   if (!map.getSource("ne2_shaded")) return;
   const style = map.getStyle();
@@ -52,17 +53,17 @@ export function ensureLowZoomRaster(map: MapLibreMap, styleId?: string): void {
       id: "ne2-shaded-fallback",
       type: "raster",
       source: "ne2_shaded",
-      maxzoom: 8,
+      maxzoom: shift(8, zoomOffset),
       paint: {
         "raster-opacity": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          0,
+          shift(0, zoomOffset),
           dark ? 0.55 : 1,
-          6,
+          shift(6, zoomOffset),
           dark ? 0.35 : 0.7,
-          8,
+          shift(8, zoomOffset),
           0,
         ],
         ...(dark ? { "raster-saturation": -0.65, "raster-brightness-max": 0.7 } : {}),
@@ -128,9 +129,10 @@ export async function ensureAdmin0Highlights(
   map: MapLibreMap,
   highlights: string[],
   styleId?: string,
-  isolate?: MapsIsolate
+  isolate?: MapsIsolate,
+  zoomOffset = 0
 ): Promise<void> {
-  ensureLowZoomRaster(map, styleId);
+  ensureLowZoomRaster(map, styleId, zoomOffset);
   const data = await loadAdmin0();
   if (!data) return;
   if (!map.getSource("admin0")) {

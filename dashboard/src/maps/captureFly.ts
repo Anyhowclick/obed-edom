@@ -1,9 +1,10 @@
 import { Map as MapLibreMap, MercatorCoordinate } from "maplibre-gl";
 import { createExportMap, waitIdleForFrame } from "./captureExport";
-import { stampOsmCropOnCanvas, stampOsmOnCanvas } from "./stampOsm";
+import { stampOsmCropOnCanvas } from "./stampOsm";
 import { churchesGeo, movieObjectsAt, withoutRevealed } from "./overlays";
 import { arcPath, clampRho } from "./flight";
 import {
+  exportCamera,
   type MapsCamera,
   type MapsChurch,
   type MapsEasing,
@@ -285,8 +286,9 @@ export function cameraAlongRoute(base: MapsCamera, points: MapsRoutePoint[], t: 
 
 const FRAME_TILE_WAIT_MS = 45000;
 
-function jumpToCamera(map: MapLibreMap, cam: MapsCamera): void {
-  map.jumpTo({ center: [cam.lon, cam.lat], zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch });
+function jumpToCamera(map: MapLibreMap, cam: MapsCamera, surfaceWidth: number): void {
+  const render = exportCamera(cam, surfaceWidth);
+  map.jumpTo({ center: [render.lon, render.lat], zoom: render.zoom, bearing: render.bearing, pitch: render.pitch });
 }
 
 function unloadedTileCount(map: MapLibreMap): number | undefined {
@@ -323,6 +325,7 @@ function frameError(map: MapLibreMap, index: number, cam: MapsCamera, cause: unk
 async function waitFrameOrRetry(
   map: MapLibreMap,
   cam: MapsCamera,
+  surfaceWidth: number,
   index: number,
   frameDeadline: number,
   isCancelled?: () => boolean
@@ -333,13 +336,13 @@ async function waitFrameOrRetry(
     if (left <= 0) throw new Error("frame tile-wait budget exhausted");
     await waitIdleForFrame(map, left, isCancelled);
   };
-  jumpToCamera(map, cam);
+  jumpToCamera(map, cam, surfaceWidth);
   try {
     await waitOnce();
   } catch (err) {
     if (isCancelled?.()) throw new Error("Export cancelled.");
     if (budget() <= 0) throw frameError(map, index, cam, err);
-    jumpToCamera(map, cam);
+    jumpToCamera(map, cam, surfaceWidth);
     try {
       await waitOnce();
     } catch (err2) {
@@ -417,7 +420,7 @@ export async function captureFlyFrames(opts: {
   const cancelled = () => Boolean(isCancelled?.());
   if (cancelled()) throw new Error("Export cancelled.");
   const count = Math.max(2, Math.round(duration * fps));
-  const { map, host } = await createExportMap({
+  const { map, host, surface } = await createExportMap({
     width,
     height,
     camera: from,
@@ -431,7 +434,10 @@ export async function captureFlyFrames(opts: {
     assetBaseUrl,
     isCancelled,
   });
+  const objectScale = 1 / surface.pixelRatio;
   try {
+    // Hop maths (cruiseZoom, cameraAtHop, arcPath) stay in authored px/zoom — `width` here is
+    // the authored surface width, unrelated to the render scale applied at jumpToCamera.
     const cameras: MapsCamera[] = [];
     for (let i = 0; i < count; i++) {
       const t = i / (count - 1);
@@ -443,24 +449,24 @@ export async function captureFlyFrames(opts: {
       const t = i / (count - 1);
       if (churches && map.getSource("churches")) {
         const objects = destinationChurches ? movieObjectsAt(churches, destinationChurches, t, objectTransition, destinationPaintsReveal) : churches;
-        (map.getSource("churches") as unknown as { setData(data: GeoJSON.FeatureCollection): void }).setData(churchesGeo(objects, null, numberPins));
+        (map.getSource("churches") as unknown as { setData(data: GeoJSON.FeatureCollection): void }).setData(churchesGeo(objects, null, numberPins, objectScale));
         map.triggerRepaint();
       }
-      await waitFrameOrRetry(map, cam, i, Date.now() + FRAME_TILE_WAIT_MS, isCancelled);
+      await waitFrameOrRetry(map, cam, width, i, Date.now() + FRAME_TILE_WAIT_MS, isCancelled);
       if (cancelled()) throw new Error("Export cancelled.");
-      const blob = outputCrop
-        ? await stampOsmCropOnCanvas(
-            map.getCanvas(),
-            outputCrop.fromX + (outputCrop.toX - outputCrop.fromX) * t,
-            (outputCrop.fromY || 0) + ((outputCrop.toY || 0) - (outputCrop.fromY || 0)) * t,
-            outputCrop.width,
-            outputCrop.height,
-            "image/jpeg",
-            0.95,
-            hillshade === true,
-            styleId
-          )
-        : await stampOsmOnCanvas(map.getCanvas(), "image/jpeg", 0.95, hillshade === true, styleId);
+      const cropX = surface.cropX + (outputCrop ? outputCrop.fromX + (outputCrop.toX - outputCrop.fromX) * t : 0);
+      const cropY = surface.cropY + (outputCrop ? (outputCrop.fromY || 0) + ((outputCrop.toY || 0) - (outputCrop.fromY || 0)) * t : 0);
+      const blob = await stampOsmCropOnCanvas(
+        map.getCanvas(),
+        cropX,
+        cropY,
+        outputCrop ? outputCrop.width : width,
+        outputCrop ? outputCrop.height : height,
+        "image/jpeg",
+        0.95,
+        hillshade === true,
+        styleId
+      );
       if (cancelled()) throw new Error("Export cancelled.");
       await onFrame(blob, i, count);
     }

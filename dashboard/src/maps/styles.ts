@@ -2,7 +2,7 @@ import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./stampOsm";
-import { withLowZoomBoundaries } from "./tonerBoundaries";
+import { shift, withLowZoomBoundaries } from "./tonerBoundaries";
 import { thinLineWidths } from "./tonerLines";
 import { buildWatercolourStyle } from "./watercolourStyle";
 import tonerStyleUrl from "./vendor/maptiler-toner-8688fbd.json?url";
@@ -82,12 +82,14 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
     if (styleId === "toner-lines") return layer.type === "background" || layer.type === "line";
     return true;
   });
-  return withHillshade(next, styleId);
+  return withHillshade(next, styleId, zoomOffset);
 }
 
 /** Top-down relief only: no `setTerrain()`, no draping, no pitch. Both layers are spliced in
- * before the first water layer (so opaque water covers terrarium's ETOPO1 bathymetry; buildWatercolourStyle lifts its land fills above that anchor so relief is not occluded), NE2 boost first so hillshade composites over it. */
-function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSpecification {
+ * before the first water layer (so opaque water covers terrarium's ETOPO1 bathymetry; buildWatercolourStyle lifts its land fills above that anchor so relief is not occluded), NE2 boost first so hillshade composites over it.
+ * Both layers are gated on MAP zoom, so `zoomOffset` shifts them the same way withLowZoomBoundaries
+ * shifts the toner boundaries — relief keys off AUTHORED zoom in both preview and export. */
+function withHillshade(style: StyleSpecification, styleId: MapsStyleId, zoomOffset = 0): StyleSpecification {
   style.sources[HILLSHADE_SOURCE_ID] = {
     type: "raster-dem",
     encoding: "terrarium",
@@ -107,7 +109,7 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
     id: HILLSHADE_LAYER_ID,
     type: "hillshade",
     source: HILLSHADE_SOURCE_ID,
-    minzoom: 6,
+    minzoom: shift(6, zoomOffset),
     layout: { visibility: "none" },
     paint: {
       "hillshade-method": "igor",
@@ -131,7 +133,7 @@ function withHillshade(style: StyleSpecification, styleId: MapsStyleId): StyleSp
           id: HILLSHADE_NE2_LAYER_ID,
           type: "raster",
           source: "ne2_shaded",
-          maxzoom: 6,
+          maxzoom: shift(6, zoomOffset),
           layout: { visibility: "none" },
           paint: { "raster-opacity": dark ? 0.28 : 0.45, "raster-saturation": -1 },
         } as LayerSpecification)
@@ -185,6 +187,6 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId, zoomOffset = 0): P
   return pending.then((s) => {
     let next = structuredClone(s);
     if (styleId === "watercolour") next = buildWatercolourStyle(next).style as StyleSpecification;
-    return withHillshade(next, styleId);
+    return withHillshade(next, styleId, zoomOffset);
   });
 }

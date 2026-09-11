@@ -878,6 +878,28 @@ def test_export_plan_stills_and_plates_carry_hidden_layers():
     assert {row["slideId"]: row["hiddenLayers"] for row in plan_cut["stills"]} == {"s1": ["pois"], "s2": ["pois"]}
 
 
+def test_export_plan_plate_rows_carry_slide_ids_full_wall():
+    """FW slides (includeSidePanels) capture at WALL_WIDTH; the dashboard picks export scale 4
+    (exportScale(7680) === 4, dashboard/src/maps/types.ts) from the plate's slideIds."""
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, includeSidePanels=True)
+    b = _slide("s2", cam_b, includeSidePanels=True)
+    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
+    assert len(plan["plates"]) == 1
+    assert plan["plates"][0]["slideIds"] == ["s1", "s2"]
+
+
+def test_export_plan_plate_rows_carry_slide_ids_centre_only():
+    """Centre-only slides capture at CENTRE_WIDTH; the dashboard picks export scale 2
+    (exportScale(3840) === 2) from the same slideIds field."""
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, includeSidePanels=False)
+    b = _slide("s2", cam_b, includeSidePanels=False)
+    plan = maps_export_plan([a, b], [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2}])
+    assert len(plan["plates"]) == 1
+    assert plan["plates"][0]["slideIds"] == ["s1", "s2"]
+
+
 def test_export_plan_hidden_layers_default_when_unset():
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a)
