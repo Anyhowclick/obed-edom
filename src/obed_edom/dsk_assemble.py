@@ -8,8 +8,9 @@ from __future__ import annotations
 import copy
 import re
 import time
+from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
@@ -31,11 +32,15 @@ from obed_edom.dsk_plan import (
     Band,
     ItemId,
     SlideClass,
+    TextBox,
     _delete_order,
+    _TEXT_GAP_PT,
     classify_deck,
     fit_slide,
+    fit_text_stack,
     read_band,
     visible_union,
+    wrapped_height,
 )
 from obed_edom.iwa_runs import (
     _load_deck,
@@ -61,6 +66,8 @@ from obed_edom.offline_inspect import _canvas_size, offline_wall_payload
 from obed_edom.remap_keynote import _AS_KIND_NAMES, _as_num, copy_keynote
 
 DEFAULT_BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
+DEFAULT_MIN_TEXT_PT = 24.0
+_TEXT_STACK_GAP = _TEXT_GAP_PT
 
 LayoutPolicy = Literal["preserve", "import"]
 
@@ -86,6 +93,19 @@ class SlideDecision:
 
 
 @dataclass(frozen=True)
+class SplitPart:
+    """One part of a text slide split N ways (D4/D6): its own long box, the slide's short
+    items at their shared affine, and the deletes/text size that go with just this part."""
+
+    fits: dict[ItemId, Rect]
+    deletes: tuple[ItemId, ...]
+    text_sizes: dict[ItemId, float]
+    run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = field(default_factory=dict)
+    stacked_ids: frozenset[ItemId] = frozenset()
+    autosize: frozenset[ItemId] = frozenset()
+
+
+@dataclass(frozen=True)
 class AssemblyPlan:
     kept: tuple[int, ...]
     ordinals: dict[int, int]
@@ -101,6 +121,11 @@ class AssemblyPlan:
     group_text_sizes: dict[int, dict[int, float]] = field(default_factory=dict)
     group_origin: dict[int, dict[int, tuple[float, float]]] = field(default_factory=dict)
     shrink_text_sizes: dict[int, dict[ItemId, float]] = field(default_factory=dict)
+    parts: dict[int, int] = field(default_factory=dict)
+    ordinal_to_number: dict[int, int] = field(default_factory=dict)
+    splits: dict[int, tuple[SplitPart, ...]] = field(default_factory=dict)
+    run_sizes: dict[int, dict[ItemId, tuple[tuple[int, int, float], ...]]] = field(default_factory=dict)
+    stacked_ids: dict[int, frozenset[ItemId]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -120,6 +145,86 @@ def _union_rect(rects: Sequence[Rect]) -> Rect:
     x1 = max(r.x + r.w for r in rects)
     y1 = max(r.y + r.h for r in rects)
     return Rect(x0, y0, x1 - x0, y1 - y0)
+
+
+def _stacked_text_rects(boxes: Sequence[TextBox], heights: dict[ItemId, float], band: Band) -> dict[ItemId, Rect]:
+    """One long box per part or per slide, full band width, stacked from the band bottom
+    upward in ``boxes`` order, using the heights ``fit_text_stack`` already computed (D4)."""
+    total = sum(heights.values()) + _TEXT_STACK_GAP * (len(boxes) - 1)
+    y = band.bottom - total
+    rects: dict[ItemId, Rect] = {}
+    for box in boxes:
+        h = heights[box.item_id]
+        rects[box.item_id] = Rect(band.x_min, y, band.width, h)
+        y += h + _TEXT_STACK_GAP
+    return rects
+
+
+def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: float) -> dict[ItemId, Rect]:
+    """Bottom-align ``short_fit``'s own rects (unchanged x/w/h) into a row whose bottom
+    sits one gap above ``stack_top`` -- the badge moves with the verse, per the golden deck."""
+    row_bottom = stack_top - _TEXT_STACK_GAP
+    row_top = row_bottom - row_h
+    out = {iid: _dc_replace(rect, y=row_top + (row_h - rect.h)) for iid, rect in short_fit.items()}
+    for rect in out.values():
+        assert rect.y + rect.h <= row_bottom + 1e-6, "short row overlaps the long-box stack"
+    return out
+
+
+def _run_size_ranges(
+    item: dict, scale: float, *, item_id: ItemId | None = None, slide_number: int | None = None,
+    warnings: list[str] | None = None,
+) -> tuple[tuple[int, int, float], ...] | None:
+    """Per-run 1-indexed character ranges ``(start, end, size * scale)`` from ``item['runs']``,
+    or ``None`` (caller keeps the flat write) for a uniform size or a gap in coverage (HIGH 5)."""
+    runs = item.get("runs") or []
+    full_len = len(item.get("text") or "")
+    ranges: list[tuple[int, int, float]] = []
+    pos = 1
+    gap = False
+    for r in runs:
+        text = r.get("text") or ""
+        length = len(text)
+        size = r.get("size")
+        if length == 0:
+            continue
+        if size is None:
+            gap = True
+            pos += length
+            continue
+        ranges.append((pos, pos + length - 1, float(size) * scale))
+        pos += length
+    if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
+        return None
+    covered = bool(ranges) and not gap and ranges[0][0] == 1 and ranges[-1][1] == full_len
+    if covered:
+        covered = all(b[0] == a[1] + 1 for a, b in zip(ranges, ranges[1:]))
+    if not covered:
+        if warnings is not None and item_id is not None:
+            warnings.append(
+                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap, flattening to one size"
+            )
+        return None
+    return tuple(ranges)
+
+
+def _text_boxes(
+    long_ids: Sequence[ItemId], items_by_id: Mapping[ItemId, dict]
+) -> tuple[list[TextBox], list[str]]:
+    """``([TextBox, ...], [warning, ...])`` for ``long_ids`` in source order (y then x);
+    a box whose font/size can't be resolved is omitted and warned about (D4 fallback)."""
+    ordered = sorted(long_ids, key=lambda iid: (items_by_id[iid].get("y", 0.0), items_by_id[iid].get("x", 0.0)))
+    boxes: list[TextBox] = []
+    warnings: list[str] = []
+    for iid in ordered:
+        item = items_by_id[iid]
+        font_name = item.get("font") or None
+        size = item.get("size") or None
+        if not font_name or not size:
+            warnings.append(f"text {iid[1]}: font/size unresolved, skipping band-stretch fit")
+            continue
+        boxes.append(TextBox(iid, item.get("text") or "", font_name, float(size)))
+    return boxes, warnings
 
 
 def slide_affine_scale(
@@ -159,6 +264,8 @@ def plan_assembly(
     band: Band,
     clips: Mapping[int, Path],
     runs: Mapping[int, Mapping[ItemId, Sequence[float]]] | None = None,
+    min_text_pt: float = DEFAULT_MIN_TEXT_PT,
+    allow_split: bool = True,
 ) -> AssemblyPlan:
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
@@ -170,7 +277,6 @@ def plan_assembly(
         if decision.action in ("in_deck", "both")
         and classes_by_number[number].category != "empty"
     )
-    ordinals = ordinal_map(kept_numbers)
 
     fits: dict[int, dict[ItemId, Rect]] = {}
     deletes: dict[int, tuple[ItemId, ...]] = {}
@@ -182,6 +288,10 @@ def plan_assembly(
     group_text_sizes: dict[int, dict[int, float]] = {}
     group_origin: dict[int, dict[int, tuple[float, float]]] = {}
     shrink_text_sizes: dict[int, dict[ItemId, float]] = {}
+    parts: dict[int, int] = {}
+    splits: dict[int, tuple[SplitPart, ...]] = {}
+    run_sizes: dict[int, dict[ItemId, tuple[tuple[int, int, float], ...]]] = {}
+    stacked_id_map: dict[int, frozenset[ItemId]] = {}
     warnings: list[str] = []
 
     for number in kept_numbers:
@@ -258,7 +368,95 @@ def plan_assembly(
         all_ids = {(item["kind"], item["kindIndex"]) for item in items}
         excluded_ids = all_ids - set(cls.kept) - set(cls.dropped_side)
 
-        deletes[number] = _delete_order(list(dropped) + list(movie_ids) + list(excluded_ids))
+        base_deletes = _delete_order(list(dropped) + list(movie_ids) + list(excluded_ids))
+        deletes[number] = base_deletes
+
+        stacked_ids: set[ItemId] = set()
+        stacked_text_sizes: dict[ItemId, float] = {}
+        stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
+        if cls.is_text and cls.long_text_ids:
+            long_ids = [iid for iid in cls.long_text_ids if iid in fit]
+            boxes, box_warnings = _text_boxes(long_ids, items_by_id)
+            warnings.extend(f"slide {number}: {w}" for w in box_warnings)
+            if boxes and len(boxes) == len(long_ids):
+                long_id_set = set(long_ids)
+                short_fit = {iid: rect for iid, rect in fit.items() if iid not in long_id_set}
+                # Fold the short row (badge/chapter-label) into the stack itself (HIGH 1):
+                # budget is band.height minus the short row's own scaled height, and the
+                # row is repositioned (with a gap) to sit directly above the long-box
+                # stack once it is placed -- never pinned to its own affine y, so the
+                # band top is left empty exactly as the golden deck lays it out.
+                stack_band = band
+                short_row_h = 0.0
+                if short_fit:
+                    short_row_h = max(rect.h for rect in short_fit.values())
+                    budget = max(0.0, band.height - short_row_h)
+                    stack_band = _dc_replace(band, height=budget)
+
+                result = fit_text_stack(boxes, stack_band, min_text_pt)
+                if result is not None:
+                    t, sizes, heights = result
+                    long_rects = _stacked_text_rects(boxes, heights, stack_band)
+                    fit.update(long_rects)
+                    if short_fit:
+                        stack_top = min(rect.y for rect in long_rects.values())
+                        fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
+                    stacked_ids = {box.item_id for box in boxes}
+                    for box in boxes:
+                        ranges = _run_size_ranges(
+                            items_by_id[box.item_id], t, item_id=box.item_id,
+                            slide_number=number, warnings=warnings,
+                        )
+                        if ranges is not None:
+                            stacked_run_sizes[box.item_id] = ranges
+                        else:
+                            stacked_text_sizes[box.item_id] = sizes[box.item_id]
+                elif not allow_split:
+                    raise AssemblyRefusal(
+                        f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
+                    )
+                elif len(boxes) < 2:
+                    raise AssemblyRefusal(
+                        f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone"
+                    )
+                else:
+                    stacked_ids = set(long_ids)
+                    part_list: list[SplitPart] = []
+                    for box in boxes:
+                        single = fit_text_stack([box], stack_band, min_text_pt)
+                        if single is None:
+                            raise AssemblyRefusal(
+                                f"slide {number} box {box.item_id[1]} does not fit the band even alone"
+                            )
+                        t1, sizes1, heights1 = single
+                        rect = _stacked_text_rects([box], heights1, stack_band)[box.item_id]
+                        part_fit = dict(short_fit)
+                        if short_fit:
+                            part_fit.update(_short_row_rects(short_fit, short_row_h, rect.y))
+                        part_fit[box.item_id] = rect
+                        other_long = [b.item_id for b in boxes if b.item_id != box.item_id]
+                        part_deletes = _delete_order(list(base_deletes) + other_long)
+                        part_ranges = _run_size_ranges(
+                            items_by_id[box.item_id], t1, item_id=box.item_id,
+                            slide_number=number, warnings=warnings,
+                        )
+                        part_item = items_by_id[box.item_id]
+                        part_autosize = (
+                            frozenset({box.item_id})
+                            if part_item.get("w") == 0.0 or part_item.get("h") == 0.0
+                            else frozenset()
+                        )
+                        part_list.append(
+                            SplitPart(
+                                fits=part_fit, deletes=part_deletes,
+                                text_sizes={box.item_id: sizes1[box.item_id]},
+                                run_sizes={box.item_id: part_ranges} if part_ranges is not None else {},
+                                stacked_ids=frozenset({box.item_id}),
+                                autosize=part_autosize,
+                            )
+                        )
+                    parts[number] = len(part_list)
+                    splits[number] = tuple(part_list)
 
         if cls.category in ("movie", "mixed"):
             clip_path = clips.get(number)
@@ -274,7 +472,7 @@ def plan_assembly(
         slide_shrink_sizes: dict[ItemId, float] = {}
         slide_autosize: set[ItemId] = set()
         for iid in cls.kept:
-            if iid[0] != "text":
+            if iid[0] != "text" or iid in stacked_ids:
                 continue
             item = items_by_id.get(iid)
             if item is None:
@@ -309,12 +507,30 @@ def plan_assembly(
                 continue
             slide_text_sizes[iid] = next(iter(distinct)) * scale
 
+        slide_text_sizes.update(stacked_text_sizes)
+        # Every stacked box gets a shrink-mode entry, uniform or mixed-run alike (nit 7):
+        # a mixed-run box's is a flat fallback only, never written -- shrink mode instead
+        # writes the same per-run ranges as warn mode (see `_slide_lines`).
+        slide_shrink_sizes.update(stacked_text_sizes)
+        for iid, ranges in stacked_run_sizes.items():
+            slide_shrink_sizes[iid] = max(size for _s, _e, size in ranges)
         if slide_text_sizes:
             text_sizes[number] = slide_text_sizes
         if slide_shrink_sizes:
             shrink_text_sizes[number] = slide_shrink_sizes
         if slide_autosize:
             autosize[number] = frozenset(slide_autosize)
+        if stacked_run_sizes:
+            run_sizes[number] = stacked_run_sizes
+        if stacked_ids:
+            stacked_id_map[number] = frozenset(stacked_ids)
+
+    ordinals = ordinal_map(kept_numbers, parts)
+    ordinal_to_number: dict[int, int] = {}
+    for number in kept_numbers:
+        first = ordinals[number]
+        for part in range(parts.get(number, 1)):
+            ordinal_to_number[first + part] = number
 
     return AssemblyPlan(
         kept=tuple(kept_numbers),
@@ -330,6 +546,11 @@ def plan_assembly(
         group_text_sizes=group_text_sizes,
         shrink_text_sizes=shrink_text_sizes,
         group_origin=group_origin,
+        parts=parts,
+        ordinal_to_number=ordinal_to_number,
+        splits=splits,
+        run_sizes=run_sizes,
+        stacked_ids=stacked_id_map,
     )
 
 
@@ -634,8 +855,10 @@ def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> 
     a deck whose PNG stage export would come back opaque."""
     objects, _id_to_file, _file_ids = _load_deck(staging_path)
     canvas = _canvas_size(objects)
-    for number in plan.kept:
-        ordinal = plan.ordinals[number]
+    ordinal_to_number = plan.ordinal_to_number or {
+        ordinal: number for number, ordinal in plan.ordinals.items()
+    }
+    for ordinal, number in sorted(ordinal_to_number.items()):
         layout = _base_layout_slide_for_ordinal(objects, ordinal)
         if layout is None:
             raise AssemblyRefusal(f"slide {number} (ordinal {ordinal}): base layout not resolvable offline")
@@ -767,24 +990,27 @@ def _group_blind_child_lines(number: int, ordinal: int, kind_index: int, rect: R
     ]
 
 
-def _text_overflow_lines(number: int, kind_index: int, addr: str, target_h: float) -> list[str]:
+def _text_overflow_lines(
+    number: int, kind_index: int, addr: str, target_h: float, *, ordinal: int | None = None
+) -> list[str]:
     """Read back a text item's live height after its geometry write and log
-    `OBED\\t<n>\\tOVERFLOW\\ttext:<idx>\\t<h>` when it exceeds `target_h` by more than 2pt --
-    covers any item with no explicit size write (autosize boxes and mixed-run boxes alike),
-    since Keynote can wrap those back to a height that overflows the fitted band."""
+    `OBED\\t<n>\\tOVERFLOW\\ttext:<idx>\\t<h>` (`<idx>` suffixed `:ordinal` on a split
+    part, so a short item repeated across parts logs a distinguishable key) when it
+    exceeds `target_h` by more than 2pt."""
+    item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
     return [
         "        try",
         f"          set curH to (height of {addr})",
         f"          if curH > {_as_num(target_h)} + 2.0 then",
         f'            log ("OBED" & tab & "{number}" & tab & "OVERFLOW" & tab & '
-        f'"text:{kind_index}" & tab & (curH as string))',
+        f'"{item_key}" & tab & (curH as string))',
         "          end if",
         "        end try",
     ]
 
 
 def _slide_lines(
-    plan: AssemblyPlan, number: int, ordinal: int, *, text_fit: Literal["warn", "shrink"] = "warn"
+    plan: AssemblyPlan, number: int, ordinal: int, *, part: int = 0, text_fit: Literal["warn", "shrink"] = "warn"
 ) -> list[str]:
     is_clip = number in plan.clips
     lines: list[str] = ["      try"]
@@ -796,9 +1022,22 @@ def _slide_lines(
             f"        set movVol to (movie volume of {movie_addr})",
         ]
 
-    fit = plan.fits.get(number, {})
-    autosize_ids = plan.autosize.get(number, frozenset())
-    text_sizes = plan.text_sizes.get(number, {})
+    split_parts = plan.splits.get(number)
+    if split_parts is not None:
+        split_part = split_parts[part]
+        fit = split_part.fits
+        deletes_here: tuple[ItemId, ...] = split_part.deletes
+        text_sizes = split_part.text_sizes
+        run_sizes_here = split_part.run_sizes
+        stacked_ids_here = split_part.stacked_ids
+        autosize_ids = plan.autosize.get(number, frozenset()) | split_part.autosize
+    else:
+        fit = plan.fits.get(number, {})
+        deletes_here = plan.deletes.get(number, ())
+        text_sizes = plan.text_sizes.get(number, {})
+        run_sizes_here = plan.run_sizes.get(number, {})
+        stacked_ids_here = plan.stacked_ids.get(number, frozenset())
+        autosize_ids = plan.autosize.get(number, frozenset())
     shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
     known_children = plan.group_children.get(number, {})
     group_text_sizes = plan.group_text_sizes.get(number, {})
@@ -830,17 +1069,26 @@ def _slide_lines(
         if item_id not in autosize_ids:
             body.append(f"          set height of theObj to {_as_num(rect.h)}")
         body.append(f"          set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
-        if kind == "text" and item_id in text_sizes:
+        if kind == "text" and item_id in run_sizes_here:
+            for start, end, size in run_sizes_here[item_id]:
+                body.append(
+                    f"          set size of characters {start} thru {end} "
+                    f"of object text of theObj to {_as_num(size)}"
+                )
+        elif kind == "text" and item_id in text_sizes:
             body.append(f"          set size of object text of theObj to {_as_num(text_sizes[item_id])}")
         elif kind == "text" and text_fit == "shrink" and item_id in shrink_text_sizes:
             body.append(
                 f"          set size of object text of theObj to {_as_num(shrink_text_sizes[item_id])}"
             )
         lines += _locked_write_block(number, addr, body)
-        if kind == "text" and item_id not in text_sizes:
-            lines += _text_overflow_lines(number, kind_index, addr, rect.h)
+        # A stacked/split box's size is a predictor estimate, never authoritative (HIGH 3):
+        # always read back its live height, even though it did get an explicit size write.
+        if kind == "text" and (item_id not in text_sizes or item_id in stacked_ids_here):
+            overflow_ordinal = ordinal if split_parts is not None else None
+            lines += _text_overflow_lines(number, kind_index, addr, rect.h, ordinal=overflow_ordinal)
 
-    for item_id in plan.deletes.get(number, ()):
+    for item_id in deletes_here:
         kind, kind_index = item_id
         name = _AS_KIND_NAMES.get(kind)
         if not name:
@@ -921,6 +1169,7 @@ def build_assembly_script(
     doc_name = _as_escape(scratch_path.name)
     approved_names = _applescript_string_list(black_layout_names)
     keep = plan.kept
+    base_ordinals = ordinal_map(keep)
 
     lines = [
         _keynote_terms(),
@@ -968,7 +1217,7 @@ def build_assembly_script(
             '      if targetLayout is missing value then error "resolved layout name not found in theDoc"',
         ]
         for number in keep:
-            ordinal = plan.ordinals[number]
+            ordinal = base_ordinals[number]
             lines.append(f"      set base layout of slide {ordinal} of theDoc to targetLayout")
         lines.append("      if donorSlide is not missing value then delete donorSlide")
 
@@ -977,9 +1226,18 @@ def build_assembly_script(
         f"      set height of theDoc to {plan.canvas[1]}",
     ]
 
+    for number in sorted(keep, key=lambda n: base_ordinals[n], reverse=True):
+        extra = plan.parts.get(number, 1) - 1
+        if extra <= 0:
+            continue
+        base_ordinal = base_ordinals[number]
+        for _ in range(extra):
+            lines.append(f"      duplicate slide {base_ordinal} to after slide {base_ordinal} of theDoc")
+
     for number in keep:
-        ordinal = plan.ordinals[number]
-        lines += _slide_lines(plan, number, ordinal, text_fit=text_fit)
+        for part in range(plan.parts.get(number, 1)):
+            ordinal = plan.ordinals[number] + part
+            lines += _slide_lines(plan, number, ordinal, part=part, text_fit=text_fit)
 
     lines += [
         "    end tell",
@@ -1007,6 +1265,7 @@ class AssembleResult:
     warnings: tuple[str, ...]
     movie_props: dict[int, dict[str, str]]
     overflows: tuple[dict, ...] = ()
+    ordinal_to_number: dict[int, int] = field(default_factory=dict)
 
 
 def _package_size(path: Path) -> int:
@@ -1054,7 +1313,9 @@ def _restore_stroke(
         warnings.append(f"stroke restore skipped: {stroke['reason']}")
         return stroke
 
-    inverse_ordinals = {ordinal: number for number, ordinal in plan.ordinals.items()}
+    inverse_ordinals = dict(plan.ordinal_to_number) or {
+        ordinal: number for number, ordinal in plan.ordinals.items()
+    }
 
     def _rekey_slides(rows: list[dict]) -> None:
         """Output ordinal -> source slide number. An ordinal with no source (should not
@@ -1095,7 +1356,8 @@ def _restore_stroke(
             ordinal = idx + 1
             number = inverse_ordinals.get(ordinal)
             slide_archive = out_objects.get(slide_id) or {}
-            retained_staged_ids = _staged_retained_ids(number, plan) if number is not None else set()
+            part = ordinal - plan.ordinals[number] if number is not None else 0
+            retained_staged_ids = _staged_retained_ids(number, plan, part=part) if number is not None else set()
             addressed = {rec["id"]: rec for rec in derive_kind_index(slide_archive, out_objects)}
             for ref in slide_archive.get("drawablesZOrder") or []:
                 rid = ref.get("identifier")
@@ -1399,15 +1661,23 @@ def _restore_stroke(
     return stroke
 
 
-def _staged_retained_ids(number: int, plan: AssemblyPlan) -> set[tuple[str, int]]:
+def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> set[tuple[str, int]]:
     """Staged (post-delete/insert) `(kind, kindIndex)` for the items this slide keeps.
     A deletion renumbers surviving siblings of the same kind, so each kind's kept source
     ids -- with any `plan.deletes[number]` id excluded first, deleted or not, so a deleted
     movie never occupies a staged index -- are ranked by source kindIndex to get the new
-    (staged) index; an inserted clip becomes the last staged movie."""
-    deleted = set(plan.deletes.get(number, ()))
+    (staged) index; an inserted clip becomes the last staged movie. A split slide reads
+    that ``part``'s own fits/deletes, not the unsplit slide's (HIGH 5)."""
+    split_parts = plan.splits.get(number)
+    if split_parts is not None:
+        split_part = split_parts[part]
+        fits_here = split_part.fits
+        deleted = set(split_part.deletes)
+    else:
+        fits_here = plan.fits.get(number, {})
+        deleted = set(plan.deletes.get(number, ()))
     by_kind: dict[str, list[int]] = {}
-    for kind, idx in plan.fits.get(number, {}):
+    for kind, idx in fits_here:
         if (kind, idx) in deleted:
             continue
         by_kind.setdefault(kind, []).append(idx)
@@ -1446,8 +1716,50 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
         warnings.append(f"builds verify skipped: {builds['error']}")
         return builds
 
-    inverse_ordinals = {ordinal: number for number, ordinal in plan.ordinals.items()}
-    out_by_number = {inverse_ordinals[ordinal]: rec for ordinal, rec in out.items() if ordinal in inverse_ordinals}
+    inverse_ordinals = plan.ordinal_to_number or {ordinal: number for number, ordinal in plan.ordinals.items()}
+    number_recs: dict[int, list[dict]] = {}
+    for ordinal, rec in out.items():
+        number = inverse_ordinals.get(ordinal)
+        if number is None:
+            continue
+        number_recs.setdefault(number, []).append(rec)
+
+    out_by_number: dict[int, dict] = {}
+    for number, recs in number_recs.items():
+        transition = recs[0].get("transition")
+        for rec in recs[1:]:
+            if rec.get("transition") != transition:
+                raise AssemblyRefusal(
+                    f"slide {number}: split parts disagree on transition "
+                    f"({transition} vs {rec.get('transition')})"
+                )
+        if len(recs) == 1:
+            merged_builds = list(recs[0]["builds"])
+        else:
+            # A short item (badge/chapter-label) is repeated on every part of a split
+            # slide, so its build shows up once per part -- merge by count, not by first
+            # occurrence, so a source slide's own repeated identical build isn't lost
+            # (HIGH 2): a key common to every part keeps the max per-part count (it is
+            # the same short item's build re-seen, not a new one), any other key sums.
+            per_part_counts = [
+                Counter((b["effect"], b["animationType"], b["identity"]) for b in rec["builds"])
+                for rec in recs
+            ]
+            common_keys = set.intersection(*(set(c) for c in per_part_counts)) if per_part_counts else set()
+            merged_counts: Counter = Counter()
+            for key in common_keys:
+                merged_counts[key] = max(c[key] for c in per_part_counts)
+            for c in per_part_counts:
+                for key, n in c.items():
+                    if key not in common_keys:
+                        merged_counts[key] += n
+            reps: dict[tuple, dict] = {}
+            for rec in recs:
+                for b in rec["builds"]:
+                    key = (b["effect"], b["animationType"], b["identity"])
+                    reps.setdefault(key, b)
+            merged_builds = [reps[key] for key, n in merged_counts.items() for _ in range(n)]
+        out_by_number[number] = {"slideId": recs[0]["slideId"], "builds": merged_builds, "transition": transition}
     src_by_number = {number: rec for number, rec in src.items() if number in plan.kept}
     builds["out_rekeyed"] = out_by_number
 
@@ -1501,6 +1813,8 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
     real_missing: list[dict] = []
     for m in report["missing"]:
         deleted_ids = set(plan.deletes.get(m["slide"], ()))
+        for split_part in plan.splits.get(m["slide"], ()):
+            deleted_ids |= set(split_part.deletes)
         key = (m["effect"], m["animationType"], m["identity"])
         candidates = src_identity_ids.get(m["slide"], {}).get(key, [])
         deleted_count = sum(1 for c in candidates if c in deleted_ids)
@@ -1652,4 +1966,5 @@ def assemble_dsk_deck(
         warnings=tuple(warnings),
         movie_props=movie_props,
         overflows=tuple(overflows),
+        ordinal_to_number=plan.ordinal_to_number,
     )

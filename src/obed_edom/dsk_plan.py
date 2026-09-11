@@ -48,6 +48,20 @@ def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bo
     return rect.w >= 0.98 * frame.w and rect.h >= 0.98 * frame.h
 
 
+DEFAULT_TEXT_SLIDE_WORDS = 10
+
+
+def _is_text_slide_kept(kept: Sequence[dict], text_slide_words: int) -> tuple[bool, tuple[ItemId, ...]]:
+    """``(is_text, long_text_ids)`` -- a slide is text when some kept ``text`` item's
+    content has more than ``text_slide_words`` whitespace-separated words (F2/D1)."""
+    long_ids = [
+        (item["kind"], item["kindIndex"])
+        for item in kept
+        if item.get("kind") == "text" and len([w for w in (item.get("text") or "").split() if w]) > text_slide_words
+    ]
+    return (bool(long_ids), tuple(long_ids))
+
+
 def _filter_kept_items(
     items: Sequence[dict],
     wall_w: float,
@@ -55,9 +69,13 @@ def _filter_kept_items(
     *,
     include_side: bool,
     group_child_text: Mapping[int, str | None] | None = None,
-) -> tuple[list[dict], list[ItemId], tuple[ItemId, ...], tuple[ItemId, ...], tuple[str, ...]]:
-    """Shared filter for every geometry/classification consumer: drops backdrops, off-canvas,
-    side-panel, scrim, and mirror-duplicate items. One kept set for every consumer."""
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+) -> tuple[
+    list[dict], list[ItemId], tuple[ItemId, ...], tuple[ItemId, ...], tuple[str, ...],
+    bool, tuple[ItemId, ...], tuple[ItemId, ...],
+]:
+    """Shared filter dropping backdrops/off-canvas/side-panel/scrim/text-slide-media/mirror
+    duplicates. Returns ``(kept, dropped_side, dropped_backdrop, dropped_duplicate, ...)``."""
     kept: list[dict] = []
     dropped_side: list[ItemId] = []
     panel_backdrops: list[dict] = []
@@ -80,6 +98,16 @@ def _filter_kept_items(
         kept.extend(panel_backdrops)
         dropped_backdrop = ()
 
+    is_text, long_text_ids = _is_text_slide_kept(kept, text_slide_words)
+    dropped_media_text: tuple[ItemId, ...] = ()
+    if is_text:
+        media_ids = {
+            (i["kind"], i["kindIndex"]) for i in kept if i.get("kind") in ("image", "movie")
+        }
+        if media_ids:
+            dropped_media_text = tuple(sorted(media_ids, key=lambda iid: (iid[0], iid[1])))
+            kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in media_ids]
+
     duplicate_map, mirror_warnings = mirror_duplicates(
         kept, (wall_w, wall_h), group_child_text=group_child_text
     )
@@ -87,8 +115,12 @@ def _filter_kept_items(
     if dropped_duplicate:
         dup_set = set(dropped_duplicate)
         kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in dup_set]
+        long_text_ids = tuple(iid for iid in long_text_ids if iid not in dup_set)
 
-    return kept, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings
+    return (
+        kept, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings,
+        is_text, long_text_ids, dropped_media_text,
+    )
 
 
 def _group_movie_descendants(group_obj: dict, objects: dict[str, dict], _depth: int = 0) -> int:
@@ -269,6 +301,9 @@ class SlideClass:
     connection_line_builds: int = 0
     dropped_duplicate: tuple[ItemId, ...] = ()
     mirror_warnings: tuple[str, ...] = ()
+    is_text: bool = False
+    long_text_ids: tuple[ItemId, ...] = ()
+    dropped_media_text: tuple[ItemId, ...] = ()
 
 
 def classify_slide(
@@ -281,14 +316,19 @@ def classify_slide(
     group_build_counts: dict[int, int] | None = None,
     connection_line_builds: int = 0,
     group_child_text: Mapping[int, str | None] | None = None,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
 ) -> SlideClass:
     number = slide["number"]
     wall_w, wall_h = wall
     if slide.get("skipped"):
         return SlideClass(number, "empty", 0, 0, (), (), (), None, 0, (), ())
 
-    kept_kinds, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings = _filter_kept_items(
-        slide.get("items") or [], wall_w, wall_h, include_side=include_side, group_child_text=group_child_text
+    (
+        kept_kinds, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings,
+        is_text, long_text_ids, dropped_media_text,
+    ) = _filter_kept_items(
+        slide.get("items") or [], wall_w, wall_h, include_side=include_side,
+        group_child_text=group_child_text, text_slide_words=text_slide_words,
     )
     kept: list[ItemId] = [(item["kind"], item["kindIndex"]) for item in kept_kinds]
     kept_set = set(kept)
@@ -339,6 +379,9 @@ def classify_slide(
         connection_line_builds,
         dropped_duplicate,
         mirror_warnings,
+        is_text=is_text,
+        long_text_ids=long_text_ids,
+        dropped_media_text=dropped_media_text,
     )
 
 
@@ -348,6 +391,7 @@ def classify_deck(
     include_side: frozenset[int] = frozenset(),
     deck: Any = None,
     payload: dict | None = None,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
 ) -> list[SlideClass]:
     """Classify every slide in ``payload`` (built from ``deck_path``/``deck`` if omitted)."""
     from obed_edom.iwa_runs import attach_group_content_signature  # noqa: PLC0415
@@ -374,6 +418,7 @@ def classify_deck(
                 group_build_counts=group_build_by_number.get(number),
                 connection_line_builds=connection_line_by_number.get(number, 0),
                 group_child_text=slide.get("groupChildSignature"),
+                text_slide_words=text_slide_words,
             )
         )
     return out
@@ -623,11 +668,13 @@ def _visibles_by_wall(
     *,
     include_side: bool,
     group_child_text: Mapping[int, str | None] | None = None,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
 ) -> dict[ItemId, Rect]:
     wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
-    filtered_items, _dropped_side, _dropped_backdrop, _dropped_duplicate, _mirror_warnings = _filter_kept_items(
-        items, wall_w, wall_h, include_side=include_side, group_child_text=group_child_text
-    )
+    filtered_items = _filter_kept_items(
+        items, wall_w, wall_h, include_side=include_side, group_child_text=group_child_text,
+        text_slide_words=text_slide_words,
+    )[0]
     visibles: dict[ItemId, Rect] = {}
     for item in filtered_items:
         item_id: ItemId = (item["kind"], item["kindIndex"])
@@ -643,11 +690,13 @@ def visible_union(
     include_side: bool,
     wall: tuple[float, float],
     group_child_text: Mapping[int, str | None] | None = None,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
 ) -> Rect | None:
     """Wall-space union of kept visible item rects (per ``_filter_kept_items``), or ``None``
     if nothing is kept/visible. Used by the DSK movie export's include_side crop rect."""
     visibles = _visibles_by_wall(
-        items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text
+        items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text,
+        text_slide_words=text_slide_words,
     )
     if not visibles:
         return None
@@ -663,6 +712,7 @@ def fit_slide(
     kept: Iterable[ItemId] | None = None,
     wall: tuple[float, float] | None = None,
     group_child_text: Mapping[int, str | None] | None = None,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
 ) -> dict[ItemId, Rect]:
     """``kept`` (explicit item ids) or ``wall`` (apply ``_filter_kept_items``) restrict which
     items are fit -- exactly one of the two must be given."""
@@ -672,7 +722,8 @@ def fit_slide(
         visibles = _visibles_by_kept(items, kept, include_side=include_side)
     else:
         visibles = _visibles_by_wall(
-            items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text
+            items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text,
+            text_slide_words=text_slide_words,
         )
 
     if not visibles:
@@ -718,6 +769,136 @@ def _union_rect(rects: Sequence[Rect]) -> Rect:
     x1 = max(r.x + r.w for r in rects)
     y1 = max(r.y + r.h for r in rects)
     return Rect(x0, y0, x1 - x0, y1 - y0)
+
+
+_FONT_DIRS: tuple[Path, ...] = (
+    Path.home() / "Library" / "Fonts",
+    Path("/System/Library/Fonts"),
+    Path("/Library/Fonts"),
+)
+_FONT_INDEX_CACHE: dict[str, Path] | None = None
+_TEXT_GAP_PT = 10.0
+_WRAP_OVERSAMPLE = 8
+_LINE_HEIGHT_FACTOR = 1.157
+_BOX_PADDING_PT = 21.0
+
+
+def _norm_font_key(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _build_font_index() -> dict[str, Path]:
+    from PIL import ImageFont  # noqa: PLC0415
+
+    index: dict[str, Path] = {}
+    stem_index: dict[str, Path] = {}
+    for directory in _FONT_DIRS:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.iterdir()):
+            if path.suffix.lower() not in (".otf", ".ttf", ".ttc"):
+                continue
+            stem = path.stem
+            stem_candidates = {stem}
+            if " - " in stem:
+                stem_candidates.add(stem.split(" - ")[-1])
+            for candidate in stem_candidates:
+                stem_index.setdefault(_norm_font_key(candidate), path)
+            try:
+                family, style = ImageFont.truetype(str(path)).getname()
+            except Exception:  # noqa: BLE001
+                continue
+            name_candidates = {family, f"{family} {style}".strip()}
+            for candidate in name_candidates:
+                index.setdefault(_norm_font_key(candidate), path)
+    for key, path in stem_index.items():
+        index.setdefault(key, path)
+    return index
+
+
+def resolve_font_path(font_name: str) -> Path | None:
+    """Resolve a PostScript font name to a file under ``_FONT_DIRS``, matched by each file's
+    own ``ImageFont.getname()`` first, filename stem second. Cached across calls."""
+    global _FONT_INDEX_CACHE
+    if _FONT_INDEX_CACHE is None:
+        _FONT_INDEX_CACHE = _build_font_index()
+    if not font_name:
+        return None
+    return _FONT_INDEX_CACHE.get(_norm_font_key(font_name))
+
+
+_WRAP_BREAK_CHARS = (" ", " ")  # ASCII space and thin space (F9/D4)
+
+
+def _wrap_lines(text: str, font: Any, max_width: float) -> list[str]:
+    """Greedy word wrap honouring ``\\n`` as a hard break; ``\\xa0`` is non-breaking (F9/D4)."""
+    import re as _re  # noqa: PLC0415
+
+    pattern = "[" + "".join(_WRAP_BREAK_CHARS) + "]"
+    lines: list[str] = []
+    for paragraph in (text or "").split("\n"):
+        if paragraph == "":
+            lines.append("")
+            continue
+        words = _re.split(pattern, paragraph)
+        current = ""
+        for word in words:
+            trial = word if not current else f"{current} {word}"
+            if not current or font.getlength(trial) <= max_width:
+                current = trial
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+    return lines
+
+
+def wrapped_height(text: str, font_name: str, size: float, width: float) -> float | None:
+    """Estimated laid-out height (pt) of ``text`` at ``size`` wrapped to ``width`` (F9).
+    ``None`` when the font cannot be resolved -- callers must warn and fall back."""
+    path = resolve_font_path(font_name)
+    if path is None or size <= 0:
+        return None
+    from PIL import ImageFont  # noqa: PLC0415
+
+    font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
+    lines = _wrap_lines(text, font, width * _WRAP_OVERSAMPLE)
+    return len(lines) * _LINE_HEIGHT_FACTOR * size + _BOX_PADDING_PT
+
+
+@dataclass(frozen=True)
+class TextBox:
+    item_id: ItemId
+    text: str
+    font_name: str
+    size: float
+
+
+def fit_text_stack(
+    boxes: Sequence[TextBox], band: Band, min_text_pt: float, *, gap: float = _TEXT_GAP_PT
+) -> tuple[float, dict[ItemId, float], dict[ItemId, float]] | None:
+    """Largest ``t`` in ``(0, 1]`` fitting ``boxes`` stacked with ``gap`` into ``band``, or
+    ``None``. A 2+-box stack pays one line of wrap-margin against the budget; one box doesn't."""
+    if not boxes:
+        return None
+    t = 1.00
+    while t > 0.0:
+        sizes = {box.item_id: box.size * t for box in boxes}
+        if any(sizes[box.item_id] < min(min_text_pt, box.size) for box in boxes):
+            return None
+        heights: dict[ItemId, float] = {}
+        for box in boxes:
+            h = wrapped_height(box.text, box.font_name, sizes[box.item_id], band.width)
+            if h is None:
+                return None
+            heights[box.item_id] = h
+        dominant = max(boxes, key=lambda b: sizes[b.item_id])
+        margin = _LINE_HEIGHT_FACTOR * sizes[dominant.item_id] if len(boxes) > 1 else 0.0
+        total = sum(heights.values()) + gap * (len(boxes) - 1) + margin
+        if total <= band.height:
+            return t, sizes, heights
+        t = round(t - 0.01, 2)
+    return None
 
 
 def _place(rect: Rect, scale: float, band: Band, anchor: str) -> Rect:

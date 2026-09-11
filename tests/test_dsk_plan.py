@@ -14,13 +14,17 @@ import obed_edom.dsk_plan as dsk_plan
 from obed_edom.dsk_plan import (
     Band,
     BandRefusal,
+    TextBox,
     classify_deck,
     classify_slide,
     fit_item,
     fit_slide,
+    fit_text_stack,
     is_panel_backdrop,
     mirror_duplicates,
     read_band,
+    resolve_font_path,
+    wrapped_height,
 )
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect
 
@@ -1062,3 +1066,81 @@ def test_gw_deck_slide32_fitted_rect():
     assert rect.w == pytest.approx(1244.4, abs=0.1)
     assert rect.h == pytest.approx(350.0, abs=0.1)
     assert rect.y == pytest.approx(704.0, abs=0.1)
+
+
+# --------------------------------------------------------------------------
+# wrapped_height / fit_text_stack -- the wrap estimator (F9, D4, step 5).
+# --------------------------------------------------------------------------
+
+TEXT_BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
+
+
+def _require_font(name):
+    if resolve_font_path(name) is None:
+        pytest.skip(f"font not present on this machine: {name}")
+
+
+def test_wrapped_height_matches_golden_boxes():
+    # F9's golden-box height model, exercised against the actual golden deck (the DSK
+    # deck, not GW -- nit 13): predicted lines within +/-1 line of the item's own
+    # laid-out height at its own (unscaled) size and width.
+    _require_deck(DSK_DECK)
+    _require_font("AzoSans-Regular")
+    from obed_edom.dsk_assemble import load_assembly_inputs
+
+    payload, classes, _runs = load_assembly_inputs(DSK_DECK)
+    by_number = {c.number: c for c in classes}
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+    checked = 0
+    for number in (3, 9, 5):
+        cls = by_number[number]
+        items_by_id = {(i["kind"], i["kindIndex"]): i for i in slides_by_number[number]["items"]}
+        for item_id in cls.long_text_ids:
+            item = items_by_id[item_id]
+            font, size = item.get("font"), item.get("size")
+            if not font or not size:
+                continue
+            predicted = wrapped_height(item["text"], font, size, item["w"])
+            assert predicted is not None
+            observed_lines = (item["h"] - 21.0) / (1.157 * size)
+            predicted_lines = (predicted - 21.0) / (1.157 * size)
+            assert abs(predicted_lines - observed_lines) <= 1.0 + 1e-6
+            checked += 1
+    assert checked >= 3
+
+
+def test_wrapped_height_missing_font_warns():
+    assert resolve_font_path("NotARealFontXYZ") is None
+    assert wrapped_height("hello world", "NotARealFontXYZ", 40.0, 1849.0) is None
+
+
+def test_fit_search_returns_measured_t():
+    # Measured against the real GW deck with this implementation's own band/margin/floor
+    # (F9's own precomputed table used a 20pt floor and no safety margin, so its
+    # published t values are not reproduced bit-for-bit here -- only the ordering and
+    # the "no slide needs a split at the default floor" property are asserted).
+    _require_deck(GW_DECK)
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    from obed_edom.dsk_assemble import load_assembly_inputs
+
+    payload, classes, _runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    slides_by_number = {s["number"]: s for s in payload["slides"]}
+
+    def _t_for(number):
+        cls = by_number[number]
+        items_by_id = {(i["kind"], i["kindIndex"]): i for i in slides_by_number[number]["items"]}
+        boxes = [
+            TextBox(iid, items_by_id[iid]["text"], items_by_id[iid]["font"], items_by_id[iid]["size"])
+            for iid in cls.long_text_ids
+        ]
+        result = fit_text_stack(boxes, TEXT_BAND, 24.0)
+        assert result is not None
+        return result[0]
+
+    t17, t38, t49 = _t_for(17), _t_for(38), _t_for(49)
+    assert t17 > t49  # heavier GW 49 badge needs more shrink than the two-box GW 17
+    # Margin now charged once for the stack, not once per box (MEDIUM 6) -- re-derived
+    # from this implementation's own band/margin/floor, not F9's no-margin/20pt table.
+    assert t17 == pytest.approx(0.74, abs=0.02)

@@ -15,12 +15,13 @@ from obed_edom.dsk_assemble import (
     AssemblyPlan,
     AssemblyRefusal,
     SlideDecision,
+    SplitPart,
     assemble_dsk_deck,
     build_assembly_script,
     load_assembly_inputs,
     plan_assembly,
 )
-from obed_edom.dsk_plan import Band, classify_slide
+from obed_edom.dsk_plan import Band, classify_slide, resolve_font_path
 from obed_edom.map_remap import Rect
 
 BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
@@ -983,6 +984,69 @@ def test_load_and_plan_against_gw_deck():
     assert fitted.y == pytest.approx(704.0, abs=0.1)
     assert fitted.w == pytest.approx(1244.4, abs=0.1)
     assert fitted.h == pytest.approx(350.0, abs=0.1)
+
+
+def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
+    # MEDIUM 6: pin the actual shipped result (plan.text_sizes/run_sizes scale, and the
+    # stack budget itself) so finding 1's badge-fold-in-stack change has to be re-blessed
+    # by a future edit, unlike the old test which asserted a bare-band t no shipped path
+    # produces.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    decisions = {13: SlideDecision(13, "in_deck"), 17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
+
+    t13 = next(iter(plan.run_sizes[13][("text", 1)]))[2] / 70.0
+    assert t13 == pytest.approx(1.0, abs=0.01)
+
+    t17 = next(iter(plan.run_sizes[17][("text", 1)]))[2] / 70.0
+    assert t17 == pytest.approx(0.72, abs=0.01)
+
+    badge13 = plan.fits[13][("shape", 0)]
+    stack13 = [r for iid, r in plan.fits[13].items() if iid in plan.stacked_ids[13]]
+    stack_top13 = min(r.y for r in stack13)
+    assert stack_top13 - (badge13.y + badge13.h) == pytest.approx(dsa._TEXT_STACK_GAP, abs=0.5)
+
+
+def test_gw13_17_21_forced_split_at_floor_66_leaves_gw13_unsplit():
+    # Acceptance table: forcing --min-text-pt 66 across GW 13/17/21 must split only
+    # GW 17 (its two-box stack can't clear the floor at any single t), assembling to
+    # 4 slides total, not refuse GW 13 (its single box clears the floor unsplit).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {n: SlideDecision(n, "in_deck") for n in (13, 17, 21)}
+    plan = plan_assembly(
+        payload, [by_number[13], by_number[17], by_number[21]], decisions=decisions,
+        band=BAND, clips={}, runs=runs, min_text_pt=66.0,
+    )
+    assert plan.kept == (13, 17, 21)
+    assert 13 not in plan.splits
+    assert 21 not in plan.splits
+    assert plan.parts.get(17) == 2
+    assert sum(plan.parts.get(n, 1) for n in plan.kept) == 4
+
+
+def test_gw13_stacked_text_does_not_overlap_badge():
+    # HIGH 2: GW 13's chapter badge and its long verse box must not overlap once the
+    # verse is stacked -- the owner's reference slide for this bug.
+    _require_gw_deck()
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
+    fit13 = plan.fits[13]
+    stacked = plan.stacked_ids.get(13, frozenset())
+    text_rects = [rect for iid, rect in fit13.items() if iid in stacked]
+    assert text_rects, "GW 13's verse box should be stacked"
+    for text_rect in text_rects:
+        for other_iid, other_rect in fit13.items():
+            if other_iid in plan.stacked_ids.get(13, frozenset()):
+                continue
+            assert dsa._intersect(text_rect, other_rect) is None, (
+                f"stacked text overlaps {other_iid}: {text_rect} vs {other_rect}"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -2739,6 +2803,23 @@ def test_staged_retained_ids_group_child_traversal_unaffected_by_deletion():
     assert dsa._staged_retained_ids(9, plan) == {("group", 0), ("image", 0)}
 
 
+def test_staged_retained_ids_reads_the_split_parts_own_fits_and_deletes():
+    # HIGH 5: a split slide's staged ranking must come from that part's own fits/deletes,
+    # not the unsplit slide's -- otherwise part 1's staged indices are computed against
+    # a fit set that still contains the other part's long box.
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {("text", 1): Rect(0, 0, 1, 1), ("text", 2): Rect(0, 0, 1, 1)}},
+        deletes={17: ()}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={("text", 1): Rect(0, 0, 1, 1)}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={("text", 2): Rect(0, 0, 1, 1)}, deletes=(("text", 1),), text_sizes={}),
+        )},
+    )
+    assert dsa._staged_retained_ids(17, plan, part=0) == {("text", 0)}
+    assert dsa._staged_retained_ids(17, plan, part=1) == {("text", 0)}
+
+
 # --------------------------------------------------------------------------
 # _verify_builds surplus tolerance: Keynote auto-attaches an
 # apple:movie-start build to an inserted clip; tolerate it only on that clip's own
@@ -3306,3 +3387,400 @@ def test_restore_stroke_refuses_when_media_census_raises(monkeypatch):
     assert "census" in stroke["reason"]
     assert "grants" not in captured
     assert "widths" not in captured
+
+
+# --------------------------------------------------------------------------
+# Text slides: classification, band stretch, split, and merged build verify
+# (content-rules-plan.md D4/D6/D7 -- steps 4, 6, 7). Font-dependent cases skip
+# when the machine doesn't have the font (F9's own carve-out).
+# --------------------------------------------------------------------------
+def _require_font(name):
+    if resolve_font_path(name) is None:
+        pytest.skip(f"font not present on this machine: {name}")
+
+
+_VERSE_1 = "For God so loved the world that he gave his only begotten Son"
+_VERSE_2 = (
+    "that whosoever believeth in him should not perish but have life "
+    "everlasting amen and amen forevermore"
+)
+
+
+def _long_text_item(kind_index, text, *, x=2000, y=200, w=1800, h=300, font="AzoSans-Regular", size=70.0):
+    item = _text_item(kind_index, x=x, y=y, w=w, h=h)
+    item["text"] = text
+    item["font"] = font
+    item["size"] = size
+    return item
+
+
+def _badge_item(kind_index, *, x=2000, y=50, w=400, h=80):
+    item = _text_item(kind_index, x=x, y=y, w=w, h=h)
+    item["text"] = "Genesis 11"
+    item["font"] = "AzoSans-Bold"
+    item["size"] = 40.0
+    return item
+
+
+def test_text_slide_drops_media_keeps_badge():
+    _require_font("AzoSans-Regular")
+    text_item = _long_text_item(1, _VERSE_1)
+    badge = _badge_item(0)
+    image = _image_item(2, x=2500, y=300, w=800, h=400)
+    slide = _slide(13, [text_item, badge, image])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    assert classes[0].is_text
+    assert classes[0].long_text_ids == (("text", 1),)
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert ("image", 2) not in plan.fits[13]
+    assert ("image", 2) in plan.deletes[13]
+    assert ("text", 1) in plan.fits[13]
+    assert ("text", 0) in plan.fits[13]
+
+
+def test_text_slide_box_stretches_to_band():
+    _require_font("AzoSans-Regular")
+    text_item = _long_text_item(1, _VERSE_1)
+    slide = _slide(13, [text_item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    rect = plan.fits[13][("text", 1)]
+    assert rect.x == pytest.approx(BAND.x_min)
+    assert rect.w == pytest.approx(BAND.width)
+    assert plan.text_sizes[13][("text", 1)] <= text_item["size"] + 1e-6
+
+
+def test_stacked_mixed_run_box_preserves_run_size_ratios():
+    # HIGH 1: a stacked mixed-run box must scale each run by t, not flatten to one size.
+    _require_font("AzoSans-Regular")
+    text = _VERSE_1
+    split_at = 20
+    runs = [
+        {"text": text[:split_at], "size": 70.0},
+        {"text": text[split_at:], "size": 85.0},
+    ]
+    item = _text_item(1, x=2000, y=200, w=1800, h=300, runs=runs)
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    item["size"] = 70.0
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    ranges = plan.run_sizes[13][("text", 1)]
+    assert len(ranges) == 2
+    assert ("text", 1) not in plan.text_sizes.get(13, {})
+    sizes_by_range = sorted(ranges, key=lambda r: r[0])
+    t = sizes_by_range[0][2] / 70.0
+    assert sizes_by_range[1][2] == pytest.approx(85.0 * t, abs=1e-6)
+    assert sizes_by_range[0] == (1, split_at, pytest.approx(70.0 * t))
+    assert sizes_by_range[1] == (split_at + 1, len(text), pytest.approx(85.0 * t))
+
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
+    )
+    assert f"set size of characters 1 thru {split_at} of object text of theObj to" in script
+    assert f"set size of characters {split_at + 1} thru {len(text)} of object text of theObj to" in script
+    # Overflow read-back still runs for a stacked box, even though it got a size write.
+    assert 'OVERFLOW" & tab & "text:1"' in script
+
+
+def test_stacked_mixed_run_box_keeps_run_ranges_under_text_fit_shrink():
+    # nit 7: shrink no longer flattens a stacked mixed-run box -- it writes the same
+    # per-run ranges (scaled by the fit factor) as warn mode, since flattening it was
+    # the one path that contradicted "source gives style".
+    _require_font("AzoSans-Regular")
+    text = _VERSE_1
+    split_at = 20
+    runs = [
+        {"text": text[:split_at], "size": 70.0},
+        {"text": text[split_at:], "size": 85.0},
+    ]
+    item = _text_item(1, x=2000, y=200, w=1800, h=300, runs=runs)
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    item["size"] = 70.0
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        text_fit="shrink",
+    )
+    assert "set size of characters" in script
+
+
+def test_john17_after_dedupe_does_not_overlap():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    assert classes[0].long_text_ids == (("text", 1), ("text", 2))
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    rect1 = plan.fits[17][("text", 1)]
+    rect2 = plan.fits[17][("text", 2)]
+    assert dsa._intersect(rect1, rect2) is None
+    assert plan.parts.get(17, 1) == 1
+
+
+# --------------------------------------------------------------------------
+# Split (step 6).
+# --------------------------------------------------------------------------
+def test_no_split_when_fit_found():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.parts.get(17, 1) == 1
+    assert 17 not in plan.splits
+
+
+def test_split_ordinals_shift_following_slides():
+    _require_font("AzoSans-Regular")
+    s13 = _slide(13, [_long_text_item(1, _VERSE_1, y=100)])
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    badge = _badge_item(0)
+    s17 = _slide(17, [box1, box2, badge])
+    s21 = _slide(21, [_long_text_item(1, _VERSE_1, y=100)])
+    payload = _payload([s13, s17, s21])
+    classes = [_classify(s13), _classify(s17), _classify(s21)]
+    decisions = {n: SlideDecision(n, "in_deck") for n in (13, 17, 21)}
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0
+    )
+    assert plan.parts[17] == 2
+    assert plan.ordinals == {13: 1, 17: 2, 21: 4}
+    assert plan.ordinal_to_number == {1: 13, 2: 17, 3: 17, 4: 21}
+
+
+def test_split_parts_one_long_box_each_keeps_badge():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    badge = _badge_item(0)
+    slide = _slide(17, [box1, box2, badge])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
+    assert plan.parts[17] == 2
+    parts = plan.splits[17]
+    assert len(parts) == 2
+    part1, part2 = parts
+    assert ("text", 1) in part1.fits and ("text", 2) not in part1.fits
+    assert ("text", 2) in part2.fits and ("text", 1) not in part2.fits
+    assert ("text", 0) in part1.fits and ("text", 0) in part2.fits
+    assert ("text", 2) in part1.deletes
+    assert ("text", 1) in part2.deletes
+
+
+def test_split_script_duplicates_in_descending_order():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    s17 = _slide(17, [box1, box2])
+    s21 = _slide(21, [_long_text_item(1, _VERSE_1, y=100)])
+    payload = _payload([s17, s21])
+    classes = [_classify(s17), _classify(s21)]
+    decisions = {n: SlideDecision(n, "in_deck") for n in (17, 21)}
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0
+    )
+    assert plan.parts[17] == 2
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        layout_policy="preserve",
+    )
+    dup_line = "duplicate slide 1 to after slide 1 of theDoc"
+    assert dup_line in script
+    dup_idx = script.index(dup_line)
+    slide21_write_idx = script.index('log ("OBED" & tab & "21"')
+    assert dup_idx < slide21_write_idx
+
+
+def test_split_script_duplicates_two_split_slides_in_descending_order():
+    # Two split slides (13, 17): the higher base ordinal's duplicate must be emitted
+    # first -- otherwise an already-emitted low-ordinal duplicate line shifts under it.
+    _require_font("AzoSans-Regular")
+    s13 = _slide(13, [_long_text_item(1, _VERSE_1, y=100), _long_text_item(2, _VERSE_2, y=500)])
+    s17 = _slide(17, [_long_text_item(1, _VERSE_1, y=100), _long_text_item(2, _VERSE_2, y=500)])
+    payload = _payload([s13, s17])
+    classes = [_classify(s13), _classify(s17)]
+    decisions = {n: SlideDecision(n, "in_deck") for n in (13, 17)}
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0
+    )
+    assert plan.parts[13] == 2
+    assert plan.parts[17] == 2
+    assert plan.ordinals[13] == 1
+    assert plan.ordinals[17] == 3
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        layout_policy="preserve",
+    )
+    # Duplicate lines address PRE-duplication ordinals (one slide per kept number, in
+    # keep order) -- 13 is base ordinal 1, 17 is base ordinal 2 -- not the post-split
+    # `plan.ordinals` used for the geometry writes below.
+    dup13_idx = script.index("duplicate slide 1 to after slide 1 of theDoc")
+    dup17_idx = script.index("duplicate slide 2 to after slide 2 of theDoc")
+    assert dup17_idx < dup13_idx
+
+
+def test_split_refused_when_single_box_cannot_fit():
+    _require_font("AzoSans-Regular")
+    huge = " ".join(["lorem"] * 400)
+    box1 = _long_text_item(1, huge, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+
+# --------------------------------------------------------------------------
+# _verify_builds across split parts (step 7).
+# --------------------------------------------------------------------------
+def _dissolve_build(kind_index, identity):
+    return {
+        "buildId": f"b{kind_index}", "chunkIds": [], "chunkOrder": [], "chunkReferent": [],
+        "kind": "text", "kindIndex": kind_index, "effect": "apple:dissolve character",
+        "animationType": "In", "identity": identity,
+    }
+
+
+def test_verify_builds_merges_split_parts(monkeypatch):
+    from obed_edom import iwa_builds
+
+    src_builds = {17: {
+        "slideId": "s",
+        "builds": [_dissolve_build(1, ("text", "part one")), _dissolve_build(2, ("text", "part two"))],
+        "transition": None,
+    }}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [_dissolve_build(0, ("text", "part one"))], "transition": None},
+        3: {"slideId": "o2", "builds": [_dissolve_build(0, ("text", "part two"))], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}),
+        )},
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 2
+    assert builds["tolerated_missing"] == []
+    assert builds["report"]["surplus"] == []
+
+
+def test_verify_builds_refuses_surplus_across_parts(monkeypatch):
+    from obed_edom import iwa_builds
+
+    src_builds = {17: {
+        "slideId": "s", "builds": [_dissolve_build(1, ("text", "part one"))], "transition": None,
+    }}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [_dissolve_build(0, ("text", "part one"))], "transition": None},
+        3: {"slideId": "o2", "builds": [_dissolve_build(0, ("text", "surplus"))], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={}, deletes=(), text_sizes={}),
+            SplitPart(fits={}, deletes=(), text_sizes={}),
+        )},
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal, match="surplus"):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+def test_verify_builds_tolerates_badge_build_repeated_on_every_part(monkeypatch):
+    # HIGH 4: a build on a short item (badge) repeated on every part must be counted
+    # once against the single source build, not refused as surplus.
+    from obed_edom import iwa_builds
+
+    src_builds = {17: {
+        "slideId": "s", "builds": [_dissolve_build(0, ("text", "badge"))], "transition": None,
+    }}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [_dissolve_build(0, ("text", "badge"))], "transition": None},
+        3: {"slideId": "o2", "builds": [_dissolve_build(0, ("text", "badge"))], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}),
+        )},
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 1
+    assert builds["report"]["surplus"] == []
+
+
+def test_verify_builds_tolerates_badge_build_repeated_twice_on_every_part(monkeypatch):
+    # HIGH 2: a source slide carrying two identical builds on a repeated short item
+    # must merge to two, not collapse to one via first-occurrence dedupe -- that traded
+    # a surplus refusal for a missing-build refusal.
+    from obed_edom import iwa_builds
+
+    badge = _dissolve_build(0, ("text", "badge"))
+    src_builds = {17: {"slideId": "s", "builds": [badge, badge], "transition": None}}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [badge, badge], "transition": None},
+        3: {"slideId": "o2", "builds": [badge, badge], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}),
+        )},
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 2
+    assert builds["report"]["surplus"] == []
+    assert builds["report"]["missing"] == []

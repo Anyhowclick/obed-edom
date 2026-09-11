@@ -49,9 +49,16 @@ def guard_out_dir(out_dir: Path, deck: Path) -> None:
         raise ValueError(f"out_dir must not be inside the source .key package: {resolved_deck}")
 
 
-def ordinal_map(keep: Collection[int]) -> dict[int, int]:
-    """Original slide number -> new ordinal after deleting everything not in `keep`."""
-    return {n: i + 1 for i, n in enumerate(sorted(set(keep)))}
+def ordinal_map(keep: Collection[int], parts: dict[int, int] | None = None) -> dict[int, int]:
+    """Original slide number -> its FIRST new ordinal after deleting everything not in
+    `keep`, each slide claiming `parts.get(n, 1)` consecutive ordinals (default: every
+    slide keeps its original single-ordinal meaning when `parts` is omitted)."""
+    result: dict[int, int] = {}
+    ordinal = 1
+    for n in sorted(set(keep)):
+        result[n] = ordinal
+        ordinal += (parts or {}).get(n, 1)
+    return result
 
 
 def _osascript_path(script: str, out_dir: Path) -> Path:
