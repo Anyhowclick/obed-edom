@@ -566,7 +566,8 @@ export function MapsTab() {
       mergeServerMeta(updated);
       return;
     }
-    saveAckJob.current = updated;
+    const baseRevision = saveQueue.current?.revision;
+    if (baseRevision == null || revision >= baseRevision) saveAckJob.current = updated;
     saveQueue.current?.reconcile({ document: remote, revision });
   }
 
