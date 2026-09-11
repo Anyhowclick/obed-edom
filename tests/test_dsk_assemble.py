@@ -1524,11 +1524,12 @@ def test_restore_stroke_divides_a_real_pattern_width_by_canvas_scale():
     assert "media" not in stroke
 
 
-def test_restore_stroke_refuses_a_matched_style_escaping_via_a_layout_reference():
+def test_restore_stroke_mints_a_matched_style_escaping_via_a_layout_reference():
     """A style paired by `match_card_stroke_styles` (a solid matched width) must still go
-    through the same census as leak widths -- an escaping layout reference refuses it and
-    it must never reach `patch_stroke_widths`, even though `match["widths"]` already has
-    it queued before the census runs."""
+    through the same census as leak widths -- an escaping layout reference, with a
+    genuine retained ref elsewhere, mints it instead and it must never reach
+    `patch_stroke_widths`, even though `match["widths"]` already has it queued before the
+    census runs."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -1564,6 +1565,9 @@ def test_restore_stroke_refuses_a_matched_style_escaping_via_a_layout_reference(
 
         iwa_write_mod.patch_stroke_widths = _fake_patch_stroke_widths
         iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        orig_mint = iwa_write_mod.mint_media_style
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
+        _fake_mint_calls.clear()
 
         plan = AssemblyPlan(
             kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
@@ -1578,13 +1582,216 @@ def test_restore_stroke_refuses_a_matched_style_escaping_via_a_layout_reference(
         iwa_write_mod.match_card_stroke_styles = orig_match
         iwa_write_mod.patch_stroke_widths = orig_patch_widths
         iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
 
     assert "widths" not in captured
     assert stroke["chosen"] == []
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style-matched"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style-matched"]["drawables"] == ["img1"]
+    [mint_call] = [c for c in _fake_mint_calls if c["source_style_id"] == "style-matched"]
+    assert mint_call["spec"]["stroke_message"]["width"] == pytest.approx(4.0)
+
+
+def test_width_restore_escape_is_minted_with_source_width():
+    """A style with a real pattern and a shrunk width, escaping via a layout reference
+    and not present in `match["widths"]` (a leak width, not a matched one), is minted
+    with the width-restore spec: the resolved own stroke, colour/frame preserved, width
+    set to the paired/leak source width -- not the grant spec."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style-leak"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style-leak"}},
+        "layout1": {"_pbtype": "KN.SlideLayoutArchive", "drawablesZOrder": [{"identifier": "img2"}]},
+        "style-leak": {"_pbtype": "TSD.MediaStyleArchive", "mediaProperties": {"stroke": {
+            "pattern": {"type": "TSDSolidPattern"}, "width": 0.25,
+            "color": {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0}, "frame": {"frameName": "Formal Shadow"},
+        }}},
+    }
+    orig_load_deck = dsa._load_deck
+    import obed_edom.iwa_write as iwa_write_mod
+
+    orig_match = iwa_write_mod.match_card_stroke_styles
+    orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
+    try:
+        dsa._load_deck = lambda path: (objects, {}, {})
+        iwa_write_mod.match_card_stroke_styles = (
+            lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+                "widths": {}, "chosen": [], "notes": [], "out_selected": []
+            }
+        )
+        iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
+        _fake_mint_calls.clear()
+
+        plan = AssemblyPlan(
+            kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
+            text_sizes={}, autosize={}, warnings=(),
+        )
+        warnings: list[str] = []
+        stroke = dsa._restore_stroke(
+            Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
+        )
+    finally:
+        dsa._load_deck = orig_load_deck
+        iwa_write_mod.match_card_stroke_styles = orig_match
+        iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
+
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style-leak"]["drawables"] == ["img1"]
+    [mint_call] = [c for c in _fake_mint_calls if c["source_style_id"] == "style-leak"]
+    spec = mint_call["spec"]
+    assert "stroke_message" in spec
+    assert spec["stroke_message"]["pattern"] == {"type": "TSDSolidPattern"}
+    assert spec["stroke_message"]["color"] == {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0}
+    assert spec["stroke_message"]["frame"] == {"frameName": "Formal Shadow"}
+    # slideWidth 7680 -> canvas_scale = 1920 / 7680 = 0.25 -> source width = 0.25 / 0.25.
+    assert spec["stroke_message"]["width"] == pytest.approx(1.0)
+
+
+def test_mint_refusal_falls_back_to_refused_media():
+    """A mint that refuses must fall back to `stroke["media_refused"]` (and the standard
+    "refused" warning), never silently disappear the style."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "layout1": {"_pbtype": "KN.SlideLayoutArchive", "drawablesZOrder": [{"identifier": "img2"}]},
+        "style1": {"mediaProperties": {"stroke": {
+            "pattern": {"type": "TSDEmptyPattern"}, "width": 1.0,
+            "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},
+        }}},
+    }
+    orig_load_deck = dsa._load_deck
+    import obed_edom.iwa_write as iwa_write_mod
+
+    orig_match = iwa_write_mod.match_card_stroke_styles
+    orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
+    try:
+        dsa._load_deck = lambda path: (objects, {}, {})
+        iwa_write_mod.match_card_stroke_styles = (
+            lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+                "widths": {}, "chosen": [], "notes": [], "out_selected": []
+            }
+        )
+        iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        iwa_write_mod.mint_media_style = lambda deck, source_style_id, drawable_ids, spec: {
+            "refused": True, "reason": "reparse gate failed",
+        }
+
+        plan = AssemblyPlan(
+            kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
+            text_sizes={}, autosize={}, warnings=(),
+        )
+        warnings: list[str] = []
+        stroke = dsa._restore_stroke(
+            Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
+        )
+    finally:
+        dsa._load_deck = orig_load_deck
+        iwa_write_mod.match_card_stroke_styles = orig_match
+        iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
+
+    assert "minted" not in stroke
+    [entry] = [r for r in stroke["media_refused"] if r["id"] == "style1"]
+    assert entry["reason"] == "reparse gate failed"
+    assert any("style1 mint refused: reparse gate failed" in w for w in warnings)
+
+
+def test_mint_refusal_with_no_reason_falls_back_to_unknown():
+    """A mint refusal that carries no `"reason"` key must still produce a warning,
+    falling back to the literal "unknown"."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "layout1": {"_pbtype": "KN.SlideLayoutArchive", "drawablesZOrder": [{"identifier": "img2"}]},
+        "style1": {"mediaProperties": {"stroke": {
+            "pattern": {"type": "TSDEmptyPattern"}, "width": 1.0,
+            "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},
+        }}},
+    }
+    orig_load_deck = dsa._load_deck
+    import obed_edom.iwa_write as iwa_write_mod
+
+    orig_match = iwa_write_mod.match_card_stroke_styles
+    orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
+    try:
+        dsa._load_deck = lambda path: (objects, {}, {})
+        iwa_write_mod.match_card_stroke_styles = (
+            lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+                "widths": {}, "chosen": [], "notes": [], "out_selected": []
+            }
+        )
+        iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        iwa_write_mod.mint_media_style = lambda deck, source_style_id, drawable_ids, spec: {"refused": True}
+
+        plan = AssemblyPlan(
+            kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
+            text_sizes={}, autosize={}, warnings=(),
+        )
+        warnings: list[str] = []
+        dsa._restore_stroke(
+            Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
+        )
+    finally:
+        dsa._load_deck = orig_load_deck
+        iwa_write_mod.match_card_stroke_styles = orig_match
+        iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
+
+    assert any(w.endswith("mint refused: unknown") for w in warnings)
+
+
+def test_restore_stroke_drives_the_real_mint_media_style_end_to_end(tmp_path):
+    """No fake: a real in-memory deck, a real layout escape, a real retained ref on the
+    kept slide -- ``_restore_stroke`` must actually call the real ``mint_media_style``
+    and land a real ``TSD.MediaStyleArchive`` variation in the output deck, re-pointing
+    only the retained drawable."""
+    pytest.importorskip("keynote_parser")
+
+    from test_iwa_write import _arch, _geom
+    from test_stroke_probe import _build_deck
+
+    layout_img = _arch(900101, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(0, 0, 10, 10)})
+    layout_root = _arch(900102, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 900101}]})
+
+    out_path = _build_deck(
+        tmp_path / "out.key", stylesheet_root=True, metadata=True,
+        extra_slide_archives=(layout_img, layout_root),
+    )
+    fw_path = _build_deck(tmp_path / "fw.key")
+
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+    )
+    warnings: list[str] = []
+    stroke = dsa._restore_stroke(fw_path, out_path, plan, {"slideWidth": 7680.0}, 999, warnings, print)
+
+    assert "900" not in {r["id"] for r in stroke.get("media_refused", [])}
+    assert stroke["minted"]["900"]["drawables"] == ["300"]
+    new_id = stroke["minted"]["900"]["new_id"]
+
+    from obed_edom.iwa_runs import _load_deck
+    objects, _id_to_file, _fi = _load_deck(out_path)
+    minted = objects[new_id]
+    assert minted["_pbtype"] == "TSD.MediaStyleArchive"
+    assert minted["super"]["parent"]["identifier"] == "900"
+    assert minted["super"]["isVariation"] is True
+    assert objects["300"]["style"]["identifier"] == new_id
+    assert objects["301"]["style"]["identifier"] == "900"
+    assert objects["900"]["mediaProperties"]["stroke"]["width"] == pytest.approx(0.25)
 
 
 def test_restore_stroke_patches_an_eligible_matched_style():
@@ -1641,11 +1848,13 @@ def test_restore_stroke_patches_an_eligible_matched_style():
     assert "media_refused" not in stroke
 
 
-def test_restore_stroke_refuses_a_style_escaping_via_a_layout_reference():
+def test_restore_stroke_mints_a_style_escaping_via_a_layout_reference():
     """`card_styles`' `slides` only tracks refs reachable via a slide's own
     `drawablesZOrder` walk, so a second image sharing the style but living outside any
     slide (a layout/master reference) never shows up there and the old `style["slides"]`
-    check alone would wrongly grant it. The full `out_objects` census must catch it."""
+    check alone would wrongly grant it. The full `out_objects` census must catch it; with
+    a genuine retained ref (`img1`) present, the style is minted for it rather than
+    refused."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -1663,6 +1872,7 @@ def test_restore_stroke_refuses_a_style_escaping_via_a_layout_reference():
 
     orig_match = iwa_write_mod.match_card_stroke_styles
     orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
     try:
         dsa._load_deck = lambda path: (objects, {}, {})
         iwa_write_mod.match_card_stroke_styles = (
@@ -1671,6 +1881,7 @@ def test_restore_stroke_refuses_a_style_escaping_via_a_layout_reference():
             }
         )
         iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
 
         plan = AssemblyPlan(
             kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
@@ -1684,20 +1895,120 @@ def test_restore_stroke_refuses_a_style_escaping_via_a_layout_reference():
         dsa._load_deck = orig_load_deck
         iwa_write_mod.match_card_stroke_styles = orig_match
         iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
 
     assert "media" not in stroke
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style1"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style1"]["drawables"] == ["img1"]
 
 
-def test_restore_stroke_refuses_a_style_via_a_transitive_child_escape():
-    """A style with its own real stroke ("style-parent") must be refused if a CHILD style
-    that inherits it via `super.parent` ("style-child", referenced only from a layout/
-    master image) escapes -- patching the parent globally would also repaint that
-    inheritor, so the census must walk inheritance, not just direct `style.identifier`
-    refs."""
+def test_restore_stroke_minted_style_with_an_orphan_referrer_skips_the_patched_warning():
+    """A style with a genuine escape, a retained ref and an orphan referrer is minted --
+    the source style is left untouched, so the orphan must not be reported via the
+    "patched with N unreached referrer(s)" warning, which only applies to a global
+    patch."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "img-orphan": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "layout1": {"_pbtype": "KN.SlideLayoutArchive", "drawablesZOrder": [{"identifier": "img2"}]},
+        "style1": {"mediaProperties": {"stroke": {
+            "pattern": {"type": "TSDEmptyPattern"}, "width": 1.0,
+            "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.0},
+        }}},
+    }
+    orig_load_deck = dsa._load_deck
+    import obed_edom.iwa_write as iwa_write_mod
+
+    orig_match = iwa_write_mod.match_card_stroke_styles
+    orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
+    try:
+        dsa._load_deck = lambda path: (objects, {}, {})
+        iwa_write_mod.match_card_stroke_styles = (
+            lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+                "widths": {}, "chosen": [], "notes": [], "out_selected": []
+            }
+        )
+        iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
+
+        plan = AssemblyPlan(
+            kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
+            text_sizes={}, autosize={}, warnings=(),
+        )
+        warnings: list[str] = []
+        stroke = dsa._restore_stroke(
+            Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
+        )
+    finally:
+        dsa._load_deck = orig_load_deck
+        iwa_write_mod.match_card_stroke_styles = orig_match
+        iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
+
+    assert stroke["minted"]["style1"]["drawables"] == ["img1"]
+    assert stroke["orphan_refs"] == {"style1": 1}
+    assert not any("patched with" in w for w in warnings)
+
+
+def test_restore_stroke_reports_unbuildable_mint_spec_reason():
+    """A style with a real (non-empty) pattern but no width has no buildable mint spec --
+    the refusal reason must say so, not fall back to the generic escaping-media
+    message."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "layout1": {"_pbtype": "KN.SlideLayoutArchive", "drawablesZOrder": [{"identifier": "img2"}]},
+        "style1": {"_pbtype": "TSD.MediaStyleArchive"},
+    }
+    orig_load_deck = dsa._load_deck
+    import obed_edom.iwa_write as iwa_write_mod
+
+    orig_match = iwa_write_mod.match_card_stroke_styles
+    orig_card_styles = iwa_write_mod.card_styles
+    try:
+        dsa._load_deck = lambda path: (objects, {}, {})
+        iwa_write_mod.card_styles = lambda out_objects, id_to_file: [{
+            "id": "style1", "member": "Index/DocumentStylesheet.iwa", "width": None,
+            "color": None, "pattern": "TSDSolidPattern", "refs": 2, "slides": [1], "inherited": False,
+        }]
+        iwa_write_mod.match_card_stroke_styles = (
+            lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+                "widths": {}, "chosen": [], "notes": [], "out_selected": []
+            }
+        )
+
+        plan = AssemblyPlan(
+            kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
+            text_sizes={}, autosize={}, warnings=(),
+        )
+        warnings: list[str] = []
+        stroke = dsa._restore_stroke(
+            Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
+        )
+    finally:
+        dsa._load_deck = orig_load_deck
+        iwa_write_mod.match_card_stroke_styles = orig_match
+        iwa_write_mod.card_styles = orig_card_styles
+
+    [entry] = [r for r in stroke["media_refused"] if r["id"] == "style1"]
+    assert entry["reason"] == "no mint spec buildable (unresolvable stroke)"
+
+
+def test_restore_stroke_mints_a_style_via_a_transitive_child_escape():
+    """A style with its own real stroke ("style-parent") must not be patched globally if
+    a CHILD style that inherits it via `super.parent` ("style-child", referenced only
+    from a layout/master image) escapes -- patching the parent globally would also
+    repaint that inheritor, so the census must walk inheritance, not just direct
+    `style.identifier` refs; with a genuine retained ref (`img1`) present, the style is
+    minted for it instead of refused."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -1731,6 +2042,8 @@ def test_restore_stroke_refuses_a_style_via_a_transitive_child_escape():
             return {"refused": False, "applied": len(widths)}
 
         iwa_write_mod.patch_stroke_widths = _fake_patch_stroke_widths
+        orig_mint = iwa_write_mod.mint_media_style
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
 
         plan = AssemblyPlan(
             kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
@@ -1744,19 +2057,81 @@ def test_restore_stroke_refuses_a_style_via_a_transitive_child_escape():
         dsa._load_deck = orig_load_deck
         iwa_write_mod.match_card_stroke_styles = orig_match
         iwa_write_mod.patch_stroke_widths = orig_patch_widths
+        iwa_write_mod.mint_media_style = orig_mint
 
     assert "widths" not in captured
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style-parent"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style-parent"]["drawables"] == ["img1"]
 
 
-def test_restore_stroke_refuses_a_style_escaping_via_a_slide_archive_outside_the_tree():
+def test_restore_stroke_mints_parent_and_inheritor_each_for_their_own_retained_ref():
+    """A retained drawable on the INHERITOR style (`img2` on `style-child`) must not
+    leak into the parent's (`style-parent`) retained set via `_retained_refs`'
+    ``str(sid) == style_id`` filter. Both styles escape (a layout/master ref each)
+    and each is minted only for its own retained ref."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [
+            {"identifier": "node1"}, {"identifier": "node2"},
+        ]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "node2": {"slide": {"identifier": "slide2"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}]},
+        "slide2": {"drawablesZOrder": [{"identifier": "img2"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style-parent"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style-child"}},
+        "escape_parent": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style-parent"}},
+        "escape_child": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style-child"}},
+        "master1": {"_pbtype": "KN.MasterSlideArchive", "drawablesZOrder": [
+            {"identifier": "escape_parent"}, {"identifier": "escape_child"},
+        ]},
+        "style-parent": {"_pbtype": "TSD.MediaStyleArchive", "mediaProperties": {"stroke": {
+            "pattern": {"type": "TSDSolidPattern"}, "width": 0.25,
+            "color": {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0},
+        }}},
+        "style-child": {"_pbtype": "TSD.MediaStyleArchive", "super": {"parent": {"identifier": "style-parent"}}},
+    }
+    orig_load_deck = dsa._load_deck
+    import obed_edom.iwa_write as iwa_write_mod
+
+    orig_match = iwa_write_mod.match_card_stroke_styles
+    orig_patch_widths = iwa_write_mod.patch_stroke_widths
+    orig_mint = iwa_write_mod.mint_media_style
+    try:
+        dsa._load_deck = lambda path: (objects, {}, {})
+        iwa_write_mod.match_card_stroke_styles = (
+            lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+                "widths": {}, "chosen": [], "notes": [], "out_selected": []
+            }
+        )
+        iwa_write_mod.patch_stroke_widths = lambda deck, widths: {"refused": False, "applied": len(widths)}
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
+
+        plan = AssemblyPlan(
+            kept=(13, 14), ordinals={13: 1, 14: 2},
+            fits={13: {("image", 0): Rect(0, 0, 100, 100)}, 14: {("image", 0): Rect(0, 0, 100, 100)}},
+            deletes={}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        )
+        warnings: list[str] = []
+        stroke = dsa._restore_stroke(
+            Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
+        )
+    finally:
+        dsa._load_deck = orig_load_deck
+        iwa_write_mod.match_card_stroke_styles = orig_match
+        iwa_write_mod.patch_stroke_widths = orig_patch_widths
+        iwa_write_mod.mint_media_style = orig_mint
+
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style-parent"]["drawables"] == ["img1"]
+    assert stroke["minted"]["style-child"]["drawables"] == ["img2"]
+
+
+def test_restore_stroke_mints_a_style_escaping_via_a_slide_archive_outside_the_tree():
     """On a real Keynote build there is no `KN.SlideLayoutArchive`/`KN.MasterSlideArchive`
     object at all -- layouts and masters are plain `KN.SlideArchive` objects living
     outside the show's own `slideTree`. The reachability walk must treat such an object
-    as a layout/master root, not just the two named archive types."""
+    as a layout/master root, not just the two named archive types; with a genuine
+    retained ref (`img1`) present, the style is minted for it rather than refused."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -1774,6 +2149,7 @@ def test_restore_stroke_refuses_a_style_escaping_via_a_slide_archive_outside_the
 
     orig_match = iwa_write_mod.match_card_stroke_styles
     orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
     try:
         dsa._load_deck = lambda path: (objects, {}, {})
         iwa_write_mod.match_card_stroke_styles = (
@@ -1782,6 +2158,7 @@ def test_restore_stroke_refuses_a_style_escaping_via_a_slide_archive_outside_the
             }
         )
         iwa_write_mod.patch_media_stroke = lambda deck, grants: {"refused": False, "patched": [], "created": []}
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
 
         plan = AssemblyPlan(
             kept=(13,), ordinals={13: 1}, fits={13: {("image", 0): Rect(0, 0, 100, 100)}}, deletes={}, clips={},
@@ -1795,12 +2172,11 @@ def test_restore_stroke_refuses_a_style_escaping_via_a_slide_archive_outside_the
         dsa._load_deck = orig_load_deck
         iwa_write_mod.match_card_stroke_styles = orig_match
         iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
 
     assert "media" not in stroke
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style1"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style1"]["drawables"] == ["img1"]
 
 
 def test_layout_master_reachable_ids_non_empty_for_slide_archive_outside_tree():
@@ -1944,12 +2320,13 @@ def test_restore_stroke_via_transitive_child_ignores_a_shadowing_grandchild():
     assert captured["widths"]["style-parent"] == pytest.approx(1.0)
 
 
-def test_restore_stroke_refuses_a_strokeless_parent_whose_strokeless_child_escapes_via_layout():
+def test_restore_stroke_mints_a_strokeless_parent_whose_strokeless_child_escapes_via_layout():
     """`style1` is strokeless (grant candidate) and `style-child` inherits from it with
     no own stroke either. `style-child` is referenced only from a layout, so granting
     `style1` a stroke would silently repaint `style-child` too. The census must count
     `style-child` as an inheritor of `style1` even though `style1` itself has no stroke
-    yet, and refuse on the layout escape."""
+    yet; since `img1` is a genuine retained ref, the style is minted for it rather than
+    refused, leaving `style1` (and the layout's `style-child` ref) untouched."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -1971,10 +2348,18 @@ def test_restore_stroke_refuses_a_strokeless_parent_whose_strokeless_child_escap
     stroke = _stroke_census_harness(objects, plan, captured=captured)
 
     assert "grants" not in captured
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style1"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style1"]["drawables"] == ["img1"]
+
+
+_fake_mint_calls: list[dict] = []
+
+
+def _fake_mint_media_style(deck, source_style_id, drawable_ids, spec):
+    _fake_mint_calls.append({
+        "source_style_id": source_style_id, "drawable_ids": list(drawable_ids), "spec": spec,
+    })
+    return {"refused": False, "new_id": f"{source_style_id}-mint", "drawables": list(drawable_ids)}
 
 
 def _stroke_census_harness(objects, plan, *, captured):
@@ -1984,6 +2369,7 @@ def _stroke_census_harness(objects, plan, *, captured):
     orig_match = iwa_write_mod.match_card_stroke_styles
     orig_card_styles = iwa_write_mod.card_styles
     orig_patch_media = iwa_write_mod.patch_media_stroke
+    orig_mint = iwa_write_mod.mint_media_style
     try:
         dsa._load_deck = lambda path: (objects, {}, {})
         iwa_write_mod.card_styles = lambda out_objects, id_to_file: [{
@@ -2001,6 +2387,7 @@ def _stroke_census_harness(objects, plan, *, captured):
             return {"refused": False, "patched": [], "created": []}
 
         iwa_write_mod.patch_media_stroke = _fake_patch_media_stroke
+        iwa_write_mod.mint_media_style = _fake_mint_media_style
         warnings: list[str] = []
         return dsa._restore_stroke(
             Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, {"slideWidth": 7680.0}, 1, warnings, print
@@ -2010,6 +2397,41 @@ def _stroke_census_harness(objects, plan, *, captured):
         iwa_write_mod.match_card_stroke_styles = orig_match
         iwa_write_mod.card_styles = orig_card_styles
         iwa_write_mod.patch_media_stroke = orig_patch_media
+        iwa_write_mod.mint_media_style = orig_mint
+
+
+def test_escaping_style_with_no_retained_refs_still_refuses():
+    """`style1`'s only referrers are a layout image (escape reason "layout/master") and a
+    non-retained kept-slide image (escape reason "non-retained (deleted/not-staged)
+    object") -- both escaping, none retained, so `_retained_refs` is empty and the style
+    must be refused, never minted, even though `_escaping_refs` is non-empty."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img2"}]},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "layout1": {"_pbtype": "KN.SlideLayoutArchive", "drawablesZOrder": [{"identifier": "img-layout"}]},
+        "img-layout": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "style1": {},
+    }
+    plan = AssemblyPlan(
+        kept=(13,), ordinals={13: 1}, fits={13: {}}, deletes={}, clips={}, text_sizes={}, autosize={},
+        warnings=(),
+    )
+    captured: dict = {}
+    _fake_mint_calls.clear()
+    stroke = _stroke_census_harness(objects, plan, captured=captured)
+
+    assert not _fake_mint_calls
+    assert "minted" not in stroke
+    assert stroke["media_refused"] == [{
+        "id": "style1",
+        "reason": "style refs escaping media: layout/master; non-retained (deleted/not-staged) object",
+        "slides": [13],
+    }]
+    row = stroke["media_refused"][0]
+    assert "minted" not in stroke
+    assert "mint" not in row
 
 
 def test_restore_stroke_grants_with_an_orphan_referrer_counted_not_refused():
@@ -2040,9 +2462,37 @@ def test_restore_stroke_grants_with_an_orphan_referrer_counted_not_refused():
     assert "media_refused" not in stroke
 
 
-def test_restore_stroke_refuses_a_style_with_a_verified_layout_referrer():
+def test_restore_stroke_treats_a_drawable_shared_with_a_template_slide_as_an_escape():
+    """`img1` is reachable both from the kept slide's `drawablesZOrder` and from a
+    template `KN.SlideArchive` (outside the show's slide tree, so layout/master
+    reachable) -- a mixed retained/escaping placement. It must never enter the retained
+    set for minting; the style is minted for `img2` alone."""
+    objects = {
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
+        "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
+        "slide1": {"drawablesZOrder": [{"identifier": "img1"}, {"identifier": "img2"}]},
+        "img1": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "img2": {"_pbtype": "TSD.ImageArchive", "style": {"identifier": "style1"}},
+        "template_slide": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "img1"}]},
+        "style1": {},
+    }
+    plan = AssemblyPlan(
+        kept=(13,), ordinals={13: 1},
+        fits={13: {("image", 0): Rect(0, 0, 100, 100), ("image", 1): Rect(0, 0, 100, 100)}},
+        deletes={}, clips={}, text_sizes={}, autosize={}, warnings=(),
+    )
+    captured: dict = {}
+    stroke = _stroke_census_harness(objects, plan, captured=captured)
+
+    assert "grants" not in captured
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style1"]["drawables"] == ["img2"]
+
+
+def test_restore_stroke_mints_a_style_with_a_verified_layout_referrer():
     """The same orphan referrer, but reachable via a real `KN.SlideLayoutArchive`
-    `drawablesZOrder` -- a genuine layout escape -- is refused, not counted as an orphan."""
+    `drawablesZOrder` -- a genuine layout escape, not counted as an orphan -- is minted
+    for the two genuine retained refs rather than refused."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -2062,17 +2512,16 @@ def test_restore_stroke_refuses_a_style_with_a_verified_layout_referrer():
     stroke = _stroke_census_harness(objects, plan, captured=captured)
 
     assert "grants" not in captured
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style1"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style1"]["drawables"] == ["img1", "img2"]
     assert "orphan_refs" not in stroke
 
 
-def test_restore_stroke_refuses_a_style_with_a_verified_master_referrer_nested_in_a_group():
+def test_restore_stroke_mints_a_style_with_a_verified_master_referrer_nested_in_a_group():
     """Same as the layout case, but the referrer is nested inside a `TSD.GroupArchive`
     that sits on a `KN.MasterSlideArchive` `drawablesZOrder` -- the reachability walk must
-    recurse into group children, exactly like the slide walk."""
+    recurse into group children, exactly like the slide walk; the style is still minted
+    for the two genuine retained refs rather than refused."""
     objects = {
         "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "node1"}]}},
         "node1": {"slide": {"identifier": "slide1"}, "isSkipped": False},
@@ -2093,10 +2542,8 @@ def test_restore_stroke_refuses_a_style_with_a_verified_master_referrer_nested_i
     stroke = _stroke_census_harness(objects, plan, captured=captured)
 
     assert "grants" not in captured
-    assert len(stroke["media_refused"]) == 1
-    refused = stroke["media_refused"][0]
-    assert refused["id"] == "style1"
-    assert "layout/master" in refused["reason"]
+    assert "media_refused" not in stroke
+    assert stroke["minted"]["style1"]["drawables"] == ["img1", "img2"]
     assert "orphan_refs" not in stroke
 
 

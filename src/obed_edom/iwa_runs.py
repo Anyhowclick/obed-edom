@@ -1,6 +1,6 @@
 """Offline per-run character style from a finalized .key IWA graph.
 
-keynote_parser is imported lazily in _load_deck so the module loads without the
+keynote_parser is imported lazily in _load_deck_full so the module loads without the
 optional iwa extra; attach_runs raises ImportError (caller leaves runs=[]).
 """
 
@@ -200,20 +200,31 @@ def slide_order(objects: dict[str, dict]) -> list[tuple[str, bool]]:
     return out
 
 
-def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]]]:
-    """(objects, id_to_file, file_ids). keynote_parser imported lazily (optional iwa extra)."""
+class UndecodableIWAMember(Exception):
+    """Raised by _load_deck_full(strict=True) when an .iwa member fails to decode."""
+
+
+def _load_deck_full(
+    path: str | Path, *, strict: bool = False,
+) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]], set[str]]:
+    """(objects, id_to_file, file_ids, header_object_references). keynote_parser imported
+    lazily (optional iwa extra). ``strict`` raises UndecodableIWAMember naming the member
+    instead of skipping it."""
     from keynote_parser.codec import IWAFile  # noqa: PLC0415 (optional extra)
 
     objects: dict[str, dict] = {}
     id_to_file: dict[str, str] = {}
     file_ids: dict[str, list[str]] = {}
+    header_object_references: set[str] = set()
     with zipfile.ZipFile(path) as zf:
         for name in zf.namelist():
             if not name.endswith(".iwa"):
                 continue
             try:
                 decoded = IWAFile.from_buffer(zf.read(name), name).to_dict()
-            except Exception:  # noqa: BLE001 — a single bad chunk must not sink the deck
+            except Exception as exc:  # noqa: BLE001 — a single bad chunk must not sink the deck
+                if strict:
+                    raise UndecodableIWAMember(name) from exc
                 continue
             for chunk in decoded["chunks"]:
                 for arch in chunk["archives"]:
@@ -223,7 +234,15 @@ def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[
                         objects[ident] = objs[0]
                     id_to_file.setdefault(ident, name)
                     file_ids.setdefault(name, []).append(ident)
-    return objects, id_to_file, file_ids
+                    for mi in arch["header"].get("messageInfos") or []:
+                        for ref in mi.get("objectReferences") or []:
+                            header_object_references.add(str(ref))
+    return objects, id_to_file, file_ids, header_object_references
+
+
+def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]]]:
+    """(objects, id_to_file, file_ids)."""
+    return _load_deck_full(path)[:3]
 
 
 def _slide_text_objects(

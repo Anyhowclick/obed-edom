@@ -1022,6 +1022,7 @@ def _restore_stroke(
             _resolve_stroke,
             card_styles,
             match_card_stroke_styles,
+            mint_media_style,
             patch_media_stroke,
             patch_stroke_widths,
         )
@@ -1066,7 +1067,7 @@ def _restore_stroke(
     leak_widths: dict[str, float] = {}
     refused_media: list[dict] = []
 
-    media_status: dict[str, tuple[int, bool]] = {}
+    media_status: dict[str, set[tuple[int, bool]]] = {}
     try:
         for idx, (slide_id, _skipped) in enumerate(slide_order(out_objects)):
             ordinal = idx + 1
@@ -1085,10 +1086,8 @@ def _restore_stroke(
                 seen: set[str] = set()
                 _collect_stroke_images(rid, out_objects, seen, images)
                 for obj_id in images:
-                    if number is None:
-                        media_status.setdefault(obj_id, (-ordinal, True))
-                    else:
-                        media_status.setdefault(obj_id, (number, retained))
+                    placement = (-ordinal, True) if number is None else (number, retained)
+                    media_status.setdefault(obj_id, set()).add(placement)
     except Exception as exc:  # noqa: BLE001
         stroke["refused"] = True
         stroke["reason"] = f"stroke media census failed ({type(exc).__name__}: {exc})"
@@ -1162,15 +1161,25 @@ def _restore_stroke(
                 cur = str(parent) if parent is not None else None
         return inheritors
 
+    def _escape_reasons(ref_id: str) -> list[str]:
+        """Escape reason for every placement of ``ref_id``: layout/master reachability plus each
+        recorded slide placement outside kept or not retained."""
+        reasons: list[str] = []
+        if ref_id in layout_master_ids:
+            reasons.append("layout/master")
+        for number, retained in media_status.get(ref_id) or set():
+            if number not in kept_set:
+                reasons.append(f"slide {number} outside kept")
+            elif not retained:
+                reasons.append("non-retained (deleted/not-staged) object")
+        return reasons
+
+    def _has_retained_placement(ref_id: str) -> bool:
+        return any(number in kept_set and retained for number, retained in media_status.get(ref_id) or set())
+
     def _escaping_refs(style_id: str) -> list[tuple[str, str]]:
-        """Every reference to ``style_id`` (or to a style that transitively inherits its
-        stroke via ``super.parent``) in ``out_objects`` that is NOT retained staged media
-        on a kept slide: a layout/master reference (verified reachable via
-        ``layout_master_ids``, not merely absent from ``media_status``), a non-retained
-        (deleted / not-staged) object, a reference on a slide outside ``plan.kept``, or a
-        non-media (image/movie) object. A reference reachable from no slide, layout or
-        master is an orphan, not an escape -- it cannot render, so a global style patch is
-        harmless to it; it is counted into ``orphan_refs`` instead."""
+        """Every non-retained (or mixed retained/escaping, i.e. shared drawable) reference to
+        ``style_id`` or an inheritor; orphans go to ``orphan_refs`` instead."""
         style_ids = {style_id} | _style_inheritors(style_id)
         escapes: list[tuple[str, str]] = []
         for ref_id, obj in out_objects.items():
@@ -1181,29 +1190,71 @@ def _restore_stroke(
             if ptype not in ("TSD.ImageArchive", "TSD.MovieArchive"):
                 escapes.append((ref_id, f"non-media object ({ptype or 'unknown'})"))
                 continue
-            status = media_status.get(ref_id)
-            if status is None:
-                if ref_id in layout_master_ids:
-                    escapes.append((ref_id, "layout/master"))
-                else:
-                    orphan_refs[style_id] = orphan_refs.get(style_id, 0) + 1
+            if ref_id not in media_status and ref_id not in layout_master_ids:
+                orphan_refs[style_id] = orphan_refs.get(style_id, 0) + 1
                 continue
-            number, retained = status
-            if number not in kept_set:
-                escapes.append((ref_id, f"slide {number} outside kept"))
-            elif not retained:
-                escapes.append((ref_id, "non-retained (deleted/not-staged) object"))
+            reasons = _escape_reasons(ref_id)
+            if not reasons:
+                continue
+            if _has_retained_placement(ref_id):
+                escapes.append((ref_id, "shared drawable"))
+            else:
+                escapes.append((ref_id, reasons[0]))
         return escapes
 
-    refused_style_ids: set[str] = set()
+    def _retained_refs(style_id: str) -> list[str]:
+        """Image/movie ids directly referencing ``style_id`` with only retained staged placements on kept slides."""
+        retained_ids: list[str] = []
+        for ref_id, obj in out_objects.items():
+            sid = (obj.get("style") or {}).get("identifier")
+            if sid is None or str(sid) != style_id:
+                continue
+            if obj.get("_pbtype") not in ("TSD.ImageArchive", "TSD.MovieArchive"):
+                continue
+            if _escape_reasons(ref_id):
+                continue
+            if _has_retained_placement(ref_id):
+                retained_ids.append(ref_id)
+        return retained_ids
 
-    def _refuse(style_id: str, slides: set[int], escapes: list[tuple[str, str]]) -> None:
-        kinds = sorted({kind for _rid, kind in escapes})
-        reason = "style refs slides outside kept" if not kinds else (
-            "style refs escaping media: " + "; ".join(kinds)
-        )
+    def _mint_spec_for(style: dict) -> dict | None:
+        """Mint spec for ``style``, or ``None`` when none is buildable."""
+        if style["pattern"] in (None, "TSDEmptyPattern"):
+            return {"width": 5.0, "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern"}
+        if style["width"] is None:
+            return None
+        source_width = match["widths"].get(style["id"], style["width"] / canvas_scale)
+        parent_stroke, _inherited = _resolve_stroke(style["id"], out_objects)
+        if parent_stroke is None:
+            return None
+        stroke_message = copy.deepcopy(parent_stroke)
+        stroke_message["width"] = source_width
+        return {"stroke_message": stroke_message}
+
+    refused_style_ids: set[str] = set()
+    minting_style_ids: set[str] = set()
+    mint_specs: dict[str, tuple[list[str], dict, set[int]]] = {}
+
+    def _refuse(
+        style_id: str, slides: set[int], escapes: list[tuple[str, str]], reason: str | None = None
+    ) -> None:
+        if reason is None:
+            kinds = sorted({kind for _rid, kind in escapes})
+            reason = "style refs slides outside kept" if not kinds else (
+                "style refs escaping media: " + "; ".join(kinds)
+            )
         refused_media.append({"id": style_id, "reason": reason, "slides": sorted(slides)})
         refused_style_ids.add(style_id)
+
+    def _mint_or_refuse(style_id: str, slides: set[int], escapes: list[tuple[str, str]], spec: dict | None) -> None:
+        retained_ids = _retained_refs(style_id)
+        if not retained_ids:
+            _refuse(style_id, slides, escapes)
+        elif spec is None:
+            _refuse(style_id, slides, escapes, "no mint spec buildable (unresolvable stroke)")
+        else:
+            mint_specs[style_id] = (retained_ids, spec, slides)
+            minting_style_ids.add(style_id)
 
     seen_style_ids: set[str] = set()
     for style in out_styles:
@@ -1216,7 +1267,7 @@ def _restore_stroke(
             continue
         escapes = _escaping_refs(style["id"])
         if escapes:
-            _refuse(style["id"], slides, escapes)
+            _mint_or_refuse(style["id"], slides, escapes, _mint_spec_for(style))
             continue
         no_stroke = style["pattern"] in (None, "TSDEmptyPattern")
         if no_stroke:
@@ -1238,9 +1289,8 @@ def _restore_stroke(
                 leak_widths[style["id"]] = style["width"] / canvas_scale
 
     matched_widths = {
-        sid: w for sid, w in match["widths"].items() if sid not in refused_style_ids
+        sid: w for sid, w in match["widths"].items() if sid not in (refused_style_ids | minting_style_ids)
     }
-    stroke["chosen"] = [c for c in match["chosen"] if c["id"] not in refused_style_ids]
     widths = {**matched_widths, **leak_widths}
     if widths:
         try:
@@ -1256,7 +1306,7 @@ def _restore_stroke(
 
     try:
         strokeless_by_number: dict[str, set[int]] = {}
-        for obj_id, (number, _retained) in media_status.items():
+        for obj_id, placements in media_status.items():
             style_id = ((out_objects.get(obj_id) or {}).get("style") or {}).get("identifier")
             if style_id is None:
                 continue
@@ -1266,14 +1316,18 @@ def _restore_stroke(
             stroke_data, _inherited = _resolve_stroke(style_id, out_objects)
             if stroke_data is not None:
                 continue
-            strokeless_by_number.setdefault(style_id, set()).add(number)
+            for number, _retained in placements:
+                strokeless_by_number.setdefault(style_id, set()).add(number)
         for style_id, slides in strokeless_by_number.items():
             if not slides.issubset(kept_set):
                 _refuse(style_id, slides, [])
                 continue
             escapes = _escaping_refs(style_id)
             if escapes:
-                _refuse(style_id, slides, escapes)
+                _mint_or_refuse(
+                    style_id, slides, escapes,
+                    {"width": 5.0, "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern"},
+                )
                 continue
             grants[style_id] = {"width": 5.0, "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern"}
     except Exception as exc:  # noqa: BLE001
@@ -1289,14 +1343,34 @@ def _restore_stroke(
         stroke["media"] = media_result
         if media_result.get("refused"):
             warnings.append(f"media stroke patch refused: {media_result.get('reason')}")
+    if mint_specs:
+        minted: dict[str, dict] = {}
+        for style_id, (retained_ids, spec, slides) in mint_specs.items():
+            try:
+                mint_result = mint_media_style(out_path, style_id, retained_ids, spec)
+            except OfflineWriteCorrupted:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                mint_result = {"refused": True, "reason": f"mint_media_style raised: {exc}"}
+            if mint_result.get("refused"):
+                reason = mint_result.get("reason") or "unknown"
+                refused_media.append({"id": style_id, "reason": reason, "slides": sorted(slides), "mint": True})
+                refused_style_ids.add(style_id)
+            else:
+                minted[style_id] = {"new_id": mint_result["new_id"], "drawables": mint_result["drawables"]}
+        if minted:
+            stroke["minted"] = minted
+    excluded_style_ids = refused_style_ids | minting_style_ids
+    stroke["chosen"] = [c for c in match["chosen"] if c["id"] not in excluded_style_ids]
     if refused_media:
         stroke["media_refused"] = refused_media
         for r in refused_media:
-            warnings.append(f"media stroke {r['id']} refused: {r['reason']}")
+            label = "mint refused" if r.get("mint") else "refused"
+            warnings.append(f"media stroke {r['id']} {label}: {r['reason']}")
     if orphan_refs:
         stroke["orphan_refs"] = orphan_refs
         for sid, n in orphan_refs.items():
-            if sid in refused_style_ids:
+            if sid in excluded_style_ids:
                 continue
             warnings.append(f"media stroke {sid} patched with {n} unreached referrer(s)")
 

@@ -100,6 +100,46 @@ def test_refuses_stroke_message_missing_width(deck):
     assert deck.read_bytes() == before
 
 
+def test_refuses_stroke_message_with_nan_width(deck):
+    before = deck.read_bytes()
+    bad_stroke = {
+        "color": {"model": "rgb", "r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0, "rgbspace": "srgb"},
+        "width": float("nan"),
+    }
+    result = patch_media_stroke(deck, {"900": {"stroke_message": bad_stroke}})
+    assert result["refused"]
+    assert "width" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_refuses_synthesized_bool_width(deck):
+    before = deck.read_bytes()
+    result = patch_media_stroke(deck, {"900": {"width": True, "color": (0.1, 0.2, 0.3, 1.0)}})
+    assert result["refused"]
+    assert "4-tuple color" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_refuses_synthesized_nan_color_component(deck):
+    before = deck.read_bytes()
+    result = patch_media_stroke(deck, {"900": {"width": 2.0, "color": (float("nan"), 0.2, 0.3, 1.0)}})
+    assert result["refused"]
+    assert "4-tuple color" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_refuses_stroke_message_with_nan_color_leaf(deck):
+    before = deck.read_bytes()
+    bad_stroke = {
+        "color": {"model": "rgb", "r": float("nan"), "g": 0.2, "b": 0.3, "a": 1.0, "rgbspace": "srgb"},
+        "width": 2.0,
+    }
+    result = patch_media_stroke(deck, {"900": {"stroke_message": bad_stroke}})
+    assert result["refused"]
+    assert "non-finite value" in result["reason"]
+    assert deck.read_bytes() == before
+
+
 def test_refuses_unknown_style_id(deck):
     before = deck.read_bytes()
     result = patch_media_stroke(deck, {"999999": {"width": 3.0, "color": (1.0, 1.0, 1.0, 1.0)}})
