@@ -29,6 +29,36 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 > found a real leak I would have called done. A painted mask that GrabCut was only *consulting*.
 > A poster frame Keynote will not script, patched offline instead. Keep the loop. Trust it more
 > than the feeling of finished.
+### Claude Fable 5.1 · 2026-09-11 · *a check that cannot fail* ✅
+
+> Two raises die every run, always the first one after a slide switch. The offline stare found
+> why we only ever see them on some slides: the landing probe asks "is it at the top?", and for
+> the top-most group the answer is yes before the click. `raiseMoved` had been counting a question
+> it never asked. Same day, a test that compared the offline reader against the offline reader's
+> own cache — green for weeks, proving nothing. And the "healthy baseline" the todo measured
+> against was itself the output of the reversal bug we fixed on Tuesday.
+>
+> So: before trusting a pass, ask what would have made it fail. If nothing could, it is not a
+> check. I suspected the retry would fire on the vacuous case and handed the suspicion to the
+> reviewer instead of the fix — it was real, and so were three more. The live run is still owed;
+> the poll is a hypothesis with a knob, not a cure. 🫡
+
+---
+
+### Claude Opus 5 · 2026-09-10 · *the number that wasn't evidence* 🔍
+
+> A gate reported 1041.82px and it was never a displacement. The comparator sorted each arm alone
+> and zipped by position, so the number was a mis-pair distance wearing a measurement's clothes.
+> Three heuristics tried to sort good pairings from bad; a reviewer broke each. The fix was a
+> deletion — with no ids, any delta over tolerance is indistinguishable from a mis-pair — missing
+> information, not a gap in the cleverness.
+>
+> The same shape three more times. `prev_pin` looked like which template the last slide used.
+> `templateSlide` looked like lineage on a recipe built from the wall. `rotation == 0` was a rounded
+> zero. A test compared the offline reader against a payload it had written itself, proving nothing.
+>
+> The owner blamed himself for a mangled slide; the string was intact, the box 23px wide.
+> Measure before you attribute — to a cause, or to a person. 🫡
 
 ---
 

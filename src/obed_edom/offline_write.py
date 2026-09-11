@@ -33,20 +33,23 @@ _OFFLINE_MEDIA_KINDS = frozenset({"image", "movie"})
 # identity mask (`_masked_media_fields`) or hard-misses a real crop -- either way it only
 # falls back to the `reported` bulk seed for x/y (never w/h — those read the mask geometry),
 # and only when the spec's x/y is None; `ItemTransform.as_dict()` always emits x/y, so a
-# masked image spec never actually needs a live seed in practice.
-_OFFLINE_SOFT_SEED_KINDS = frozenset({"group", "text"})
+# masked image spec never actually needs a live seed in practice. Group omitted too: its
+# frame is derived from the offline composed child union, never from `reported` — only
+# text still needs a live bulk-geometry seed (its stored y is anchor-dependent).
+_OFFLINE_SOFT_SEED_KINDS = frozenset({"text"})
 
 # Live-verify tolerance per kind (px), consumed by `_say_verify_report`'s per-kind lookup;
 # "_default" covers any kind not listed. Text is now a real (if loose) bar — see
 # `verify_live_frames` — not merely reported.
 LIVE_VERIFY_TOL: dict[str, float] = {"text": 4.0, "_default": 2.0}
-# Group is the composed child-union vs the planned rect, so it carries the union
-# model's own gap: measured max 1.92px over 240 comparable specs on the AppleScript
-# reference arm (2026-09-07 Full bank) -- 2.5 gives ~1.3x headroom over that. The 240 was
-# the reference arm's set of comparable specs, not the 244 this bar actually gates
-# (needs_keynote is per-run); it also excludes slide 36 `ki2..ki5` (~139px on the
-# reference arm), the separate never-written-spec bug this change deliberately keeps
-# gating -- that line stays RED after the W1 writer fix.
+# Group is now a self-consistency check on offline-WRITTEN groups: both write and verify
+# share `compose_geometry`, so the expected value is 0.00px -- it no longer proves the
+# group reached Keynote correctly, only that the writer's own arithmetic is internally
+# consistent (only `verify_live_frames` and the A-vs-B identity compare do that). 2.5px is
+# kept as headroom for Keynote's re-save of the deck between the patch and the decode, not
+# tightened to `_default` yet -- that is a follow-up once one live run has published a real
+# post-fix maximum. Groups the AppleScript fallback wrote (never-written specs, e.g. slide
+# 36 `ki2..ki5`) are excluded from this bar and reported on the `group-missed` line instead.
 OFFLINE_VERIFY_TOL: dict[str, float] = {"group": 2.5, "_default": 0.5}
 
 
@@ -110,8 +113,8 @@ def counts_from_payload(wall: dict[str, Any]) -> dict[int, dict[str, int]]:
 def _soft_seed_slides(
     offline_slides: set[int], specs_by_slide: dict[int, list[dict[str, Any]]]
 ) -> set[int]:
-    """Offline slides carrying a non-hide, geometry-bearing group/text spec — the only
-    kinds whose write needs a live bulk-geometry seed (`reported`)."""
+    """Offline slides carrying a non-hide, geometry-bearing text spec — the only
+    kind whose write needs a live bulk-geometry seed (`reported`)."""
     from obed_edom.remap_keynote import _spec_bears_geometry  # noqa: PLC0415 (avoid a module cycle)
 
     out: set[int] = set()
@@ -159,6 +162,24 @@ def _fallback_specs_by_slide(
         if specs:
             out[n] = specs
     return out
+
+
+def _written_specs_by_slide(
+    specs_by_slide: dict[int, list[dict[str, Any]]],
+    fallback_by_slide: dict[int, list[dict[str, Any]]],
+) -> dict[int, list[dict[str, Any]]]:
+    """Planned specs MINUS the ones that went to the AppleScript fallback. Hides ride
+    along so `bridge_specs_kindindex` still shifts wall → saved kindIndex."""
+    missed = {
+        n: {(str(s.get("kind")), s.get("kindIndex")) for s in v if s.get("role") != "hide"}
+        for n, v in fallback_by_slide.items()
+    }
+    return {
+        n: [s for s in specs
+            if s.get("role") == "hide"
+            or (str(s.get("kind")), s.get("kindIndex")) not in missed.get(n, ())]
+        for n, specs in specs_by_slide.items()
+    }
 
 
 def _fallback_bodies(fallback_by_slide: dict[int, list[dict[str, Any]]]) -> dict[int, str]:
@@ -294,7 +315,7 @@ def _patch_offline_slides(
     say: Callable[[str], None],
 ) -> dict[int, Any]:
     """Patch every offline slide in ONE zip rewrite. Empty result ⇒ caller falls the whole
-    run back to AppleScript (never patch group/text without a live seed).
+    run back to AppleScript (never patch text without a live seed).
 
     `iwa_write.OfflineWriteCorrupted` means the in-place copy-back itself failed: the deck
     IS truncated and the temp `.<name>.obedwrite.tmp` beside it holds the full rewrite.
@@ -676,13 +697,21 @@ def run_offline_write(
     group_verify: dict[str, Any] | None = None
     if mode == "verify":
         composed = _composed_frames(dest, offline_slides)
-        offline_report = verify_offline_frames(specs_by_slide, composed)
-        _, group_approx_rows = group_frame_rows(specs_by_slide, composed)
+        written_specs = _written_specs_by_slide(specs_by_slide, fallback_by_slide)
+        offline_report = verify_offline_frames(written_specs, composed)
+        _, group_approx_rows = group_frame_rows(written_specs, composed)
         if group_approx_rows:
             worst = max(r["delta"] for r in group_approx_rows)
             say(f"Offline-write verify: group-approx n={len(group_approx_rows)} "
                 f"worst={worst:.2f}px NOT GATED (needs_keynote-flagged; excluded from "
                 "the group bar).")
+        missed_comparable, missed_approx = group_frame_rows(fallback_by_slide, composed)
+        group_missed_rows = missed_comparable + missed_approx
+        missed_max = max((r["delta"] for r in group_missed_rows), default=None)
+        if group_missed_rows:
+            say(f"Offline-write verify: group-missed n={len(group_missed_rows)} "
+                f"worst={missed_max:.2f}px NOT GATED (written by the AppleScript "
+                "fallback, not by the offline patcher).")
         issues = _natural_audit(dest, offline_slides)
         gating = {n: [i for i in v if i.get("gating", True)] for n, v in issues.items()}
         gating = {n: v for n, v in gating.items() if v}
@@ -702,13 +731,18 @@ def run_offline_write(
             if s.get("role") != "hide" and str(s.get("kind") or "") == "group"
             and s.get("w") is not None and s.get("h") is not None
         )
-        if group_planned and "group" not in offline_report:
-            say(f"offline-write verify: group bar did NOT run — {group_planned} group spec(s) "
-                "planned, 0 comparable; this PASS proves nothing about groups.")
+        group_written = sum(
+            1 for specs in written_specs.values() for s in specs
+            if s.get("role") != "hide" and str(s.get("kind") or "") == "group"
+            and s.get("w") is not None and s.get("h") is not None
+        )
+        if group_written and "group" not in offline_report:
+            say(f"offline-write verify: group bar did NOT run — {group_written} group spec(s) "
+                "written, 0 comparable; this PASS proves nothing about groups.")
             offline_verify_pass = False
         group_max, group_n, _worst5 = offline_report.get("group", (0.0, 0, []))
-        group_verify = {"planned": group_planned, "n": group_n,
-                        "max": group_max if group_n else None}
+        group_verify = {"planned": group_planned, "written": group_written, "n": group_n,
+                        "max": group_max if group_n else None, "missedMax": missed_max}
     result: dict[str, Any] = {
         "mode": mode,
         "slides": sorted(offline_slides),

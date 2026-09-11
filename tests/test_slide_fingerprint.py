@@ -516,7 +516,7 @@ def test_real_dsk_deck_fingerprint():
         pytest.skip("keynote-parser (iwa extra) not installed")
 
     out = fingerprint_deck(DSK, font_env="pinned-for-test")
-    assert len(out["slides"]) == 42
+    assert len(out["slides"]) == 43
     assert _is_hex64(out["global"])
     # Near-empty uncacheable (measured ~0 dangling/cross-slide on the gold decks).
     assert len(out["uncacheable"]) <= 2, out["uncacheable"]

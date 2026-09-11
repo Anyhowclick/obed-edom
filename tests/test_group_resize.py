@@ -501,7 +501,7 @@ def test_obed_raise_slide_fronts_only_when_selection_succeeded():
     )
     handler = _raise_slide_handler(script)
     found_true_at = handler.index("set _found to true")
-    front_at = handler.index("my obedFront()")
+    front_at = handler.index('my obedFront("raise", slideNo, _mn)')
     guard_at = handler.index("if not _found then")
     assert found_true_at < guard_at < front_at
 
@@ -946,7 +946,7 @@ def test_obed_raise_item_fronts_only_when_selection_succeeded():
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
     found_true_at = handler.index("set _found to true")
-    front_at = handler.index("my obedFront()")
+    front_at = handler.index('my obedFront("badge", slideNo, _hit)')
     guard_at = handler.index("if not _found then return")
     assert found_true_at < guard_at < front_at
 
@@ -1862,3 +1862,254 @@ def test_say_stat_finalize_detail_chunks_keep_the_prefix():
 
     for line in raise_lines:
         assert len(re.findall(r"raise(?:Dead|Unknown)\(", line)) <= 40
+
+
+def _front_handler(script: str) -> str:
+    return script[script.index("on obedFront(") : script.index("end obedFront")]
+
+
+def test_obed_front_takes_phase_slide_index_and_tags_front_err():
+    """obedFront gets three params, and every call site plus its own error tag passes
+    them through, so a raise/badge -1719 can be traced to the exact slide/index/phase."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    assert "on obedFront(phase, slideNo, idx)" in script
+    front = _front_handler(script)
+    assert '& "@" & phase & ",s=" & slideNo & ",idx=" & idx & "]"' in front
+    # All three call sites, explicit -- raise (obedRaiseSlide), retry (obedRaiseRetry),
+    # badge (obedRaiseItem, passing the resolved _hit, never the planned idx).
+    assert 'my obedFront("raise", slideNo, _mn)' in script
+    assert script.count('my obedFront("raise", slideNo, _mn)') == 2
+    assert 'my obedFront("badge", slideNo, _hit)' in script
+    assert '" exported="' not in front  # never breaks the non-greedy frontErr parser
+
+
+def test_obed_front_polls_menu_enabled_before_clicking():
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    front = _front_handler(script)
+    enabled_at = front.index('enabled of menu item "Bring to Front"')
+    click_at = front.index('click menu item "Bring to Front"')
+    assert enabled_at < click_at
+    assert "repeat" in front and "exit repeat" in front
+
+
+def test_obed_front_emits_raise_blind_when_not_enabled_and_still_clicks(monkeypatch):
+    """OBED_RAISE_SETTLE_MAX=0 collapses the poll to a single read; if it's not enabled,
+    raiseBlind is emitted and the click still happens unconditionally."""
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "0")
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    front = _front_handler(script)
+    ready_at = front.index("if not _ready then")
+    blind_at = front.index('raiseBlind(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ")')
+    click_try_at = front.index('click menu item "Bring to Front"')
+    assert ready_at < blind_at < click_try_at
+    assert "set raiseBlindCount to raiseBlindCount + 1" in front
+
+
+def test_raise_settle_bounds_rejects_invalid_and_non_finite_values(monkeypatch):
+    """Negative/non-numeric settle_max, and non-finite settle_min or settle_max (inf,
+    nan), must all fall back rather than emit an AppleScript-illegal literal."""
+    from obed_edom.keynote import _raise_settle_bounds
+
+    monkeypatch.delenv("OBED_RAISE_SETTLE_MIN", raising=False)
+    monkeypatch.delenv("OBED_RAISE_SETTLE_MAX", raising=False)
+
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "-1")
+    assert _raise_settle_bounds() == (0.35, 1.5)
+
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "not-a-number")
+    assert _raise_settle_bounds() == (0.35, 1.5)
+
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "inf")
+    assert _raise_settle_bounds() == (0.35, 1.5)
+
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "nan")
+    assert _raise_settle_bounds() == (0.35, 1.5)
+
+    monkeypatch.delenv("OBED_RAISE_SETTLE_MAX", raising=False)
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MIN", "inf")
+    assert _raise_settle_bounds() == (0.35, 1.5)
+
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MIN", "nan")
+    assert _raise_settle_bounds() == (0.35, 1.5)
+
+    monkeypatch.delenv("OBED_RAISE_SETTLE_MIN", raising=False)
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "0")
+    assert _raise_settle_bounds() == (0.35, 0.0)  # exactly 0 stays allowed
+
+
+def test_obed_front_settle_max_zero_threshold_checked_before_poll_delay(monkeypatch):
+    """With settle_max=0 the loop's ceiling check must run before `delay 0.1`, so the
+    poll performs exactly one `enabled` read and exits without ever sleeping 0.1 s."""
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MAX", "0")
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    front = _front_handler(script)
+    threshold_at = front.index("if _waited >= 0.000 then exit repeat")
+    poll_delay_at = front.index("delay 0.1")
+    assert threshold_at < poll_delay_at
+
+
+def test_obed_front_settle_env_never_shortens_below_todays_floor(monkeypatch):
+    monkeypatch.setenv("OBED_RAISE_SETTLE_MIN", "0.01")
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    front = _front_handler(script)
+    assert "delay 0.350" in front  # clamped, not 0.010
+    assert "delay 0.2" in front  # the post-click settle is never touched by env
+
+
+def test_raise_dead_retries_once_with_a_longer_settle_then_reports():
+    """A verified dead raise gets exactly one retry (obedRaiseRetry) before it falls
+    into the unchanged raiseDead branch; on the retry's success, `_at` becomes `_top`
+    and the existing landed-branch decrement runs -- never a second, separate decrement
+    living inside the dead branch's own text."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    assert "on obedRaiseRetry(slideNo, _mn, _top, _f)" in script
+    retry = script[script.index("on obedRaiseRetry") : script.index("end obedRaiseRetry")]
+    assert "set selection of theDoc to {group _mn of slide slideNo of theDoc}" in retry
+    assert 'my obedFront("raise", slideNo, _mn)' in retry
+    assert "delay 1.050" in retry  # max(1.0, 0.35 * 3)
+
+    handler = _raise_slide_handler(script)
+    retry_call_at = handler.index("my obedRaiseRetry(slideNo, _mn, _top, _f)")
+    dead_mn_at = handler.index("if (_mn is not _top) and (_at is _mn) then")
+    top_at = handler.index("if _at is _top then")
+    assert dead_mn_at < retry_call_at < top_at
+    assert "set raiseRetried to raiseRetried + 1" in handler
+    # Exactly one retry call site, gated by exactly one guard that excludes the
+    # vacuous case (_mn is _top) explicitly -- that case can never reach
+    # obedRaiseRetry.
+    assert handler.count("my obedRaiseRetry(slideNo, _mn, _top, _f)") == 1
+    assert handler.count("if (_mn is not _top) and (_at is _mn) then") == 1
+
+    # The pre-existing structural invariants (must stay true post-retry).
+    mn_branch_at = handler.index("else if _at is _mn then")
+    unknown_at = handler.index("    else\n")
+    top_branch = handler[top_at:mn_branch_at]
+    dead_branch = handler[mn_branch_at:unknown_at]
+    assert "- 1" in top_branch
+    assert "- 1" not in dead_branch
+
+
+def test_raise_vacuous_token_when_target_is_top_real():
+    """A target already at `_top` before the click cannot fail the landing probe --
+    raiseVacuous marks that, purely observational (the raise still proceeds as usual)."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    handler = _raise_slide_handler(script)
+    top_check_at = handler.index("if _mn is _top then")
+    front_at = handler.index('my obedFront("raise", slideNo, _mn)')
+    assert top_check_at < front_at
+    assert 'raiseVacuous(s=" & slideNo & ",idx=" & _mn & ")' in handler
+    assert "set raiseVacuous to raiseVacuous + 1" in handler
+
+
+def test_stat_accumulators_include_raise_blind_counters():
+    assert "raiseBlindCount" in _STAT_ACCUMULATORS
+    assert "raiseVacuous" in _STAT_ACCUMULATORS
+    assert "raiseRetried" in _STAT_ACCUMULATORS
+
+
+def test_finalize_return_string_carries_raise_blind_counters():
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {}
+    )
+    assert "set raiseBlindCount to 0" in script
+    assert "set raiseVacuous to 0" in script
+    assert "set raiseRetried to 0" in script
+    assert '" raiseBlindCount=" & raiseBlindCount' in script
+    assert '" raiseVacuous=" & raiseVacuous' in script
+    assert '" raiseRetried=" & raiseRetried' in script
+
+
+def test_run_stat_finalize_result_dict_exposes_raise_blind_counters(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+
+    state = {"raw": ""}
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=0 "
+        "badgeUnresolved=0 badgeMoved=0 badgeFrontDead=0 raiseMoved=5 raiseDead=1 "
+        "raiseUnknown=2 raiseBlindCount=3 raiseVacuous=4 raiseRetried=1 "
+        "detail= raiseDead(s=4,idx=2)"
+    )
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["raiseBlindCount"] == 3
+    assert result["raiseVacuous"] == 4
+    assert result["raiseRetried"] == 1
+
+
+def test_front_err_entry_round_trips_through_both_parsers(monkeypatch, tmp_path):
+    """A richer `frontErr` entry carrying `@phase,s=,idx=` must still round-trip through
+    both keynote.py's own regex and offline_write_ab.front_err_from_raw."""
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+    from scripts.offline_write_ab import front_err_from_raw
+
+    state = {"raw": ""}
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= [-1719@raise,s=40,idx=1] exported=false sigFallback=0 unresolved=0 "
+        "badgeFallback=0 badgeUnresolved=0 badgeMoved=0 badgeFrontDead=0 raiseMoved=0 "
+        "raiseDead=1 raiseUnknown=0 raiseBlindCount=0 raiseVacuous=0 raiseRetried=0 detail="
+    )
+    result = keynote_mod._run_stat_finalize(tmp_path / "x.key", jobs, {"269": 200.0})
+    assert result["frontErr"] == "[-1719@raise,s=40,idx=1]"
+    assert front_err_from_raw(state["raw"]).strip() == "[-1719@raise,s=40,idx=1]"
+
+
+def test_say_stat_finalize_detail_logs_raise_blind_and_vacuous():
+    from obed_edom.remap_keynote import _say_stat_finalize_detail
+
+    child_resize_result = {
+        "tokens": {
+            "raiseBlind": ["s=40,idx=1,phase=raise"],
+            "raiseVacuous": ["s=20,idx=1"],
+        },
+        "frontErr": "",
+        "detail": "",
+    }
+    lines: list[str] = []
+    _say_stat_finalize_detail(child_resize_result, None, lines.append)
+    raise_lines = [line for line in lines if line.startswith("Stat raise detail: ")]
+    assert len(raise_lines) == 1
+    assert "raiseBlind(s=40,idx=1,phase=raise)" in raise_lines[0]
+    assert "raiseVacuous(s=20,idx=1)" in raise_lines[0]

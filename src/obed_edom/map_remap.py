@@ -887,12 +887,13 @@ CENTRE_PANEL_CENTRE_TOLERANCE = 0.25
 CENTRE_PANEL_OVERLAY_MAX_AREA_FRACTION = 0.25
 
 
-def centre_panel_image(
+def _centre_panel_item(
     items: Iterable[dict], wall_w: float, wall_h: float, dest_w: float, dest_h: float
-) -> Rect | None:
+) -> dict | None:
     if dest_w <= 0 or dest_h <= 0 or wall_w <= 0 or wall_h <= 0:
         return None
-    best: Rect | None = None
+    best: dict | None = None
+    best_rect: Rect | None = None
     for item in items:
         if not is_pairable_image(item):
             continue
@@ -903,9 +904,16 @@ def centre_panel_image(
             continue
         if abs((r.x + r.w / 2) - wall_w / 2) > wall_w * CENTRE_PANEL_CENTRE_TOLERANCE:
             continue
-        if best is None or r.w * r.h > best.w * best.h:
-            best = r
+        if best_rect is None or r.w * r.h > best_rect.w * best_rect.h:
+            best, best_rect = item, r
     return best
+
+
+def centre_panel_image(
+    items: Iterable[dict], wall_w: float, wall_h: float, dest_w: float, dest_h: float
+) -> Rect | None:
+    item = _centre_panel_item(items, wall_w, wall_h, dest_w, dest_h)
+    return item_rect(item) if item is not None else None
 
 
 def _slide_for_panel_framing(slide: dict, panel: Rect) -> dict:
@@ -3557,6 +3565,7 @@ def on_canvas_fraction(
     recipe: dict[str, Any],
     wall_w: float,
     wall_h: float,
+    excluded_report: dict[str, int] | None = None,
 ) -> float:
     """Share of affine-governed art still on the CG canvas."""
     groups = _groups_from_recipe(recipe)
@@ -3567,18 +3576,18 @@ def on_canvas_fraction(
     ignore = _replaced_item_ids(slide, recipe, (wall_w, wall_h))
     # A cover sheds side panels on purpose; a map framing that sends content off-frame is a failed framing.
     crop_footprint = map_src if recipe.get("source") in _COVER_SOURCES else None
-    seen = inside = 0
+    seen = inside = excluded = excluded_off = 0
     for item in slide.get("items") or []:
         if is_placeholder_text(item) or item.get("duplicateOf"):
             continue
         if not is_visible(item, wall_w, wall_h) or is_chrome_bg(item):
             continue
-        if is_list_item(item) or id(item) in ignore:
+        if is_list_item(item):
             continue
-        if crop_footprint is not None:
+        skipped = id(item) in ignore
+        if not skipped and crop_footprint is not None:
             cx0, _cy0 = item_center(item)
-            if not (crop_footprint.x <= cx0 <= crop_footprint.x + crop_footprint.w):
-                continue
+            skipped = not (crop_footprint.x <= cx0 <= crop_footprint.x + crop_footprint.w)
         rect = _clipped(item_rect(item), wall_w, wall_h)
         if rect.w <= 0 or rect.h <= 0:
             continue
@@ -3589,10 +3598,17 @@ def on_canvas_fraction(
             mapped = map_rect(rect, map_src, map_dst)
         else:
             continue
-        seen += 1
         cx, cy = mapped.center()
-        if 0 <= cx <= dest_w and 0 <= cy <= dest_h:
-            inside += 1
+        on = 0 <= cx <= dest_w and 0 <= cy <= dest_h
+        if skipped:
+            excluded += 1
+            excluded_off += 0 if on else 1
+            continue
+        seen += 1
+        inside += 1 if on else 0
+    if excluded_report is not None:
+        excluded_report["excluded"] = excluded
+        excluded_report["excludedOffCanvas"] = excluded_off
     if not seen:
         return 1.0
     return inside / seen
@@ -3845,16 +3861,39 @@ def _framing_unusable(
     )
 
 
+def _cover_clamp(affine: Affine, src: Rect, dest_w: float, dest_h: float) -> Affine:
+    """Clamp translation, per axis, so a reused affine that maps `src` at least as wide/tall as the frame covers it with no gap."""
+    tx, ty = affine.tx, affine.ty
+    mapped_w = src.w * affine.s
+    mapped_h = src.h * affine.s
+    if mapped_w >= dest_w:
+        x0 = min(0.0, max(dest_w - mapped_w, src.x * affine.s + tx))
+        tx = x0 - src.x * affine.s
+    if mapped_h >= dest_h:
+        y0 = min(0.0, max(dest_h - mapped_h, src.y * affine.s + ty))
+        ty = y0 - src.y * affine.s
+    return Affine(affine.s, tx, ty)
+
+
 def _recipe_reusing_affine(
     slide: dict, recipe: dict[str, Any], affine: Affine, wall_w: float, wall_h: float
 ) -> dict[str, Any] | None:
     """Re-anchor this recipe on an adjacent same-pin sibling's affine so a magic-move map stays 1:1."""
     dest_w = _f(recipe.get("destWidth"), CG_WIDTH)
     dest_h = _f(recipe.get("destHeight"), CG_HEIGHT)
-    panel = centre_panel_image(slide.get("items") or [], wall_w, wall_h, dest_w, dest_h)
+    panel_item = _centre_panel_item(slide.get("items") or [], wall_w, wall_h, dest_w, dest_h)
+    panel = item_rect(panel_item) if panel_item is not None else None
     src = panel or _rect_from_dict(recipe.get("mapSrc"))
     if src is None or src.w <= 0 or src.h <= 0 or affine.s <= 0:
         return None
+    # Offline geometry reports a rotated item's AABB top-left with its UNROTATED w/h (iwa_geometry
+    # `_frame_rect`), so `_cover_clamp`'s axis-aligned covers-the-frame test is only meaningful once
+    # the source is positively known to be unrotated. If no panel item was resolved (src fell back to
+    # mapSrc) or its rotation is absent/unknown, that cannot be proven — refuse the clamp rather than
+    # move an already-valid crop on an unproven assumption.
+    known_rotation = panel_item.get("rotation") if panel_item is not None else None
+    if known_rotation is not None and _f(known_rotation) % 360 == 0:
+        affine = _cover_clamp(affine, src, dest_w, dest_h)
     dst = affine.apply_rect(src)
     out = dict(recipe)
     out["mapSrc"] = src.as_dict()
@@ -3865,6 +3904,16 @@ def _recipe_reusing_affine(
         {**affine.as_dict(), "src": src.as_dict(), "dst": dst.as_dict(), "members": 0}
     ]
     return out
+
+
+# A recipe may seed (or continue) a sibling-reuse chain only if its affine actually came from
+# g_slide's own geometry: "template"/"template-layout"/"template-cover" (learn_recipe fit map_dst
+# against the template slide) or "sibling-affine" (a continuation of an already-qualified link).
+# "cover-fallback" can carry a templateSlide too, but that affine is a crop of the WALL panel with
+# no template geometry behind it, so it must not qualify — despite looking like "landed on template N".
+_TEMPLATE_FRAMED_SOURCES = frozenset(
+    {"template", "template-layout", "template-cover", "sibling-affine"}
+)
 
 
 ROSTER_MIN_NAMES = 8
@@ -3947,7 +3996,7 @@ def plan_payload_transforms(
     wall_h = _f(payload.get("slideHeight"), CG_HEIGHT)
     transforms: list[ItemTransform] = []
     prev_number: int | None = None
-    prev_pin: int | None = None
+    prev_template: int | None = None
     prev_affine: Affine | None = None
     roster_keep, roster_drop = roster_slides(payload.get("slides") or [])
     if roster_report is not None:
@@ -3976,10 +4025,10 @@ def plan_payload_transforms(
             if wanted is not None and _framing_unusable(
                 slide, slide_recipe, wall_w, wall_h, min_on_canvas
             ):
-                # Pinned magic-move: if this page's art pairs to a sliver, reuse the previous same-pin sibling's affine so the map stays 1:1.
+                # Pinned magic-move: if this page's art pairs to a sliver, reuse the adjacent previous slide's affine when it landed on the same template — by pin or by pairing.
                 if (
                     prev_number == number - 1
-                    and prev_pin == wanted
+                    and prev_template == wanted
                     and prev_affine is not None
                 ):
                     reused = _recipe_reusing_affine(
@@ -4025,6 +4074,12 @@ def plan_payload_transforms(
                         fitted_slides.append(number)
                     if framing_report:
                         framing_report[-1]["fitted"] = True
+            if framing_report:
+                counts: dict[str, int] = {}
+                framing_report[-1]["onCanvas"] = round(
+                    on_canvas_fraction(slide, slide_recipe, wall_w, wall_h, counts), 3
+                )
+                framing_report[-1].update(counts)
         preview = (previews or {}).get(number)
         analysis = (
             analyse_free_text(
@@ -4076,7 +4131,11 @@ def plan_payload_transforms(
             else None
         )
         prev_number = number
-        prev_pin = wanted
+        prev_template = (
+            slide_recipe.get("templateSlide")
+            if slide_recipe.get("source") in _TEMPLATE_FRAMED_SOURCES
+            else None
+        )
     return transforms
 
 

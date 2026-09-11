@@ -804,7 +804,7 @@ def restore_source_builds(
 
 
 _DETAIL_LOG_CAP = 40
-_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown")
+_RAISE_TOKEN_KINDS = ("raiseDead", "raiseUnknown", "raiseBlind", "raiseVacuous")
 _RESOLVE_RARE_KINDS = ("sigTwin", "unresolved", "dedupMiss", "skip")
 
 
@@ -1076,6 +1076,12 @@ def remap_keynote(
             + " — it would have shrunk them to a sliver, so their own best framing "
             "was used instead."
         )
+    hidden = [r for r in framing_rows if r.get("excludedOffCanvas")]
+    if hidden:
+        say("Framing coverage on " + ", ".join(
+            f"slide {r['slide']} ({r['excludedOffCanvas']} of {r['excluded']} overlay object(s) off-frame)"
+            for r in hidden[:8]) + ("…" if len(hidden) > 8 else "")
+            + " is scored on the framed artwork only; those overlays are placed, not dropped.")
     if fitted:
         say(
             f"No template framing matched {len(fitted)} slide(s) "

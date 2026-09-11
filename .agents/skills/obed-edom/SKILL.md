@@ -297,13 +297,34 @@ template.
 
 Run the Full gate on copies with `--mode verify --no-validate`; use
 `--pass2-bar parity` only to expose and compare a known pre-existing pass-2
-problem. Require Accessibility, refuse any already-open Keynote document, run
+problem. The dead-raise cause was the not-ready Arrange menu, fixed by the
+readiness poll (`OBED_RAISE_SETTLE_MAX`, default 1.5s; `0` disables and
+reproduces the defect) — live-verified 2026-09-11. Require Accessibility,
+refuse any already-open Keynote document, run
 serially, and quit Keynote between A and B. This workflow is viable on the
 16GB host when guarded this way; the memory caution is not a blanket ban on
 full-deck work. Run it from an unlocked working copy of the deck — `ditto`
 preserves Finder's `uchg` flag, and a locked copy breaks the gate's writes.
 After any planner/driver change, also run `scripts/golden_plan.py` — a
 Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote`.
+
+Pass 2's GUI raise (`obedRaiseSlide`/`obedFront`) emits `raiseDead(s=,idx=)` and
+`raiseUnknown(s=,idx=)` on a failed Bring to Front, plus the tagged
+`frontErr` `[errNum@phase,s=,idx=]` (no entry may contain the literal
+` exported=` — both parsers cut there). `raiseBlind(s=,idx=,phase=)` is an
+observational click-time readiness token (still clicks); `raiseVacuous(s=,idx=)`
+fires when the target is already frontmost (`_mn is _top`) and is never
+retried. `raiseRetried` counts one retry on a verified non-vacuous dead
+raise. `raiseBlindCount`/`raiseVacuous`/`raiseRetried` are counters in the
+result dict and on `Stat raise detail:`, alongside `raiseMoved`/`raiseDead`/
+`raiseUnknown`. Two env knobs tune the readiness poll on `enabled of menu
+item "Bring to Front"`: `OBED_RAISE_SETTLE_MAX` (default 1.5, `0` disables,
+non-finite/negative fall back) bounds it above the existing 0.35s floor;
+`OBED_RAISE_SETTLE_MIN` only lengthens the floor. `-1719` is
+`errAEIllegalIndex`, not an Accessibility denial (`-1743`/`-25211` are) —
+measured 2026-09-10 with Accessibility probed granted. The strict pass-2 bar
+still aborts on any `frontErr`, so `--pass2-bar parity` is mandatory for W1
+gating until a run returns an empty `frontErr`.
 
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
@@ -464,6 +485,19 @@ Load-bearing rules:
   guess. `buildChunks` is the render timeline and `builds` an unordered owning set
   Keynote permutes on save, so never read `builds` order as reveal order (measured:
   chain-coherent 45/45 under `buildChunks` vs 13/45 under `builds` — D8).
+
+### External reference: KeynoteKit
+
+https://github.com/memfrag/KeynoteKit — Swift 6 offline `.key` reader/writer on the
+same keynote-parser 14.4 schemas; evaluated 2026-09-09 as REFERENCE ONLY, not
+imported or vendored. Corroborates the surgical design (records/zip entries kept
+verbatim except mutated ones) and covers all five path-source kinds with
+`naturalSize` on resize; does NOT do group-child scaling, mask `originalSize`, or
+baseline/superscript style writes. Its `reorderDrawables` permutes
+`drawablesZOrder` only (we patch `ownedDrawables` identically — unmeasured whether
+the lighter write opens cleanly). Its writer creates a NEW file, crossing our
+in-place/inode rule. Consult its Swift when a record's semantics are unclear and
+for the parked `iwa-surgical-write-generator` feature.
 
 ---
 
