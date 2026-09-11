@@ -73,6 +73,33 @@ def test_creates_stroke_where_absent(tmp_path):
     }
 
 
+def test_stroke_message_writes_the_submessage_verbatim(deck):
+    full_stroke = {
+        "color": {"model": "rgb", "r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0, "rgbspace": "srgb"},
+        "width": 7.0,
+        "cap": "RoundCap",
+        "join": "RoundJoin",
+        "miterLimit": 10.0,
+        "pattern": {"type": "TSDSolidPattern", "phase": 1.0, "count": 2, "pattern": [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]},
+        "frame": {"frameName": "square", "assetScale": 1.0},
+    }
+    result = patch_media_stroke(deck, {"900": {"stroke_message": full_stroke}})
+    assert not result["refused"]
+    assert result["patched"] == ["900"]
+
+    objects, _id_to_file, _fi = _load_deck(deck)
+    assert objects["900"]["mediaProperties"]["stroke"] == full_stroke
+
+
+def test_refuses_stroke_message_missing_width(deck):
+    before = deck.read_bytes()
+    bad_stroke = {"color": {"model": "rgb", "r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0, "rgbspace": "srgb"}}
+    result = patch_media_stroke(deck, {"900": {"stroke_message": bad_stroke}})
+    assert result["refused"]
+    assert "width" in result["reason"]
+    assert deck.read_bytes() == before
+
+
 def test_refuses_unknown_style_id(deck):
     before = deck.read_bytes()
     result = patch_media_stroke(deck, {"999999": {"width": 3.0, "color": (1.0, 1.0, 1.0, 1.0)}})
@@ -154,3 +181,56 @@ def test_created_stroke_matches_real_sample_shape():
     assert built["join"] == real["join"]
     assert built["miterLimit"] == pytest.approx(real["miterLimit"])
     assert built["pattern"]["type"] == real["pattern"]["type"]
+
+
+def test_refuses_when_reparse_stroke_does_not_match_requested_message(deck, monkeypatch):
+    """The reparse-equality gate must refuse when the post-write reparse of the
+    stylesheet member disagrees with the `stroke_message` that was requested -- e.g. a
+    keynote_parser round-trip bug that silently mangles a field. Monkeypatches
+    `IWAFile.from_buffer` so only the second call (the post-write reparse) returns a
+    mutated stroke; the deck must be left byte-identical."""
+    import obed_edom.iwa_write as iwa_write_mod
+
+    before = deck.read_bytes()
+    orig_from_buffer = iwa_write_mod.IWAFile.from_buffer
+    calls = {"n": 0}
+    target_member = "Index/DocumentStylesheet.iwa"
+
+    def _fake_from_buffer(data, filename=None):
+        result = orig_from_buffer(data, filename)
+        if filename == target_member:
+            calls["n"] += 1
+        if filename == target_member and calls["n"] == 3:
+            orig_to_dict = result.to_dict
+
+            def _mutated_to_dict():
+                decoded = orig_to_dict()
+                for ch in decoded["chunks"]:
+                    for arch in ch["archives"]:
+                        if str(arch["header"]["identifier"]) != "900":
+                            continue
+                        for o in arch.get("objects") or []:
+                            stroke = (o.get("mediaProperties") or {}).get("stroke")
+                            if stroke is not None:
+                                o["mediaProperties"]["stroke"] = dict(stroke, width=999.0)
+                return decoded
+
+            result.to_dict = _mutated_to_dict
+        return result
+
+    monkeypatch.setattr(iwa_write_mod.IWAFile, "from_buffer", staticmethod(_fake_from_buffer))
+
+    full_stroke = {
+        "color": {"model": "rgb", "r": 0.1, "g": 0.2, "b": 0.3, "a": 1.0, "rgbspace": "srgb"},
+        "width": 7.0,
+        "cap": "RoundCap",
+        "join": "RoundJoin",
+        "miterLimit": 10.0,
+        "pattern": {"type": "TSDSolidPattern", "phase": 1.0, "count": 2, "pattern": [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]},
+        "frame": {"frameName": "square", "assetScale": 1.0},
+    }
+    result = patch_media_stroke(deck, {"900": {"stroke_message": full_stroke}})
+
+    assert result["refused"]
+    assert "reparsed stroke does not match requested message" in result["reason"]
+    assert deck.read_bytes() == before

@@ -5,6 +5,7 @@ report's transition note on clip slides is expected, not a defect.
 """
 from __future__ import annotations
 
+import copy
 import re
 import time
 from collections.abc import Callable
@@ -282,7 +283,8 @@ def plan_assembly(
             distinct = set(item_sizes)
             if len(distinct) > 1:
                 warnings.append(f"slide {number} text {iid[1]} mixed run sizes")
-                slide_shrink_sizes[iid] = max(distinct) * scale
+                if iid in slide_autosize:
+                    slide_shrink_sizes[iid] = max(distinct) * scale
                 continue
             slide_text_sizes[iid] = next(iter(distinct)) * scale
 
@@ -402,8 +404,8 @@ def _all_group_child_records(
 
 
 def _attach_full_group_children(fw_deck: Path, payload: dict, *, deck: Any = None) -> None:
-    """Attach ``slide['groupChildren']`` for every flat top-level group, superseding
-    ``iwa_runs.attach_group_children`` (autosize-only). Read-only."""
+    """Attach ``slide['groupChildren']`` for every flat top-level group (not just
+    autosize ones, unlike ``iwa_runs.attach_group_children``). Read-only."""
     objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(fw_deck)
     kids_by_index: dict[int, dict[int, list[dict]]] = {}
     for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
@@ -497,11 +499,11 @@ def _first_matching_layout(objects: dict[str, dict], names: Sequence[str]) -> tu
 
 
 def layout_alpha_safe(slide_archive: dict, objects: dict[str, dict], canvas: tuple[float, float]) -> bool:
-    """The layout probe's (2026-09-10) alpha gate: a slide/layout PNG-exports opaque
-    whenever it owns a drawable spanning the full ``canvas`` (``x<=0``, ``y<=0``,
-    ``x+w>=W``, ``y+h>=H``); one with no such drawable -- including zero drawables --
-    exports transparent. Frames come from ``compose_geometry`` (masks, rotation and
-    group unions composed, not raw ``geometry``)."""
+    """A slide/layout PNG-exports opaque whenever it owns a drawable spanning the full
+    ``canvas`` (``x<=0``, ``y<=0``, ``x+w>=W``, ``y+h>=H``); one with no such drawable
+    -- including zero drawables -- exports transparent. Frames come from
+    ``compose_geometry`` (masks, rotation and group unions composed, not raw
+    ``geometry``)."""
     width, height = canvas
     for rec in compose_geometry(slide_archive, objects):
         x, y, w, h = rec["x"], rec["y"], rec["w"], rec["h"]
@@ -886,10 +888,10 @@ def build_assembly_script(
 
     `layout_policy`:
     - "import" (default): always imports the alpha-safe layout from `layout_template`
-      (the layout probe, 2026-09-10: a full-canvas drawable exports opaque even from a
-      Blank layout), never an FW-owned layout matched by name -- a same-named layout the
-      FW deck happens to own is not guaranteed to be alpha-safe (see
-      `check_layout_import_preconditions`, the plan-time dedupe-trap refusal).
+      (a full-canvas drawable exports opaque even from a Blank layout), never an
+      FW-owned layout matched by name -- a same-named layout the FW deck happens to
+      own is not guaranteed to be alpha-safe (see `check_layout_import_preconditions`,
+      the plan-time dedupe-trap refusal).
     - "preserve": leaves every kept slide's base layout untouched -- no layout is
       searched for or imported.
     """
@@ -1002,10 +1004,16 @@ def _restore_stroke(
     log: Callable[[str], None],
 ) -> dict:
     """Card-border stroke-width restore (paired styles) plus a default stroke grant for
-    kept media whose style has none, restricted to styles referenced only by kept slides.
-    Styles are re-keyed from output ordinals to source slide numbers before comparing
-    against ``plan.kept``. Re-raises ``OfflineWriteCorrupted``; every other failure is
-    reported in the returned dict and as a warning, never raised."""
+    kept media whose style has none, restricted to styles every one of whose references
+    -- in ``out_objects``, not just the image/movie leaves ``card_styles`` counts, so a
+    layout/master reference or a non-retained (deleted/not-staged) object is caught too --
+    resolves to retained staged media on a kept slide. Classification (grant vs width
+    restore) is by the RESOLVED pattern regardless of whether the style carries its own
+    stroke or inherits one; an inherited style's restore is written as the child style's
+    own stroke via ``patch_media_stroke``, since ``patch_stroke_widths`` only patches an
+    own stroke. Styles are re-keyed from output ordinals to source slide numbers before
+    comparing against ``plan.kept``. Re-raises ``OfflineWriteCorrupted``; every other
+    failure is reported in the returned dict and as a warning, never raised."""
     stroke: dict = {}
     try:
         from obed_edom.iwa_write import (
@@ -1050,7 +1058,6 @@ def _restore_stroke(
         return stroke
 
     stroke["notes"] = match["notes"]
-    stroke["chosen"] = match["chosen"]
     for note in match["notes"]:
         log(note)
 
@@ -1058,24 +1065,183 @@ def _restore_stroke(
     grants: dict[str, dict] = {}
     leak_widths: dict[str, float] = {}
     refused_media: list[dict] = []
+
+    media_status: dict[str, tuple[int, bool]] = {}
+    try:
+        for idx, (slide_id, _skipped) in enumerate(slide_order(out_objects)):
+            ordinal = idx + 1
+            number = inverse_ordinals.get(ordinal)
+            slide_archive = out_objects.get(slide_id) or {}
+            retained_staged_ids = _staged_retained_ids(number, plan) if number is not None else set()
+            addressed = {rec["id"]: rec for rec in derive_kind_index(slide_archive, out_objects)}
+            for ref in slide_archive.get("drawablesZOrder") or []:
+                rid = ref.get("identifier")
+                if rid is None:
+                    continue
+                rid = str(rid)
+                rec = addressed.get(rid)
+                retained = rec is None or (rec["kind"], rec["kindIndex"]) in retained_staged_ids
+                images: list[str] = []
+                seen: set[str] = set()
+                _collect_stroke_images(rid, out_objects, seen, images)
+                for obj_id in images:
+                    if number is None:
+                        media_status.setdefault(obj_id, (-ordinal, True))
+                    else:
+                        media_status.setdefault(obj_id, (number, retained))
+    except Exception as exc:  # noqa: BLE001
+        stroke["refused"] = True
+        stroke["reason"] = f"stroke media census failed ({type(exc).__name__}: {exc})"
+        warnings.append(f"stroke restore skipped: {stroke['reason']}")
+        return stroke
+
+    def _layout_master_reachable_ids() -> set[str]:
+        """Every drawable id reachable from any layout/master root's
+        ``drawablesZOrder``, recursing ``TSD.GroupArchive`` children exactly like the
+        slide walk above. A root is any ``KN.SlideArchive``, ``KN.SlideLayoutArchive``
+        or ``KN.MasterSlideArchive`` object whose id is not in the show's own slide
+        tree -- on decks with no dedicated layout/master archive type, layouts and
+        masters are plain ``KN.SlideArchive`` objects living outside ``slide_order``."""
+        reachable: set[str] = set()
+
+        def _walk(obj_id: str) -> None:
+            if obj_id in reachable:
+                return
+            reachable.add(obj_id)
+            obj = out_objects.get(obj_id)
+            if obj and obj.get("_pbtype") == "TSD.GroupArchive":
+                for ref in obj.get("children") or []:
+                    cid = ref.get("identifier")
+                    if cid is not None:
+                        _walk(str(cid))
+
+        show_slide_ids = {sid for sid, _skipped in slide_order(out_objects)}
+        for obj_id, obj in out_objects.items():
+            if obj.get("_pbtype") not in (
+                "KN.SlideArchive",
+                "KN.SlideLayoutArchive",
+                "KN.MasterSlideArchive",
+            ):
+                continue
+            if obj_id in show_slide_ids:
+                continue
+            for ref in obj.get("drawablesZOrder") or []:
+                rid = ref.get("identifier")
+                if rid is not None:
+                    _walk(str(rid))
+        return reachable
+
+    layout_master_ids = _layout_master_reachable_ids()
+    orphan_refs: dict[str, int] = {}
+
+    def _style_inheritors(style_id: str) -> set[str]:
+        """Every ``TSD.MediaStyleArchive`` id in ``out_objects`` that actually resolves
+        its stroke from ``style_id`` (``style_id`` itself excluded): the ``super.parent``
+        walk, mirroring ``_resolve_stroke`` exactly, must reach ``style_id`` before any
+        node carrying its own ``mediaProperties.stroke``. An intermediate style
+        with its own stroke shadows ``style_id`` and stops the walk without counting."""
+        inheritors: set[str] = set()
+        for obj_id, obj in out_objects.items():
+            if obj.get("_pbtype") != "TSD.MediaStyleArchive" or obj_id == style_id:
+                continue
+            cur: str | None = obj_id
+            seen: set[str] = set()
+            for _ in range(6):
+                if cur is None or cur in seen:
+                    break
+                seen.add(cur)
+                o = out_objects.get(cur)
+                if not o:
+                    break
+                if cur == style_id:
+                    inheritors.add(obj_id)
+                    break
+                if (o.get("mediaProperties") or {}).get("stroke") is not None:
+                    break
+                parent = ((o.get("super") or {}).get("parent") or {}).get("identifier")
+                cur = str(parent) if parent is not None else None
+        return inheritors
+
+    def _escaping_refs(style_id: str) -> list[tuple[str, str]]:
+        """Every reference to ``style_id`` (or to a style that transitively inherits its
+        stroke via ``super.parent``) in ``out_objects`` that is NOT retained staged media
+        on a kept slide: a layout/master reference (verified reachable via
+        ``layout_master_ids``, not merely absent from ``media_status``), a non-retained
+        (deleted / not-staged) object, a reference on a slide outside ``plan.kept``, or a
+        non-media (image/movie) object. A reference reachable from no slide, layout or
+        master is an orphan, not an escape -- it cannot render, so a global style patch is
+        harmless to it; it is counted into ``orphan_refs`` instead."""
+        style_ids = {style_id} | _style_inheritors(style_id)
+        escapes: list[tuple[str, str]] = []
+        for ref_id, obj in out_objects.items():
+            sid = (obj.get("style") or {}).get("identifier")
+            if sid is None or str(sid) not in style_ids:
+                continue
+            ptype = obj.get("_pbtype")
+            if ptype not in ("TSD.ImageArchive", "TSD.MovieArchive"):
+                escapes.append((ref_id, f"non-media object ({ptype or 'unknown'})"))
+                continue
+            status = media_status.get(ref_id)
+            if status is None:
+                if ref_id in layout_master_ids:
+                    escapes.append((ref_id, "layout/master"))
+                else:
+                    orphan_refs[style_id] = orphan_refs.get(style_id, 0) + 1
+                continue
+            number, retained = status
+            if number not in kept_set:
+                escapes.append((ref_id, f"slide {number} outside kept"))
+            elif not retained:
+                escapes.append((ref_id, "non-retained (deleted/not-staged) object"))
+        return escapes
+
+    refused_style_ids: set[str] = set()
+
+    def _refuse(style_id: str, slides: set[int], escapes: list[tuple[str, str]]) -> None:
+        kinds = sorted({kind for _rid, kind in escapes})
+        reason = "style refs slides outside kept" if not kinds else (
+            "style refs escaping media: " + "; ".join(kinds)
+        )
+        refused_media.append({"id": style_id, "reason": reason, "slides": sorted(slides)})
+        refused_style_ids.add(style_id)
+
+    seen_style_ids: set[str] = set()
     for style in out_styles:
-        if style["inherited"]:
-            continue
+        seen_style_ids.add(style["id"])
         slides = set(style["slides"])
         if not slides:
             continue
         if not slides.issubset(kept_set):
-            refused_media.append(
-                {"id": style["id"], "reason": "style refs slides outside kept", "slides": sorted(slides)}
-            )
+            _refuse(style["id"], slides, [])
+            continue
+        escapes = _escaping_refs(style["id"])
+        if escapes:
+            _refuse(style["id"], slides, escapes)
             continue
         no_stroke = style["pattern"] in (None, "TSDEmptyPattern")
         if no_stroke:
             grants[style["id"]] = {"width": 5.0, "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern"}
-        elif style["width"] is not None and style["id"] not in match["widths"]:
-            leak_widths[style["id"]] = style["width"] / canvas_scale
+        elif style["width"] is not None:
+            if style["inherited"]:
+                parent_stroke, _inherited = _resolve_stroke(style["id"], out_objects)
+                stroke_message = copy.deepcopy(parent_stroke) if parent_stroke is not None else None
+                if stroke_message is not None:
+                    stroke_message["width"] = style["width"] / canvas_scale
+                    grants[style["id"]] = {"stroke_message": stroke_message}
+                else:
+                    grants[style["id"]] = {
+                        "width": style["width"] / canvas_scale,
+                        "color": style["color"],
+                        "pattern": style["pattern"],
+                    }
+            elif style["id"] not in match["widths"]:
+                leak_widths[style["id"]] = style["width"] / canvas_scale
 
-    widths = {**match["widths"], **leak_widths}
+    matched_widths = {
+        sid: w for sid, w in match["widths"].items() if sid not in refused_style_ids
+    }
+    stroke["chosen"] = [c for c in match["chosen"] if c["id"] not in refused_style_ids]
+    widths = {**matched_widths, **leak_widths}
     if widths:
         try:
             restore_result = patch_stroke_widths(out_path, widths)
@@ -1090,42 +1256,26 @@ def _restore_stroke(
 
     try:
         strokeless_by_number: dict[str, set[int]] = {}
-        for idx, (slide_id, _skipped) in enumerate(slide_order(out_objects)):
-            ordinal = idx + 1
-            number = inverse_ordinals.get(ordinal)
-            if number is None:
+        for obj_id, (number, _retained) in media_status.items():
+            style_id = ((out_objects.get(obj_id) or {}).get("style") or {}).get("identifier")
+            if style_id is None:
                 continue
-            slide_archive = out_objects.get(slide_id) or {}
-            retained_staged_ids = _staged_retained_ids(number, plan)
-            addressed = {rec["id"]: rec for rec in derive_kind_index(slide_archive, out_objects)}
-            images: list[str] = []
-            seen: set[str] = set()
-            for ref in slide_archive.get("drawablesZOrder") or []:
-                rid = ref.get("identifier")
-                if rid is None:
-                    continue
-                rid = str(rid)
-                rec = addressed.get(rid)
-                if rec is not None and (rec["kind"], rec["kindIndex"]) not in retained_staged_ids:
-                    continue
-                _collect_stroke_images(rid, out_objects, seen, images)
-            for obj_id in images:
-                style_id = ((out_objects.get(obj_id) or {}).get("style") or {}).get("identifier")
-                if style_id is None:
-                    continue
-                if grants.get(str(style_id)) is not None:
-                    continue
-                stroke_data, _inherited = _resolve_stroke(str(style_id), out_objects)
-                if stroke_data is not None:
-                    continue
-                strokeless_by_number.setdefault(str(style_id), set()).add(number)
+            style_id = str(style_id)
+            if style_id in seen_style_ids or grants.get(style_id) is not None:
+                continue
+            stroke_data, _inherited = _resolve_stroke(style_id, out_objects)
+            if stroke_data is not None:
+                continue
+            strokeless_by_number.setdefault(style_id, set()).add(number)
         for style_id, slides in strokeless_by_number.items():
-            if slides.issubset(kept_set):
-                grants[style_id] = {"width": 5.0, "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern"}
-            else:
-                refused_media.append(
-                    {"id": style_id, "reason": "style refs slides outside kept", "slides": sorted(slides)}
-                )
+            if not slides.issubset(kept_set):
+                _refuse(style_id, slides, [])
+                continue
+            escapes = _escaping_refs(style_id)
+            if escapes:
+                _refuse(style_id, slides, escapes)
+                continue
+            grants[style_id] = {"width": 5.0, "color": (1.0, 1.0, 1.0, 1.0), "pattern": "TSDSolidPattern"}
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"strokeless media collection failed ({type(exc).__name__}: {exc})")
 
@@ -1143,6 +1293,12 @@ def _restore_stroke(
         stroke["media_refused"] = refused_media
         for r in refused_media:
             warnings.append(f"media stroke {r['id']} refused: {r['reason']}")
+    if orphan_refs:
+        stroke["orphan_refs"] = orphan_refs
+        for sid, n in orphan_refs.items():
+            if sid in refused_style_ids:
+                continue
+            warnings.append(f"media stroke {sid} patched with {n} unreached referrer(s)")
 
     return stroke
 
@@ -1176,11 +1332,13 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
     attributable to a deletion, on a transition change unexplained by a clip insert, or
     on any reveal-order mismatch. A missing build is tolerated only when it matches (by
     kind/kindIndex, via the source build records) an item this slide's plan actually
-    deleted. A surplus `apple:movie-start`/`In` on an inserted clip is tolerated only when
-    PAIRED with a source `apple:movie-start`/`In` on that slide's deleted movie -- Keynote
-    auto-attaches the build to a freshly imported movie, and it is legitimate only as a
-    replacement for the one the deleted source movie carried; a surplus with no such source
-    build is refused like any other."""
+    deleted. A surplus `apple:movie-start`/`In` on an inserted clip is tolerated only up to
+    the count of matching `apple:movie-start`/`In` builds the slide's deleted source movie
+    carried, and only when that deleted movie-start also shows up in `report["missing"]` --
+    Keynote auto-attaches the build to a freshly imported movie, and it is legitimate only
+    as a replacement for the ones the deleted source movie carried; each tolerated count is
+    consumed so a later surplus cannot reuse the same source build, and any surplus beyond
+    that (or with no such source build) is refused like any other."""
     from obed_edom.iwa_builds import deck_builds, verify_builds
 
     builds: dict = {}
@@ -1202,6 +1360,7 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
 
     tolerated_surplus: list[dict] = []
     real_surplus: list[dict] = []
+    avail_movie_start: dict[int, int] = {}
     for s in report["surplus"]:
         clip = plan.clips.get(s["slide"])
         is_clip_movie_start = (
@@ -1210,11 +1369,25 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
             and s["animationType"] == "In"
             and s["identity"] == ("movie", clip[0].name)
         )
-        paired = is_clip_movie_start and any(
-            b["kind"] == "movie" and b["kindIndex"] == clip[1][1]
-            and b["effect"] == "apple:movie-start" and b["animationType"] == "In"
-            for b in src_by_number.get(s["slide"], {}).get("builds", [])
-        )
+        paired = False
+        if is_clip_movie_start:
+            matching_src = [
+                b for b in src_by_number.get(s["slide"], {}).get("builds", [])
+                if b["kind"] == "movie" and b["kindIndex"] == clip[1][1]
+                and b["effect"] == "apple:movie-start" and b["animationType"] == "In"
+            ]
+            if s["slide"] not in avail_movie_start:
+                matching_identities = {b["identity"] for b in matching_src}
+                missing_count = sum(
+                    m["count"] for m in report["missing"]
+                    if m["slide"] == s["slide"] and m["effect"] == "apple:movie-start"
+                    and m["animationType"] == "In" and m["identity"] in matching_identities
+                )
+                avail_movie_start[s["slide"]] = min(len(matching_src), missing_count)
+            avail = avail_movie_start[s["slide"]]
+            if s["count"] <= avail:
+                paired = True
+                avail_movie_start[s["slide"]] = avail - s["count"]
         (tolerated_surplus if paired else real_surplus).append(s)
     builds["tolerated_surplus"] = tolerated_surplus
     if real_surplus:

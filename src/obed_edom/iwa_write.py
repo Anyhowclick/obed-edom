@@ -1190,8 +1190,10 @@ def _stroke_submessage(spec: dict) -> dict:
 
 def patch_media_stroke(deck: Path, strokes: dict) -> dict:
     """Set/overwrite ``mediaProperties.stroke`` for each ``TSD.MediaStyleArchive`` id in
-    ``strokes`` (``{id: {"width", "color": (r,g,b,a), "pattern"?, "rgbspace"?}}``),
-    single-member rewrite of ``Index/DocumentStylesheet.iwa`` via ``_rewrite_members``.
+    ``strokes`` (``{id: {"width", "color": (r,g,b,a), "pattern"?, "rgbspace"?}}``, or
+    ``{id: {"stroke_message": dict}}`` to write a complete resolved stroke submessage
+    verbatim instead of synthesizing one), single-member rewrite of
+    ``Index/DocumentStylesheet.iwa`` via ``_rewrite_members``.
 
     Unlike ``patch_stroke_widths``, an id with no OWN stroke is not refused: its
     ``mediaProperties.stroke`` is CREATED (shaped like a real solid stroke) and the id
@@ -1213,6 +1215,11 @@ def patch_media_stroke(deck: Path, strokes: dict) -> dict:
         if id_to_file.get(sid) != target_member:
             return {"refused": True,
                     "reason": f"style {sid} lives in {id_to_file.get(sid)!r}, not {target_member!r}"}
+        stroke_message = strokes[sid].get("stroke_message")
+        if stroke_message is not None:
+            width = stroke_message.get("width") if isinstance(stroke_message, dict) else None
+            if not isinstance(stroke_message, dict) or not isinstance(width, (int, float)) or width <= 0:
+                return {"refused": True, "reason": f"style {sid} stroke_message needs a numeric positive width"}
 
     with zipfile.ZipFile(deck) as zf:
         if target_member not in zf.namelist():
@@ -1223,6 +1230,7 @@ def patch_media_stroke(deck: Path, strokes: dict) -> dict:
     patched = copy.deepcopy(decoded)
     applied = 0
     created: list[str] = []
+    expected_strokes: dict[str, dict] = {}
     for ch in patched["chunks"]:
         for arch in ch["archives"]:
             aid = str(arch["header"]["identifier"])
@@ -1232,7 +1240,14 @@ def patch_media_stroke(deck: Path, strokes: dict) -> dict:
                 media = o.setdefault("mediaProperties", {})
                 if media.get("stroke") is None:
                     created.append(aid)
-                media["stroke"] = _stroke_submessage(strokes[aid])
+                spec = strokes[aid]
+                stroke_message = spec.get("stroke_message")
+                media["stroke"] = (
+                    copy.deepcopy(stroke_message) if stroke_message is not None
+                    else _stroke_submessage(spec)
+                )
+                if stroke_message is not None:
+                    expected_strokes[aid] = media["stroke"]
                 applied += 1
                 break
 
@@ -1254,6 +1269,18 @@ def patch_media_stroke(deck: Path, strokes: dict) -> dict:
 
     if applied != len(strokes) or not value_clean:
         return {"refused": True, "reason": "partial apply on reparse"}
+
+    reparsed_by_id = _archives_by_id(reparsed)
+    for aid, expected in expected_strokes.items():
+        if strokes[aid].get("stroke_message") is None:
+            continue
+        arch = reparsed_by_id.get(aid)
+        stroke = None
+        for o in (arch.get("objects") or []) if arch else []:
+            stroke = (o.get("mediaProperties") or {}).get("stroke")
+            break
+        if stroke != expected:
+            return {"refused": True, "reason": f"style {aid} reparsed stroke does not match requested message"}
 
     try:
         _rewrite_members(deck, {target_member: new_member})
