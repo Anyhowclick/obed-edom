@@ -2198,6 +2198,72 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     assert append_response.json()["result"] == latest_b["result"]
 
 
+def test_load_session_locks_idle_check_and_status_flip_together(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    reached = threading.Event()
+    release = threading.Event()
+    real_require_idle = maps._require_idle
+    state = {"gated": False}
+
+    def gated_require_idle(j):
+        real_require_idle(j)
+        if j.id == job["id"] and not state["gated"]:
+            state["gated"] = True
+            reached.set()
+            release.wait(5)
+
+    monkeypatch.setattr(maps, "_require_idle", gated_require_idle)
+
+    import_outcome = {}
+
+    def do_import():
+        import_outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/session",
+            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+        )
+
+    import_thread = threading.Thread(target=do_import)
+    import_thread.start()
+    assert reached.wait(5)
+
+    append_outcome = {}
+
+    def do_append():
+        append_outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    append_thread = threading.Thread(target=do_append)
+    append_thread.start()
+    append_thread.join(1)
+
+    release.set()
+    import_thread.join(5)
+    append_thread.join(5)
+    monkeypatch.undo()
+
+    assert not import_thread.is_alive()
+    assert not append_thread.is_alive()
+    assert import_outcome["response"].status_code == 200, import_outcome["response"].text
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    slide_after = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+    append_response = append_outcome["response"]
+    if append_response.status_code == 409:
+        assert not any(c.get("assetId") for c in slide_after.get("churches", []))
+    else:
+        assert append_response.status_code == 200, append_response.text
+        church_id = append_response.json()["churchId"]
+        assert any(c["id"] == church_id for c in slide_after["churches"])
+
+
 def test_delete_and_edit_conflict_leaves_exactly_one_winner():
     job = _seed()
     doc = _doc(job)

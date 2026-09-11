@@ -1220,10 +1220,11 @@ def save_session(job_id: str):
 
 @router.post("/{job_id}/session")
 async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
-    job = _job_or_404(job_id)
-    _require_idle(job)
-    previous_status = job.status
-    job.status = "running"
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        _require_idle(job)
+        previous_status = job.status
+        job.status = "running"
 
     def import_uploaded() -> tuple[dict[str, Any], dict[str, int]]:
         with tempfile.NamedTemporaryFile(suffix=".obedmaps") as uploaded:
@@ -1239,7 +1240,8 @@ async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
     try:
         result, imported = await run_in_threadpool(import_uploaded)
     except Exception:
-        job.status = previous_status
+        with _mutation_lock(job_id):
+            job.status = previous_status
         raise
     finally:
         await file.close()

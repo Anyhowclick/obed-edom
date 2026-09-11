@@ -625,19 +625,25 @@ export function MapsTab() {
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
-    if (!view) return;
+    if (!slide || !view) return;
     const token = ++thumbnailToken.current;
     const gate = () => shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id });
-    const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade, isolate: view.isolate });
+    const fingerprintOf = (s: MapsSlide) => {
+      const v = slideForAudience(s, audience);
+      return JSON.stringify({ slideId, audience, style: v.style, camera: v.camera, highlights: v.highlights, churches: v.churches, hiddenLayers: v.hiddenLayers, hillshade: v.hillshade, isolate: v.isolate });
+    };
+    const fingerprint = fingerprintOf(slide);
+    const matchesFingerprint = () => {
+      const latest = docRef.current?.slides.find((item) => item.id === slideId);
+      return !!latest && fingerprintOf(latest) === fingerprint;
+    };
     await mapRef.current?.waitUntilIdle(view.style);
     if (!gate()) return;
     const blob = await mapRef.current?.captureBlob();
-    if (!blob || !gate()) return;
-    const latest = docRef.current?.slides.find((item) => item.id === slideId);
-    if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade, isolate: slideForAudience(latest, audience).isolate }) !== fingerprint) return;
+    if (!blob || !gate() || !matchesFingerprint()) return;
     const hillshade = view?.hillshade === true;
     const stamped = await stampOsm(blob, hillshade, view?.style);
-    if (!gate()) return;
+    if (!gate() || !matchesFingerprint()) return;
     let updated: Job;
     try {
       updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: saveQueue.current?.revision ?? undefined });
