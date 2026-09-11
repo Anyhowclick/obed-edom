@@ -618,15 +618,11 @@ export function MapsTab() {
     return applyLocalDoc(withSlideCamera(current, slideId, activeAudienceRef.current, cam)) ?? current;
   }
 
-  async function captureThumb(slideId: string, retriesLeft = 1, revisionOverride?: number) {
+  async function captureThumb(slideId: string, retriesLeft = 1) {
     if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
-    const queueRevision = saveQueue.current?.revision ?? undefined;
-    const startRevision =
-      typeof revisionOverride === "number" && typeof queueRevision === "number"
-        ? Math.max(revisionOverride, queueRevision)
-        : revisionOverride ?? queueRevision;
+    const startRevision = saveQueue.current?.revision ?? undefined;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
@@ -648,10 +644,13 @@ export function MapsTab() {
       updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: startRevision });
     } catch (err) {
       if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
-        void captureThumb(slideId, retriesLeft - 1, err.stateRevision).catch((retryErr) => {
-          if (retryErr instanceof MapsStaleThumbnailError) return;
-          setError(retryErr instanceof Error ? retryErr.message : String(retryErr));
-        });
+        const queueRevision = saveQueue.current?.revision;
+        if (typeof queueRevision === "number" && queueRevision >= err.stateRevision) {
+          void captureThumb(slideId, retriesLeft - 1).catch((retryErr) => {
+            if (retryErr instanceof MapsStaleThumbnailError) return;
+            setError(retryErr instanceof Error ? retryErr.message : String(retryErr));
+          });
+        }
         return;
       }
       throw err;

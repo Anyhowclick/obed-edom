@@ -2136,15 +2136,7 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
 
     append_lock_reached = threading.Event()
-    real_decode_png = maps._decode_png
     landmark_bytes = _landmark_png()
-
-    def spy_decode_png(raw):
-        if raw == landmark_bytes:
-            append_lock_reached.set()
-        return real_decode_png(raw)
-
-    monkeypatch.setattr(maps, "_decode_png", spy_decode_png)
 
     import_outcome_b = {}
 
@@ -2160,6 +2152,17 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     # The status flip and the publish call must already be running under the
     # job's own mutation lock, held by the import thread.
     assert tail_lock_state.get("owned") is True
+    import_ident = import_thread_b.ident
+
+    real_mutation_lock = maps._mutation_lock
+
+    def spy_mutation_lock(job_id):
+        lock = real_mutation_lock(job_id)
+        if job_id == job_b["id"] and threading.get_ident() != import_ident:
+            append_lock_reached.set()
+        return lock
+
+    monkeypatch.setattr(maps, "_mutation_lock", spy_mutation_lock)
 
     append_outcome = {}
 

@@ -32,10 +32,10 @@ export type Job = {
 
 export type ChosenFile = { path: string; name: string };
 
-async function readError(res: Response): Promise<string> {
+async function readError(res: Response, parsed?: unknown): Promise<string> {
   try {
-    const data = await res.json();
-    return data.detail || JSON.stringify(data);
+    const data = parsed !== undefined ? parsed : await res.json();
+    return (data as { detail?: string })?.detail || JSON.stringify(data);
   } catch {
     return res.statusText;
   }
@@ -457,6 +457,7 @@ export async function postMapsPng(
     if (detail && typeof detail === "object" && detail.staleThumbnail && typeof detail.stateRevision === "number") {
       throw new MapsStaleThumbnailError(detail.stateRevision);
     }
+    throw new Error(await readError(res, data));
   }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
