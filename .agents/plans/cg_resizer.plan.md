@@ -297,7 +297,22 @@ todos:
       `payload.get(\"reader\") == \"jxa\"` — honest short-term fix, since Full is deliberately
       unbanked in the digest bank (see that reasoning in the jxa-digest-bank work); (2) bank a
       JXA per-slide kind-count fixture next to the digest bank."
-    status: pending
+    status: done
+    resolution: "FIXED 2026-09-11 on branch fix/kindindex-guard-test-vacuous. Shipped both
+      options: (1) `_cached_exact_payload` gates on `payload.get('reader') == 'jxa'`, closing
+      the vacuity for both integration tests, skip reasons reworded to name the reader
+      condition and regeneration command; (2) new banker scripts/bank_jxa_kind_counts.py
+      (modelled on bank_jxa_slide_digests.py) banked Gold_Wall_Input.key's 19-slide JXA kind
+      counts Keynote-free into tests/fixtures/jxa-kind-counts/gold_wall_input.json; new test
+      test_integration_gold_deck_kind_counts_match_banked_jxa cross-checks
+      derive_deck_kind_index against that bank on every run — 19/19 slides clean; synthetic
+      test_guard_trips_on_jxa_only_dual_listing pins the trip direction with no deck/Keynote.
+      tests/test_iwa_kindindex.py: 20 passed/2 skipped -> 22 passed/2 skipped (skips: MAP_DECK
+      absent; Full deliberately unbanked). Residual: slide 73's trip is unexercised against
+      real ground truth until a legacy Keynote read of Full_Report_Card_Wall.key. Correction:
+      tests/fixtures/jxa-slide-digests/gold_wall_input.json is committed on main (fa80746) and
+      test_golden_plan.py's Gold bank test runs green today (1 passed, 1 skipped, only Full
+      skips) — the earlier claim that those bank tests were fully skipped was wrong."
 isProject: false
 ---
 
@@ -367,8 +382,8 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
   7.7s, `flagged == []` where `[73]` expected) — NOT deck drift: the test's oracle
   (`_cached_exact_payload`, the shared inspect-cache slot for the current deck digest) is
   stamped `reader: offline` since R2b, so IWA-derived kind counts agree with it by construction
-  and the JXA-only dual listing on slide 73 can never trip the guard. See new todo
-  `kindindex-guard-test-vacuous`.
+  and the JXA-only dual listing on slide 73 can never trip the guard. FIXED 2026-09-11 on branch
+  `fix/kindindex-guard-test-vacuous` — see `kindindex-guard-test-vacuous`'s resolution.
 - **W1 default flip stays ON HOLD** (`w-offline-write-stabilise`: universal naturalSize writer +
   a healthy whole-deck gate are its bar). The 2026-09-10 nap-window whole-deck gate ran
   (`output/bank/2026-09-10/w1-gate/`) and came back RED: arm B (offline writer) is now clean bar
