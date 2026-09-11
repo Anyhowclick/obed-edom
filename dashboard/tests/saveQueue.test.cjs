@@ -313,7 +313,7 @@ test("status reflects dirty, in-flight, acknowledged, blocked, and error transit
   release();
   await flushed;
   assert.equal(queue.status, "saved");
-  assert.deepEqual(statuses, ["unsaved", "saving", "saved"]);
+  assert.deepEqual(statuses, ["saved", "unsaved", "saving", "saved"]);
 });
 
 test("status is paused while a conflict is blocked", async () => {
@@ -331,6 +331,41 @@ test("status is paused while a conflict is blocked", async () => {
   queue.markDirty();
   await assert.rejects(queue.flush(), MapsSaveBlockedError);
   assert.equal(queue.status, "paused");
+});
+
+test("an ack that conflicts with an edit made during the flight pauses without a spurious onError", async () => {
+  let live = doc("Local");
+  let shouldConflict = true;
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      if (shouldConflict) {
+        shouldConflict = false;
+        live = doc("Edited during flight");
+        return { document: doc("Remote", [{ id: "p1", name: "p1", lat: 1, lon: 2, kind: "dot", color: "#fff" }]), revision: revision + 1 };
+      }
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => undefined,
+    onError: () => assert.fail("should not surface a transport error for a blocked save"),
+  });
+  queue.setAcknowledged({ document: doc(), revision: 0 });
+  queue.markDirty();
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.equal(queue.status, "paused");
+  assert.ok(queue.conflict);
+
+  queue.reloadLatest();
+  assert.equal(queue.status, "saved");
+
+  queue.setAcknowledged({ document: doc(), revision: 0 });
+  live = doc("Local");
+  shouldConflict = true;
+  queue.markDirty();
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  await queue.keepMyChanges();
+  assert.equal(queue.status, "saved");
 });
 
 test("status is error after a transport failure and clears on the next successful save", async () => {

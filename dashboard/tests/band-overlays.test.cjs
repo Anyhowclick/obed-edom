@@ -98,6 +98,10 @@ test("BandOverlays: snap guide renders only while cgSnapped is true", () => {
   assert.ok(render({ cgSnapped: true }).includes("maps-snap-guide"));
 });
 
+test("BandOverlays: snap guide is absent when splitCg is true even if cgSnapped", () => {
+  assert.ok(!render({ cgSnapped: true, splitCg: true }).includes("maps-snap-guide"));
+});
+
 test("styles.css: .maps-object-layer sits above the crop overlay and stays click-through except its handles", () => {
   const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
   const block = (selector) => {
@@ -118,6 +122,25 @@ test("styles.css: .maps-object-layer sits above the crop overlay and stays click
   assert.ok(cropZ === null || cropZ < layerZ, "crop overlay must not out-rank the object layer");
   const handle = block(".maps-object-handle");
   assert.match(handle, /pointer-events:\s*auto/);
+});
+
+test("styles.css: .maps-snap-guide is click-through and ordered above the crop overlay", () => {
+  const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
+  const block = (selector) => {
+    const m = css.match(new RegExp(selector.replace(/[.]/g, "\\.") + "\\s*\\{([^}]*)\\}"));
+    assert.ok(m, `missing ${selector} block`);
+    return m[1];
+  };
+  const zIndexOf = (blockText) => {
+    const m = blockText.match(/z-index:\s*(-?\d+)/);
+    return m ? Number(m[1]) : null;
+  };
+  const guide = block(".maps-snap-guide");
+  assert.match(guide, /pointer-events:\s*none/);
+  const cropOverlay = block(".maps-crop-overlay");
+  const cropZ = zIndexOf(cropOverlay);
+  const guideZ = zIndexOf(guide);
+  assert.ok(cropZ === null || guideZ === null || cropZ <= guideZ, "crop overlay must not out-rank the snap guide");
 });
 
 test("MapView.tsx: uses previewLayout from ./types and no longer computes inner height as 1080 * scale", () => {

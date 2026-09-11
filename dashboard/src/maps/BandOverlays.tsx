@@ -70,7 +70,7 @@ export function BandOverlays({
           </div>
         )}
       </div>
-      {cgSnapped && <div className="maps-snap-guide" />}
+      {exportCg && !splitCg && cgSnapped && <div className="maps-snap-guide" />}
       {box && (
         <div className="maps-object-layer">
           <div className="maps-object-box" style={objectBoxStyle(box, k, bandTop)}>

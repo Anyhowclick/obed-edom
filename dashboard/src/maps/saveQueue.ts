@@ -48,6 +48,7 @@ export class MapsSaveQueue {
 
   setAcknowledged(ack: MapsSaveAck): void {
     this.base = { document: copy(ack.document), revision: ack.revision };
+    this.emitStatus();
   }
 
   reset(ack: MapsSaveAck): void {
@@ -65,6 +66,7 @@ export class MapsSaveQueue {
     if (!this.base || !current) {
       this.setAcknowledged(ack);
       if (current) this.options.publish(copy(ack.document));
+      this.emitStatus();
       return;
     }
     if (ack.revision < this.base.revision) return;
@@ -153,6 +155,7 @@ export class MapsSaveQueue {
         retries = 0;
       } catch (error) {
         if (epoch !== this.epoch) return;
+        if (error instanceof MapsSaveBlockedError) throw error;
         if (isConflict(error)) {
           const latest = this.options.document() || sent;
           if (!this.applyMerge(rebaseMapsDocument(requestBase.document, latest, error.remote.document), error.remote)) throw new MapsSaveBlockedError();

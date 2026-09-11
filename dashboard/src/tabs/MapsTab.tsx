@@ -590,11 +590,11 @@ export function MapsTab() {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveQueue.current?.markDirty();
     const scheduledId = currentJob.id;
     const run = () => {
       saveTimer.current = null;
       if (jobRef.current?.id !== scheduledId) return;
-      saveQueue.current?.markDirty();
       void saveQueue.current?.flush().catch(() => undefined);
     };
     if (immediate) run();
@@ -2005,7 +2005,7 @@ export function MapsTab() {
         >
           <IconLibrary />
         </button>
-        <span className={`maps-save-status maps-save-status-${saveStatus}`}>{SAVE_STATUS_LABEL[saveStatus]}</span>
+        <span className={`maps-save-status maps-save-status-${saveStatus}`} aria-live="polite">{SAVE_STATUS_LABEL[saveStatus]}</span>
         <span className="note">{job.id}</span>
       </div>
       <div className="maps-stylebar">
