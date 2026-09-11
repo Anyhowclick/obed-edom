@@ -141,14 +141,14 @@ test("plateSurfaceWidth falls back from plate.plateW when slideIds don't resolve
   assert.equal(plateSurfaceWidth(["missing"], new Map(), CENTRE_W + 1), WALL_W);
 });
 
-test("surfaceWidthOf: displayed width is driven by the toggle, independent of authoredWidth (density)", () => {
-  // The toggle alone decides the DISPLAY extent (WALL_W with it on, CENTRE_W without) — the
-  // slide's own authoredWidth (density) plays no part except deciding the CG-split boundary.
+test("surfaceWidthOf: FW-authored slides always display full wall; toggle only widens centre slides", () => {
+  // Centre-authored slide: toggle decides the DISPLAY extent.
   assert.equal(surfaceWidthOf(CENTRE_W, false), CENTRE_W);
   assert.equal(surfaceWidthOf(CENTRE_W, true), WALL_W);
-  // Even an FW-authored slide (authoredWidth === WALL_W) only widens the DISPLAY when the toggle
-  // is on — with it off, the display still narrows to CENTRE_W while density stays FW.
-  assert.equal(surfaceWidthOf(WALL_W, false), CENTRE_W);
+  // FW-authored slide (authoredWidth === WALL_W) always displays the full wall, toggle or not —
+  // its own export surface is already full-wall, so the preview must match regardless of the
+  // "Show side panels" toggle.
+  assert.equal(surfaceWidthOf(WALL_W, false), WALL_W);
   assert.equal(surfaceWidthOf(WALL_W, true), WALL_W);
   // CG split always shows just the CG crop regardless of the toggle.
   assert.equal(surfaceWidthOf(CG_W, true), CG_W);

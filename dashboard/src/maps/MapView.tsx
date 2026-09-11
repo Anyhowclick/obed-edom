@@ -966,7 +966,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const bandEl = event.currentTarget.closest(".maps-map-band");
     const width = bandEl?.clientWidth || 1;
     event.currentTarget.setPointerCapture(event.pointerId);
-    cgDrag.current = { x: event.clientX, shift: cgShiftX, width, surfaceWidth: surfaceWidthOf(authoredWidth, sidePanels) };
+    cgDrag.current = { x: event.clientX, shift: cgShiftX, width, surfaceWidth: surfaceWidthOf(effectiveWidth, sidePanels) };
   }
 
   function onCgPointerMove(event: React.PointerEvent<HTMLElement>) {
@@ -991,9 +991,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   // staying pinned to the (possibly mismatched) authoredWidth prop for the hop's duration.
   const effectiveWidth = hopWidth ?? authoredWidth;
   const wrapWarn = worldCopyWarning(camera.zoom);
-  const splitCg = effectiveWidth <= CG_W;
-  const fullWall = sidePanels && !splitCg;
   const surfaceWidth = surfaceWidthOf(effectiveWidth, sidePanels);
+  const splitCg = surfaceWidth === CG_W;
+  const fullWall = surfaceWidth === WALL_W;
   const surfaceOrigin = fullWall ? 0 : CG_ORIGIN - CG_W / 2;
   const cgLeft = ((CG_ORIGIN + cgShiftX - surfaceOrigin) / surfaceWidth) * 100;
   const cgWidth = (CG_W / surfaceWidth) * 100;

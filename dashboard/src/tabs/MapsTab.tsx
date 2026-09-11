@@ -72,6 +72,7 @@ import {
   restitchWithMemory,
   slideHiddenLayers,
   suggestedHopKind,
+  surfaceWidthOf,
   type MapsCamera,
   type MapsAudience,
   type MapsChurch,
@@ -423,7 +424,7 @@ export function MapsTab() {
     hillshade: activeView.hillshade,
     isolate: activeView.isolate ? { mode: activeView.isolate.mode, strength: activeView.isolate.strength } : null,
     authoredWidth: renderedAuthoredWidth,
-    sidePanels: renderedSidePanels,
+    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
     crop: doc?.crop,
   }) : "";
 

@@ -252,12 +252,13 @@ export function captureWidth(slide: { includeSidePanels?: boolean }): number {
   return slide.includeSidePanels ? WALL_W : CENTRE_W;
 }
 
-/** Displayed band width in authored px: the CG split shows only the CG crop; a centre-only slide
- * (authoredWidth === CENTRE_W) shows just the centre unless "Show side panels" widens the visible
- * band to the full wall for context — density (authoredWidth) is unchanged either way. */
+/** Displayed band width in authored px: the CG split shows only the CG crop; a full-wall slide
+ * (authoredWidth === WALL_W) always shows the full wall; a centre-only slide (authoredWidth ===
+ * CENTRE_W) shows just the centre unless "Show side panels" widens the visible band to the full
+ * wall for context — density (authoredWidth) is unchanged either way. */
 export function surfaceWidthOf(authoredWidth: number, sidePanels: boolean): number {
   const splitCg = authoredWidth <= CG_W;
-  const fullWall = sidePanels && !splitCg;
+  const fullWall = authoredWidth === WALL_W || (sidePanels && !splitCg);
   return splitCg ? CG_W : fullWall ? WALL_W : WALL_W - FW_W * 2;
 }
 
