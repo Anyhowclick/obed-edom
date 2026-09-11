@@ -32,6 +32,7 @@ import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
+import { commitCamera, withSlideCamera } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
@@ -269,6 +270,7 @@ export function MapsTab() {
   const activeRef = useRef<string | null>(null);
   const activeAudienceRef = useRef<MapsAudience>("lw");
   const previewingRef = useRef(false);
+  const saveConflictRef = useRef<{ paths: string[] } | null>(null);
   const exportingRef = useRef(false);
   const previewAbort = useRef(false);
   const previewRun = useRef(0);
@@ -315,12 +317,13 @@ export function MapsTab() {
   activeRef.current = activeId;
   activeAudienceRef.current = activeAudience;
   previewingRef.current = previewing;
+  saveConflictRef.current = saveConflict;
 
   if (!saveQueue.current) {
     saveQueue.current = new MapsSaveQueue({
       document: () => docRef.current,
       publish: (next) => {
-        applyLocalDoc(next);
+        setLocalDoc(next);
         const acknowledged = saveAckJob.current;
         if (acknowledged) mergeServerMeta(acknowledged);
       },
@@ -528,13 +531,18 @@ export function MapsTab() {
     mapRef.current?.resize();
   }
 
-  function applyLocalDoc(next: MapsDocument) {
+  function setLocalDoc(next: MapsDocument) {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const coerced = coerceHopKinds(next);
     docRef.current = coerced;
     setJob({ ...currentJob, result: { ...(currentJob.result || {}), ...coerced } });
     return coerced;
+  }
+
+  function applyLocalDoc(next: MapsDocument) {
+    if (saveConflictRef.current) return;
+    return setLocalDoc(next);
   }
 
   function mergeServerMeta(updated: Job) {
@@ -602,11 +610,7 @@ export function MapsTab() {
     if (!current) return null;
     const cam = mapRef.current?.getCamera();
     if (!cam) return current;
-    const slidesNext = current.slides.map((slide) => {
-      if (slide.id !== slideId) return slide;
-      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera: cam } } : { ...slide, camera: cam };
-    });
-    return applyLocalDoc({ ...current, slides: slidesNext }) ?? current;
+    return applyLocalDoc(withSlideCamera(current, slideId, activeAudienceRef.current, cam)) ?? current;
   }
 
   async function captureThumb(slideId: string) {
@@ -633,7 +637,7 @@ export function MapsTab() {
 
   async function flushAndSave(immediate = true) {
     const id = activeRef.current;
-    if (!id || previewingRef.current) return;
+    if (!id || previewingRef.current || saveConflictRef.current) return;
     const next = writeCameraInto(id);
     const slide = next?.slides.find((item) => item.id === id);
     if (slide) await mapRef.current?.waitUntilIdle(slideForAudience(slide, activeAudienceRef.current).style);
@@ -692,12 +696,9 @@ export function MapsTab() {
   function onCameraCommit(camera: MapsCamera) {
     const current = docRef.current;
     const id = activeRef.current;
-    if (!current || !id || previewingRef.current || saveConflict) return;
-    const slidesNext = current.slides.map((slide) => {
-      if (slide.id !== id) return slide;
-      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera } } : { ...slide, camera };
-    });
-    patchDoc({ ...current, slides: slidesNext });
+    if (!current || !id) return;
+    const next = commitCamera(current, id, activeAudienceRef.current, camera, { frozen: !!saveConflictRef.current, previewing: previewingRef.current });
+    if (next) patchDoc(next);
   }
 
   function updateActive(partial: Partial<MapsSlide>) {

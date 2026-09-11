@@ -1,0 +1,43 @@
+const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+
+const root = path.resolve(__dirname, "..");
+const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-conflict-freeze-"));
+const runtime = process.env.CODEX_NODE || process.execPath;
+const compile = spawnSync(runtime, [
+  path.join(root, "node_modules/typescript/bin/tsc"), "--module", "commonjs", "--target", "ES2020", "--skipLibCheck", "true",
+  "--outDir", out, path.join(root, "src/maps/commit.ts"), path.join(root, "src/maps/types.ts"),
+], { cwd: root, encoding: "utf8" });
+assert.equal(compile.status, 0, compile.stderr || compile.stdout);
+const { commitCamera } = require(path.join(out, "commit.js"));
+
+const camera = { lat: 1, lon: 2, zoom: 8, bearing: 0, pitch: 0 };
+const doc = (cg) => ({
+  defaultStyle: "positron", crop: "center+cg", exportLw: true, exportCg: true, exportDsk: false, hiddenLayers: [], cachedCountries: [], assets: [], links: [],
+  slides: [{
+    id: "s1", title: "Old", style: "positron", camera: { lat: 0, lon: 0, zoom: 5, bearing: 0, pitch: 0 },
+    highlights: [], churches: [], cgShiftX: 0, cgShiftY: 0, includeSidePanels: false,
+    cg: cg ? { camera: { lat: 0, lon: 0, zoom: 5, bearing: 0, pitch: 0 }, style: "positron", highlights: [], churches: [] } : undefined,
+  }],
+});
+
+test("commitCamera returns null while a conflict is pending", () => {
+  const result = commitCamera(doc(false), "s1", "lw", camera, { frozen: true, previewing: false });
+  assert.equal(result, null);
+});
+
+test("commitCamera returns null while previewing", () => {
+  const result = commitCamera(doc(false), "s1", "lw", camera, { frozen: false, previewing: true });
+  assert.equal(result, null);
+});
+
+test("commitCamera writes the cg camera when audience is cg and the slide has a cg view", () => {
+  const result = commitCamera(doc(true), "s1", "cg", camera, { frozen: false, previewing: false });
+  assert.ok(result);
+  assert.deepEqual(result.slides[0].cg.camera, camera);
+  assert.deepEqual(result.slides[0].camera, { lat: 0, lon: 0, zoom: 5, bearing: 0, pitch: 0 });
+});
