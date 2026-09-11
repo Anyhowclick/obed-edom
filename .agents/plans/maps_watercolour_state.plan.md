@@ -1,9 +1,9 @@
 ---
 name: Maps + Watercolour branch state
-overview: PR #63 and PR #68 are merged into main. New branch feat/maps-ux-round (PR #70, open, HEAD aac2807) carries the UX round and the reorder-memory/isolate-default follow-up. Records what landed on 2026-09-09, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63 and PR #68 are merged into main. New branch feat/maps-ux-round (PR #70, open, HEAD 8b4341a) carries the UX round, the reorder-memory/isolate-default follow-up, and honest preview option 2b. Records what landed on 2026-09-09 and 2026-09-11, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
-    content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie and Keynote re-render of restored pairs."
+    content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie, Keynote re-render of restored pairs, and honest preview 2b QA (toner lines, pitched downtown, movie hops across relief/province/CG-crop gates, morph plate slide, centre-to-FW mixed hop, side-panel toggle on centre-only slide)."
   - id: review2
     content: "Done: PR #63 review round 2 (on 0644d97) returned REQUEST-CHANGES with 8 findings; 7 fixed in 290d4f7, finding 2 rejected on purpose (country cut-out stays plain, no orange). PR #63 and #68 both merged into main."
     status: done
@@ -80,13 +80,15 @@ PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-r
 - `462f0cd` flight profile for hop movies: `flight: "arc" | "phases"` on `MapsLink` (missing ⇒ arc, no legacy inference by owner decision); new `maps/flight.ts` van Wijk closed form (asinh-stable r0/r1, w0-relative pure-zoom guard, exact endpoints, rho = existing `curve`); arc defaults to linear easing (constant perceived velocity across uniform 30 fps frames); bearing/pitch follow progress; routes still honoured under arc; inspector gets a "Flight" select (phases controls + HopTimeline only shown under phases; "Curve" scrub shown under arc); Reset hop no longer forces ease-in-out; server Literal validation + non-movie strip; phases branch pinned by baked fixtures. Two Codex passes: REQUEST-CHANGES then APPROVE.
 - `69be4e7` watercolour lifecycle leftovers: cooperative cancellation (`WatercolourCancelled` at stage boundaries, GrabCut split into single `GC_EVAL` iterations with byte-identical output pinned by test), cancelled batches retain finished files and show muted cancelled tiles, mask specs keyed by photo index only + submit-time validation via `decode_image`, one atomic `append_landmark` shared by Studio add-to-map and the new `POST /{job}/slides/{slide}/landmark` (asset promoted before publish, `w<hex8>` ids, `stillPng` invalidated, client has no optimistic window, `churchId` returned), JobRunner hardening (per-job locks, unique temp files, `update_result` reverts on save failure, delete tombstones, submit never reuses an id). Six Codex passes (five REQUEST-CHANGES then APPROVE), full pytest suite 1693 passed.
 
+- `8b4341a` honest preview option 2b: every surface renders as a 1920 CSS px screen magnified (FW 7680 scale 4, LW 3840 scale 2, CG 1920 scale 1 unchanged; camera `log2(scale)` below authored; output px == authored px; plates keep ceil/centred crop via `plateSurfaceWidth` from slideIds), preview pinned to the same inner element scaled to the band (`compensatedFov`/`previewHostRect` removed), zoom clamps/object scale/isolate projection/CG crop/prefetch/toner+relief gates follow the render camera (relief keyed off authored zoom everywhere), movie hops preview at `hopSurfaceWidth = max(from,to)` with MapView override restored on every exit path (`hopRestore`/`hopSeq`/`silentJump`); toner hairline limit resolved (toner plan updated). Reviews: Codex R1 5 findings → fix → opus 5 rounds (APPROVE-WITH-NITS ×3 with fixes applied) interleaved with Codex R2/R3 one High each → Codex R4 APPROVE. Known limits: tiles are fetched 1-2 zoom levels coarser than before on FW/LW (deliberate; dense downtown slides look softer; hillshade/NE2 raster upscaled), and `createExportMap` has no node test (Vite worker import).
+
 ### Owner decisions 2026-09-10
 - No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
 
 ## Known limits / assumptions
 
 - **Province tile floor.** `admin_level` 4 geometry starts at map z1; nothing renders provinces below it. Preview runs `previewZoomDelta` below authored, so low-zoom previews stay silent about provinces even though the 7680 export shows them.
-- **Export hairlines.** Vendored line weights are screen-scale, so authored z2-3 exports draw 1-1.2 px borders on the wall. The real fix is parked **option 2b** in [maps_toner_lowzoom.plan.md](maps_toner_lowzoom.plan.md) (render the export through the preview camera at pixelRatio 7.68).
+- **Export hairlines resolved in `8b4341a`** via honest preview option 2b (render camera at `log2(scale)` below authored, output px == authored px); see toner plan for detail. Tiles now fetch 1-2 zoom levels coarser on FW/LW (deliberate trade-off; dense downtown slides look softer, hillshade/NE2 raster upscaled).
 - **Keynote autoplay is not scriptable.** Movies start on slide arrival unless "Start movie on click" is set; whether that applies depends on Document ▸ Movies / build order. Owner must check.
 - **Landmark picker is LW-only** — the server appends to `slide["churches"]` with no audience parameter; the watercolour choice is disabled in CG.
 - **Reveal cache is fingerprinted** on asset, duration, opacity, strokes, seed, audience, algo v3.
@@ -110,6 +112,13 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 6. Cancelled-batch UX: finished tiles usable, cancelled tiles muted, no red banner, Download batch returns finished files only.
 7. Add-to-map to a non-active Maps slide → Maps shows placeholder thumbnail, selecting recaptures with the landmark, objects list already lists it.
 8. Race: Studio add while a Maps edit is pending → no conflict dialog, both present.
+9. Honest preview 2b: toner-lines still at authored 2.5 vs preview.
+10. Honest preview 2b: pitched downtown z16 still vs preview at 25%.
+11. Honest preview 2b: a movie hop crossing a relief/province gate (scrub for popping).
+12. Honest preview 2b: a CG-crop movie hop.
+13. Honest preview 2b: a morph plate slide in Keynote.
+14. Honest preview 2b: a centre→FW mixed movie hop preview vs export.
+15. Honest preview 2b: "Show side panels" on a centre-only slide (density unchanged, CG frame aligned).
 
 ## Open backlog
 
@@ -119,8 +128,9 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 - **Real concurrent-race tests**: Studio append vs stale state save, two appends, stale thumbnail writer after append, asset revision handoff, session import vs stale save, delete/edit conflict.
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
-- **Honest preview, options 2 / 2a / 2b** — see the toner plan. 2b also removes the export hairline problem.
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
+
+Open decision for the owner: an FW-authored slide with the display toggle off shows only the centre band while labelled FW — should `includeSidePanels` force the full-wall display?
 
 ## Pointers
 
