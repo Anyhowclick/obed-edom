@@ -93,6 +93,11 @@ test("BandOverlays: no box means no object layer at all", () => {
   assert.ok(!markup.includes("maps-object-layer"));
 });
 
+test("BandOverlays: snap guide renders only while cgSnapped is true", () => {
+  assert.ok(!render({ cgSnapped: false }).includes("maps-snap-guide"));
+  assert.ok(render({ cgSnapped: true }).includes("maps-snap-guide"));
+});
+
 test("styles.css: .maps-object-layer sits above the crop overlay and stays click-through except its handles", () => {
   const css = fs.readFileSync(path.join(root, "src/styles.css"), "utf8");
   const block = (selector) => {
