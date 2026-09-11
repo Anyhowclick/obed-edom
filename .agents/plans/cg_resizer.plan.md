@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); finish `as-geometry-rounding` (arm A's rounding vs. the plan oracle bar), a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2; new bug-backlog item `badge-width-collapse-gold-slide-2` (Gold slide 2 badge groups collapsed ~12x narrower) queued after `stat-raise-dead-4`/`as-geometry-rounding`. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) pending live confirmation (ranged gate then a full W1 gate); `kindindex-guard-test-vacuous` is on PR #77; then a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2; new bug-backlog item `badge-width-collapse-gold-slide-2` (Gold slide 2 badge groups collapsed ~12x narrower) queued after `stat-raise-dead-4`/`as-geometry-rounding`. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -62,7 +62,31 @@ todos:
       because the range looks like rounding; the range 1.19-1.92px is wider than pure integer
       rounding of a sub-pixel value would explain, and slide 36 is in the set for a known DIFFERENT
       reason (the group-width miss). Dependency: this matters for the W1 default flip, because while
-      arm A is the RED source, a gate GREEN cannot be reached by improving the offline writer alone."
+      arm A is the RED source, a gate GREEN cannot be reached by improving the offline writer alone.
+
+      RESOLVED 2026-09-11 on PR #78 (`b0dfa43`). Measurement
+      (`output/bank/2026-09-11/as-geometry-rounding/measurement.md`): NOT rounding — Keynote's
+      aspect lock: AppleScript geometry writes on image/movie/group are aspect-locked, storing x, y,
+      h as integers and computing w = round(h) × the object's source aspect (image/movie/group);
+      model residual ≤0.001px on 1034/1039 oracle rows, the rest = the known slide 36. The planner's
+      aspect error (≤0.79%) was traced to reader rounding (`offline_inspect` rounds source rects
+      before the affine), so arm A was writing the correct geometry and arm B's exact write was the
+      one introducing a small distortion. Owner chose the HYBRID after a Fable peer review: planner
+      snap (x, y, h → int, w = h × the unrounded composed aspect, for childless non-card non-badge
+      image/movie/group; `aspect` added to the wall payload, `INSPECT_VERSION` 5, `None` for masked)
+      plus a permanent aspect-aware arm-A oracle at 0.25px (arm B stays 1.0px, `GATE_VERSION`
+      unchanged); offline-write mode now refuses aspect-less caches and re-reads two-tier; the legacy
+      merge keeps image/movie aspect only and counts an aspect-less item as WARN; the oracle keeps
+      its soft bar for child-written groups. Golden re-bank is value-only (max |Δw| 1.92px). The
+      Keynote-free falsifier pins the Full deck at 1440 rows = 6 slide-36 + 56 child + 674 masked +
+      71 card + 633 asserted exact. The JXA digest bank was re-stamped v5 via `--payload`. Review: 3
+      opus rounds, Codex R1 REQUEST-CHANGES (the aspect-less cache hole was HIGH severity) → R2
+      APPROVE. Suite 1760/81. NOT YET LIVE-VERIFIED: needs the ranged live gate (47/113/82) then a
+      full W1 gate to confirm arm A ≤0.25px — owner hands-off ack required; the Full gate's
+      plan-oracle A should then go GREEN bar slide 36. Deferred open question carried inside this
+      todo: whether Keynote locks the MASK FRAME aspect or the NATURAL image/movie aspect for masked
+      media — masked items get `aspect=None` until that is measured. Follow-up backlog item opened
+      from this round: `digest-bank-version-decouple` (see that todo)."
     status: pending
   - id: surface-raise-tokens
     content: "DONE 2026-09-09, PR #61 `fix/surface-raise-tokens` (`c5e9c34`, Codex 3 passes), precondition for `stat-raise-dead-4`'s diagnosis. `keynote._run_stat_finalize` now returns `tokens` {name: [args]} and `frontErr`; `obedRaiseSlide` emits a `raiseDead(s=,idx=)` token for EVERY dead raise (the `is 0` guards removed); `remap_keynote._say_stat_finalize_detail` logs `Stat raise detail: ` (chunks of ≤40, marker `(i/n)` after the prefix), `WARNING stat-finalize: GUI Bring to Front returned error(s) `, `Badge raise detail: ` (unchanged), `Stat resolve detail: ` (rare kinds uncapped, sigFallback capped at 40). Unblocks `stat-raise-dead-4` localising all 4 `raiseDead` occurrences by log alone on the next production run."
@@ -313,6 +337,14 @@ todos:
       tests/fixtures/jxa-slide-digests/gold_wall_input.json is committed on main (fa80746) and
       test_golden_plan.py's Gold bank test runs green today (1 passed, 1 skipped, only Full
       skips) — the earlier claim that those bank tests were fully skipped was wrong."
+  - id: digest-bank-version-decouple
+    content: "BUG BACKLOG (B), low priority, opened 2026-09-11 from the `as-geometry-rounding`
+      round. `tests/test_golden_plan.py` asserts the JXA digest bank's `inspectVersion` field
+      equals the current `INSPECT_VERSION`, but the digests themselves ignore that field — so
+      every payload-shape bump (e.g. the v5 aspect-field bump on PR #78) forces a re-stamp of the
+      whole bank even when no digest value actually changed. Decouple the assertion from
+      `INSPECT_VERSION`, or stamp/compare only the fields the digest actually reads."
+    status: pending
 isProject: false
 ---
 
@@ -388,10 +420,13 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
   a healthy whole-deck gate are its bar). The 2026-09-10 nap-window whole-deck gate ran
   (`output/bank/2026-09-10/w1-gate/`) and came back RED: arm B (offline writer) is now clean bar
   the owner-accepted slide 36, but arm A (production AppleScript path) fails the plan oracle on 14
-  slides at 1.19-1.92px — see the new `as-geometry-rounding` item, which the flip now also depends
-  on (a gate GREEN cannot be reached by improving the offline writer alone). **W2 `w-zorder-patch`
-  stays gated on W1** and is purely speed/Accessibility removal, since `8a7b4bb` fixed the
-  raise-order correctness bug W2's own plan had assumed was already handled.
+  slides at 1.19-1.92px — see the `as-geometry-rounding` item. `as-geometry-rounding` is now
+  RESOLVED on PR #78 (`b0dfa43`): the cause was Keynote's aspect lock on AppleScript image/movie/
+  group writes, not rounding, fixed by a hybrid planner aspect-snap plus a permanent aspect-aware
+  arm-A oracle at 0.25px — pending the live ranged gate (47/113/82) and a full W1 gate to confirm
+  arm A ≤0.25px before the flip can proceed. **W2 `w-zorder-patch` stays gated on W1** and is
+  purely speed/Accessibility removal, since `8a7b4bb` fixed the raise-order correctness bug W2's
+  own plan had assumed was already handled.
 - **Deck facts:** `Map_Extracted_Wall_1st.key` is gone from the decks folder (58 oracle tests
   skip); `Full_Report_Card_Wall.key` was re-saved by autosave 2026-09-09 10:34 (content identical,
   digest `291b0322`, old cache stale) and is NOT `uchg`-locked (only `Full_Report_Card_CG.key` is),
@@ -505,14 +540,17 @@ cleanup and golden-plan gate; the refactor assessment.
 2. **`stat-raise-dead-4`** — FIXED, live-verified 2026-09-11 (×3 + ×3 controls, see the todo):
    0 dead raises with the readiness poll on vs. 5 lost under the fixed 0.35s delay — PR #75
    ready to merge (owner merges)
-2b. **`as-geometry-rounding`**, NEW 2026-09-10 — decide whether the plan-oracle bar widens for the
-   AppleScript arm, or the AppleScript geometry writer compensates for Keynote's rounding, or the
-   14 slides hide a real defect distinct from rounding; blocks the W1 default flip either way.
+2b. **`as-geometry-rounding`** — RESOLVED on PR #78 (`b0dfa43`): the cause was Keynote's aspect
+   lock on AppleScript image/movie/group geometry writes, not rounding; fix is a hybrid planner
+   aspect-snap plus a permanent aspect-aware arm-A oracle at 0.25px. NOT yet live-verified — needs
+   the ranged live gate (47/113/82) then a full W1 gate confirming arm A ≤0.25px before it can be
+   treated as closing the W1 default-flip dependency.
 3. **Shared osascript runner** (timeout/lock/name-verified bind) — before the W1 flip.
 4. **IWA natural-size/sentinel unification** + one decode→re-encode→diff — before W2.
 5. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
    a healthy whole-deck gate (green on both gold decks, with the consistency audit), now also
-   gated on `as-geometry-rounding`'s resolution for arm A.
+   gated on `as-geometry-rounding`'s live confirmation for arm A (fix landed on PR #78; live ranged
+   + full W1 gate still owed).
 6. **W2 `w-zorder-patch`** — gated on W1 stable; purely speed + Accessibility removal now.
    `restore_source_builds` must still run LAST, after any future z-order write.
 7. **Bug backlog:** `map-label-offslide-parked-delete`, `card-border-source-ref-floor-fix`
@@ -764,6 +802,9 @@ whose number disagrees with the run either side of it. Ships at `warning`.
 - An autosize text box's stored y is the visual TOP for `kFrameAlignTop` and the visual CENTRE
   only for `kFrameAlignMiddle`; Keynote's AppleScript/JXA `position` (read and write) is always
   the visual top-left. Never re-add write-side `±h/2` compensation for a read-side anchor bug.
+- AppleScript geometry writes on image/movie/group are aspect-locked: Keynote keeps x, y, h
+  (integers) and recomputes w from the object's own aspect. Plan rects for those kinds must be
+  AR-consistent or the writer silently changes w (`as-geometry-rounding`, PR #78).
 - KeynoteKit (Swift, same 14.4 schemas) is a reference only — it does not unblock W2 (evaluated
   2026-09-09).
 
