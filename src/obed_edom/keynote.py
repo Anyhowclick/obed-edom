@@ -805,6 +805,7 @@ _STAT_ACCUMULATORS = (
     "raiseBlindCount",
     "raiseVacuous",
     "raiseRetried",
+    "raiseClickRetried",
 )
 
 # Position always matches; w/h only match where the live frame isn't Keynote's own
@@ -1237,21 +1238,25 @@ def _stat_job_handlers() -> list[str]:
         "    end try",
         "  end tell",
         "  if not _found then return",
-        "  my obedFront(\"badge\", slideNo, _hit)",
-        "  if badgeMoved is 0 and badgeFrontDead is 0 then",
+        "  set _frontResult to my obedFront(\"badge\", slideNo, _hit)",
+        "  set _retriedOnly to badgeMoved is not 0 and _frontResult is not 0",
+        "  if (badgeMoved is 0 or _frontResult is not 0) and badgeFrontDead is 0 then",
         "    set _kindCount to my obedKindCount(slideNo, theKind)",
         "    if _kindCount is 0 then",
         '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
+        "      if _retriedOnly then set badgeMoved to badgeMoved + 1",
         "    else",
         "      set _topReal to my obedTopReal(slideNo, theKind, _kindCount)",
         "      if _topReal < 2 or _hit is not less than _topReal then",
         '        set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+        "        if _retriedOnly then set badgeMoved to badgeMoved + 1",
         "      else",
         "        set _foundAt to my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)",
         "        if _foundAt is _topReal then",
         "          set badgeMoved to badgeMoved + 1",
         "        else if _foundAt is 0 or _foundAt > _topReal then",
         '          set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+        "          if _retriedOnly then set badgeMoved to badgeMoved + 1",
         "        else",
         "          set badgeFrontDead to 1",
         '          set report to report & " badgeFrontDead(s=" & slideNo & ")"',
@@ -1285,11 +1290,11 @@ def _stat_job_handlers() -> list[str]:
         "  end repeat",
         "end obedBadgeSlide",
         # Bounded readiness poll: wait the settle floor, then poll `enabled` every 0.1 s
-        # up to the ceiling before clicking regardless of what it read (today's behaviour
-        # when polling never confirms readiness). `enabled` is probed in its own `try` so
-        # a read failure degrades to `missing value`, treated as not-ready.
-        "on obedFront(phase, slideNo, idx)",
-        "  global frontRaised, frontErr, raiseBlindCount, report",
+        # up to the ceiling, returning whatever it read (today's behaviour when polling
+        # never confirms readiness). `enabled` is probed in its own `try` so a read
+        # failure degrades to `missing value`, treated as not-ready.
+        "on obedFrontReady(phase, slideNo, idx)",
+        "  global raiseBlindCount, report",
         f"  delay {_as_fixed(settle_min)}",
         "  set _ready to false",
         "  set _waited to 0.0",
@@ -1313,15 +1318,46 @@ def _stat_job_handlers() -> list[str]:
         "    set raiseBlindCount to raiseBlindCount + 1",
         '    set report to report & " raiseBlind(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ")"',
         "  end if",
+        "  return _ready",
+        "end obedFrontReady",
+        # A click error re-runs the whole readiness sequence (settle floor + poll) once
+        # before giving up -- a bare re-click after the same failed resolution rescues
+        # nothing (raise-dead bank). frontRaised counts once per call, on whichever
+        # attempt lands; only a second failure reaches frontErr, tagged `,retry]`.
+        "on obedFront(phase, slideNo, idx)",
+        "  global frontRaised, frontErr, raiseClickRetried, report",
+        "  my obedFrontReady(phase, slideNo, idx)",
+        "  set _clicked to false",
         "  try",
         "    " + _keynote_process_tell(),
         '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
         "    end tell",
+        "    set _clicked to true",
+        "  on error errMsg number errNum",
+        "    set raiseClickRetried to raiseClickRetried + 1",
+        '    set report to report & " raiseClickRetry(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ",err=" & errNum & ")"',
+        "  end try",
+        "  if _clicked then",
         "    set frontRaised to frontRaised + 1",
         "    delay 0.2",
+        "    return 0",
+        "  end if",
+        "  my obedFrontReady(phase, slideNo, idx)",
+        "  set _clicked to false",
+        "  try",
+        "    " + _keynote_process_tell(),
+        '      click menu item "Bring to Front" of menu "Arrange" of menu bar item "Arrange" of menu bar 1',
+        "    end tell",
+        "    set _clicked to true",
         "  on error errMsg number errNum",
-        '    set frontErr to frontErr & " [" & errNum & "@" & phase & ",s=" & slideNo & ",idx=" & idx & "]"',
+        '    set frontErr to frontErr & " [" & errNum & "@" & phase & ",s=" & slideNo & ",idx=" & idx & ",retry]"',
         "  end try",
+        "  if _clicked then",
+        "    set frontRaised to frontRaised + 1",
+        "    delay 0.2",
+        "    return 1",
+        "  end if",
+        "  return 2",
         "end obedFront",
     ]
     return lines
@@ -1435,6 +1471,7 @@ def _build_stat_finalize_script(
         "  set raiseBlindCount to 0",
         "  set raiseVacuous to 0",
         "  set raiseRetried to 0",
+        "  set raiseClickRetried to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
@@ -1542,7 +1579,8 @@ def _build_stat_finalize_script(
         '& " badgeFrontDead=" & badgeFrontDead & " raiseMoved=" & raiseMoved '
         '& " raiseDead=" & raiseDead & " raiseUnknown=" & raiseUnknown '
         '& " raiseBlindCount=" & raiseBlindCount & " raiseVacuous=" & raiseVacuous '
-        '& " raiseRetried=" & raiseRetried & " detail=" & report',
+        '& " raiseRetried=" & raiseRetried & " raiseClickRetried=" & raiseClickRetried '
+        '& " detail=" & report',
         "end tell",
         "end using terms from",
     ]
@@ -1628,6 +1666,7 @@ def _run_stat_finalize(
         "raiseBlindCount": _num("raiseBlindCount"),
         "raiseVacuous": _num("raiseVacuous"),
         "raiseRetried": _num("raiseRetried"),
+        "raiseClickRetried": _num("raiseClickRetried"),
         "detail": detail,
         "tokens": _parse_detail_tokens(detail),
         "frontErr": front_err,
