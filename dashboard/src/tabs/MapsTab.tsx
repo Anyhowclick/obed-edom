@@ -622,7 +622,13 @@ export function MapsTab() {
     const view = slide ? slideForAudience(slide, audience) : null;
     if (!slide || !view) return;
     const token = ++thumbnailToken.current;
-    const gate = () => shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id });
+    const gate = () =>
+      shouldPublishThumb({
+        frozen: !!saveConflictRef.current,
+        tokenStillValid: token === thumbnailToken.current,
+        sameJob: jobRef.current?.id === currentJob.id,
+        sameView: activeRef.current === slideId && activeAudienceRef.current === audience,
+      });
     const fingerprintOf = (s: MapsSlide) => thumbnailFingerprint(slideId, audience, slideForAudience(s, audience), thumbnailGeometryRef.current);
     const fingerprint = fingerprintOf(slide);
     const matchesFingerprint = () => {

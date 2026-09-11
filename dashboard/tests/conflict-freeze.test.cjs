@@ -43,13 +43,17 @@ test("commitCamera writes the cg camera when audience is cg and the slide has a 
 });
 
 test("shouldPublishThumb rejects a thumbnail once the save conflict freezes the doc", () => {
-  assert.equal(shouldPublishThumb({ frozen: true, tokenStillValid: true, sameJob: true }), false);
+  assert.equal(shouldPublishThumb({ frozen: true, tokenStillValid: true, sameJob: true, sameView: true }), false);
 });
 
 test("shouldPublishThumb rejects a stale capture whose token was superseded", () => {
-  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: false, sameJob: true }), false);
+  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: false, sameJob: true, sameView: true }), false);
+});
+
+test("shouldPublishThumb rejects a capture whose slide navigated away underneath it", () => {
+  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: true, sameJob: true, sameView: false }), false);
 });
 
 test("shouldPublishThumb allows publishing when nothing changed underneath it", () => {
-  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: true, sameJob: true }), true);
+  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: true, sameJob: true, sameView: true }), true);
 });

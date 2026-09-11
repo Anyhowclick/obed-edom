@@ -31,8 +31,8 @@ export function withSlideCamera(doc: MapsDocument, slideId: string, audience: Ma
   return { ...doc, slides };
 }
 
-export function shouldPublishThumb(gate: { frozen: boolean; tokenStillValid: boolean; sameJob: boolean }): boolean {
-  return !gate.frozen && gate.tokenStillValid && gate.sameJob;
+export function shouldPublishThumb(gate: { frozen: boolean; tokenStillValid: boolean; sameJob: boolean; sameView: boolean }): boolean {
+  return !gate.frozen && gate.tokenStillValid && gate.sameJob && gate.sameView;
 }
 
 export function commitCamera(
