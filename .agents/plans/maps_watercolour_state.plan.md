@@ -119,6 +119,7 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 13. Honest preview 2b: a morph plate slide in Keynote.
 14. Honest preview 2b: a centre→FW mixed movie hop preview vs export.
 15. Honest preview 2b: "Show side panels" on a centre-only slide (density unchanged, CG frame aligned).
+16. FW slide with the display toggle off shows the full wall with the CG frame aligned.
 
 ## Open backlog
 
@@ -130,12 +131,11 @@ Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazi
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
 
-Open decision for the owner: an FW-authored slide with the display toggle off shows only the centre band while labelled FW — should `includeSidePanels` force the full-wall display?
-
 ## Pointers
 
 - **PR #63** (merged) and **PR #68** (merged) carried the earlier branch. PR #63 first review: verdict REQUEST-CHANGES, 11 findings, all addressed in `6c4c62f`; report and the posted comment are in the session scratchpad (`codex-review.md`, `pr-comment.md`). Second review (on `0644d97`): verdict REQUEST-CHANGES, 8 findings, 7 fixed in `290d4f7`, finding 2 rejected on purpose (country cut-out stays plain, no orange); see `codex-review2.md` in the scratchpad and the PR review comments.
 - **PR #70** (open, `feat/maps-ux-round`) carries this state. Codex ran three passes on the UX round (`3a14021`): 2x REQUEST-CHANGES then APPROVE-WITH-NITS; four passes on the QA round (`aac2807`): 3x REQUEST-CHANGES then APPROVE. Reports in the session scratchpad `codex-review*.md`.
+- **Forced full-wall display (shipped `40940b90`)**: an FW-authored slide now always previews the full wall regardless of the display toggle. `surfaceWidthOf` is the single source of truth; `MapView` derives `splitCg`/`fullWall` from it; the thumbnail fingerprint carries authored + displayed surface width. Codex ran 2 review rounds then APPROVE.
 - **Poster-frame patch (shipped `89f9749`)**: Keynote AppleScript cannot set the movie's poster frame (movie class has no `poster` property), so the route is an offline IWA patch of `TSD.MovieArchive.posterTime` (field 5) via `src/obed_edom/iwa_movies.py` (`movie_archives` / `plan_movie_posters` / `patch_movie_posters`, one-to-one 1px frame match, refuse-not-guess), invoked from `_apply_poster_frames` in `maps_keynote.py` per deck after `_run_one_deck`, gated by env `OBED_MAPS_POSTER_FRAME=off|on|verify` (default off). Failures are contained: `OfflineWriteCorrupted` triggers deck regeneration unpatched and removal of the `.obedwrite.tmp` recovery file; `result["posterFrame"]` carries a per-deck record. Probe script `scripts/probe_movie_poster.py` (dump/patch/reopen, `--yes-open-keynote`, copies under `output/movie-poster-probe`, exact POSIX path check) is still owed a run before flipping the gate on — see Owner QA owed. `REVEAL_FPS=30` is now shared. `keynote-parser` (the `iwa` extra) is installed in `.venv` via `uv sync --extra iwa`. Two Codex passes: REQUEST-CHANGES then APPROVE-WITH-NITS, nit applied. Full original plan in the session scratchpad `qa-round-plan.md` Part A.
 - Shipped-plan details live in the session scratchpad as `mask-upgrades-plan.md`, `isolate-round2-plan.md`, `round3-plan.md`, `landing-plan.md`, `picker-reorder-plan.md`, `preview-band-plan.md`, `reveal-plan.md`, `reveal2-plan.md`.
 - Memory: `maps-p2-film-route`, `browser-pane-maplibre-hidden` (a hidden Browser pane freezes MapLibre's rAF — drive `map.resize()` via `javascript_tool`; never use port 8765).
