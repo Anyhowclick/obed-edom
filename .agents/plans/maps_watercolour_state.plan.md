@@ -93,8 +93,14 @@ PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `m
 - `5b64012` **F2** `load_session` status flip and publish now happen under one `_mutation_lock`, closing the window where a concurrent save could land between them.
 - `9a6317d` **F3** `JobRunner.update_result` (`jobs.py`, shared by every job type) re-checks job membership under lock before writing a result.
 - `f32c3b1`/`e3e00bd`/`e29a4a0`/`f84959c`/`a342705`/`2c111ae`/`835d812` dashboard conflict freeze: `applyLocalDoc` is the single choke point for local-doc writes (no-op during a conflict); `setLocalDoc` is a raw setter used only by the save queue's publish; `onConflict` sets `saveConflictRef` synchronously and bumps `thumbnailToken`; `captureThumb` re-checks `shouldPublishThumb` after every await; new pure `dashboard/src/maps/commit.ts` (`withSlideCamera`/`commitCamera`); thumbnail posts pass the acknowledged revision and retry a stale 409 once, only when the local acknowledged revision >= the server's; `MapsStaleThumbnailError` added to `api.ts`; `readError` now parses the response body once. Tests: `dashboard/tests/conflict-freeze.test.cjs`, additions to `saveQueue.test.cjs`.
+- `24838e6` closed thumb-capture and session-import mutation races: shared `thumbnailFingerprint(slideId, audience, view, geometry)` in `maps/commit.ts`, used by both the effect and `captureThumb`, re-checked after `stampOsm`; `load_session`'s idle check and status flip now happen under one `_mutation_lock`, restored on `BaseException`; test `test_load_session_locks_idle_check_and_status_flip_together`.
+- `9ea5eb5` survives a client disconnect mid-import, unifies the thumbnail fingerprint further, deflakes a lock test.
+- `0af6bd9`/`63cefb3` a stale 409 now `await saveQueue.flush()`s before retrying; any flush failure stops the retry instead of retrying blind; `saveQueue` test pins that flush resolves after `base.revision` updates.
+- `5f9791c` the stale-thumbnail retry is awaited before returning.
+- `37e6e66` `sameView` in `shouldPublishThumb`: a capture aborts if the displayed slide/audience changed mid-flight.
+- `c2ff6ee` `shouldReconcileThumb({frozen, sameJob})` gates the post-POST reconcile of a committed thumbnail upload after navigating away.
 - `d09f52f`/`8de19ce` race tests made deterministic (lock-signal instead of timed joins), assertions tightened.
-- Reviews: opus rounds throughout + Codex (backend APPROVE-WITH-NITS after 2 rounds; dashboard REVISE then fixes, final gate pending at time of writing). Full pytest and dashboard suites run (jobs.py is shared).
+- Reviews: opus rounds throughout + Codex final gate ran 6 rounds on the whole branch (rebased on `main` `31f9dbe` after round 1 flagged it behind), each round one finding, all fixed. Full pytest and dashboard suites run (jobs.py is shared).
 - Declined: Codex's ask for a React harness for MapsTab (no such harness exists; owner decision to skip); opus's "thumbnail permanently stale when a bump doesn't touch the slide" (the existing thumbnail still matches the view; only a change that pops it changes the slide fingerprint).
 - Known limit: the stale-thumbnail retry stops silently when the local doc is behind the server (see F1). The CAS/session-import atomic contract — F4, `post_png` writing into `previewDir` while `load_session` swaps it — is **not** fixed; a plan exists (see Open backlog).
 
@@ -151,6 +157,7 @@ Round from 2026-09-11 (honest preview 2b owner QA): cut-out PASS, flight PASS, r
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
+- **`selectSlide` unguarded thumbnail await.** `selectSlide` awaits `captureThumb(prev)` unguarded, and every caller does `void selectSlide(...)`, so a non-stale thumbnail POST failure on the first attempt silently prevents the slide switch (unhandled rejection) — asymmetric with the retry path, which surfaces via `setError`. Found in review; pre-existing, not introduced by this branch.
 
 ## Pointers
 
