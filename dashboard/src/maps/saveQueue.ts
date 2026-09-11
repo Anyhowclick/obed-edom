@@ -12,7 +12,10 @@ export type MapsSaveQueueOptions = {
   transport: MapsSaveTransport;
   onConflict: (conflict: { remote: MapsSaveAck; candidate: MapsDocument; paths: string[] }) => void;
   onError: (error: unknown) => void;
+  onStatus?: (status: MapsSaveStatus) => void;
 };
+
+export type MapsSaveStatus = "saved" | "saving" | "unsaved" | "paused" | "error";
 
 const copy = <T>(value: T): T => structuredClone(value);
 const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
@@ -23,8 +26,25 @@ export class MapsSaveQueue {
   private dirty = false;
   private blocked: { remote: MapsSaveAck; candidate: MapsDocument; paths: string[] } | null = null;
   private epoch = 0;
+  private lastError = false;
+  private lastStatus: MapsSaveStatus | null = null;
 
   constructor(private readonly options: MapsSaveQueueOptions) {}
+
+  get status(): MapsSaveStatus {
+    if (this.blocked) return "paused";
+    if (this.inFlight) return "saving";
+    if (this.lastError) return "error";
+    if (this.dirty) return "unsaved";
+    return "saved";
+  }
+
+  private emitStatus(): void {
+    const status = this.status;
+    if (status === this.lastStatus) return;
+    this.lastStatus = status;
+    this.options.onStatus?.(status);
+  }
 
   setAcknowledged(ack: MapsSaveAck): void {
     this.base = { document: copy(ack.document), revision: ack.revision };
@@ -36,6 +56,8 @@ export class MapsSaveQueue {
     this.dirty = false;
     this.blocked = null;
     this.inFlight = null;
+    this.lastError = false;
+    this.emitStatus();
   }
 
   reconcile(ack: MapsSaveAck): void {
@@ -51,6 +73,7 @@ export class MapsSaveQueue {
 
   markDirty(): void {
     this.dirty = true;
+    this.emitStatus();
   }
 
   get conflict(): { remote: MapsSaveAck; candidate: MapsDocument; paths: string[] } | null {
@@ -67,9 +90,10 @@ export class MapsSaveQueue {
     if (!this.dirty || !this.base) return Promise.resolve();
     const pending = this.drain();
     this.inFlight = pending;
+    this.emitStatus();
     pending.then(
-      () => { if (this.inFlight === pending) this.inFlight = null; },
-      () => { if (this.inFlight === pending) this.inFlight = null; },
+      () => { if (this.inFlight === pending) this.inFlight = null; this.emitStatus(); },
+      () => { if (this.inFlight === pending) this.inFlight = null; this.emitStatus(); },
     );
     return pending;
   }
@@ -80,6 +104,7 @@ export class MapsSaveQueue {
     this.options.publish(copy(this.blocked.remote.document));
     this.blocked = null;
     this.dirty = false;
+    this.emitStatus();
   }
 
   keepMyChanges(): Promise<void> {
@@ -89,6 +114,7 @@ export class MapsSaveQueue {
     this.options.publish(copy(conflict.candidate));
     this.blocked = null;
     this.dirty = true;
+    this.emitStatus();
     return this.flush();
   }
 
@@ -97,10 +123,13 @@ export class MapsSaveQueue {
     if (result.conflicts.length) {
       this.blocked = { remote: copy(remote), candidate: copy(result.value), paths: [...result.conflicts] };
       this.options.onConflict(this.blocked);
+      this.emitStatus();
       return false;
     }
     this.options.publish(copy(result.value));
     this.dirty = !equal(result.value, remote.document);
+    this.lastError = false;
+    this.emitStatus();
     return true;
   }
 
@@ -128,13 +157,17 @@ export class MapsSaveQueue {
           const latest = this.options.document() || sent;
           if (!this.applyMerge(rebaseMapsDocument(requestBase.document, latest, error.remote.document), error.remote)) throw new MapsSaveBlockedError();
           if (retries++ >= 1) {
+            this.lastError = true;
             this.options.onError(new Error("The map kept changing while it was being saved."));
+            this.emitStatus();
             throw new Error("The map kept changing while it was being saved.");
           }
           continue;
         }
         this.dirty = true;
+        this.lastError = true;
         this.options.onError(error);
+        this.emitStatus();
         throw error;
       }
     }

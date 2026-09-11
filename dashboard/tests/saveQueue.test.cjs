@@ -287,3 +287,71 @@ test("flush resolves only after the acknowledged revision is updated", async () 
   await flushed;
   assert.equal(queue.revision, 1);
 });
+
+test("status reflects dirty, in-flight, acknowledged, blocked, and error transitions", async () => {
+  let live = doc("Local");
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const statuses = [];
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      await gate;
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: () => undefined,
+    onStatus: (status) => statuses.push(status),
+  });
+  queue.setAcknowledged({ document: live, revision: 0 });
+  assert.equal(queue.status, "saved");
+  queue.markDirty();
+  assert.equal(queue.status, "unsaved");
+  const flushed = queue.flush();
+  assert.equal(queue.status, "saving");
+  release();
+  await flushed;
+  assert.equal(queue.status, "saved");
+  assert.deepEqual(statuses, ["unsaved", "saving", "saved"]);
+});
+
+test("status is paused while a conflict is blocked", async () => {
+  let live = doc("Local");
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async () => {
+      throw new MapsSaveConflictError({ document: doc("Remote", [{ id: "p1", name: "p1", lat: 1, lon: 2, kind: "dot", color: "#fff" }]), revision: 1 });
+    },
+    onConflict: () => undefined,
+    onError: () => assert.fail("should not surface a transport error"),
+  });
+  queue.setAcknowledged({ document: doc(), revision: 0 });
+  queue.markDirty();
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.equal(queue.status, "paused");
+});
+
+test("status is error after a transport failure and clears on the next successful save", async () => {
+  let live = doc("Local");
+  let attempts = 0;
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("network down");
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: () => undefined,
+  });
+  queue.setAcknowledged({ document: live, revision: 0 });
+  queue.markDirty();
+  await assert.rejects(queue.flush(), /network down/);
+  assert.equal(queue.status, "error");
+  queue.markDirty();
+  await queue.flush();
+  assert.equal(queue.status, "saved");
+});
