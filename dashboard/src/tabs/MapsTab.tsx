@@ -41,7 +41,7 @@ import { MapView, type MapViewHandle } from "../maps/MapView";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
-import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
+import { MapsSaveBlockedError, MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
   CG_W,
@@ -641,6 +641,12 @@ export function MapsTab() {
       updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: saveQueue.current?.revision ?? undefined });
     } catch (err) {
       if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
+        try {
+          await saveQueue.current?.flush();
+        } catch (flushErr) {
+          if (!(flushErr instanceof MapsSaveBlockedError)) throw flushErr;
+          return;
+        }
         const queueRevision = saveQueue.current?.revision;
         if (typeof queueRevision === "number" && queueRevision >= err.stateRevision) {
           void captureThumb(slideId, retriesLeft - 1).catch((retryErr) => {
