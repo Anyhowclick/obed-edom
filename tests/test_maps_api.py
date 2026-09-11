@@ -2240,9 +2240,19 @@ def test_load_session_locks_idle_check_and_status_flip_together(monkeypatch):
             files={"file": ("st-marks.png", _landmark_png(), "image/png")},
         )
 
+    append_lock_reached = threading.Event()
+    real_mutate_document_with_asset = maps._mutate_document_with_asset
+
+    def spy_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate):
+        if job_id == job["id"] and not append_lock_reached.is_set():
+            append_lock_reached.set()
+        return real_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate)
+
+    monkeypatch.setattr(maps, "_mutate_document_with_asset", spy_mutate_document_with_asset)
+
     append_thread = threading.Thread(target=do_append)
     append_thread.start()
-    append_thread.join(1)
+    assert append_lock_reached.wait(5), "append never reached the lock-acquisition point"
 
     release.set()
     import_thread.join(5)
@@ -2256,12 +2266,8 @@ def test_load_session_locks_idle_check_and_status_flip_together(monkeypatch):
     latest = client.get(f"/api/jobs/{job['id']}").json()
     slide_after = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
     append_response = append_outcome["response"]
-    if append_response.status_code == 409:
-        assert not any(c.get("assetId") for c in slide_after.get("churches", []))
-    else:
-        assert append_response.status_code == 200, append_response.text
-        church_id = append_response.json()["churchId"]
-        assert any(c["id"] == church_id for c in slide_after["churches"])
+    assert append_response.status_code == 409, append_response.text
+    assert not any(c.get("assetId") for c in slide_after.get("churches", []))
 
 
 def test_delete_and_edit_conflict_leaves_exactly_one_winner():

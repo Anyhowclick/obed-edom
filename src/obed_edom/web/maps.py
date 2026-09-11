@@ -1239,7 +1239,7 @@ async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
 
     try:
         result, imported = await run_in_threadpool(import_uploaded)
-    except Exception:
+    except BaseException:
         with _mutation_lock(job_id):
             job.status = previous_status
         raise

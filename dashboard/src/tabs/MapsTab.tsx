@@ -33,7 +33,7 @@ import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
-import { commitCamera, shouldPublishThumb, withSlideCamera } from "../maps/commit";
+import { commitCamera, shouldPublishThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
@@ -306,6 +306,7 @@ export function MapsTab() {
   const [landmarkPicker, setLandmarkPicker] = useState(false);
   const [wcGridOpen, setWcGridOpen] = useState(false);
   const landmarkPickerRef = useRef<HTMLDivElement | null>(null);
+  const thumbnailGeometryRef = useRef<ThumbnailGeometry>({ authoredWidth: CENTRE_W, surfaceWidth: CENTRE_W, crop: undefined });
   const [wcJobs, setWcJobs] = useState<Job[]>([]);
 
   useEffect(() => {
@@ -367,6 +368,11 @@ export function MapsTab() {
   const renderedSurfaceSlide = previewView || active;
   const renderedAuthoredWidth = renderedSurfaceSlide ? authoredSurfaceWidth(renderedSurfaceSlide, activeAudience) : CENTRE_W;
   const renderedSidePanels = previewView ? previewView.includeSidePanels === true : sidePanels;
+  thumbnailGeometryRef.current = {
+    authoredWidth: renderedAuthoredWidth,
+    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
+    crop: doc?.crop,
+  };
   const activeIndex = active ? slides.findIndex((s) => s.id === active.id) : -1;
   const stateRevision = Number(job?.result?.stateRevision);
   const outgoing = useMemo(() => {
@@ -421,26 +427,15 @@ export function MapsTab() {
     }
   }, [active, activeAudience]);
 
-  const thumbnailFingerprint = activeView ? JSON.stringify({
-    id: activeView.id,
-    audience: activeAudience,
-    style: activeView.style,
-    camera: activeView.camera,
-    highlights: activeView.highlights,
-    churches: activeView.churches,
-    hiddenLayers: activeView.hiddenLayers,
-    hillshade: activeView.hillshade,
-    isolate: activeView.isolate ? { mode: activeView.isolate.mode, strength: activeView.isolate.strength } : null,
-    authoredWidth: renderedAuthoredWidth,
-    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
-    crop: doc?.crop,
-  }) : "";
+  const activeThumbnailFingerprint = activeView
+    ? thumbnailFingerprint(activeView.id, activeAudience, activeView, thumbnailGeometryRef.current)
+    : "";
 
   useEffect(() => {
-    if (!active || job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || saveConflict || !thumbnailFingerprint) return;
+    if (!active || job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || saveConflict || !activeThumbnailFingerprint) return;
     const timer = window.setTimeout(() => void captureThumb(active.id).catch((err) => setError(err instanceof Error ? err.message : String(err))), 750);
     return () => window.clearTimeout(timer);
-  }, [active?.id, thumbnailFingerprint, job?.status, previewing, exporting, sessionBusy, saveConflict]);
+  }, [active?.id, activeThumbnailFingerprint, job?.status, previewing, exporting, sessionBusy, saveConflict]);
 
   useEffect(() => {
     setSelectedPins([]);
@@ -628,10 +623,7 @@ export function MapsTab() {
     if (!slide || !view) return;
     const token = ++thumbnailToken.current;
     const gate = () => shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, sameJob: jobRef.current?.id === currentJob.id });
-    const fingerprintOf = (s: MapsSlide) => {
-      const v = slideForAudience(s, audience);
-      return JSON.stringify({ slideId, audience, style: v.style, camera: v.camera, highlights: v.highlights, churches: v.churches, hiddenLayers: v.hiddenLayers, hillshade: v.hillshade, isolate: v.isolate });
-    };
+    const fingerprintOf = (s: MapsSlide) => thumbnailFingerprint(slideId, audience, slideForAudience(s, audience), thumbnailGeometryRef.current);
     const fingerprint = fingerprintOf(slide);
     const matchesFingerprint = () => {
       const latest = docRef.current?.slides.find((item) => item.id === slideId);
@@ -641,8 +633,8 @@ export function MapsTab() {
     if (!gate()) return;
     const blob = await mapRef.current?.captureBlob();
     if (!blob || !gate() || !matchesFingerprint()) return;
-    const hillshade = view?.hillshade === true;
-    const stamped = await stampOsm(blob, hillshade, view?.style);
+    const hillshade = view.hillshade === true;
+    const stamped = await stampOsm(blob, hillshade, view.style);
     if (!gate() || !matchesFingerprint()) return;
     let updated: Job;
     try {
