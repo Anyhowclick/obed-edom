@@ -1960,9 +1960,22 @@ def test_studio_append_during_a_stale_state_save_yields_409_and_keeps_the_landma
 def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
     job = _seed()
     slide_id = job["result"]["slides"][0]["id"]
-    before_revision = int(job["result"].get("stateRevision") or 0)
 
     from obed_edom.web import maps
+
+    seed_revision = int(job["result"].get("stateRevision") or 0)
+    seed_bytes = _landmark_png()
+    seeded = client.post(
+        f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=thumb&revision={seed_revision}",
+        content=seed_bytes,
+    )
+    assert seeded.status_code == 200, seeded.text
+    seeded_result = seeded.json()["result"]
+    before_revision = int(seeded_result["stateRevision"] or 0)
+    preview_dir = Path(seeded_result["previewDir"])
+    thumb_path = next(p for p in preview_dir.glob("*.png") if p.name.startswith(slide_id))
+    on_disk_before = thumb_path.read_bytes()
+    assert on_disk_before == seed_bytes
 
     thumb_started = threading.Event()
     release_thumb = threading.Event()
@@ -1976,12 +1989,27 @@ def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
 
     monkeypatch.setattr(maps, "_validate_raster", gated_validate_raster)
 
+    write_calls = []
+    real_write_atomic = maps._write_atomic
+
+    def spy_write_atomic(path, data):
+        write_calls.append(Path(path))
+        return real_write_atomic(path, data)
+
+    monkeypatch.setattr(maps, "_write_atomic", spy_write_atomic)
+
+    stale_image = Image.new("RGBA", (40, 20), (10, 200, 10, 255))
+    stale_buffer = BytesIO()
+    stale_image.save(stale_buffer, "PNG")
+    stale_bytes = stale_buffer.getvalue()
+    assert stale_bytes != seed_bytes
+
     outcome = {}
 
     def post_thumb():
         outcome["response"] = client.post(
             f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=thumb&revision={before_revision}",
-            content=_landmark_png(),
+            content=stale_bytes,
         )
 
     thread = threading.Thread(target=post_thumb)
@@ -2001,69 +2029,136 @@ def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
     latest = client.get(f"/api/jobs/{job['id']}").json()
     slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
     assert slide.get("stillPng") is None
-    preview_dir = Path(latest["result"]["previewDir"])
+    on_disk_after = thumb_path.read_bytes()
+    assert on_disk_after == on_disk_before
+    assert thumb_path not in write_calls
     leftover_pngs = [p for p in preview_dir.glob("*.png") if p.name.startswith(slide_id)]
-    assert not leftover_pngs
+    assert leftover_pngs == [thumb_path]
     assert not list(preview_dir.glob("*.tmp"))
     assert int(latest["result"]["stateRevision"] or 0) == before_revision + 1
 
 
 def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypatch):
-    job = _seed()
-    slide_id = job["result"]["slides"][0]["id"]
-    session = client.get(f"/api/maps/{job['id']}/session")
-    assert session.status_code == 200, session.text
-
     from obed_edom.web import maps
 
+    # Part (a): an append landing while the archive is still being read must
+    # see the job "running" and 409, leaving no asset behind.
+    job_a = _seed()
+    slide_a = job_a["result"]["slides"][0]["id"]
+    session_a = client.get(f"/api/maps/{job_a['id']}/session")
+    assert session_a.status_code == 200, session_a.text
+
+    mid_import = threading.Event()
+    release_import = threading.Event()
+    real_read_archive = maps._read_session_archive
+
+    def gated_read_archive(job, source):
+        if job.id == job_a["id"]:
+            mid_import.set()
+            release_import.wait(5)
+        return real_read_archive(job, source)
+
+    monkeypatch.setattr(maps, "_read_session_archive", gated_read_archive)
+
+    import_outcome_a = {}
+
+    def import_session_a():
+        import_outcome_a["response"] = client.post(
+            f"/api/maps/{job_a['id']}/session",
+            files={"file": ("saved.obedmaps", session_a.content, "application/zip")},
+        )
+
+    import_thread_a = threading.Thread(target=import_session_a)
+    import_thread_a.start()
+    assert mid_import.wait(5)
+
+    mid_append = client.post(
+        f"/api/maps/{job_a['id']}/slides/{slide_a}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert mid_append.status_code == 409, mid_append.text
+    assert mid_append.json()["detail"] == "Maps job is not ready"
+
+    release_import.set()
+    import_thread_a.join(5)
+    assert not import_thread_a.is_alive()
+    assert import_outcome_a["response"].status_code == 200, import_outcome_a["response"].text
+    monkeypatch.undo()
+
+    latest_a = client.get(f"/api/jobs/{job_a['id']}").json()
+    slide_after_a = next(s for s in latest_a["result"]["slides"] if s["id"] == slide_a)
+    assert not any(c.get("assetId") for c in slide_after_a.get("churches", []))
+
+    # Part (b): the status-flip-to-publish tail must run under the same job
+    # lock an append needs, so the append cannot land in the gap between them.
+    job_b = _seed()
+    slide_b = job_b["result"]["slides"][0]["id"]
+    session_b = client.get(f"/api/maps/{job_b['id']}/session")
+    assert session_b.status_code == 200, session_b.text
+
     tail_reached = threading.Event()
-    release = threading.Event()
+    release_tail = threading.Event()
     real_mutate_document = maps._mutate_document
+    tail_lock_state = {}
 
     def spy_mutate_document(job_id, expected_revision, mutate):
-        if job_id == job["id"]:
+        if job_id == job_b["id"] and "owned" not in tail_lock_state:
+            tail_lock_state["owned"] = maps._mutation_lock(job_id)._is_owned()
             tail_reached.set()
-            # Give a concurrent append a real chance to land in the status-flip-to-publish
-            # tail window (pre-fix, this window is unlocked; post-fix, the append blocks
-            # on the same job lock and this just delays it briefly).
-            release.wait(5)
+            release_tail.wait(5)
         return real_mutate_document(job_id, expected_revision, mutate)
 
     monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
 
-    outcome = {}
+    import_outcome_b = {}
 
-    def import_session():
-        outcome["response"] = client.post(
-            f"/api/maps/{job['id']}/session",
-            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+    def import_session_b():
+        import_outcome_b["response"] = client.post(
+            f"/api/maps/{job_b['id']}/session",
+            files={"file": ("saved.obedmaps", session_b.content, "application/zip")},
         )
 
-    thread = threading.Thread(target=import_session)
-    thread.start()
+    import_thread_b = threading.Thread(target=import_session_b)
+    import_thread_b.start()
     assert tail_reached.wait(5)
-    thread.join(0.2)
-    release.set()
+    # The status flip and the publish call must already be running under the
+    # job's own mutation lock, held by the import thread.
+    assert tail_lock_state.get("owned") is True
 
-    append = client.post(
-        f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
-        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
-    )
-    thread.join(5)
-    assert outcome["response"].status_code == 200, outcome["response"].text
-    assert append.status_code in {200, 409}
+    append_outcome = {}
 
-    latest = client.get(f"/api/jobs/{job['id']}").json()
-    slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
-    if append.status_code == 200:
-        church_id = append.json()["churchId"]
-        assert any(c["id"] == church_id for c in slide["churches"])
-        asset_id = next(c["assetId"] for c in slide["churches"] if c["id"] == church_id)
-        asset_response = client.get(f"/api/maps/{job['id']}/assets/{asset_id}.png")
+    def append_during_tail():
+        append_outcome["response"] = client.post(
+            f"/api/maps/{job_b['id']}/slides/{slide_b}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    append_thread = threading.Thread(target=append_during_tail)
+    append_thread.start()
+    append_thread.join(0.2)
+    assert append_thread.is_alive(), "append must block on the job lock while the import tail is held"
+
+    release_tail.set()
+    import_thread_b.join(5)
+    append_thread.join(5)
+    assert not import_thread_b.is_alive()
+    assert not append_thread.is_alive()
+
+    assert import_outcome_b["response"].status_code == 200, import_outcome_b["response"].text
+    append_response = append_outcome["response"]
+    assert append_response.status_code in {200, 409}
+
+    latest_b = client.get(f"/api/jobs/{job_b['id']}").json()
+    slide_after_b = next(s for s in latest_b["result"]["slides"] if s["id"] == slide_b)
+    if append_response.status_code == 200:
+        church_id = append_response.json()["churchId"]
+        assert any(c["id"] == church_id for c in slide_after_b["churches"])
+        asset_id = next(c["assetId"] for c in slide_after_b["churches"] if c["id"] == church_id)
+        asset_response = client.get(f"/api/maps/{job_b['id']}/assets/{asset_id}.png")
         assert asset_response.status_code == 200
     else:
-        assert append.json()["detail"] == "Maps job is not ready"
-        assert not any(c.get("assetId") for c in slide.get("churches", []))
+        assert append_response.json()["detail"] == "Maps job is not ready"
+        assert not any(c.get("assetId") for c in slide_after_b.get("churches", []))
 
 
 def test_delete_and_edit_conflict_leaves_exactly_one_winner():
@@ -2092,13 +2187,24 @@ def test_delete_and_edit_conflict_leaves_exactly_one_winner():
     loser = next(r for r in responses if r.status_code == 409)
     assert winner.json()["result"]["stateRevision"] == revision + 1
     assert loser.json()["detail"]["stateRevision"] == revision + 1
-    winner_ids = [s["id"] for s in winner.json()["result"]["slides"]]
-    loser_ids = [s["id"] for s in loser.json()["detail"]["document"]["slides"]]
-    assert loser_ids == winner_ids
 
+    document_keys = (
+        "defaultStyle",
+        "crop",
+        "exportLw",
+        "exportCg",
+        "exportDsk",
+        "hiddenLayers",
+        "cachedCountries",
+        "assets",
+        "slides",
+        "links",
+        "retiredLinks",
+    )
     latest = client.get(f"/api/jobs/{job['id']}").json()
+    winner_doc = {key: latest["result"].get(key) for key in document_keys}
+    assert loser.json()["detail"]["document"] == winner_doc
     assert int(latest["result"]["stateRevision"]) == revision + 1
-    assert [s["id"] for s in latest["result"]["slides"]] == winner_ids
 
 
 def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch):
