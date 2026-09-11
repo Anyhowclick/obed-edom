@@ -1,0 +1,188 @@
+{
+ "bankVersion": 1,
+ "capturedUTC": "2026-09-11T02:25:14.270514+00:00",
+ "deck": "Gold_Wall_Input.key",
+ "inspectVersion": 4,
+ "keynoteBundleId": "com.apple.Keynote",
+ "keynoteVersion": "15.3.1",
+ "reader": "jxa",
+ "slideCount": 19,
+ "slides": [
+  {
+   "counts": {
+    "image": 1,
+    "shape": 1,
+    "text": 7
+   },
+   "slide": 0
+  },
+  {
+   "counts": {
+    "group": 2,
+    "image": 5,
+    "shape": 1,
+    "text": 3
+   },
+   "slide": 1
+  },
+  {
+   "counts": {
+    "image": 14,
+    "line": 1,
+    "movie": 1,
+    "shape": 5,
+    "text": 8
+   },
+   "slide": 2
+  },
+  {
+   "counts": {
+    "group": 1,
+    "image": 14,
+    "line": 1,
+    "shape": 6,
+    "text": 8
+   },
+   "slide": 3
+  },
+  {
+   "counts": {
+    "group": 1,
+    "image": 8,
+    "line": 1,
+    "shape": 1,
+    "text": 5
+   },
+   "slide": 4
+  },
+  {
+   "counts": {
+    "image": 4,
+    "shape": 1,
+    "text": 2
+   },
+   "slide": 5
+  },
+  {
+   "counts": {
+    "group": 1,
+    "image": 16,
+    "shape": 1,
+    "text": 2
+   },
+   "slide": 6
+  },
+  {
+   "counts": {
+    "image": 12,
+    "line": 1,
+    "shape": 13,
+    "text": 12
+   },
+   "slide": 7
+  },
+  {
+   "counts": {
+    "image": 12,
+    "line": 1,
+    "movie": 5,
+    "shape": 36,
+    "text": 21
+   },
+   "slide": 8
+  },
+  {
+   "counts": {
+    "image": 3,
+    "movie": 1,
+    "text": 2
+   },
+   "slide": 9
+  },
+  {
+   "counts": {
+    "image": 21,
+    "shape": 139,
+    "text": 15
+   },
+   "slide": 10
+  },
+  {
+   "counts": {
+    "image": 21,
+    "shape": 139,
+    "text": 202
+   },
+   "slide": 11
+  },
+  {
+   "counts": {
+    "group": 8,
+    "image": 21,
+    "line": 1,
+    "shape": 139,
+    "text": 200
+   },
+   "slide": 12
+  },
+  {
+   "counts": {
+    "group": 52,
+    "image": 21,
+    "line": 1,
+    "shape": 139,
+    "text": 3
+   },
+   "slide": 13
+  },
+  {
+   "counts": {
+    "group": 37,
+    "image": 21,
+    "line": 1,
+    "shape": 139,
+    "text": 3
+   },
+   "slide": 14
+  },
+  {
+   "counts": {
+    "group": 11,
+    "image": 22,
+    "line": 1,
+    "shape": 139,
+    "text": 3
+   },
+   "slide": 15
+  },
+  {
+   "counts": {
+    "group": 10,
+    "image": 21,
+    "line": 1,
+    "shape": 139,
+    "text": 3
+   },
+   "slide": 16
+  },
+  {
+   "counts": {
+    "image": 4,
+    "shape": 1,
+    "text": 4
+   },
+   "slide": 17
+  },
+  {
+   "counts": {
+    "group": 67,
+    "image": 122,
+    "line": 68,
+    "shape": 2,
+    "text": 2
+   },
+   "slide": 18
+  }
+ ],
+ "sourceDigest": "c7f870edf4a5be2f862eec95a52e7c8224a8628d133e4d236beb611d06011f67"
+}
