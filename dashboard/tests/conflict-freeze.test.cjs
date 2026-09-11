@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/commit.ts"), path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { commitCamera } = require(path.join(out, "commit.js"));
+const { commitCamera, shouldPublishThumb } = require(path.join(out, "commit.js"));
 
 const camera = { lat: 1, lon: 2, zoom: 8, bearing: 0, pitch: 0 };
 const doc = (cg) => ({
@@ -40,4 +40,16 @@ test("commitCamera writes the cg camera when audience is cg and the slide has a 
   assert.ok(result);
   assert.deepEqual(result.slides[0].cg.camera, camera);
   assert.deepEqual(result.slides[0].camera, { lat: 0, lon: 0, zoom: 5, bearing: 0, pitch: 0 });
+});
+
+test("shouldPublishThumb rejects a thumbnail once the save conflict freezes the doc", () => {
+  assert.equal(shouldPublishThumb({ frozen: true, tokenStillValid: true, revisionMatches: true }), false);
+});
+
+test("shouldPublishThumb rejects a stale capture whose token was superseded", () => {
+  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: false, revisionMatches: true }), false);
+});
+
+test("shouldPublishThumb allows publishing when nothing changed underneath it", () => {
+  assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: true, revisionMatches: true }), true);
 });

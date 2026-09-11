@@ -32,7 +32,7 @@ import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
-import { commitCamera, withSlideCamera } from "../maps/commit";
+import { commitCamera, shouldPublishThumb, withSlideCamera } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
@@ -347,6 +347,7 @@ export function MapsTab() {
       },
       onConflict: (conflict) => {
         saveConflictRef.current = { paths: conflict.paths };
+        thumbnailToken.current += 1;
         setSaveConflict({ paths: conflict.paths });
       },
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
@@ -620,6 +621,7 @@ export function MapsTab() {
     if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
+    const revision = saveQueue.current?.revision ?? undefined;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
@@ -627,15 +629,16 @@ export function MapsTab() {
     const token = ++thumbnailToken.current;
     const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade, isolate: view.isolate });
     await mapRef.current?.waitUntilIdle(view.style);
-    if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
+    if (saveConflictRef.current || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
     const blob = await mapRef.current?.captureBlob();
-    if (!blob || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
+    if (!blob || saveConflictRef.current || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
     const latest = docRef.current?.slides.find((item) => item.id === slideId);
     if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade, isolate: slideForAudience(latest, audience).isolate }) !== fingerprint) return;
     const hillshade = view?.hillshade === true;
     const stamped = await stampOsm(blob, hillshade, view?.style);
-    if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
-    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience });
+    if (saveConflictRef.current || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
+    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision });
+    if (!shouldPublishThumb({ frozen: !!saveConflictRef.current, tokenStillValid: token === thumbnailToken.current, revisionMatches: jobRef.current?.id === currentJob.id })) return;
     reconcileServerJob(updated);
   }
 

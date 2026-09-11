@@ -8,6 +8,10 @@ export function withSlideCamera(doc: MapsDocument, slideId: string, audience: Ma
   return { ...doc, slides };
 }
 
+export function shouldPublishThumb(gate: { frozen: boolean; tokenStillValid: boolean; revisionMatches: boolean }): boolean {
+  return !gate.frozen && gate.tokenStillValid && gate.revisionMatches;
+}
+
 export function commitCamera(
   doc: MapsDocument,
   slideId: string,
