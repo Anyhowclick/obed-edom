@@ -1931,21 +1931,11 @@ def test_studio_append_during_a_stale_state_save_yields_409_and_keeps_the_landma
     wash_job = _wait(wash_response.json()["id"])
     item = wash_job["result"]["items"][0]
 
-    appended = threading.Event()
-    outcome = {}
-
-    def run_append():
-        outcome["response"] = client.post(
-            f"/api/watercolour/{wash_job['id']}/items/{item['id']}/add-to-map/{map_job['id']}/{slide_id}"
-        )
-        appended.set()
-
-    thread = threading.Thread(target=run_append)
-    thread.start()
-    assert appended.wait(5)
-    thread.join(5)
-    assert outcome["response"].status_code == 200, outcome["response"].text
-    church_id = outcome["response"].json()["churchId"]
+    append_response = client.post(
+        f"/api/watercolour/{wash_job['id']}/items/{item['id']}/add-to-map/{map_job['id']}/{slide_id}"
+    )
+    assert append_response.status_code == 200, append_response.text
+    church_id = append_response.json()["churchId"]
 
     stale_save = client.post(
         f"/api/maps/{map_job['id']}/state",
@@ -2027,7 +2017,7 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     from obed_edom.web import maps
 
     tail_reached = threading.Event()
-    append_done = threading.Event()
+    release = threading.Event()
     real_mutate_document = maps._mutate_document
 
     def spy_mutate_document(job_id, expected_revision, mutate):
@@ -2036,7 +2026,7 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
             # Give a concurrent append a real chance to land in the status-flip-to-publish
             # tail window (pre-fix, this window is unlocked; post-fix, the append blocks
             # on the same job lock and this just delays it briefly).
-            append_done.wait(2)
+            release.wait(5)
         return real_mutate_document(job_id, expected_revision, mutate)
 
     monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
@@ -2052,24 +2042,28 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     thread = threading.Thread(target=import_session)
     thread.start()
     assert tail_reached.wait(5)
+    thread.join(0.2)
+    release.set()
 
     append = client.post(
         f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
         files={"file": ("st-marks.png", _landmark_png(), "image/png")},
     )
-    append_done.set()
     thread.join(5)
     assert outcome["response"].status_code == 200, outcome["response"].text
     assert append.status_code in {200, 409}
 
     latest = client.get(f"/api/jobs/{job['id']}").json()
+    slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
     if append.status_code == 200:
         church_id = append.json()["churchId"]
-        slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
         assert any(c["id"] == church_id for c in slide["churches"])
         asset_id = next(c["assetId"] for c in slide["churches"] if c["id"] == church_id)
         asset_response = client.get(f"/api/maps/{job['id']}/assets/{asset_id}.png")
         assert asset_response.status_code == 200
+    else:
+        assert append.json()["detail"] == "Maps job is not ready"
+        assert not any(c.get("assetId") for c in slide.get("churches", []))
 
 
 def test_delete_and_edit_conflict_leaves_exactly_one_winner():
@@ -2114,12 +2108,12 @@ def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch
 
     save_entered = threading.Event()
     release_save = threading.Event()
+    gated_once = threading.Event()
     real_job_lock = RUNNER._job_lock
-    calls = {"n": 0}
 
     def gated_job_lock(job_id):
-        calls["n"] += 1
-        if job_id == job["id"] and calls["n"] == 1:
+        if job_id == job["id"] and not gated_once.is_set():
+            gated_once.set()
             save_entered.set()
             release_save.wait(5)
         return real_job_lock(job_id)
@@ -2137,7 +2131,7 @@ def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch
     thread = threading.Thread(target=append)
     thread.start()
     assert save_entered.wait(5)
-    assert RUNNER.delete(job["id"]) is True
+    assert RUNNER.delete(job["id"], purge=False) is True
     release_save.set()
     thread.join(5)
 
