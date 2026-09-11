@@ -331,6 +331,16 @@ measured 2026-09-10 with Accessibility probed granted. The strict pass-2 bar
 still aborts on any `frontErr`, so `--pass2-bar parity` is mandatory for W1
 gating until a run returns an empty `frontErr`.
 
+`obedFront` (shared by every raise phase, including badge) retries once on a
+click *error* (not just a dead landing): it re-polls readiness via
+`obedFrontReady` before the second click, bumps `raiseClickRetried` and emits
+`raiseClickRetry(s=,idx=,phase=,err=)` on the first failure, and only tags
+`frontErr` `[errNum@phase,s=,idx=,retry]` on a second failure. `offline_write_ab.py`
+logs a non-gating `WARN <label>: raiseClickRetried=<n> ...` line in both bar
+modes; `raiseClickRetried` is neither a `PASS2_PARITY_KEYS` nor a
+`PASS2_ZERO_KEYS` member. A twice-failed retry still latches `badgeFrontDead`
+deck-wide as before — that is by design, not a regression.
+
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
 both A/B decks and run records are present, so diagnose and re-run comparisons
