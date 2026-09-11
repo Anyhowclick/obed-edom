@@ -457,7 +457,7 @@ export async function postMapsPng(
     if (detail && typeof detail === "object" && detail.staleThumbnail && typeof detail.stateRevision === "number") {
       throw new MapsStaleThumbnailError(detail.stateRevision);
     }
-    throw new Error(await readError(res, data));
+    throw new Error(await readError(res, data ?? undefined));
   }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

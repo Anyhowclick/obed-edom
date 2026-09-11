@@ -2152,17 +2152,15 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     # The status flip and the publish call must already be running under the
     # job's own mutation lock, held by the import thread.
     assert tail_lock_state.get("owned") is True
-    import_ident = import_thread_b.ident
 
-    real_mutation_lock = maps._mutation_lock
+    real_mutate_document_with_asset = maps._mutate_document_with_asset
 
-    def spy_mutation_lock(job_id):
-        lock = real_mutation_lock(job_id)
-        if job_id == job_b["id"] and threading.get_ident() != import_ident:
+    def spy_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate):
+        if job_id == job_b["id"] and not append_lock_reached.is_set():
             append_lock_reached.set()
-        return lock
+        return real_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate)
 
-    monkeypatch.setattr(maps, "_mutation_lock", spy_mutation_lock)
+    monkeypatch.setattr(maps, "_mutate_document_with_asset", spy_mutate_document_with_asset)
 
     append_outcome = {}
 
@@ -2188,6 +2186,7 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     assert import_outcome_b["response"].status_code == 200, import_outcome_b["response"].text
     append_response = append_outcome["response"]
     assert append_response.status_code == 200, append_response.text
+    monkeypatch.undo()
 
     latest_b = client.get(f"/api/jobs/{job_b['id']}").json()
     slide_after_b = next(s for s in latest_b["result"]["slides"] if s["id"] == slide_b)

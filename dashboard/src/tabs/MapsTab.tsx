@@ -622,7 +622,6 @@ export function MapsTab() {
     if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
-    const startRevision = saveQueue.current?.revision ?? undefined;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
@@ -641,7 +640,7 @@ export function MapsTab() {
     if (!gate()) return;
     let updated: Job;
     try {
-      updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: startRevision });
+      updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: saveQueue.current?.revision ?? undefined });
     } catch (err) {
       if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
         const queueRevision = saveQueue.current?.revision;
