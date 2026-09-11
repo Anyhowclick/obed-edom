@@ -35,6 +35,10 @@ export function shouldPublishThumb(gate: { frozen: boolean; tokenStillValid: boo
   return !gate.frozen && gate.tokenStillValid && gate.sameJob && gate.sameView;
 }
 
+export function shouldReconcileThumb(gate: { frozen: boolean; sameJob: boolean }): boolean {
+  return !gate.frozen && gate.sameJob;
+}
+
 export function commitCamera(
   doc: MapsDocument,
   slideId: string,

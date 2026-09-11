@@ -33,7 +33,7 @@ import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
-import { commitCamera, shouldPublishThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
+import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
@@ -663,7 +663,7 @@ export function MapsTab() {
       }
       throw err;
     }
-    if (!gate()) return;
+    if (!shouldReconcileThumb({ frozen: !!saveConflictRef.current, sameJob: jobRef.current?.id === currentJob.id })) return;
     reconcileServerJob(updated);
   }
 

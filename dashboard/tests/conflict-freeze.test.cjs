@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/commit.ts"), path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { commitCamera, shouldPublishThumb } = require(path.join(out, "commit.js"));
+const { commitCamera, shouldPublishThumb, shouldReconcileThumb } = require(path.join(out, "commit.js"));
 
 const camera = { lat: 1, lon: 2, zoom: 8, bearing: 0, pitch: 0 };
 const doc = (cg) => ({
@@ -56,4 +56,16 @@ test("shouldPublishThumb rejects a capture whose slide navigated away underneath
 
 test("shouldPublishThumb allows publishing when nothing changed underneath it", () => {
   assert.equal(shouldPublishThumb({ frozen: false, tokenStillValid: true, sameJob: true, sameView: true }), true);
+});
+
+test("shouldReconcileThumb allows reconciling a committed upload even after navigating away", () => {
+  assert.equal(shouldReconcileThumb({ frozen: false, sameJob: true }), true);
+});
+
+test("shouldReconcileThumb rejects reconciling once the save conflict freezes the doc", () => {
+  assert.equal(shouldReconcileThumb({ frozen: true, sameJob: true }), false);
+});
+
+test("shouldReconcileThumb rejects reconciling a job that is no longer current", () => {
+  assert.equal(shouldReconcileThumb({ frozen: false, sameJob: false }), false);
 });
