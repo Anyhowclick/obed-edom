@@ -1,8 +1,10 @@
 import json
 import shutil
 import subprocess
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 
@@ -1822,3 +1824,328 @@ def test_add_landmark_places_on_the_cg_view_and_invalidates_only_its_still_png()
     assert church["kind"] == "landmark"
     assert cg_view.get("stillPng") is None
     assert updated_slide.get("stillPng") is not None
+
+
+# --- Concurrent-race tests ---------------------------------------------------
+# These exercise real thread interleavings around the per-job mutation lock
+# (_mutation_lock in obed_edom.web.maps) and the job store (obed_edom.web.jobs).
+
+
+def test_two_concurrent_appends_both_land_with_distinct_ids_and_assets(monkeypatch):
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    before_revision = int(job["result"].get("stateRevision") or 0)
+
+    from obed_edom.web import maps
+
+    barrier = threading.Barrier(2)
+    real_decode = maps._decode_png
+
+    def gated_decode(raw):
+        payload = real_decode(raw)
+        barrier.wait(5)
+        return payload
+
+    monkeypatch.setattr(maps, "_decode_png", gated_decode)
+
+    def upload(name):
+        return client.post(
+            f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+            files={"file": (name, _landmark_png(), "image/png")},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(upload, "a.png"), pool.submit(upload, "b.png")]
+        responses = [future.result(timeout=5) for future in futures]
+
+    for response in responses:
+        assert response.status_code == 200, response.text
+    bodies = [response.json() for response in responses]
+    church_ids = {body["churchId"] for body in bodies}
+    assert len(church_ids) == 2
+    revisions = sorted(body["result"]["stateRevision"] for body in bodies)
+    assert revisions == [before_revision + 1, before_revision + 2]
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+    assert {c["id"] for c in slide["churches"]} == church_ids
+    asset_ids = {c["assetId"] for c in slide["churches"]}
+    assert len(asset_ids) == 2
+    for asset_id in asset_ids:
+        asset_response = client.get(f"/api/maps/{job['id']}/assets/{asset_id}.png")
+        assert asset_response.status_code == 200
+
+
+def test_asset_upload_hands_the_new_revision_to_the_next_save():
+    # The per-job mutation lock fully serializes writes, so an upload that lands
+    # between a client's read and its save is a sequencing race, not a lock race:
+    # client 1 reads stale_revision, client 2's upload commits first, then client
+    # 1's save (still carrying stale_revision) must 409 with the new revision.
+    job = _seed()
+    doc = _doc(job)
+    stale_revision = int(job["result"].get("stateRevision") or 0)
+
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    asset = uploaded.json()["asset"]
+    new_revision = uploaded.json()["stateRevision"]
+
+    stale_save = client.post(
+        f"/api/maps/{job['id']}/state",
+        json={"expectedRevision": stale_revision, "document": doc},
+    )
+    assert stale_save.status_code == 409, stale_save.text
+    stale_detail = stale_save.json()["detail"]
+    assert stale_detail["stateRevision"] == new_revision
+    assert stale_detail["document"]["assets"] == [asset]
+
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180,
+        }
+    ]
+    retry = client.post(
+        f"/api/maps/{job['id']}/state",
+        json={"expectedRevision": new_revision, "document": doc},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["result"]["assets"] == [asset]
+
+
+def test_studio_append_during_a_stale_state_save_yields_409_and_keeps_the_landmark():
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    stale_doc = _doc(map_job)
+    before_revision = int(map_job["result"].get("stateRevision") or 0)
+
+    wash_response = client.post(
+        "/api/watercolour",
+        files=[("files", ("landmark.png", _landmark_png(), "image/png"))],
+        data={"masks": json.dumps({"0": {"transparent": True, "rect": [4, 2, 30, 14]}})},
+    )
+    assert wash_response.status_code == 200, wash_response.text
+    wash_job = _wait(wash_response.json()["id"])
+    item = wash_job["result"]["items"][0]
+
+    appended = threading.Event()
+    outcome = {}
+
+    def run_append():
+        outcome["response"] = client.post(
+            f"/api/watercolour/{wash_job['id']}/items/{item['id']}/add-to-map/{map_job['id']}/{slide_id}"
+        )
+        appended.set()
+
+    thread = threading.Thread(target=run_append)
+    thread.start()
+    assert appended.wait(5)
+    thread.join(5)
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    church_id = outcome["response"].json()["churchId"]
+
+    stale_save = client.post(
+        f"/api/maps/{map_job['id']}/state",
+        json={"expectedRevision": before_revision, "document": stale_doc},
+    )
+    assert stale_save.status_code == 409, stale_save.text
+    detail = stale_save.json()["detail"]
+    assert detail["stateRevision"] == before_revision + 1
+    slide_in_conflict = next(s for s in detail["document"]["slides"] if s["id"] == slide_id)
+    assert any(c["id"] == church_id for c in slide_in_conflict["churches"])
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    live_slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+    assert any(c["id"] == church_id for c in live_slide["churches"])
+    asset_id = next(c["assetId"] for c in live_slide["churches"] if c["id"] == church_id)
+    asset_response = client.get(f"/api/maps/{map_job['id']}/assets/{asset_id}.png")
+    assert asset_response.status_code == 200
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    assert not list(asset_dir.glob("*.tmp"))
+
+
+def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    before_revision = int(job["result"].get("stateRevision") or 0)
+
+    from obed_edom.web import maps
+
+    thumb_started = threading.Event()
+    release_thumb = threading.Event()
+    real_validate_raster = maps._validate_raster
+
+    def gated_validate_raster(raw, **kwargs):
+        dims = real_validate_raster(raw, **kwargs)
+        thumb_started.set()
+        release_thumb.wait(5)
+        return dims
+
+    monkeypatch.setattr(maps, "_validate_raster", gated_validate_raster)
+
+    outcome = {}
+
+    def post_thumb():
+        outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=thumb&revision={before_revision}",
+            content=_landmark_png(),
+        )
+
+    thread = threading.Thread(target=post_thumb)
+    thread.start()
+    assert thumb_started.wait(5)
+
+    landmark = client.post(
+        f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert landmark.status_code == 200, landmark.text
+
+    release_thumb.set()
+    thread.join(5)
+    assert outcome["response"].status_code == 200, outcome["response"].text
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+    assert slide.get("stillPng") is None
+    preview_dir = Path(latest["result"]["previewDir"])
+    leftover_pngs = [p for p in preview_dir.glob("*.png") if p.name.startswith(slide_id)]
+    assert not leftover_pngs
+    assert not list(preview_dir.glob("*.tmp"))
+    assert int(latest["result"]["stateRevision"] or 0) == before_revision + 1
+
+
+def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypatch):
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    from obed_edom.web import maps
+
+    tail_reached = threading.Event()
+    append_done = threading.Event()
+    real_mutate_document = maps._mutate_document
+
+    def spy_mutate_document(job_id, expected_revision, mutate):
+        if job_id == job["id"]:
+            tail_reached.set()
+            # Give a concurrent append a real chance to land in the status-flip-to-publish
+            # tail window (pre-fix, this window is unlocked; post-fix, the append blocks
+            # on the same job lock and this just delays it briefly).
+            append_done.wait(2)
+        return real_mutate_document(job_id, expected_revision, mutate)
+
+    monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
+
+    outcome = {}
+
+    def import_session():
+        outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/session",
+            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+        )
+
+    thread = threading.Thread(target=import_session)
+    thread.start()
+    assert tail_reached.wait(5)
+
+    append = client.post(
+        f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    append_done.set()
+    thread.join(5)
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert append.status_code in {200, 409}
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    if append.status_code == 200:
+        church_id = append.json()["churchId"]
+        slide = next(s for s in latest["result"]["slides"] if s["id"] == slide_id)
+        assert any(c["id"] == church_id for c in slide["churches"])
+        asset_id = next(c["assetId"] for c in slide["churches"] if c["id"] == church_id)
+        asset_response = client.get(f"/api/maps/{job['id']}/assets/{asset_id}.png")
+        assert asset_response.status_code == 200
+
+
+def test_delete_and_edit_conflict_leaves_exactly_one_winner():
+    job = _seed()
+    doc = _doc(job)
+    slide_id = doc["slides"][0]["id"]
+    revision = int(job["result"].get("stateRevision") or 0)
+
+    delete_doc = {**doc, "slides": [s for s in doc["slides"] if s["id"] != slide_id]}
+    edit_doc = json.loads(json.dumps(doc))
+    edit_doc["slides"][0]["title"] = "Edited under race"
+
+    def post(document):
+        return client.post(
+            f"/api/maps/{job['id']}/state",
+            json={"expectedRevision": revision, "document": document},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(post, delete_doc), pool.submit(post, edit_doc)]
+        responses = [future.result(timeout=5) for future in futures]
+
+    statuses = sorted(response.status_code for response in responses)
+    assert statuses == [200, 409]
+    winner = next(r for r in responses if r.status_code == 200)
+    loser = next(r for r in responses if r.status_code == 409)
+    assert winner.json()["result"]["stateRevision"] == revision + 1
+    assert loser.json()["detail"]["stateRevision"] == revision + 1
+    winner_ids = [s["id"] for s in winner.json()["result"]["slides"]]
+    loser_ids = [s["id"] for s in loser.json()["detail"]["document"]["slides"]]
+    assert loser_ids == winner_ids
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    assert int(latest["result"]["stateRevision"]) == revision + 1
+    assert [s["id"] for s in latest["result"]["slides"]] == winner_ids
+
+
+def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch):
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    output_dir = Path(job["result"]["outputDir"])
+
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    real_job_lock = RUNNER._job_lock
+    calls = {"n": 0}
+
+    def gated_job_lock(job_id):
+        calls["n"] += 1
+        if job_id == job["id"] and calls["n"] == 1:
+            save_entered.set()
+            release_save.wait(5)
+        return real_job_lock(job_id)
+
+    monkeypatch.setattr(RUNNER, "_job_lock", gated_job_lock)
+
+    outcome = {}
+
+    def append():
+        outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    thread = threading.Thread(target=append)
+    thread.start()
+    assert save_entered.wait(5)
+    assert RUNNER.delete(job["id"]) is True
+    release_save.set()
+    thread.join(5)
+
+    assert outcome["response"].status_code == 404, outcome["response"].text
+    monkeypatch.undo()
+    assert RUNNER.get(job["id"]) is None
+    asset_dir = output_dir / "assets"
+    pngs = set(asset_dir.glob("*.png")) if asset_dir.is_dir() else set()
+    tmps = set(asset_dir.glob("*.tmp")) if asset_dir.is_dir() else set()
+    assert not pngs
+    assert not tmps
