@@ -1243,9 +1243,10 @@ async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
         raise
     finally:
         await file.close()
-    job.status = "done"
-    job.error = None
-    payload = _mutate_document(job_id, None, lambda _latest: result)
+    with _mutation_lock(job_id):
+        job.status = "done"
+        job.error = None
+        payload = _mutate_document(job_id, None, lambda _latest: result)
     payload["sessionImport"] = imported
     return payload
 
