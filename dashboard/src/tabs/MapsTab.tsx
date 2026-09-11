@@ -42,13 +42,15 @@ import { StylePicker } from "../maps/StylePicker";
 import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
+  CG_W,
+  CENTRE_W,
   DEFAULT_ISOLATE_STRENGTH,
   HOP_LABELS,
   LAYER_FILTERS,
   MAX_LAT,
   appearanceMismatch,
   authoredSurfaceWidth,
-  captureWidth,
+  hopSurfaceWidth,
   showCgBand,
   shouldFocusAddedLandmark,
   slideForAudience,
@@ -56,6 +58,9 @@ import {
   clampZoom,
   coerceHopKinds,
   documentFromResult,
+  exportScale,
+  exportZoomDelta,
+  plateSurfaceWidth,
   hasOutgoingMovie,
   minZoomForView,
   movieAppearanceMismatch,
@@ -67,6 +72,7 @@ import {
   restitchWithMemory,
   slideHiddenLayers,
   suggestedHopKind,
+  surfaceWidthOf,
   type MapsCamera,
   type MapsAudience,
   type MapsChurch,
@@ -347,13 +353,11 @@ export function MapsTab() {
   const activeHiddenLayers = slideHiddenLayers(activeView);
   const activeHillshade = activeView?.hillshade === true;
   const renderedView = previewView || activeView;
-  const renderedAuthoredWidth = previewView
-    ? authoredSurfaceWidth(previewView, activeAudience)
-    : activeAudience === "cg" && active?.cg
-      ? 1920
-      : sidePanels
-        ? 7680
-        : 3840;
+  // Density comes from the slide's own export surface (includeSidePanels / audience), never the
+  // display-only "Show side panels" toggle — that toggle only widens the visible band around the
+  // same density (see renderedSidePanels / MapView's surfaceWidthOf).
+  const renderedSurfaceSlide = previewView || active;
+  const renderedAuthoredWidth = renderedSurfaceSlide ? authoredSurfaceWidth(renderedSurfaceSlide, activeAudience) : CENTRE_W;
   const renderedSidePanels = previewView ? previewView.includeSidePanels === true : sidePanels;
   const activeIndex = active ? slides.findIndex((s) => s.id === active.id) : -1;
   const stateRevision = Number(job?.result?.stateRevision);
@@ -420,6 +424,7 @@ export function MapsTab() {
     hillshade: activeView.hillshade,
     isolate: activeView.isolate ? { mode: activeView.isolate.mode, strength: activeView.isolate.strength } : null,
     authoredWidth: renderedAuthoredWidth,
+    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
     crop: doc?.crop,
   }) : "";
 
@@ -1124,23 +1129,29 @@ export function MapsTab() {
       return;
     }
     if (link.kind === "movie") {
-      await mapRef.current?.animateHop({
-        from: fromView.camera,
-        to: toView.camera,
-        durationMs: link.duration * 1000,
-        easing: link.easing,
-        routePoints: link.route?.points,
-        curve: link.curve,
-        flyZoom: link.flyZoom,
-        easeIn: link.easeIn,
-        easeOut: link.easeOut,
-        flight: link.flight,
-        fromObjects: fromView.churches,
-        toObjects: toView.churches,
-        objectTransition: link.objectTransition,
-        destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
-        width: Math.max(authoredSurfaceWidth(from, audience), authoredSurfaceWidth(to, audience)),
-      });
+      try {
+        await mapRef.current?.animateHop({
+          from: fromView.camera,
+          to: toView.camera,
+          durationMs: link.duration * 1000,
+          easing: link.easing,
+          routePoints: link.route?.points,
+          curve: link.curve,
+          flyZoom: link.flyZoom,
+          easeIn: link.easeIn,
+          easeOut: link.easeOut,
+          flight: link.flight,
+          fromObjects: fromView.churches,
+          toObjects: toView.churches,
+          objectTransition: link.objectTransition,
+          destinationPaintsReveal: !hasOutgoingMovie(docRef.current?.links || [], to.id),
+          width: hopSurfaceWidth(from, to, audience),
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        stopPreview(true);
+        return;
+      }
       if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
       return;
     }
@@ -1361,10 +1372,12 @@ export function MapsTab() {
         terrain: boolean;
         phase: string;
       }): Promise<void> => {
+        const scale = exportScale(opts.width);
+        const delta = exportZoomDelta(opts.width);
         const tilePlan = await planMapsTiles({
-          cameras: opts.cameras,
-          width: opts.width,
-          height: opts.height,
+          cameras: opts.cameras.map((c) => ({ ...c, zoom: c.zoom + delta })),
+          width: opts.width / scale,
+          height: opts.height / scale,
           maxzoom: 14,
           terrain: opts.terrain,
         });
@@ -1458,6 +1471,7 @@ export function MapsTab() {
         const blob = await captureExportRaster({
           width: plate.plateW,
           height: plate.plateH,
+          surfaceWidth: plateSurfaceWidth(plate.slideIds, slidesById, plate.plateW),
           camera: plate.camera,
           styleId: plate.style as MapsSlide["style"],
           highlights: plate.highlights,
@@ -1507,6 +1521,7 @@ export function MapsTab() {
           const blob = await captureExportRaster({
             width: plate.plateW,
             height: plate.plateH,
+            surfaceWidth: CG_W,
             camera: plate.camera,
             styleId: plate.style as MapsSlide["style"],
             highlights: plate.highlights,
@@ -1526,7 +1541,7 @@ export function MapsTab() {
         const from = slidesById.get(link.from);
         const to = slidesById.get(link.to);
         if (!from || !to) continue;
-        const width = Math.max(captureWidth(from), captureWidth(to));
+        const width = hopSurfaceWidth(from, to, "lw");
         const height = 1080;
         const fps = 30;
         const count = Math.max(2, Math.round(link.duration * fps));
@@ -1603,10 +1618,7 @@ export function MapsTab() {
           if (!baseFrom || !baseTo) continue;
           const from = slideForAudience(baseFrom, "cg");
           const to = slideForAudience(baseTo, "cg");
-          const width = Math.max(
-            authoredSurfaceWidth(baseFrom, "cg"),
-            authoredSurfaceWidth(baseTo, "cg")
-          );
+          const width = hopSurfaceWidth(baseFrom, baseTo, "cg");
           const cropFromX = (width - 1920) / 2 + (baseFrom.cg ? 0 : baseFrom.cgShiftX);
           const cropToX = (width - 1920) / 2 + (baseTo.cg ? 0 : baseTo.cgShiftX);
           const fps = 30;
@@ -1754,7 +1766,7 @@ export function MapsTab() {
       ? autoCruiseZoom(
           activeView.camera,
           nextView.camera,
-          Math.max(authoredSurfaceWidth(active!, activeAudience), authoredSurfaceWidth(nextSlide!, activeAudience))
+          hopSurfaceWidth(active!, nextSlide!, activeAudience)
         )
       : 0;
   const zoomFloor = minZoomForView();

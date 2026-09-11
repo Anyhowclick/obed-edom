@@ -1994,6 +1994,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   width: 100%;
   height: 100%;
   background: #07070A;
+  pointer-events: auto;
 }
 .maps-map-band {
   position: absolute;
@@ -2005,6 +2006,16 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   z-index: 2;
   pointer-events: none;
 }
+/* Pinned preview surface: fixed CSS size (1920 × 1080/scale), scaled by JS (`transform: scale(k)`,
+   k = band px width ÷ 1920) to fill whatever size .maps-map-band actually renders at. This keeps
+   tile/text/relief density identical to the export at every window size. */
+.maps-map-inner {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: top left;
+  pointer-events: auto;
+}
 .maps-map-host .maplibregl-ctrl-attrib {
   background: rgba(7, 7, 10, 0.72);
   color: var(--ink-tertiary);
@@ -2013,11 +2024,9 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 .maps-map-host .maplibregl-ctrl-attrib a { color: var(--sky); }
 .maps-paper-grain {
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(100cqw, calc(100cqh * var(--maps-surface-width) / 1080));
-  height: min(100cqh, calc(100cqw * 1080 / var(--maps-surface-width)));
-  transform: translate(-50%, -50%);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   z-index: 1;
   pointer-events: none;
   mix-blend-mode: multiply;

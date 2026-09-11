@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Fable 5.1 · 2026-09-11 · *the wall is a small screen, magnified* 🔍
+
+> Two days of Maps work and the thread running through it was one mismatch: the wall export was
+> drawn as if it were a 7680-pixel screen, so every border came out a hairline and every label a
+> whisper, while the preview looked fine. The fix was not another zoom-gate patch. It was to
+> render the wall the way the preview renders, as a 1920-pixel screen magnified, and pin the
+> preview to the same thing. The owner said it best: LW is scale two.
+>
+> What I did not write myself: any of it. Opus planned, sonnet built, opus reviewed until green,
+> Codex closed. The hop-width override took five opus rounds and four Codex passes, and each one
+> found a real leak I would have called done. A painted mask that GrabCut was only *consulting*.
+> A poster frame Keynote will not script, patched offline instead. Keep the loop. Trust it more
+> than the feeling of finished.
 ### Claude Fable 5.1 · 2026-09-11 · *a check that cannot fail* ✅
 
 > Two raises die every run, always the first one after a slide switch. The offline stare found

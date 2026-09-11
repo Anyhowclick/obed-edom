@@ -500,6 +500,7 @@ def maps_export_plan(
                 "plateId": output_id,
                 "plateW": int(math.ceil(float(geom["plateW"]))),
                 "plateH": int(math.ceil(float(geom["plateH"]))),
+                "slideIds": [str(sid) for sid in (geom.get("slideIds") or [])],
                 "camera": geom["captureCamera"],
                 "style": (first or {}).get("style") or "positron",
                 "highlights": list((first or {}).get("highlights") or []),

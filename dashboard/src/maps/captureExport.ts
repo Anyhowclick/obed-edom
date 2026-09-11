@@ -3,11 +3,15 @@ import { Map as MapLibreMap } from "maplibre-gl";
 import { applyLayerFilters } from "./layers";
 import { addOverlays, applyHillshade, ensureAdmin0Highlights, ensureLowZoomRaster, loadAdmin0 } from "./overlays";
 import { countryClipRings } from "./isolate";
-import { stampOsm } from "./stampOsm";
+import { stampOsmCropOnCanvas } from "./stampOsm";
 import { resolveOpenFreeMapStyle } from "./styles";
 import { mapsTransformRequest } from "./tileProxy";
 import { installPatternById, installPatterns, stylePatterns } from "./watercolourStyle";
 import {
+  exportCamera,
+  exportSurface,
+  exportZoomDelta,
+  type ExportSurface,
   type MapsCamera,
   type MapsChurch,
   type MapsIsolate,
@@ -33,6 +37,12 @@ function maxTextureSize(): number {
   } finally {
     gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
+}
+
+/** GPU-supported `maxCanvasSize` cap, shared with the preview map so its pinned pixelRatio is
+ * actually honoured rather than silently clamped (MapLibre's default maxCanvasSize is 4096). */
+export function exportGpuCap(): number {
+  return Math.min(maxTextureSize(), HARD_CAP);
 }
 
 export function waitEvent(
@@ -121,6 +131,10 @@ export async function waitIdleForFrame(
 export type ExportMapOpts = {
   width: number;
   height: number;
+  /** Slide's authored surface width (WALL_W/CENTRE_W/CG_W), used to pick the render scale.
+   * Defaults to `width`; morph plates pass this explicitly since a plate can be larger than
+   * one authored surface (see `morphPlatePx`). */
+  surfaceWidth?: number;
   camera: MapsCamera;
   styleId: MapsStyleId;
   highlights: string[];
@@ -133,7 +147,9 @@ export type ExportMapOpts = {
   isCancelled?: () => boolean;
 };
 
-export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLibreMap; host: HTMLDivElement }> {
+export async function createExportMap(
+  opts: ExportMapOpts
+): Promise<{ map: MapLibreMap; host: HTMLDivElement; surface: ExportSurface }> {
   const {
     width,
     height,
@@ -148,28 +164,32 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
     assetBaseUrl,
     isCancelled,
   } = opts;
+  const surfaceWidth = opts.surfaceWidth ?? width;
+  const surface = exportSurface(width, height, surfaceWidth);
+  const zoomDelta = exportZoomDelta(surfaceWidth);
   const tex = maxTextureSize();
   const cap = Math.min(tex, HARD_CAP);
-  if (width > cap || height > cap) {
-    throw new Error(`Export raster ${width}×${height} exceeds GPU texture cap ${cap}.`);
+  if (surface.canvasWidth > cap || surface.canvasHeight > cap) {
+    throw new Error(`Export raster ${surface.canvasWidth}×${surface.canvasHeight} exceeds GPU texture cap ${cap}.`);
   }
   const host = document.createElement("div");
-  host.style.cssText = `position:fixed;left:-99999px;top:0;width:${width}px;height:${height}px;visibility:hidden;pointer-events:none;`;
+  host.style.cssText = `position:fixed;left:-99999px;top:0;width:${surface.cssWidth}px;height:${surface.cssHeight}px;visibility:hidden;pointer-events:none;`;
   document.body.appendChild(host);
-  const style = await resolveOpenFreeMapStyle(styleId);
+  const style = await resolveOpenFreeMapStyle(styleId, zoomDelta);
+  const exportCam = exportCamera(camera, surfaceWidth);
   const map = new MapLibreMap({
     container: host,
     style,
-    center: [camera.lon, camera.lat],
-    zoom: camera.zoom,
-    bearing: camera.bearing,
-    pitch: camera.pitch,
+    center: [exportCam.lon, exportCam.lat],
+    zoom: exportCam.zoom,
+    bearing: exportCam.bearing,
+    pitch: exportCam.pitch,
     renderWorldCopies: true,
-    transformConstrain: (center, zoom) => ({ center, zoom: Math.max(0, Math.min(22, zoom)) }),
-    minZoom: 0,
+    transformConstrain: (center, zoom) => ({ center, zoom: Math.max(zoomDelta, Math.min(22 + zoomDelta, zoom)) }),
+    minZoom: zoomDelta,
     attributionControl: false,
     fadeDuration: 0,
-    pixelRatio: 1,
+    pixelRatio: surface.pixelRatio,
     maxCanvasSize: [cap, cap],
     interactive: false,
     transformRequest: (url) => mapsTransformRequest(url),
@@ -179,18 +199,21 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
   try {
     await waitEvent(map, "load", TILE_WAIT_MS, isCancelled);
     installPatterns(map, stylePatterns(styleId));
-    ensureLowZoomRaster(map, styleId);
+    // Toner boundaries and relief gates are already baked into `style` at the authored offset
+    // via resolveOpenFreeMapStyle above; only the JS-added ne2 fallback layer needs the offset here.
+    ensureLowZoomRaster(map, styleId, zoomDelta);
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
+    const objectScale = 1 / surface.pixelRatio;
     if (churches) {
-      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl, 1, isolate);
+      await addOverlays(map, highlights, churches, null, styleId, numberPins, assetBaseUrl, objectScale, isolate);
     } else {
-      await ensureAdmin0Highlights(map, highlights, styleId, isolate);
+      await ensureAdmin0Highlights(map, highlights, styleId, isolate, zoomDelta);
     }
     applyLayerFilters(map, hiddenLayers);
     applyHillshade(map, hillshade);
     await waitIdleForFrame(map, undefined, isCancelled);
-    return { map, host };
+    return { map, host, surface };
   } catch (err) {
     map.remove();
     host.remove();
@@ -198,24 +221,20 @@ export async function createExportMap(opts: ExportMapOpts): Promise<{ map: MapLi
   }
 }
 
-function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    try {
-      canvas.toBlob((blob) => {
-        if (!blob) reject(new Error("Export canvas toBlob failed (CORS taint or empty)."));
-        else resolve(blob);
-      }, "image/png");
-    } catch {
-      reject(new Error("Map canvas is tainted (CORS). Cannot export."));
-    }
-  });
-}
-
 export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
-  const { map, host } = await createExportMap(opts);
+  const { map, host, surface } = await createExportMap(opts);
   try {
-    const raw = await canvasToBlob(map.getCanvas());
-    return await stampOsm(raw, opts.hillshade === true, opts.styleId);
+    return await stampOsmCropOnCanvas(
+      map.getCanvas(),
+      surface.cropX,
+      surface.cropY,
+      opts.width,
+      opts.height,
+      "image/png",
+      1,
+      opts.hillshade === true,
+      opts.styleId
+    );
   } finally {
     map.remove();
     host.remove();
@@ -226,13 +245,22 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
  * so Keynote can stack it above the mask with pins on top. Null when there is nothing to isolate. */
 export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: Blob; country: Blob } | null> {
   if (!opts.isolate || !opts.highlights.length) return null;
-  const { map, host } = await createExportMap(opts);
+  const { map, host, surface } = await createExportMap(opts);
   try {
     map.setPaintProperty("admin0-fill", "fill-opacity", 0);
     map.setPaintProperty("admin0-line", "line-opacity", 0);
     await waitIdleForFrame(map, undefined, opts.isCancelled);
-    const baseRaw = await canvasToBlob(map.getCanvas());
-    const base = await stampOsm(baseRaw, opts.hillshade === true, opts.styleId);
+    const base = await stampOsmCropOnCanvas(
+      map.getCanvas(),
+      surface.cropX,
+      surface.cropY,
+      opts.width,
+      opts.height,
+      "image/png",
+      1,
+      opts.hillshade === true,
+      opts.styleId
+    );
 
     map.setLayoutProperty("isolate-fill", "visibility", "none");
     await waitIdleForFrame(map, undefined, opts.isCancelled);
@@ -244,18 +272,23 @@ export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: B
     canvas.height = opts.height;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2D canvas context is unavailable for the isolate cut-out.");
+    const pr = surface.pixelRatio;
     ctx.beginPath();
     for (const ring of rings) {
       ring.forEach(([lon, lat], index) => {
         const { x, y } = map.project([lon, lat]);
-        if (index === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        const px = x * pr - surface.cropX;
+        const py = y * pr - surface.cropY;
+        if (index === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
       });
       ctx.closePath();
     }
     ctx.clip();
-    ctx.drawImage(map.getCanvas(), 0, 0);
-    const country = await canvasToBlob(canvas);
+    ctx.drawImage(map.getCanvas(), surface.cropX, surface.cropY, opts.width, opts.height, 0, 0, opts.width, opts.height);
+    const country = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Isolate cut-out toBlob failed."))), "image/png");
+    });
     return { base, country };
   } finally {
     map.remove();

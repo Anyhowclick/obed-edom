@@ -314,4 +314,50 @@ test("withLowZoomBoundaries re-gates only the three toner boundary layers, weigh
   assert.equal(byId(clamped, "boundary_country_z0-4").minzoom, 0);
   assert.equal(byId(clamped, "boundary_country_z0-4").maxzoom, 0);
   assert.equal(byId(clamped, "boundary_country_z5-").minzoom, 0);
+
+  // FW export renders at exportZoomDelta(7680) === -2 (types.ts) — the authored 4/5 gates land at 2/3.
+  const fwExport = withLowZoomBoundaries(vendor.layers, -2);
+  assert.equal(byId(fwExport, "boundary_state_z1-4").minzoom, 2);
+  assert.equal(byId(fwExport, "boundary_state_z1-4").maxzoom, 3);
+  assert.equal(byId(fwExport, "boundary_state").minzoom, 3);
+  assert.equal(byId(fwExport, "boundary_country_z0-4").maxzoom, 3);
+  assert.equal(byId(fwExport, "boundary_country_z5-").minzoom, 3);
+
+  // The raised province layer's upper gate (authored maxzoom 14) must shift too, or FW loses
+  // provinces at authored zoom 16 instead of 14.
+  assert.equal(byId(next, "boundary_state").maxzoom, 14);
+  assert.equal(byId(preview, "boundary_state").maxzoom, 14 + previewOffset);
+  assert.equal(byId(fwExport, "boundary_state").maxzoom, 12);
+});
+
+test("applyAuthoredZoomGates re-gates the toner province upper bound and the relief layers by the same offset", () => {
+  const { applyAuthoredZoomGates } = require(path.join(out, "tonerBoundaries.js"));
+  const ranges = {};
+  const paint = { "ne2-shaded-fallback": ["interpolate", ["linear"], ["zoom"], 0, 1, 6, 0.7, 8, 0] };
+  const layers = new Set([
+    "boundary_state_z1-4",
+    "boundary_state",
+    "boundary_country_z0-4",
+    "boundary_country_z5-",
+    "hillshade",
+    "terrarium-ne2",
+    "ne2-shaded-fallback",
+  ]);
+  const map = {
+    getLayer: (id) => (layers.has(id) ? {} : undefined),
+    setLayerZoomRange: (id, min, max) => {
+      ranges[id] = [min, max];
+    },
+    getPaintProperty: (id) => paint[id],
+    setPaintProperty: (id, key, value) => {
+      paint[id] = value;
+    },
+  };
+
+  applyAuthoredZoomGates(map, -2);
+  assert.deepEqual(ranges["boundary_state"], [3, 12]);
+  assert.deepEqual(ranges["hillshade"], [4, 24]);
+  assert.deepEqual(ranges["terrarium-ne2"], [0, 4]);
+  assert.deepEqual(ranges["ne2-shaded-fallback"], [0, 6]);
+  assert.deepEqual(paint["ne2-shaded-fallback"], ["interpolate", ["linear"], ["zoom"], 0, 1, 4, 0.7, 6, 0]);
 });
