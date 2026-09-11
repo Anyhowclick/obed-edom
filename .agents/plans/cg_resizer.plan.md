@@ -150,7 +150,13 @@ todos:
       full-gate check. FINAL ACCEPTANCE (the item's actual bar, not the targeted run alone): the next
       full W1 A/B gate on the Full deck with `--pass2-bar strict` returns `frontErr=''` in both arms
       and `front` A==B — only then may this item be marked DONE. `--pass2-bar parity` stays
-      mandatory until that gate lands."
+      mandatory until that gate lands.
+      LIVE ×3/×3 DONE 2026-09-11 23:17 (bank `output/bank/2026-09-11/badge-retry/results.md`):
+      3 treatment (default poll) runs identical, 0 retries, no frontErr; 3 controls
+      (`OBED_RAISE_SETTLE_MAX=0`) reproduced `-1719@badge,s=55,idx=1` in 2 of 3, both times the
+      retry landed it (`frontErr` empty, offline z-order oracle SAME_ORDER=yes vs the clean runs on
+      all 7 target ordinals) -> FIX CONFIRMED; strict-bar RED class closed pending the full W1
+      gate."
     status: pending
   - id: surface-raise-tokens
     content: "DONE 2026-09-09, PR #61 `fix/surface-raise-tokens` (`c5e9c34`, Codex 3 passes), precondition for `stat-raise-dead-4`'s diagnosis. `keynote._run_stat_finalize` now returns `tokens` {name: [args]} and `frontErr`; `obedRaiseSlide` emits a `raiseDead(s=,idx=)` token for EVERY dead raise (the `is 0` guards removed); `remap_keynote._say_stat_finalize_detail` logs `Stat raise detail: ` (chunks of ≤40, marker `(i/n)` after the prefix), `WARNING stat-finalize: GUI Bring to Front returned error(s) `, `Badge raise detail: ` (unchanged), `Stat resolve detail: ` (rare kinds uncapped, sigFallback capped at 40). Unblocks `stat-raise-dead-4` localising all 4 `raiseDead` occurrences by log alone on the next production run."
