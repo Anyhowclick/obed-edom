@@ -267,3 +267,23 @@ test("reloadLatest and keepMyChanges clear the conflict so later edits are accep
   assert.equal(queue.conflict, null);
   assert.equal(live.slides[0].title, "Local");
 });
+
+test("flush resolves only after the acknowledged revision is updated", async () => {
+  let live = doc("Local");
+  let resolveTransport;
+  const pending = new Promise((resolve) => { resolveTransport = resolve; });
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent) => pending.then(() => ({ document: sent, revision: 1 })),
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.setAcknowledged({ document: live, revision: 0 });
+  queue.markDirty();
+  const flushed = queue.flush();
+  assert.equal(queue.revision, 0);
+  resolveTransport();
+  await flushed;
+  assert.equal(queue.revision, 1);
+});

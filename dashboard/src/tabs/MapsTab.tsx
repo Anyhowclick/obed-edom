@@ -41,7 +41,7 @@ import { MapView, type MapViewHandle } from "../maps/MapView";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
-import { MapsSaveBlockedError, MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
+import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
   CG_W,
@@ -643,8 +643,7 @@ export function MapsTab() {
       if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
         try {
           await saveQueue.current?.flush();
-        } catch (flushErr) {
-          if (!(flushErr instanceof MapsSaveBlockedError)) throw flushErr;
+        } catch {
           return;
         }
         const queueRevision = saveQueue.current?.revision;
