@@ -1,6 +1,6 @@
 ---
 name: Maps + Watercolour branch state
-overview: PR #63, #68, and #79 (feat/maps-ux-round) are merged into main. New branch feat/maps-backlog-races, rebased on main 31f9dbe, PR TBD (not yet opened), carries the concurrent-race tests and the backend/dashboard fixes they found. Records what landed on 2026-09-09, 2026-09-11, and the backlog round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63, #68, and #79 (feat/maps-ux-round) are merged into main. New branch feat/maps-backlog-races, rebased on main 31f9dbe, PR #81 (open), carries the concurrent-race tests and the backend/dashboard fixes they found. Records what landed on 2026-09-09, 2026-09-11, and the backlog round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
     content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie, Keynote re-render of restored pairs, and honest preview 2b QA (toner lines, pitched downtown, movie hops across relief/province/CG-crop gates, morph plate slide, centre-to-FW mixed hop, side-panel toggle on centre-only slide)."
@@ -21,7 +21,7 @@ isProject: false
 
 # Maps + Watercolour branch state
 
-PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `main`. Current branch `feat/maps-backlog-races`, rebased on `main` `31f9dbe`, PR **TBD** (not yet opened). Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
+PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `main`. Current branch `feat/maps-backlog-races`, rebased on `main` `31f9dbe`, PR **#81** (open). Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
 
 ## Shipped 2026-09-09
 
@@ -100,7 +100,7 @@ PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `m
 - `37e6e66` `sameView` in `shouldPublishThumb`: a capture aborts if the displayed slide/audience changed mid-flight.
 - `c2ff6ee` `shouldReconcileThumb({frozen, sameJob})` gates the post-POST reconcile of a committed thumbnail upload after navigating away.
 - `d09f52f`/`8de19ce` race tests made deterministic (lock-signal instead of timed joins), assertions tightened.
-- Reviews: opus rounds throughout + Codex final gate ran 6 rounds on the whole branch (rebased on `main` `31f9dbe` after round 1 flagged it behind), each round one finding, all fixed. Full pytest and dashboard suites run (jobs.py is shared).
+- Reviews: opus rounds throughout + Codex final gate ran 6 rounds on the whole branch (rebased on `main` `31f9dbe` after round 1 flagged it behind), each round one finding, all fixed. Codex round 7 APPROVED on `39f4a35`. Full pytest and dashboard suites run (jobs.py is shared).
 - Declined: Codex's ask for a React harness for MapsTab (no such harness exists; owner decision to skip); opus's "thumbnail permanently stale when a bump doesn't touch the slide" (the existing thumbnail still matches the view; only a change that pops it changes the slide fingerprint).
 - Known limit: the stale-thumbnail retry stops silently when the local doc is behind the server (see F1). The CAS/session-import atomic contract — F4, `post_png` writing into `previewDir` while `load_session` swaps it — is **not** fixed; a plan exists (see Open backlog).
 
