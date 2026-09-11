@@ -1294,6 +1294,7 @@ async def post_png(
     kind: str = Query("thumb"),
     audience: Literal["lw", "cg"] = Query("lw"),
     variant: str | None = Query(None),
+    revision: int | None = Query(None),
 ) -> dict:
     job = _job_or_404(job_id)
     _require_idle(job)
@@ -1338,24 +1339,14 @@ async def post_png(
         return _runner().public_dict(job)
     folder = Path(str(result.get("previewDir") or ""))
     path = folder / Path(safe).name
-    _write_atomic(path, body)
-    next_slides = []
-    names = list((result.get("previewFiles") or {}).get("maps") or [])
-    if safe not in names:
-        names.append(safe)
-    for slide in slides:
-        item = dict(slide)
-        if item.get("id") == slideId:
-            if audience == "cg" and isinstance(item.get("cg"), dict):
-                item["cg"] = {**item["cg"], "stillPng": safe}
-            else:
-                item["stillPng"] = safe
-        next_slides.append(item)
-    result["slides"] = next_slides
-    files = dict(result.get("previewFiles") or {})
-    files["maps"] = names
-    result["previewFiles"] = files
-    def publish(latest: dict[str, Any]) -> dict[str, Any]:
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        _require_idle(job)
+        latest = dict(job.result or {})
+        current_revision = int(latest.get("stateRevision") or 0)
+        if revision is not None and revision != current_revision:
+            return _runner().public_dict(job)
+        _write_atomic(path, body)
         fresh_slides = list(latest.get("slides") or [])
         fresh_names = list((latest.get("previewFiles") or {}).get("maps") or [])
         if safe not in fresh_names: fresh_names.append(safe)
@@ -1363,9 +1354,13 @@ async def post_png(
             if item.get("id") == slideId:
                 if audience == "cg" and isinstance(item.get("cg"), dict): item["cg"] = {**item["cg"], "stillPng": safe}
                 else: item["stillPng"] = safe
-        latest["slides"] = fresh_slides; latest["previewFiles"] = {**(latest.get("previewFiles") or {}), "maps": fresh_names}
-        return latest
-    return _mutate_document(job_id, None, publish)
+        latest["slides"] = fresh_slides
+        latest["previewFiles"] = {**(latest.get("previewFiles") or {}), "maps": fresh_names}
+        latest["stateRevision"] = current_revision + 1
+        saved = _runner().update_result(job_id, latest)
+        if not saved:
+            raise HTTPException(404, "Unknown maps job")
+        return _runner().public_dict(saved)
 
 
 @router.post("/{job_id}/frame")
