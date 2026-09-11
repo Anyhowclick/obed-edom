@@ -32,10 +32,10 @@ export type Job = {
 
 export type ChosenFile = { path: string; name: string };
 
-async function readError(res: Response): Promise<string> {
+async function readError(res: Response, parsed?: unknown): Promise<string> {
   try {
-    const data = await res.json();
-    return data.detail || JSON.stringify(data);
+    const data = parsed !== undefined ? parsed : await res.json();
+    return (data as { detail?: string })?.detail || JSON.stringify(data);
   } catch {
     return res.statusText;
   }
@@ -426,10 +426,19 @@ export type MapsExportPlan = {
   };
 };
 
+export class MapsStaleThumbnailError extends Error {
+  readonly stateRevision: number;
+
+  constructor(stateRevision: number) {
+    super("Thumbnail revision is stale.");
+    this.stateRevision = stateRevision;
+  }
+}
+
 export async function postMapsPng(
   id: string,
   blob: Blob,
-  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg"; variant?: "country" } = {}
+  opts: { kind?: MapsPngKind; slideId?: string; plateId?: string; audience?: "lw" | "cg"; variant?: "country"; revision?: number } = {}
 ): Promise<Job> {
   const params = new URLSearchParams();
   if (opts.kind) params.set("kind", opts.kind);
@@ -437,10 +446,19 @@ export async function postMapsPng(
   if (opts.plateId) params.set("plateId", opts.plateId);
   if (opts.audience) params.set("audience", opts.audience);
   if (opts.variant) params.set("variant", opts.variant);
+  if (opts.revision !== undefined) params.set("revision", String(opts.revision));
   const res = await fetch(`/api/maps/${id}/png?${params.toString()}`, {
     method: "POST",
     body: blob,
   });
+  if (res.status === 409) {
+    const data = await res.json().catch(() => null);
+    const detail = data?.detail;
+    if (detail && typeof detail === "object" && detail.staleThumbnail && typeof detail.stateRevision === "number") {
+      throw new MapsStaleThumbnailError(detail.stateRevision);
+    }
+    throw new Error(await readError(res, data ?? undefined));
+  }
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }

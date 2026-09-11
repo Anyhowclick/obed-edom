@@ -12,6 +12,7 @@ import {
   planMapsTiles,
   pollJob,
   postMapsFrame,
+  MapsStaleThumbnailError,
   postMapsPng,
   prefetchMapsTiles,
   previewUrl,
@@ -32,6 +33,7 @@ import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
+import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
@@ -269,6 +271,7 @@ export function MapsTab() {
   const activeRef = useRef<string | null>(null);
   const activeAudienceRef = useRef<MapsAudience>("lw");
   const previewingRef = useRef(false);
+  const saveConflictRef = useRef<{ paths: string[] } | null>(null);
   const exportingRef = useRef(false);
   const previewAbort = useRef(false);
   const previewRun = useRef(0);
@@ -303,6 +306,7 @@ export function MapsTab() {
   const [landmarkPicker, setLandmarkPicker] = useState(false);
   const [wcGridOpen, setWcGridOpen] = useState(false);
   const landmarkPickerRef = useRef<HTMLDivElement | null>(null);
+  const thumbnailGeometryRef = useRef<ThumbnailGeometry>({ authoredWidth: CENTRE_W, surfaceWidth: CENTRE_W, crop: undefined });
   const [wcJobs, setWcJobs] = useState<Job[]>([]);
 
   useEffect(() => {
@@ -315,12 +319,13 @@ export function MapsTab() {
   activeRef.current = activeId;
   activeAudienceRef.current = activeAudience;
   previewingRef.current = previewing;
+  saveConflictRef.current = saveConflict;
 
   if (!saveQueue.current) {
     saveQueue.current = new MapsSaveQueue({
       document: () => docRef.current,
       publish: (next) => {
-        applyLocalDoc(next);
+        setLocalDoc(next);
         const acknowledged = saveAckJob.current;
         if (acknowledged) mergeServerMeta(acknowledged);
       },
@@ -342,7 +347,11 @@ export function MapsTab() {
           throw err;
         }
       },
-      onConflict: (conflict) => setSaveConflict({ paths: conflict.paths }),
+      onConflict: (conflict) => {
+        saveConflictRef.current = { paths: conflict.paths };
+        thumbnailToken.current += 1;
+        setSaveConflict({ paths: conflict.paths });
+      },
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
     });
   }
@@ -359,6 +368,11 @@ export function MapsTab() {
   const renderedSurfaceSlide = previewView || active;
   const renderedAuthoredWidth = renderedSurfaceSlide ? authoredSurfaceWidth(renderedSurfaceSlide, activeAudience) : CENTRE_W;
   const renderedSidePanels = previewView ? previewView.includeSidePanels === true : sidePanels;
+  thumbnailGeometryRef.current = {
+    authoredWidth: renderedAuthoredWidth,
+    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
+    crop: doc?.crop,
+  };
   const activeIndex = active ? slides.findIndex((s) => s.id === active.id) : -1;
   const stateRevision = Number(job?.result?.stateRevision);
   const outgoing = useMemo(() => {
@@ -413,26 +427,15 @@ export function MapsTab() {
     }
   }, [active, activeAudience]);
 
-  const thumbnailFingerprint = activeView ? JSON.stringify({
-    id: activeView.id,
-    audience: activeAudience,
-    style: activeView.style,
-    camera: activeView.camera,
-    highlights: activeView.highlights,
-    churches: activeView.churches,
-    hiddenLayers: activeView.hiddenLayers,
-    hillshade: activeView.hillshade,
-    isolate: activeView.isolate ? { mode: activeView.isolate.mode, strength: activeView.isolate.strength } : null,
-    authoredWidth: renderedAuthoredWidth,
-    surfaceWidth: surfaceWidthOf(renderedAuthoredWidth, renderedSidePanels),
-    crop: doc?.crop,
-  }) : "";
+  const activeThumbnailFingerprint = activeView
+    ? thumbnailFingerprint(activeView.id, activeAudience, activeView, thumbnailGeometryRef.current)
+    : "";
 
   useEffect(() => {
-    if (!active || job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || saveConflict || !thumbnailFingerprint) return;
+    if (!active || job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || saveConflict || !activeThumbnailFingerprint) return;
     const timer = window.setTimeout(() => void captureThumb(active.id).catch((err) => setError(err instanceof Error ? err.message : String(err))), 750);
     return () => window.clearTimeout(timer);
-  }, [active?.id, thumbnailFingerprint, job?.status, previewing, exporting, sessionBusy, saveConflict]);
+  }, [active?.id, activeThumbnailFingerprint, job?.status, previewing, exporting, sessionBusy, saveConflict]);
 
   useEffect(() => {
     setSelectedPins([]);
@@ -528,13 +531,18 @@ export function MapsTab() {
     mapRef.current?.resize();
   }
 
-  function applyLocalDoc(next: MapsDocument) {
+  function setLocalDoc(next: MapsDocument) {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const coerced = coerceHopKinds(next);
     docRef.current = coerced;
     setJob({ ...currentJob, result: { ...(currentJob.result || {}), ...coerced } });
     return coerced;
+  }
+
+  function applyLocalDoc(next: MapsDocument) {
+    if (saveConflictRef.current) return;
+    return setLocalDoc(next);
   }
 
   function mergeServerMeta(updated: Job) {
@@ -558,7 +566,8 @@ export function MapsTab() {
       mergeServerMeta(updated);
       return;
     }
-    saveAckJob.current = updated;
+    const baseRevision = saveQueue.current?.revision;
+    if (baseRevision == null || revision >= baseRevision) saveAckJob.current = updated;
     saveQueue.current?.reconcile({ document: remote, revision });
   }
 
@@ -602,38 +611,66 @@ export function MapsTab() {
     if (!current) return null;
     const cam = mapRef.current?.getCamera();
     if (!cam) return current;
-    const slidesNext = current.slides.map((slide) => {
-      if (slide.id !== slideId) return slide;
-      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera: cam } } : { ...slide, camera: cam };
-    });
-    return applyLocalDoc({ ...current, slides: slidesNext }) ?? current;
+    return applyLocalDoc(withSlideCamera(current, slideId, activeAudienceRef.current, cam)) ?? current;
   }
 
-  async function captureThumb(slideId: string) {
+  async function captureThumb(slideId: string, retriesLeft = 1) {
+    if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const audience = activeAudienceRef.current;
     const slide = docRef.current?.slides.find((s) => s.id === slideId);
     const view = slide ? slideForAudience(slide, audience) : null;
-    if (!view) return;
+    if (!slide || !view) return;
     const token = ++thumbnailToken.current;
-    const fingerprint = JSON.stringify({ slideId, audience, style: view.style, camera: view.camera, highlights: view.highlights, churches: view.churches, hiddenLayers: view.hiddenLayers, hillshade: view.hillshade, isolate: view.isolate });
+    const gate = () =>
+      shouldPublishThumb({
+        frozen: !!saveConflictRef.current,
+        tokenStillValid: token === thumbnailToken.current,
+        sameJob: jobRef.current?.id === currentJob.id,
+        sameView: activeRef.current === slideId && activeAudienceRef.current === audience,
+      });
+    const fingerprintOf = (s: MapsSlide) => thumbnailFingerprint(slideId, audience, slideForAudience(s, audience), thumbnailGeometryRef.current);
+    const fingerprint = fingerprintOf(slide);
+    const matchesFingerprint = () => {
+      const latest = docRef.current?.slides.find((item) => item.id === slideId);
+      return !!latest && fingerprintOf(latest) === fingerprint;
+    };
     await mapRef.current?.waitUntilIdle(view.style);
-    if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
+    if (!gate()) return;
     const blob = await mapRef.current?.captureBlob();
-    if (!blob || token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
-    const latest = docRef.current?.slides.find((item) => item.id === slideId);
-    if (!latest || JSON.stringify({ slideId, audience, style: slideForAudience(latest, audience).style, camera: slideForAudience(latest, audience).camera, highlights: slideForAudience(latest, audience).highlights, churches: slideForAudience(latest, audience).churches, hiddenLayers: slideForAudience(latest, audience).hiddenLayers, hillshade: slideForAudience(latest, audience).hillshade, isolate: slideForAudience(latest, audience).isolate }) !== fingerprint) return;
-    const hillshade = view?.hillshade === true;
-    const stamped = await stampOsm(blob, hillshade, view?.style);
-    if (token !== thumbnailToken.current || jobRef.current?.id !== currentJob.id) return;
-    const updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience });
+    if (!blob || !gate() || !matchesFingerprint()) return;
+    const hillshade = view.hillshade === true;
+    const stamped = await stampOsm(blob, hillshade, view.style);
+    if (!gate() || !matchesFingerprint()) return;
+    let updated: Job;
+    try {
+      updated = await postMapsPng(currentJob.id, stamped, { kind: "thumb", slideId, audience, revision: saveQueue.current?.revision ?? undefined });
+    } catch (err) {
+      if (err instanceof MapsStaleThumbnailError && retriesLeft > 0) {
+        try {
+          await saveQueue.current?.flush();
+        } catch {
+          return;
+        }
+        const queueRevision = saveQueue.current?.revision;
+        if (typeof queueRevision === "number" && queueRevision >= err.stateRevision) {
+          await captureThumb(slideId, retriesLeft - 1).catch((retryErr) => {
+            if (retryErr instanceof MapsStaleThumbnailError) return;
+            setError(retryErr instanceof Error ? retryErr.message : String(retryErr));
+          });
+        }
+        return;
+      }
+      throw err;
+    }
+    if (!shouldReconcileThumb({ frozen: !!saveConflictRef.current, sameJob: jobRef.current?.id === currentJob.id })) return;
     reconcileServerJob(updated);
   }
 
   async function flushAndSave(immediate = true) {
     const id = activeRef.current;
-    if (!id || previewingRef.current) return;
+    if (!id || previewingRef.current || saveConflictRef.current) return;
     const next = writeCameraInto(id);
     const slide = next?.slides.find((item) => item.id === id);
     if (slide) await mapRef.current?.waitUntilIdle(slideForAudience(slide, activeAudienceRef.current).style);
@@ -692,12 +729,9 @@ export function MapsTab() {
   function onCameraCommit(camera: MapsCamera) {
     const current = docRef.current;
     const id = activeRef.current;
-    if (!current || !id || previewingRef.current || saveConflict) return;
-    const slidesNext = current.slides.map((slide) => {
-      if (slide.id !== id) return slide;
-      return activeAudienceRef.current === "cg" && slide.cg ? { ...slide, cg: { ...slide.cg, camera } } : { ...slide, camera };
-    });
-    patchDoc({ ...current, slides: slidesNext });
+    if (!current || !id) return;
+    const next = commitCamera(current, id, activeAudienceRef.current, camera, { frozen: !!saveConflictRef.current, previewing: previewingRef.current });
+    if (next) patchDoc(next);
   }
 
   function updateActive(partial: Partial<MapsSlide>) {

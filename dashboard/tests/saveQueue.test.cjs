@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/saveQueue.ts"), path.join(root, "src/maps/rebase.ts"), path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { MapsSaveConflictError, MapsSaveQueue } = require(path.join(out, "saveQueue.js"));
+const { MapsSaveConflictError, MapsSaveBlockedError, MapsSaveQueue } = require(path.join(out, "saveQueue.js"));
 
 const doc = (title = "Old", churches = []) => ({
   defaultStyle: "positron", crop: "center+cg", exportLw: true, exportCg: true, exportDsk: false, hiddenLayers: [], cachedCountries: [], assets: [], links: [],
@@ -207,4 +207,83 @@ test("a transport failure leaves the queue dirty, fires onError, skips publish, 
   await queue.flush();
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1], calls[0]);
+});
+
+test("a blocked queue rejects flush with MapsSaveBlockedError and a later flush stays blocked", async () => {
+  let live = doc("Local");
+  let transportCalls = 0;
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async () => {
+      transportCalls += 1;
+      throw new MapsSaveConflictError({ document: doc("Remote"), revision: 1 });
+    },
+    onConflict: () => undefined,
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.setAcknowledged({ document: doc(), revision: 0 });
+  queue.markDirty();
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.ok(queue.conflict);
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.equal(transportCalls, 1);
+});
+
+test("reloadLatest and keepMyChanges clear the conflict so later edits are accepted again", async () => {
+  let live = doc("Local");
+  let attempts = 0;
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      attempts += 1;
+      if (attempts === 1) throw new MapsSaveConflictError({ document: doc("Remote"), revision: 1 });
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => undefined,
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.setAcknowledged({ document: doc(), revision: 0 });
+  queue.markDirty();
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.ok(queue.conflict);
+  queue.reloadLatest();
+  assert.equal(queue.conflict, null);
+  assert.equal(live.slides[0].title, "Remote");
+
+  live = doc("Edited again");
+  queue.markDirty();
+  await queue.flush();
+  assert.equal(live.slides[0].title, "Edited again");
+
+  attempts = 0;
+  queue.setAcknowledged({ document: doc(), revision: 0 });
+  live = doc("Local");
+  queue.markDirty();
+  await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.ok(queue.conflict);
+  await queue.keepMyChanges();
+  assert.equal(queue.conflict, null);
+  assert.equal(live.slides[0].title, "Local");
+});
+
+test("flush resolves only after the acknowledged revision is updated", async () => {
+  let live = doc("Local");
+  let resolveTransport;
+  const pending = new Promise((resolve) => { resolveTransport = resolve; });
+  const queue = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent) => pending.then(() => ({ document: sent, revision: 1 })),
+    onConflict: () => assert.fail("unexpected conflict"),
+    onError: (error) => assert.fail(String(error)),
+  });
+  queue.setAcknowledged({ document: live, revision: 0 });
+  queue.markDirty();
+  const flushed = queue.flush();
+  assert.equal(queue.revision, 0);
+  resolveTransport();
+  await flushed;
+  assert.equal(queue.revision, 1);
 });

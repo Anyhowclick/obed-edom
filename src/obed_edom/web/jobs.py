@@ -191,10 +191,11 @@ class JobRunner:
             raise
 
     def update_result(self, job_id: str, result: dict[str, Any]) -> Job | None:
-        job = self._jobs.get(job_id)
-        if not job:
-            return None
         with self._job_lock(job_id):
+            with self._lock:
+                if job_id not in self._jobs:
+                    return None
+                job = self._jobs[job_id]
             previous_result, previous_updated_at = job.result, job.updated_at
             job.result = result
             job.updated_at = time.time()

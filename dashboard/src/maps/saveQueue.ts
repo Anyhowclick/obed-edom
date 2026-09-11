@@ -57,6 +57,10 @@ export class MapsSaveQueue {
     return this.blocked;
   }
 
+  get revision(): number | null {
+    return this.base?.revision ?? null;
+  }
+
   flush(): Promise<void> {
     if (this.inFlight) return this.inFlight;
     if (this.blocked) return Promise.reject(new MapsSaveBlockedError());

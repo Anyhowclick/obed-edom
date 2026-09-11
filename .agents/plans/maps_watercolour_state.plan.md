@@ -1,6 +1,6 @@
 ---
 name: Maps + Watercolour branch state
-overview: PR #63 and PR #68 are merged into main. New branch feat/maps-ux-round (PR #70, open, HEAD 8b4341a) carries the UX round, the reorder-memory/isolate-default follow-up, and honest preview option 2b. Records what landed on 2026-09-09 and 2026-09-11, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63, #68, and #79 (feat/maps-ux-round) are merged into main. New branch feat/maps-backlog-races, rebased on main 31f9dbe, PR #81 (open), carries the concurrent-race tests and the backend/dashboard fixes they found. Records what landed on 2026-09-09, 2026-09-11, and the backlog round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
     content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie, Keynote re-render of restored pairs, and honest preview 2b QA (toner lines, pitched downtown, movie hops across relief/province/CG-crop gates, morph plate slide, centre-to-FW mixed hop, side-panel toggle on centre-only slide)."
@@ -14,14 +14,14 @@ todos:
     content: "Shipped in 89f9749: offline IWA patch of TSD.MovieArchive.posterTime via src/obed_edom/iwa_movies.py (movie_archives / plan_movie_posters / patch_movie_posters, one-to-one 1px frame match, refuse-not-guess), wired into maps_keynote.py's _apply_poster_frames per deck after _run_one_deck, gated OBED_MAPS_POSTER_FRAME=off|on|verify (default off). Probe script scripts/probe_movie_poster.py (dump/patch/reopen). Owner QA owed: run the probe to learn whether Keynote regenerates the poster from posterTime or keeps cached posterImageData; only then flip the gate on."
     status: probe owed
   - id: backlog
-    content: Pick the next bounded package from "Open backlog" and plan it before touching code
+    content: "Shipped: the race-tests/conflict-freeze package (7 concurrent-race tests + F1/F2/F3 backend fixes + dashboard conflict freeze, see 'Shipped 2026-09-11 (backlog round)'). Next: owner review of the CAS atomic contract plan (five decisions listed under Open backlog), then plan and implement it."
     status: pending
 isProject: false
 ---
 
 # Maps + Watercolour branch state
 
-PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-round`, PR **#70** (open), HEAD `aac2807`. Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
+PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `main`. Current branch `feat/maps-backlog-races`, rebased on `main` `31f9dbe`, PR **#81** (open). Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
 
 ## Shipped 2026-09-09
 
@@ -86,6 +86,24 @@ PR **#63** and PR **#68** are merged into `main`. Current branch `feat/maps-ux-r
 
 - `1fc4039` preview shows map above and below the band again; object controls draw over the crop overlay. Owner QA of honest preview 2b found two regressions that had happened before: (a) no map above/below the band for navigation (pinned inner = band only); (b) object box/handles hidden behind the CG/LW crop overlay. Fixed in `previewLayout(frameW, frameH, surfaceWidth, scale)` (`types.ts`): pinned-density inner element up to `PREVIEW_NAV_MAX = 3` bands tall, band centred via `translateY(-bandTop·k) scale(k)`, fov re-compensated (`compensatedFov` restored) so the band projects like the export, thumbnails/dissolve frames crop to the band; one `applyTransform` folds size/transform/fov/pixelRatio under suppress (MapLibre `resize`/`setPixelRatio`/`setVerticalFieldOfView` fire `moveend` synchronously); passthrough `transformConstrain` constructor option kept; new `BandOverlays.tsx` renders the crop overlay then a band-space object layer above it; nav margins z-index 3. Regression tests that fail on the old structure: `dashboard/tests/preview-layout.test.cjs` and `dashboard/tests/band-overlays.test.cjs` — any preview-surface rework must keep them green. Reviews: five opus rounds (one overturned a prior reviewer's band-height-constrain finding — the constructor option already bypassed the default constrain), Codex two passes → APPROVE.
 
+## Shipped 2026-09-11 (backlog round)
+
+- `9403888` seven concurrent-race tests (`tests/test_maps_api.py` end section): Studio append vs stale state save, two appends, stale thumbnail writer after append, asset revision handoff, session import vs stale save, delete/edit conflict.
+- `a9fa873`/`c8a6d72`/`f95f23e`/`e31733e` **F1** stale thumbnail write moved under `_mutate_document` in `post_png`; optional `revision` query param; a stale write 409s with `{staleThumbnail, stateRevision}`, no document write and no revision bump.
+- `5b64012` **F2** `load_session` status flip and publish now happen under one `_mutation_lock`, closing the window where a concurrent save could land between them.
+- `9a6317d` **F3** `JobRunner.update_result` (`jobs.py`, shared by every job type) re-checks job membership under lock before writing a result.
+- `f32c3b1`/`e3e00bd`/`e29a4a0`/`f84959c`/`a342705`/`2c111ae`/`835d812` dashboard conflict freeze: `applyLocalDoc` is the single choke point for local-doc writes (no-op during a conflict); `setLocalDoc` is a raw setter used only by the save queue's publish; `onConflict` sets `saveConflictRef` synchronously and bumps `thumbnailToken`; `captureThumb` re-checks `shouldPublishThumb` after every await; new pure `dashboard/src/maps/commit.ts` (`withSlideCamera`/`commitCamera`); thumbnail posts pass the acknowledged revision and retry a stale 409 once, only when the local acknowledged revision >= the server's; `MapsStaleThumbnailError` added to `api.ts`; `readError` now parses the response body once. Tests: `dashboard/tests/conflict-freeze.test.cjs`, additions to `saveQueue.test.cjs`.
+- `24838e6` closed thumb-capture and session-import mutation races: shared `thumbnailFingerprint(slideId, audience, view, geometry)` in `maps/commit.ts`, used by both the effect and `captureThumb`, re-checked after `stampOsm`; `load_session`'s idle check and status flip now happen under one `_mutation_lock`, restored on `BaseException`; test `test_load_session_locks_idle_check_and_status_flip_together`.
+- `9ea5eb5` survives a client disconnect mid-import, unifies the thumbnail fingerprint further, deflakes a lock test.
+- `0af6bd9`/`63cefb3` a stale 409 now `await saveQueue.flush()`s before retrying; any flush failure stops the retry instead of retrying blind; `saveQueue` test pins that flush resolves after `base.revision` updates.
+- `5f9791c` the stale-thumbnail retry is awaited before returning.
+- `37e6e66` `sameView` in `shouldPublishThumb`: a capture aborts if the displayed slide/audience changed mid-flight.
+- `c2ff6ee` `shouldReconcileThumb({frozen, sameJob})` gates the post-POST reconcile of a committed thumbnail upload after navigating away.
+- `d09f52f`/`8de19ce` race tests made deterministic (lock-signal instead of timed joins), assertions tightened.
+- Reviews: opus rounds throughout + Codex final gate ran 6 rounds on the whole branch (rebased on `main` `31f9dbe` after round 1 flagged it behind), each round one finding, all fixed. Codex round 7 APPROVED on `39f4a35`. Full pytest and dashboard suites run (jobs.py is shared).
+- Declined: Codex's ask for a React harness for MapsTab (no such harness exists; owner decision to skip); opus's "thumbnail permanently stale when a bump doesn't touch the slide" (the existing thumbnail still matches the view; only a change that pops it changes the slide fingerprint).
+- Known limit: the stale-thumbnail retry stops silently when the local doc is behind the server (see F1). The CAS/session-import atomic contract — F4, `post_png` writing into `previewDir` while `load_session` swaps it — is **not** fixed; a plan exists (see Open backlog).
+
 ### Owner decisions 2026-09-10
 - No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
 
@@ -130,16 +148,16 @@ Round from 2026-09-11 (honest preview 2b owner QA): cut-out PASS, flight PASS, r
 17. Navigation context visible above/below the band (post-`1fc4039`).
 18. Object handles above the CG/LW frame (post-`1fc4039`).
 19. Window resize does not dirty the document.
+20. Save conflict: gestures stay live but nothing edits the document until Reload latest / Keep my changes; thumbnails not posted during a conflict.
 
 ## Open backlog
 
-- **CAS atomic contract.** Mutations still do not share one atomic contract with job completion, CSV/export, history relocation, and the session status/commit window. Migrate remaining backend Maps writers, session/import and export-metadata paths through it; add rollback for failed atomic file/document publication.
+- **CAS atomic contract.** Mutations still do not share one atomic contract with job completion, CSV/export, history relocation, and the session status/commit window (F4: `post_png` writing into `previewDir` while `load_session` swaps it, remains open). A written plan exists (owner review owed) covering this and session-assets rollback; five owner decisions pending: frames go through the contract or lock-only (**rec: lock-only**); relocate on maps jobs via the contract or a 409 (**rec: 409**); stills/plates bump=False; naming; tile rollback on a failed import (**rec: leave tiles**). The plan's inventory also found: export/CSV-bootstrap completion never bumps `stateRevision`; `relocate_job` read-modify-writes `job.result` outside the mutation lock.
 - **Session assets/previews** are installed and backups removed before the document commit, so rollback is unreliable.
-- **Conflict freeze is incomplete**: MapView gestures and callback paths stay live while form controls are locked.
-- **Real concurrent-race tests**: Studio append vs stale state save, two appends, stale thumbnail writer after append, asset revision handoff, session import vs stale save, delete/edit conflict.
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
+- **`selectSlide` unguarded thumbnail await.** `selectSlide` awaits `captureThumb(prev)` unguarded, and every caller does `void selectSlide(...)`, so a non-stale thumbnail POST failure on the first attempt silently prevents the slide switch (unhandled rejection) — asymmetric with the retry path, which surfaces via `setError`. Found in review; pre-existing, not introduced by this branch.
 
 ## Pointers
 
