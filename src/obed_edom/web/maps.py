@@ -74,6 +74,10 @@ def _mutation_lock(job_id: str) -> threading.RLock:
     return _MUTATION_LOCKS.setdefault(job_id, threading.RLock())
 
 
+class _NoMutation(Exception):
+    """Raised by a mutate callback to publish nothing and return the current job."""
+
+
 def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict[str, Any]:
     with _mutation_lock(job_id):
         job = _job_or_404(job_id)
@@ -82,7 +86,10 @@ def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict
         revision = int(result.get("stateRevision") or 0)
         if expected_revision is not None and expected_revision != revision:
             raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
-        updated = mutate(result)
+        try:
+            updated = mutate(result)
+        except _NoMutation:
+            return _runner().public_dict(job)
         updated["stateRevision"] = revision + 1
         saved = _runner().update_result(job_id, updated)
         if not saved:
@@ -1340,28 +1347,30 @@ async def post_png(
         return _runner().public_dict(job)
     folder = Path(str(result.get("previewDir") or ""))
     path = folder / Path(safe).name
-    with _mutation_lock(job_id):
-        job = _job_or_404(job_id)
-        _require_idle(job)
-        latest = dict(job.result or {})
+
+    def publish(latest: dict[str, Any]) -> dict[str, Any]:
         current_revision = int(latest.get("stateRevision") or 0)
         if revision is not None and revision != current_revision:
-            return _runner().public_dict(job)
+            raise _NoMutation
         _write_atomic(path, body)
-        fresh_slides = list(latest.get("slides") or [])
+        fresh_slides = []
+        for slide in latest.get("slides") or []:
+            if slide.get("id") == slideId:
+                item = dict(slide)
+                if audience == "cg" and isinstance(item.get("cg"), dict):
+                    item["cg"] = {**item["cg"], "stillPng": safe}
+                else:
+                    item["stillPng"] = safe
+                slide = item
+            fresh_slides.append(slide)
         fresh_names = list((latest.get("previewFiles") or {}).get("maps") or [])
-        if safe not in fresh_names: fresh_names.append(safe)
-        for item in fresh_slides:
-            if item.get("id") == slideId:
-                if audience == "cg" and isinstance(item.get("cg"), dict): item["cg"] = {**item["cg"], "stillPng": safe}
-                else: item["stillPng"] = safe
+        if safe not in fresh_names:
+            fresh_names.append(safe)
         latest["slides"] = fresh_slides
         latest["previewFiles"] = {**(latest.get("previewFiles") or {}), "maps": fresh_names}
-        latest["stateRevision"] = current_revision + 1
-        saved = _runner().update_result(job_id, latest)
-        if not saved:
-            raise HTTPException(404, "Unknown maps job")
-        return _runner().public_dict(saved)
+        return latest
+
+    return _mutate_document(job_id, None, publish)
 
 
 @router.post("/{job_id}/frame")
