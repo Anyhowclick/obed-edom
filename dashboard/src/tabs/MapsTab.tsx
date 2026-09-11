@@ -345,7 +345,10 @@ export function MapsTab() {
           throw err;
         }
       },
-      onConflict: (conflict) => setSaveConflict({ paths: conflict.paths }),
+      onConflict: (conflict) => {
+        saveConflictRef.current = { paths: conflict.paths };
+        setSaveConflict({ paths: conflict.paths });
+      },
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
     });
   }
@@ -614,6 +617,7 @@ export function MapsTab() {
   }
 
   async function captureThumb(slideId: string) {
+    if (saveConflictRef.current) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const audience = activeAudienceRef.current;

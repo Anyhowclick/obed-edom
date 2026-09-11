@@ -209,12 +209,14 @@ test("a transport failure leaves the queue dirty, fires onError, skips publish, 
   assert.deepEqual(calls[1], calls[0]);
 });
 
-test("a blocked queue rejects flush with MapsSaveBlockedError and stays undirty", async () => {
+test("a blocked queue rejects flush with MapsSaveBlockedError and a later flush stays blocked", async () => {
   let live = doc("Local");
+  let transportCalls = 0;
   const queue = new MapsSaveQueue({
     document: () => live,
     publish: (next) => { live = next; },
     transport: async () => {
+      transportCalls += 1;
       throw new MapsSaveConflictError({ document: doc("Remote"), revision: 1 });
     },
     onConflict: () => undefined,
@@ -225,6 +227,7 @@ test("a blocked queue rejects flush with MapsSaveBlockedError and stays undirty"
   await assert.rejects(queue.flush(), MapsSaveBlockedError);
   assert.ok(queue.conflict);
   await assert.rejects(queue.flush(), MapsSaveBlockedError);
+  assert.equal(transportCalls, 1);
 });
 
 test("reloadLatest and keepMyChanges clear the conflict so later edits are accepted again", async () => {
