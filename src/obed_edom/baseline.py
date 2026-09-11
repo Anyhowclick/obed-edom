@@ -22,7 +22,7 @@ from obed_edom.paths import find_repo_root
 
 PAIRING_VERSION = 1
 # Bump on payload-shape change. Digest-keyed cache; `.k<version>` partitions Keynote builds. Untagged = 14.5, unread.
-INSPECT_VERSION = 4
+INSPECT_VERSION = 5
 # Bump on template stat-size map shape change. Also `.k<version>` (AppleScript read).
 TEMPLATE_STAT_VERSION = 1
 DIGEST_LEN = 16

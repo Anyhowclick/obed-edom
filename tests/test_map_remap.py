@@ -6029,3 +6029,141 @@ def test_badge_slot_group_never_takes_the_child_write_path():
     d = group_tf.as_dict()
     assert "children" not in d
     assert (round(group_tf.w, 1), round(group_tf.h, 1)) == (90.0, 90.0)
+
+
+def _aspect_recipe(src: dict, s: float = 0.25) -> dict:
+    return {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [{"s": s, "tx": 0.0, "ty": 0.0, "src": src}],
+    }
+
+
+def test_aspect_locked_group_snaps_to_source_aspect():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    slide = {
+        "number": 2,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6, aspect=278.0 / 87.6),
+        ],
+    }
+    out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert d["x"] == round(d["x"])
+    assert d["y"] == round(d["y"])
+    assert d["h"] == round(d["h"])
+    assert abs(d["w"] - round(d["h"]) * (278.0 / 87.6)) <= 0.01
+
+
+def test_aspect_snap_covers_image_and_movie():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    aspect = 278.0 / 87.6
+    for kind in ("image", "movie"):
+        slide = {
+            "number": 2,
+            "items": [
+                _item(kindIndex=0, kind=kind, x=4164.3, y=39.4, w=278.0, h=87.6, aspect=aspect),
+            ],
+        }
+        out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+        tf = next(t for t in out if t.kind == kind)
+        d = tf.as_dict()
+        assert d["x"] == round(d["x"])
+        assert d["y"] == round(d["y"])
+        assert d["h"] == round(d["h"])
+        assert abs(d["w"] - round(d["h"]) * aspect) <= 0.01
+
+
+def test_card_sample_override_beats_the_aspect_snap():
+    recipe = {
+        "destWidth": 1920.0, "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        "cardSamples": [
+            {"rect": {"x": 0.0, "y": 0.0, "w": 120.0, "h": 100.0}, "aspect": 1.2,
+             "caption": {"font": "Amplitude-Bold", "size": 10.0, "color": None, "text": "CHC Villamonte"}},
+        ],
+    }
+    slide = {
+        "number": 4,
+        "items": [
+            _item(kindIndex=0, kind="group", x=3300.0, y=300.0, w=131.8, h=109.5, aspect=131.8 / 109.5),
+        ],
+        "groupChildText": {0: "CHC Arao"},
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    card = next(t for t in out if t.kind == "group")
+    assert (round(card.w, 1), round(card.h, 1)) == (120.0, 100.0)
+
+
+def test_badge_slot_group_is_not_aspect_snapped():
+    title = _item(kind="text", text="Global Missions", x=2000.0, y=50.0, w=500.0, h=100.0)
+    badge_group = _item(kindIndex=0, kind="group", x=2150.0, y=0.0, w=200.0, h=200.0, aspect=1.0)
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "mapSrc": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "mapDst": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+        "titleDst": {"x": 800.0, "y": 40.0, "w": 300.0, "h": 60.0},
+        "badgeSlots": {"group:0": {"x": 700.0, "y": 20.0, "w": 90.0, "h": 90.0}},
+    }
+    slide = {
+        "number": 6,
+        "items": [title, badge_group],
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    assert (round(group_tf.w, 1), round(group_tf.h, 1)) == (90.0, 90.0)
+
+
+def test_group_with_autosize_children_is_not_aspect_snapped():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    slide = {
+        "number": 2,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6, aspect=278.0 / 87.6),
+        ],
+        "groupChildText": {0: "Ps George"},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert len(d["children"]) == 2
+    assert d["w"] == pytest.approx(69.5, abs=0.1)
+    assert d["h"] == pytest.approx(21.9, abs=0.1)
+
+
+def test_item_without_aspect_is_unchanged():
+    src = {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}
+    slide = {
+        "number": 2,
+        "items": [
+            _item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6),
+        ],
+    }
+    out = plan_slide_transforms(slide, _aspect_recipe(src), wall_size=(7680, 1080))
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert d["x"] == pytest.approx(1041.08, abs=0.001)
+    assert d["y"] == pytest.approx(9.85, abs=0.001)
+    assert d["w"] == pytest.approx(69.5, abs=0.001)
+    assert d["h"] == pytest.approx(21.9, abs=0.001)
+
+
+def test_backdrop_pin_survives_the_aspect_snap():
+    slide = {
+        "number": 1,
+        "items": [
+            _item(kindIndex=0, kind="image", fileName="map BG-1.png", x=0, y=0, w=7680, h=1080, aspect=7680.0 / 1080.0),
+        ],
+    }
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [{"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 0, "y": -50, "w": 7680, "h": 1080}}],
+    }
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080))
+    tf = next(t for t in out if t.kind == "image")
+    assert tf.y == 0.0

@@ -108,8 +108,10 @@ TOL_SOFT = 1.0
 TOL_MASK = 2.0
 TOL_TEXT = 2.0
 TOL_CHILD = 2.0
+TOL_ASPECT = 0.25
 
 _HARD_KINDS = {"shape", "line"}
+_ASPECT_LOCKED = {"group", "image", "movie"}
 _TEXT_BUCKETS = {"text"}  # "child:text" is unreachable: `_child_kind` never yields "text"
 
 # D4 pass-2 (stat-finalize) health, from `keynote._run_stat_finalize`'s result dict.
@@ -840,6 +842,8 @@ def plan_oracle_slide(
     id_by_addr: dict[tuple[str, int], str],
     recs_by_id: dict[str, dict[str, Any]],
     tols: Tolerances,
+    *,
+    aspects: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Compare every planned transform's target against the drawable it resolves to,
     id-addressed via the SOURCE deck's kind index (D3) -- raise-immune, hide-immune
@@ -870,6 +874,11 @@ def plan_oracle_slide(
     A spec with no ``kindIndex`` at all (should never happen -- ``ItemTransform.as_dict``
     always emits one) is a RED ``missing_ids`` entry too, reason ``"spec carries no
     kindIndex"`` — never silently dropped.
+
+    For arm A's aspect-locked childless image/movie/group specs, the predicted width is
+    compared against both the float aspect-lock ``h * ar`` and its integer rounding (Keynote
+    stores the integer when the frame aspect differs from the media aspect), at
+    ``TOL_ASPECT``.
 
     Returns ``{"pass": bool, "per_kind": {kind: {n, worst, pass, fails}}, "missing_ids":
     [...], "skipped": int, "compared": int, "approx": [...]}`` where ``compared`` is the
@@ -919,7 +928,18 @@ def plan_oracle_slide(
         entry = per_kind.setdefault(kind, {"n": 0, "worst": 0.0, "pass": True, "fails": []})
         tol = tols.hard if kind in _OFFLINE_EXACT_KINDS else tols.soft
         planned, actual = _spec_box(spec, rec)
-        worst = max(abs(a - b) for a, b in zip(planned, actual))
+        ar = (aspects or {}).get(obj_id) if (kind in _ASPECT_LOCKED and not spec.get("children")) else None
+        if ar:
+            h = round(planned[3])
+            w_pred = h * ar
+            planned = (round(planned[0]), round(planned[1]), w_pred, float(h))
+            tol = TOL_ASPECT
+            diffs = [abs(planned[0] - actual[0]), abs(planned[1] - actual[1]),
+                     min(abs(planned[2] - actual[2]), abs(round(planned[2]) - actual[2])),
+                     abs(planned[3] - actual[3])]
+            worst = max(diffs)
+        else:
+            worst = max(abs(a - b) for a, b in zip(planned, actual))
         entry["n"] += 1
         entry["worst"] = max(entry["worst"], worst)
         if worst > tol:
@@ -1124,6 +1144,21 @@ def spec_id_map(source_deck: Path | str) -> dict[str, list[dict[str, Any]]]:
                     for r in records]
         for i, records in idx.items()
     }
+
+
+def source_aspects(source_deck: Path | str) -> dict[str, float]:
+    from obed_edom.iwa_geometry import compose_geometry  # noqa: PLC0415
+    from obed_edom.iwa_runs import _load_deck, slide_order  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = _load_deck(source_deck)
+    out: dict[str, float] = {}
+    for slide_id, _skipped in slide_order(objects):
+        if slide_id not in objects:
+            continue
+        for r in compose_geometry(objects[slide_id], objects):
+            if r["h"] and r["w"] and r.get("geom_source") != "mask":
+                out[r["id"]] = r["w"] / r["h"]
+    return out
 
 
 def _id_by_addr_for_slide(id_map: dict[str, list[dict[str, Any]]], slide: int
@@ -1460,6 +1495,7 @@ def main(argv: list[str] | None = None) -> int:
     # Decode A, extract every compared slide's units, then DROP A's raw archive map
     # before decoding B — two whole-deck decodes held live at once is the dominant
     # memory cost on the Full deck.
+    aspects = source_aspects(args.source)
     a_objects, a_by_slide = decode_deck(a_deck)
     a_units_by_slide = {n: slide_units(a_objects, n) for n in compared_slides}
     del a_objects
@@ -1476,7 +1512,7 @@ def main(argv: list[str] | None = None) -> int:
         specs_n = [t for t in (plan_a.get("transforms") or []) if int(t.get("slide", -1)) == n]
         id_by_addr = _id_by_addr_for_slide(id_map, n)
 
-        oracle_a = plan_oracle_slide(specs_n, id_by_addr, a_by_slide.get(n, {}), tols)
+        oracle_a = plan_oracle_slide(specs_n, id_by_addr, a_by_slide.get(n, {}), tols, aspects=aspects)
         oracle_b = plan_oracle_slide(specs_n, id_by_addr, b_by_slide.get(n, {}), tols)
         _log(f"  slide {n}:")
         _log_plan_oracle_report("A", oracle_a)

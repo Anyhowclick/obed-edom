@@ -9,6 +9,7 @@ monkeypatched or stood in for here rather than exercised against a real deck.
 
 from __future__ import annotations
 
+import collections
 import json
 import sys
 from pathlib import Path
@@ -16,7 +17,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from obed_edom.iwa_geometry import audit_natural_consistency
+from obed_edom.iwa_geometry import audit_natural_consistency, compose_geometry
+from obed_edom.iwa_runs import _load_deck, slide_order
+from obed_edom.paths import find_repo_root
 from obed_edom.offline_write import (
     OFFLINE_VERIFY_TOL,
     _fallback_bodies,
@@ -38,6 +41,7 @@ from obed_edom.remap_keynote import offline_write_mode
 from scripts.offline_write_ab import (
     CARD_REF_FLOOR,
     Tolerances,
+    _id_by_addr_for_slide,
     accessibility_ok,
     card_border_damage_reasons,
     card_border_refs,
@@ -55,6 +59,8 @@ from scripts.offline_write_ab import (
     plan_oracle_slide,
     plan_parity,
     run_record,
+    source_aspects,
+    spec_id_map,
     tol_for_bucket,
     unit_bucket,
     write_run_record,
@@ -2745,6 +2751,150 @@ def test_log_plan_oracle_report_prints_approx_line(capsys):
     assert "NOT GATED" in out
 
 
+def test_plan_oracle_aspect_predicts_keynote_rounded_width():
+    ar = 2.9014084507042255
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 10.0, "y": 20.0, "w": 999.0, "h": 71.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 10.0, "y": 20.0, "w": round(71.0) * ar, "h": 71.0,
+                        "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"g1": ar})
+    assert report["pass"] is True
+    report_no_aspects = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances())
+    assert report_no_aspects["pass"] is False
+
+
+def test_plan_oracle_aspect_bar_is_quarter_pixel():
+    ar = 2.0
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 999.0, "h": 20.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 40.3, "h": 20.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is False
+    recs_by_id["i1"]["w"] = 40.2
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is True
+
+
+def test_plan_oracle_aspect_accepts_stretched_integer_width():
+    ar = 3.7433
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 374.0, "h": 100.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is True
+
+
+def test_plan_oracle_aspect_still_accepts_float_lock_width():
+    ar = 1.339245
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 1268.26, "h": 947.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 947.0 * ar, "h": 947.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is True
+
+
+def test_plan_oracle_aspect_rejects_width_matching_neither():
+    ar = 3.7433
+    specs = [{"slide": 1, "kind": "image", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+    id_by_addr = {("image", 0): "i1"}
+    recs_by_id = {"i1": {"id": "i1", "kind": "image", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 373.6, "h": 100.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"i1": ar})
+    assert report["pass"] is False
+    assert report["per_kind"]["image"]["worst"] == pytest.approx(0.4)
+
+
+def test_plan_oracle_stretched_integer_width_ignored_for_shape():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 374.33, "h": 100.0}]
+    id_by_addr = {("shape", 0): "s1"}
+    recs_by_id = {"s1": {"id": "s1", "kind": "shape", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 374.0, "h": 100.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5), aspects={"s1": 3.7433})
+    assert report["pass"] is True
+    assert report["per_kind"]["shape"]["worst"] == pytest.approx(0.33)
+
+
+def test_plan_oracle_without_aspects_is_unchanged():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 5.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0))
+    assert report["per_kind"]["group"]["worst"] == 5.0
+    assert report["pass"] is False
+
+
+def test_plan_oracle_aspect_ignored_for_shape():
+    specs = [{"slide": 1, "kind": "shape", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}]
+    id_by_addr = {("shape", 0): "s1"}
+    recs_by_id = {"s1": {"id": "s1", "kind": "shape", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.6, "h": 10.0, "geom_source": "iwa"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(hard=0.5), aspects={"s1": 1.0})
+    assert report["pass"] is False
+    assert report["per_kind"]["shape"]["worst"] == pytest.approx(0.6)
+
+
+def test_plan_oracle_missing_aspect_falls_back_to_soft():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 10.6, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0), aspects={})
+    assert report["pass"] is True
+    assert report["per_kind"]["group"]["worst"] == pytest.approx(0.6)
+
+
+def test_plan_oracle_aspect_still_red_on_gross_miss():
+    specs = [{"slide": 36, "kind": "group", "kindIndex": 0, "x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0}]
+    id_by_addr = {("group", 0): "g36"}
+    recs_by_id = {"g36": {"id": "g36", "kind": "group", "kindIndex": 0,
+                         "x": 0.0, "y": 90.0, "w": 100.0, "h": 100.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(), aspects={"g36": 1.0})
+    assert report["pass"] is False
+    assert report["per_kind"]["group"]["worst"] == 90.0
+
+
+def test_plan_oracle_child_written_group_keeps_soft_compare():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "children": [{"kind": "image"}],
+              "x": 0.0, "y": 0.0, "w": 10.6, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0), aspects={"g1": 1.0})
+    assert report["pass"] is True
+    assert report["per_kind"]["group"]["worst"] == pytest.approx(0.6)
+
+
+def test_plan_oracle_childless_group_still_aspect_aware():
+    specs = [{"slide": 1, "kind": "group", "kindIndex": 0, "children": [],
+              "x": 0.0, "y": 0.0, "w": 10.6, "h": 10.0}]
+    id_by_addr = {("group", 0): "g1"}
+    recs_by_id = {"g1": {"id": "g1", "kind": "group", "kindIndex": 0,
+                        "x": 0.0, "y": 0.0, "w": 15.0, "h": 10.0, "geom_source": "group-union"}}
+    report = plan_oracle_slide(specs, id_by_addr, recs_by_id, Tolerances(soft=1.0), aspects={"g1": 1.5})
+    assert report["pass"] is True
+    assert report["per_kind"]["group"]["worst"] == pytest.approx(0.0)
+
+
+def test_source_aspects_filters_masked_media(monkeypatch):
+    objects = {"s1": {"kind": "slide"}}
+    monkeypatch.setattr("obed_edom.iwa_runs._load_deck", lambda deck: (objects, {}, {}), raising=False)
+    monkeypatch.setattr("obed_edom.iwa_runs.slide_order", lambda objs: [("s1", False)], raising=False)
+    monkeypatch.setattr(
+        "obed_edom.iwa_geometry.compose_geometry",
+        lambda slide, objs: [
+            {"id": "visible", "w": 100.0, "h": 50.0, "geom_source": "iwa"},
+            {"id": "masked", "w": 100.0, "h": 50.0, "geom_source": "mask"},
+        ],
+        raising=False,
+    )
+    assert source_aspects(Path("/tmp/x.key")) == {"visible": 2.0}
+
+
 # --- run_record / write_run_record / load_run_record (D13) ---------------------------
 
 
@@ -2935,4 +3085,189 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     assert plan_out["statSlides"] == [3]
 
 
+def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
+    import obed_edom.remap_keynote as rk
+    from obed_edom.map_remap import ItemTransform
+
+    monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
+    monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
+
+    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rk, "recipe_for",
+        lambda wall, template: {
+            "source": "test", "mapSrc": "src", "mapDst": "dst",
+            "destWidth": 1920, "destHeight": 1080, "characterStyles": [],
+        },
+    )
+    monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
+    monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 0, "list": 0, "hide": 0})
+    monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "restore_card_stroke_widths", lambda *a, **k: None)
+
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    dest = tmp_path / "out.key"
+    source.touch()
+    template.touch()
+
+    wall_payload = {
+        "slideWidth": 7680, "slideHeight": 1080,
+        "slides": [{
+            "number": 1,
+            "items": [
+                {"kind": "image", "kindIndex": 0},
+                {"kind": "group", "kindIndex": 0},
+                {"kind": "image", "kindIndex": 1},
+                {"kind": "image", "kindIndex": 2, "aspect": 1.0},
+            ],
+        }],
+    }
+    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [])
+    logs: list[str] = []
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        plan_out={}, log=logs.append,
+    )
+    warn_lines = [line for line in logs if line.startswith("WARN: aspect-snap unavailable")]
+    assert len(warn_lines) == 1
+    assert "3 item(s) on 1 slide(s)" in warn_lines[0]
+
+    hide_transform = ItemTransform(
+        slide_number=1, item_index=1, kind="image", x=0, y=0, w=1, h=1,
+        kind_index=1, role="hide",
+    )
+    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [hide_transform])
+    logs = []
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        plan_out={}, log=logs.append,
+    )
+    warn_lines = [line for line in logs if line.startswith("WARN: aspect-snap unavailable")]
+    assert len(warn_lines) == 1
+    assert "2 item(s) on 1 slide(s)" in warn_lines[0]
+
+
 # ============================================================================
+# M-ASPECT falsifier — Keynote-free: the snap must equal its own predicted
+# aspect-locked rect for every image/movie/group spec (see plan-aspect.md 26).
+# ============================================================================
+_DECKS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs")
+_FULL_DECK = _DECKS / "Full_Report_Card_Wall.key"
+_BASE_TEMPLATE = _DECKS / "Base_CG_Assets.key"
+_FAILS_JSON = find_repo_root() / "tests/fixtures/as-geometry-rounding/fails.json"
+
+
+@pytest.mark.skipif(
+    not (_FULL_DECK.exists() and _BASE_TEMPLATE.exists()), reason="local gold deck only"
+)
+def test_full_deck_plan_is_aspect_consistent():
+    """71/674/633 (and the derived 1378/1440) are measured pins on
+    ``Full_Report_Card_Wall.key`` — a change in any of them is a re-measurement
+    decision, not a fixture bump."""
+    import obed_edom.remap_keynote as rk
+    from scripts import golden_plan
+
+    with golden_plan._pinned_env():
+        wall, tmpl, plan, _env = golden_plan.capture_plan(_FULL_DECK, _BASE_TEMPLATE)
+    aspects = source_aspects(_FULL_DECK)
+    id_map = spec_id_map(_FULL_DECK)
+    objects, _id_to_file, _file_ids = _load_deck(_FULL_DECK)
+    geom_sources: dict[str, str | None] = {}
+    for slide_id, _skipped in slide_order(objects):
+        if slide_id not in objects:
+            continue
+        for r in compose_geometry(objects[slide_id], objects):
+            geom_sources[r["id"]] = r.get("geom_source")
+    recipe = rk.recipe_for(wall, tmpl)
+    card_sizes = {
+        (round(s["rect"]["w"], 2), round(s["rect"]["h"], 2)) for s in recipe.get("cardSamples") or []
+    }
+    badge_sizes = {
+        (round(r["w"], 2), round(r["h"], 2)) for r in (recipe.get("badgeSlots") or {}).values() if r
+    }
+
+    assert _FAILS_JSON.exists(), f"banked fails missing: {_FAILS_JSON}"
+    fails = json.loads(_FAILS_JSON.read_text())
+    banked_fail_addrs = {
+        (f["slide"], f["kind"], f["ki"]) for f in fails if f["slide"] != 36
+    }
+
+    id_by_addr_cache: dict[int, dict[tuple[str, int], str]] = {}
+    asserted: set[tuple[int, str, int]] = set()
+    dropped_no_aspect_ids: list[str] = []
+    card_badge_rows: list[tuple[int, str, int]] = []
+    buckets: collections.Counter = collections.Counter()
+    candidates = 0
+    for t in plan.get("transforms") or []:
+        if t.get("role") == "hide":
+            continue
+        kind = t.get("kind")
+        if kind not in {"image", "movie", "group"}:
+            continue
+        candidates += 1
+        slide = t["slide"]
+        if slide == 36:
+            buckets["slide36"] += 1
+            continue
+        if t.get("children"):
+            buckets["child"] += 1
+            continue
+        kind_index = t.get("kindIndex")
+        if slide not in id_by_addr_cache:
+            id_by_addr_cache[slide] = _id_by_addr_for_slide(id_map, slide)
+        obj_id = id_by_addr_cache[slide].get((kind, kind_index))
+        if obj_id is None:
+            buckets["no_id"] += 1
+            continue
+        x, y, w, h = t["x"], t["y"], t["w"], t["h"]
+        size = (round(w, 2), round(h, 2))
+        if kind == "group" and (size in card_sizes or size in badge_sizes):
+            buckets["card_badge"] += 1
+            card_badge_rows.append((slide, kind, kind_index))
+            continue
+        ar = aspects.get(obj_id)
+        if ar is None:
+            buckets["masked"] += 1
+            dropped_no_aspect_ids.append(obj_id)
+            continue
+        h_r = round(h)
+        pred = (round(x), round(y), round(h_r * ar, 2), float(h_r))
+        worst = max(abs(a - b) for a, b in zip(pred, (x, y, w, h)))
+        assert worst <= 0.001, (slide, kind, kind_index, pred, (x, y, w, h))
+        assert abs(x - round(x)) <= 5e-3
+        assert abs(y - round(y)) <= 5e-3
+        assert abs(h - round(h)) <= 5e-3
+        asserted.add((slide, kind, kind_index))
+        buckets["asserted"] += 1
+
+    assert candidates == 1440
+    assert candidates == (
+        buckets["slide36"] + buckets["child"] + buckets["no_id"]
+        + buckets["card_badge"] + buckets["masked"] + len(asserted)
+    )
+    assert buckets["no_id"] == 0, buckets
+    assert buckets["slide36"] == 6
+    assert buckets["child"] == 56
+    assert buckets["masked"] == 674
+    assert buckets["card_badge"] == 71
+    assert len(asserted) == 633
+    assert buckets["asserted"] == len(asserted)
+    assert buckets["masked"] + buckets["card_badge"] + len(asserted) == 1378
+
+    assert all(geom_sources.get(obj_id) == "mask" for obj_id in dropped_no_aspect_ids), (
+        dropped_no_aspect_ids
+    )
+    assert len(dropped_no_aspect_ids) == 674
+    assert all(row[1] == "group" for row in card_badge_rows), card_badge_rows
+
+    missing = banked_fail_addrs - asserted
+    assert not missing, f"banked fail rows silently excluded from the aspect snap: {missing}"
+    slide_36_fail_addrs = {(f["slide"], f["kind"], f["ki"]) for f in fails if f["slide"] == 36}
+    assert len(slide_36_fail_addrs) == 4

@@ -211,6 +211,15 @@ def _f(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _item_aspect(item: dict) -> float | None:
+    a = item.get("aspect")
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return None
+    return a if a > 0 else None
+
+
 def item_rect(item: dict) -> Rect:
     start = item.get("start")
     end = item.get("end")
@@ -2740,6 +2749,16 @@ def plan_slide_transforms(
                 start = (_f(slot["start"][0]), _f(slot["start"][1]))
             if slot.get("end"):
                 end = (_f(slot["end"][0]), _f(slot["end"][1]))
+        _asp = _item_aspect(item)
+        if (
+            str(item.get("kind") or "") in {"image", "movie", "group"}
+            and _asp is not None
+            and not child_src
+            and badge_dst is None
+            and ("group", kind_index) not in card_keys
+        ):
+            _h = float(round(mapped.h))
+            mapped = Rect(float(round(mapped.x)), float(round(mapped.y)), _h * _asp, _h)
         out.append(
             ItemTransform(
                 slide_number=number,

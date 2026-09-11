@@ -170,6 +170,103 @@ def test_rejected_cache_bypasses_cache_on_partial_two_tier_fallback(monkeypatch,
     assert out["reader"] == "offline"
 
 
+def _image_item(*, aspect: object = "missing") -> dict:
+    item = {"kind": "image", "kindIndex": 0, "start": [0, 0], "end": [1, 1]}
+    if aspect != "missing":
+        item["aspect"] = aspect
+    return item
+
+
+def test_aspect_less_jxa_cache_is_rejected_in_offline_mode(monkeypatch, tmp_path):
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("jxa")
+    cached["slides"][0]["items"] = [_image_item()]
+    offline_payload = {"slideCount": 3, "slides": _cached_wall("offline")["slides"],
+                        "_offline": {"bulk_ok": True}}
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    import obed_edom.inspect as inspect_mod
+    import obed_edom.offline_inspect as offline_mod
+
+    monkeypatch.setattr(inspect_mod, "bulk_geometry", _no_bulk_geometry)
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", lambda *a, **k: offline_payload)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
+
+    assert out is offline_payload
+
+
+def test_aspect_less_jxa_cache_is_served_when_mode_off(monkeypatch, tmp_path):
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("jxa")
+    cached["slides"][0]["items"] = [_image_item()]
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    monkeypatch.setattr(rk, "inspect_keynote", _fail_inspect)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="off", say=lambda _m: None)
+
+    assert out is cached
+
+
+def test_aspect_complete_offline_cache_is_served(monkeypatch, tmp_path):
+    source = tmp_path / "wall.key"
+    source.touch()
+    cached = _cached_wall("offline")
+    cached["slides"][0]["items"] = [_image_item(aspect=1.5)]
+    monkeypatch.setattr(rk, "cached_payload", lambda _source: cached)
+    import obed_edom.offline_inspect as offline_mod
+
+    def boom(*a, **k):
+        pytest.fail("two_tier_wall_payload should not be called")
+
+    monkeypatch.setattr(offline_mod, "two_tier_wall_payload", boom)
+
+    out = rk.acquire_wall_payload(source, slide_range=None, mode="on", say=lambda _m: None)
+
+    assert out is cached
+
+
+def test_wall_payload_carries_aspect_accepts_none_for_masked():
+    from obed_edom.inspect import wall_payload_carries_aspect
+
+    payload = {"slides": [{"items": [{"kind": "image", "aspect": None}]}]}
+    assert wall_payload_carries_aspect(payload) is True
+
+
+def test_legacy_merge_preserves_media_aspect_and_drops_group_aspect(monkeypatch, tmp_path):
+    source = tmp_path / "wall.key"
+    source.touch()
+    payload = {
+        "slides": [{
+            "number": 1,
+            "items": [
+                {"kind": "image", "kindIndex": 0, "aspect": 1.5},
+                {"kind": "group", "kindIndex": 0, "aspect": 2.0},
+            ],
+        }],
+    }
+
+    def fake_inspect_keynote(key_path, *, slide_range=None, use_cache=None):
+        return {
+            "slides": [{
+                "number": 1,
+                "items": [
+                    {"kind": "image", "kindIndex": 0},
+                    {"kind": "group", "kindIndex": 0},
+                ],
+            }],
+        }
+
+    monkeypatch.setattr(rk, "inspect_keynote", fake_inspect_keynote)
+
+    rk._merge_legacy_slides(payload, source, [1])
+
+    items = {(it["kind"], it["kindIndex"]): it for it in payload["slides"][0]["items"]}
+    assert items[("image", 0)]["aspect"] == 1.5
+    assert "aspect" not in items[("group", 0)]
+
+
 def test_no_cache_keeps_legacy_cache_behavior(monkeypatch, tmp_path):
     source = tmp_path / "wall.key"
     source.touch()
