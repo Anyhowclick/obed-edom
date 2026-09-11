@@ -648,7 +648,7 @@ export function MapsTab() {
         }
         const queueRevision = saveQueue.current?.revision;
         if (typeof queueRevision === "number" && queueRevision >= err.stateRevision) {
-          void captureThumb(slideId, retriesLeft - 1).catch((retryErr) => {
+          await captureThumb(slideId, retriesLeft - 1).catch((retryErr) => {
             if (retryErr instanceof MapsStaleThumbnailError) return;
             setError(retryErr instanceof Error ? retryErr.message : String(retryErr));
           });
