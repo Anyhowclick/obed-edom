@@ -351,6 +351,16 @@ def pass2_zero_warn(label: str, result: dict[str, Any] | None, *, tolerated: boo
             "(pass2-bar=parity: A != B, NOT tolerated — see the RED lines above).")
 
 
+def pass2_click_retry_warn(label: str, result: dict[str, Any] | None) -> str:
+    """`raiseClickRetried` WARN, observational only -- renders in both `--pass2-bar`
+    modes and only when non-zero; "" otherwise."""
+    n = int((result or {}).get("raiseClickRetried") or 0)
+    if not n:
+        return ""
+    return (f"WARN {label}: raiseClickRetried={n} (GUI Bring-to-Front click errors "
+            "rescued by a retry; does not gate).")
+
+
 def plan_parity(
     plan_a: dict[str, Any], plan_b: dict[str, Any], compared_slides: list[int]
 ) -> list[str]:
@@ -1454,6 +1464,9 @@ def main(argv: list[str] | None = None) -> int:
         warns = [f"{key}={result.get(key)}" for key in PASS2_WARN_KEYS if int(result.get(key) or 0)]
         if warns:
             _log(f"WARN {label}: {', '.join(warns)} (non-zero fallback; investigate, does not gate).")
+        click_retry_warn = pass2_click_retry_warn(label, result)
+        if click_retry_warn:
+            _log(click_retry_warn)
 
     if not zero_keys_hard:
         for label, result in (("A", child_resize_a), ("B", child_resize_b)):

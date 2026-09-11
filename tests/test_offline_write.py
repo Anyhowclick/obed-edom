@@ -53,6 +53,7 @@ from scripts.offline_write_ab import (
     keynote_open_documents,
     load_run_record,
     pass2_bar_line,
+    pass2_click_retry_warn,
     pass2_health,
     pass2_parity,
     pass2_zero_warn,
@@ -2048,6 +2049,26 @@ def test_pass2_health_parity_frontErr_with_accessibility_code_stays_hard():
     assert any("Accessibility denied" in r for r in reasons)
 
 
+def test_pass2_health_strict_green_when_a_click_was_retried_and_landed():
+    # A rescued click leaves frontErr empty -- strict must stay green, and the
+    # observational raiseClickRetried counter must not itself be a zero key.
+    raw = "done=1 skipped=0 front=700 dedupDeleted=0 dedupShortfall=0 frontErr= exported=true"
+    reasons = pass2_health(_pass2(raw=raw, front=700, raiseClickRetried=1), label="A",
+                           expect_raises=True, zero_keys_hard=True)
+    assert reasons == []
+
+
+def test_pass2_health_strict_still_red_on_a_post_retry_front_err():
+    raw = "done=1 skipped=0 front=699 dedupDeleted=0 dedupShortfall=0 frontErr= [-1719@badge,s=8,idx=1,retry] exported=true"
+    reasons = pass2_health(_pass2(raw=raw, front=699, raiseClickRetried=1), label="A",
+                           expect_raises=True, zero_keys_hard=True)
+    assert any("frontErr" in r for r in reasons)
+    assert not any("Accessibility denied" in r for r in reasons)
+    parity_reasons = pass2_health(_pass2(raw=raw, front=699, raiseClickRetried=1), label="A",
+                                  expect_raises=True, zero_keys_hard=False)
+    assert parity_reasons == []
+
+
 # --- pass2_parity (D4) --------------------------------------------------------------
 
 
@@ -2084,6 +2105,13 @@ def test_pass2_parity_excludes_front_when_not_hard():
     reasons = pass2_parity(_pass2(), _pass2(front=99, unresolved=5), front_hard=False)
     assert not any("front" in r for r in reasons)
     assert any("unresolved" in r for r in reasons)
+
+
+def test_pass2_parity_ignores_raise_click_retried():
+    # Retries are timing-dependent per arm -- a rescue in one arm and not the other
+    # must not manufacture a RED; everything else stays equal.
+    reasons = pass2_parity(_pass2(raiseClickRetried=1), _pass2(raiseClickRetried=0))
+    assert reasons == []
 
 
 # --- pass2_bar_line / pass2_zero_warn (item 3: false "tolerated because A==B") -------
@@ -2132,6 +2160,33 @@ def test_pass2_zero_warn_not_tolerated_when_parity_nonempty():
 def test_pass2_zero_warn_empty_when_all_zero():
     assert pass2_zero_warn("A", _pass2(), tolerated=True) == ""
     assert pass2_zero_warn("A", _pass2(), tolerated=False) == ""
+
+
+def test_pass2_click_retry_warn_line():
+    # Non-zero -> rendered; zero/None -> absent. Bar-mode rendering is locked
+    # separately below (the formatter itself takes no mode argument).
+    warn = pass2_click_retry_warn("B", _pass2(raiseClickRetried=1))
+    assert warn == ("WARN B: raiseClickRetried=1 (GUI Bring-to-Front click errors "
+                    "rescued by a retry; does not gate).")
+    assert pass2_click_retry_warn("B", _pass2()) == ""
+    assert pass2_click_retry_warn("B", None) == ""
+
+
+def test_pass2_click_retry_warn_call_site_renders_in_both_bar_modes():
+    """The `pass2_click_retry_warn` call site must sit above the
+    `if not zero_keys_hard:` block that gates the parity-only WARNs, so it fires under
+    both `--pass2-bar strict` and `--pass2-bar parity` -- not just because the
+    formatter itself takes no mode argument. A regression that drifts the call site
+    into that block would still pass the formatter-level test above, so this locks
+    the call site's position in the source directly."""
+    import inspect
+
+    import scripts.offline_write_ab as offline_write_ab
+
+    src = inspect.getsource(offline_write_ab)
+    call_at = src.index("click_retry_warn = pass2_click_retry_warn(label, result)")
+    gate_at = src.index("if not zero_keys_hard:", call_at)
+    assert call_at < gate_at
 
 
 # --- plan_parity (D5) ----------------------------------------------------------------
