@@ -2110,6 +2110,17 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
 
     monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
 
+    append_lock_reached = threading.Event()
+    real_decode_png = maps._decode_png
+    landmark_bytes = _landmark_png()
+
+    def spy_decode_png(raw):
+        if raw == landmark_bytes:
+            append_lock_reached.set()
+        return real_decode_png(raw)
+
+    monkeypatch.setattr(maps, "_decode_png", spy_decode_png)
+
     import_outcome_b = {}
 
     def import_session_b():
@@ -2130,13 +2141,15 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     def append_during_tail():
         append_outcome["response"] = client.post(
             f"/api/maps/{job_b['id']}/slides/{slide_b}/landmark",
-            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+            files={"file": ("st-marks.png", landmark_bytes, "image/png")},
         )
 
-    append_thread = threading.Thread(target=append_during_tail)
+    append_thread = threading.Thread(target=append_during_tail, name="append_during_tail")
     append_thread.start()
-    append_thread.join(0.2)
-    assert append_thread.is_alive(), "append must block on the job lock while the import tail is held"
+    # Deterministic signal: the append thread has reached the point right
+    # before it tries to acquire the job's mutation lock, which the import
+    # tail is still holding.
+    assert append_lock_reached.wait(5), "append never reached the lock-acquisition point"
 
     release_tail.set()
     import_thread_b.join(5)
@@ -2146,19 +2159,16 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
 
     assert import_outcome_b["response"].status_code == 200, import_outcome_b["response"].text
     append_response = append_outcome["response"]
-    assert append_response.status_code in {200, 409}
+    assert append_response.status_code == 200, append_response.text
 
     latest_b = client.get(f"/api/jobs/{job_b['id']}").json()
     slide_after_b = next(s for s in latest_b["result"]["slides"] if s["id"] == slide_b)
-    if append_response.status_code == 200:
-        church_id = append_response.json()["churchId"]
-        assert any(c["id"] == church_id for c in slide_after_b["churches"])
-        asset_id = next(c["assetId"] for c in slide_after_b["churches"] if c["id"] == church_id)
-        asset_response = client.get(f"/api/maps/{job_b['id']}/assets/{asset_id}.png")
-        assert asset_response.status_code == 200
-    else:
-        assert append_response.json()["detail"] == "Maps job is not ready"
-        assert not any(c.get("assetId") for c in slide_after_b.get("churches", []))
+    church_id = append_response.json()["churchId"]
+    assert any(c["id"] == church_id for c in slide_after_b["churches"])
+    asset_id = next(c["assetId"] for c in slide_after_b["churches"] if c["id"] == church_id)
+    asset_response = client.get(f"/api/maps/{job_b['id']}/assets/{asset_id}.png")
+    assert asset_response.status_code == 200
+    assert append_response.json()["result"] == latest_b["result"]
 
 
 def test_delete_and_edit_conflict_leaves_exactly_one_winner():
