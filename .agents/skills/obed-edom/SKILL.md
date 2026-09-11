@@ -305,6 +305,24 @@ preserves Finder's `uchg` flag, and a locked copy breaks the gate's writes.
 After any planner/driver change, also run `scripts/golden_plan.py` — a
 Keynote-free apply-plan SHA-256 gate through the real `remap_keynote.remap_keynote`.
 
+Pass 2's GUI raise (`obedRaiseSlide`/`obedFront`) emits `raiseDead(s=,idx=)` and
+`raiseUnknown(s=,idx=)` on a failed Bring to Front, plus the tagged
+`frontErr` `[errNum@phase,s=,idx=]` (no entry may contain the literal
+` exported=` — both parsers cut there). `raiseBlind(s=,idx=,phase=)` is an
+observational click-time readiness token (still clicks); `raiseVacuous(s=,idx=)`
+fires when the target is already frontmost (`_mn is _top`) and is never
+retried. `raiseRetried` counts one retry on a verified non-vacuous dead
+raise. `raiseBlindCount`/`raiseVacuous`/`raiseRetried` are counters in the
+result dict and on `Stat raise detail:`, alongside `raiseMoved`/`raiseDead`/
+`raiseUnknown`. Two env knobs tune the readiness poll on `enabled of menu
+item "Bring to Front"`: `OBED_RAISE_SETTLE_MAX` (default 1.5, `0` disables,
+non-finite/negative fall back) bounds it above the existing 0.35s floor;
+`OBED_RAISE_SETTLE_MIN` only lengthens the floor. `-1719` is
+`errAEIllegalIndex`, not an Accessibility denial (`-1743`/`-25211` are) —
+measured 2026-09-10 with Accessibility probed granted. The strict pass-2 bar
+still aborts on any `frontErr`, so `--pass2-bar parity` is mandatory for W1
+gating until a run returns an empty `frontErr`.
+
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:
 both A/B decks and run records are present, so diagnose and re-run comparisons
