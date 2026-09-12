@@ -1275,10 +1275,14 @@ def test_no_crop_when_visible_inside_panel():
     assert dsk_plan._rects_close(visible, mask_abs)
 
 
-def test_crop_silent_on_rotated_frame_needing_no_crop():
+def test_crop_refused_on_rotated_full_panel_mask_true_aabb_overflows():
+    # The snapped mask rect equals the window, but the raw rotated AABB of a full-panel
+    # mask at 5 degrees genuinely overflows it -- D6 requires the LWCROP fallback, not
+    # silence (round-2 finding 3).
     obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080))
     objects = {"img": obj, **extra}
-    assert crop_geometry(obj, objects, CENTRE_PANEL_RECT) is None
+    with pytest.raises(CropRefusal):
+        crop_geometry(obj, objects, CENTRE_PANEL_RECT)
 
 
 def test_crop_geometry_unmasked_rotated_uses_frame_aabb():
@@ -1298,6 +1302,33 @@ def test_crop_refused_on_rotated_frame_needing_crop():
     objects = {"img": obj, **extra}
     with pytest.raises(CropRefusal):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+
+
+def test_crop_refused_on_referenced_but_missing_mask():
+    # `mask.identifier` points at an object that isn't in `objects` -- must not be
+    # silently treated as unmasked (round-2 finding 4).
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    obj["mask"] = {"identifier": "missing-mask"}
+    objects = {"img": obj}
+    with pytest.raises(CropRefusal, match="mask"):
+        crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+
+
+def test_crop_refused_on_zero_natural_size_when_crop_needed():
+    # naturalSize missing/zero but the visible rect is a genuine subset of mask_abs --
+    # must fall back with a warning, not silently keep the source (round-2 finding 4).
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(0, 0))
+    objects = {"img": obj, **extra}
+    with pytest.raises(CropRefusal, match="naturalSize"):
+        crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+
+
+def test_crop_silent_on_zero_natural_size_when_no_crop_needed():
+    # Same invalid naturalSize, but the visible rect already equals mask_abs -- nothing
+    # to crop, so this must stay silent.
+    obj, extra = _image_obj(x=1954, y=27, w=1381, h=921, mask=(0, 0, 1381, 921), natural=(0, 0))
+    objects = {"img": obj, **extra}
+    assert crop_geometry(obj, objects, CENTRE_PANEL_RECT) is None
 
 
 def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
@@ -1404,7 +1435,10 @@ def test_plan_crops_falls_back_on_rotated_frame(tmp_path, monkeypatch):
     assert any("rotated" in w for w in warnings)
 
 
-def test_plan_crops_silent_on_rotated_item_needing_no_crop(tmp_path, monkeypatch):
+def test_plan_crops_warns_on_rotated_full_panel_mask_needing_crop(tmp_path, monkeypatch):
+    # The snapped mask rect equals the window, but the raw rotated AABB of a full-panel
+    # mask at 5 degrees genuinely overflows it -- must fall back with a warning, not
+    # silence (round-2 finding 3).
     from PIL import Image
     import zipfile as _zipfile
 
@@ -1425,7 +1459,7 @@ def test_plan_crops_silent_on_rotated_item_needing_no_crop(tmp_path, monkeypatch
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}
-    assert warnings == []
+    assert any("rotated" in w and "LWCROP" in w for w in warnings)
 
 
 def test_plan_crops_refuses_duplicate_fileName_on_one_slide(tmp_path, monkeypatch):
@@ -1531,6 +1565,60 @@ def test_plan_crops_refuses_collision_with_kept_uncropped_image(tmp_path, monkey
             key_path, {}, objects, items, [("image", 0), ("image", 1)],
             crop_dir=tmp_path / "crops", number=3,
         )
+
+
+def test_plan_crops_refuses_collision_with_kept_uncropped_image_crop_first(tmp_path, monkeypatch):
+    """image0 genuinely needs a crop and is planned before image1, which is kept
+    uncropped and shares its fileName -- the collision must still be caught (D6),
+    regardless of which item is visited first."""
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-0.jpg")
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    obj0, extra0 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m0")
+    obj0["data"] = {"identifier": "0"}
+    obj1, extra1 = _image_obj(x=1954, y=27, w=1381, h=921, mask=(0, 0, 1381, 921), natural=(1600, 1056), mask_id="m1")
+    obj1["data"] = {"identifier": "1"}
+    objects = {"img0": obj0, "img1": obj1, **extra0, **extra1}
+    monkeypatch.setattr(
+        dsk_plan, "_item_object_ids",
+        lambda slide_archive, objects: {("image", 0): "img0", ("image", 1): "img1"},
+    )
+    items = [
+        {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "dup.jpg"},
+        {"kind": "image", "kindIndex": 1, "rotation": 0, "fileName": "dup.jpg"},
+    ]
+    with pytest.raises(CropRefusal, match="collides"):
+        plan_crops(
+            key_path, {}, objects, items, [("image", 0), ("image", 1)],
+            crop_dir=tmp_path / "crops", number=3,
+        )
+
+
+def test_plan_crops_dry_run_notes_would_crop_without_writing_files(tmp_path, monkeypatch):
+    """``dry_run`` (``--no-image-crop``) must still emit the LWCROP note for an image
+    that would have been cropped, but never touch disk (round-2 finding 5)."""
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m0")
+    obj["data"] = {"identifier": "0"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+    crop_dir = tmp_path / "crops"
+    crops, warnings = plan_crops(
+        _empty_key(tmp_path), {}, objects, [item], [("image", 0)],
+        crop_dir=crop_dir, number=3, dry_run=True,
+    )
+    assert crops == {}
+    assert any("no-image-crop" in w and "LWCROP" in w for w in warnings)
+    assert not crop_dir.exists()
 
 
 def test_plan_crops_leaves_pre_existing_file_on_refusal(tmp_path, monkeypatch):

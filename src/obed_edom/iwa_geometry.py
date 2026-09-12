@@ -117,6 +117,14 @@ def _mask_corner_aabb(fx: float, fy: float, fw: float, fh: float, fa: float,
     return _corners_aabb(lambda lx, ly: to_slide(*to_image(lx, ly)), mw, mh)
 
 
+def _mask_aabb(frame_geom: dict, mask_geom: dict) -> tuple[float, float, float, float]:
+    """True rotated AABB of a mask composed through its parent frame transform."""
+    fx, fy, fw, fh, fa = _xywha(frame_geom)
+    mx, my, mw, mh, ma = _xywha(mask_geom)
+    x0, y0, x1, y1 = _mask_corner_aabb(fx, fy, fw, fh, fa, mx, my, mw, mh, ma)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
 def _masked_rect(frame_geom: dict, mask_geom: dict
                  ) -> tuple[tuple[float, float, float, float], bool]:
     """Mask box at snapped 90°; rotated=True when snap displacement > _MASK_TRUST_PX."""

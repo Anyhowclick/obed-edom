@@ -338,9 +338,8 @@ def plan_assembly(
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
 ) -> AssemblyPlan:
-    """Pure planning over `payload`/`classes`, EXCEPT `plan_crops` (unless
-    `no_image_crop`), which writes cropped image files under `crop_dir` as it plans.
-    `classes` must be built with the SAME flags passed here (see D2/D6 in the plan)."""
+    """Pure planning over `payload`/`classes`, EXCEPT `plan_crops`, which writes
+    cropped image files under `crop_dir` (unless `no_image_crop`) as it plans."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -370,7 +369,7 @@ def plan_assembly(
     anchors_out: dict[int, str] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
-    if objects_graph is None and fw_deck is not None and not no_image_crop:
+    if objects_graph is None and fw_deck is not None:
         objects_graph = _load_deck(fw_deck)[0]
 
     crop_files_written: list[Path] = []
@@ -408,7 +407,7 @@ def plan_assembly(
             fits[number] = fit
 
             slide_crops: dict[ItemId, CropSpec] = {}
-            if not no_image_crop and objects_graph is not None and fw_deck is not None:
+            if objects_graph is not None and fw_deck is not None:
                 slide_archive = _slide_archive_for_number(objects_graph, number)
                 if slide_archive is not None:
                     build_target_ids = {
@@ -426,11 +425,12 @@ def plan_assembly(
                             crop_dir=crop_dir if crop_dir is not None else Path(fw_deck).parent / "crops",
                             number=number,
                             build_targets=build_target_ids,
+                            dry_run=no_image_crop,
                         )
                     except CropRefusal as exc:
                         raise AssemblyRefusal(str(exc)) from exc
                     warnings.extend(f"slide {number}: {w}" for w in crop_warnings)
-                    crop_files_written.extend(spec.path for spec in slide_crops.values())
+                    crop_files_written.extend(spec.path for spec in slide_crops.values() if spec.created)
             if slide_crops:
                 crops_out[number] = slide_crops
 
@@ -1894,9 +1894,8 @@ def _restore_stroke(
 def _restore_crop_zorder(
     fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: list[str]
 ) -> dict[int, dict]:
-    """Move each re-inserted cropped image (D2/plan step 2) back to its deleted source
-    item's z-order index, per slide, via ``reorder_drawables``. Refuses per slide, not
-    the whole deck; a slide with nothing found to move is simply absent from the result."""
+    """Move each re-inserted cropped image back to its deleted source item's z-order
+    index, per slide; a slide with nothing to move is absent from the result."""
     result: dict[int, dict] = {}
     if not plan.crops:
         return result

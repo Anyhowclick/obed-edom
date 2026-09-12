@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from obed_edom.iwa_builds import _ref_id, _transition_effect_duration, build_identity, deck_builds
-from obed_edom.iwa_geometry import _frame_aabb, _frame_rect, _geom_dict, _mask_geom, _masked_rect, _xywha
+from obed_edom.iwa_geometry import _frame_aabb, _frame_rect, _geom_dict, _mask_aabb, _mask_geom, _masked_rect, _xywha
 from obed_edom.iwa_kindindex import derive_kind_index
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.map_remap import (
@@ -947,9 +947,8 @@ MIN_CROP_PX = 8.0
 
 
 class CropRefusal(ValueError):
-    """Raised on a crop window under ``MIN_CROP_PX`` or a duplicate ``fileName``
-    (D2/D6); every other crop precondition failure is a per-item fallback
-    handled inside ``plan_crops`` instead."""
+    """Hard refusal (min window, duplicate name) or a per-item fallback signal
+    caught by ``plan_crops`` and turned into an LWCROP warning."""
 
 
 @dataclass(frozen=True)
@@ -961,6 +960,7 @@ class CropSpec:
     source_file_name: str
     px_box: tuple[int, int, int, int]
     visible: Rect
+    created: bool = True
 
 
 def _rects_close(a: Rect, b: Rect, tol: float = 0.5) -> bool:
@@ -982,15 +982,19 @@ def crop_geometry(
     obj: dict, objects: dict[str, dict], window: Rect
 ) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
     """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
-    ``window``, or ``None`` when nothing is visible; raises ``CropRefusal`` when a crop is needed on rotated geometry (D2/D6)."""
+    ``window``, or ``None`` when nothing is visible; raises ``CropRefusal`` as a
+    per-item fallback (rotated geometry, unresolved mask, invalid size)."""
+    mask_ref = (obj.get("mask") or {}).get("identifier")
+    if mask_ref is not None and objects.get(str(mask_ref)) is None:
+        raise CropRefusal("referenced mask not found")
     geom = _geom_dict(obj)
     mask_geom = _mask_geom(obj, objects)
     frame_angle = _xywha(geom)[4]
     frame_rotated = abs((frame_angle % 360.0 + 180.0) % 360.0 - 180.0) > 0.01
     if mask_geom:
         masked_rect, mask_rotated = _masked_rect(geom, mask_geom)
-        mask_abs = Rect(*masked_rect)
         rotated = frame_rotated or mask_rotated
+        mask_abs = Rect(*_mask_aabb(geom, mask_geom)) if rotated else Rect(*masked_rect)
     else:
         mask_abs = Rect(*_frame_aabb(geom))
         rotated = frame_rotated
@@ -1004,7 +1008,9 @@ def crop_geometry(
     frame = Rect(*_frame_rect(geom))
     natural = _asset_natural_size(obj)
     if frame.w <= 0 or frame.h <= 0 or natural[0] <= 0 or natural[1] <= 0:
-        return None
+        if _rects_close(visible, mask_abs):
+            return None
+        raise CropRefusal("invalid frame or naturalSize geometry")
     sx, sy = natural[0] / frame.w, natural[1] / frame.h
     x0, y0 = (visible.x - frame.x) * sx, (visible.y - frame.y) * sy
     x1, y1 = x0 + visible.w * sx, y0 + visible.h * sy
@@ -1036,6 +1042,7 @@ def plan_crops(
     crop_dir: str | Path,
     number: int,
     build_targets: Iterable[ItemId] = (),
+    dry_run: bool = False,
 ) -> tuple[dict[ItemId, CropSpec], list[str]]:
     """Offline per-slide crop planning: a kept image whose visible rect is a proper
     subset of ``window`` is replaced by a cropped file under ``crop_dir``."""
@@ -1101,6 +1108,11 @@ def plan_crops(
                 _mark_kept(item)
                 continue
 
+            if dry_run:
+                warnings.append(f"image {item_id[1]}: --no-image-crop, keeping source (LWCROP)")
+                _mark_kept(item)
+                continue
+
             data_id = _data_identifier(obj)
             member = data_index.get(str(data_id)) if data_id is not None else None
             if member is None:
@@ -1141,12 +1153,6 @@ def plan_crops(
                     f"slide {number} image {item_id[1]}: fileName {source_name!r} collides with another "
                     "kept image already cropped this slide"
                 )
-            if source_name in kept_uncropped_names:
-                _cleanup()
-                raise CropRefusal(
-                    f"slide {number} image {item_id[1]}: fileName {source_name!r} collides with another "
-                    "kept image left uncropped this slide"
-                )
             out_dir = Path(crop_dir) / str(number)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / source_name
@@ -1165,6 +1171,18 @@ def plan_crops(
             used_names.add(source_name)
             if not pre_existing:
                 created_paths.add(out_path)
-            crops[item_id] = CropSpec(path=out_path, source_file_name=source_name, px_box=px_box, visible=visible)
+            crops[item_id] = CropSpec(
+                path=out_path, source_file_name=source_name, px_box=px_box, visible=visible,
+                created=not pre_existing,
+            )
+
+    for name in used_names:
+        if name in kept_uncropped_names:
+            _cleanup()
+            conflicting = next(iid for iid, spec in crops.items() if spec.source_file_name == name)
+            raise CropRefusal(
+                f"slide {number} image {conflicting[1]}: fileName {name!r} collides with another "
+                "kept image left uncropped this slide"
+            )
 
     return crops, warnings

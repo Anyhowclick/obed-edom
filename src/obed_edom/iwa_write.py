@@ -1951,7 +1951,18 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
     if member is None:
         return {"refused": True, "reason": f"slide {slide_id} has no owning member"}
 
-    order = [str(ref["identifier"]) for ref in obj.get("drawablesZOrder") or [] if ref.get("identifier") is not None]
+    raw_order = obj.get("drawablesZOrder") or []
+    order = [str(ref["identifier"]) for ref in raw_order if ref.get("identifier") is not None]
+    if len(order) != len(raw_order):
+        return {
+            "refused": True,
+            "reason": f"slide {slide_id}: drawablesZOrder has an identifier-less ref, refusing to reorder",
+        }
+    if len(order) != len(set(order)):
+        return {
+            "refused": True,
+            "reason": f"slide {slide_id}: drawablesZOrder has a duplicate identifier, refusing to reorder",
+        }
     for drawable_id, new_index in moves.items():
         if drawable_id not in order:
             return {"refused": True, "reason": f"drawable {drawable_id} not in {slide_id}'s drawablesZOrder"}

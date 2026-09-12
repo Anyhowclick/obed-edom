@@ -2532,6 +2532,38 @@ def test_reorder_drawables_refuses_when_owned_drawables_has_an_identifierless_re
     assert deck.read_bytes() == before
 
 
+def test_reorder_drawables_refuses_when_zorder_has_an_identifierless_ref(tmp_path, monkeypatch):
+    """A ref with no ``identifier`` in ``drawablesZOrder`` itself must refuse, not just
+    silently filter it out of ``order`` (round-2 finding 6)."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    objects, id_to_file, file_ids = _load_deck(deck)
+    objects["100"]["drawablesZOrder"].append({})
+    monkeypatch.setattr(
+        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
+    )
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "drawablesZOrder" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_when_zorder_has_a_duplicate_id(tmp_path, monkeypatch):
+    """A duplicate id in ``drawablesZOrder`` makes ``order.remove()`` ambiguous during a
+    move -- must refuse instead of silently moving the wrong occurrence."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    objects, id_to_file, file_ids = _load_deck(deck)
+    objects["100"]["drawablesZOrder"].append({"identifier": 220})
+    monkeypatch.setattr(
+        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
+    )
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "drawablesZOrder" in result["reason"]
+    assert deck.read_bytes() == before
+
+
 def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
     deck = _build_builds_deck(tmp_path / "builds.key")
     before = deck.read_bytes()

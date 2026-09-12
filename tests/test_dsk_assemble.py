@@ -4452,7 +4452,10 @@ def test_refusal_cleans_up_earlier_slides_crop_files(tmp_path, monkeypatch):
     crop_path = tmp_path / "3" / "photo.jpg"
     crop_path.parent.mkdir(parents=True)
     crop_path.write_bytes(b"fake")
-    fake_spec = CropSpec(path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    fake_spec = CropSpec(
+        path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1),
+        created=True,
+    )
 
     def fake_plan_crops(*a, **k):
         number = k.get("number")
@@ -4477,6 +4480,41 @@ def test_refusal_cleans_up_earlier_slides_crop_files(tmp_path, monkeypatch):
             deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
         )
     assert not crop_path.exists()
+
+
+def test_refusal_preserves_preexisting_crop_file(tmp_path, monkeypatch):
+    from obed_edom.dsk_plan import CropRefusal, CropSpec
+
+    crop_path = tmp_path / "3" / "photo.jpg"
+    crop_path.parent.mkdir(parents=True)
+    crop_path.write_bytes(b"fake")
+    fake_spec = CropSpec(
+        path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1),
+        created=False,
+    )
+
+    def fake_plan_crops(*a, **k):
+        number = k.get("number")
+        if number == 3:
+            return ({("image", 0): fake_spec}, [])
+        raise CropRefusal(f"slide {number} image 0: crop window under 8px")
+
+    monkeypatch.setattr(dsa, "plan_crops", fake_plan_crops)
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    slide3 = _slide(3, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    slide5 = _slide(5, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide3, slide5])
+    classes = [_classify(slide3), _classify(slide5)]
+    decisions = {
+        3: SlideDecision(3, "in_deck", anchor="auto"),
+        5: SlideDecision(5, "in_deck", anchor="auto"),
+    }
+    with pytest.raises(AssemblyRefusal):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+        )
+    assert crop_path.read_bytes() == b"fake"
 
 
 def test_rotated_image_falls_back_through_plan_assembly(tmp_path, monkeypatch):
@@ -4520,7 +4558,10 @@ def test_unconsumed_split_refusal_cleans_up_earlier_crop_files(tmp_path, monkeyp
     crop_path = tmp_path / "3" / "photo.jpg"
     crop_path.parent.mkdir(parents=True)
     crop_path.write_bytes(b"fake")
-    fake_spec = CropSpec(path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    fake_spec = CropSpec(
+        path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1),
+        created=True,
+    )
 
     monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
     monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
@@ -4536,6 +4577,32 @@ def test_unconsumed_split_refusal_cleans_up_earlier_crop_files(tmp_path, monkeyp
             split_overrides={3: 2},
         )
     assert not crop_path.exists()
+
+
+def test_unconsumed_split_refusal_preserves_preexisting_crop_file(tmp_path, monkeypatch):
+    from obed_edom.dsk_plan import CropSpec
+
+    crop_path = tmp_path / "3" / "photo.jpg"
+    crop_path.parent.mkdir(parents=True)
+    crop_path.write_bytes(b"fake")
+    fake_spec = CropSpec(
+        path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1),
+        created=False,
+    )
+
+    monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    slide3 = _slide(3, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide3])
+    classes = [_classify(slide3)]
+    decisions = {3: SlideDecision(3, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="does not apply"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+            split_overrides={3: 2},
+        )
+    assert crop_path.read_bytes() == b"fake"
 
 
 def test_crop_min_window_refuses(monkeypatch):
