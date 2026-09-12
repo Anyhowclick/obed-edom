@@ -273,3 +273,22 @@ test("withBrighterDarkLines lifts interpolate-hcl outputs and leaves its stops a
   assert.equal(after[5], 10);
   assert.equal(avg(after[6]), 102);
 });
+
+test("withBrighterDarkLines normalises the HSL hue so 360 wraps to 0 and negatives wrap forward", () => {
+  const lift = (colour) => {
+    const result = withBrighterDarkLines({
+      version: 8,
+      sources: {},
+      layers: [{ id: "hue", type: "line", paint: { "line-color": colour } }],
+    });
+    return channels(result.layers[0].paint["line-color"]);
+  };
+
+  assert.deepEqual(lift("hsl(360,100%,10%)"), lift("hsl(0,100%,10%)"));
+  assert.deepEqual(lift("hsl(-120,50%,10%)"), lift("hsl(240,50%,10%)"));
+  assert.deepEqual(lift("hsl(480,100%,50%)"), lift("hsl(120,100%,50%)"));
+
+  // hsl -> rgb sanity: two known conversions, checked through the (shared) lift.
+  assert.deepEqual(lift("hsl(120,100%,50%)"), lift("rgb(0,255,0)"));
+  assert.deepEqual(lift("hsl(240,100%,25%)"), lift("rgb(0,0,128)"));
+});

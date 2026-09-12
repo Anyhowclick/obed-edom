@@ -9,7 +9,8 @@ const EXPRESSION_OPS = ["interpolate", "interpolate-hcl", "interpolate-lab", "st
 
 type Rgba = { r: number; g: number; b: number; a: number };
 
-function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+function hslToRgb(hue: number, s: number, l: number): [number, number, number] {
+  const h = ((hue % 360) + 360) % 360;
   const c = (1 - Math.abs(2 * l - 1)) * s;
   const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
   const m = l - c / 2;
