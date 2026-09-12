@@ -3856,7 +3856,10 @@ def test_split_parts_both_carry_the_badges_size_write():
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
     from obed_edom.remap_keynote import _as_num
 
-    badge_size = plan.text_sizes[17][("text", 0)]
+    unsplit_plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert unsplit_plan.parts.get(17, 1) == 1
+    badge_size = unsplit_plan.text_sizes[17][("text", 0)]
+    assert plan.text_sizes[17][("text", 0)] == badge_size
     script = build_assembly_script(
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
         layout_policy="preserve",

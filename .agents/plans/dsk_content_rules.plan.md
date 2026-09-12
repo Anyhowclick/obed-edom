@@ -389,6 +389,10 @@ recognised as repeated is summed, as before. This can mis-classify a key shared 
 repeated item and a per-part-unique one, or under-count a losing repeated item across both parts;
 both err toward refusal rather than silent loss, which is the deliberate tradeoff.
 
+A split text slide can never be a clip: text slides drop movies (`D4`), so `movie_ids` is empty
+and only a group-nested movie could still classify `movie`/`mixed`, which refuses at `:501`
+("classified movie with no kept movie") before any clip is recorded.
+
 ### D6. Flags and refusals
 
 New `dsk-assemble` CLI (`cli.py:113`):

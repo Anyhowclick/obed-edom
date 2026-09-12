@@ -424,6 +424,11 @@ def plan_assembly(
                                     f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
                                     "--text-fit shrink"
                                 )
+                            else:
+                                warnings.append(
+                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                    "preserving source sizing"
+                                )
                             stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
                         else:
                             stacked_text_sizes[box.item_id] = sizes[box.item_id]
@@ -477,6 +482,11 @@ def plan_assembly(
                                     f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
                                     "--text-fit shrink"
                                 )
+                            else:
+                                warnings.append(
+                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                    "preserving source sizing"
+                                )
                             stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
                         part_list.append(
                             SplitPart(
@@ -487,7 +497,6 @@ def plan_assembly(
                                 autosize=part_autosize,
                             )
                         )
-                    assert number not in clips_out, f"slide {number}: split text slide cannot also be a clip"
                     parts[number] = len(part_list)
                     splits[number] = tuple(part_list)
                     for iid in long_ids:
