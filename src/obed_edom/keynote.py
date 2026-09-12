@@ -806,6 +806,7 @@ _STAT_ACCUMULATORS = (
     "raiseVacuous",
     "raiseRetried",
     "raiseClickRetried",
+    "lastFrontBlind",
 )
 
 # Position always matches; w/h only match where the live frame isn't Keynote's own
@@ -1209,7 +1210,7 @@ def _stat_job_handlers() -> list[str]:
         "  return _f",
         "end obedGroupFrame",
         "on obedRaiseItem(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH)",
-        "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, report",
+        "  global theDoc, badgeUnresolved, badgeMoved, badgeFrontDead, lastFrontBlind, report",
         "  set _hit to my obedBadgeFind(slideNo, theKind, idx, fx, fy, fw, fh, matchW, matchH, badgeFrontDead is 0)",
         "  if _hit is 0 then",
         "    set badgeUnresolved to badgeUnresolved + 1",
@@ -1239,24 +1240,28 @@ def _stat_job_handlers() -> list[str]:
         "  end tell",
         "  if not _found then return",
         "  set _frontResult to my obedFront(\"badge\", slideNo, _hit)",
-        "  set _retriedOnly to badgeMoved is not 0 and _frontResult is not 0",
-        "  if (badgeMoved is 0 or _frontResult is not 0) and badgeFrontDead is 0 then",
+        "  set _reprobe to _frontResult is not 0 or lastFrontBlind is not 0",
+        "  set _probeOnly to badgeMoved is not 0 and _reprobe",
+        "  if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then",
+        "    if _probeOnly and _frontResult is 0 then",
+        '      set report to report & " badgeProbeBlind(s=" & slideNo & ",k=" & theKind & ")"',
+        "    end if",
         "    set _kindCount to my obedKindCount(slideNo, theKind)",
         "    if _kindCount is 0 then",
         '      set report to report & " badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
-        "      if _retriedOnly then set badgeMoved to badgeMoved + 1",
+        "      if _probeOnly then set badgeMoved to badgeMoved + 1",
         "    else",
         "      set _topReal to my obedTopReal(slideNo, theKind, _kindCount)",
         "      if _topReal < 2 or _hit is not less than _topReal then",
         '        set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
-        "        if _retriedOnly then set badgeMoved to badgeMoved + 1",
+        "        if _probeOnly then set badgeMoved to badgeMoved + 1",
         "      else",
         "        set _foundAt to my obedBadgeFind(slideNo, theKind, _topReal, fx, fy, fw, fh, matchW, matchH, false)",
         "        if _foundAt is _topReal then",
         "          set badgeMoved to badgeMoved + 1",
         "        else if _foundAt is 0 or _foundAt > _topReal then",
         '          set report to report & " badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
-        "          if _retriedOnly then set badgeMoved to badgeMoved + 1",
+        "          if _probeOnly then set badgeMoved to badgeMoved + 1",
         "        else",
         "          set badgeFrontDead to 1",
         '          set report to report & " badgeFrontDead(s=" & slideNo & ")"',
@@ -1292,9 +1297,10 @@ def _stat_job_handlers() -> list[str]:
         # Bounded readiness poll: wait the settle floor, then poll `enabled` every 0.1 s
         # up to the ceiling, returning whatever it read (today's behaviour when polling
         # never confirms readiness). `enabled` is probed in its own `try` so a read
-        # failure degrades to `missing value`, treated as not-ready.
+        # failure degrades to `missing value`, treated as not-ready. Also records
+        # lastFrontBlind for the caller when the poll never confirms readiness.
         "on obedFrontReady(phase, slideNo, idx)",
-        "  global raiseBlindCount, report",
+        "  global raiseBlindCount, lastFrontBlind, report",
         f"  delay {_as_fixed(settle_min)}",
         "  set _ready to false",
         "  set _waited to 0.0",
@@ -1317,6 +1323,7 @@ def _stat_job_handlers() -> list[str]:
         "  if not _ready then",
         "    set raiseBlindCount to raiseBlindCount + 1",
         '    set report to report & " raiseBlind(s=" & slideNo & ",idx=" & idx & ",phase=" & phase & ")"',
+        "    set lastFrontBlind to 1",
         "  end if",
         "  return _ready",
         "end obedFrontReady",
@@ -1325,7 +1332,8 @@ def _stat_job_handlers() -> list[str]:
         # nothing (raise-dead bank). frontRaised counts once per call, on whichever
         # attempt lands; only a second failure reaches frontErr, tagged `,retry]`.
         "on obedFront(phase, slideNo, idx)",
-        "  global frontRaised, frontErr, raiseClickRetried, report",
+        "  global frontRaised, frontErr, raiseClickRetried, lastFrontBlind, report",
+        "  set lastFrontBlind to 0",
         "  my obedFrontReady(phase, slideNo, idx)",
         "  set _clicked to false",
         "  try",
@@ -1472,6 +1480,7 @@ def _build_stat_finalize_script(
         "  set raiseVacuous to 0",
         "  set raiseRetried to 0",
         "  set raiseClickRetried to 0",
+        "  set lastFrontBlind to 0",
         '  set exported to "false"',
         '  set report to ""',
     ]
