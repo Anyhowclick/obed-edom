@@ -210,6 +210,13 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
       assert.match(style.sources.openmaptiles.tiles[0], /openfreemap/);
       assert.match(style.glyphs, /openfreemap/);
     }
+    const idsOf = (style) => new Set(style.layers.map((layer) => layer.id));
+    for (const style of [background, full]) {
+      const ids = idsOf(style);
+      assert.ok(ids.has("building_pattern"), "expected the hatched building_pattern layer");
+      assert.ok(!ids.has("building_fill"), "expected the solid building_fill layer to be dropped");
+    }
+
     const boundaryIds = ["boundary_state", "boundary_state_z1-4", "boundary_country_z0-4", "boundary_country_z5-"];
     const lineIds = new Set(lines.layers.map((layer) => layer.id));
     const backgroundIds = new Set(background.layers.map((layer) => layer.id));

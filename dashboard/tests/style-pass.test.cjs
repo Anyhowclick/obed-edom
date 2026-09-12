@@ -20,7 +20,8 @@ function compile(file) {
 compile("tonerBuildings.ts");
 compile("darkContrast.ts");
 const { withoutSolidBuildings } = require(path.join(out, "tonerBuildings.js"));
-const { withBrighterDarkLines } = require(path.join(out, "darkContrast.js"));
+const darkContrast = require(path.join(out, "darkContrast.js"));
+const { withBrighterDarkLines } = darkContrast;
 
 const vendor = JSON.parse(fs.readFileSync(path.join(root, "src/maps/vendor/maptiler-toner-8688fbd.json"), "utf8"));
 
@@ -161,13 +162,31 @@ test("withBrighterDarkLines is monotone across the whole grey ramp", () => {
   assert.deepEqual([lifted[0], lifted[54], lifted[60], lifted[101], lifted[160], lifted[200]], [96, 118, 120, 136, 160, 200]);
 });
 
-test("withBrighterDarkLines is applied exactly once, so a second pass lifts further", () => {
-  // styles.ts calls it once, on the freshly fetched Dark style; a strictly monotone
-  // non-identity map cannot be idempotent, so this documents the single application.
+test("withBrighterDarkLines is idempotent: a second pass is a no-op", () => {
   const once = withBrighterDarkLines(darkStyle);
   const twice = withBrighterDarkLines(once);
-  const avgOf = (style) => avg(style.layers.find((l) => l.id === "highway_minor").paint["line-color"]);
-  assert.ok(avgOf(twice) > avgOf(once));
+  assert.deepEqual(twice, once);
+  assert.equal(twice, once);
+});
+
+test("withBrighterDarkLines stamps the style it returns", () => {
+  const once = withBrighterDarkLines({ ...darkStyle, metadata: { keep: 1 } });
+  assert.equal(once.metadata["obed-edom:darkContrast"], darkContrast.DARK_CONTRAST_VERSION);
+  assert.equal(once.metadata.keep, 1);
+  assert.equal(darkStyle.metadata, undefined);
+});
+
+test("withBrighterDarkLines leaves malformed colour literals untouched", () => {
+  const bad = ["rgb(1oops 2 3)", "hsl(0 20 30)", "rgb(10,20,30,)", "rgb(10 20 / 30)", "rgb(10 20)", "rgb(10, 20 30)", "rgb(0,0,0,0.5,1)"];
+  const layers = bad.map((colour, i) => ({ id: `bad_${i}`, type: "line", paint: { "line-color": colour } }));
+  const result = withBrighterDarkLines({ version: 8, sources: {}, layers });
+  assert.deepEqual(result.layers.map((layer) => layer.paint["line-color"]), bad);
+
+  // the well-formed counterparts are still lifted.
+  const good = ["rgb(1 2 3)", "hsl(0 20% 30%)", "rgb(10,20,30)", "rgb(10 20 30 / 0.5)"];
+  const okLayers = good.map((colour, i) => ({ id: `ok_${i}`, type: "line", paint: { "line-color": colour } }));
+  const lifted = withBrighterDarkLines({ version: 8, sources: {}, layers: okLayers });
+  for (const layer of lifted.layers) assert.match(layer.paint["line-color"], /^rgba\(/);
 });
 
 test("withBrighterDarkLines recurses into expression outputs and leaves inputs, stops and labels alone", () => {
