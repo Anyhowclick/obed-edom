@@ -4,9 +4,10 @@ from pathlib import Path
 
 from obed_edom.annotate import annotate_outline
 from obed_edom.contrast import check_contrast
-from obed_edom.keynote import generate_both, output_dir_for
+from obed_edom.keynote import generate_both, stem_for
 from obed_edom.models import Flag, GenerationResult
 from obed_edom.parse_outline import parse_outline
+from obed_edom.paths import ensure_export_subdir, output_root
 from obed_edom.report import write_review
 from obed_edom.slide_map import map_slides
 from obed_edom.validate import validate_outline, validate_slide_specs
@@ -27,6 +28,7 @@ def generate(
     check_visuals: bool = True,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
+    output_dir: Path | None = None,
 ) -> GenerationResult:
     docx = Path(docx).expanduser().resolve()
     if docx.suffix.lower() != ".docx":
@@ -38,11 +40,12 @@ def generate(
     flags.extend(map_flags)
     flags.extend(validate_slide_specs(lw, dsk))
 
-    out_dir = output_dir_for(docx)
+    parent = output_dir or output_root()
+    out_dir = ensure_export_subdir(parent, stem_for(docx))
     review_path = out_dir / "review.pdf"
     lw_key = None
     dsk_key = None
-    stem = docx.stem.replace(" ", "_")
+    stem = stem_for(docx)
     cued_docx = annotate_outline(outline, lw, dsk, out_dir / f"{stem}_CUED.docx")
 
     if make_keynote:
@@ -53,6 +56,7 @@ def generate(
             export=check_visuals,
             lw_template=lw_template,
             dsk_template=dsk_template,
+            output_dir=output_dir,
         )
         for result, deck in ((lw_result, "LW"), (dsk_result, "DSK")):
             if result.get("skipped"):

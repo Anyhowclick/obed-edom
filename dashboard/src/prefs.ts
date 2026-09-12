@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { getSettings } from "./api";
 
 /** A boolean the operator sets once and keeps for the rest of the session. */
 export function useSessionToggle(key: string, fallback: boolean): [boolean, (next: boolean) => void] {
@@ -26,6 +27,75 @@ export function useSessionToggle(key: string, fallback: boolean): [boolean, (nex
   );
 
   return [value, update];
+}
+
+/** A string the operator sets once and keeps for the rest of the session. */
+export function useSessionPath(key: string, fallback = ""): [string, (next: string) => void] {
+  const [value, setValue] = useState<string>(() => {
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw !== null) return raw;
+    } catch {
+      /* ignore */
+    }
+    return fallback;
+  });
+
+  const update = useCallback(
+    (next: string) => {
+      setValue(next);
+      try {
+        sessionStorage.setItem(key, next);
+      } catch {
+        /* ignore */
+      }
+    },
+    [key]
+  );
+
+  return [value, update];
+}
+
+let defaultExportDirRequest: Promise<string> | null = null;
+let defaultExportDirVersion = 0;
+const defaultExportDirListeners = new Set<() => void>();
+
+/** Invalidates the shared default-export-dir fetch so every mounted `useDefaultExportDir` refetches. */
+export function refreshDefaultExportDir(): void {
+  defaultExportDirRequest = null;
+  defaultExportDirVersion += 1;
+  defaultExportDirListeners.forEach((listener) => listener());
+}
+
+/** The operator's persisted default export folder (`""` when unset), fetched once and shared. */
+export function useDefaultExportDir(): string {
+  const [value, setValue] = useState("");
+  const [version, setVersion] = useState(defaultExportDirVersion);
+
+  useEffect(() => {
+    const listener = () => setVersion((v) => v + 1);
+    defaultExportDirListeners.add(listener);
+    return () => {
+      defaultExportDirListeners.delete(listener);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!defaultExportDirRequest) {
+      defaultExportDirRequest = getSettings()
+        .then((settings) => settings.defaultExportDir || "")
+        .catch(() => "");
+    }
+    defaultExportDirRequest.then((dir) => {
+      if (!cancelled) setValue(dir);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [version]);
+
+  return value;
 }
 
 export const SHOW_INFO_KEY = "obed-edom.findings.showInfo";

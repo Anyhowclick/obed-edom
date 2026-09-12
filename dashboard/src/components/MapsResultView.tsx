@@ -1,6 +1,15 @@
 import { previewUrl, reveal, type Job } from "../api";
+import { JobName } from "./JobName";
 
-export function MapsResultView({ job, onOpen }: { job: Job; onOpen: (src: string) => void }) {
+export function MapsResultView({
+  job,
+  onOpen,
+  onRename,
+}: {
+  job: Job;
+  onOpen: (src: string) => void;
+  onRename?: (id: string, name: string) => Promise<Job>;
+}) {
   const result = (job.result || {}) as {
     destPath?: string;
     destPathCg?: string;
@@ -11,6 +20,7 @@ export function MapsResultView({ job, onOpen }: { job: Job; onOpen: (src: string
   const names = result.previewFiles?.maps || [];
   return (
     <div>
+      {onRename && <JobName job={job} onRename={onRename} className="note" />}
       {result.destPath && (
         <p className="note path-note">
           LED wall: {result.destPath}{" "}

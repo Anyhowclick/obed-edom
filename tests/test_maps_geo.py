@@ -1,3 +1,5 @@
+import pytest
+
 from obed_edom.maps_geo import (
     CG_MIN_ZOOM,
     CG_WIDTH,
@@ -68,6 +70,22 @@ def test_lon_wraps_across_the_dateline():
     assert clamp_lon(-190) == 170
     assert clamp_lon(180) == 180
     assert clamp_lon(-180) == -180
+
+
+def test_lon_wraps_large_multiples_without_looping():
+    assert clamp_lon(720 + 190) == -170
+    assert clamp_lon(-720 - 190) == 170
+
+
+def test_clamp_lon_rejects_non_finite():
+    with pytest.raises(ValueError):
+        clamp_lon(float("inf"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("-inf"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("nan"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("1e400"))
 
 
 def test_clamp_zoom_allows_below_wrap_thresholds():
@@ -193,6 +211,36 @@ def test_usa_is_not_lusaka(monkeypatch):
     assert hit["camera"]["lon"] < 0
     place = search_places("usa")
     assert place is None or "lusaka" not in str(place.get("label") or "").lower()
+
+
+def test_geocode_singapore_carries_place_type(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    hit = geocode("Singapore")
+    assert hit["source"] == "places"
+    assert hit["placeType"] == "city"
+
+
+def test_parse_maps_query_zoom_from_url():
+    at = parse_maps_query("@1.3,103.8,6.8z")
+    assert at["zoomFromUrl"] is True
+    comma_zoom = parse_maps_query("https://www.google.com/maps/@1.3,103.8/data=!3d1!4d1,6.8z")
+    assert comma_zoom["zoomFromUrl"] is True
+    no_zoom = parse_maps_query("https://www.google.com/maps/@1.3,103.8")
+    assert no_zoom["zoomFromUrl"] is False
+    bare_pair = parse_maps_query("1.3,103.8")
+    assert bare_pair["zoomFromUrl"] is False
+
+
+def test_country_via_admin0_has_place_type(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    hit = geocode("USA")
+    assert hit["placeType"] == "country"
 
 
 def test_geometry_bbox_antimeridian_not_lon_zero():

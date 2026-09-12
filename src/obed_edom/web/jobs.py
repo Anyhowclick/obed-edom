@@ -15,6 +15,10 @@ from obed_edom.inspect import preview_media
 # Aliased: `output_root` is also a parameter name in this module.
 from obed_edom.paths import output_root as default_output_root
 from obed_edom.validate import flag_dict
+from obed_edom.web.job_names import generate_job_name, normalise_job_name
+
+# Id-derived private roots whose basename follows job.name (see JobRunner.rename).
+_ID_DERIVED_ROOTS = (".maps", ".watercolour", ".resize", ".diff", ".outline", ".inspect")
 
 
 @dataclass
@@ -22,6 +26,7 @@ class Job:
     id: str
     kind: str
     feature: str = ""
+    name: str = ""
     status: str = "queued"
     logs: list[str] = field(default_factory=list)
     error: str | None = None
@@ -46,6 +51,7 @@ class Job:
             "id": self.id,
             "kind": self.kind,
             "feature": self.feature,
+            "name": self.name,
             "status": self.status,
             "logs": self.logs[-80:],
             "error": self.error,
@@ -60,6 +66,7 @@ class Job:
             id=str(data["id"]),
             kind=str(data.get("kind") or "job"),
             feature=str(data.get("feature") or data.get("kind") or "job"),
+            name=str(data.get("name") or data["id"]),
             status=str(data.get("status") or "done"),
             logs=list(data.get("logs") or []),
             error=data.get("error"),
@@ -78,8 +85,10 @@ class JobRunner:
         self._queue: deque[str] = deque()
         self._running: set[str] = set()
         self._lock = threading.Lock()
-        self._job_locks: dict[str, threading.Lock] = {}
+        self._job_locks: dict[str, threading.RLock] = {}
         self._deleted_ids: set[str] = set()
+        self._deleted_names: set[str] = set()
+        self._reserved_names: set[str] = set()
         self._cv = threading.Condition(self._lock)
         self._load_sessions()
         self._worker = threading.Thread(target=self._loop, daemon=True)
@@ -95,7 +104,8 @@ class JobRunner:
     ) -> Job:
         with self._cv:
             job_id = self._new_job_id()
-            job = Job(id=job_id, kind=kind, feature=feature or kind, result=result)
+            job_name = self._new_job_name()
+            job = Job(id=job_id, kind=kind, feature=feature or kind, name=job_name, result=result)
             self._jobs[job.id] = job
             self._fns[job.id] = fn
             self._queue.append(job.id)
@@ -112,23 +122,39 @@ class JobRunner:
     def _generate_job_id() -> str:
         return str(uuid.uuid4())[:8]
 
+    def _new_job_name(self) -> str:
+        taken = {job.name.lower() for job in self._jobs.values()} | self._deleted_names | self._reserved_names
+        for _ in range(200):
+            candidate = generate_job_name(taken)
+            if not self._name_folder_exists(candidate):
+                return candidate
+            taken.add(candidate.lower())
+        return f"{candidate}-{uuid.uuid4().hex[:6]}"
+
+    def _name_folder_exists(self, name: str) -> bool:
+        for root_name in _ID_DERIVED_ROOTS:
+            if (self._output_root / root_name / name).exists():
+                return True
+        return False
+
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
     def rerun(self, job_id: str, fn: Callable[[Job], dict[str, Any]]) -> Job | None:
-        with self._cv:
-            job = self._jobs.get(job_id)
-            if not job:
-                return None
-            if job_id in self._running or job.status == "running":
-                raise RuntimeError("Job is already running")
-            job.status = "queued"
-            job.error = None
-            job._cancelled.clear()
-            job.updated_at = time.time()
-            self._fns[job.id] = fn
-            self._queue.append(job.id)
-            self._cv.notify()
+        with self._job_lock(job_id):
+            with self._cv:
+                job = self._jobs.get(job_id)
+                if not job:
+                    return None
+                if job_id in self._running or job.status == "running":
+                    raise RuntimeError("Job is already running")
+                job.status = "queued"
+                job.error = None
+                job._cancelled.clear()
+                job.updated_at = time.time()
+                self._fns[job.id] = fn
+                self._queue.append(job.id)
+                self._cv.notify()
         return job
 
     def cancel(self, job_id: str) -> Job | None:
@@ -167,12 +193,18 @@ class JobRunner:
         data["artifacts"] = artifact_status(job, self._output_root)
         return data
 
-    def _job_lock(self, job_id: str) -> threading.Lock:
+    def _job_lock(self, job_id: str) -> threading.RLock:
         with self._lock:
             lock = self._job_locks.get(job_id)
             if lock is None:
-                lock = self._job_locks[job_id] = threading.Lock()
+                lock = self._job_locks[job_id] = threading.RLock()
             return lock
+
+    def job_lock(self, job_id: str) -> threading.RLock:
+        """Public accessor so a feature's own commit transaction (e.g. maps' `rename_job_folder`)
+        can hold this job's lock across `set_name`/`update_result` calls that re-acquire it;
+        the lock is an `RLock` so those inner acquisitions do not deadlock."""
+        return self._job_lock(job_id)
 
     def save(self, job: Job) -> None:
         if job.status not in {"done", "error"}:
@@ -238,12 +270,122 @@ class JobRunner:
             result["destPathDsk"] = str(Path(dest_path_dsk).expanduser())
         return self.update_result(job_id, result)
 
+    def _is_name_taken_locked(self, name: str, *, exclude_job_id: str | None = None) -> bool:
+        lowered = name.lower()
+        for job in self._jobs.values():
+            if job.id != exclude_job_id and job.name.lower() == lowered:
+                return True
+        return lowered in self._deleted_names or lowered in self._reserved_names
+
+    def reserve_name(self, name: str, *, exclude_job_id: str | None = None) -> None:
+        """Claim a target name for an in-flight rename transaction so a concurrent
+        submit or rename can't take it before the transaction commits or aborts."""
+        with self._lock:
+            if self._is_name_taken_locked(name, exclude_job_id=exclude_job_id):
+                raise FileExistsError(f"A job named '{name}' already exists")
+            self._reserved_names.add(name.lower())
+
+    def release_name(self, name: str) -> None:
+        with self._lock:
+            self._reserved_names.discard(name.lower())
+
+    def set_name(self, job_id: str, name: str, *, save: bool = True) -> Job:
+        """Assign an already-validated name, optionally saving immediately. Used directly
+        by feature-specific rename flows (e.g. maps, which moves its folder inside
+        `maps_commit`). Pass `save=False` to assign the name in memory only, leaving a
+        later `update_result` (in the same commit) to persist name and result together."""
+        with self._job_lock(job_id):
+            job = self._jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            previous_name, previous_updated_at = job.name, job.updated_at
+            job.name = name
+            job.updated_at = time.time()
+            if save:
+                try:
+                    self.save(job)
+                except Exception:
+                    job.name, job.updated_at = previous_name, previous_updated_at
+                    raise
+        return job
+
+    def rename(self, job_id: str, raw_name: str) -> Job:
+        """Generic rename for the id-derived folders owned directly by jobs.py
+        (resize/diff/outline/inspect/watercolour). Maps jobs are renamed through
+        `maps.rename_job_folder`, which stages the folder move via `maps_commit`."""
+        with self._job_lock(job_id):
+            job = self._jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status in {"queued", "running"} or job_id in self._running:
+                raise RuntimeError("Job is still running")
+            name = normalise_job_name(raw_name)
+            if name == job.name.lower():
+                return job
+            old_name = job.name
+            self.reserve_name(name, exclude_job_id=job_id)
+            try:
+                self.reserve_name(old_name, exclude_job_id=job_id)
+            except Exception:
+                self.release_name(name)
+                raise
+            try:
+                result = dict(job.result or {})
+                old_dir = self._id_derived_dir(result)
+                new_dir: Path | None = None
+                if old_dir is not None and old_dir.name == job.name:
+                    new_dir = old_dir.parent / name
+                    if new_dir.exists():
+                        raise FileExistsError(f"A folder named '{name}' already exists")
+                    os.replace(old_dir, new_dir)
+                    result = rewrite_result_paths(result, old_dir, new_dir)
+                    if result.get("stem") == job.name:
+                        result["stem"] = name
+                previous_name, previous_result, previous_updated_at = job.name, job.result, job.updated_at
+                job.name = name
+                job.result = result
+                job.updated_at = time.time()
+                try:
+                    self.save(job)
+                except Exception:
+                    job.name, job.result, job.updated_at = previous_name, previous_result, previous_updated_at
+                    if new_dir is not None and old_dir is not None:
+                        os.replace(new_dir, old_dir)
+                    raise
+            finally:
+                self.release_name(name)
+                self.release_name(old_name)
+        return job
+
+    def _id_derived_dir(self, result: dict[str, Any]) -> Path | None:
+        output_dir = result.get("outputDir")
+        if not output_dir:
+            return None
+        candidate = Path(output_dir)
+        root = self._output_root.resolve()
+        for root_name in _ID_DERIVED_ROOTS:
+            private_root = (root / root_name).resolve()
+            try:
+                private_root.relative_to(root)
+            except ValueError:
+                continue
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(private_root)
+            except (OSError, ValueError):
+                continue
+            if resolved.parent == private_root:
+                return candidate
+        return None
+
     def delete(self, job_id: str, *, purge: bool = True) -> bool:
         with self._job_lock(job_id):
             with self._lock:
                 job = self._jobs.pop(job_id, None)
                 if job is not None:
                     self._deleted_ids.add(job_id)
+                    self._deleted_names.add(job.name.lower())
+                self._job_locks.pop(job_id, None)
             if not job:
                 return False
             self._session_file(job_id).unlink(missing_ok=True)
@@ -349,23 +491,56 @@ class JobRunner:
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
             finally:
-                with self._cv:
-                    if job.cancelled():
-                        job.status = "error"
-                        job.error = "Export cancelled."
-                        job.log("Cancelled.")
-                    elif error is not None:
-                        job.status = "error"
-                        job.error = error
-                        job.log(f"Error: {error}")
-                    else:
-                        job.result = result
-                        job.status = "done"
-                        job.log("Finished.")
-                    self._running.discard(job_id)
-                    job.updated_at = time.time()
-            with self._job_lock(job_id):
-                self.save(job)
+                with self._job_lock(job_id):
+                    with self._cv:
+                        previous_result, previous_status = job.result, job.status
+                        if job.cancelled():
+                            job.status = "error"
+                            job.error = "Export cancelled."
+                            job.log("Cancelled.")
+                        elif error is not None:
+                            job.status = "error"
+                            job.error = error
+                            job.log(f"Error: {error}")
+                        else:
+                            job.result = result
+                            job.status = "done"
+                            job.log("Finished.")
+                        self._running.discard(job_id)
+                        job.updated_at = time.time()
+                    try:
+                        self.save(job)
+                    except Exception as exc:  # noqa: BLE001
+                        if error is None and not job.cancelled():
+                            job.result = previous_result
+                            job.status = "error"
+                            job.error = str(exc)
+                            job.log(f"Error: {exc}")
+
+
+def rewrite_result_paths(result: dict[str, Any], old_dir: Path, new_dir: Path) -> dict[str, Any]:
+    """Recursively replace absolute-path strings rooted at `old_dir` with `new_dir`.
+
+    Relative filenames (e.g. `stillPng`, `previewFiles` entries) are untouched by
+    construction: only strings equal to or prefixed by `str(old_dir)` are rewritten.
+    """
+    old_str, new_str = str(old_dir), str(new_dir)
+    prefix = old_str + os.sep
+
+    def rewrite(value: Any) -> Any:
+        if isinstance(value, str):
+            if value == old_str:
+                return new_str
+            if value.startswith(prefix):
+                return new_str + value[len(old_str):]
+            return value
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        return value
+
+    return rewrite(result)
 
 
 def serialize_flags(flags) -> list[dict]:

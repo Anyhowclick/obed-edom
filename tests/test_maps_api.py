@@ -1,10 +1,12 @@
 import json
+import os
 import shutil
 import subprocess
 import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
@@ -469,7 +471,7 @@ def test_bootstrap_csv_infers_hop_kind_against_deck_resolved_legacy_slide(monkey
     job = _seed()
     stored = RUNNER.get(job["id"])
     assert stored is not None
-    camera = camera_dict(1.3521, 103.8198, 8)
+    camera = camera_dict(1.3521, 103.8198, 13)
     stored.result["hiddenLayers"] = ["pois"]
     stored.result["slides"][0]["camera"] = camera
     stored.result["slides"][0]["hiddenLayers"] = None
@@ -893,6 +895,73 @@ def test_reveal_duration_out_of_range_rejected():
         {
             "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
             "assetId": asset["id"], "size": 180, "reveal": {"kind": "brush", "duration": 10},
+        }
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
+def test_scale_with_map_round_trips_on_landmark():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "scaleWithMap": True, "sizeZoom": 6.5,
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    church = saved.json()["result"]["slides"][0]["churches"][0]
+    assert church["scaleWithMap"] is True
+    assert church["sizeZoom"] == 6.5
+
+
+def test_scale_with_map_rejected_without_size_zoom():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "scaleWithMap": True,
+        }
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
+def test_scale_with_map_rejected_on_non_landmark():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {"id": "p1", "name": "Dot", "lat": 3, "lon": 101, "kind": "dot", "color": "#c44a42", "scaleWithMap": True, "sizeZoom": 6},
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
+def test_size_zoom_out_of_range_rejected():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "scaleWithMap": True, "sizeZoom": 23,
         }
     ]
     rejected = _save(job, doc)
@@ -1604,6 +1673,8 @@ def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
     church = slide["churches"][-1]
     assert church["size"] == _default_landmark_size(church["assetWidth"])
     assert church["size"] != 180
+    assert church["scaleWithMap"] is True
+    assert church["sizeZoom"] == slide["camera"]["zoom"]
     import re
     assert re.fullmatch(r"w[0-9a-f]{8}", church["id"])
 
@@ -1839,14 +1910,14 @@ def test_two_concurrent_appends_both_land_with_distinct_ids_and_assets(monkeypat
     from obed_edom.web import maps
 
     barrier = threading.Barrier(2)
-    real_decode = maps._decode_png
+    real_decode = maps.decode_png
 
     def gated_decode(raw):
         payload = real_decode(raw)
         barrier.wait(5)
         return payload
 
-    monkeypatch.setattr(maps, "_decode_png", gated_decode)
+    monkeypatch.setattr(maps, "decode_png", gated_decode)
 
     def upload(name):
         return client.post(
@@ -1990,13 +2061,13 @@ def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
     monkeypatch.setattr(maps, "_validate_raster", gated_validate_raster)
 
     write_calls = []
-    real_write_atomic = maps._write_atomic
+    real_stage_bytes = maps.MapsCommit.stage_bytes
 
-    def spy_write_atomic(path, data):
+    def spy_stage_bytes(self, path, data):
         write_calls.append(Path(path))
-        return real_write_atomic(path, data)
+        return real_stage_bytes(self, path, data)
 
-    monkeypatch.setattr(maps, "_write_atomic", spy_write_atomic)
+    monkeypatch.setattr(maps.MapsCommit, "stage_bytes", spy_stage_bytes)
 
     stale_image = Image.new("RGBA", (40, 20), (10, 200, 10, 255))
     stale_buffer = BytesIO()
@@ -2123,19 +2194,24 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
 
     tail_reached = threading.Event()
     release_tail = threading.Event()
-    real_mutate_document = maps._mutate_document
+    real_maps_commit = maps.maps_commit
     tail_lock_state = {}
-
-    def spy_mutate_document(job_id, expected_revision, mutate):
-        if job_id == job_b["id"] and "owned" not in tail_lock_state:
-            tail_lock_state["owned"] = maps._mutation_lock(job_id)._is_owned()
-            tail_reached.set()
-            release_tail.wait(5)
-        return real_mutate_document(job_id, expected_revision, mutate)
-
-    monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
-
     append_lock_reached = threading.Event()
+
+    @contextmanager
+    def spy_maps_commit(job_id, expected_revision=None, *, bump=True):
+        if job_id == job_b["id"]:
+            if "owned" not in tail_lock_state:
+                tail_lock_state["owned"] = maps._mutation_lock(job_id)._is_owned()
+                tail_reached.set()
+                release_tail.wait(5)
+            else:
+                append_lock_reached.set()
+        with real_maps_commit(job_id, expected_revision, bump=bump) as commit:
+            yield commit
+
+    monkeypatch.setattr(maps, "maps_commit", spy_maps_commit)
+
     landmark_bytes = _landmark_png()
 
     import_outcome_b = {}
@@ -2152,15 +2228,6 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     # The status flip and the publish call must already be running under the
     # job's own mutation lock, held by the import thread.
     assert tail_lock_state.get("owned") is True
-
-    real_mutate_document_with_asset = maps._mutate_document_with_asset
-
-    def spy_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate):
-        if job_id == job_b["id"] and not append_lock_reached.is_set():
-            append_lock_reached.set()
-        return real_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate)
-
-    monkeypatch.setattr(maps, "_mutate_document_with_asset", spy_mutate_document_with_asset)
 
     append_outcome = {}
 
@@ -2241,14 +2308,16 @@ def test_load_session_locks_idle_check_and_status_flip_together(monkeypatch):
         )
 
     append_lock_reached = threading.Event()
-    real_mutate_document_with_asset = maps._mutate_document_with_asset
+    real_maps_commit = maps.maps_commit
 
-    def spy_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate):
+    @contextmanager
+    def spy_maps_commit(job_id, expected_revision=None, *, bump=True):
         if job_id == job["id"] and not append_lock_reached.is_set():
             append_lock_reached.set()
-        return real_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate)
+        with real_maps_commit(job_id, expected_revision, bump=bump) as commit:
+            yield commit
 
-    monkeypatch.setattr(maps, "_mutate_document_with_asset", spy_mutate_document_with_asset)
+    monkeypatch.setattr(maps, "maps_commit", spy_maps_commit)
 
     append_thread = threading.Thread(target=do_append)
     append_thread.start()
@@ -2358,3 +2427,1247 @@ def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch
     tmps = set(asset_dir.glob("*.tmp")) if asset_dir.is_dir() else set()
     assert not pngs
     assert not tmps
+
+
+def test_bootstrap_csv_headerless_paste_zooms_via_ladder(monkeypatch):
+    job = _seed()
+
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": 'China\nUdaipur,"24.58, 73.68"\n', "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert len(new_slides) == 2
+    china_slide = next(s for s in new_slides if s["title"] == "China")
+    udaipur_slide = next(s for s in new_slides if s["title"] == "Udaipur")
+    assert china_slide["camera"]["zoom"] == pytest.approx(4.3)
+    assert udaipur_slide["camera"]["zoom"] == pytest.approx(13.0)
+
+
+def test_bootstrap_csv_row_error_returns_400_with_line_detail():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China\n,24.5 N, 73.6 E\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail[0].startswith("Line 2:")
+
+
+def test_bootstrap_csv_headerless_paste_into_pins(monkeypatch):
+    job = _seed()
+
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China\n", "targetSlideId": "s1", "audience": "lw"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    pins = done["result"]["slides"][0]["churches"]
+    assert [pin["name"] for pin in pins] == ["China"]
+
+
+def test_bootstrap_csv_headerless_explicit_zoom_wins_over_ladder(monkeypatch):
+    job = _seed()
+
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China,z=6.8\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    china_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert china_slide["camera"]["zoom"] == pytest.approx(6.8)
+
+
+def test_bootstrap_csv_headerless_leftover_words_qualify_the_geocode_query(monkeypatch):
+    job = _seed()
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "Paris,France\nUdaipur,India,z=6.8\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Paris, France", "Udaipur, India"]
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    udaipur_slide = next(s for s in new_slides if s["title"] == "Udaipur")
+    assert udaipur_slide["camera"]["zoom"] == pytest.approx(6.8)
+
+
+def test_bootstrap_csv_header_form_place_column_is_full_query_override(monkeypatch):
+    job = _seed()
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": 'name,place\nMy Church,"Paris, France"\n', "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Paris, France"]
+
+
+def test_bootstrap_csv_header_form_bad_zoom_reports_error_not_crash():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,zoom\nParis,notazoom\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert "Line 2" in detail[0]
+    assert "bad zoom" in detail[0]
+
+
+def test_bootstrap_csv_header_form_unknown_kind_reports_error_not_crash():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,kind\nParis,spaceport\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert "Line 2" in detail[0]
+    assert "unknown kind" in detail[0]
+
+
+def test_bootstrap_csv_place_only_header_with_extra_comma_is_joined_not_a_500(monkeypatch):
+    job = _seed()
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "place\nParis, France\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Paris, France"]
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert len(new_slides) == 1
+
+
+def test_bootstrap_csv_multi_column_header_extra_columns_is_400_not_500():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nX,1,2,3\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert "Line 2" in detail[0]
+    assert "too many columns" in detail[0]
+
+
+def test_bootstrap_csv_place_header_naming_country_adopts_country_name_as_title():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "place\nFrance\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert len(new_slides) == 1
+    assert new_slides[0]["title"] == "France"
+# --- maps_commit contract tests -----------------------------------------------
+
+
+def test_asset_upload_rolls_back_on_save_failure(monkeypatch):
+    job = _seed()
+    before_revision = int(job["result"].get("stateRevision") or 0)
+    before_assets = job["result"].get("assets") or []
+
+    def boom(_job_id, _result):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(RUNNER, "update_result", boom)
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/api/maps/{job['id']}/assets",
+            files={"file": ("church.png", _landmark_png(), "image/png")},
+        )
+    monkeypatch.undo()
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    assert int(latest["result"].get("stateRevision") or 0) == before_revision
+    assert latest["result"].get("assets") == before_assets
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    leftover = set(asset_dir.glob("*")) if asset_dir.is_dir() else set()
+    assert not leftover
+
+
+def test_session_import_restores_assets_and_previews_when_commit_fails(monkeypatch):
+    from obed_edom.web import maps
+
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&kind=thumb", content=_landmark_png())
+    assert thumb.status_code == 200, thumb.text
+    landmark = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert landmark.status_code == 200, landmark.text
+    before = client.get(f"/api/jobs/{map_job['id']}").json()
+    before_revision = int(before["result"]["stateRevision"] or 0)
+    asset_dir = Path(before["result"]["outputDir"]) / "assets"
+    preview_dir = Path(before["result"]["previewDir"])
+    before_asset_names = sorted(p.name for p in asset_dir.glob("*.png"))
+    before_asset_bytes = {p.name: p.read_bytes() for p in asset_dir.glob("*.png")}
+    before_preview_names = sorted(p.name for p in preview_dir.glob("*.png"))
+    before_preview_bytes = {p.name: p.read_bytes() for p in preview_dir.glob("*.png")}
+
+    session = client.get(f"/api/maps/{map_job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    real_update_result = RUNNER.update_result
+
+    def failing_update_result(job_id, result):
+        if job_id == map_job["id"]:
+            raise RuntimeError("simulated save failure")
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+    with pytest.raises(RuntimeError, match="simulated save failure"):
+        client.post(
+            f"/api/maps/{map_job['id']}/session",
+            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+        )
+    monkeypatch.undo()
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert int(latest["result"]["stateRevision"] or 0) == before_revision
+    after_asset_names = sorted(p.name for p in asset_dir.glob("*.png"))
+    after_preview_names = sorted(p.name for p in preview_dir.glob("*.png"))
+    assert after_asset_names == before_asset_names
+    assert after_preview_names == before_preview_names
+    for name, data in before_asset_bytes.items():
+        assert (asset_dir / name).read_bytes() == data
+    for name, data in before_preview_bytes.items():
+        assert (preview_dir / name).read_bytes() == data
+    assert not list(asset_dir.glob("*.obedbak-*"))
+    assert not list(preview_dir.glob("*.obedbak-*"))
+    assert not list(asset_dir.parent.glob(".session-import-*"))
+
+
+def test_session_import_restores_prior_error_status_when_update_result_fails(monkeypatch):
+    map_job = _seed()
+    session = client.get(f"/api/maps/{map_job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    job = RUNNER.get(map_job["id"])
+    job.status = "error"
+    job.error = "prior failure"
+
+    real_update_result = RUNNER.update_result
+
+    def failing_update_result(job_id, result):
+        if job_id == map_job["id"]:
+            raise RuntimeError("simulated save failure")
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+    with pytest.raises(RuntimeError, match="simulated save failure"):
+        client.post(
+            f"/api/maps/{map_job['id']}/session",
+            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+        )
+    monkeypatch.undo()
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert latest["status"] == "error"
+    assert latest["error"] == "prior failure"
+
+
+def test_session_import_bumps_revision_and_invalidates_stale_save():
+    job = _seed()
+    doc = _doc(job)
+    stale_revision = int(job["result"].get("stateRevision") or 0)
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    loaded = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("saved.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    new_revision = int(loaded.json()["result"]["stateRevision"] or 0)
+    assert new_revision == stale_revision + 1
+
+    stale_save = client.post(
+        f"/api/maps/{job['id']}/state",
+        json={"expectedRevision": stale_revision, "document": doc},
+    )
+    assert stale_save.status_code == 409, stale_save.text
+    assert stale_save.json()["detail"]["stateRevision"] == new_revision
+
+
+def test_export_bumps_state_revision(monkeypatch):
+    job = _seed()
+    before_revision = int(job["result"].get("stateRevision") or 0)
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    response = client.post(f"/api/maps/{job['id']}/export")
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert int(done["result"]["stateRevision"] or 0) == before_revision + 1
+
+
+def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
+    job = _seed()
+    captured = {}
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        captured["export_dir"] = export_dir
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    export_dir = tmp_path / "exports"
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": str(export_dir)})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_dir"] == export_dir.resolve()
+    assert done["result"]["exportDir"] == str(export_dir.resolve())
+
+
+def test_export_clears_export_dir_with_empty_string(monkeypatch, tmp_path):
+    job = _seed()
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    export_dir = tmp_path / "exports"
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": str(export_dir)})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["result"]["exportDir"] == str(export_dir.resolve())
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert "exportDir" not in done["result"]
+
+
+def test_export_uses_configured_default_export_dir_with_no_override(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    job = _seed()
+    captured = {}
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        captured["export_dir"] = export_dir
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    default_dir = tmp_path / "default-exports"
+    default_dir.mkdir()
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(default_dir)}
+    )
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_dir"] == default_dir.resolve()
+    # The resolved operator default is used for this export, but it is not a sticky
+    # per-job override — a later export with no default configured must not carry it.
+    assert "exportDir" not in done["result"]
+
+
+def test_export_uses_output_root_default_flat_not_private_maps_dir(monkeypatch, tmp_path):
+    from obed_edom.paths import output_root
+
+    job = _seed()
+    captured = {}
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        captured["export_dir"] = export_dir
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    # No operator default configured: the default resolves to `output_root()`, which
+    # must be passed through as the flat export destination rather than nulled back to
+    # the job's private `.maps` directory.
+    assert captured["export_dir"] == output_root()
+    assert "exportDir" not in done["result"]
+
+
+def test_export_fails_when_configured_default_export_dir_vanishes(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    job = _seed()
+    stale_dir = tmp_path / "gone"
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(stale_dir)}
+    )
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 400
+    assert "no longer exists" in response.json()["detail"]
+
+
+def test_export_rejects_private_root_export_dir():
+    from obed_edom.paths import output_root
+
+    job = _seed()
+    response = client.post(
+        f"/api/maps/{job['id']}/export", json={"exportDir": str(output_root() / ".maps")}
+    )
+    assert response.status_code == 400
+
+
+def test_export_body_rejects_unknown_field_other_than_export_dir():
+    job = _seed()
+    response = client.post(f"/api/maps/{job['id']}/export", json={"bogus": True})
+    assert response.status_code == 422
+
+
+def test_bootstrap_csv_bumps_state_revision(monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    job = _seed()
+    before_revision = int(job["result"].get("stateRevision") or 0)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nSingapore,1.3521,103.8198\n", "replace": "true"},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert int(done["result"]["stateRevision"] or 0) == before_revision + 1
+
+    slide_id = done["result"]["slides"][0]["id"]
+    before_pin_revision = int(done["result"]["stateRevision"] or 0)
+    pinned = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nHanoi,21.0278,105.8342\n", "targetSlideId": slide_id},
+    )
+    assert pinned.status_code == 200, pinned.text
+    done_pin = _wait(job["id"])
+    assert done_pin["status"] == "done", done_pin.get("error")
+    assert int(done_pin["result"]["stateRevision"] or 0) == before_pin_revision + 1
+
+
+def test_still_and_plate_writes_take_the_mutation_lock():
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    still_body = _landmark_png()
+    plate_body = _landmark_png()
+
+    def post_still():
+        return client.post(f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=still", content=still_body)
+
+    def post_plate():
+        return client.post(f"/api/maps/{job['id']}/png?plateId=plate-a&kind=plate", content=plate_body)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(post_still) for _ in range(4)] + [pool.submit(post_plate) for _ in range(4)]
+        responses = [future.result(timeout=5) for future in futures]
+    for response in responses:
+        assert response.status_code == 200, response.text
+
+    output_dir = Path(job["result"]["outputDir"])
+    stills = list((output_dir / "stills").glob("*.png"))
+    assert len(stills) == 1
+    assert stills[0].read_bytes() == still_body
+    assert not list((output_dir / "stills").glob("*.tmp"))
+    assert not list((output_dir / "stills").glob("*.obedbak-*"))
+
+    plates = list((output_dir / "plates").glob("*.png"))
+    assert len(plates) == 1
+    assert plates[0].read_bytes() == plate_body
+    assert not list((output_dir / "plates").glob("*.tmp"))
+    assert not list((output_dir / "plates").glob("*.obedbak-*"))
+
+
+def test_promote_removes_unpromoted_tmp_files_when_a_later_staged_path_fails(tmp_path, monkeypatch):
+    import os
+
+    from obed_edom.web import maps
+
+    commit = maps.MapsCommit(job_id="job", job=None, result={})
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    commit.stage_bytes(first, b"a")
+    commit.stage_bytes(second, b"b")
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    with pytest.raises(OSError):
+        commit._promote()
+
+    assert not first.exists()
+    assert not second.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_promote_restores_original_when_tmp_to_dest_replace_fails(tmp_path, monkeypatch):
+    import os
+
+    from obed_edom.web import maps
+
+    commit = maps.MapsCommit(job_id="job", job=None, result={})
+    dest = tmp_path / "dest.png"
+    dest.write_bytes(b"original")
+    commit.stage_bytes(dest, b"new")
+
+    tmp_path_marker = commit._promotions[0][1]
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if str(src) == str(tmp_path_marker) and str(dst) == str(dest):
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    with pytest.raises(OSError):
+        commit._promote()
+
+    assert dest.exists()
+    assert dest.read_bytes() == b"original"
+    assert not list(tmp_path.glob("*.obedbak-*"))
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_bootstrap_csv_enqueue_waits_for_admitted_commit(monkeypatch):
+    from obed_edom.web import maps
+
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    landmark_started = threading.Event()
+    release_landmark = threading.Event()
+    fired = threading.Event()
+
+    def hook(job_id):
+        if job_id == map_job["id"] and not fired.is_set():
+            fired.set()
+            landmark_started.set()
+            release_landmark.wait(5)
+
+    monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
+
+    landmark_outcome = {}
+
+    def do_landmark():
+        landmark_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    landmark_thread = threading.Thread(target=do_landmark)
+    landmark_thread.start()
+    assert landmark_started.wait(5)
+
+    before_revision = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+
+    bootstrap_outcome = {}
+    bootstrap_returned = threading.Event()
+
+    def do_bootstrap():
+        bootstrap_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/bootstrap-csv",
+            data={"csv_text": "name,lat,lon\nSt Marks,51.5,-0.1\n", "replace": "true"},
+        )
+        bootstrap_returned.set()
+
+    bootstrap_thread = threading.Thread(target=do_bootstrap)
+    bootstrap_thread.start()
+    assert not bootstrap_returned.wait(0.1)
+
+    revision_while_blocked = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+    assert revision_while_blocked == before_revision
+
+    release_landmark.set()
+    landmark_thread.join(5)
+    bootstrap_thread.join(5)
+
+    assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
+    assert bootstrap_outcome["response"].status_code == 200, bootstrap_outcome["response"].text
+
+    for _ in range(50):
+        if RUNNER.get(map_job["id"]).status != "queued" and RUNNER.get(map_job["id"]).status != "running":
+            break
+        time.sleep(0.1)
+
+    final = RUNNER.get(map_job["id"])
+    assert final.status == "done"
+    final_revision = int(final.result.get("stateRevision") or 0)
+    assert final_revision > before_revision
+
+
+def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
+    from obed_edom.web import maps
+
+    map_job = _seed()
+    commit_started = threading.Event()
+    release_commit = threading.Event()
+    fired = threading.Event()
+
+    def hook(job_id):
+        if job_id == map_job["id"] and not fired.is_set():
+            fired.set()
+            commit_started.set()
+            release_commit.wait(5)
+
+    monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
+
+    captured = {}
+
+    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True):
+        captured["export_lw"] = export_lw
+        captured["export_cg"] = export_cg
+        captured["export_dsk"] = export_dsk
+        return {**(job.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr(maps, "_run_export", fake_run_export)
+
+    doc = _doc(map_job)
+    assert doc["exportLw"] is True
+    doc["exportLw"] = False
+
+    state_outcome = {}
+
+    def do_state_save():
+        state_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/state",
+            json={"expectedRevision": 0, "document": doc},
+        )
+
+    state_thread = threading.Thread(target=do_state_save)
+    state_thread.start()
+    assert commit_started.wait(5)
+
+    before_revision = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+
+    export_outcome = {}
+    export_returned = threading.Event()
+
+    def do_export():
+        export_outcome["response"] = client.post(f"/api/maps/{map_job['id']}/export")
+        export_returned.set()
+
+    export_thread = threading.Thread(target=do_export)
+    export_thread.start()
+    assert not export_returned.wait(0.1)
+
+    revision_while_blocked = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+    assert revision_while_blocked == before_revision
+
+    release_commit.set()
+    state_thread.join(5)
+    export_thread.join(5)
+
+    assert state_outcome["response"].status_code == 200, state_outcome["response"].text
+    assert export_outcome["response"].status_code == 200, export_outcome["response"].text
+
+    done = _wait(map_job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_lw"] is False
+    assert captured["export_cg"] is True
+
+
+def test_session_export_snapshot_is_consistent(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    landmark_started = threading.Event()
+    release_landmark = threading.Event()
+    fired = threading.Event()
+
+    def hook(job_id):
+        if job_id == job["id"] and not fired.is_set():
+            fired.set()
+            landmark_started.set()
+            release_landmark.wait(5)
+
+    monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
+
+    outcome = {}
+
+    def do_export():
+        outcome["response"] = client.get(f"/api/maps/{job['id']}/session")
+
+    thread = threading.Thread(target=do_export)
+    thread.start()
+    assert landmark_started.wait(5)
+
+    landmark_outcome = {}
+
+    def do_landmark():
+        landmark_outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    landmark_thread = threading.Thread(target=do_landmark)
+    landmark_thread.start()
+    time.sleep(0.1)
+    assert landmark_thread.is_alive()
+
+    release_landmark.set()
+    thread.join(5)
+    landmark_thread.join(5)
+    monkeypatch.undo()
+
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
+
+    with zipfile.ZipFile(BytesIO(outcome["response"].content)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        manifest_asset_ids = {asset["id"] for asset in manifest["document"]["assets"]}
+        archive_asset_ids = {
+            name.split("/", 1)[1][: -len(".png")]
+            for name in archive.namelist()
+            if name.startswith("assets/") and name.endswith(".png")
+        }
+    assert manifest_asset_ids == archive_asset_ids
+
+
+def test_rename_maps_job_moves_folder_without_bumping_revision():
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    latest = client.get(f"/api/jobs/{job['id']}")
+    revision = int(latest.json()["result"].get("stateRevision") or 0)
+
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"Quiet Jordan {job['id']}"})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["name"] == target
+    new_output_dir = Path(body["result"]["outputDir"])
+    assert new_output_dir.name == target
+    assert not old_output_dir.exists()
+    assert new_output_dir.is_dir()
+    assert body["result"]["stem"] == target
+    assert int(body["result"].get("stateRevision") or 0) == revision
+
+    save_res = _save(body, _doc(body))
+    assert save_res.status_code == 200, save_res.text
+
+
+def test_rename_maps_job_leaves_external_dest_path_untouched(tmp_path):
+    job = _seed()
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    external_dest = export_dir / "wall.key"
+    external_dest.write_text("fake wall deck")
+    latest = client.get(f"/api/jobs/{job['id']}")
+    result = dict(latest.json()["result"])
+    result["destPath"] = str(external_dest)
+    from obed_edom.web.app import RUNNER
+
+    RUNNER.update_result(job["id"], result)
+
+    target = f"quiet-galilee-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["result"]["destPath"] == str(external_dest)
+    assert external_dest.is_file()
+
+
+def test_rename_maps_job_keeps_assets_and_previews_servable():
+    job = _seed()
+    preview_dir = Path(job["result"]["previewDir"])
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    (preview_dir / "s1.png").write_bytes(b"fake-png")
+
+    target = f"silent-tabor-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+
+    preview = client.get(f"/api/jobs/{job['id']}/previews/maps/s1.png")
+    assert preview.status_code == 200
+    assert Path(body["result"]["previewDir"]).parent.name == target
+
+
+def test_rename_maps_job_renames_orphaned_session_archive():
+    job = _seed()
+    archive = client.get(f"/api/maps/{job['id']}/session")
+    assert archive.status_code == 200, archive.text
+    old_archive_path = Path(job["result"]["outputDir"]) / f"{job['name']}.obedmaps"
+    assert old_archive_path.is_file()
+
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    new_output_dir = Path(body["result"]["outputDir"])
+    assert not old_archive_path.exists()
+    assert (new_output_dir / f"{target}.obedmaps").is_file()
+
+
+def test_rename_maps_job_rolls_back_on_commit_failure(monkeypatch):
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+
+    def boom(_job_id, result):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(RUNNER, "update_result", boom)
+    with pytest.raises(OSError):
+        client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    monkeypatch.undo()
+    assert old_output_dir.is_dir()
+    stored = RUNNER.get(job["id"])
+    assert stored.name == job["name"]
+
+
+def test_rename_refuses_duplicate_maps_name():
+    first = _seed()
+    second = _seed()
+    dup = client.patch(f"/api/jobs/{first['id']}/name", json={"name": second["name"]})
+    assert dup.status_code == 409
+
+
+def test_rename_maps_job_rejects_invalid_name():
+    job = _seed()
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": "../evil"})
+    assert res.status_code == 400
+
+
+def test_rename_maps_job_rolls_back_on_set_name_failure(monkeypatch):
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+
+    def boom(_job_id, _name, **_kwargs):
+        raise RuntimeError("session write failed")
+
+    monkeypatch.setattr(RUNNER, "set_name", boom)
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    assert res.status_code == 409
+    monkeypatch.undo()
+    assert old_output_dir.is_dir()
+    stored = RUNNER.get(job["id"])
+    assert stored.name == job["name"]
+    assert stored.result["outputDir"] == job["result"]["outputDir"]
+
+
+def test_rename_maps_job_writes_name_and_result_in_a_single_save(monkeypatch):
+    job = _seed()
+    calls = {"n": 0}
+    real_save = RUNNER.save
+
+    def counting_save(job_obj):
+        calls["n"] += 1
+        return real_save(job_obj)
+
+    monkeypatch.setattr(RUNNER, "save", counting_save)
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    monkeypatch.undo()
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert calls["n"] == 1
+    assert body["name"] == target
+    assert Path(body["result"]["outputDir"]).name == target
+
+    stored_raw = json.loads(RUNNER._session_file(job["id"]).read_text(encoding="utf-8"))
+    assert stored_raw["name"] == target
+    assert Path(stored_raw["result"]["outputDir"]).name == target
+
+
+def test_rename_maps_job_refused_while_running():
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.status = "running"
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"quiet-jordan-{job['id']}"})
+    assert res.status_code == 409
+    stored.status = "done"
+
+
+def test_rename_maps_job_refused_while_queued():
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.status = "queued"
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"quiet-jordan-{job['id']}"})
+    assert res.status_code == 409
+    stored.status = "done"
+
+
+def test_rename_non_maps_job_refused_while_running_returns_409():
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(_job):
+        started.set()
+        release.wait(2)
+        return {}
+
+    job = RUNNER.submit("resize", work, feature="resize")
+    assert started.wait(1)
+    res = client.patch(f"/api/jobs/{job.id}/name", json={"name": "quiet-jordan"})
+    assert res.status_code == 409
+    assert res.json()["detail"] == "Job is still running"
+    release.set()
+    _wait(job.id)
+
+
+def test_name_folder_exists_checks_all_id_derived_roots():
+    runner = RUNNER
+    for root_name in (".maps", ".watercolour", ".resize", ".diff", ".outline", ".inspect"):
+        folder = runner._output_root / root_name / "already-taken"
+        folder.mkdir(parents=True, exist_ok=True)
+        assert runner._name_folder_exists("already-taken") is True
+        folder.rmdir()
+    assert runner._name_folder_exists("definitely-not-taken") is False
+
+
+def test_rename_maps_job_rejects_folder_outside_maps_root():
+    job = _seed()
+    outside = Path(job["result"]["outputDir"]).parent.parent / "elsewhere" / job["name"]
+    outside.mkdir(parents=True)
+
+    stored = RUNNER.get(job["id"])
+    original_result = stored.result
+    tampered = dict(stored.result)
+    tampered["outputDir"] = str(outside)
+    stored.result = tampered
+
+    try:
+        res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+        assert res.status_code == 500
+    finally:
+        stored.result = original_result
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_rename_maps_job_restores_name_in_memory_when_restore_save_also_fails(monkeypatch):
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    old_result = job["result"]
+
+    def failing_save(_job_obj):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(RUNNER, "save", failing_save)
+    with pytest.raises(OSError):
+        client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    monkeypatch.undo()
+
+    assert old_output_dir.is_dir()
+    stored = RUNNER.get(job["id"])
+    assert stored.name == job["name"]
+    assert stored.result["outputDir"] == old_result["outputDir"]
+
+
+def test_rename_maps_reserves_target_name_across_concurrent_rename(monkeypatch):
+    from obed_edom.web import maps
+
+    job_a = _seed()
+    job_b = _seed()
+    target = f"shared-name-{job_a['id']}"
+
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+    old_dir_a = Path(job_a["result"]["outputDir"])
+
+    def hooked_replace(src, dst):
+        if str(src) == str(old_dir_a):
+            started.set()
+            release.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    outcome = {}
+
+    def do_rename_a():
+        outcome["response"] = client.patch(f"/api/jobs/{job_a['id']}/name", json={"name": target})
+
+    thread = threading.Thread(target=do_rename_a)
+    thread.start()
+    assert started.wait(2)
+
+    dup = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": target})
+    assert dup.status_code == 409
+
+    release.set()
+    thread.join(5)
+    monkeypatch.undo()
+
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert outcome["response"].json()["name"] == target
+    assert RUNNER.get(job_b["id"]).name != target
+
+
+def test_rename_maps_reserves_source_name_across_concurrent_rename(monkeypatch):
+    from obed_edom.web import maps
+
+    job_a = _seed()
+    job_b = _seed()
+    target = f"shared-name-{job_a['id']}"
+    old_name_a = job_a["name"]
+
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+    old_dir_a = Path(job_a["result"]["outputDir"])
+
+    def hooked_replace(src, dst):
+        if str(src) == str(old_dir_a):
+            started.set()
+            release.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    outcome = {}
+
+    def do_rename_a():
+        outcome["response"] = client.patch(f"/api/jobs/{job_a['id']}/name", json={"name": target})
+
+    thread = threading.Thread(target=do_rename_a)
+    thread.start()
+    assert started.wait(2)
+
+    # job_a's old name is briefly absent from `_jobs` (its in-memory name is
+    # already the target), but the transaction must have reserved it too.
+    dup = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
+    assert dup.status_code == 409
+
+    release.set()
+    thread.join(5)
+    monkeypatch.undo()
+
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert outcome["response"].json()["name"] == target
+    assert RUNNER.get(job_b["id"]).name != old_name_a
+
+
+def test_rename_maps_job_serializes_with_concurrent_delete(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    target = f"quiet-jordan-{job['id']}"
+
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+
+    def hooked_replace(src, dst):
+        if str(src) == str(old_output_dir):
+            started.set()
+            release.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    rename_outcome = {}
+
+    def do_rename():
+        rename_outcome["response"] = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+
+    thread = threading.Thread(target=do_rename)
+    thread.start()
+    assert started.wait(2)
+
+    delete_outcome = {}
+
+    def do_delete():
+        delete_outcome["response"] = client.delete(f"/api/jobs/{job['id']}")
+
+    delete_thread = threading.Thread(target=do_delete)
+    delete_thread.start()
+    time.sleep(0.2)
+    assert delete_thread.is_alive(), "delete must block behind the rename's held job lock"
+
+    release.set()
+    thread.join(5)
+    delete_thread.join(5)
+    monkeypatch.undo()
+
+    assert rename_outcome["response"].status_code == 200, rename_outcome["response"].text
+    new_output_dir = Path(rename_outcome["response"].json()["result"]["outputDir"])
+    assert delete_outcome["response"].status_code == 200, delete_outcome["response"].text
+    assert RUNNER.get(job["id"]) is None
+    assert not new_output_dir.exists()
+    assert not old_output_dir.exists()
+
+
+def test_rename_maps_job_delete_blocks_until_rollback_completes(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    new_output_dir = old_output_dir.parent / f"quiet-jordan-{job['id']}"
+    target = new_output_dir.name
+
+    commit_failing = threading.Event()
+    release_rollback = threading.Event()
+    rollback_started = threading.Event()
+    finish_rollback = threading.Event()
+    real_update_result = RUNNER.update_result
+    real_replace = os.replace
+
+    def failing_update_result(job_id, result):
+        if job_id == job["id"]:
+            commit_failing.set()
+            release_rollback.wait(5)
+            raise OSError("disk full")
+        return real_update_result(job_id, result)
+
+    def hooked_replace(src, dst):
+        if str(src) == str(new_output_dir) and str(dst) == str(old_output_dir):
+            rollback_started.set()
+            finish_rollback.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    rename_outcome = {}
+
+    def do_rename():
+        try:
+            rename_outcome["response"] = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+        except OSError as exc:
+            rename_outcome["error"] = exc
+
+    thread = threading.Thread(target=do_rename)
+    thread.start()
+    assert commit_failing.wait(2)
+    assert new_output_dir.is_dir()
+    assert not old_output_dir.exists()
+
+    delete_outcome = {}
+
+    def do_delete():
+        delete_outcome["response"] = client.delete(f"/api/jobs/{job['id']}")
+
+    delete_thread = threading.Thread(target=do_delete)
+    delete_thread.start()
+    time.sleep(0.2)
+    assert delete_thread.is_alive(), "delete must block behind the held job lock before the rollback even starts"
+
+    release_rollback.set()
+    assert rollback_started.wait(2)
+    time.sleep(0.2)
+    assert delete_thread.is_alive(), "delete must stay blocked while the rollback os.replace is in flight"
+
+    finish_rollback.set()
+    thread.join(5)
+    delete_thread.join(5)
+    monkeypatch.undo()
+
+    assert "error" in rename_outcome and isinstance(rename_outcome["error"], OSError)
+    assert delete_outcome["response"].status_code == 200, delete_outcome["response"].text
+    assert RUNNER.get(job["id"]) is None
+    assert not new_output_dir.exists()
+    assert not old_output_dir.exists()
+
+
+def test_rename_maps_job_reserves_source_name_during_failing_commit(monkeypatch):
+    job_a = _seed()
+    job_b = _seed()
+    old_name_a = job_a["name"]
+    old_output_dir_a = Path(job_a["result"]["outputDir"])
+    target = f"quiet-jordan-{job_a['id']}"
+
+    inside_failing_save = threading.Event()
+    release = threading.Event()
+    real_update_result = RUNNER.update_result
+
+    def failing_update_result(job_id, result):
+        if job_id == job_a["id"]:
+            inside_failing_save.set()
+            release.wait(5)
+            raise OSError("disk full")
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+
+    outcome = {}
+
+    def do_rename():
+        try:
+            outcome["response"] = client.patch(f"/api/jobs/{job_a['id']}/name", json={"name": target})
+        except OSError as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=do_rename)
+    thread.start()
+    assert inside_failing_save.wait(2)
+
+    refused = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
+    assert refused.status_code == 409
+
+    release.set()
+    thread.join(5)
+    monkeypatch.undo()
+
+    assert "error" in outcome and isinstance(outcome["error"], OSError)
+    assert old_output_dir_a.is_dir()
+    stored_a = RUNNER.get(job_a["id"])
+    assert stored_a.name == old_name_a
+    assert stored_a.result["outputDir"] == job_a["result"]["outputDir"]
+
+    still_refused = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
+    assert still_refused.status_code == 409
+    assert RUNNER.get(job_b["id"]).name != old_name_a

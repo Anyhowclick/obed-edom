@@ -1,9 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { cancelWatercolour, fetchWatercolourPreview, pollJob, startWatercolour } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { FileWell } from "../components/FileWell";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { WatercolourResultView } from "../components/WatercolourResultView";
+import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 import { floodFill } from "../watercolour/floodFill";
 import { sobelMagnitude, snapToEdge } from "../watercolour/edges";
@@ -1013,7 +1015,7 @@ const LandmarkMask = forwardRef<LandmarkMaskHandle, {
 });
 
 export function WatercolourTab() {
-  const { job, upsert, error: openError } = useCurrentJob("watercolour");
+  const { job, upsert, rename, error: openError } = useCurrentJob("watercolour");
   const [files, setFiles] = useState<File[]>([]);
   const [wash, setWash] = useState(0.65);
   const [ink, setInk] = useState(0.42);
@@ -1026,6 +1028,8 @@ export function WatercolourTab() {
   const [open, setOpen] = useState<string | null>(null);
   const cancelRef = useRef(false);
   const landmarkMaskRef = useRef<LandmarkMaskHandle | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.watercolour.exportDir");
+  const defaultExportDir = useDefaultExportDir();
 
   async function selectFiles(next: File[]) {
     const resolved = await Promise.all(next.map(toSupported));
@@ -1056,7 +1060,12 @@ export function WatercolourTab() {
       }
     }
     try {
-      const created = await startWatercolour(files, { washSoftness: wash, inkAmount: ink, masks: selectedMasks });
+      const created = await startWatercolour(files, {
+        washSoftness: wash,
+        inkAmount: ink,
+        masks: selectedMasks,
+        exportDir: exportDir || undefined,
+      });
       upsert(created);
       setFiles([]);
       const done = await pollJob(
@@ -1094,6 +1103,12 @@ export function WatercolourTab() {
           multiple
           onFiles={selectFiles}
           browseLabel="Choose on this Mac"
+        />
+        <ExportDestinationRow
+          value={exportDir}
+          onChange={setExportDir}
+          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+          onError={setError}
         />
       </div>
       {files.length > 0 && <p className="note">{files.map((file) => file.name).join(", ")}</p>}
@@ -1148,6 +1163,7 @@ export function WatercolourTab() {
           job={job}
           onOpen={setOpen}
           onError={setError}
+          onRename={rename}
           onEdit={(p) => {
             setFiles(p.files);
             setMasks(p.masks as Record<string, MaskSpec>);

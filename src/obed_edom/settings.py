@@ -11,6 +11,7 @@ DEFAULTS = {
     "reuseThreshold": 0.6,
     "reusePairings": True,
     "reusePreviews": True,
+    "defaultExportDir": "",
 }
 
 
@@ -30,6 +31,8 @@ def _clamp(data: dict) -> dict:
         out["reusePairings"] = bool(data["reusePairings"])
     if "reusePreviews" in data:
         out["reusePreviews"] = bool(data["reusePreviews"])
+    if "defaultExportDir" in data:
+        out["defaultExportDir"] = str(data["defaultExportDir"] or "").strip()
     return out
 
 
@@ -46,8 +49,12 @@ def load_settings(root: Path | None = None) -> dict:
     return _clamp(data)
 
 
-def save_settings(data: dict, root: Path | None = None) -> dict:
+def save_settings(data: dict, root: Path | None = None, *, validate_dir: bool = True) -> dict:
     out = _clamp(data)
+    if validate_dir and out["defaultExportDir"]:
+        from obed_edom.paths import validate_export_dir  # noqa: PLC0415
+
+        out["defaultExportDir"] = str(validate_export_dir(out["defaultExportDir"]))
     path = settings_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")

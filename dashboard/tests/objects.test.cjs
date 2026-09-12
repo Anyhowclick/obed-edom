@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { defaultLandmarkSize, resizeFromCorner } = require(path.join(out, "objects.js"));
+const { defaultLandmarkSize, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
 
 test("defaultLandmarkSize floors tiny assets at 240", () => {
   assert.equal(defaultLandmarkSize(10), 240);
@@ -56,4 +56,33 @@ test("resizeFromCorner clamps to [24, 4000]", () => {
 test("resizeFromCorner accounts for objectScale != 1", () => {
   assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 0.5, "se"), 320);
   assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 2, "se"), 170);
+});
+
+test("effectiveObjectSize is unchanged when scaleWithMap is off", () => {
+  assert.equal(effectiveObjectSize({ size: 200, scaleWithMap: false, sizeZoom: 5 }, 6), 200);
+});
+
+test("effectiveObjectSize doubles for +1 zoom", () => {
+  assert.equal(effectiveObjectSize({ size: 200, scaleWithMap: true, sizeZoom: 5 }, 6), 400);
+});
+
+test("effectiveObjectSize halves for -1 zoom", () => {
+  assert.equal(effectiveObjectSize({ size: 200, scaleWithMap: true, sizeZoom: 5 }, 4), 100);
+});
+
+test("effectiveObjectSize has no floor", () => {
+  assert.equal(effectiveObjectSize({ size: 1, scaleWithMap: true, sizeZoom: 20 }, 0), Math.pow(2, -20));
+});
+
+test("effectiveObjectSize is unchanged when sizeZoom is missing", () => {
+  assert.equal(effectiveObjectSize({ size: 200, scaleWithMap: true }, 10), 200);
+});
+
+test("zoomSizeFactor matches effectiveObjectSize's ratio", () => {
+  assert.equal(zoomSizeFactor(5, 7), 4);
+});
+
+test("resizeFromCorner with a zoom-inflated scale edits ground size", () => {
+  const zoomFactor = zoomSizeFactor(5, 6);
+  assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 1 * zoomFactor, "se"), 170);
 });

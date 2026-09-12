@@ -12,7 +12,7 @@ from pathlib import Path
 
 from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
-from obed_edom.paths import output_root, select_deck_template
+from obed_edom.paths import ensure_export_subdir, output_root, select_deck_template
 
 
 def _keynote_tell() -> str:
@@ -32,12 +32,12 @@ def _keynote_process_tell() -> str:
     )
 
 
-def _stem(docx: Path) -> str:
+def stem_for(docx: Path) -> str:
     return docx.stem.replace(" ", "_")
 
 
 def output_dir_for(docx: Path, root: Path | None = None) -> Path:
-    out = (root / "output" if root else output_root()) / _stem(docx)
+    out = (root / "output" if root else output_root()) / stem_for(docx)
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -2164,6 +2164,7 @@ def generate_both(
     *,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
+    output_dir: Path | None = None,
 ) -> tuple[Path, Path | None, Path | None, dict, dict]:
     lw_src = select_deck_template(lw_template)
     dsk_src = select_deck_template(dsk_template)
@@ -2171,8 +2172,9 @@ def generate_both(
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."
         )
-    out_dir = output_dir_for(docx)
-    stem = _stem(docx)
+    parent = output_dir or output_root()
+    out_dir = ensure_export_subdir(parent, stem_for(docx))
+    stem = stem_for(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"
     lw_export = out_dir / "previews" / "lw" if export and lw_src else None

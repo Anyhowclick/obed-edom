@@ -5,6 +5,7 @@ import binascii
 import io
 import json
 import math
+import os
 import shutil
 import uuid
 import zipfile
@@ -17,7 +18,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
-from obed_edom.paths import output_root
+from obed_edom.paths import ensure_export_dir, export_destination, output_root, validate_export_dir
 from obed_edom.watercolour import MAX_ENCODED_BYTES, Cancel, WatercolourCancelled, WatercolourError, WatercolourOptions, _has_paint, convert, decode_image, grabcut_mask, render
 
 router = APIRouter(prefix="/api/watercolour", tags=["watercolour"])
@@ -175,7 +176,7 @@ def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int
 
 
 def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions, masks: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    root = Path(str((job.result or {}).get("outputDir") or output_root() / ".watercolour" / job.id))
+    root = Path(str((job.result or {}).get("outputDir") or output_root() / ".watercolour" / job.name))
     originals, results = root / "originals", root / "results"
     originals.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
@@ -222,11 +223,77 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
       sidecar_tmp.replace(sidecar)
       job.result["cancelled"] = job.cancelled()
       job.result["partial"] = job.cancelled() and any(row.get("status") == "done" for row in rows)
+      job.result["exportedResults"] = _export_done_results(job, results, rows)
     return dict(job.result)
 
 
+def _export_done_results(job, results: Path, rows: list[dict[str, Any]]) -> list[str]:
+    dest_dir = ensure_export_dir(export_destination(job))
+    exported: list[str] = []
+    for row in rows:
+        if row.get("status") != "done" or not row.get("result"):
+            continue
+        src = results / row["result"]
+        if not src.is_file():
+            continue
+        dest, error = _copy_into_export_dir(src, dest_dir)
+        if dest is not None:
+            exported.append(str(dest))
+        else:
+            job.log(f"Could not copy {row['result']} into {dest_dir} ({error}).")
+    return exported
+
+
+def _copy_into_export_dir(src: Path, dest_dir: Path) -> tuple[Path | None, str | None]:
+    """Copy `src` into `dest_dir`, claiming a collision-free name atomically.
+
+    Copies to a destination-local temp file first, then claims the final name by
+    hard-linking the temp file into place (atomic: `os.link` fails with
+    `FileExistsError` rather than overwriting), so two concurrent batches racing on the
+    same name never clobber each other. The temp file is always removed; a failed copy
+    leaves no partial file behind and returns a reason string instead of a path.
+    """
+    tmp = dest_dir / f".{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copy2(src, tmp)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        return None, str(exc)
+    try:
+        stem, suffix = src.stem, src.suffix
+        counter = 1
+        while True:
+            name = f"{stem}{suffix}" if counter == 1 else f"{stem}-{counter}{suffix}"
+            candidate = dest_dir / name
+            try:
+                os.link(tmp, candidate)
+            except FileExistsError:
+                counter += 1
+                continue
+            except OSError:
+                try:
+                    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    counter += 1
+                    continue
+                os.close(fd)
+                fallback_tmp = dest_dir / f".{uuid.uuid4().hex}.tmp"
+                try:
+                    shutil.copy2(tmp, fallback_tmp)
+                    os.replace(fallback_tmp, candidate)
+                except OSError as exc:
+                    fallback_tmp.unlink(missing_ok=True)
+                    candidate.unlink(missing_ok=True)
+                    return None, str(exc)
+            return candidate, None
+    except OSError as exc:
+        return None, str(exc)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 @router.post("")
-async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42), masks: str = Form("{}")) -> dict:
+async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42), masks: str = Form("{}"), export_dir: str = Form("")) -> dict:
     if not files or len(files) > MAX_BATCH_FILES:
         raise HTTPException(400, f"Choose between one and {MAX_BATCH_FILES} photos")
     if len(masks.encode("utf-8")) > 2 * 1024 * 1024:
@@ -242,6 +309,12 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
     valid_keys = {str(i) for i in range(len(files))}
     if any(key not in valid_keys for key in mask_specs):
         raise HTTPException(400, "Mask settings must be keyed by photo index")
+    resolved_export_dir = ""
+    if export_dir.strip():
+        try:
+            resolved_export_dir = str(validate_export_dir(export_dir))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     staged_root = output_root() / ".watercolour" / ".uploads" / uuid.uuid4().hex
     staged_root.mkdir(parents=True, exist_ok=False)
     staged: list[tuple[str, Path]] = []
@@ -267,7 +340,7 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
             "watercolour",
             lambda job: _run_batch(job, staged, options, mask_specs),
             feature="watercolour",
-            result={"stagingDir": str(staged_root)},
+            result={"stagingDir": str(staged_root), **({"exportDir": resolved_export_dir} if resolved_export_dir else {})},
         )
     except Exception:
         shutil.rmtree(staged_root, ignore_errors=True)
@@ -359,11 +432,12 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
     name = str(item.get("name") or "Landmark").rsplit(".", 1)[0]
     source = _result_file(job_id, item_id, "result")
     from obed_edom.web import maps
-    payload, width, height, version = maps._decode_png(source.read_bytes())
+    payload, width, height, version = maps.decode_png(source.read_bytes())
     asset_id = uuid.uuid4().hex
-    def append(result: dict[str, Any]) -> dict[str, Any]:
-        return maps.append_landmark(result, slide_id, "lw", name, width, height, version, asset_id)
-    updated = maps._mutate_document_with_asset(maps_job_id, None, asset_id, payload, append)
+    with maps.maps_commit(maps_job_id, None) as commit:
+        commit.result = maps.append_landmark(commit.result, slide_id, "lw", name, width, height, version, asset_id)
+        commit.stage_bytes(maps.asset_path(commit.result, asset_id), payload)
+    updated = commit.payload
     result = dict(updated["result"] or {})
     slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
     churches = (slide or {}).get("churches") or []
@@ -372,6 +446,10 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
 
 
 def _job_root(job_id: str) -> Path:
+    job = _runner().get(job_id)
+    output_dir = (job.result or {}).get("outputDir") if job else None
+    if output_dir:
+        return Path(str(output_dir)).resolve()
     return (output_root() / ".watercolour" / job_id).resolve()
 
 

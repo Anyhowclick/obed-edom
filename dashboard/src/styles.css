@@ -390,6 +390,13 @@ h3 {
   align-items: stretch;
   min-width: 0;
 }
+.session-pick-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .session-pick {
   flex: 1 1 auto;
   min-width: 0;
@@ -423,6 +430,32 @@ h3 {
 }
 .session-row.active .session-del,
 .session-del:hover { color: var(--err); border-color: var(--err); }
+.job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
+.job-name-edit {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.job-name-edit:hover { opacity: 1; }
+.job-name-editing { flex-wrap: wrap; }
+.job-name-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  background: var(--bg-surface-solid);
+  color: var(--ink-primary);
+  border: var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font: inherit;
+}
+.job-name-preview { font-size: 11px; color: var(--ink-tertiary); }
+.job-name-error { font-size: 11px; color: var(--err); flex-basis: 100%; }
 .library-detail { min-width: 0; }
 .library-detail .playlist-bar {
   margin: 0;

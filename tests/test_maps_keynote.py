@@ -328,6 +328,78 @@ def _landmark_church(**extra) -> dict:
     return row
 
 
+def test_landmark_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 200
+
+
+def test_landmark_scale_with_map_zoom_out_halves_width(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 4)
+    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 50
+
+
+def test_landmark_scale_with_map_zoom_in_doubles_width_on_morph_plate(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    cam_a, cam_b = _pan_camera(6, 400)
+    slide = _slide("s1", cam_a, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    geom = morph_plate_geom([cam_a, cam_b])
+    plate_path = _dummy_png(tmp_path / "plate.png")
+    items = build_slide_items(
+        slide, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True, asset_root=asset_root
+    )
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 200
+
+
+def test_landmark_scale_with_map_off_is_unchanged(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_landmark_church(sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 100
+
+
+def test_landmark_scale_with_map_clamps_at_effective_size_max(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 40)
+    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5, size=100)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 20000
+
+
+def test_landmark_sub_one_px_is_dropped_but_others_remain(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    _dummy_png(asset_root / "asset2.png")
+    camera = _camera(3.0, 101.0, 8)
+    tiny = _landmark_church(id="tiny", assetId="asset1", size=0.5)
+    visible = {**_landmark_church(id="visible", assetId="asset2", size=100), "lon": 101.01}
+    slide = _slide("s1", camera, churches=[tiny, visible])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmarks = [item for item in items if item.get("landmark")]
+    assert len(landmarks) == 1
+
+
 def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: Path):
     asset_root = tmp_path / "assets"
     _dummy_png(asset_root / "asset1.png")
@@ -464,6 +536,69 @@ def test_render_reveals_uses_separate_lw_and_cg_paths(tmp_path: Path, monkeypatc
     )
     reveals, _, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
     assert reveals[("lw", "s1", "lm")] != reveals[("cg", "s1", "lm")]
+
+
+def test_reveal_movie_composite_drops_sub_one_px_landmark_but_keeps_others(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    captured: dict[str, list] = {}
+
+    def fake_render_slide(base_png, country_png, landmarks, dest, **_kw):
+        captured["landmarks"] = landmarks
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.render_slide_reveal_movie", fake_render_slide)
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    _dummy_png(output_dir / "assets" / "asset2.png")
+    _dummy_png(output_dir / "stills" / "s1.png")
+    tiny = _landmark_church(id="tiny", assetId="asset1", size=0.5, reveal={"kind": "brush", "duration": 1.2})
+    visible = {
+        **_landmark_church(id="visible", assetId="asset2", size=100, reveal={"kind": "brush", "duration": 1.2}),
+        "lon": 101.01,
+    }
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[tiny, visible], revealMovie=True)
+    reveals, reveal_movies, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert reveals[("lw", "s1", "tiny")].endswith(".mov")
+    assert reveals[("lw", "s1", "visible")].endswith(".mov")
+    assert ("lw", "s1") in reveal_movies
+    assert len(captured["landmarks"]) == 1
+
+
+def test_reveal_movie_composite_uses_cg_view_camera_zoom(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    captured: dict[str, list] = {}
+
+    def fake_render_slide(base_png, country_png, landmarks, dest, **_kw):
+        captured["landmarks"] = landmarks
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"mov")
+        return dest
+
+    monkeypatch.setattr("obed_edom.maps_reveal.render_slide_reveal_movie", fake_render_slide)
+    output_dir = tmp_path / "out"
+    _dummy_png(output_dir / "assets" / "asset1.png")
+    _dummy_png(output_dir / "stills" / "s1_CG.png")
+    # scaleWithMap sized so it's visible at the lw camera's zoom (8) but shrinks below
+    # 1px at the CG override camera's zoom (-40) — the composite must filter using the
+    # cg view's own camera, not the top-level slide's.
+    church = _landmark_church(id="lm", assetId="asset1", size=100, scaleWithMap=True, sizeZoom=8,
+                               reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide(
+        "s1", _camera(3.0, 101.0, 8), churches=[], revealMovie=True,
+        cg={"camera": _camera(3.0, 101.0, -40), "style": "positron", "churches": [church]},
+    )
+    reveals, reveal_movies, _ = _render_reveals(output_dir, [slide], [], lambda _m: None, None)
+    assert reveals[("cg", "s1", "lm")].endswith(".mov")
+    assert ("cg", "s1") not in reveal_movies
+    assert "landmarks" not in captured
 
 
 def test_reveal_movie_slide_emits_bg_movie_and_no_still(tmp_path: Path):

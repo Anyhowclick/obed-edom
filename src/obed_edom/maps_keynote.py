@@ -34,7 +34,7 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
 
@@ -712,6 +712,17 @@ def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
     return min(PIN_MAX_PT, DOT_SIZE)
 
 
+EFFECTIVE_SIZE_MAX = 20000
+
+
+def _effective_size(church: dict[str, Any], zoom: float, movie: Path | None) -> float:
+    size = float(church.get("size") or _pin_size(church, movie))
+    size_zoom = church.get("sizeZoom")
+    if church.get("scaleWithMap") and size_zoom is not None:
+        size = size * 2 ** (zoom - float(size_zoom))
+    return min(EFFECTIVE_SIZE_MAX, size)
+
+
 def _place_churches(
     churches: list[dict[str, Any]],
     *,
@@ -750,7 +761,11 @@ def _place_churches(
             theta = math.radians(float(camera.get("bearing") or 0))
             copy_dx = math.cos(theta) * copy_world
             copy_dy = -math.sin(theta) * copy_world
-        size = int(church.get("size") or _pin_size(church, movie))
+        zoom = float((camera or {}).get("zoom") or 0)
+        size = _effective_size(church, zoom, movie)
+        if size < 1:
+            continue
+        size = int(size)
         color = parse_color(str(church.get("color") or "#c44a42"))
         kind = str(church.get("kind") or "dot")
         asset_id = str(church.get("assetId") or "")
@@ -1672,6 +1687,12 @@ def _render_reveals(
             country_still = _country_still_path(item_slide, output_dir, audience)
             cap_w, cap_h = slide_capture_size(item_slide)
             origin_x = slide_map_origin_x(item_slide)
+            slide_zoom = float((item_slide.get("camera") or {}).get("zoom") or 0)
+            landmark_churches = [
+                church for church in landmark_churches if _effective_size(church, slide_zoom, None) >= 1
+            ]
+            if not landmark_churches:
+                continue
             geometry_items = _place_churches(
                 landmark_churches,
                 plate=None,
@@ -1730,13 +1751,25 @@ def _render_reveals(
     return reveals, reveal_movies, reveal_poster_times
 
 
-def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True, export_dsk: bool = False) -> dict[str, Any]:
+def export_maps_job(
+    job: Any,
+    *,
+    export_lw: bool = True,
+    export_cg: bool = True,
+    export_dsk: bool = False,
+    export_dir: Path | None = None,
+) -> dict[str, Any]:
     if not export_lw and not export_cg and not export_dsk:
         raise ValueError("At least one export target must be on")
     is_cancelled = getattr(job, "cancelled", lambda: False)
     _raise_if_cancelled(is_cancelled)
     result = inherit_hidden_layers(dict(getattr(job, "result", None) or {}))
-    output_dir = Path(str(result.get("outputDir") or find_repo_root() / "output" / ".maps" / str(getattr(job, "id", "maps"))))
+    output_dir = Path(
+        str(
+            result.get("outputDir")
+            or find_repo_root() / "output" / ".maps" / str(getattr(job, "name", None) or getattr(job, "id", "maps"))
+        )
+    )
     preview_dir = Path(str(result.get("previewDir") or (output_dir / "previews")))
     output_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -1770,12 +1803,17 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
     links = plan["links"]
     result["links"] = links
     movie = find_pin_drop_wave()
-    stem = str(result.get("stem") or f"maps-{getattr(job, 'id', 'maps')}")
+    stem = str(result.get("stem") or getattr(job, "name", "") or f"maps-{getattr(job, 'id', 'maps')}")
     flags: list[Any] = []
     flags_cg: list[Any] = []
     poster_frame: list[dict[str, Any]] = []
+    if export_dir is not None:
+        export_dir = ensure_export_dir(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
     if export_lw:
-        dest = output_dir / f"{stem}.key"
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
+        dest = (export_dir or output_dir) / f"{stem}.key"
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")
         ops = plan_deck(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
@@ -1792,7 +1830,9 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
             poster_frame.append(record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
-        dest_dsk = output_dir / f"{stem}_DSK.key"
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
+        dest_dsk = (export_dir or output_dir) / f"{stem}_DSK.key"
         _log(job, f"Exporting DSK deck {dest_dsk.name} (1920×1080)…")
         ops_dsk = dsk_ops(
             plan_deck(
@@ -1809,7 +1849,9 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
         if record is not None:
             poster_frame.append(record)
     if export_cg:
-        dest_cg = output_dir / f"{stem}_CG.key"
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
+        dest_cg = (export_dir or output_dir) / f"{stem}_CG.key"
         _log(job, f"Exporting CG deck {dest_cg.name} (1920×1080)…")
         split_cg = any(isinstance(slide.get("cg"), dict) for slide in slides)
         if split_cg:

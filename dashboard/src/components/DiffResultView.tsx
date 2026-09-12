@@ -6,6 +6,7 @@ import type { OutlineRow } from "../outline";
 import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { OutlineStrip } from "./OutlineStrip";
 import { isPreviewVideo } from "./PreviewGrid";
+import { JobName } from "./JobName";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
 import { ErrorNotice } from "./ErrorNotice";
@@ -277,6 +278,7 @@ export function DiffResultView({
   onSaveSlots,
   onStartFresh,
   checking,
+  onRename,
 }: {
   job: Job;
   onOpen: (src: string) => void;
@@ -284,6 +286,7 @@ export function DiffResultView({
   onSaveSlots?: (slots: Slot[]) => void | Promise<void>;
   onStartFresh?: () => void;
   checking?: boolean;
+  onRename?: (id: string, name: string) => Promise<Job>;
 }) {
   const result = (job.result || null) as DiffResult | null;
   const { focusMode, setFocusMode } = useLayout();
@@ -379,6 +382,7 @@ export function DiffResultView({
 
   return (
     <>
+        {onRename && <JobName job={job} onRename={onRename} className="note" />}
         {result.reuse?.used !== false && result.reuse && (result.reuse.carried > 0 || result.reuse.added > 0) && (
           <div className="reuse-banner">
             <span>

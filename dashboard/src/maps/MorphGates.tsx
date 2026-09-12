@@ -10,6 +10,7 @@ import {
   morphPlatePx,
   bearingDelta,
   captureWidth,
+  isolateDissolveNeeded,
   slideHiddenLayers,
   softMovieFields,
   type MapsLayerFilterId,
@@ -199,7 +200,7 @@ export function MovieAppearanceGate({
   disabled: boolean;
   onMatch: () => void;
 }) {
-  const destIsolated = !!(to.isolate && to.highlights.length);
+  const destIsolated = isolateDissolveNeeded(from, to);
   const sourceIsolated = !!from.isolate && !destIsolated;
   const softFields = softMovieFields(from, to);
   const allRows = morphGateList(from, to).filter(

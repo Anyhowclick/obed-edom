@@ -22,13 +22,22 @@ import {
   MapsStateConflictError,
   addWatercolourToMap,
   watercolourImageUrl,
+  renameJob,
   type Job,
 } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { type Item as WcItem } from "../components/WatercolourResultView";
 import { useRunNav } from "../nav";
-import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
+import {
+  MAPS_INSPECTOR_KEY,
+  MAPS_SIDE_PANELS_KEY,
+  useDefaultExportDir,
+  useSessionPath,
+  useSessionToggle,
+} from "../prefs";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
@@ -38,6 +47,7 @@ import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
+import { zoomSizeFactor } from "../maps/objects";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
@@ -64,8 +74,10 @@ import {
   exportZoomDelta,
   plateSurfaceWidth,
   hasOutgoingMovie,
+  isolateDissolveNeeded,
   minZoomForView,
   movieAppearanceMismatch,
+  plainIsolateTarget,
   worldCopyWarning,
   nextPinId,
   nextSlideId,
@@ -302,6 +314,8 @@ export function MapsTab() {
     return Number.isFinite(raw) && raw >= 160 ? Math.min(420, raw) : 220;
   });
   const navDrag = useRef<{ x: number; w: number } | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.maps.exportDir");
+  const defaultExportDir = useDefaultExportDir();
   const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, true);
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
   const [layersOpen, setLayersOpen] = useState(false);
@@ -569,6 +583,14 @@ export function MapsTab() {
     });
   }
 
+  async function renameCurrentJob(id: string, name: string): Promise<Job> {
+    await persistCurrentState();
+    const updated = await renameJob(id, name);
+    mergeServerMeta(updated);
+    saveAckJob.current = updated;
+    return updated;
+  }
+
   function reconcileServerJob(updated: Job) {
     const remote = documentFromResult(updated.result);
     const revision = Number(updated.result?.stateRevision);
@@ -742,6 +764,11 @@ export function MapsTab() {
     if (!current || !id) return;
     const next = commitCamera(current, id, activeAudienceRef.current, camera, { frozen: !!saveConflictRef.current, previewing: previewingRef.current });
     if (next) patchDoc(next);
+  }
+
+  function revealMovieGuard(churches: MapsChurch[]): Partial<MapsSlide> {
+    if (!activeView?.revealMovie) return {};
+    return churches.some((c) => c.kind === "landmark" && c.reveal) ? {} : { revealMovie: undefined };
   }
 
   function updateActive(partial: Partial<MapsSlide>) {
@@ -1020,7 +1047,8 @@ export function MapsTab() {
     if (!activeView || selectedPins.length === 0 || locked) return;
     if (!window.confirm(`Remove ${selectedPins.length} selected object${selectedPins.length === 1 ? "" : "s"}?`)) return;
     const selected = new Set(selectedPins);
-    updateActive({ churches: activeView.churches.filter((church) => !selected.has(church.id)) });
+    const churches = activeView.churches.filter((church) => !selected.has(church.id));
+    updateActive({ churches, ...revealMovieGuard(churches) });
     if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
     setSelectedPins([]);
   }
@@ -1148,6 +1176,25 @@ export function MapsTab() {
     if (!previewAbort.current && previewRun.current === run) await mapRef.current?.waitUntilIdle(view.style);
   }
 
+  async function crossfadeTo(toView: MapsSlide, duration: number, run: number) {
+    const blob = await mapRef.current?.capturePreviewBlob();
+    if (!blob || previewAbort.current || previewRun.current !== run) return;
+    clearDissolveFrame();
+    const url = URL.createObjectURL(blob);
+    dissolveUrl.current = url;
+    try {
+      setDissolveFrame({ url, fading: false, duration });
+      await applyPreviewView(toView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (previewAbort.current || previewRun.current !== run) return;
+      setDissolveFrame({ url, fading: true, duration });
+      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, duration * 1000)));
+    } finally {
+      clearDissolveFrame(url);
+    }
+  }
+
   async function previewLink(link: MapsLink, from: MapsSlide, to: MapsSlide) {
     const run = previewRun.current;
     const audience = activeAudienceRef.current;
@@ -1158,21 +1205,12 @@ export function MapsTab() {
       return;
     }
     if (link.kind === "dissolve") {
-      const blob = await mapRef.current?.capturePreviewBlob();
-      if (!blob || previewAbort.current || previewRun.current !== run) return;
-      clearDissolveFrame();
-      const url = URL.createObjectURL(blob);
-      dissolveUrl.current = url;
-      setDissolveFrame({ url, fading: false, duration: link.duration });
-      await applyPreviewView(toView, run);
-      if (previewAbort.current || previewRun.current !== run) return;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      setDissolveFrame({ url, fading: true, duration: link.duration });
-      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, link.duration * 1000)));
-      clearDissolveFrame(url);
+      await crossfadeTo(toView, link.duration, run);
       return;
     }
     if (link.kind === "movie") {
+      await applyPreviewView(fromView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
       try {
         await mapRef.current?.animateHop({
           from: fromView.camera,
@@ -1196,7 +1234,14 @@ export function MapsTab() {
         stopPreview(true);
         return;
       }
-      if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      if (isolateDissolveNeeded(fromView, toView)) {
+        await applyPreviewView(plainIsolateTarget(toView), run);
+        if (previewAbort.current || previewRun.current !== run) return;
+        await crossfadeTo(toView, link.duration || 1, run);
+      } else {
+        await applyPreviewView(toView, run);
+      }
       return;
     }
     await mapRef.current?.easeTo(toView.camera, link.duration * 1000);
@@ -1214,7 +1259,13 @@ export function MapsTab() {
     previewAbort.current = false;
     savedCamera.current = mapRef.current?.getCamera() || from.camera;
     setPreviewing(true);
-    await previewLink(link, from, to);
+    try {
+      await previewLink(link, from, to);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      stopPreview(true);
+      return;
+    }
     if (previewAbort.current) return;
     if (restore) stopPreview(true);
     else setPreviewing(false);
@@ -1244,7 +1295,13 @@ export function MapsTab() {
       const to = current.slides[i + 1];
       const link = linkBetween(current.links, from.id, to.id);
       if (!link) continue;
-      await previewLink(link, from, to);
+      try {
+        await previewLink(link, from, to);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        stopPreview(true);
+        return;
+      }
     }
     if (previewAbort.current) return;
     setPreviewing(false);
@@ -1745,6 +1802,7 @@ export function MapsTab() {
         exportLw: latest?.exportLw,
         exportCg: latest?.exportCg,
         exportDsk: latest?.exportDsk,
+        exportDir,
       });
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
@@ -1879,6 +1937,7 @@ export function MapsTab() {
               </button>
               <button
                 type="button"
+                title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
                   csvMode.current = "append";
@@ -1890,6 +1949,7 @@ export function MapsTab() {
               <button
                 type="button"
                 disabled={!active}
+                title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
                   csvMode.current = "pins";
@@ -1950,7 +2010,7 @@ export function MapsTab() {
         <input
           ref={csvInput}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,.txt,text/csv,text/plain"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -2006,7 +2066,7 @@ export function MapsTab() {
           <IconLibrary />
         </button>
         <span className={`maps-save-status maps-save-status-${saveStatus}`} aria-live="polite">{SAVE_STATUS_LABEL[saveStatus]}</span>
-        <span className="note">{job.id}</span>
+        <JobName job={job} onRename={renameCurrentJob} className="note" />
       </div>
       <div className="maps-stylebar">
         <StylePicker
@@ -2212,7 +2272,7 @@ export function MapsTab() {
                 camera={renderedView?.camera || active.camera}
                 styleId={renderedView?.style || active.style}
                 highlights={renderedView?.highlights || active.highlights}
-                isolate={renderedView?.isolate || active.isolate}
+                isolate={renderedView ? renderedView.isolate : active.isolate}
                 churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
@@ -2346,9 +2406,14 @@ export function MapsTab() {
                       onChange={(event) => {
                         const kind = event.target.value as MapsPinKind;
                         if (kind === "landmark" && !pin.assetId) return;
-                        updateActive({
-                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, kind } : c)),
-                        });
+                        const churches = (activeView?.churches || []).map((c) =>
+                          c.id === pin.id
+                            ? kind === "landmark"
+                              ? { ...c, kind }
+                              : { ...c, kind, scaleWithMap: undefined, sizeZoom: undefined, reveal: undefined }
+                            : c
+                        );
+                        updateActive({ churches, ...revealMovieGuard(churches) });
                       }}
                     >
                       <option value="dot">Dot</option>
@@ -2362,6 +2427,25 @@ export function MapsTab() {
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   {pin.kind === "landmark" && (
                     <>
+                      <label className="maps-check">
+                        <input
+                          type="checkbox"
+                          checked={!!pin.scaleWithMap}
+                          disabled={locked}
+                          onChange={(event) => {
+                            const zoom = activeView?.camera.zoom ?? 0;
+                            updateActive({
+                              churches: (activeView?.churches || []).map((c) => {
+                                if (c.id !== pin.id) return c;
+                                if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
+                                const size = c.sizeZoom != null ? (c.size || 120) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || 120;
+                                return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
+                              }),
+                            });
+                          }}
+                        />{" "}
+                        Scale with map
+                      </label>
                       <label className="maps-check">
                         <input
                           type="checkbox"
@@ -2440,7 +2524,8 @@ export function MapsTab() {
                     type="button"
                     disabled={locked}
                     onClick={() => {
-                      updateActive({ churches: (activeView?.churches || []).filter((c) => c.id !== pin.id) });
+                      const churches = (activeView?.churches || []).filter((c) => c.id !== pin.id);
+                      updateActive({ churches, ...revealMovieGuard(churches) });
                       setSelectedPin(null);
                       setSelectedPins((ids) => ids.filter((id) => id !== pin.id));
                     }}
@@ -3005,6 +3090,12 @@ export function MapsTab() {
                     />
                     DSK lower third (1920×1080)
                   </label>
+                  <ExportDestinationRow
+                    value={exportDir}
+                    onChange={setExportDir}
+                    defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+                    onError={setError}
+                  />
                   <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
                     Export
                   </button>

@@ -12,9 +12,11 @@ import {
 import { CheckResultView } from "../components/CheckResultView";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useLayout } from "../nav";
 import type { Slot } from "../playlist";
+import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 type Mode = "none" | "outline" | "deck" | "deck+outline" | "pair" | "pair+outline";
@@ -58,6 +60,8 @@ export function CheckTab() {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [lwFinal, setLwFinal] = useState(true);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.check.exportDir");
+  const defaultExportDir = useDefaultExportDir();
 
   const result = (job?.result || undefined) as
     | { path?: string; leftPath?: string; rightPath?: string; outlinePath?: string; kind?: string }
@@ -130,7 +134,7 @@ export function CheckTab() {
           )
         );
       } else if (mode === "outline") {
-        await track(await startOutline(outline!.path));
+        await track(await startOutline(outline!.path, exportDir || undefined));
       } else {
         const deck = (left || right)!;
         await track(
@@ -207,6 +211,14 @@ export function CheckTab() {
             onClear={() => setRight(null)}
             onError={setError}
           />
+          {mode === "outline" && (
+            <ExportDestinationRow
+              value={exportDir}
+              onChange={setExportDir}
+              defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+              onError={setError}
+            />
+          )}
         </div>
         {wallPresent && outline && (
           <label className="final-ask">

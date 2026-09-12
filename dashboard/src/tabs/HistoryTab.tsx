@@ -13,7 +13,7 @@ import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
 import { useJobSessions } from "../sessions";
 
 export function HistoryTab({ active: visible }: { active: boolean }) {
-  const { jobs, active, activeId, setActiveId, upsert, remove, removeAll, reload, sessionError } = useJobSessions();
+  const { jobs, active, activeId, setActiveId, upsert, rename, remove, removeAll, reload, sessionError } = useJobSessions();
   const { openInFeature } = useRunNav();
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,34 +38,6 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
       if (feature === "dsk" || feature === "resize" || feature === "check") {
         const file = await chooseKeynote("Keynote this run should point at");
         upsert(await relocateJob(active.id, { path: file.path }));
-        return;
-      }
-      if (feature === "maps") {
-        const wall = await chooseKeynote("LED wall Map Keynote");
-        const result = (active.result || {}) as {
-          exportCg?: boolean;
-          exportDsk?: boolean;
-          destPathCg?: string;
-          destPathDsk?: string;
-        };
-        const needCg = result.exportCg !== false || Boolean(result.destPathCg);
-        const needDsk = result.exportDsk === true || Boolean(result.destPathDsk);
-        const body: { destPath: string; destPathCg?: string; destPathDsk?: string } = { destPath: wall.path };
-        if (needCg) {
-          try {
-            const cg = await chooseKeynote("CG Map Keynote");
-            body.destPathCg = cg.path;
-          } catch {}
-        }
-        if (needDsk) {
-          try {
-            const dsk = await chooseKeynote("DSK Map Keynote");
-            body.destPathDsk = dsk.path;
-          } catch {
-            /* wall relocate still proceeds */
-          }
-        }
-        upsert(await relocateJob(active.id, body));
         return;
       }
       const left = await chooseKeynote("Left / LW Keynote");
@@ -100,7 +72,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         <p className="note">No saved runs yet. Generate, compare, or validate from the other tabs.</p>
       ) : (
         <div className="split library">
-          <SessionList jobs={jobs} activeId={activeId} onSelect={setActiveId} onDelete={remove} />
+          <SessionList jobs={jobs} activeId={activeId} onSelect={setActiveId} onDelete={remove} onRename={rename} />
           <div className="library-detail">
             {active && (
               <>
@@ -123,20 +95,20 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                       Use this folder
                     </button>
                   )}
-                  {feature && feature !== "watercolour" && (
+                  {feature && feature !== "watercolour" && feature !== "maps" && (
                     <button className="btn secondary" type="button" onClick={relocate}>
                       Relocate…
                     </button>
                   )}
                 </div>
-                {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} />}
-                {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} />}
-                {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} />}
-                {feature === "check" && <CheckResultView job={active} onOpen={setOpen} />}
-                {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
-                {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
-                {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} />}
-                {feature === "watercolour" && <WatercolourResultView job={active} onOpen={setOpen} onError={setError} />}
+                {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "check" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} onRename={rename} />}
+                {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "watercolour" && <WatercolourResultView job={active} onOpen={setOpen} onError={setError} onRename={rename} />}
               </>
             )}
           </div>

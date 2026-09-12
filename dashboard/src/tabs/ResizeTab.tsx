@@ -11,9 +11,11 @@ import {
 } from "../api";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { FramingReview, type FramingProposal } from "../components/FramingReview";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
+import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 function parseSlideSpec(raw: string): number[] | null {
@@ -45,6 +47,8 @@ type ResizeResult = FramingProposal & {
   path?: string;
   templatePath?: string;
   destPath?: string;
+  exportDir?: string;
+  resolvedExportDir?: string;
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -58,7 +62,7 @@ type ResizeResult = FramingProposal & {
 };
 
 export function ResizeTab() {
-  const { job, upsert, error: openError } = useCurrentJob("resize");
+  const { job, upsert, rename, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
@@ -67,6 +71,8 @@ export function ResizeTab() {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.resize.exportDir");
+  const defaultExportDir = useDefaultExportDir();
   const result = (job?.result || undefined) as ResizeResult | undefined;
 
   useEffect(() => {
@@ -101,6 +107,7 @@ export function ResizeTab() {
         templatePath: template.path,
         slides: parsedSlides ?? undefined,
         validate,
+        exportDir: exportDir || undefined,
       });
       upsert(created);
       await track(created);
@@ -150,6 +157,15 @@ export function ResizeTab() {
   const counts = result?.counts;
   const score = result?.templateScore || result?.goldScore;
   const awaitingFramings = result?.phase === "framing";
+  // A failed Apply leaves the proposal result (phase: "framing") in place so the review
+  // stays visible for a retry — but the export row must unlock, since "pick another
+  // folder" is a common fix for the error, and a locked row can't be changed.
+  const exportDirLocked = awaitingFramings && job?.status !== "error";
+  // Once a proposal is captured, Apply always uses the destination it was proposed
+  // against — freeze the row so it can't drift out from under the pending apply.
+  const frozenExportDir = exportDirLocked
+    ? result?.resolvedExportDir || result?.exportDir || ""
+    : undefined;
   const fitted = result?.fittedSlides || [];
   const offFrame = result?.offFrame || [];
   const overruled = (result?.framingReport || []).filter((r) => r.confirmed && r.fitted);
@@ -191,6 +207,13 @@ export function ResizeTab() {
           }}
           onPath={(path) => setTemplate({ path, name: path.split("/").pop() || path })}
           onError={setError}
+        />
+        <ExportDestinationRow
+          value={frozenExportDir ?? exportDir}
+          onChange={setExportDir}
+          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+          onError={setError}
+          disabled={exportDirLocked}
         />
       </div>
       <label className="field">
@@ -297,7 +320,13 @@ export function ResizeTab() {
       )}
       <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}
-      {job && <InspectResultView job={job} onOpen={setOpen} />}
+      {job && (
+        <InspectResultView
+          job={job}
+          onOpen={setOpen}
+          onRename={rename}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );
