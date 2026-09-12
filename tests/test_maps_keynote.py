@@ -12,7 +12,10 @@ import pytest
 
 from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, world_width
 from obed_edom.maps_keynote import (
+    CG_WIDTH,
+    DOT_SIZE,
     DSK_SCALE,
+    DSK_WIDTH,
     MAP_BG_RE,
     PANEL_EDGES,
     WALL_HEIGHT,
@@ -27,6 +30,7 @@ from obed_edom.maps_keynote import (
     cg_crop_origin,
     coerce_link_kinds,
     dsk_item,
+    dsk_ops,
     export_maps_job,
     hop_capture_size,
     maps_export_plan,
@@ -327,10 +331,12 @@ def test_hidden_pin_label_stays_in_state_but_is_not_exported(tmp_path: Path):
 
 def test_static_drop_pin_tip_is_anchored_to_the_projected_location(tmp_path: Path):
     camera = _camera(3.0, 101.0, 8)
+    # lat 3.1 projects to y = 503.539..., i.e. a NON-integral tip: the height must
+    # still be the canonical raster height, not a projection-fraction artefact.
     slide = _slide(
         "s1",
         camera,
-        churches=[{"id": "c", "name": "Anchor", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#ff8a00"}],
+        churches=[{"id": "c", "name": "Anchor", "lat": 3.1, "lon": 101.0, "kind": "dropPin", "color": "#ff8a00"}],
     )
     items = build_slide_items(
         slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True,
@@ -339,8 +345,10 @@ def test_static_drop_pin_tip_is_anchored_to_the_projected_location(tmp_path: Pat
     pins = _pin_items(items)
     assert len(pins) == 1
     pin = pins[0]
-    projected_x, projected_y = project_into_camera(3.0, 101.0, camera)
+    projected_x, projected_y = project_into_camera(3.1, 101.0, camera)
+    assert projected_y != whole(projected_y)
     assert abs((pin["x"] + pin["w"] / 2) - projected_x) <= 1
+    assert pin["h"] == whole(pin["w"] * 1.08)
     assert pin["y"] + pin["h"] == whole(projected_y)
 
 
@@ -356,8 +364,12 @@ def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
     )
     pins = _pin_items(items)
     assert len(pins) == 1
-    assert pins[0]["w"] == pins[0]["h"]
-    assert Path(pins[0]["path"]).name.startswith("dot-")
+    dot = pins[0]
+    assert dot["w"] == dot["h"] == whole(DOT_SIZE)
+    projected_x, projected_y = project_into_camera(3.0, 101.0, _camera(3.0, 101.0, 8))
+    assert abs((dot["x"] + dot["w"] / 2) - projected_x) <= 1
+    assert abs((dot["y"] + dot["h"] / 2) - projected_y) <= 1
+    assert Path(dot["path"]).name.startswith("dot-")
 
 
 def _landmark_church(**extra) -> dict:
@@ -2285,7 +2297,7 @@ def test_export_maps_job_cg_autoplay_regeneration_invalidates_cg_poster_record(t
     assert "truncated" in cg_autoplay["reason"]
 
 
-def _kitchen_sink_ops(tmp_path: Path) -> list[dict]:
+def _kitchen_sink_ops(tmp_path: Path, *, wall: bool = True) -> list[dict]:
     """One deck plan touching every `_emit_item` branch and every transition shape.
 
     Map still, country cutout, landmark movie with a still fallback, a dot, a
@@ -2317,13 +2329,14 @@ def _kitchen_sink_ops(tmp_path: Path) -> list[dict]:
         plate_path=None,
         still=_dummy_png(tmp_path / "stills" / "s1.png"),
         movie=None,
-        wall=True,
+        wall=wall,
         asset_root=asset_root,
         pin_root=tmp_path / "pins",
         country_still=_dummy_png(tmp_path / "stills" / "s1-country.png"),
         reveals={("lw", "s1", "lm"): str(reveal_mov)},
         sid="s1",
     )
+    deck_width = WALL_WIDTH if wall else CENTRE_WIDTH
     bg_movie = tmp_path / "movies" / "s3.mov"
     bg_movie.parent.mkdir(parents=True, exist_ok=True)
     bg_movie.write_bytes(b"mov")
@@ -2333,7 +2346,7 @@ def _kitchen_sink_ops(tmp_path: Path) -> list[dict]:
         {"id": "s2", "duplicate": True, "items": items,
          "transition": {"effect": "dissolve", "duration": 0.8, "automatic": True}},
         {"id": "s3", "duplicate": False,
-         "items": [mod._item("movie", 0, 0, WALL_WIDTH, WALL_HEIGHT, path=str(bg_movie), map=True)],
+         "items": [mod._item("movie", 0, 0, deck_width, WALL_HEIGHT, path=str(bg_movie), map=True)],
          "transition": {"effect": None, "duration": 2.0, "automatic": True}},
         {"id": "s4", "duplicate": False,
          "items": [mod._item("text", 10, 20, 200, 40, text='Quote "x" & tail')],
@@ -2342,9 +2355,16 @@ def _kitchen_sink_ops(tmp_path: Path) -> list[dict]:
 
 
 def test_deck_script_never_emits_shape_properties(tmp_path: Path):
-    ops = _kitchen_sink_ops(tmp_path)
-    dsk = [{**op, "items": [dsk_item(item) for item in op["items"]]} for op in ops]
-    for width, plan in ((int(WALL_WIDTH), ops), (int(CENTRE_WIDTH), ops), (int(CENTRE_WIDTH), dsk)):
+    """All three real export paths: the 7680 wall plan, the 1920 CG plan built
+    from wall=False items, and the 1920 DSK plan built by `dsk_ops`."""
+    wall_ops = _kitchen_sink_ops(tmp_path)
+    cg_ops = _kitchen_sink_ops(tmp_path, wall=False)
+    matrix = (
+        (int(WALL_WIDTH), wall_ops),
+        (CG_WIDTH, cg_ops),
+        (DSK_WIDTH, dsk_ops(wall_ops)),
+    )
+    for width, plan in matrix:
         script = build_deck_script(plan, tmp_path / "deck.key", width=width, height=int(WALL_HEIGHT))
         for banned in ("shape type", "fill type", "fill color", "color fill", "make new shape"):
             assert banned not in script, banned

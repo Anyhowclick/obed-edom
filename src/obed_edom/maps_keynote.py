@@ -742,6 +742,9 @@ def _place_churches(
     sid: str = "",
     skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
+    """`pin_root` is required on purpose: dot and drop-pin rasters are written
+    there, so a caller that forgets it must fail rather than emit a markerless
+    deck. Production callers pass `output_dir / "pins"`."""
     items: list[dict[str, Any]] = []
     for church in churches:
         if skip_landmarks and str(church.get("kind") or "") == "landmark":
@@ -785,7 +788,13 @@ def _place_churches(
             if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
                 continue
             x = cx + origin_x - size / 2.0
-            y = cy - size if kind == "landmark" else cy - size * 1.08 if static_drop else cy - size / 2.0
+            drop_h = whole(size * 1.08)
+            if kind == "landmark":
+                y = cy - size
+            elif static_drop:
+                y = whole(cy) - drop_h
+            else:
+                y = cy - size / 2.0
             if wall:
                 x = avoid_straddle(x, size)
             if kind == "landmark":
@@ -823,7 +832,7 @@ def _place_churches(
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
             else:
                 pin_kind = "droppin" if static_drop else "dot"
-                height = whole(cy) - whole(y) if static_drop else size
+                height = drop_h if static_drop else size
                 items.append(
                     _item(
                         "image",
@@ -900,6 +909,7 @@ def build_slide_items(
     sid: str = "",
     skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
+    """`pin_root` is required (see `_place_churches`); pass `output_dir / "pins"`."""
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
     )
