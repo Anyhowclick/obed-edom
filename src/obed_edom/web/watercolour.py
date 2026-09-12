@@ -236,27 +236,29 @@ def _export_done_results(job, results: Path, rows: list[dict[str, Any]]) -> list
         src = results / row["result"]
         if not src.is_file():
             continue
-        dest = _copy_into_export_dir(src, dest_dir)
+        dest, error = _copy_into_export_dir(src, dest_dir)
         if dest is not None:
             exported.append(str(dest))
+        else:
+            job.log(f"Could not copy {row['result']} into {dest_dir} ({error}).")
     return exported
 
 
-def _copy_into_export_dir(src: Path, dest_dir: Path) -> Path | None:
+def _copy_into_export_dir(src: Path, dest_dir: Path) -> tuple[Path | None, str | None]:
     """Copy `src` into `dest_dir`, claiming a collision-free name atomically.
 
     Copies to a destination-local temp file first, then claims the final name by
     hard-linking the temp file into place (atomic: `os.link` fails with
     `FileExistsError` rather than overwriting), so two concurrent batches racing on the
     same name never clobber each other. The temp file is always removed; a failed copy
-    leaves no partial file behind and the row is simply not reported as exported.
+    leaves no partial file behind and returns a reason string instead of a path.
     """
     tmp = dest_dir / f".{uuid.uuid4().hex}.tmp"
     try:
         shutil.copy2(src, tmp)
-    except OSError:
+    except OSError as exc:
         tmp.unlink(missing_ok=True)
-        return None
+        return None, str(exc)
     try:
         stem, suffix = src.stem, src.suffix
         counter = 1
@@ -275,10 +277,17 @@ def _copy_into_export_dir(src: Path, dest_dir: Path) -> Path | None:
                     counter += 1
                     continue
                 os.close(fd)
-                shutil.copy2(tmp, candidate)
-            return candidate
-    except OSError:
-        return None
+                fallback_tmp = dest_dir / f".{uuid.uuid4().hex}.tmp"
+                try:
+                    shutil.copy2(tmp, fallback_tmp)
+                    os.replace(fallback_tmp, candidate)
+                except OSError as exc:
+                    fallback_tmp.unlink(missing_ok=True)
+                    candidate.unlink(missing_ok=True)
+                    return None, str(exc)
+            return candidate, None
+    except OSError as exc:
+        return None, str(exc)
     finally:
         tmp.unlink(missing_ok=True)
 

@@ -1752,8 +1752,6 @@ def export_maps_job(
     preview_dir = Path(str(result.get("previewDir") or (output_dir / "previews")))
     output_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.mkdir(parents=True, exist_ok=True)
-    if export_dir is not None:
-        export_dir.mkdir(parents=True, exist_ok=True)
     slides = [dict(slide) for slide in (result.get("slides") or [])]
     links = [dict(link) for link in (result.get("links") or [])]
     if not slides:
@@ -1790,7 +1788,10 @@ def export_maps_job(
     poster_frame: list[dict[str, Any]] = []
     if export_dir is not None:
         export_dir = ensure_export_dir(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
     if export_lw:
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
         dest = (export_dir or output_dir) / f"{stem}.key"
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")
         ops = plan_deck(
@@ -1808,6 +1809,8 @@ def export_maps_job(
             poster_frame.append(record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
         dest_dsk = (export_dir or output_dir) / f"{stem}_DSK.key"
         _log(job, f"Exporting DSK deck {dest_dsk.name} (1920×1080)…")
         ops_dsk = dsk_ops(
@@ -1825,6 +1828,8 @@ def export_maps_job(
         if record is not None:
             poster_frame.append(record)
     if export_cg:
+        if export_dir is not None:
+            export_dir = ensure_export_dir(export_dir)
         dest_cg = (export_dir or output_dir) / f"{stem}_CG.key"
         _log(job, f"Exporting CG deck {dest_cg.name} (1920×1080)…")
         split_cg = any(isinstance(slide.get("cg"), dict) for slide in slides)

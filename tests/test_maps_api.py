@@ -2568,7 +2568,32 @@ def test_export_uses_configured_default_export_dir_with_no_override(monkeypatch,
     done = _wait(job["id"])
     assert done["status"] == "done", done.get("error")
     assert captured["export_dir"] == default_dir.resolve()
-    assert done["result"]["exportDir"] == str(default_dir.resolve())
+    # The resolved operator default is used for this export, but it is not a sticky
+    # per-job override — a later export with no default configured must not carry it.
+    assert "exportDir" not in done["result"]
+
+
+def test_export_uses_output_root_default_flat_not_private_maps_dir(monkeypatch, tmp_path):
+    from obed_edom.paths import output_root
+
+    job = _seed()
+    captured = {}
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        captured["export_dir"] = export_dir
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    # No operator default configured: the default resolves to `output_root()`, which
+    # must be passed through as the flat export destination rather than nulled back to
+    # the job's private `.maps` directory.
+    assert captured["export_dir"] == output_root()
+    assert "exportDir" not in done["result"]
 
 
 def test_export_fails_when_configured_default_export_dir_vanishes(monkeypatch, tmp_path):
@@ -2799,7 +2824,7 @@ def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
 
     captured = {}
 
-    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True):
         captured["export_lw"] = export_lw
         captured["export_cg"] = export_cg
         captured["export_dsk"] = export_dsk

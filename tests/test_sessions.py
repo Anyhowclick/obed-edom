@@ -672,6 +672,7 @@ def test_rename_moves_folder_and_rewrites_result_paths(tmp_path: Path, monkeypat
     from obed_edom.web import app as app_module
 
     output = tmp_path / "output"
+    output.mkdir(parents=True, exist_ok=True)
     runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
     monkeypatch.setattr(app_module, "default_output_root", lambda: output)
     monkeypatch.setattr("obed_edom.paths.output_root", lambda: output)
