@@ -53,10 +53,16 @@ test("validateManualRows requires a name in slides mode", () => {
   assert.deepEqual(errors.map((e) => e.message), ["Row 1: enter a name."]);
 });
 
-test("validateManualRows defaults the pin name to Pin when a locator is present", () => {
+test("validateManualRows leaves an unnamed pin nameless so the server adopts the geocoded label", () => {
   const { payload, errors } = validateManualRows([row({ place: "Bedok, Singapore" })], "pins");
   assert.deepEqual(errors, []);
-  assert.deepEqual(payload, [{ name: "Pin", place: "Bedok, Singapore", kind: "dropPin" }]);
+  assert.deepEqual(payload, [{ place: "Bedok, Singapore", kind: "dropPin" }]);
+});
+
+test("validateManualRows names a coordinates-only pin Pin, which the server needs to accept the row", () => {
+  const { payload, errors } = validateManualRows([row({ lat: "1.3", lon: "103.8" })], "pins");
+  assert.deepEqual(errors, []);
+  assert.deepEqual(payload, [{ name: "Pin", lat: 1.3, lon: 103.8, kind: "dropPin" }]);
 });
 
 test("validateManualRows rejects a pins row whose only locator is a link", () => {

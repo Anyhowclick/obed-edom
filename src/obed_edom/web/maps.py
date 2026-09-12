@@ -1639,6 +1639,32 @@ def export_plan(job_id: str) -> dict:
     return payload
 
 
+def _start_bootstrap(
+    job_id: str,
+    places: list[Place],
+    *,
+    replace: bool,
+    target_slide_id: str | None,
+    audience: str,
+) -> dict:
+    try:
+        with _mutation_lock(job_id):
+            job = _job_or_404(job_id)
+            _require_idle(job)
+            if target_slide_id:
+                updated = _runner().rerun(
+                    job_id,
+                    lambda j, rows=places, sid=target_slide_id, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
+                )
+            else:
+                updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not updated:
+        raise HTTPException(404, "Unknown maps job")
+    return _runner().public_dict(updated)
+
+
 @router.post("/{job_id}/bootstrap-csv")
 async def bootstrap_csv(
     job_id: str,
@@ -1664,22 +1690,7 @@ async def bootstrap_csv(
         raise HTTPException(400, errors)
     if not places:
         raise HTTPException(400, ["No places found"])
-    try:
-        with _mutation_lock(job_id):
-            job = _job_or_404(job_id)
-            _require_idle(job)
-            if targetSlideId:
-                updated = _runner().rerun(
-                    job_id,
-                    lambda j, rows=places, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
-                )
-            else:
-                updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    if not updated:
-        raise HTTPException(404, "Unknown maps job")
-    return _runner().public_dict(updated)
+    return _start_bootstrap(job_id, places, replace=replace, target_slide_id=targetSlideId, audience=audience)
 
 
 @router.post("/{job_id}/bootstrap-rows")
@@ -1692,22 +1703,9 @@ def bootstrap_rows(job_id: str, body: BootstrapRowsBody) -> dict:
         raise HTTPException(400, errors)
     if not places:
         raise HTTPException(400, ["No places found"])
-    try:
-        with _mutation_lock(job_id):
-            job = _job_or_404(job_id)
-            _require_idle(job)
-            if body.targetSlideId:
-                updated = _runner().rerun(
-                    job_id,
-                    lambda j, rows=places, sid=body.targetSlideId, aud=body.audience: _run_pin_bootstrap(j, rows, sid, aud),
-                )
-            else:
-                updated = _runner().rerun(job_id, lambda j, rows=places, rep=body.replace: _run_bootstrap(j, rows, rep))
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    if not updated:
-        raise HTTPException(404, "Unknown maps job")
-    return _runner().public_dict(updated)
+    return _start_bootstrap(
+        job_id, places, replace=body.replace, target_slide_id=body.targetSlideId, audience=body.audience
+    )
 
 
 @router.get("/geocode")
