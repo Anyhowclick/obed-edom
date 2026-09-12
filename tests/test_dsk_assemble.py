@@ -1228,7 +1228,8 @@ def _assemble_fixture(tmp_path):
 def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(
         dsa, "load_assembly_inputs",
-        lambda deck, include_side=frozenset(), text_slide_words=10: (payload, classes, {}),
+        lambda deck, include_side=frozenset(), text_slide_words=10, no_dedupe=False,
+        no_drop_panel_backdrop=False: (payload, classes, {}),
     )
     monkeypatch.setattr(dsa, "LiveBatch", _make_fake_live_batch(stderr_text, returncode))
     monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
@@ -1319,6 +1320,25 @@ def test_assemble_parses_overflow_lines_into_result_and_warnings(tmp_path, monke
     assert result.overflows == ({"slide": 13, "item": "text:2", "height": 269.3},)
     assert any("slide 13: text text:2 overflow" in w for w in result.warnings)
     assert 13 not in result.movie_props or "OVERFLOW" not in result.movie_props[13]
+
+
+def test_assemble_dsk_deck_calls_restore_crop_zorder(tmp_path, monkeypatch):
+    fw_deck, out_path, payload, classes, decisions, clips = _assemble_fixture(tmp_path)
+    _patch_common(monkeypatch, payload, classes, "OBED\t13\tdone\nOBED\t32\tdone")
+
+    captured: dict = {}
+
+    def fake_restore_crop_zorder(fw_deck_arg, staging_path, plan, warnings):
+        captured["fw_deck"] = fw_deck_arg
+        captured["staging_path"] = staging_path
+        captured["plan"] = plan
+        return {}
+
+    monkeypatch.setattr(dsa, "_restore_crop_zorder", fake_restore_crop_zorder)
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips=clips, layout_policy="preserve")
+    assert captured["fw_deck"] == fw_deck
+    assert captured["plan"] is not None
+    assert result.zorder == {}
 
 
 def test_assemble_builds_surplus_raises_refusal(tmp_path, monkeypatch):
@@ -3259,7 +3279,8 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
     def fake_assemble_dsk_deck(
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
-        no_image_crop=False, no_auto_anchor=False,
+        no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
+        split_overrides=None,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -3338,7 +3359,8 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
     def fake_assemble_dsk_deck(
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
-        no_image_crop=False, no_auto_anchor=False,
+        no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
+        split_overrides=None,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
@@ -4334,6 +4356,19 @@ def test_group_with_media_child_counts_towards_placement():
     assert plan.anchors[6] == "centre"
 
 
+def test_group_shape_plus_text_badge_does_not_count_towards_placement():
+    # GW 7/37 shaped: a rounded-rect badge behind text, no image leaf anywhere on the
+    # slide -- zero content, so centre (not right, which the shape: leaf used to force).
+    badge = _group_item(0, x=4702, y=15, w=645, h=92)
+    slide = _slide(7, [badge])
+    slide["groupChildSignature"] = {0: "shape:scalarPathSource:kTSDRoundedRectangle:525.9x98.4\ntext:Elohim (plural)"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {7: SlideDecision(7, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[7] == "centre"
+
+
 def test_no_auto_anchor_flag_forces_centre():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
     payload = _payload([slide])
@@ -4367,6 +4402,65 @@ def test_deletes_include_backdrop_duplicate_and_cropped(monkeypatch):
     assert ("shape", 0) in plan.deletes[28]
     assert ("image", 0) in plan.deletes[28]
     assert plan.crops[28][("image", 0)] is fake_spec
+
+
+def test_plan_assembly_loads_deck_itself_when_deck_is_none(monkeypatch):
+    from obed_edom.dsk_plan import CropSpec
+
+    fake_spec = CropSpec(path=Path("/tmp/fake.jpg"), source_file_name="fake.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    loaded: dict = {}
+
+    def fake_load_deck(path):
+        loaded["path"] = path
+        return ({}, {}, {})
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    image = _image_item(0, x=1954, y=27, w=1381, h=921)
+    slide = _slide(5, [image])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {5: SlideDecision(5, "in_deck", anchor="auto")}
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        deck=None, fw_deck="/tmp/does-not-matter.key", crop_dir=Path("/tmp/crops"),
+    )
+    assert loaded["path"] == "/tmp/does-not-matter.key"
+    assert plan.crops[5][("image", 0)] is fake_spec
+
+
+def test_refusal_cleans_up_earlier_slides_crop_files(tmp_path, monkeypatch):
+    from obed_edom.dsk_plan import CropRefusal, CropSpec
+
+    crop_path = tmp_path / "3" / "photo.jpg"
+    crop_path.parent.mkdir(parents=True)
+    crop_path.write_bytes(b"fake")
+    fake_spec = CropSpec(path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+
+    def fake_plan_crops(*a, **k):
+        number = k.get("number")
+        if number == 3:
+            return ({("image", 0): fake_spec}, [])
+        raise CropRefusal(f"slide {number} image 0: crop window under 8px")
+
+    monkeypatch.setattr(dsa, "plan_crops", fake_plan_crops)
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    slide3 = _slide(3, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    slide5 = _slide(5, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide3, slide5])
+    classes = [_classify(slide3), _classify(slide5)]
+    decisions = {
+        3: SlideDecision(3, "in_deck", anchor="auto"),
+        5: SlideDecision(5, "in_deck", anchor="auto"),
+    }
+    assert crop_path.exists()
+    with pytest.raises(AssemblyRefusal):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+        )
+    assert not crop_path.exists()
 
 
 def test_crop_min_window_refuses(monkeypatch):
@@ -4471,6 +4565,184 @@ def test_restore_crop_zorder_moves_cropped_image_to_source_index(tmp_path, monke
     assert captured["moves"] == {"imgO": 0}
     assert result[1] == {"refused": False}
     assert warnings == []
+
+
+def test_restore_crop_zorder_two_crops_compose_correctly(tmp_path, monkeypatch):
+    # src_z = [A(image0, cropped), B(shape0, kept), C(image1, cropped)]. Both A and C
+    # are deleted+replaced; computed against the SOURCE list, targets are A->0, C->1.
+    # Applying naively in crop_specs (sorted-by-source-id) order would push B to the
+    # top; applying in ascending target order must land [newA, B, newC].
+    import zipfile as _zipfile
+    from obed_edom.dsk_plan import CropSpec
+
+    src_slide = {
+        "_pbtype": "KN.SlideArchive",
+        "drawablesZOrder": [{"identifier": "A"}, {"identifier": "B"}, {"identifier": "C"}],
+    }
+    out_slide = {
+        "_pbtype": "KN.SlideArchive",
+        "drawablesZOrder": [{"identifier": "B"}, {"identifier": "newA"}, {"identifier": "newC"}],
+    }
+    out_images = {
+        "newA": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "dA"}},
+        "newC": {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "dC"}},
+    }
+    src_objects = {"slideS": src_slide}
+    out_objects = {"slideO": out_slide, "B": {"_pbtype": "TSD.ShapeArchive"}, **out_images}
+
+    def fake_load_deck(path):
+        return (src_objects, {}, {}) if str(path) == "src.key" else (out_objects, {}, {})
+
+    def fake_slide_order(objects):
+        return [("slideS", False)] if objects is src_objects else [("slideO", False)]
+
+    def fake_derive_kind_index(slide_archive, objects):
+        return [
+            {"id": "A", "kind": "image", "kindIndex": 0},
+            {"id": "B", "kind": "shape", "kindIndex": 0},
+            {"id": "C", "kind": "image", "kindIndex": 1},
+        ]
+
+    out_path = tmp_path / "out.key"
+    with _zipfile.ZipFile(out_path, "w"):
+        pass
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "slide_order", fake_slide_order)
+    monkeypatch.setattr(dsa, "derive_kind_index", fake_derive_kind_index)
+    monkeypatch.setattr(dsa, "_build_data_index", lambda names: {"dA": "a.jpg", "dC": "c.jpg"})
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("data") or {}).get("identifier"))
+
+    spec_a = CropSpec(path=Path("/tmp/a.jpg"), source_file_name="a.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    spec_c = CropSpec(path=Path("/tmp/c.jpg"), source_file_name="c.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}},
+        deletes={1: (("image", 0), ("image", 1))}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        crops={1: {("image", 0): spec_a, ("image", 1): spec_c}},
+    )
+
+    captured: dict = {}
+
+    def fake_reorder(out_path_arg, slide_id, moves):
+        captured["moves"] = moves
+        # Mimic reorder_drawables' own sequential-application contract.
+        order = list(out_slide["drawablesZOrder"])
+        order = [str(ref["identifier"]) for ref in order]
+        for did, idx in moves.items():
+            order.remove(did)
+            order.insert(idx, did)
+        captured["final_order"] = order
+        return {"refused": False}
+
+    monkeypatch.setattr(dsa, "reorder_drawables", fake_reorder)
+
+    warnings: list = []
+    dsa._restore_crop_zorder("src.key", out_path, plan, warnings)
+    assert captured["moves"] == {"newA": 0, "newC": 2}
+    assert captured["final_order"] == ["newA", "B", "newC"]
+    assert warnings == []
+
+
+def test_split_and_crop_together_refuses(monkeypatch):
+    from obed_edom.dsk_plan import CropSpec
+
+    _require_font("AzoSans-Regular")
+    fake_spec = CropSpec(path=Path("/tmp/fake.jpg"), source_file_name="fake.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="split and image crop"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0,
+            deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+        )
+
+
+def test_restore_crop_zorder_real_pair_end_to_end(tmp_path):
+    """No mocked ``reorder_drawables``: a real source deck and a real staged (output)
+    deck, both real ``.key`` zips -- ``_restore_crop_zorder`` must find the crop insert
+    by fileName and actually rewrite the output deck's ``drawablesZOrder``."""
+    pytest.importorskip("keynote_parser")
+    import io
+    import zipfile as _zipfile
+    from test_iwa_write import _arch, _geom, _member
+    from obed_edom.dsk_plan import CropSpec
+    from obed_edom.iwa_runs import _load_deck
+
+    img_s = _arch(230, "TSD.ImageArchive", {"data": {"identifier": 5}, "super": _geom(300, 100, 120, 60)})
+    grp_s = _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 30, 30), "children": [{"identifier": 251}]})
+    child_s = _arch(251, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _geom(0, 0, 30, 30)})
+    slide_s = _arch(100, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 230}, {"identifier": 250}]})
+    show_s = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node_s = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    src_path = tmp_path / "src.key"
+    buf = io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show_s, node_s]))
+        z.writestr("Index/Slide-100.iwa", _member([slide_s, img_s, grp_s, child_s]))
+    src_path.write_bytes(buf.getvalue())
+
+    grp_o = _arch(350, "TSD.GroupArchive", {"super": _geom(500, 500, 30, 30), "children": [{"identifier": 351}]})
+    child_o = _arch(351, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _geom(0, 0, 30, 30)})
+    img_o = _arch(330, "TSD.ImageArchive", {"data": {"identifier": 9}, "super": _geom(300, 100, 120, 60)})
+    slide_o = _arch(200, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 350}, {"identifier": 330}]})
+    show_o = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 20}]}})
+    node_o = _arch(20, "KN.SlideNodeArchive", {"slide": {"identifier": 200}, "isSkipped": False})
+    out_path = tmp_path / "out.key"
+    buf = io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show_o, node_o]))
+        z.writestr("Index/Slide-200.iwa", _member([slide_o, img_o, grp_o, child_o]))
+        z.writestr("Data/photo-9.jpg", b"fake-jpeg-bytes")
+    out_path.write_bytes(buf.getvalue())
+
+    spec = CropSpec(path=Path("/tmp/photo.jpg"), source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}},
+        deletes={1: (("image", 0),)}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        crops={1: {("image", 0): spec}},
+    )
+    warnings: list = []
+    result = dsa._restore_crop_zorder(src_path, out_path, plan, warnings)
+    assert result[1]["refused"] is False
+    objects, _id_to_file, _file_ids = _load_deck(out_path)
+    assert [ref["identifier"] for ref in objects["200"]["drawablesZOrder"]] == ["330", "350"]
+    assert warnings == []
+
+
+def test_split_override_forces_split_even_when_it_would_fit():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    # Without an override, GW 17's two boxes fit as one stack at the default floor.
+    plan_natural = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert 17 not in plan_natural.splits
+    plan_forced = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, split_overrides={17: 2},
+    )
+    assert plan_forced.parts[17] == 2
+    assert len(plan_forced.splits[17]) == 2
+
+
+def test_split_override_refuses_on_part_count_mismatch():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="--split requests 3"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, split_overrides={17: 3})
 
 
 def test_min_text_pt_forces_split():

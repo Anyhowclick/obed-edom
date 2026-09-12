@@ -73,12 +73,17 @@ def _filter_kept_items(
     include_side: bool,
     group_child_text: Mapping[int, str | None] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> tuple[
     list[dict], list[ItemId], tuple[ItemId, ...], tuple[ItemId, ...], tuple[str, ...],
     bool, tuple[ItemId, ...], tuple[ItemId, ...],
 ]:
     """Shared filter dropping backdrops/off-canvas/side-panel/scrim/text-slide-media/mirror
-    duplicates. Returns ``(kept, dropped_side, dropped_backdrop, dropped_duplicate, ...)``."""
+    duplicates. Returns ``(kept, dropped_side, dropped_backdrop, dropped_duplicate, ...)``.
+    ``no_dedupe``/``no_drop_panel_backdrop`` are operator escape hatches (D6, `--no-dedupe`/
+    `--no-drop-panel-backdrop`) that keep the mirror-duplicate pair, resp. the panel scrim,
+    instead of dropping them."""
     kept: list[dict] = []
     dropped_side: list[ItemId] = []
     panel_backdrops: list[dict] = []
@@ -91,7 +96,7 @@ def _filter_kept_items(
         if not include_side and is_side_panel_item(item, wall_w, wall_h):
             dropped_side.append(item_id)
             continue
-        if is_panel_backdrop(item, (wall_w, wall_h), include_side=include_side):
+        if not no_drop_panel_backdrop and is_panel_backdrop(item, (wall_w, wall_h), include_side=include_side):
             panel_backdrops.append(item)
             continue
         kept.append(item)
@@ -111,14 +116,17 @@ def _filter_kept_items(
             dropped_media_text = tuple(sorted(media_ids, key=lambda iid: (iid[0], iid[1])))
             kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in media_ids]
 
-    duplicate_map, mirror_warnings = mirror_duplicates(
-        kept, (wall_w, wall_h), group_child_text=group_child_text
-    )
-    dropped_duplicate = tuple(duplicate_map)
-    if dropped_duplicate:
-        dup_set = set(dropped_duplicate)
-        kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in dup_set]
-        long_text_ids = tuple(iid for iid in long_text_ids if iid not in dup_set)
+    dropped_duplicate: tuple[ItemId, ...] = ()
+    mirror_warnings: tuple[str, ...] = ()
+    if not no_dedupe:
+        duplicate_map, mirror_warnings = mirror_duplicates(
+            kept, (wall_w, wall_h), group_child_text=group_child_text
+        )
+        dropped_duplicate = tuple(duplicate_map)
+        if dropped_duplicate:
+            dup_set = set(dropped_duplicate)
+            kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in dup_set]
+            long_text_ids = tuple(iid for iid in long_text_ids if iid not in dup_set)
 
     return (
         kept, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings,
@@ -320,6 +328,8 @@ def classify_slide(
     connection_line_builds: int = 0,
     group_child_text: Mapping[int, str | None] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> SlideClass:
     number = slide["number"]
     wall_w, wall_h = wall
@@ -332,6 +342,7 @@ def classify_slide(
     ) = _filter_kept_items(
         slide.get("items") or [], wall_w, wall_h, include_side=include_side,
         group_child_text=group_child_text, text_slide_words=text_slide_words,
+        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     kept: list[ItemId] = [(item["kind"], item["kindIndex"]) for item in kept_kinds]
     kept_set = set(kept)
@@ -395,6 +406,8 @@ def classify_deck(
     deck: Any = None,
     payload: dict | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> list[SlideClass]:
     """Classify every slide in ``payload`` (built from ``deck_path``/``deck`` if omitted)."""
     from obed_edom.iwa_runs import attach_group_content_signature  # noqa: PLC0415
@@ -422,6 +435,8 @@ def classify_deck(
                 connection_line_builds=connection_line_by_number.get(number, 0),
                 group_child_text=slide.get("groupChildSignature"),
                 text_slide_words=text_slide_words,
+                no_dedupe=no_dedupe,
+                no_drop_panel_backdrop=no_drop_panel_backdrop,
             )
         )
     return out
@@ -672,11 +687,13 @@ def _visibles_by_wall(
     include_side: bool,
     group_child_text: Mapping[int, str | None] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> dict[ItemId, Rect]:
     wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
     filtered_items = _filter_kept_items(
         items, wall_w, wall_h, include_side=include_side, group_child_text=group_child_text,
-        text_slide_words=text_slide_words,
+        text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )[0]
     visibles: dict[ItemId, Rect] = {}
     for item in filtered_items:
@@ -694,12 +711,14 @@ def visible_union(
     wall: tuple[float, float],
     group_child_text: Mapping[int, str | None] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> Rect | None:
     """Wall-space union of kept visible item rects (per ``_filter_kept_items``), or ``None``
     if nothing is kept/visible. Used by the DSK movie export's include_side crop rect."""
     visibles = _visibles_by_wall(
         items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text,
-        text_slide_words=text_slide_words,
+        text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if not visibles:
         return None
@@ -716,6 +735,8 @@ def fit_slide(
     wall: tuple[float, float] | None = None,
     group_child_text: Mapping[int, str | None] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> dict[ItemId, Rect]:
     """``kept`` (explicit item ids) or ``wall`` (apply ``_filter_kept_items``) restrict which
     items are fit -- exactly one of the two must be given."""
@@ -726,7 +747,7 @@ def fit_slide(
     else:
         visibles = _visibles_by_wall(
             items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text,
-            text_slide_words=text_slide_words,
+            text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
         )
 
     if not visibles:
@@ -1087,8 +1108,10 @@ def plan_crops(
 
             source_name = item.get("fileName") or Path(member).name
             if source_name in used_names:
-                warnings.append(f"image {item_id[1]}: fileName {source_name!r} already cropped this slide, keeping source (LWCROP)")
-                continue
+                raise CropRefusal(
+                    f"slide {number} image {item_id[1]}: fileName {source_name!r} collides with another "
+                    "kept image already cropped this slide"
+                )
             out_dir = Path(crop_dir) / str(number)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / source_name

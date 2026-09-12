@@ -489,6 +489,18 @@ on a slide whose parts disagree on transition.
 | 32 | coal fix | crop `3840:1080:1920:0`, no document resize, side panels deleted in the scratch script |
 | 8 | regression | unchanged vs r7 with `--include-side 8` |
 
+Opus-C review round 2: fixing finding 1 (`_group_has_media` -- a badge group counts as
+content only when it has an `image:`/`movie:` leaf, not merely a non-`text:` one) flips
+anchor GW 44/50/51/53/54 from `right` to `centre` -- each keeps a single text-only badge
+group (shape + text, no media) and nothing else, so zero content items is correct, but
+this is a layout change on five slides the owner should eyeball on the next gold run,
+not only GW 7/37 (the bug the review actually caught).
+
+`dsk_plan.py`'s outward px-rounding of the crop box against the un-rounded `visible`
+rect (round 1 finding 13, knowingly deferred) is a non-uniform sub-pixel stretch of the
+cropped image against its frame -- below visual threshold on the GW deck's crops, but
+worth an eyeball on a crop with a very small visible window.
+
 **Live** — one hands-off run:
 
 1. `dsk-export-clips "Sermon_PK (GW).key" --slides 32,33 --out clips-r8`

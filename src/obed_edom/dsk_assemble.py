@@ -251,16 +251,22 @@ def slide_affine_scale(
     anchor: str,
     wall: tuple[float, float],
     group_child_text: Mapping[int, str | None] | None = None,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> float | None:
     """The one shared uniform scale ``fit_slide`` applies across a slide, recomputed from
     its two public results rather than as a private ``fit_slide`` attribute. ``None`` when
     the slide has no visible/fit content. Used for group children -- never derive a
     group's scale from a live group width, which is wrong once the fit has clipped it."""
-    union = visible_union(items, include_side=include_side, wall=wall, group_child_text=group_child_text)
+    union = visible_union(
+        items, include_side=include_side, wall=wall, group_child_text=group_child_text,
+        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
+    )
     if union is None:
         return None
     fit = fit_slide(
-        items, band, include_side=include_side, anchor=anchor, wall=wall, group_child_text=group_child_text
+        items, band, include_side=include_side, anchor=anchor, wall=wall, group_child_text=group_child_text,
+        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if not fit:
         return None
@@ -282,24 +288,27 @@ def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | N
     return objects.get(slide_id)
 
 
-def _group_is_text_only(signature: str | None) -> bool:
+def _group_has_media(signature: str | None) -> bool:
     """True when `signature` (`slide['groupChildSignature']`, composite of ``text:``/
-    ``shape:``/``image:``-tagged leaves) has no non-text leaf. Unresolved/empty
-    signatures are conservatively NOT text-only."""
+    ``shape:``/``image:``/``movie:``-tagged leaves) has an ``image:``/``movie:`` leaf.
+    Unresolved (``None``) signatures are conservatively treated as content; an empty
+    signature (every leaf normalised away) is not conservative in the same sense but is
+    harmless -- it counts as content, same as unresolved."""
     if not signature:
-        return False
-    return all(part.startswith("text:") for part in signature.split("\n") if part)
+        return True
+    return any(part.startswith(("image:", "movie:")) for part in signature.split("\n") if part)
 
 
 def _content_item_count(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> int:
     """Count of kept image/movie/group items -- placement is by COUNT (D3); text
-    (and text-only badge groups with no media child) never count towards it."""
+    (and a badge group with no image/movie leaf, e.g. a text-only or a
+    shape-plus-text pill) never counts towards it."""
     group_signature = group_signature or {}
     count = 0
     for kind, kind_index in cls.kept:
         if kind not in ("image", "movie", "group"):
             continue
-        if kind == "group" and _group_is_text_only(group_signature.get(kind_index)):
+        if kind == "group" and not _group_has_media(group_signature.get(kind_index)):
             continue
         count += 1
     return count
@@ -322,9 +331,25 @@ def plan_assembly(
     no_image_crop: bool = False,
     builds: Mapping[int, dict] | None = None,
     no_auto_anchor: bool = False,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
+    split_overrides: Mapping[int, int] | None = None,
 ) -> AssemblyPlan:
     """Pure planning over `payload`/`classes`, EXCEPT `plan_crops` (unless
-    `no_image_crop`), which writes cropped image files under `crop_dir` as it plans."""
+    `no_image_crop`), which writes cropped image files under `crop_dir` as it plans.
+    Cropping needs the IWA object graph: pass it as `deck` (a `(objects, ...)` tuple or
+    the raw `objects` dict) to reuse one already loaded, or leave it `None` and this
+    loads `fw_deck` itself.
+
+    `no_dedupe`/`no_drop_panel_backdrop` are D6 operator escape hatches threaded down to
+    `_filter_kept_items` -- note `classes` must already have been built (via
+    `classify_deck`/`classify_slide`) with the SAME flags, since `cls.kept` and this
+    function's own re-derivation of kept items (through `fit_slide`) must agree.
+
+    `split_overrides` (D6 `--split N=k`) forces slide `N`'s stacked-text fit to be
+    treated as not fitting as one box, so it goes through the multi-part split path,
+    regardless of whether it would otherwise fit -- refuses if slide `N` does not have
+    exactly `k` long text boxes to split."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -354,327 +379,352 @@ def plan_assembly(
     anchors_out: dict[int, str] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
+    if objects_graph is None and fw_deck is not None and not no_image_crop:
+        objects_graph = _load_deck(fw_deck)[0]
+
+    # `plan_crops` writes files as it plans (see the docstring above); a refusal on a
+    # later slide must not leave an earlier slide's crop files behind on disk.
+    crop_files_written: list[Path] = []
 
     for number in kept_numbers:
-        decision = decisions[number]
-        cls = classes_by_number[number]
-        slide = slides_by_number[number]
-        items = slide.get("items") or []
-        items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
-        group_child_text = slide.get("groupChildSignature")
-        warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
+        try:
+            decision = decisions[number]
+            cls = classes_by_number[number]
+            slide = slides_by_number[number]
+            items = slide.get("items") or []
+            items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
+            group_child_text = slide.get("groupChildSignature")
+            warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
-        if decision.anchor in (None, "auto"):
-            anchor = "centre" if no_auto_anchor else (
-                "right" if _content_item_count(cls, slide.get("groupChildSignature")) == 1 else "centre"
-            )
-        else:
-            anchor = decision.anchor
-        anchors_out[number] = anchor
+            if decision.anchor in (None, "auto"):
+                anchor = "centre" if no_auto_anchor else (
+                    "right" if _content_item_count(cls, slide.get("groupChildSignature")) == 1 else "centre"
+                )
+            else:
+                anchor = decision.anchor
+            anchors_out[number] = anchor
 
-        fit = fit_slide(
-            items,
-            band,
-            include_side=decision.keep_side,
-            anchor=anchor,
-            wall=wall,
-            group_child_text=group_child_text,
-        )
-        fits[number] = fit
-
-        slide_crops: dict[ItemId, CropSpec] = {}
-        if not no_image_crop and objects_graph is not None and fw_deck is not None:
-            slide_archive = _slide_archive_for_number(objects_graph, number)
-            if slide_archive is not None:
-                build_target_ids = {
-                    (b["kind"], b["kindIndex"])
-                    for b in ((builds or {}).get(number) or {}).get("builds") or []
-                }
-                try:
-                    slide_crops, crop_warnings = plan_crops(
-                        fw_deck,
-                        slide_archive,
-                        objects_graph,
-                        items,
-                        cls.kept,
-                        include_side=decision.keep_side,
-                        crop_dir=crop_dir if crop_dir is not None else Path(fw_deck).parent / "crops",
-                        number=number,
-                        build_targets=build_target_ids,
-                    )
-                except CropRefusal as exc:
-                    raise AssemblyRefusal(str(exc)) from exc
-                warnings.extend(f"slide {number}: {w}" for w in crop_warnings)
-        if slide_crops:
-            crops_out[number] = slide_crops
-
-        top_level_movie_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
-        if cls.category in ("movie", "mixed") and cls.movie_count > len(top_level_movie_ids):
-            raise AssemblyRefusal(f"slide {number}: movie nested in group unsupported")
-
-        group_ids = [iid for iid in cls.kept if iid[0] == "group"]
-        if group_ids:
-            scale = slide_affine_scale(
+            fit = fit_slide(
                 items,
                 band,
                 include_side=decision.keep_side,
                 anchor=anchor,
                 wall=wall,
                 group_child_text=group_child_text,
+                no_dedupe=no_dedupe,
+                no_drop_panel_backdrop=no_drop_panel_backdrop,
             )
-            if scale is not None:
-                group_scale[number] = scale
-            slide_group_children: dict[int, list[dict]] = {}
-            slide_group_text_sizes: dict[int, float] = {}
-            slide_group_origin: dict[int, tuple[float, float]] = {}
-            children_payload = slide.get("groupChildren") or {}
-            child_text_payload = slide.get("groupChildText") or {}
-            caption_payload = slide.get("groupCaption") or {}
-            for iid in group_ids:
-                kind_index = iid[1]
-                has_text = bool((child_text_payload.get(kind_index) or "").strip())
-                children = children_payload.get(kind_index)
-                if has_text and children is None:
-                    raise AssemblyRefusal(
-                        f"slide {number}: group {kind_index} has text but no offline child "
-                        "metadata (nested/rotated/masked group, or an autosize child whose "
-                        "naturalSize disagrees with its frame) -- refusing to write blind"
-                    )
-                if children is not None:
-                    slide_group_children[kind_index] = children
-                    group_item = items_by_id.get(iid)
-                    if group_item is not None:
-                        slide_group_origin[kind_index] = (group_item.get("x", 0.0), group_item.get("y", 0.0))
-                    caption = caption_payload.get(kind_index)
-                    if caption is not None and caption.get("size") and scale is not None:
-                        slide_group_text_sizes[kind_index] = caption["size"] * scale
-            if slide_group_children:
-                group_children[number] = slide_group_children
-            if slide_group_text_sizes:
-                group_text_sizes[number] = slide_group_text_sizes
-            if slide_group_origin:
-                group_origin[number] = slide_group_origin
+            fits[number] = fit
 
-        dropped = () if decision.keep_side else cls.dropped_side
-        movie_ids: tuple[ItemId, ...] = ()
-        if cls.category in ("movie", "mixed"):
-            movie_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
-
-        all_ids = {(item["kind"], item["kindIndex"]) for item in items}
-        excluded_ids = all_ids - set(cls.kept) - set(cls.dropped_side)
-
-        crop_ids = tuple(sorted(slide_crops.keys()))
-        base_deletes = _delete_order(list(dropped) + list(movie_ids) + list(excluded_ids) + list(crop_ids))
-        deletes[number] = base_deletes
-
-        stacked_ids: set[ItemId] = set()
-        stacked_text_sizes: dict[ItemId, float] = {}
-        stacked_shrink_only_sizes: dict[ItemId, float] = {}
-        stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
-        if cls.is_text and cls.long_text_ids:
-            long_ids = [iid for iid in cls.long_text_ids if iid in fit]
-            boxes, box_warnings = _text_boxes(long_ids, items_by_id)
-            warnings.extend(f"slide {number}: {w}" for w in box_warnings)
-            if boxes and len(boxes) == len(long_ids):
-                long_id_set = set(long_ids)
-                short_fit = {iid: rect for iid, rect in fit.items() if iid not in long_id_set}
-                stack_band = band
-                short_row_h = 0.0
-                if short_fit:
-                    short_row_h = max(rect.h for rect in short_fit.values())
-                    budget = max(0.0, band.height - short_row_h - _TEXT_STACK_GAP)
-                    stack_band = _dc_replace(band, height=budget)
-
-                result = fit_text_stack(boxes, stack_band, min_text_pt)
-                if result is not None:
-                    t, sizes, heights = result
-                    long_rects = _stacked_text_rects(boxes, heights, stack_band)
-                    fit.update(long_rects)
-                    if short_fit:
-                        stack_top = min(rect.y for rect in long_rects.values())
-                        fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
-                    stacked_ids = {box.item_id for box in boxes}
-                    for box in boxes:
-                        ranges, unresolved = _run_size_ranges(
-                            items_by_id[box.item_id], t, item_id=box.item_id,
-                            slide_number=number, warnings=warnings,
+            slide_crops: dict[ItemId, CropSpec] = {}
+            if not no_image_crop and objects_graph is not None and fw_deck is not None:
+                slide_archive = _slide_archive_for_number(objects_graph, number)
+                if slide_archive is not None:
+                    build_target_ids = {
+                        (b["kind"], b["kindIndex"])
+                        for b in ((builds or {}).get(number) or {}).get("builds") or []
+                    }
+                    try:
+                        slide_crops, crop_warnings = plan_crops(
+                            fw_deck,
+                            slide_archive,
+                            objects_graph,
+                            items,
+                            cls.kept,
+                            include_side=decision.keep_side,
+                            crop_dir=crop_dir if crop_dir is not None else Path(fw_deck).parent / "crops",
+                            number=number,
+                            build_targets=build_target_ids,
                         )
-                        if isinstance(ranges, tuple):
-                            stacked_run_sizes[box.item_id] = ranges
-                        elif ranges is not None:
-                            stacked_text_sizes[box.item_id] = ranges
-                        elif unresolved:
-                            if t < 1.0:
-                                if text_fit == "warn":
-                                    raise AssemblyRefusal(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
-                                        f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
-                                    )
-                                warnings.append(
-                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
-                                    f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
-                                    "--text-fit shrink"
-                                )
-                            elif text_fit == "shrink":
-                                warnings.append(
-                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
-                                    "flattening run sizes to the lead size under --text-fit shrink"
-                                )
-                            else:
-                                warnings.append(
-                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
-                                    "preserving source sizing"
-                                )
-                            stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
-                        else:
-                            stacked_text_sizes[box.item_id] = sizes[box.item_id]
-                elif not allow_split:
-                    raise AssemblyRefusal(
-                        f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
-                    )
-                elif len(boxes) < 2:
-                    raise AssemblyRefusal(
-                        f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
-                    )
-                else:
-                    if slide_crops:
+                    except CropRefusal as exc:
+                        raise AssemblyRefusal(str(exc)) from exc
+                    warnings.extend(f"slide {number}: {w}" for w in crop_warnings)
+                    crop_files_written.extend(spec.path for spec in slide_crops.values())
+            if slide_crops:
+                crops_out[number] = slide_crops
+
+            top_level_movie_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
+            if cls.category in ("movie", "mixed") and cls.movie_count > len(top_level_movie_ids):
+                raise AssemblyRefusal(f"slide {number}: movie nested in group unsupported")
+
+            group_ids = [iid for iid in cls.kept if iid[0] == "group"]
+            if group_ids:
+                scale = slide_affine_scale(
+                    items,
+                    band,
+                    include_side=decision.keep_side,
+                    anchor=anchor,
+                    wall=wall,
+                    group_child_text=group_child_text,
+                    no_dedupe=no_dedupe,
+                    no_drop_panel_backdrop=no_drop_panel_backdrop,
+                )
+                if scale is not None:
+                    group_scale[number] = scale
+                slide_group_children: dict[int, list[dict]] = {}
+                slide_group_text_sizes: dict[int, float] = {}
+                slide_group_origin: dict[int, tuple[float, float]] = {}
+                children_payload = slide.get("groupChildren") or {}
+                child_text_payload = slide.get("groupChildText") or {}
+                caption_payload = slide.get("groupCaption") or {}
+                for iid in group_ids:
+                    kind_index = iid[1]
+                    has_text = bool((child_text_payload.get(kind_index) or "").strip())
+                    children = children_payload.get(kind_index)
+                    if has_text and children is None:
                         raise AssemblyRefusal(
-                            f"slide {number}: text split and image crop both apply -- unsupported"
+                            f"slide {number}: group {kind_index} has text but no offline child "
+                            "metadata (nested/rotated/masked group, or an autosize child whose "
+                            "naturalSize disagrees with its frame) -- refusing to write blind"
                         )
-                    stacked_ids = set(long_ids)
-                    part_list: list[SplitPart] = []
-                    for box in boxes:
-                        single = fit_text_stack([box], stack_band, min_text_pt)
-                        if single is None:
-                            raise AssemblyRefusal(
-                                f"slide {number} box {box.item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
-                            )
-                        t1, sizes1, heights1 = single
-                        rect = _stacked_text_rects([box], heights1, stack_band)[box.item_id]
-                        part_fit = dict(short_fit)
-                        if short_fit:
-                            part_fit.update(_short_row_rects(short_fit, short_row_h, rect.y))
-                        part_fit[box.item_id] = rect
-                        other_long = [b.item_id for b in boxes if b.item_id != box.item_id]
-                        part_deletes = _delete_order(list(base_deletes) + other_long)
-                        part_ranges, part_unresolved = _run_size_ranges(
-                            items_by_id[box.item_id], t1, item_id=box.item_id,
-                            slide_number=number, warnings=warnings,
-                        )
-                        part_item = items_by_id[box.item_id]
-                        part_autosize = (
-                            frozenset({box.item_id})
-                            if part_item.get("w") == 0.0 or part_item.get("h") == 0.0
-                            else frozenset()
-                        )
-                        part_text_sizes: dict[ItemId, float] = {}
-                        if isinstance(part_ranges, float):
-                            part_text_sizes[box.item_id] = part_ranges
-                        elif part_ranges is None and not part_unresolved:
-                            part_text_sizes[box.item_id] = sizes1[box.item_id]
-                        elif part_unresolved:
-                            if t1 < 1.0:
-                                if text_fit == "warn":
-                                    raise AssemblyRefusal(
-                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
-                                        f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
-                                    )
-                                warnings.append(
-                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
-                                    f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
-                                    "--text-fit shrink"
-                                )
-                            elif text_fit == "shrink":
-                                warnings.append(
-                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
-                                    "flattening run sizes to the lead size under --text-fit shrink"
-                                )
-                            else:
-                                warnings.append(
-                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
-                                    "preserving source sizing"
-                                )
-                            stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
-                        part_list.append(
-                            SplitPart(
-                                fits=part_fit, deletes=part_deletes,
-                                text_sizes=part_text_sizes,
-                                run_sizes={box.item_id: part_ranges} if isinstance(part_ranges, tuple) else {},
-                                stacked_ids=frozenset({box.item_id}),
-                                autosize=part_autosize,
-                            )
-                        )
-                    parts[number] = len(part_list)
-                    splits[number] = tuple(part_list)
-                    for iid in long_ids:
-                        fit.pop(iid, None)
+                    if children is not None:
+                        slide_group_children[kind_index] = children
+                        group_item = items_by_id.get(iid)
+                        if group_item is not None:
+                            slide_group_origin[kind_index] = (group_item.get("x", 0.0), group_item.get("y", 0.0))
+                        caption = caption_payload.get(kind_index)
+                        if caption is not None and caption.get("size") and scale is not None:
+                            slide_group_text_sizes[kind_index] = caption["size"] * scale
+                if slide_group_children:
+                    group_children[number] = slide_group_children
+                if slide_group_text_sizes:
+                    group_text_sizes[number] = slide_group_text_sizes
+                if slide_group_origin:
+                    group_origin[number] = slide_group_origin
+
+            dropped = () if decision.keep_side else cls.dropped_side
+            movie_ids: tuple[ItemId, ...] = ()
+            if cls.category in ("movie", "mixed"):
+                movie_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
+
+            all_ids = {(item["kind"], item["kindIndex"]) for item in items}
+            excluded_ids = all_ids - set(cls.kept) - set(cls.dropped_side)
+
+            crop_ids = tuple(sorted(slide_crops.keys()))
+            base_deletes = _delete_order(list(dropped) + list(movie_ids) + list(excluded_ids) + list(crop_ids))
+            deletes[number] = base_deletes
+
+            stacked_ids: set[ItemId] = set()
+            stacked_text_sizes: dict[ItemId, float] = {}
+            stacked_shrink_only_sizes: dict[ItemId, float] = {}
+            stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
+            if cls.is_text and cls.long_text_ids:
+                long_ids = [iid for iid in cls.long_text_ids if iid in fit]
+                boxes, box_warnings = _text_boxes(long_ids, items_by_id)
+                warnings.extend(f"slide {number}: {w}" for w in box_warnings)
+                if boxes and len(boxes) == len(long_ids):
+                    long_id_set = set(long_ids)
+                    short_fit = {iid: rect for iid, rect in fit.items() if iid not in long_id_set}
+                    stack_band = band
+                    short_row_h = 0.0
                     if short_fit:
-                        fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
+                        short_row_h = max(rect.h for rect in short_fit.values())
+                        budget = max(0.0, band.height - short_row_h - _TEXT_STACK_GAP)
+                        stack_band = _dc_replace(band, height=budget)
 
-        if cls.category in ("movie", "mixed"):
-            clip_path = clips.get(number)
-            if clip_path is None:
-                raise AssemblyRefusal(f"no clip provided for movie slide {number}")
-            if not movie_ids:
-                raise AssemblyRefusal(f"slide {number} classified {cls.category} with no kept movie")
-            first_movie = min(movie_ids, key=lambda iid: iid[1])
-            clips_out[number] = (clip_path, first_movie)
+                    forced_parts = (split_overrides or {}).get(number)
+                    if forced_parts is not None and len(boxes) != forced_parts:
+                        raise AssemblyRefusal(
+                            f"slide {number}: --split requests {forced_parts} part(s) but the slide "
+                            f"has {len(boxes)} long text box(es) to split"
+                        )
+                    result = None if forced_parts is not None else fit_text_stack(boxes, stack_band, min_text_pt)
+                    if result is not None:
+                        t, sizes, heights = result
+                        long_rects = _stacked_text_rects(boxes, heights, stack_band)
+                        fit.update(long_rects)
+                        if short_fit:
+                            stack_top = min(rect.y for rect in long_rects.values())
+                            fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
+                        stacked_ids = {box.item_id for box in boxes}
+                        for box in boxes:
+                            ranges, unresolved = _run_size_ranges(
+                                items_by_id[box.item_id], t, item_id=box.item_id,
+                                slide_number=number, warnings=warnings,
+                            )
+                            if isinstance(ranges, tuple):
+                                stacked_run_sizes[box.item_id] = ranges
+                            elif ranges is not None:
+                                stacked_text_sizes[box.item_id] = ranges
+                            elif unresolved:
+                                if t < 1.0:
+                                    if text_fit == "warn":
+                                        raise AssemblyRefusal(
+                                            f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                            f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
+                                        )
+                                    warnings.append(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                        f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
+                                        "--text-fit shrink"
+                                    )
+                                elif text_fit == "shrink":
+                                    warnings.append(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        "flattening run sizes to the lead size under --text-fit shrink"
+                                    )
+                                else:
+                                    warnings.append(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        "preserving source sizing"
+                                    )
+                                stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
+                            else:
+                                stacked_text_sizes[box.item_id] = sizes[box.item_id]
+                    elif not allow_split:
+                        raise AssemblyRefusal(
+                            f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
+                        )
+                    elif len(boxes) < 2:
+                        raise AssemblyRefusal(
+                            f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
+                        )
+                    else:
+                        if slide_crops:
+                            raise AssemblyRefusal(
+                                f"slide {number}: text split and image crop both apply -- unsupported"
+                            )
+                        stacked_ids = set(long_ids)
+                        part_list: list[SplitPart] = []
+                        for box in boxes:
+                            single = fit_text_stack([box], stack_band, min_text_pt)
+                            if single is None:
+                                raise AssemblyRefusal(
+                                    f"slide {number} box {box.item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
+                                )
+                            t1, sizes1, heights1 = single
+                            rect = _stacked_text_rects([box], heights1, stack_band)[box.item_id]
+                            part_fit = dict(short_fit)
+                            if short_fit:
+                                part_fit.update(_short_row_rects(short_fit, short_row_h, rect.y))
+                            part_fit[box.item_id] = rect
+                            other_long = [b.item_id for b in boxes if b.item_id != box.item_id]
+                            part_deletes = _delete_order(list(base_deletes) + other_long)
+                            part_ranges, part_unresolved = _run_size_ranges(
+                                items_by_id[box.item_id], t1, item_id=box.item_id,
+                                slide_number=number, warnings=warnings,
+                            )
+                            part_item = items_by_id[box.item_id]
+                            part_autosize = (
+                                frozenset({box.item_id})
+                                if part_item.get("w") == 0.0 or part_item.get("h") == 0.0
+                                else frozenset()
+                            )
+                            part_text_sizes: dict[ItemId, float] = {}
+                            if isinstance(part_ranges, float):
+                                part_text_sizes[box.item_id] = part_ranges
+                            elif part_ranges is None and not part_unresolved:
+                                part_text_sizes[box.item_id] = sizes1[box.item_id]
+                            elif part_unresolved:
+                                if t1 < 1.0:
+                                    if text_fit == "warn":
+                                        raise AssemblyRefusal(
+                                            f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                            f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
+                                        )
+                                    warnings.append(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                        f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
+                                        "--text-fit shrink"
+                                    )
+                                elif text_fit == "shrink":
+                                    warnings.append(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        "flattening run sizes to the lead size under --text-fit shrink"
+                                    )
+                                else:
+                                    warnings.append(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                        "preserving source sizing"
+                                    )
+                                stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
+                            part_list.append(
+                                SplitPart(
+                                    fits=part_fit, deletes=part_deletes,
+                                    text_sizes=part_text_sizes,
+                                    run_sizes={box.item_id: part_ranges} if isinstance(part_ranges, tuple) else {},
+                                    stacked_ids=frozenset({box.item_id}),
+                                    autosize=part_autosize,
+                                )
+                            )
+                        parts[number] = len(part_list)
+                        splits[number] = tuple(part_list)
+                        for iid in long_ids:
+                            fit.pop(iid, None)
+                        if short_fit:
+                            fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
 
-        wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
-        slide_text_sizes: dict[ItemId, float] = {}
-        slide_shrink_sizes: dict[ItemId, float] = {}
-        slide_autosize: set[ItemId] = set()
-        for iid in cls.kept:
-            if iid[0] != "text" or iid in stacked_ids:
-                continue
-            item = items_by_id.get(iid)
-            if item is None:
-                continue
-            if item.get("w") == 0.0 or item.get("h") == 0.0:
-                slide_autosize.add(iid)
-            if runs is not None:
-                item_sizes = list(runs.get(number, {}).get(iid) or [])
-            else:
-                item_sizes = [
-                    r["size"] for r in (item.get("runs") or []) if r.get("size") is not None
-                ]
-            if not item_sizes:
-                continue
-            fitted = fit.get(iid)
-            if fitted is None:
-                continue
-            visible = _intersect(item_rect(item), wall_rect)
-            if visible is None:
-                continue
-            if visible.w > 0:
-                scale = fitted.w / visible.w
-            elif visible.h > 0:
-                scale = fitted.h / visible.h
-            else:
-                continue
-            distinct = set(item_sizes)
-            if len(distinct) > 1:
-                warnings.append(f"slide {number} text {iid[1]} mixed run sizes")
-                if iid in slide_autosize:
-                    slide_shrink_sizes[iid] = max(distinct) * scale
-                continue
-            slide_text_sizes[iid] = next(iter(distinct)) * scale
+            if cls.category in ("movie", "mixed"):
+                clip_path = clips.get(number)
+                if clip_path is None:
+                    raise AssemblyRefusal(f"no clip provided for movie slide {number}")
+                if not movie_ids:
+                    raise AssemblyRefusal(f"slide {number} classified {cls.category} with no kept movie")
+                first_movie = min(movie_ids, key=lambda iid: iid[1])
+                clips_out[number] = (clip_path, first_movie)
 
-        slide_text_sizes.update(stacked_text_sizes)
-        slide_shrink_sizes.update(stacked_text_sizes)
-        slide_shrink_sizes.update(stacked_shrink_only_sizes)
-        for iid, ranges in stacked_run_sizes.items():
-            slide_shrink_sizes[iid] = max(size for _s, _e, size in ranges)
-        if slide_text_sizes:
-            text_sizes[number] = slide_text_sizes
-        if slide_shrink_sizes:
-            shrink_text_sizes[number] = slide_shrink_sizes
-        if slide_autosize:
-            autosize[number] = frozenset(slide_autosize)
-        if stacked_run_sizes:
-            run_sizes[number] = stacked_run_sizes
-        if stacked_ids:
-            stacked_id_map[number] = frozenset(stacked_ids)
+            wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if decision.keep_side else CENTRE_PANEL_RECT
+            slide_text_sizes: dict[ItemId, float] = {}
+            slide_shrink_sizes: dict[ItemId, float] = {}
+            slide_autosize: set[ItemId] = set()
+            for iid in cls.kept:
+                if iid[0] != "text" or iid in stacked_ids:
+                    continue
+                item = items_by_id.get(iid)
+                if item is None:
+                    continue
+                if item.get("w") == 0.0 or item.get("h") == 0.0:
+                    slide_autosize.add(iid)
+                if runs is not None:
+                    item_sizes = list(runs.get(number, {}).get(iid) or [])
+                else:
+                    item_sizes = [
+                        r["size"] for r in (item.get("runs") or []) if r.get("size") is not None
+                    ]
+                if not item_sizes:
+                    continue
+                fitted = fit.get(iid)
+                if fitted is None:
+                    continue
+                visible = _intersect(item_rect(item), wall_rect)
+                if visible is None:
+                    continue
+                if visible.w > 0:
+                    scale = fitted.w / visible.w
+                elif visible.h > 0:
+                    scale = fitted.h / visible.h
+                else:
+                    continue
+                distinct = set(item_sizes)
+                if len(distinct) > 1:
+                    warnings.append(f"slide {number} text {iid[1]} mixed run sizes")
+                    if iid in slide_autosize:
+                        slide_shrink_sizes[iid] = max(distinct) * scale
+                    continue
+                slide_text_sizes[iid] = next(iter(distinct)) * scale
+
+            slide_text_sizes.update(stacked_text_sizes)
+            slide_shrink_sizes.update(stacked_text_sizes)
+            slide_shrink_sizes.update(stacked_shrink_only_sizes)
+            for iid, ranges in stacked_run_sizes.items():
+                slide_shrink_sizes[iid] = max(size for _s, _e, size in ranges)
+            if slide_text_sizes:
+                text_sizes[number] = slide_text_sizes
+            if slide_shrink_sizes:
+                shrink_text_sizes[number] = slide_shrink_sizes
+            if slide_autosize:
+                autosize[number] = frozenset(slide_autosize)
+            if stacked_run_sizes:
+                run_sizes[number] = stacked_run_sizes
+            if stacked_ids:
+                stacked_id_map[number] = frozenset(stacked_ids)
+        except Exception:
+            for crop_path in crop_files_written:
+                try:
+                    Path(crop_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
 
     ordinals = ordinal_map(kept_numbers, parts)
     ordinal_to_number: dict[int, int] = {}
@@ -830,6 +880,8 @@ def load_assembly_inputs(
     *,
     include_side: frozenset[int] = frozenset(),
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
 ) -> tuple[dict, list[SlideClass], dict[int, dict[ItemId, list[float]]]]:
     """The only I/O in the pure planning path: offline payload, classifier output, and
     per-text-item run sizes, all read from `fw_deck` once."""
@@ -842,6 +894,7 @@ def load_assembly_inputs(
     attach_group_captions(fw_deck, payload, deck=deck)
     classes = classify_deck(
         fw_deck, include_side=include_side, deck=deck, payload=payload, text_slide_words=text_slide_words,
+        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
 
     runs: dict[int, dict[ItemId, list[float]]] = {}
@@ -1880,9 +1933,15 @@ def _restore_crop_zorder(
             str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
         ]
         deleted = set(plan.deletes.get(number, ()))
+        # A cropped source is `deleted` (its own drawable is gone) but its replacement
+        # still occupies a slot in the output order, so it must count as a survivor
+        # when deriving another crop's target index -- only a plain (non-cropped)
+        # delete actually removes a slot.
+        deleted_not_cropped = deleted - set(crop_specs)
 
-        moves: dict[str, int] = {}
+        targets: dict[str, int] = {}
         used_out_ids: set[str] = set()
+        refused_target = False
         for source_iid in sorted(crop_specs):
             spec = crop_specs[source_iid]
             pos = next((i for i, zid in enumerate(src_z) if src_addr.get(zid) == source_iid), None)
@@ -1891,7 +1950,7 @@ def _restore_crop_zorder(
                     f"slide {number} image {source_iid[1]}: source not found in z-order, crop z-order not restored"
                 )
                 continue
-            target_index = sum(1 for zid in src_z[:pos] if src_addr.get(zid) not in deleted)
+            target_index = sum(1 for zid in src_z[:pos] if src_addr.get(zid) not in deleted_not_cropped)
 
             out_id = None
             for zid in reversed(out_z):
@@ -1910,10 +1969,28 @@ def _restore_crop_zorder(
                     "z-order not restored"
                 )
                 continue
+            if target_index >= len(out_z):
+                warnings.append(
+                    f"slide {number} image {source_iid[1]}: target index {target_index} out of range "
+                    f"for {len(out_z)} drawables, crop z-order not restored"
+                )
+                refused_target = True
+                continue
             used_out_ids.add(out_id)
-            moves[out_id] = min(target_index, len(out_z) - 1)
+            targets[out_id] = target_index
+
+        # `reorder_drawables` applies moves in dict order, each against the list left by
+        # the previous move (its own contract). `target_index` above already treats every
+        # OTHER cropped source as a surviving slot (not a deletion), so the full set of
+        # `target_index`es is exactly the desired final positions in one consistent list;
+        # applying them in ascending order (each earlier, lower-index id already seated
+        # before a later one is placed) reproduces that list via `reorder_drawables`'
+        # own remove+insert semantics.
+        moves = dict(sorted(targets.items(), key=lambda kv: kv[1]))
 
         if not moves:
+            if refused_target:
+                warnings.append(f"slide {number}: crop z-order restore refused: target index out of range")
             continue
         try:
             move_result = reorder_drawables(out_path, out_slide_id, moves)
@@ -2164,6 +2241,9 @@ def assemble_dsk_deck(
     crop_dir: Path | None = None,
     no_image_crop: bool = False,
     no_auto_anchor: bool = False,
+    no_dedupe: bool = False,
+    no_drop_panel_backdrop: bool = False,
+    split_overrides: Mapping[int, int] | None = None,
 ) -> AssembleResult:
     """Runs the live AppleScript batch end to end (plan -> LiveBatch -> script),
     then two offline IWA post-passes: card-border stroke restore and build/transition
@@ -2198,6 +2278,7 @@ def assemble_dsk_deck(
     deck = _load_deck(fw_deck)
     payload, classes, runs = load_assembly_inputs(
         fw_deck, include_side=include_side, text_slide_words=text_slide_words,
+        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
@@ -2205,6 +2286,7 @@ def assemble_dsk_deck(
         min_text_pt=min_text_pt, allow_split=allow_split,
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
+        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,
     )
     for number in sorted(plan.anchors):
         log(f"slide {number}: anchor {plan.anchors[number]}")

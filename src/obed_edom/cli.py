@@ -190,6 +190,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Never derive a slide's anchor from its kept content-item count; slides with no "
         "explicit --anchor stay centred.",
     )
+    dsk_assemble.add_argument(
+        "--no-dedupe", action="store_true",
+        help="Never drop a kept item as a mirror-duplicate of another; keep both.",
+    )
+    dsk_assemble.add_argument(
+        "--no-drop-panel-backdrop", action="store_true",
+        help="Never drop a textless full-frame shape (the verse-slide scrim) as a panel backdrop.",
+    )
+    dsk_assemble.add_argument(
+        "--split", action="append", default=[], metavar="N=k",
+        help="Force slide N's text stack to split into exactly k parts, overriding the "
+        "offline fit decision; refuses if N does not have exactly k long text boxes. "
+        "Repeatable.",
+    )
     remap.add_argument(
         "--source-previews",
         help=(
@@ -381,6 +395,22 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             return 1
         anchors[slide_no] = anchor
 
+    split_overrides: dict[int, int] = {}
+    for spec in args.split:
+        slide_text, sep, count_text = spec.partition("=")
+        if not sep:
+            print(f"Bad --split {spec!r}; expected N=k.", file=sys.stderr)
+            return 1
+        try:
+            slide_no, part_count = int(slide_text), int(count_text)
+        except ValueError:
+            print(f"Bad --split {spec!r}; expected N=k.", file=sys.stderr)
+            return 1
+        if slide_no not in slide_set:
+            print(f"Bad --split {spec!r}; slide {slide_no} is not in --slides.", file=sys.stderr)
+            return 1
+        split_overrides[slide_no] = part_count
+
     clips: dict[int, Path] = {}
     for spec in args.clip:
         slide_text, sep, clip_text = spec.partition("=")
@@ -434,6 +464,9 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             crop_dir=args.crop_dir,
             no_image_crop=args.no_image_crop,
             no_auto_anchor=args.no_auto_anchor,
+            no_dedupe=args.no_dedupe,
+            no_drop_panel_backdrop=args.no_drop_panel_backdrop,
+            split_overrides=split_overrides,
         )
     except AssemblyRefusal as exc:
         print(f"Assembly refused: {exc}", file=sys.stderr)

@@ -219,6 +219,31 @@ def test_panel_backdrop_kept_when_sole_content():
     assert out.kept == (("movie", 0),)
 
 
+def test_no_drop_panel_backdrop_flag_keeps_the_scrim():
+    scrim_28 = _shape_item(0, x=951, y=0, w=3840, h=1080)
+    badge = _text_item(0, x=2000, y=900, w=400, h=100)
+    out = classify_slide(
+        _slide(28, [scrim_28, badge]), None, CENTRE_WALL, include_side=False, no_drop_panel_backdrop=True,
+    )
+    assert out.dropped_backdrop == ()
+    assert ("shape", 0) in out.kept
+
+
+def test_no_dedupe_flag_keeps_the_mirror_pair():
+    # GW 24's real cluster (see test_mirror_duplicates_gw24_cluster): 4 items in, 2
+    # normally survive; --no-dedupe keeps all 4.
+    image2 = _image_item(2, 1944, 23, 504, 919, "1.png")
+    image3 = _image_item(3, 2484, 23, 504, 919, "2.png")
+    image4 = _image_item(4, 5233, 23, 504, 919, "2.png")
+    image5 = _image_item(5, 4693, 23, 504, 919, "1.png")
+    items = [image2, image3, image4, image5]
+    out_deduped = classify_slide(_slide(24, items), None, CENTRE_WALL, include_side=False)
+    assert out_deduped.dropped_duplicate != ()
+    out_kept = classify_slide(_slide(24, items), None, CENTRE_WALL, include_side=False, no_dedupe=True)
+    assert out_kept.dropped_duplicate == ()
+    assert set(out_kept.kept) == {("image", 2), ("image", 3), ("image", 4), ("image", 5)}
+
+
 def test_is_panel_backdrop_tests_wall_frame_under_include_side():
     # Finding 5: include_side no longer skips the scrim test outright -- it tests against
     # the full wall frame instead of the centre panel.
@@ -1225,6 +1250,19 @@ def test_crop_box_from_frame_mask_and_lw():
     assert px_box == (0, 1533, 6000, 3222)
 
 
+def test_crop_geometry_unmasked_uses_frame_as_mask_abs():
+    # No `mask` key at all -- `mask_abs` falls back to the frame rect (round 1 finding
+    # 4); the frame here extends past the centre panel on both sides so the crop is real.
+    obj, extra = _image_obj(x=1920, y=0, w=3840, h=2000, natural=(3840, 2000))
+    objects = {"img": obj, **extra}
+    result = crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+    assert result is not None
+    mask_abs, visible, px_box = result
+    assert mask_abs == Rect(1920.0, 0.0, 3840.0, 2000.0)
+    assert visible == Rect(1920.0, 0.0, 3840.0, 1080.0)
+    assert px_box == (0, 0, 3840, 1080)
+
+
 def test_no_crop_when_visible_inside_panel():
     # GW 48 shaped: the whole masked visible rect already sits inside the panel window,
     # so nothing is cropped away (D2) -- crop_geometry still reports it; plan_crops is the
@@ -1268,6 +1306,39 @@ def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
     )
     assert crops == {}
     assert any("EXIF" in w for w in warnings)
+
+
+def test_plan_crops_refuses_duplicate_fileName_on_one_slide(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-0.jpg")
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    obj0, extra0 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m0")
+    obj0["data"] = {"identifier": "0"}
+    obj1, extra1 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m1")
+    obj1["data"] = {"identifier": "1"}
+    objects = {"img0": obj0, "img1": obj1, **extra0, **extra1}
+    monkeypatch.setattr(
+        dsk_plan, "_item_object_ids",
+        lambda slide_archive, objects: {("image", 0): "img0", ("image", 1): "img1"},
+    )
+    items = [
+        {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "dup.jpg"},
+        {"kind": "image", "kindIndex": 1, "rotation": 0, "fileName": "dup.jpg"},
+    ]
+    with pytest.raises(CropRefusal, match="collides"):
+        plan_crops(
+            key_path, {}, objects, items, [("image", 0), ("image", 1)],
+            crop_dir=tmp_path / "crops", number=3,
+        )
 
 
 def _empty_key(tmp_path):

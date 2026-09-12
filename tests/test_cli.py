@@ -27,7 +27,46 @@ def test_dsk_assemble_new_flags_parse(tmp_path, capsys):
             "dsk-assemble", str(missing), "--out", str(tmp_path / "out.key"), "--slides", "1",
             "--min-text-pt", "66", "--text-slide-words", "8", "--no-split",
             "--crop-dir", str(tmp_path / "crops"), "--no-image-crop", "--no-auto-anchor",
+            "--no-dedupe", "--no-drop-panel-backdrop", "--split", "17=2",
         ]
     )
     assert rc == 1
     assert "File not found" in capsys.readouterr().err
+
+
+def test_dsk_assemble_bad_split_spec_rejected(tmp_path, capsys, monkeypatch):
+    import obed_edom.offline_inspect as offline_inspect
+
+    source = tmp_path / "deck.key"
+    source.mkdir()
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload",
+        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 20},
+    )
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "1",
+            "--split", "not-a-spec",
+        ]
+    )
+    assert rc == 1
+    assert "Bad --split" in capsys.readouterr().err
+
+
+def test_dsk_assemble_split_slide_not_in_slides_rejected(tmp_path, capsys, monkeypatch):
+    import obed_edom.offline_inspect as offline_inspect
+
+    source = tmp_path / "deck.key"
+    source.mkdir()
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload",
+        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 20},
+    )
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "1",
+            "--split", "17=2",
+        ]
+    )
+    assert rc == 1
+    assert "not in --slides" in capsys.readouterr().err

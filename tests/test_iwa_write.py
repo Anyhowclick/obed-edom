@@ -2465,6 +2465,46 @@ def test_reorder_drawables_value_clean_touches_only_the_slide_archive(tmp_path):
     assert changed == ["Index/Slide-100.iwa"]
 
 
+def _build_owned_drawables_deck(path, owned_ids):
+    """One slide whose ``drawablesZOrder`` is ``[220, 230, 250]`` and ``ownedDrawables``
+    is ``owned_ids`` -- real slides carry the two in lockstep; these tests probe what
+    happens when a caller's ``ownedDrawables`` disagrees."""
+    slide = _arch(
+        100,
+        "KN.SlideArchive",
+        {
+            "drawablesZOrder": [{"identifier": 220}, {"identifier": 230}, {"identifier": 250}],
+            "ownedDrawables": [{"identifier": i} for i in owned_ids],
+        },
+    )
+    show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
+    node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Index/Document.iwa", _member([show, node]))
+        z.writestr("Index/Slide-100.iwa", _member([slide]))
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_reorder_drawables_mirrors_permutation_into_owned_drawables_when_same_id_set(tmp_path):
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert [ref["identifier"] for ref in objects["100"]["drawablesZOrder"]] == ["250", "220", "230"]
+    assert [ref["identifier"] for ref in objects["100"]["ownedDrawables"]] == ["250", "220", "230"]
+
+
+def test_reorder_drawables_refuses_when_owned_drawables_id_set_differs(tmp_path):
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 999])
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "ownedDrawables" in result["reason"]
+    assert deck.read_bytes() == before
+
+
 def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
     deck = _build_builds_deck(tmp_path / "builds.key")
     before = deck.read_bytes()

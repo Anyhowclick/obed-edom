@@ -1938,10 +1938,19 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
     ``_rewrite_members``. Moves are applied in ``moves`` dict order, each against the
     list left by the previous move.
 
+    ``ownedDrawables`` is a second reference list on the same archive that, on every
+    real slide observed so far, is byte-for-byte the same order as ``drawablesZOrder``.
+    This function does not know which list Keynote treats as the authoritative order
+    (KeynoteKit's own writer touches ``drawablesZOrder`` only), so as the safer premise
+    it mirrors the same permutation into ``ownedDrawables`` when present and refuses
+    outright if that list is not a reordering of the exact same id set (rather than
+    silently leaving it stale).
+
     Refuses (deck untouched) unless ``slide_id`` resolves to a same-member
     ``KN.SlideArchive`` with a ``drawablesZOrder``, every id in ``moves`` is currently
-    one of its entries, every ``newIndex`` is in range, and the re-encoded archive set
-    changed only ``slide_id``.
+    one of its entries, every ``newIndex`` is in range, ``ownedDrawables`` (if present)
+    is a permutation of the same ids, and the re-encoded archive set changed only
+    ``slide_id``.
     """
     deck = Path(deck)
     slide_id = str(slide_id)
@@ -1968,6 +1977,16 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
         order.remove(drawable_id)
         order.insert(new_index, drawable_id)
 
+    owned_raw = obj.get("ownedDrawables")
+    mirror_owned = owned_raw is not None
+    if mirror_owned:
+        owned_ids = [str(ref["identifier"]) for ref in owned_raw if ref.get("identifier") is not None]
+        if set(owned_ids) != set(order):
+            return {
+                "refused": True,
+                "reason": f"slide {slide_id}: ownedDrawables id set differs from drawablesZOrder, refusing to reorder",
+            }
+
     with zipfile.ZipFile(deck) as zf:
         if member not in zf.namelist():
             return {"refused": True, "reason": f"member {member} missing from deck"}
@@ -1982,6 +2001,8 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
                 continue
             for o in arch.get("objects") or []:
                 o["drawablesZOrder"] = [{"identifier": did} for did in order]
+                if mirror_owned:
+                    o["ownedDrawables"] = [{"identifier": did} for did in order]
                 touched += 1
 
     if touched != 1:
@@ -2000,11 +2021,16 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
     reparsed_by_id = _archives_by_id(reparsed)
     arch = reparsed_by_id.get(slide_id)
     new_order = None
+    new_owned = None
     for o in (arch.get("objects") or []) if arch else []:
         new_order = [str(ref["identifier"]) for ref in o.get("drawablesZOrder") or []]
+        if mirror_owned:
+            new_owned = [str(ref["identifier"]) for ref in o.get("ownedDrawables") or []]
         break
     if new_order != order:
         return {"refused": True, "reason": f"slide {slide_id} reparsed drawablesZOrder does not match requested order"}
+    if mirror_owned and new_owned != order:
+        return {"refused": True, "reason": f"slide {slide_id} reparsed ownedDrawables does not match requested order"}
 
     try:
         _rewrite_members(deck, {member: new_member})
