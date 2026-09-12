@@ -1807,3 +1807,69 @@ def test_export_maps_job_removes_stale_poster_frame_when_gate_off(tmp_path: Path
 
     result = export_maps_job(job, export_lw=True, export_cg=False)
     assert "posterFrame" not in result
+
+
+def test_build_deck_script_creates_document_on_basic_black_theme(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert 'set theDoc to make new document with properties {document theme:theme "Basic Black"}' in script
+    assert "set theDoc to make new document\n" in script  # the bare fallback branch
+    assert 'set base slide of slide 1 of theDoc to master slide "Blank" of theDoc' in script
+
+
+def test_build_deck_script_new_slides_use_blank_master_with_fallback(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert 'make new slide at after slide 1 with properties {base slide:master slide "Blank" of theDoc}' in script
+    assert "make new slide at after slide 1\n" in script  # the bare fallback branch
+    for marker in (
+        'make new slide at after slide 1 with properties {base slide:master slide "Blank" of theDoc}',
+        "on error",
+        "end try",
+    ):
+        assert marker in script
+
+
+def test_build_deck_script_theme_and_master_scripts_compile(tmp_path: Path):
+    """A `try` block rescues only runtime errors, never a COMPILE error (627cd66) -- verify
+    the theme-create and blank-master AppleScript this PR emits actually osacompiles."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("osacompile") is None:
+        pytest.skip("osacompile unavailable (non-macOS)")
+
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osacompile", "-o", "/dev/null", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "-2707" not in proc.stderr
+    assert "-2741" not in proc.stderr

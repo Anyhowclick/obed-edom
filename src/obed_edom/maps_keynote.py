@@ -1263,7 +1263,12 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             slide_no += 1
         else:
             body += [
-                f"      make new slide at after slide {slide_no}",
+                "      try",
+                f'        make new slide at after slide {slide_no} with properties '
+                '{base slide:master slide "Blank" of theDoc}',
+                "      on error",
+                f"        make new slide at after slide {slide_no}",
+                "      end try",
             ]
             slide_no += 1
         body += _emit_slide_body(op, slide_no)
@@ -1277,7 +1282,11 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             f'      close (every document whose name is "{name}" or name is "{stem}") saving no',
             "      delay 0.3",
             "    end try",
-            "    set theDoc to make new document",
+            "    try",
+            '      set theDoc to make new document with properties {document theme:theme "Basic Black"}',
+            "    on error",
+            "      set theDoc to make new document",
+            "    end try",
             f"    set width of theDoc to {int(width)}",
             f"    set height of theDoc to {int(height)}",
             f'    save theDoc in POSIX file "{dest_s}"',
@@ -1296,6 +1305,9 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             "    set theDoc to document 1",
             f'    if name of theDoc does not start with "{stem}" then error '
             '"maps export bound the wrong document: " & (name of theDoc)',
+            "    try",
+            '      set base slide of slide 1 of theDoc to master slide "Blank" of theDoc',
+            "    end try",
             "    tell theDoc",
             *body,
             "    end tell",
