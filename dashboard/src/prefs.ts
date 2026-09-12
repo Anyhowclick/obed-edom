@@ -57,10 +57,28 @@ export function useSessionPath(key: string, fallback = ""): [string, (next: stri
 }
 
 let defaultExportDirRequest: Promise<string> | null = null;
+let defaultExportDirVersion = 0;
+const defaultExportDirListeners = new Set<() => void>();
+
+/** Invalidates the shared default-export-dir fetch so every mounted `useDefaultExportDir` refetches. */
+export function refreshDefaultExportDir(): void {
+  defaultExportDirRequest = null;
+  defaultExportDirVersion += 1;
+  defaultExportDirListeners.forEach((listener) => listener());
+}
 
 /** The operator's persisted default export folder (`""` when unset), fetched once and shared. */
 export function useDefaultExportDir(): string {
   const [value, setValue] = useState("");
+  const [version, setVersion] = useState(defaultExportDirVersion);
+
+  useEffect(() => {
+    const listener = () => setVersion((v) => v + 1);
+    defaultExportDirListeners.add(listener);
+    return () => {
+      defaultExportDirListeners.delete(listener);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,7 +93,7 @@ export function useDefaultExportDir(): string {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [version]);
 
   return value;
 }

@@ -32,12 +32,12 @@ def _keynote_process_tell() -> str:
     )
 
 
-def _stem(docx: Path) -> str:
+def stem_for(docx: Path) -> str:
     return docx.stem.replace(" ", "_")
 
 
 def output_dir_for(docx: Path, root: Path | None = None) -> Path:
-    out = (root / "output" if root else output_root()) / _stem(docx)
+    out = (root / "output" if root else output_root()) / stem_for(docx)
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -2172,9 +2172,9 @@ def generate_both(
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."
         )
-    out_dir = (output_dir / _stem(docx)) if output_dir else output_dir_for(docx)
+    out_dir = (output_dir / stem_for(docx)) if output_dir else output_dir_for(docx)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = _stem(docx)
+    stem = stem_for(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"
     lw_export = out_dir / "previews" / "lw" if export and lw_src else None

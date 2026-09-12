@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { chooseFolder, getSettings, putSettings, type Settings } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { refreshDefaultExportDir } from "../prefs";
 
 export function SettingsTab() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -20,6 +21,7 @@ export function SettingsTab() {
       const written = await putSettings(next);
       setSettings(written);
       setSaved(true);
+      if (next.defaultExportDir !== undefined) refreshDefaultExportDir();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

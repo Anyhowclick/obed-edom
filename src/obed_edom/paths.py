@@ -46,14 +46,14 @@ def validate_export_dir(raw: str | Path) -> Path:
         private_root = output / root_name
         try:
             resolved.relative_to(private_root)
-        except (ValueError, FileNotFoundError):
+        except ValueError:
             pass
         else:
             raise ValueError(f"Export directory cannot be inside {private_root}")
 
     try:
         resolved.relative_to(cache_root().resolve())
-    except (ValueError, FileNotFoundError):
+    except ValueError:
         pass
     else:
         raise ValueError(f"Export directory cannot be inside {cache_root()}")
@@ -70,12 +70,23 @@ def validate_export_dir(raw: str | Path) -> Path:
 
 
 def export_destination(job) -> Path:
-    """Job override, else the operator default, else `output_root()`."""
+    """Job override, else the operator default, else `output_root()`.
+
+    Falls back to `output_root()` (and sets `job.result["exportDirFallback"]`)
+    when the chosen directory has since vanished or turned into a file.
+    """
     from obed_edom.settings import load_settings  # noqa: PLC0415
 
-    override = (getattr(job, "result", None) or {}).get("exportDir")
+    result = getattr(job, "result", None)
+    override = (result or {}).get("exportDir")
     if override:
-        return Path(override)
+        candidate = Path(override)
+        if candidate.is_dir():
+            return candidate
+        if result is not None:
+            result.pop("exportDir", None)
+            result["exportDirFallback"] = True
+        return output_root()
 
     default_dir = (load_settings().get("defaultExportDir") or "").strip()
     if default_dir:

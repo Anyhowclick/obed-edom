@@ -336,6 +336,27 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     assert client.get("/api/settings").json()["reuseThreshold"] == 0.8
 
 
+def test_settings_unrelated_change_does_not_revalidate_export_dir(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    client = TestClient(app)
+    put = client.put("/api/settings", json={"defaultExportDir": str(export_dir)})
+    assert put.status_code == 200
+
+    # The stored export dir is now a file — re-validating it on an unrelated change
+    # would 400 and would try to mkdir over it.
+    export_dir.rmdir()
+    export_dir.write_text("now a file")
+
+    res = client.put("/api/settings", json={"reusePreviews": False})
+    assert res.status_code == 200
+    assert res.json()["reusePreviews"] is False
+    assert export_dir.is_file()
+
+
 def test_settings_rejects_private_root_export_dir(monkeypatch, tmp_path):
     from obed_edom import settings as settings_mod
 
@@ -358,6 +379,23 @@ def test_outline_endpoint_writes_findings_pdf_to_export_dir(tmp_path):
     outline_report = Path(job["result"]["outlineReport"])
     assert outline_report.parent == export_dir.resolve()
     assert outline_report.is_file()
+
+
+def test_outline_export_dir_removed_between_submit_and_run_falls_back(tmp_path):
+    from obed_edom.paths import output_root
+    from obed_edom.web.app import _run_outline
+    from obed_edom.web.jobs import Job
+
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    export_dir = tmp_path / "exports"  # never created — simulates removal before the job runs
+    job = Job(id="job-1", kind="outline", result={"exportDir": str(export_dir)})
+
+    result = _run_outline(job, path)
+
+    assert result["exportDirFallback"] is True
+    assert "exportDir" not in result
+    assert Path(result["outlineReport"]).parent == output_root()
+    assert Path(result["outlineReport"]).is_file()
 
 
 def test_outline_endpoint_rejects_private_root_export_dir(tmp_path):
