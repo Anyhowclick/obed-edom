@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { defaultLandmarkSize, defaultObjectSize, rebaseForPaste, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
+const { OBJECT_SIZE_MIN, OBJECT_SIZE_MAX, SIZE_ZOOM_MIN, SIZE_ZOOM_MAX, defaultLandmarkSize, defaultObjectSize, rebaseForPaste, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
 
 test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and the landmark default", () => {
   assert.equal(defaultObjectSize("dot"), 28);
@@ -132,5 +132,50 @@ test("copy-then-paste to many slides holds the source on-screen size at every ta
     const pasted = rebaseForPaste(clipboard, clipboard.sizeZoom, targetZoom);
     assert.equal(pasted.sizeZoom, targetZoom);
     assert.equal(effectiveObjectSize(pasted, targetZoom), onScreen);
+  }
+});
+
+test("rebaseForPaste clamps an oversized effective size and re-anchors sizeZoom", () => {
+  // size 120 authored at sizeZoom 5, source camera at zoom 11 -> 7680 px, past the API max.
+  const church = { kind: "landmark", size: 120, scaleWithMap: true, sizeZoom: 5 };
+  assert.equal(effectiveObjectSize(church, 11), 7680);
+  const pasted = rebaseForPaste(church, 11, 11);
+  assert.equal(pasted.size, OBJECT_SIZE_MAX);
+  assert.ok(pasted.sizeZoom >= SIZE_ZOOM_MIN && pasted.sizeZoom <= SIZE_ZOOM_MAX);
+  assert.ok(Math.abs(effectiveObjectSize(pasted, 11) - 7680) < 1);
+});
+
+test("rebaseForPaste clamps a sub-pixel effective size and re-anchors sizeZoom", () => {
+  // size 120 at sizeZoom 18, source camera at zoom 0 -> ~0.00046 px, under the API min.
+  const church = { kind: "landmark", size: 120, scaleWithMap: true, sizeZoom: 18 };
+  const eff = effectiveObjectSize(church, 0);
+  assert.ok(eff < 1);
+  const pasted = rebaseForPaste(church, 0, 10);
+  assert.equal(pasted.size, OBJECT_SIZE_MIN);
+  assert.ok(pasted.sizeZoom > 10 && pasted.sizeZoom <= SIZE_ZOOM_MAX);
+  assert.ok(Math.abs(effectiveObjectSize(pasted, 10) - eff) < 1e-9);
+});
+
+test("rebaseForPaste accepts a residual size error when the sizeZoom correction is clamped", () => {
+  // Same object pasted onto a zoom-22 camera: the correction wants sizeZoom ~33, past the API
+  // max 22, so sizeZoom clamps and the pasted object ends up larger than the original 0.00046 px.
+  const church = { kind: "landmark", size: 120, scaleWithMap: true, sizeZoom: 18 };
+  const eff = effectiveObjectSize(church, 0);
+  const pasted = rebaseForPaste(church, 0, 22);
+  assert.equal(pasted.size, OBJECT_SIZE_MIN);
+  assert.equal(pasted.sizeZoom, SIZE_ZOOM_MAX);
+  assert.equal(effectiveObjectSize(pasted, 22), 1);
+  assert.ok(effectiveObjectSize(pasted, 22) > eff);
+});
+
+test("rebaseForPaste keeps size and sizeZoom inside the API ranges across cameras", () => {
+  for (const sizeZoom of [0, 5, 12, 22]) {
+    for (const sourceZoom of [0, 4, 11, 18, 22]) {
+      for (const targetZoom of [0, 7, 22]) {
+        const pasted = rebaseForPaste({ kind: "landmark", size: 120, scaleWithMap: true, sizeZoom }, sourceZoom, targetZoom);
+        assert.ok(pasted.size >= OBJECT_SIZE_MIN && pasted.size <= OBJECT_SIZE_MAX, `size ${pasted.size}`);
+        assert.ok(pasted.sizeZoom >= SIZE_ZOOM_MIN && pasted.sizeZoom <= SIZE_ZOOM_MAX, `sizeZoom ${pasted.sizeZoom}`);
+      }
+    }
   }
 });

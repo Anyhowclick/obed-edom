@@ -48,7 +48,7 @@ import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
-import { defaultObjectSize, rebaseForPaste, zoomSizeFactor } from "../maps/objects";
+import { OBJECT_SIZE_MAX, defaultObjectSize, rebaseForPaste, zoomSizeFactor } from "../maps/objects";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
@@ -2458,7 +2458,7 @@ export function MapsTab() {
                             const defaultSize = defaultObjectSize(c.kind);
                             if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
                             const size = c.sizeZoom != null ? (c.size || defaultSize) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || defaultSize;
-                            return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
+                            return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, size))), sizeZoom: undefined };
                           }),
                         });
                       }}

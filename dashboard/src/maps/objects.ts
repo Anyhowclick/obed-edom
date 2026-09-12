@@ -1,5 +1,11 @@
 import type { ExpressionSpecification } from "maplibre-gl";
 
+/** Server bounds for `size` / `sizeZoom` (MapsChurch in src/obed_edom/web/maps.py). */
+export const OBJECT_SIZE_MIN = 1;
+export const OBJECT_SIZE_MAX = 4000;
+export const SIZE_ZOOM_MIN = 0;
+export const SIZE_ZOOM_MAX = 22;
+
 /** Mirrors `_default_landmark_size` in src/obed_edom/web/watercolour.py. */
 export function defaultLandmarkSize(assetWidth: number): number {
   return Math.trunc(Math.max(240, Math.min(1600, Math.min(assetWidth, Math.trunc(1920 / 3) * 2))));
@@ -71,12 +77,14 @@ export function resizeFromCorner(
   const px = (2 * sx * dx) / scale;
   const py = (sy * dy) / (a * scale);
   const d = Math.abs(px) >= Math.abs(py) ? px : py;
-  return Math.round(Math.max(24, Math.min(4000, startSize + d)));
+  return Math.round(Math.max(24, Math.min(OBJECT_SIZE_MAX, startSize + d)));
 }
 
 /**
  * Clipboard rebase: materialise the object's on-screen size at `sourceZoom` into `size`
  * and re-anchor `sizeZoom` to the target camera, so a paste keeps the same on-screen size.
+ * `size` is clamped to the server's range and `sizeZoom` shifted by log2(size'/eff) so the
+ * effective size at the target camera is unchanged; a `sizeZoom` clamp leaves a residual.
  */
 export function rebaseForPaste<T extends { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }>(
   church: T,
@@ -84,5 +92,10 @@ export function rebaseForPaste<T extends { size?: number; scaleWithMap?: boolean
   targetZoom: number
 ): T {
   if (!church.scaleWithMap) return church;
-  return { ...church, size: Math.round(effectiveObjectSize(church, sourceZoom)), sizeZoom: targetZoom };
+  const eff = effectiveObjectSize(church, sourceZoom);
+  const anchor = Math.max(SIZE_ZOOM_MIN, Math.min(SIZE_ZOOM_MAX, targetZoom));
+  if (!(eff > 0) || !Number.isFinite(eff)) return { ...church, size: OBJECT_SIZE_MIN, sizeZoom: anchor };
+  const size = Math.max(OBJECT_SIZE_MIN, Math.min(OBJECT_SIZE_MAX, Math.round(eff)));
+  const sizeZoom = Math.max(SIZE_ZOOM_MIN, Math.min(SIZE_ZOOM_MAX, targetZoom + Math.log2(size / eff)));
+  return { ...church, size, sizeZoom };
 }
