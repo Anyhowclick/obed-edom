@@ -283,6 +283,8 @@ def test_generate_default_path_rejects_symlink_into_private_root(
     monkeypatch.setattr(pipeline, "map_slides", lambda outline: ([], [], []))
     monkeypatch.setattr(pipeline, "validate_outline", lambda outline: [])
     monkeypatch.setattr(pipeline, "validate_slide_specs", lambda lw, dsk: [])
+    monkeypatch.setattr(pipeline, "annotate_outline", lambda outline, lw, dsk, dest: dest)
+    monkeypatch.setattr(pipeline, "write_review", lambda *args, **kwargs: None)
 
     docx = tmp_path / "Sermon BC.docx"
     stem = pipeline.stem_for(docx)

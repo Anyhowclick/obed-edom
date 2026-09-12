@@ -15,7 +15,6 @@ from obed_edom.models import SlideSpec
 from obed_edom.paths import ensure_export_subdir, output_root, select_deck_template
 
 
-
 def _keynote_tell() -> str:
     """Tell header: address by bundle id, never by name."""
     return f'tell application id "{keynote_app.bundle_id()}"'

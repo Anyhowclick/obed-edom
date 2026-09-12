@@ -587,6 +587,7 @@ export function MapsTab() {
     await persistCurrentState();
     const updated = await renameJob(id, name);
     mergeServerMeta(updated);
+    saveAckJob.current = updated;
     return updated;
   }
 
