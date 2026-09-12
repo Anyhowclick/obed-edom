@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET; pass-2 half blocked on `badge-raise-readiness-poll` — a single arm-B badge click error, not a missing poll; fix implemented on `fix/badge-raise-readiness-poll`, pending the §5.2 live falsifier); `kindindex-guard-test-vacuous` is on PR #77; then a shared osascript runner, IWA natural-size/sentinel unification, the W1 default flip, then W2; new bug-backlog item `badge-width-collapse-gold-slide-2` (Gold slide 2 badge groups collapsed ~12x narrower) queued after `stat-raise-dead-4`/`as-geometry-rounding`. Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; next is `badge-width-collapse-gold-slide-2` (Gold slide 2 badge groups collapsed ~12x narrower), then a shared osascript runner, the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -97,66 +97,81 @@ todos:
       (`gate-recompare.log`, `--reuse-a/--reuse-b`): only slide 36 fails, arm-A image worst 0.01px."
     status: pending
   - id: badge-raise-readiness-poll
-    content: "BUG BACKLOG (B), medium priority, NEW 2026-09-11 from the full W1 gate
-      (`output/bank/2026-09-11/w1-gate/`), CORRECTED 2026-09-11 by opus read-only diagnosis
-      (`.../scratchpad/badge-poll-plan.md`). Original premise was wrong: `obedFront`
-      (`keynote.py:1327`, pre-fix `31f9dbe` `:1291`) is already the single shared readiness-polled
-      handler and was already called for the badge phase via `obedRaiseItem` — there was no poll to
-      extend. What actually
-      happened on the 09-11 gate: the poll read `enabled = true` and the `click menu item \"Bring to
-      Front\"` itself threw `-1719@badge,s=8,idx=1` (a System Events element-resolution failure, not
-      an addressing error — slide 8 has exactly one shape at index 1). Measured offline: the slide-8
-      badge plate (`17414542`) verifiably did NOT land in `B_flagged.key` — it stays at z2 under
-      `17414504`/`18763297` while its siblings raised to z6-z10, visibly half-covered on the CG
-      canvas (arm A has it correctly at z5). `front` A=700/B=699 is an honest count; `badgeMoved`
-      319/319 is an upper bound, not a measurement, because the badge landing probe is blind in two
-      ways: (B1) it only runs once per run while `badgeMoved is 0`, and (B2) it is per-kind and
-      slide 8 has exactly one `shape`, so it would have been vacuous even if it had run.
-      IMPLEMENTED on branch `fix/badge-raise-readiness-poll` per the plan's §3 fix shape: `obedFront`
-      now retries once on a click *error* (not a landing failure) by re-running the whole readiness
-      sequence (settle floor + bounded `enabled` poll, factored into `obedFrontReady`, emits
-      `raiseBlind` on each poll that fails to confirm readiness) before the second click;
-      `frontRaised` still counts once per call;
-      a first failure bumps `raiseClickRetried` and emits the observational token
-      `raiseClickRetry(s=,idx=,phase=,err=)` (errNum only, never errMsg); only a second failure lands
-      in `frontErr` tagged `[errNum@phase,s=,idx=,retry]`. `obedRaiseItem` re-runs the badge landing
-      probe after a retried click regardless of `badgeMoved` (the return value 0/1/2 from `obedFront`
-      signals clean/retried/failed), so a rescued-or-not badge raise is verified rather than counted
-      blindly; a per-raise badge liveness probe was explicitly rejected (≈+2-4 min/gate arm, no
-      detection benefit — it would not have caught this defect either, per B2). `offline_write_ab.py`
-      gains a non-gating `WARN <label>: raiseClickRetried=<n> ...` line in both bar modes;
-      `PASS2_PARITY_KEYS`/`PASS2_ZERO_KEYS` are unchanged (retries are timing-dependent per arm, not
-      a parity or strict key). Offline suite 1782/84 passed, golden unaffected.
-      DESIGN RISK (review finding 2, opus r1+r2, KEPT AS DESIGNED): a *twice*-failed click (retry
-      also fails) now latches `badgeFrontDead` deck-wide via the existing entry-guard contract
-      (`keynote.py:1270-1278`, pre-fix `31f9dbe` `:1266-1273`), and
-      `obedBadgeSlide` skips all later-slide badge raises — this is correct, already-designed
-      behaviour, not a regression, but must be called out in the PR body; a live control run should
-      be checked for a `badgeFrontDead(s=)` token and later-slide badge skips, not just for the
-      rescue case. PARKED, not in this PR: a `badgeProbeVacuous(s=,k=)` token for blind spot (B2),
-      and resolving the System Events process once per script instead of per tell (H1, trades a
-      transient whose-clause failure for a stale process reference, needs its own measurement).
-      STATUS stays pending until the §5.2 live falsifier: never launch Keynote from an agent session;
-      owner-run only, 16GB Mac, hands-off ack. Preferred protocol is the raise-dead ×3 re-point at
-      badge slides 8/40/55/56/106/109/110 on a `BADGE10_Wall.key` copy (3 treatment + 3 control
-      `OBED_RAISE_SETTLE_MAX=0` runs, serial, Keynote quit between runs); the decision is an offline
-      oracle read of slide 8's `drawablesZOrder` (does `17414542` sit above `18763297`?), never
-      `badgeMoved`, which cannot answer this. Decision rule: controls reproduce `-1719@badge` and the
-      retry lands the plate above `18763297` -> fix confirmed (`raiseClickRetried >= 1`, `frontErr`
-      empty is the expected signature); controls reproduce it and the plate stays buried with a
-      doubled `raiseBlind` -> the retry fired while still not ready, lengthen its poll floor (reuse
-      `obedRaiseRetry`'s `max(1.0, settle_min * 3)`) and re-run, do not escalate to a per-raise probe;
-      controls do not reproduce `-1719` at all -> inconclusive on the small deck, fall back to the
-      full-gate check. FINAL ACCEPTANCE (the item's actual bar, not the targeted run alone): the next
-      full W1 A/B gate on the Full deck with `--pass2-bar strict` returns `frontErr=''` in both arms
-      and `front` A==B — only then may this item be marked DONE. `--pass2-bar parity` stays
-      mandatory until that gate lands.
-      LIVE ×3/×3 DONE 2026-09-11 23:17 (bank `output/bank/2026-09-11/badge-retry/results.md`):
-      3 treatment (default poll) runs identical, 0 retries, no frontErr; 3 controls
-      (`OBED_RAISE_SETTLE_MAX=0`) reproduced `-1719@badge,s=55,idx=1` in 2 of 3, both times the
-      retry landed it (`frontErr` empty, offline z-order oracle SAME_ORDER=yes vs the clean runs on
-      all 7 target ordinals) -> FIX CONFIRMED; strict-bar RED class closed pending the full W1
-      gate."
+    content: "DONE 2026-09-12 (PR #80 merged b390466; live ×3/×3 + full W1 strict gate 2026-09-12
+      GREEN bar slide 36, bank output/bank/2026-09-12/w1-gate/results.md). BUG BACKLOG (B), medium
+      priority, NEW 2026-09-11 from the full W1 gate (`output/bank/2026-09-11/w1-gate/`), CORRECTED
+      2026-09-11 by opus read-only diagnosis (`.../scratchpad/badge-poll-plan.md`). Root cause: the
+      09-11 gate's poll read `enabled = true` and the `click menu item \"Bring to Front\"` itself
+      threw `-1719@badge,s=8,idx=1` (System Events element-resolution failure); the slide-8 badge
+      plate verifiably did not land while `badgeMoved` reported an upper bound, not a measurement,
+      because the landing probe (B1) only ran once per run while `badgeMoved is 0` and (B2) was
+      per-kind, vacuous on slide 8's single shape. FIX (PR #80, `fix/badge-raise-readiness-poll`):
+      `obedFront` retries once on a click *error* (not a landing failure) by re-running the whole
+      readiness sequence before the second click; a first failure bumps `raiseClickRetried` and
+      emits `raiseClickRetry(...)`; only a second failure lands in `frontErr` tagged `[...,retry]`.
+      `obedRaiseItem` re-runs the badge landing probe after a retried click regardless of
+      `badgeMoved`. DESIGN RISK (KEPT AS DESIGNED): a twice-failed click still latches
+      `badgeFrontDead` deck-wide via the existing entry-guard contract, and `obedBadgeSlide` skips
+      all later-slide badge raises — correct, already-designed behaviour, not a regression.
+      LIVE ×3/×3 DONE 2026-09-11 23:17 (`output/bank/2026-09-11/badge-retry/results.md`): 3
+      treatment runs identical/0 retries, 2 of 3 controls reproduced `-1719@badge,s=55,idx=1` and
+      the retry landed it both times -> FIX CONFIRMED.
+      FULL W1 GATE 2026-09-12: run 1 (08:13-09:25) surfaced a SEPARATE, deck-wide-cumulative-state
+      defect unrelated to PR #80 — see the new `badge-probe-on-blind` item for the full incident and
+      the recommended follow-up fix; PR #80's retry branch never executed on that run
+      (`raiseClickRetried=0` throughout) and is exonerated by offline diagnosis
+      (`.../scratchpad/armA-blind-diag.md`). Re-run arm A (09:25-09:57, `--reuse-b`) was clean: 0
+      badge blind, 12 raise blind (the usual set), no retries, no frontErr, z-order identical to the
+      09-11 clean A on all 21 checked slides. FINAL ACCEPTANCE MET: the full W1 A/B gate on the Full
+      deck with `--pass2-bar strict` returned `frontErr=''` in both arms and `front` A==B, RED only
+      from the owner-accepted slide-36 D10 #4 group residual -> GREEN bar slide 36. PARKED, not in
+      this PR: a `badgeProbeVacuous(s=,k=)` token for blind spot (B2), and resolving the System
+      Events process once per script instead of per tell (H1)."
+    status: completed
+  - id: badge-probe-on-blind
+    content: "IMPLEMENTED 2026-09-12 on branch fix/badge-probe-on-blind (PR pending): `lastFrontBlind`
+      global set in obedFrontReady's not-ready arm, cleared at the top of obedFront; obedRaiseItem
+      `_reprobe = _frontResult is not 0 or lastFrontBlind is not 0`, `_probeOnly` crediting; token
+      `badgeProbeBlind(s=,k=)`; return string/result dict/_RAISE_TOKEN_KINDS/PASS2 keys unchanged;
+      8 new tests, suite 1799/84; opus r1 APPROVE-WITH-NITS + Codex APPROVE. Replay: run-1 arm A
+      would have latched badgeFrontDead(s=42) → RED at run time. Status stays pending until the
+      next full gate confirms no behaviour change on a blind-free run.
+
+      BUG BACKLOG (B), medium priority, NEW 2026-09-12 from the 2026-09-12 full W1 gate run 1
+      (`output/bank/2026-09-12/w1-gate/{gate-run1.log,ENV.txt,A_unflagged.run.json}`), diagnosed
+      read-only offline (`output/bank/2026-09-12/w1-gate/armA-blind-diag.md`). On the FIRST 2026-09-12 arm-A run,
+      232 `raiseBlind(phase=badge)` fired on exactly the 45 badge slides ≥42 (of 63 badge slides,
+      318 planned members) — a perfect suffix of the badge pass, no interleaving, no recovery over
+      ~24 min. `raiseClickRetried=0` and `frontErr=''` throughout, so PR #80's new retry branch
+      never executed and is not the cause. Offline z-order (09-11 A vs 09-12 A, full 155-ordinal
+      deck) shows every one of those 45 blind slides differs (44/45; slide 74's raise was vacuous
+      and left no trace) and no non-blind slide differs: blind ⇔ badge raise did not land, 1:1,
+      confidence high. Content/ordinal trigger falsified (slide 43 is byte-identical in
+      kind/index/geometry to slide 41, and 41 landed while 43 did not; the same badge slides raised
+      cleanly in the 09-11 ranged ×3/×3 on this same PR #80 code). Runtime arithmetic (Δ582s over
+      232 extra blind polls = 2.51s each = exactly the poll floor+ceiling) proves Keynote stayed
+      responsive throughout and the AppleEvent `set selection` kept succeeding — this is the
+      ineffective-selection signature: the model-level selection stopped being reflected in the
+      window that owns the Arrange menu, most likely cumulative Keynote state during a long GUI pass
+      (H1, ~0.55 confidence; modal sheet H2 ~0.15; one-off environment event H3 ~0.15; locked
+      objects, wrong process, hang/timeout, and the badge-fallback-count delta are all falsified).
+      GATE-STRUCTURE DEFECT (the actionable finding, root-cause-independent): `obedRaiseItem`
+      verifies badge landing only while the GLOBAL `badgeMoved` counter is still 0 — once the first
+      badge slide verifies, nothing is checked again for the rest of the deck, so the run reported
+      `badgeMoved=319`/`badgeFrontDead=0` (a GREEN-looking pass) while 232 raises silently did
+      nothing; the readiness poll's `raiseBlind` token is a symptom counter, not a verifier, and is
+      the only reason this run was caught at all. RECOMMENDED FIX: verify landing whenever
+      `obedFrontReady` returned false (cheap — only fires on already-blind polls), not only while
+      `badgeMoved is 0`, mirroring the retry-path check `badge-raise-readiness-poll` already added
+      for click errors. Two probe protocols are banked in `armA-blind-diag.md` §3b to distinguish
+      H1/H2/H3 if a live investigation is warranted: Probe A (zero-code, ranged arm-A re-run over
+      badge slides 36-56 only) and Probe B (one-line instrumentation in `obedFrontReady`'s
+      `if not _ready` arm capturing `selection`/`sheets`/`AXMain` before emitting the token, run only
+      if A is clean). NEITHER PROBE WAS RUN — the 2026-09-12 re-run (`--reuse-b`) came back clean
+      (0 badge blind) before either was needed, so H1/H2/H3 remain undistinguished; run them only if
+      this recurs. The FIRST 2026-09-12 arm-A run (`A_tainted.key`/`A_tainted.run.json`) must NEVER
+      be used as a W1 reference — every badge raise from slide 42 on is unlanded despite a clean
+      report."
     status: pending
   - id: surface-raise-tokens
     content: "DONE 2026-09-09, PR #61 `fix/surface-raise-tokens` (`c5e9c34`, Codex 3 passes), precondition for `stat-raise-dead-4`'s diagnosis. `keynote._run_stat_finalize` now returns `tokens` {name: [args]} and `frontErr`; `obedRaiseSlide` emits a `raiseDead(s=,idx=)` token for EVERY dead raise (the `is 0` guards removed); `remap_keynote._say_stat_finalize_detail` logs `Stat raise detail: ` (chunks of ≤40, marker `(i/n)` after the prefix), `WARNING stat-finalize: GUI Bring to Front returned error(s) `, `Badge raise detail: ` (unchanged), `Stat resolve detail: ` (rare kinds uncapped, sigFallback capped at 40). Unblocks `stat-raise-dead-4` localising all 4 `raiseDead` occurrences by log alone on the next production run."
@@ -495,9 +510,10 @@ Mac is preferred, not mandatory policy. Historical reviews retain their original
   group writes, not rounding, fixed by a hybrid planner aspect-snap plus a permanent aspect-aware
   arm-A oracle at 0.25px — LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f`: the
   geometry half of the flip bar is now MET (plan-oracle A green bar slide 36, B exact); the
-  pass-2 half is blocked on `badge-raise-readiness-poll` (a single arm-B badge click error, not a
-  missing poll; fix implemented on `fix/badge-raise-readiness-poll`, pending the §5.2 live
-  falsifier) before the flip can proceed.
+  pass-2 half is now ALSO MET (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, full W1
+  strict gate 2026-09-12 GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict
+  is now the W1 gate bar. Next: `badge-width-collapse-gold-slide-2`, then a shared osascript
+  runner, then the W1 default flip.
   **W2 `w-zorder-patch` stays gated on W1** and is
   purely speed/Accessibility removal, since `8a7b4bb` fixed the raise-order correctness bug W2's
   own plan had assumed was already handled.
@@ -624,10 +640,11 @@ cleanup and golden-plan gate; the refactor assessment.
 5. **W1 default flip** (`w-offline-write-stabilise`) — bar is the universal naturalSize writer plus
    a healthy whole-deck gate (green on both gold decks, with the consistency audit). The geometry
    half of the flip bar is now MET (`as-geometry-rounding` LIVE-CONFIRMED 2026-09-11, full W1 gate
-   on `bb69e3f`: plan-oracle A green bar slide 36, B exact); the pass-2 half is blocked on
-   `badge-raise-readiness-poll` (a single arm-B badge click error, not a missing poll; fix
-   implemented on `fix/badge-raise-readiness-poll`, pending the §5.2 live falsifier). W1 flip is
-   next after that item lands, plus the shared osascript runner.
+   on `bb69e3f`: plan-oracle A green bar slide 36, B exact); the pass-2 half is now ALSO MET
+   (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, full W1 strict gate 2026-09-12
+   GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate
+   bar. Next: `badge-width-collapse-gold-slide-2`, then the shared osascript runner, then the W1
+   default flip, then W2.
 6. **W2 `w-zorder-patch`** — gated on W1 stable; purely speed + Accessibility removal now.
    `restore_source_builds` must still run LAST, after any future z-order write.
 7. **Bug backlog:** `map-label-offslide-parked-delete`, `card-border-source-ref-floor-fix`
