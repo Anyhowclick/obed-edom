@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; `badge-width-collapse-gold-slide-2` is IMPLEMENTED on branch fix/badge-width-collapse (PR pending Codex; opus review APPROVE-WITH-NITS on r3), status stays pending until the owner's live acceptance run; next = a shared osascript runner, then IWA natural-size/sentinel unification, then the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; `badge-width-collapse-gold-slide-2` is DONE (PR #94 @ 1ad51ed, owner merges; live acceptance PASSED 2026-09-12 18:07, `output/bank/2026-09-12/badge-width-live/results.md`); next = a shared osascript runner, then IWA natural-size/sentinel unification, then the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -372,7 +372,10 @@ todos:
       the point the value is PRODUCED, not where it is consumed."
     status: pending
   - id: badge-width-collapse-gold-slide-2
-    content: "IMPLEMENTED 2026-09-12 — PR #94 open (fix/badge-width-collapse @ 1ad51ed), owner merges; live acceptance owed. Root
+    content: "DONE 2026-09-12 — PR #94 (fix/badge-width-collapse @ 1ad51ed, owner merges); live
+      acceptance PASSED 18:07 (bank `output/bank/2026-09-12/badge-width-live/results.md`: badges
+      278.0×88.0 exact, strings intact; caveat: cached-jxa refusal not exercised live, v4 cache
+      version-stale, covered by the real-payload test). Root
       cause measured offline: the 2026-09-10 16:31 run consumed a cached `reader: jxa` payload
       with no `groupChildren`, so the planner fell back to a bare group-level
       `set properties {width:278,height:88}` write; Keynote 15.3.1 aspect-locks a group size
@@ -445,16 +448,12 @@ todos:
       Residual, not fixed here: F4 (a refused rect carries no
       `sizeRefused` token through to the framing UI, so it can't tell 'kept at source size' from
       'planned at source size') and F12 (a live-JXA path with a raised IWA decode error has no
-      guard). STATUS STAYS PENDING: live acceptance owed. Owner-run ranged Gold remap of slide 2
-      only (owner ack, from the maps-tab worktree with its `jxa` inspect cache left in place —
-      that cache is the reproducer, do not delete it before the run):
-      `python -m obed_edom remap \"Gold_Wall_Input.key\" --template \"Base_CG_Assets.key\"
-      --slides 2`. PASS = both badge groups within +-2px of 278x88 (or of the template badge size
-      if a badge slot ever matches them), the yellow plate and the full 'Ps George'/'Ps Joanna'
-      strings intact, no `groupCollapseRefused` in the run log. If the guard fires instead (groups
-      at source size + a loud WARNING) that is a PASS for the guard and a FAIL for the fix — report
-      both. Then mark DONE."
-    status: pending
+      guard). DONE 2026-09-12 — PR #94 (fix/badge-width-collapse @ 1ad51ed, owner merges); live
+      acceptance PASSED 18:07 (bank `output/bank/2026-09-12/badge-width-live/results.md`: badges
+      278.0×88.0 exact (source 277.97×87.57), strings intact; caveat: cached-jxa refusal not
+      exercised live (v4 cache version-stale vs INSPECT_VERSION 5), covered instead by
+      `tests/test_jxa_wall_regression.py`)."
+    status: completed
   - id: refused-group-score-centre
     content: "BUG BACKLOG (C), low priority, NEW 2026-09-12. `score_against_gold`
       (map_remap.py ~4419) builds the match centre from the rejected w/h for a `size_refused`
