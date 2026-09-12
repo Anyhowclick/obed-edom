@@ -453,7 +453,7 @@ def test_bootstrap_csv_preserves_empty_deck_layers(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name,lat\nSingapore\n", "replace": "false"},
+        data={"csv_text": "name\nSingapore\n", "replace": "false"},
     )
     assert started.status_code == 200
     done = _wait(job["id"])
@@ -606,7 +606,7 @@ def test_bootstrap_csv_queues_then_adds_slides(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name,lat\nKuala Lumpur\nSingapore\n", "replace": "false"},
+        data={"csv_text": "name\nKuala Lumpur\nSingapore\n", "replace": "false"},
     )
     assert started.status_code == 200
     assert started.json()["status"] in {"queued", "running", "done"}
@@ -636,7 +636,7 @@ def test_bootstrap_csv_replace_clears_prior_outputs(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name,lat\nSingapore\n", "replace": "true"},
+        data={"csv_text": "name\nSingapore\n", "replace": "true"},
     )
     assert started.status_code == 200
     done = _wait(job["id"])
@@ -653,7 +653,7 @@ def test_bootstrap_csv_can_add_pins_to_one_slide(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name,lat\nKuala Lumpur\nSingapore\n", "targetSlideId": "s1", "audience": "lw"},
+        data={"csv_text": "name\nKuala Lumpur\nSingapore\n", "targetSlideId": "s1", "audience": "lw"},
     )
     assert started.status_code == 200
     done = _wait(job["id"])
@@ -2428,3 +2428,68 @@ def test_bootstrap_csv_headerless_explicit_zoom_wins_over_ladder(monkeypatch):
     assert done["status"] == "done", done.get("error")
     china_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
     assert china_slide["camera"]["zoom"] == pytest.approx(6.8)
+
+
+def test_bootstrap_csv_headerless_leftover_words_qualify_the_geocode_query(monkeypatch):
+    job = _seed()
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "Paris,France\nUdaipur,India,z=6.8\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Paris, France", "Udaipur, India"]
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    udaipur_slide = next(s for s in new_slides if s["title"] == "Udaipur")
+    assert udaipur_slide["camera"]["zoom"] == pytest.approx(6.8)
+
+
+def test_bootstrap_csv_header_form_place_column_is_full_query_override(monkeypatch):
+    job = _seed()
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": 'name,place\nMy Church,"Paris, France"\n', "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Paris, France"]
+
+
+def test_bootstrap_csv_header_form_bad_zoom_reports_error_not_crash():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,zoom\nParis,notazoom\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert "Line 2" in detail[0]
+    assert "bad zoom" in detail[0]
+
+
+def test_bootstrap_csv_header_form_unknown_kind_reports_error_not_crash():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,kind\nParis,spaceport\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert "Line 2" in detail[0]
+    assert "unknown kind" in detail[0]
