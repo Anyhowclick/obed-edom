@@ -92,6 +92,28 @@ def test_completion_wins_when_job_finishes_before_cancel(tmp_path: Path):
     assert job.result == {"complete": True}
 
 
+def test_loop_reverts_result_when_save_fails(tmp_path: Path, monkeypatch):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    job = runner.submit("maps", lambda _job: {"new": True}, feature="maps", result={"old": True})
+
+    real_save = runner.save
+
+    def failing_save(saved_job: Job) -> None:
+        if saved_job.id == job.id:
+            raise RuntimeError("disk full")
+        real_save(saved_job)
+
+    monkeypatch.setattr(runner, "save", failing_save)
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline and job.status == "queued":
+        time.sleep(0.02)
+    time.sleep(0.1)
+
+    assert job.status == "running"
+    assert job.result == {"old": True}
+
+
 def test_delete_purges_output_under_root(tmp_path: Path):
     sessions = tmp_path / "sessions"
     output = tmp_path / "output"
