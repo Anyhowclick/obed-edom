@@ -1,0 +1,19 @@
+{
+  "version": 8,
+  "name": "Dark (trimmed sample, tiles.openfreemap.org/styles/dark)",
+  "sources": { "openmaptiles": { "type": "vector", "tiles": ["https://tiles.openfreemap.org/planet/{z}/{x}/{y}.pbf"] } },
+  "layers": [
+    { "id": "background", "type": "background", "paint": { "background-color": "rgb(12,12,12)" } },
+    { "id": "water", "type": "fill", "source-layer": "water", "paint": { "fill-color": "rgb(27 ,27 ,29)" } },
+    { "id": "waterway", "type": "line", "source-layer": "waterway", "paint": { "line-color": "rgb(27 ,27 ,29)" } },
+    { "id": "building", "type": "fill", "source-layer": "building", "paint": { "fill-color": "rgb(10,10,10)", "fill-outline-color": "rgb(27 ,27 ,29)" } },
+    { "id": "highway_minor", "type": "line", "source-layer": "transportation", "paint": { "line-color": "#181818" } },
+    { "id": "highway_major_casing", "type": "line", "source-layer": "transportation", "paint": { "line-color": "rgba(60,60,60,0.8)" } },
+    { "id": "railway", "type": "line", "source-layer": "transportation", "paint": { "line-color": "rgb(35,35,35)" } },
+    { "id": "boundary_state", "type": "line", "source-layer": "boundary", "paint": { "line-color": "hsl(0,0%,21%)" } },
+    { "id": "boundary_country_z0-4", "type": "line", "source-layer": "boundary", "paint": { "line-color": "hsl(0,0%,23%)" } },
+    { "id": "highway_motorway_inner", "type": "line", "source-layer": "transportation", "paint": { "line-color": ["interpolate", ["linear"], ["zoom"], 5.8, "hsla(0,0%,85%,0.53)", 6, "#000"] } },
+    { "id": "highway_name_motorway", "type": "symbol", "source-layer": "transportation_name", "paint": { "text-color": "hsl(0,0%,37%)" } },
+    { "id": "place_city", "type": "symbol", "source-layer": "place", "paint": { "text-color": "rgb(101,101,101)", "text-halo-color": "rgba(0,0,0,0.7)" } }
+  ]
+}

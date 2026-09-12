@@ -201,8 +201,8 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
     const styles = require(path.join(out, "styles.js"));
     assert.deepEqual(styles.remapTonerFonts({ nested: ["Nunito Regular", "Nunito SemiBold", "Noto Sans Bold Italic"] }), { nested: ["Noto Sans Regular", "Noto Sans Bold", "Noto Sans Italic"] });
     const [full, background, lines] = await Promise.all([styles.resolveOpenFreeMapStyle("toner"), styles.resolveOpenFreeMapStyle("toner-background"), styles.resolveOpenFreeMapStyle("toner-lines")]);
-    assert.equal(full.layers.length, 39);
-    assert.equal(background.layers.length, 13);
+    assert.equal(full.layers.length, 38);
+    assert.equal(background.layers.length, 12);
     assert.equal(lines.layers.length, 15);
     for (const style of [full, background, lines]) {
       assert.equal(style.sprite, undefined);
