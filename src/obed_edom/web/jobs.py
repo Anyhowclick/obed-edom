@@ -385,6 +385,7 @@ class JobRunner:
                 if job is not None:
                     self._deleted_ids.add(job_id)
                     self._deleted_names.add(job.name.lower())
+                self._job_locks.pop(job_id, None)
             if not job:
                 return False
             self._session_file(job_id).unlink(missing_ok=True)
