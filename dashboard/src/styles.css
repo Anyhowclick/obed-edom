@@ -19,7 +19,6 @@
   --accent-collab-fg: #1A1300;
   --accent-danger: #FF4D4D;
   --accent-danger-fg: #FFFFFF;
-  --snap-guide: #ffcc00;
   --glow-magenta: #E12B7C;
   --glow-violet: #6C38FF;
   --glow-indigo: #2D1B69;
@@ -66,6 +65,26 @@
 
   --radius-2xs: 4px;
 
+  /* Classification hues. State stays form (solid white, lime ring, sky focus) and
+     status stays the left bars and text, so a shared hue never reads as a shared
+     meaning. Audience — who the deck is for. */
+  --aud-lw:  #FFD166;  --aud-lw-tint:  rgba(255, 209, 102, 0.14); --aud-lw-line:  rgba(255, 209, 102, 0.45);
+  --aud-cg:  #B388FF;  --aud-cg-tint:  rgba(179, 136, 255, 0.16); --aud-cg-line:  rgba(179, 136, 255, 0.50);
+  --aud-dsk: #FF7BAC;  --aud-dsk-tint: rgba(255, 123, 172, 0.14); --aud-dsk-line: rgba(255, 123, 172, 0.45);
+
+  /* Job kind — which tool made it. */
+  --job-generate:    var(--glow-orange);
+  --job-check:       var(--status-info);
+  --job-dsk:         var(--aud-dsk);
+  --job-resize:      var(--aud-cg);
+  --job-maps:        var(--accent-primary);
+  --job-watercolour: #7FA9FF;
+
+  /* Maps object kind. */
+  --obj-dot:      var(--status-info);
+  --obj-droppin:  var(--glow-orange);
+  --obj-landmark: var(--job-watercolour);
+
   --navy: var(--bg-canvas);
   --navy-2: var(--bg-surface-highlight);
   --ink: var(--ink-primary);
@@ -77,7 +96,7 @@
   --info: var(--status-info);
   --panel: var(--bg-surface-glass);
   --sky: var(--status-info);
-  --plum: var(--accent-collab);
+  --plum: var(--aud-cg);
   --rose: var(--glow-magenta);
 }
 
@@ -186,6 +205,25 @@ body::before {
   letter-spacing: -0.01em;
   transition: var(--transition);
 }
+/* One dot per tool, the same hue the tool's runs carry in History. History and
+   Settings get none — they are not jobs. */
+.nav-btn::before {
+  content: "";
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 10px;
+  background: var(--job-colour, transparent);
+  box-shadow: 0 0 0 1px rgba(7, 7, 10, 0.35);
+}
+.sidebar.collapsed .nav-btn::before { display: none; }
+.nav-btn[data-tab="generate"] { --job-colour: var(--job-generate); }
+.nav-btn[data-tab="check"] { --job-colour: var(--job-check); }
+.nav-btn[data-tab="dsk"] { --job-colour: var(--job-dsk); }
+.nav-btn[data-tab="resize"] { --job-colour: var(--job-resize); }
+.nav-btn[data-tab="maps"] { --job-colour: var(--job-maps); }
+.nav-btn[data-tab="watercolour"] { --job-colour: var(--job-watercolour); }
 .nav-btn:hover { background: var(--bg-surface-glass); color: var(--ink-primary); }
 .nav-btn.active {
   background: var(--bg-surface-solid);
@@ -231,7 +269,7 @@ h3 {
 }
 .lede { color: var(--ink-secondary); margin: 0 0 24px; max-width: 62ch; font-weight: 400; line-height: 1.6; }
 
-.row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.row { display: flex; gap: var(--gap-group); flex-wrap: wrap; align-items: flex-start; }
 .col { flex: 1; min-width: 240px; }
 
 .well {
@@ -248,20 +286,27 @@ h3 {
 .well.over { border-color: rgba(184, 246, 75, 0.55); background: var(--bg-surface-highlight); }
 .well p { margin: 6px 0 0; color: var(--ink-secondary); font-size: 14px; }
 .well strong { display: block; color: var(--ink-primary); font-weight: 600; }
-.well.keynote {
+/* A well is tinted by who the deck is for, so the two decks with the least in
+   common stop being the same colour. The outline takes the teal LW left behind. */
+.well.lw { border-color: var(--aud-lw-line); background: var(--aud-lw-tint); }
+.well.lw.over { border-color: var(--aud-lw); background: rgba(255, 209, 102, 0.22); }
+.well.lw strong { color: var(--aud-lw); }
+.well.cg { border-color: var(--aud-cg-line); background: var(--aud-cg-tint); }
+.well.cg.over { border-color: var(--aud-cg); background: rgba(179, 136, 255, 0.24); }
+.well.cg strong { color: var(--aud-cg); }
+.well.dsk { border-color: var(--aud-dsk-line); background: var(--aud-dsk-tint); }
+.well.dsk.over { border-color: var(--aud-dsk); background: rgba(255, 123, 172, 0.22); }
+.well.dsk strong { color: var(--aud-dsk); }
+.well.document {
   border-color: rgba(0, 229, 255, 0.35);
   background: rgba(0, 229, 255, 0.08);
 }
-.well.keynote.over { border-color: rgba(0, 229, 255, 0.6); background: rgba(0, 229, 255, 0.14); }
-.well.keynote strong { color: var(--status-info); }
-.well.document {
-  border-color: rgba(255, 199, 44, 0.4);
-  background: rgba(255, 199, 44, 0.08);
-}
-.well.document.over { border-color: rgba(255, 199, 44, 0.65); background: rgba(255, 199, 44, 0.14); }
-.well.document strong { color: var(--accent-collab); }
-.well-tone-keynote .btn.secondary { border-color: rgba(0, 229, 255, 0.4); color: var(--status-info); }
-.well-tone-document .btn.secondary { border-color: rgba(255, 199, 44, 0.45); color: var(--accent-collab); }
+.well.document.over { border-color: rgba(0, 229, 255, 0.6); background: rgba(0, 229, 255, 0.14); }
+.well.document strong { color: var(--status-info); }
+.well-tone-lw .btn.secondary { border-color: var(--aud-lw-line); color: var(--aud-lw); }
+.well-tone-cg .btn.secondary { border-color: var(--aud-cg-line); color: var(--aud-cg); }
+.well-tone-dsk .btn.secondary { border-color: var(--aud-dsk-line); color: var(--aud-dsk); }
+.well-tone-document .btn.secondary { border-color: rgba(0, 229, 255, 0.4); color: var(--status-info); }
 
 .btn {
   display: inline-flex;
@@ -300,6 +345,10 @@ h3 {
   box-shadow: none;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+/* The filled red pill deletes the operator's own content. A recoverable purge —
+   a tile cache — is a ghost with the same glyph. */
+.btn.danger-text { color: var(--err); }
+.btn.danger-text:hover:not(:disabled) { border-color: var(--err); }
 .btn:focus-visible,
 .nav-btn:focus-visible,
 .seg button:focus-visible,
@@ -458,12 +507,21 @@ h3 {
 .cap { font-size: 12px; color: var(--muted); }
 .job-list .cap { font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
 .session-group:first-child .cap { margin-top: 0; }
+/* diff and check are both the Sermon Checker, so they share a hue. */
+[data-feature="generate"] { --job-colour: var(--job-generate); }
+[data-feature="diff"], [data-feature="check"] { --job-colour: var(--job-check); }
+[data-feature="dsk"] { --job-colour: var(--job-dsk); }
+[data-feature="resize"] { --job-colour: var(--job-resize); }
+[data-feature="maps"] { --job-colour: var(--job-maps); }
+[data-feature="watercolour"] { --job-colour: var(--job-watercolour); }
+.job-list .cap[data-feature] { color: var(--job-colour); }
 .session-row {
   display: flex;
   gap: 6px;
   align-items: stretch;
   min-width: 0;
 }
+.session-row[data-feature] { border-left: 2px solid var(--job-colour); padding-left: 6px; }
 .session-pick-info {
   flex: 1 1 auto;
   min-width: 0;
@@ -540,7 +598,7 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--gap-group);
   margin-bottom: 8px;
 }
 .history-head h1 { margin: 0; }
@@ -737,7 +795,7 @@ h3 {
   align-items: center;
   justify-content: flex-end;
   margin: 0;
-  gap: 8px;
+  gap: var(--gap-ctl);
 }
 /* A square of the row's tier. min-width rather than width so the few that carry a
    count badge or a menu caret grow instead of spilling out of the pill. */
@@ -790,7 +848,7 @@ h3 {
   content: "";
   position: absolute;
   inset: 10px 3px;
-  border-radius: 99px;
+  border-radius: var(--radius-pill);
   background: var(--line);
 }
 .pair-split:hover::before,
@@ -808,7 +866,7 @@ body.dragging-split { cursor: col-resize; user-select: none; }
 .row-acts {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--gap-ctl);
   margin-top: 8px;
 }
 .slide-slot { min-width: 0; }
@@ -994,7 +1052,7 @@ label.check input[type="checkbox"]:disabled,
 .note { color: var(--muted); font-size: 14px; }
 .maps-save-status {
   padding: 3px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 750;
   letter-spacing: 0.03em;
@@ -1088,6 +1146,22 @@ label.check input[type="checkbox"]:disabled,
   font-weight: 600;
 }
 .seg button.on { background: var(--bg-surface-solid); color: var(--ink-inverse); border-color: transparent; }
+/* Audience spine, drawn inside the pill so it survives the solid-white on-state. */
+.seg button.aud-lw, .seg button.aud-cg, .seg button.aud-dsk {
+  position: relative;
+  overflow: hidden;
+}
+.seg button.aud-lw::before, .seg button.aud-cg::before, .seg button.aud-dsk::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+.seg button.aud-lw::before { background: var(--aud-lw); }
+.seg button.aud-cg::before { background: var(--aud-cg); }
+.seg button.aud-dsk::before { background: var(--aud-dsk); }
 .thumbs-row {
   display: flex;
   gap: 8px;
@@ -1125,7 +1199,7 @@ label.check input[type="checkbox"]:disabled,
   border-radius: var(--radius-sm);
   background: rgba(0, 229, 255, 0.08);
 }
-.outline-cues { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.outline-cues { display: flex; gap: var(--gap-ctl); align-items: center; flex-wrap: wrap; }
 .cue-hold { color: var(--muted); font-size: 12px; font-style: italic; }
 .outline-script {
   margin: 6px 0 0;
@@ -1149,12 +1223,12 @@ label.check input[type="checkbox"]:disabled,
   gap: 8px 16px;
 }
 .framing-bar .playlist-controls { flex: 1 1 auto; }
-.framing-tabs { display: flex; gap: 6px; flex-shrink: 0; }
+.framing-tabs { display: flex; gap: var(--gap-ctl); flex-shrink: 0; }
 .framing-filter {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--gap-ctl);
   margin: 4px 0;
   padding: 8px 12px;
   border: var(--border-glass);
@@ -1319,7 +1393,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   font-size: 10px;
   line-height: 1.3;
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   background: rgba(7, 7, 10, 0.78);
   color: var(--ink);
 }
@@ -1339,7 +1413,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   padding: 0;
   background: none;
   border: 2px solid var(--ok);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   cursor: pointer;
   line-height: 0;
   opacity: 0.65;
@@ -1371,7 +1445,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   width: 320px;
   display: block;
   border: 1px solid rgba(255, 255, 255, 0.82);
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
 }
 .option-tip-label {
   display: block;
@@ -1385,7 +1459,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
 .framing-option .crop-preview,
 .framing-chip .crop-preview {
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
 }
 .framing-option-num {
   position: absolute;
@@ -1394,7 +1468,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   font-size: 9px;
   line-height: 1.35;
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   background: rgba(7, 7, 10, 0.8);
   color: var(--ink);
 }
@@ -1430,7 +1504,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   max-width: 760px;
   display: block;
   border: 1px solid rgba(255, 255, 255, 0.82);
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
 }
 .framing-after { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
 .outline-reader { display: flex; flex-direction: column; gap: 4px; max-width: 96ch; }
@@ -1585,13 +1659,13 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
 
 .plan-modes {
   display: inline-flex;
-  gap: 2px;
+  gap: var(--gap-tight);
   margin-left: 2px;
 }
 .plan-modes button {
   background: none;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   padding: 1px 6px;
   font: inherit;
   font-weight: 400;
@@ -1618,7 +1692,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   padding: 8px 10px;
   border: 1px solid var(--err);
   border-left-width: 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: rgba(240, 163, 160, 0.1);
   color: var(--ink);
   font-size: 12px;
@@ -1728,13 +1802,13 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--gap-ctl);
 }
 .maps-stylebar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--gap-ctl);
 }
 .maps-deck-actions { position: relative; }
 .maps-deck-actions-menu {
@@ -1829,7 +1903,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   right: 4px;
   font-size: 9px;
   padding: 1px 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(0, 0, 0, 0.6);
   color: #fff;
 }
@@ -1906,7 +1980,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   left: 3px;
   width: 2px;
   border-radius: 2px;
-  background: var(--plum);
+  background: var(--line);
   opacity: 0.7;
 }
 .maps-split:hover::before,
@@ -1928,6 +2002,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   font: inherit;
   position: relative;
 }
+/* A ring, not a dot: a filled lime dot collided with the lime "selected" border. */
 .maps-thumb.fw::after {
   content: "";
   position: absolute;
@@ -1936,8 +2011,8 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-primary);
-  box-shadow: 0 0 0 1px rgba(7, 7, 10, 0.85);
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--aud-lw);
   pointer-events: none;
 }
 .maps-thumb img {
@@ -1994,6 +2069,10 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
   font-weight: 700;
   letter-spacing: 0.06em;
 }
+/* FW is LW plus side panels, so it is the same yellow outlined rather than filled. */
+.maps-thumb-view-label.lw { background: var(--aud-lw); color: var(--ink-inverse); }
+.maps-thumb-view-label.fw { color: var(--aud-lw); box-shadow: inset 0 0 0 1px var(--aud-lw-line); }
+.maps-thumb-view-label.cg { background: var(--aud-cg); color: var(--ink-inverse); }
 .maps-thumb-label {
   display: block;
   padding: 6px 8px;
@@ -2050,7 +2129,7 @@ input.maps-thumb-title-input:focus {
 .maps-gutter-line {
   flex: 1;
   height: 1px;
-  background: var(--plum);
+  background: var(--line);
   min-width: 8px;
 }
 .maps-gutter-kind {
@@ -2073,7 +2152,7 @@ input.maps-thumb-title-input:focus {
   text-transform: none;
   letter-spacing: 0;
 }
-.ui-icon, .maps-icon {
+.ui-icon {
   width: var(--icon-size, 16px);
   height: var(--icon-size, 16px);
   display: block;
@@ -2081,7 +2160,7 @@ input.maps-thumb-title-input:focus {
   fill: none;
   stroke: currentColor;
 }
-.ui-icon.filled, .maps-icon.filled {
+.ui-icon.filled {
   fill: currentColor;
   stroke: none;
 }
@@ -2089,11 +2168,11 @@ input.maps-thumb-title-input:focus {
 .btn.on .ui-icon .fill-on { fill: currentColor; }
 .maps-nav-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--gap-ctl);
   margin-top: 4px;
 }
 .maps-nav-actions .btn { flex: 1; }
-.maps-landmark-pop { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
+.maps-landmark-pop { display: flex; flex-direction: column; gap: var(--gap-ctl); min-width: 220px; }
 .maps-landmark-grid { grid-template-columns: repeat(3, 96px); margin-top: 4px; }
 .maps-landmark-tile {
   background-image:
@@ -2223,7 +2302,7 @@ input.maps-thumb-title-input:focus {
 .maps-crop-frame {
   position: absolute;
   box-sizing: border-box;
-  border: 2px solid var(--sky);
+  border: 2px solid var(--aud-lw);
 }
 .maps-crop-frame.fw {
   inset: 0;
@@ -2245,7 +2324,7 @@ input.maps-thumb-title-input:focus {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--sky);
+  color: var(--aud-lw);
   background: rgba(7, 7, 10, 0.72);
   padding: 2px 6px;
   border-radius: var(--radius-xs);
@@ -2281,7 +2360,7 @@ input.maps-thumb-title-input:focus {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: var(--snap-guide);
+  background: var(--accent-primary);
   pointer-events: none;
   z-index: 3;
 }
@@ -2491,6 +2570,14 @@ input.maps-thumb-title-input:focus {
   font-family: var(--font-sans);
   font-size: 13px;
 }
+/* Kind is the glyph and the spine; the swatch stays the operator's own colour. */
+.maps-pin-row.kind-dot { border-left: 2px solid var(--obj-dot); }
+.maps-pin-row.kind-droppin { border-left: 2px solid var(--obj-droppin); }
+.maps-pin-row.kind-landmark { border-left: 2px solid var(--obj-landmark); }
+.maps-pin-kind { display: inline-flex; flex: 0 0 auto; }
+.maps-pin-kind.kind-dot { color: var(--obj-dot); }
+.maps-pin-kind.kind-droppin { color: var(--obj-droppin); }
+.maps-pin-kind.kind-landmark { color: var(--obj-landmark); }
 .maps-pin-row:hover,
 .maps-pin-row.active {
   border-color: rgba(255, 255, 255, 0.28);
@@ -2556,7 +2643,7 @@ input.maps-thumb-title-input:focus {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: var(--gap-ctl);
   margin-bottom: 4px;
 }
 .maps-pin-bulk .note { flex: 1 1 100%; margin: 0; }
@@ -2564,13 +2651,13 @@ input.maps-thumb-title-input:focus {
 .hop-phase-toggles {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
+  gap: var(--gap-tight);
 }
 .hop-phase-toggle {
   min-width: 0;
   padding: 4px 5px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-xs);
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   font: inherit;
@@ -2794,19 +2881,20 @@ input.maps-thumb-title-input:focus {
 .maps-hl-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--gap-ctl);
   margin: 0 0 10px;
 }
+/* The same orange the map paints those countries (maps/overlays.ts). */
 .maps-hl-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   margin: 0;
   padding: 3px 8px;
-  border: 1px solid rgba(255, 199, 44, 0.45);
+  border: 1px solid rgba(232, 119, 42, 0.45);
   border-radius: var(--radius-pill);
-  background: rgba(255, 199, 44, 0.16);
-  color: var(--accent-collab);
+  background: rgba(232, 119, 42, 0.16);
+  color: #e8772a;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -2869,6 +2957,18 @@ input.maps-thumb-title-input:focus {
   font-size: 13px;
   color: var(--ink);
 }
+/* The switch itself stays green when on — that is state. The dot is the audience. */
+.maps-check.aud-lw::before,
+.maps-check.aud-cg::before,
+.maps-check.aud-dsk::before {
+  content: "";
+  flex: 0 0 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.maps-check.aud-lw::before { background: var(--aud-lw); }
+.maps-check.aud-cg::before { background: var(--aud-cg); }
+.maps-check.aud-dsk::before { background: var(--aud-dsk); }
 .maps-check input[type="radio"] {
   accent-color: var(--sky);
   width: auto;
@@ -2883,7 +2983,7 @@ input.maps-thumb-title-input:focus {
   margin: 0;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background-color: rgba(18, 18, 26, 0.65);
   background-image: radial-gradient(circle at center, #ffffff 0 45%, transparent 47%);
   background-repeat: no-repeat;

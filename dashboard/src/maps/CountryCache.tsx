@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clearMapsTileCache, mapsTileCacheStats } from "../api";
 import { loadAdmin0 } from "./overlays";
-import { IconCaret, IconGlobe, IconTrash } from "../components/icons";
+import { IconCaret, IconTiles, IconTrash } from "../components/icons";
 
 export const PINNED_CACHE_COUNTRIES = ["PHL", "IND", "IDN", "MYS"] as const;
 
@@ -122,7 +122,7 @@ export function CountryCachePicker({
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
       >
-        <IconGlobe />
+        <IconTiles />
         {selected.length ? <span className="maps-layers-count">{selected.length}</span> : null}
         <IconCaret />
       </button>
@@ -139,7 +139,7 @@ export function CountryCachePicker({
           <div className="maps-cache-usage">
             <span className="note">{cacheBytes == null ? "Cache size unknown" : `Cache ${formatCacheBytes(cacheBytes)}`}</span>
             <button
-              className="btn maps-delete maps-cache-delete"
+              className="btn secondary icon-btn danger-text"
               type="button"
               disabled={disabled || cacheBusy}
               onClick={() => void onClearCache()}

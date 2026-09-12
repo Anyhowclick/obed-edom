@@ -20,11 +20,11 @@ export function SessionList({ jobs, activeId, onSelect, onDelete, onRename }: Pr
     <div className="job-list">
       {groups.map(([feature, items]) => (
         <div key={feature} className="session-group">
-            <div className="cap">{FEATURE_LABELS[feature as keyof typeof FEATURE_LABELS] || feature}</div>
+            <div className="cap" data-feature={feature}>{FEATURE_LABELS[feature as keyof typeof FEATURE_LABELS] || feature}</div>
           {items.map((job) => {
             const { text, tone } = statusLabel(feature, job.status);
             return (
-            <div key={job.id} className={`session-row ${job.id === activeId ? "active" : ""}`}>
+            <div key={job.id} className={`session-row ${job.id === activeId ? "active" : ""}`} data-feature={feature}>
               <div className="session-pick-info">
                 {onRename && <JobName job={job} onRename={onRename} onSelect={onSelect} />}
                 <button

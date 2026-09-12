@@ -196,6 +196,7 @@ export function CheckTab() {
           <FileWell
             label="Keynote (.key)"
             hint="Drop from Finder or choose on this Mac"
+            tone="lw"
             file={left}
             onChoose={() => pick("left")}
             onPath={(path) => setLeft({ path, name: path.split("/").pop() || path })}
@@ -205,6 +206,7 @@ export function CheckTab() {
           <FileWell
             label="Second Keynote (.key)"
             hint="Optional — add a DSK to compare the two"
+            tone="dsk"
             file={right}
             onChoose={() => pick("right")}
             onPath={(path) => setRight({ path, name: path.split("/").pop() || path })}
