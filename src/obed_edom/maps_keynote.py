@@ -34,6 +34,7 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
+from obed_edom.maps_pins import ensure_pin_png
 from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
@@ -734,6 +735,7 @@ def _place_churches(
     origin_x: float = 0,
     capture_w: float = WALL_WIDTH,
     asset_root: Path | None = None,
+    pin_root: Path | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_audience: str = "lw",
@@ -819,36 +821,20 @@ def _place_churches(
                         items.append(item)
             elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
-            else:
-                if kind == "dropPin":
-                    tail_w = round(size * 0.46)
-                    tail_h = round(size * 0.4)
-                    items.append(
-                        _item(
-                            "shape",
-                            x + (size - tail_w) / 2.0,
-                            y + size * 0.68,
-                            tail_w,
-                            tail_h,
-                            color=color,
-                            shape="triangle",
-                            rotation=180,
-                        )
+            elif pin_root is not None:
+                pin_kind = "droppin" if static_drop else "dot"
+                height = round(size * 1.08) if static_drop else size
+                items.append(
+                    _item(
+                        "image",
+                        x,
+                        y,
+                        size,
+                        height,
+                        path=str(ensure_pin_png(pin_root, pin_kind, color)),
+                        color=color,
                     )
-                items.append(_item("shape", x, y, size, size, color=color, shape="oval"))
-                if kind == "dropPin":
-                    inner = max(6, round(size * 0.36))
-                    items.append(
-                        _item(
-                            "shape",
-                            x + (size - inner) / 2.0,
-                            y + (size - inner) / 2.0,
-                            inner,
-                            inner,
-                            color=(65535, 65535, 65535),
-                            shape="oval",
-                        )
-                    )
+                )
             if name and church.get("showLabel", True):
                 nw = max(48, min(420, 11 * len(name)))
                 nx = x + size + 8
@@ -906,6 +892,7 @@ def build_slide_items(
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
     asset_root: Path | None = None,
+    pin_root: Path | None = None,
     country_still: Path | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
@@ -933,6 +920,7 @@ def build_slide_items(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                pin_root=pin_root,
                 allow_reveal=allow_reveal,
                 reveals=reveals,
                 reveal_audience=reveal_audience,
@@ -1060,6 +1048,7 @@ def plan_deck(
             bg_movie=bg_movie,
             dest_slide=item_dest,
             asset_root=output_dir / "assets",
+            pin_root=output_dir / "pins",
             country_still=country_still,
             allow_reveal=not duplicate,
             reveals=reveals,
@@ -1164,26 +1153,6 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
                 f"          set height of img to {h}",
             ]
         lines.append("        end try")
-        return lines
-    if kind == "shape":
-        color = item.get("color") or (0xC4 * 257, 0x4A * 257, 0x42 * 257)
-        shape = item.get("shape") or "oval"
-        lines = [
-            "        set shp to make new shape with properties "
-            f"{{shape type:{shape}, position:{{{x}, {y}}}, width:{w}, height:{h}}}",
-            "        try",
-            "          set fill type of shp to color fill",
-            "        end try",
-            "        try",
-            f"          set fill color of shp to {{{color[0]}, {color[1]}, {color[2]}}}",
-            "        end try",
-        ]
-        if item.get("rotation") is not None:
-            lines += [
-                "        try",
-                f"          set rotation of shp to {float(item['rotation'])}",
-                "        end try",
-            ]
         return lines
     text = _as_escape(str(item.get("text") or ""))
     font_size = float(item.get("fontSize") or 24)
