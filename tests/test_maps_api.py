@@ -2562,3 +2562,50 @@ def test_bootstrap_csv_header_form_unknown_kind_reports_error_not_crash():
     detail = started.json()["detail"]
     assert "Line 2" in detail[0]
     assert "unknown kind" in detail[0]
+
+
+def test_bootstrap_csv_place_only_header_with_extra_comma_is_joined_not_a_500(monkeypatch):
+    job = _seed()
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "place\nParis, France\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Paris, France"]
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert len(new_slides) == 1
+
+
+def test_bootstrap_csv_multi_column_header_extra_columns_is_400_not_500():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nX,1,2,3\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert "Line 2" in detail[0]
+    assert "too many columns" in detail[0]
+
+
+def test_bootstrap_csv_place_header_naming_country_adopts_country_name_as_title():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "place\nFrance\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert len(new_slides) == 1
+    assert new_slides[0]["title"] == "France"

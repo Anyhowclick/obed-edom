@@ -321,6 +321,10 @@ def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
         zoom = float(zoom_raw) if zoom_raw else None
     except ValueError:
         return f"Line {line}: bad zoom {zoom_raw!r}"
+    if zoom is not None and not (0 <= zoom <= 22):
+        return f"Line {line}: zoom out of range {zoom_raw!r} (must be 0-22)"
+    if (lat_raw and not lon_raw) or (lon_raw and not lat_raw):
+        return f"Line {line}: lat without lon" if lat_raw else f"Line {line}: lon without lat"
     kind_raw = (row.get("kind") or "").strip()
     kind: str | None = None
     if kind_raw:
@@ -330,15 +334,29 @@ def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
     return Place(line=line, name=name, url=url, lat=lat, lon=lon, zoom=zoom, kind=kind, query=query, full_query=bool(query))
 
 
+_RESTKEY = "__extra__"
+
+
 def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list[str]]:
-    reader = csv.DictReader(io.StringIO(sample))
+    reader = csv.DictReader(io.StringIO(sample), restkey=_RESTKEY)
+    fieldnames = [str(f or "").strip().lower() for f in (reader.fieldnames or [])]
+    single_joinable_header = len(fieldnames) == 1 and fieldnames[0] in _SINGLE_FIELD_HEADERS
     places: list[Place] = []
     errors: list[str] = []
     for raw in reader:
         line_no = line_offset + reader.line_num
+        extra = raw.pop(_RESTKEY, None)
         row = {str(key or "").strip().lower(): (value or "").strip() for key, value in raw.items()}
-        if not any(row.values()):
+        if not any(row.values()) and not extra:
             continue
+        if extra:
+            if single_joinable_header:
+                key = fieldnames[0]
+                parts = [row.get(key, "")] + [str(e).strip() for e in extra if str(e).strip()]
+                row[key] = ", ".join(p for p in parts if p)
+            else:
+                errors.append(f"Line {line_no}: too many columns")
+                continue
         result = _place_from_dict_row(row, line_no)
         if isinstance(result, str):
             errors.append(result)
