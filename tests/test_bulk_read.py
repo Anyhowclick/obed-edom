@@ -432,5 +432,26 @@ def test_bulk_geometry_default_no_close_by_name_on_invalid_json(tmp_path, monkey
     assert closed == []
 
 
+def test_bulk_geometry_keep_open_closes_by_name_on_runner_timeout(tmp_path, monkeypatch):
+    from obed_edom import osascript_runner
+
+    key = tmp_path / "deck.key"
+    key.write_text("stub")
+    closed: list[Path] = []
+
+    def boom(argv, *, timeout=None, is_cancelled=None):
+        raise osascript_runner.OsascriptTimeout("osascript timed out after 30s")
+
+    monkeypatch.setattr(osascript_runner, "_execute", boom)
+    monkeypatch.setattr(
+        inspect_mod, "_close_document_by_name", lambda p: closed.append(Path(p))
+    )
+
+    with pytest.raises(osascript_runner.OsascriptTimeout):
+        inspect_mod.bulk_geometry(key, keep_open=True)
+
+    assert closed == [key.resolve()]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

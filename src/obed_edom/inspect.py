@@ -360,8 +360,8 @@ def bulk_geometry(
             wanted = sorted({int(n) for n in slides})
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
-        proc = run_jxa(BULK_GEOMETRY_JS, plan)
         try:
+            proc = run_jxa(BULK_GEOMETRY_JS, plan)
             parsed = parse_json_stdout(proc, "Bulk geometry read")
         except RuntimeError:
             if keep_open:
