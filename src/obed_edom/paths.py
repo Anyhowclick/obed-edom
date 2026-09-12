@@ -32,31 +32,45 @@ _PRIVATE_ROOT_NAMES = (
 )
 
 
-def validate_export_dir(raw: str | Path) -> Path:
-    """Resolve an owner-chosen export destination, rejecting private working roots."""
+def _within_root(resolved: Path, root: Path) -> bool:
+    """True if `resolved` is `root` or inside it, tolerating case-insensitive volumes."""
+    try:
+        resolved.relative_to(root)
+        return True
+    except ValueError:
+        pass
+    root_cf = str(root).rstrip(os.sep).lower()
+    cand_cf = str(resolved).lower()
+    if cand_cf == root_cf or cand_cf.startswith(root_cf + os.sep):
+        return True
+    try:
+        return resolved.exists() and root.exists() and os.path.samefile(resolved, root)
+    except OSError:
+        return False
+
+
+def _check_export_dir_safe(resolved: Path) -> None:
+    """Raise if `resolved` (already absolute + resolved) falls inside a private working root."""
     from obed_edom.baseline import cache_root  # noqa: PLC0415
 
+    output = output_root().resolve()
+    for root_name in _PRIVATE_ROOT_NAMES:
+        private_root = output / root_name
+        if _within_root(resolved, private_root):
+            raise ValueError(f"Export directory cannot be inside {private_root}")
+
+    if _within_root(resolved, cache_root().resolve()):
+        raise ValueError(f"Export directory cannot be inside {cache_root()}")
+
+
+def validate_export_dir(raw: str | Path) -> Path:
+    """Resolve an owner-chosen export destination, rejecting private working roots."""
     resolved = Path(str(raw)).expanduser()
     if not resolved.is_absolute():
         raise ValueError(f"Export directory must be an absolute path: {raw}")
     resolved = resolved.resolve()
 
-    output = output_root().resolve()
-    for root_name in _PRIVATE_ROOT_NAMES:
-        private_root = output / root_name
-        try:
-            resolved.relative_to(private_root)
-        except ValueError:
-            pass
-        else:
-            raise ValueError(f"Export directory cannot be inside {private_root}")
-
-    try:
-        resolved.relative_to(cache_root().resolve())
-    except ValueError:
-        pass
-    else:
-        raise ValueError(f"Export directory cannot be inside {cache_root()}")
+    _check_export_dir_safe(resolved)
 
     if resolved.exists() and not resolved.is_dir():
         raise ValueError(f"Export directory is not a directory: {resolved}")
@@ -69,11 +83,25 @@ def validate_export_dir(raw: str | Path) -> Path:
     return resolved
 
 
+def ensure_export_dir(path: str | Path) -> Path:
+    """Re-resolve and re-validate an export directory immediately before a deliverable write.
+
+    Defends against a symlink swapped into place after the original `validate_export_dir`
+    (or `export_destination`) call approved the path.
+    """
+    resolved = Path(str(path)).expanduser().resolve()
+    _check_export_dir_safe(resolved)
+    if not resolved.is_dir():
+        raise ValueError(f"Export directory is no longer a directory: {resolved}")
+    return resolved
+
+
 def export_destination(job) -> Path:
     """Job override, else the operator default, else `output_root()`.
 
-    Falls back to `output_root()` (and sets `job.result["exportDirFallback"]`)
-    when the chosen directory has since vanished or turned into a file.
+    Raises `ValueError` with an actionable message when a chosen directory (override or
+    default) has since vanished or turned into a file — the export should fail rather than
+    silently redirect into `output_root()`.
     """
     from obed_edom.settings import load_settings  # noqa: PLC0415
 
@@ -83,16 +111,18 @@ def export_destination(job) -> Path:
         candidate = Path(override)
         if candidate.is_dir():
             return candidate
-        if result is not None:
-            result.pop("exportDir", None)
-            result["exportDirFallback"] = True
-        return output_root()
+        raise ValueError(
+            f"Export folder {candidate} no longer exists — pick another in Settings / Export to…"
+        )
 
     default_dir = (load_settings().get("defaultExportDir") or "").strip()
     if default_dir:
         candidate = Path(default_dir)
         if candidate.is_dir():
             return candidate
+        raise ValueError(
+            f"Export folder {candidate} no longer exists — pick another in Settings / Export to…"
+        )
 
     return output_root()
 

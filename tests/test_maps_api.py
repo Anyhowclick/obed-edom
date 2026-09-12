@@ -2546,6 +2546,45 @@ def test_export_clears_export_dir_with_empty_string(monkeypatch, tmp_path):
     assert "exportDir" not in done["result"]
 
 
+def test_export_uses_configured_default_export_dir_with_no_override(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    job = _seed()
+    captured = {}
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        captured["export_dir"] = export_dir
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    default_dir = tmp_path / "default-exports"
+    default_dir.mkdir()
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(default_dir)}
+    )
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_dir"] == default_dir.resolve()
+    assert done["result"]["exportDir"] == str(default_dir.resolve())
+
+
+def test_export_fails_when_configured_default_export_dir_vanishes(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    job = _seed()
+    stale_dir = tmp_path / "gone"
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(stale_dir)}
+    )
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 400
+    assert "no longer exists" in response.json()["detail"]
+
+
 def test_export_rejects_private_root_export_dir():
     from obed_edom.paths import output_root
 

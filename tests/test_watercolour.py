@@ -1213,3 +1213,48 @@ def test_renamed_watercolour_job_still_serves_result_file_and_download():
 
     assert client.get(f'/api/watercolour/{job_id}/items/{item_id}/result').status_code == 200
     assert client.get(f'/api/watercolour/{job_id}/download').status_code == 200
+
+
+def test_copy_into_export_dir_never_overwrites_under_concurrency(tmp_path):
+    import threading
+
+    from obed_edom.web.watercolour import _copy_into_export_dir
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    # Both threads race to export a same-named "shot.png" from two independent batches.
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"aaaa")
+
+    results: list[Path | None] = [None, None]
+
+    def worker(index):
+        results[index] = _copy_into_export_dir(src, dest_dir)
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert all(r is not None for r in results)
+    assert len(set(results)) == 2
+    for path in results:
+        assert path.is_file()
+        assert path.read_bytes() == b"aaaa"
+    assert not list(dest_dir.glob("*.tmp"))
+
+
+def test_copy_into_export_dir_leaves_no_partial_file_on_failure(tmp_path, monkeypatch):
+    from obed_edom.web import watercolour as watercolour_web
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"data")
+
+    def boom(*args, **kwargs):
+        raise OSError("injected mid-copy failure")
+
+    monkeypatch.setattr(watercolour_web.shutil, "copy2", boom)
+    result = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert result is None
+    assert list(dest_dir.iterdir()) == []

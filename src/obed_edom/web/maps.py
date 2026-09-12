@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -58,7 +59,7 @@ from obed_edom.maps_tiles import (
     rels_for_cameras,
     rels_for_countries,
 )
-from obed_edom.paths import output_root, validate_export_dir
+from obed_edom.paths import ensure_export_dir, export_destination, output_root, validate_export_dir
 from obed_edom.web.job_names import normalise_job_name
 from obed_edom.web.jobs import rewrite_result_paths
 
@@ -1668,12 +1669,22 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
             if not export_lw and not export_cg and not export_dsk:
                 raise HTTPException(400, "At least one export target must be on")
             raw_export_dir = result.get("exportDir") if payload is None or payload.exportDir is None else payload.exportDir
-            export_dir = None
             if raw_export_dir:
                 try:
                     export_dir = validate_export_dir(raw_export_dir)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
+            else:
+                # No active override (never set, or explicitly cleared by an empty
+                # `exportDir`): resolve the operator default rather than letting
+                # `_run_export` fall back to the job's private `.maps` directory.
+                default_source = SimpleNamespace(result={**result, "exportDir": None})
+                try:
+                    export_dir = export_destination(default_source)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+                if export_dir == output_root():
+                    export_dir = None
             updated = _runner().rerun(
                 job_id,
                 lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir: _run_export(j, lw, cg, dsk, ed),
