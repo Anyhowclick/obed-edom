@@ -852,3 +852,120 @@ def test_rename_of_generator_job_does_not_move_user_folder(tmp_path: Path):
     assert renamed.name == "quiet-jordan"
     assert user_folder.is_dir()
     assert renamed.result["outputDir"] == str(user_folder)
+
+
+def test_id_derived_dir_rejects_private_root_that_escapes_via_symlink(tmp_path: Path):
+    output = tmp_path / "output"
+    output.mkdir()
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "escaped-job").mkdir()
+    (output / ".resize").symlink_to(outside)
+
+    result = {"outputDir": str(output / ".resize" / "escaped-job")}
+    assert runner._id_derived_dir(result) is None
+
+
+def test_rerun_blocks_until_rename_releases_job_lock(tmp_path: Path, monkeypatch):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job = runner.submit("resize", work, feature="resize")
+    done = _wait(runner, job.id)
+    assert done.status == "done"
+
+    started = threading.Event()
+    release = threading.Event()
+    real_save = JobRunner.save
+
+    def hooked_save(self, target_job):
+        if target_job.id == job.id:
+            started.set()
+            release.wait(2)
+        return real_save(self, target_job)
+
+    monkeypatch.setattr(JobRunner, "save", hooked_save)
+
+    rename_result: dict = {}
+
+    def do_rename():
+        rename_result["job"] = runner.rename(job.id, "quiet-jordan")
+
+    rename_thread = threading.Thread(target=do_rename)
+    rename_thread.start()
+    assert started.wait(1)
+
+    rerun_done = threading.Event()
+
+    def do_rerun():
+        runner.rerun(job.id, lambda _j: {"stem": "again"})
+        rerun_done.set()
+
+    rerun_thread = threading.Thread(target=do_rerun)
+    rerun_thread.start()
+    time.sleep(0.2)
+    assert not rerun_done.is_set()
+
+    release.set()
+    rename_thread.join(2)
+    assert rename_result["job"].name == "quiet-jordan"
+    rerun_thread.join(2)
+    assert rerun_done.is_set()
+
+    monkeypatch.undo()
+    finished = _wait(runner, job.id)
+    assert finished.name == "quiet-jordan"
+    assert finished.result == {"stem": "again"}
+
+
+def test_rename_reserves_target_name_for_whole_transaction(tmp_path: Path, monkeypatch):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job_a = runner.submit("resize", work, feature="resize")
+    job_b = runner.submit("resize", work, feature="resize")
+    _wait(runner, job_a.id)
+    _wait(runner, job_b.id)
+
+    started = threading.Event()
+    release = threading.Event()
+    real_save = JobRunner.save
+
+    def hooked_save(self, target_job):
+        if target_job.id == job_a.id:
+            started.set()
+            release.wait(2)
+        return real_save(self, target_job)
+
+    monkeypatch.setattr(JobRunner, "save", hooked_save)
+
+    result_a: dict = {}
+
+    def do_rename_a():
+        result_a["job"] = runner.rename(job_a.id, "shared-name")
+
+    thread_a = threading.Thread(target=do_rename_a)
+    thread_a.start()
+    assert started.wait(1)
+
+    with pytest.raises(FileExistsError):
+        runner.rename(job_b.id, "shared-name")
+
+    release.set()
+    thread_a.join(2)
+    monkeypatch.undo()
+
+    assert result_a["job"].name == "shared-name"
+    assert runner.get(job_b.id).name != "shared-name"

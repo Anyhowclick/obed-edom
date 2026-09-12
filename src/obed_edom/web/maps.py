@@ -475,6 +475,27 @@ def _require_idle(job) -> None:
         raise HTTPException(409, "Maps job is not ready")
 
 
+def _resolved_maps_root() -> Path:
+    root = output_root().resolve()
+    maps_root = (root / ".maps").resolve()
+    try:
+        maps_root.relative_to(root)
+    except ValueError:
+        raise HTTPException(500, "Maps root is outside the output root")
+    return maps_root
+
+
+def _require_direct_child(parent: Path, candidate: Path) -> Path:
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(parent)
+    except (OSError, ValueError):
+        raise HTTPException(500, "Maps job folder is outside the maps root")
+    if resolved.parent != parent:
+        raise HTTPException(500, "Maps job folder is outside the maps root")
+    return resolved
+
+
 def rename_job_folder(job_id: str, raw_name: str):
     """Rename a maps job: validate, move its `.maps` folder and set `Job.name`,
     both under `maps_commit`'s lock and restore ladder (`bump=False` — folder
@@ -489,24 +510,29 @@ def rename_job_folder(job_id: str, raw_name: str):
     `Job.name` is assigned in memory only (`set_name(..., save=False)`); the commit's
     own `update_result` on exit persists name and result in a single session-file
     write, avoiding a crash window where the file would carry the new name against
-    stale paths.
+    stale paths. The target name is reserved for the whole transaction so a
+    concurrent submit or rename cannot claim it first.
     """
-    job = _job_or_404(job_id)
     name = normalise_job_name(raw_name)
     runner = _runner()
-    if name == job.name.lower():
-        return job
-    if runner.is_name_taken(name, exclude_job_id=job_id):
-        raise FileExistsError(f"A job named '{name}' already exists")
-    previous_name = job.name
+    maps_root = _resolved_maps_root()
+    previous_name: str | None = None
     old_dir: Path | None = None
     new_dir: Path | None = None
     archive_renamed = False
+    reserved = False
     try:
         with maps_commit(job_id, None, bump=False) as commit:
+            job = commit.job
+            previous_name = job.name
+            if name == job.name.lower():
+                return runner.get(job_id)
+            runner.reserve_name(name, exclude_job_id=job_id)
+            reserved = True
             old_dir = Path(str(commit.result.get("outputDir") or ""))
             if old_dir.name != job.name:
                 raise HTTPException(500, "Maps job folder does not match its current name")
+            _require_direct_child(maps_root, old_dir)
             new_dir = old_dir.parent / name
             if new_dir.exists():
                 raise FileExistsError(f"A folder named '{name}' already exists")
@@ -529,12 +555,12 @@ def rename_job_folder(job_id: str, raw_name: str):
                     os.replace(new_archive, old_archive)
             os.replace(new_dir, old_dir)
         current = runner.get(job_id)
-        if current is not None and current.name == name:
-            try:
-                runner.set_name(job_id, previous_name)
-            except Exception:
-                pass
+        if current is not None and current.name == name and previous_name is not None:
+            runner.set_name(job_id, previous_name, save=False)
         raise
+    finally:
+        if reserved:
+            runner.release_name(name)
     return runner.get(job_id)
 
 

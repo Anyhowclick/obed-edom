@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -3235,3 +3236,77 @@ def test_name_folder_exists_checks_all_id_derived_roots():
         assert runner._name_folder_exists("already-taken") is True
         folder.rmdir()
     assert runner._name_folder_exists("definitely-not-taken") is False
+
+
+def test_rename_maps_job_rejects_folder_outside_maps_root():
+    job = _seed()
+    outside = Path(job["result"]["outputDir"]).parent.parent / "elsewhere" / job["name"]
+    outside.mkdir(parents=True)
+
+    stored = RUNNER.get(job["id"])
+    tampered = dict(stored.result)
+    tampered["outputDir"] = str(outside)
+    stored.result = tampered
+
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    assert res.status_code == 500
+
+
+def test_rename_maps_job_restores_name_in_memory_when_restore_save_also_fails(monkeypatch):
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    old_result = job["result"]
+
+    def failing_save(_job_obj):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(RUNNER, "save", failing_save)
+    with pytest.raises(OSError):
+        client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    monkeypatch.undo()
+
+    assert old_output_dir.is_dir()
+    stored = RUNNER.get(job["id"])
+    assert stored.name == job["name"]
+    assert stored.result["outputDir"] == old_result["outputDir"]
+
+
+def test_rename_maps_reserves_target_name_across_concurrent_rename(monkeypatch):
+    from obed_edom.web import maps
+
+    job_a = _seed()
+    job_b = _seed()
+    target = f"shared-name-{job_a['id']}"
+
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+    old_dir_a = Path(job_a["result"]["outputDir"])
+
+    def hooked_replace(src, dst):
+        if str(src) == str(old_dir_a):
+            started.set()
+            release.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    outcome = {}
+
+    def do_rename_a():
+        outcome["response"] = client.patch(f"/api/jobs/{job_a['id']}/name", json={"name": target})
+
+    thread = threading.Thread(target=do_rename_a)
+    thread.start()
+    assert started.wait(2)
+
+    dup = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": target})
+    assert dup.status_code == 409
+
+    release.set()
+    thread.join(5)
+    monkeypatch.undo()
+
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert outcome["response"].json()["name"] == target
+    assert RUNNER.get(job_b["id"]).name != target
