@@ -1964,7 +1964,7 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
     mirror_owned = owned_raw is not None
     if mirror_owned:
         owned_ids = [str(ref["identifier"]) for ref in owned_raw if ref.get("identifier") is not None]
-        if len(owned_ids) != len(order) or sorted(owned_ids) != sorted(order):
+        if len(owned_raw) != len(owned_ids) or len(owned_ids) != len(order) or sorted(owned_ids) != sorted(order):
             return {
                 "refused": True,
                 "reason": f"slide {slide_id}: ownedDrawables id set differs from drawablesZOrder, refusing to reorder",

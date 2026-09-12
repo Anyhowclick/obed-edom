@@ -4479,7 +4479,7 @@ def test_refusal_cleans_up_earlier_slides_crop_files(tmp_path, monkeypatch):
     assert not crop_path.exists()
 
 
-def test_rotated_image_refuses_through_plan_assembly(tmp_path, monkeypatch):
+def test_rotated_image_falls_back_through_plan_assembly(tmp_path, monkeypatch):
     from PIL import Image
     import zipfile as _zipfile
 
@@ -4506,11 +4506,12 @@ def test_rotated_image_refuses_through_plan_assembly(tmp_path, monkeypatch):
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {5: SlideDecision(5, "in_deck", anchor="auto")}
-    with pytest.raises(AssemblyRefusal, match="rotated"):
-        plan_assembly(
-            payload, classes, decisions=decisions, band=BAND, clips={},
-            deck=(objects, {}, {}), fw_deck=key_path, crop_dir=tmp_path / "crops",
-        )
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        deck=(objects, {}, {}), fw_deck=key_path, crop_dir=tmp_path / "crops",
+    )
+    assert plan.crops == {}
+    assert any("rotated" in w for w in plan.warnings)
 
 
 def test_unconsumed_split_refusal_cleans_up_earlier_crop_files(tmp_path, monkeypatch):

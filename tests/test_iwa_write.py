@@ -2516,6 +2516,22 @@ def test_reorder_drawables_refuses_when_owned_drawables_has_a_duplicate_id(tmp_p
     assert deck.read_bytes() == before
 
 
+def test_reorder_drawables_refuses_when_owned_drawables_has_an_identifierless_ref(tmp_path, monkeypatch):
+    """A ref with no ``identifier`` is skipped when building ``owned_ids``, so the id
+    *set* still matches ``order`` -- the raw list length must be checked too."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 250])
+    objects, id_to_file, file_ids = _load_deck(deck)
+    objects["100"]["ownedDrawables"].append({})
+    monkeypatch.setattr(
+        "obed_edom.iwa_write._load_deck", lambda _deck: (objects, id_to_file, file_ids)
+    )
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "ownedDrawables" in result["reason"]
+    assert deck.read_bytes() == before
+
+
 def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
     deck = _build_builds_deck(tmp_path / "builds.key")
     before = deck.read_bytes()

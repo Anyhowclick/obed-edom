@@ -1275,8 +1275,16 @@ def test_no_crop_when_visible_inside_panel():
     assert dsk_plan._rects_close(visible, mask_abs)
 
 
-def test_crop_refused_on_rotated_frame():
+def test_crop_silent_on_rotated_frame_needing_no_crop():
     obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080))
+    objects = {"img": obj, **extra}
+    assert crop_geometry(obj, objects, CENTRE_PANEL_RECT) is None
+
+
+def test_crop_refused_on_rotated_frame_needing_crop():
+    obj, extra = _image_obj(
+        x=1920, y=-981.6, w=3840, h=2560, angle=5.0, mask=(0, 808, 3840, 1472), natural=(6000, 4000)
+    )
     objects = {"img": obj, **extra}
     with pytest.raises(CropRefusal):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
@@ -1353,8 +1361,11 @@ def test_plan_crops_refuses_rotated_item(tmp_path, monkeypatch):
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 5.0, "fileName": "photo.jpg"}
-    with pytest.raises(CropRefusal):
-        plan_crops(key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3)
+    crops, warnings = plan_crops(
+        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert any("rotated" in w for w in warnings)
 
 
 def test_plan_crops_refuses_rotated_frame(tmp_path, monkeypatch):
@@ -1370,14 +1381,41 @@ def test_plan_crops_refuses_rotated_frame(tmp_path, monkeypatch):
         zf.write(buf_path, "Data/photo.jpg")
 
     obj, extra = _image_obj(
-        x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080), natural=(6000, 4000)
+        x=1920, y=-981.6, w=3840, h=2560, angle=5.0, mask=(0, 808, 3840, 1472), natural=(6000, 4000)
     )
     obj["data"] = {"identifier": "1"}
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
-    with pytest.raises(CropRefusal):
-        plan_crops(key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3)
+    crops, warnings = plan_crops(
+        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert any("rotated" in w for w in warnings)
+
+
+def test_plan_crops_silent_on_rotated_item_needing_no_crop(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo.jpg")
+
+    obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080), natural=(6000, 4000))
+    obj["data"] = {"identifier": "1"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 5.0, "fileName": "photo.jpg"}
+    crops, warnings = plan_crops(
+        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert warnings == []
 
 
 def test_plan_crops_refuses_duplicate_fileName_on_one_slide(tmp_path, monkeypatch):
@@ -1516,3 +1554,34 @@ def test_plan_crops_writes_file_keeping_source_name(tmp_path, monkeypatch):
     assert spec.px_box == (0, 1533, 6000, 3222)
     with Image.open(spec.path) as cropped:
         assert cropped.size == (6000, 3222 - 1533)
+
+
+def test_plan_crops_unlinks_partial_file_on_save_failure(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    obj["data"] = {"identifier": "1"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+
+    def _broken_save(self, fp, *args, **kwargs):
+        Path(fp).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Image.Image, "save", _broken_save)
+    crops, warnings = plan_crops(
+        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert any("could not save crop" in w for w in warnings)
+    assert not (tmp_path / "crops" / "3" / "photo.jpg").exists()

@@ -270,15 +270,17 @@ its style, builds and z-order.
 - **Offline (`dsk_plan.plan_crops` + `dsk_assemble`)**, per cropped image:
   - `member = data_member_index(zip_names)[data_id]` — new helper next to `_build_data_index`
     (`offline_inspect.py:44`) returning `{data id: raw member name}` (F1).
-  - `px = Image.open(member).size`; **refuse** unless `px == naturalSize` and the EXIF orientation
-    is absent or 1 (F1), and unless `item["rotation"] % 360 == 0` and the record's
-    `needs_keynote` is not `rotated-masked` — the pixel mapping below is only valid axis-aligned.
-  - visible `V = (frame ∩ mask_abs) ∩ CENTRE_PANEL_RECT` (or the full wall when `keep_side`);
-    source-pixel crop box = `((V.x − frame.x) * px_w/frame.w, (V.y − frame.y) * px_h/frame.h, …)`,
+  - visible `V = (frame ∩ mask_abs) ∩ CENTRE_PANEL_RECT` (or the full wall when `keep_side`); no
+    crop needed (`V` empty, or `V` already matches `mask_abs`) is checked first, before any
+    rotation check, so a rotated image that needs no crop is silent.
+  - `px = Image.open(member).size`; **fall back** (keep source, warn) unless `px == naturalSize`
+    and the EXIF orientation is absent or 1 (F1), and unless the frame and mask are axis-aligned —
+    the pixel mapping below is only valid axis-aligned.
+  - source-pixel crop box = `((V.x − frame.x) * px_w/frame.w, (V.y − frame.y) * px_h/frame.h, …)`,
     rounded outward to whole pixels and clamped to the image.
-  - crop with PIL (`ImageOps.exif_transpose` first, then `.crop`), write to
-    `--crop-dir` (default `<work dir>/crops`) as `<source stem>-lw<NNN>.<ext>`, format preserved
-    (JPEG quality 95, PNG stays PNG so alpha survives).
+  - crop with PIL, write to `--crop-dir` (default `<work dir>/crops`) under the **source**
+    `fileName` verbatim (owner rule — matches Keynote's own re-import), format preserved (JPEG
+    quality 95, PNG stays PNG so alpha survives).
   - record `plan.crops[number][ItemId] = CropSpec(path, source_file_name, fitted_rect)`.
 - **Live (`_slide_lines`, `dsk_assemble.py:764`)**: put the source image id into
   `plan.deletes[number]`, then insert exactly as the clip path already does and as F8 measured —
@@ -290,9 +292,11 @@ its style, builds and z-order.
   - a build targets the image → **do not replace**; keep the source drawable, fit it as today and
     emit an `OBED … LWCROP` operator note. A delete-and-reinsert changes the file name and
     `build_identity` is file-keyed (F6), so the build would be silently lost.
-  - `px != naturalSize`, EXIF orientation ≠ 1, rotated frame/mask, or an unresolvable data member →
-    same fallback + a warning.
-  - the crop window is < 8 px on either axis → refuse the slide.
+  - `px != naturalSize`, EXIF orientation ≠ 1, an unresolvable data member, or a rotated frame/mask
+    that a crop actually needs → same fallback + a warning; a rotated image needing no crop is
+    silent (checked before the rotation test, see above).
+  - the crop window is < 8 px on either axis, or the `fileName` collides with another kept image
+    already cropped this slide → refuse the slide.
 - **Style continuity**: a fresh insert has no card stroke. `_restore_stroke` (`dsk_assemble.py:997`)
   keys media by file name via `card_styles(out_objects, out_id_to_file)`, so register the cropped
   file under its **source** file name — pass `plan.crops`' `source_file_name` into the
@@ -380,6 +384,11 @@ at 66 and does not split).
 
 `deletes[number]` (`dsk_assemble.py:228`) additionally carries `cls.dropped_backdrop`,
 `cls.dropped_duplicate` and every crop-replaced image id, in `_delete_order`.
+
+Multi-crop z-order: a source that was itself cropped (and so is in `deleted_not_cropped`'s
+complement) still counts as a survivor when deriving another crop's insertion target on the same
+slide, since its replacement occupies its old position; moves must then be applied in ascending
+target order so an earlier insert doesn't shift a later target's index.
 
 `_merge_split_part_builds` (`dsk_assemble.py:1742`): each part's own long-box builds are always
 summed. A short item's build is recognised as "repeated" only when its source id (recovered from
@@ -517,10 +526,11 @@ cropped image against its frame -- below visual threshold on the GW deck's crops
 worth an eyeball on a crop with a very small visible window.
 
 `dsk-export-clips` (`dsk_movie_export.py:549,567,642`) still calls `visible_union`/
-`classify_deck` with the default dedupe filter, so it computes a movie slide's crop rect with
-dedupe on even when the operator ran `dsk-assemble --no-dedupe`. Not a bug in either subcommand
-today, but the two disagree under `--no-dedupe` -- worth fixing before that flag is used on a
-deck with a duplicated movie slide.
+`classify_deck` with the default `no_dedupe`/`drop_panel_backdrop` flags, so it computes a movie
+slide's crop rect with dedupe and backdrop-drop on even when the operator ran `dsk-assemble
+--no-dedupe`/`--no-drop-panel-backdrop`. Not a bug in either subcommand today, but the two now
+disagree on two flags rather than one -- worth fixing before either is used on a deck with a
+duplicated movie slide or a movie behind a panel backdrop.
 
 **Live** — one hands-off run:
 

@@ -947,8 +947,9 @@ MIN_CROP_PX = 8.0
 
 
 class CropRefusal(ValueError):
-    """A crop window under ``MIN_CROP_PX`` (D2/D6); every other crop precondition
-    failure is a per-item fallback handled inside ``plan_crops`` instead."""
+    """Raised on a crop window under ``MIN_CROP_PX`` or a duplicate ``fileName``
+    (D2/D6); every other crop precondition failure is a per-item fallback
+    handled inside ``plan_crops`` instead."""
 
 
 @dataclass(frozen=True)
@@ -982,22 +983,28 @@ def crop_geometry(
 ) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
     """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
     ``window`` (unmasked uses its frame); ``None`` when nothing is visible.
-    Raises ``CropRefusal`` on a rotated frame or mask (axis-aligned only)."""
+    Raises ``CropRefusal`` only when a crop is actually needed on a rotated
+    frame or mask (axis-aligned only) — callers fall back to the source, same
+    as EXIF≠1; a rotated image that needs no crop (nothing visible, or the
+    visible rect already matches ``mask_abs``) returns ``None`` silently."""
     geom = _geom_dict(obj)
     mask_geom = _mask_geom(obj, objects)
     frame_angle = _xywha(geom)[4]
-    if abs((frame_angle % 360.0 + 180.0) % 360.0 - 180.0) > 0.01:
-        raise CropRefusal("rotated frame")
+    frame_rotated = abs((frame_angle % 360.0 + 180.0) % 360.0 - 180.0) > 0.01
     if mask_geom:
-        masked_rect, rotated = _masked_rect(geom, mask_geom)
-        if rotated:
-            raise CropRefusal("rotated-masked geometry")
+        masked_rect, mask_rotated = _masked_rect(geom, mask_geom)
         mask_abs = Rect(*masked_rect)
+        rotated = frame_rotated or mask_rotated
     else:
         mask_abs = Rect(*_frame_rect(geom))
+        rotated = frame_rotated
     visible = _intersect(mask_abs, window)
     if visible is None:
         return None
+    if rotated:
+        if _rects_close(visible, mask_abs):
+            return None
+        raise CropRefusal("rotated-masked geometry" if mask_geom else "rotated frame")
     frame = Rect(*_frame_rect(geom))
     natural = _asset_natural_size(obj)
     if frame.w <= 0 or frame.h <= 0 or natural[0] <= 0 or natural[1] <= 0:
@@ -1068,18 +1075,18 @@ def plan_crops(
             if item_id in build_target_set:
                 warnings.append(f"image {item_id[1]}: a build targets this image, keeping source (LWCROP)")
                 continue
-            if (item.get("rotation") or 0) % 360 != 0:
-                _cleanup()
-                raise CropRefusal(f"slide {number} image {item_id[1]}: rotated, refusing crop")
             try:
                 result = crop_geometry(obj, objects, window)
             except CropRefusal as exc:
-                _cleanup()
-                raise CropRefusal(f"slide {number} image {item_id[1]}: {exc}") from exc
+                warnings.append(f"image {item_id[1]}: {exc}, keeping source (LWCROP)")
+                continue
             if result is None:
                 continue
             mask_abs, visible, px_box = result
             if _rects_close(visible, mask_abs):
+                continue
+            if (item.get("rotation") or 0) % 360 != 0:
+                warnings.append(f"image {item_id[1]}: rotated, keeping source (LWCROP)")
                 continue
 
             data_id = _data_identifier(obj)
@@ -1127,6 +1134,7 @@ def plan_crops(
             try:
                 src_img.crop(px_box).save(out_path, **save_kwargs)
             except Exception as exc:  # noqa: BLE001
+                out_path.unlink(missing_ok=True)
                 warnings.append(f"image {item_id[1]}: could not save crop as {source_name!r} ({exc}), keeping source (LWCROP)")
                 continue
 
