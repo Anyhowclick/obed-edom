@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test:maps": "node --test tests/*.test.cjs",
-    "test:ui": "vitest run",
+    "typecheck:ui": "tsc -p tests-ui --noEmit",
+    "test:ui": "npm run typecheck:ui && vitest run",
     "test:ui:watch": "vitest",
     "preview": "vite preview"
   },

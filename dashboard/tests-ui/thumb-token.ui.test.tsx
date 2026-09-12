@@ -29,7 +29,6 @@ describe("thumbnail token gating", () => {
     mapsApiScript.saveMapsState.conflictOnce({
       document: { ...doc, slides: [{ ...doc.slides[0], camera: makeCamera({ zoom: 8 }) }] },
       stateRevision: 3,
-      paths: ["slides.0.camera"],
     });
 
     await tick(500);
@@ -43,9 +42,10 @@ describe("thumbnail token gating", () => {
     expect(mapsApiScript.postMapsPng.calls).toHaveLength(0);
   });
 
-  it("switching the active slide mid-capture invalidates the stale capture's token; only the newer one publishes", async () => {
-    // Both captures target the same unchanged slide-1 content (same fingerprint), so only the
-    // thumbnailToken bump — not a fingerprint mismatch — can tell the stale one apart.
+  it("a second capture of the same slide invalidates the first capture's token", async () => {
+    // selectSlide awaits captureThumb(prev) before moving activeRef, so both captures target
+    // the same unchanged slide-1 content (same fingerprint) — only the thumbnailToken bump,
+    // not a fingerprint mismatch, can tell the stale one apart.
     const doc = makeDoc({ slides: [makeSlide({ id: "slide-1", title: "Slide 1" }), makeSlide({ id: "slide-2", title: "Slide 2" })] });
     const job = makeJob({ result: { ...doc, stateRevision: 1 } });
     const { mapFake } = await renderMapsTab({ job });

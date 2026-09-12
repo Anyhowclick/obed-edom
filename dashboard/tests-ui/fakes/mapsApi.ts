@@ -1,14 +1,10 @@
 import { vi } from "vitest";
-import type { Job, MapsStateConflict } from "../../src/api";
+import type { Job, MapsStateConflict, Settings } from "../../src/api";
 import { makeJob } from "./doc";
 
-type PngCall = { kind?: string; slideId?: string; audience?: string; revision?: number };
-type ApiErrorClasses = {
-  MapsStateConflictError: new (conflict: MapsStateConflict) => Error;
-  MapsStaleThumbnailError: new (stateRevision: number) => Error & { stateRevision: number };
-};
+const actual = await vi.importActual<typeof import("../../src/api")>("../../src/api");
 
-let errorClasses: ApiErrorClasses | null = null;
+type PngCall = { kind?: string; slideId?: string; audience?: string; revision?: number };
 
 let saveConflictOnce: { conflict: MapsStateConflict } | null = null;
 let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRevision: number }> = [];
@@ -26,7 +22,7 @@ export const saveMapsState = vi.fn(async (id: string, document: Record<string, u
   if (saveConflictOnce) {
     const { conflict } = saveConflictOnce;
     saveConflictOnce = null;
-    throw new errorClasses!.MapsStateConflictError(conflict);
+    throw new actual.MapsStateConflictError(conflict);
   }
   return makeJob({ id, result: { ...document, stateRevision: expectedRevision + 1 } });
 });
@@ -36,7 +32,7 @@ export const postMapsPng = vi.fn(async (id: string, _blob: Blob, opts: PngCall =
   if (staleOnce) {
     const { stateRevision } = staleOnce;
     staleOnce = null;
-    throw new errorClasses!.MapsStaleThumbnailError(stateRevision);
+    throw new actual.MapsStaleThumbnailError(stateRevision);
   }
   return makeJob({ id });
 });
@@ -56,13 +52,14 @@ export const getJob = vi.fn(async (id: string): Promise<Job> => {
   return makeJob({ id });
 });
 
-export const getSettings = vi.fn(async () => ({ defaultExportDir: "" }));
-
-/** Called once from the `../src/api` mock factory so the fake can throw real error classes
- * (product code branches on `instanceof MapsStateConflictError` / `MapsStaleThumbnailError`). */
-export function registerApiErrorClasses(classes: ApiErrorClasses) {
-  errorClasses = classes;
-}
+export const getSettings = vi.fn(
+  async (): Promise<Settings> => ({
+    reuseThreshold: 0,
+    reusePairings: false,
+    reusePreviews: false,
+    defaultExportDir: "",
+  })
+);
 
 export function resetMapsApiScript() {
   saveConflictOnce = null;
@@ -81,7 +78,7 @@ export function resetMapsApiScript() {
 
 export const mapsApiScript = {
   saveMapsState: {
-    conflictOnce(conflict: { document: Record<string, unknown>; stateRevision: number; paths: string[] }) {
+    conflictOnce(conflict: { document: Record<string, unknown>; stateRevision: number }) {
       saveConflictOnce = { conflict: { document: conflict.document, stateRevision: conflict.stateRevision } };
     },
     get calls() {

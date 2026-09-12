@@ -26,7 +26,6 @@ describe("conflict freeze", () => {
     mapsApiScript.saveMapsState.conflictOnce({
       document: { ...doc, slides: [{ ...doc.slides[0], camera: remoteCamera }] },
       stateRevision: 5,
-      paths: ["slides.0.camera"],
     });
 
     await tick(500);
@@ -67,7 +66,6 @@ describe("conflict freeze", () => {
     mapsApiScript.saveMapsState.conflictOnce({
       document: { ...doc, slides: [{ ...doc.slides[0], camera: makeCamera({ zoom: 9 }) }] },
       stateRevision: 5,
-      paths: ["slides.0.camera"],
     });
 
     await tick(500);

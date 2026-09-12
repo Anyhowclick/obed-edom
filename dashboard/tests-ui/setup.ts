@@ -12,12 +12,13 @@ beforeEach(() => {
   window.sessionStorage.clear();
   window.localStorage.clear();
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
-  if (!URL.createObjectURL) URL.createObjectURL = vi.fn(() => "blob:fake");
-  else vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fake");
-  if (!URL.revokeObjectURL) URL.revokeObjectURL = vi.fn();
-  else vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-  if (!window.matchMedia) {
-    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+  // jsdom 30 doesn't implement Blob URLs or matchMedia; these are plain assignments, not
+  // spies, so clearMocks/restoreMocks never strips them.
+  URL.createObjectURL = vi.fn(() => "blob:fake");
+  URL.revokeObjectURL = vi.fn();
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn().mockImplementation((query: string) => ({
       matches: false,
       media: query,
       onchange: null,
@@ -26,11 +27,12 @@ beforeEach(() => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       dispatchEvent: vi.fn(),
-    }));
-  }
+    }))
+  );
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });

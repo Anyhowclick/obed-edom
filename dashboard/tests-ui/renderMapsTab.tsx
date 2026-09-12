@@ -10,7 +10,6 @@ import { getJob, mapsApiScript, resetMapsApiScript } from "./fakes/mapsApi";
 vi.mock("../src/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/api")>();
   const apiFake = await import("./fakes/mapsApi");
-  apiFake.registerApiErrorClasses({ MapsStateConflictError: actual.MapsStateConflictError, MapsStaleThumbnailError: actual.MapsStaleThumbnailError });
   return {
     ...actual,
     saveMapsState: apiFake.saveMapsState,

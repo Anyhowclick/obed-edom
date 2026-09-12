@@ -248,6 +248,8 @@ function pinIdFromEvent(event: MapMouseEvent, map: MapLibreMap): string {
   return String(hits[0]?.properties?.id || "");
 }
 
+export type MapViewProps = Props;
+
 export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   {
     camera,
