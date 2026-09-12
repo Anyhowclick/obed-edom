@@ -247,10 +247,10 @@ def test_run_size_ranges_full_coverage_multi_size():
     assert unresolved is False
 
 
-def test_run_size_ranges_uniform_size_is_safe_to_flatten():
+def test_run_size_ranges_uniform_size_returns_scaled_run_size():
     item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}
-    ranges, unresolved = dsa._run_size_ranges(item, 1.0)
-    assert ranges is None
+    ranges, unresolved = dsa._run_size_ranges(item, 0.5)
+    assert ranges == 5.0
     assert unresolved is False
 
 
@@ -3612,6 +3612,38 @@ def test_stacked_mixed_run_box_preserves_run_size_ratios():
     assert 'OVERFLOW" & tab & "text:1"' in script
 
 
+def test_stacked_box_uniform_run_size_differs_from_leading_size():
+    # Runs cover the text uniformly at a size other than the item's own leading size --
+    # the flat write must use the run size scaled by t, not the leading size scaled by t.
+    _require_font("AzoSans-Regular")
+    text = _VERSE_1
+    runs = [{"text": text, "size": 85.0}]
+    item = _text_item(1, x=2000, y=200, w=1800, h=300, runs=runs)
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    item["size"] = 70.0
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert ("text", 1) not in plan.run_sizes.get(13, {})
+
+    baseline = _text_item(1, x=2000, y=200, w=1800, h=300, runs=None)
+    baseline["text"] = text
+    baseline["font"] = "AzoSans-Regular"
+    baseline["size"] = 70.0
+    baseline_slide = _slide(13, [baseline])
+    baseline_payload = _payload([baseline_slide])
+    baseline_classes = [_classify(baseline_slide)]
+    baseline_plan = plan_assembly(
+        baseline_payload, baseline_classes, decisions=decisions, band=BAND, clips={}
+    )
+    t = baseline_plan.text_sizes[13][("text", 1)] / 70.0
+
+    assert plan.text_sizes[13][("text", 1)] == pytest.approx(85.0 * t, abs=1e-6)
+
+
 def test_stacked_box_gap_in_run_coverage_preserves_source_sizing():
     # A run with size=None (no full per-run coverage) must not be silently flattened
     # to a whole-object write -- only offered under an explicit --text-fit shrink.
@@ -3640,6 +3672,39 @@ def test_stacked_box_gap_in_run_coverage_preserves_source_sizing():
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
     )
     assert "set size of object text of theObj" not in script
+
+
+def test_stacked_box_gap_in_run_coverage_at_t_ge_1_warns_of_flat_write_under_shrink():
+    # Same coverage gap at t >= 1, but under --text-fit shrink the flat write still
+    # happens -- the warning must say so, not claim source sizing is preserved.
+    _require_font("AzoSans-Regular")
+    text = _VERSE_1
+    split_at = 20
+    runs = [
+        {"text": text[:split_at], "size": 70.0},
+        {"text": text[split_at:], "size": None},
+    ]
+    item = _text_item(1, x=2000, y=200, w=1800, h=300, runs=runs)
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    item["size"] = 70.0
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, text_fit="shrink")
+    assert ("text", 1) in plan.shrink_text_sizes.get(13, {})
+    assert any(
+        "flattening run sizes to the lead size under --text-fit shrink" in w and "box 1" in w
+        for w in plan.warnings
+    )
+    assert not any("preserving source sizing" in w for w in plan.warnings)
+
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        text_fit="shrink",
+    )
+    assert "set size of object text of theObj to" in script
 
 
 def _gw49_shaped_item(kind_index, *, x=2000, y=200, w=1800, h=300, split_at=20, size=150.0):

@@ -1151,6 +1151,11 @@ def test_wrap_lines_hard_breaks_on_each_separator(sep):
     assert lines == ["one", "two"]
 
 
+def test_wrap_lines_crlf_breaks_once():
+    lines = dsk_plan._wrap_lines("one\r\ntwo", _FixedWidthFont(), max_width=1000)
+    assert lines == ["one", "two"]
+
+
 def test_wrap_lines_mixed_separators_all_break():
     lines = dsk_plan._wrap_lines("a\nb c d", _FixedWidthFont(), max_width=1000)
     assert lines == ["a", "b", "c", "d"]

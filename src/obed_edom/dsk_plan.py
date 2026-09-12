@@ -840,7 +840,7 @@ def _wrap_lines(text: str, font: Any, max_width: float) -> list[str]:
     import re as _re  # noqa: PLC0415
 
     pattern = "[" + "".join(_WRAP_BREAK_CHARS) + "]"
-    para_pattern = "[" + "".join(_PARA_BREAK_CHARS) + "]"
+    para_pattern = "\r\n|[" + "".join(_PARA_BREAK_CHARS) + "]"
     lines: list[str] = []
     for paragraph in _re.split(para_pattern, text or ""):
         if paragraph == "":

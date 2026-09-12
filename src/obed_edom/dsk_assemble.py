@@ -174,8 +174,9 @@ def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: flo
 def _run_size_ranges(
     item: dict, scale: float, *, item_id: ItemId | None = None, slide_number: int | None = None,
     warnings: list[str] | None = None,
-) -> tuple[tuple[tuple[int, int, float], ...] | None, bool]:
-    """Per-run 1-indexed character ranges ``(start, end, size * scale)``, or ``(None, unresolved)``
+) -> tuple[tuple[tuple[int, int, float], ...] | float | None, bool]:
+    """Per-run 1-indexed character ranges ``(start, end, size * scale)``; a single ``float``
+    (the covered run size ``* scale``) when every run shares one size; or ``(None, unresolved)``
     -- ``unresolved`` marks a size gap where the caller must preserve source sizing."""
     runs = item.get("runs") or []
     full_len = len(item.get("text") or "")
@@ -210,7 +211,7 @@ def _run_size_ranges(
             )
         return None, True
     if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
-        return None, False
+        return ranges[0][2], False
     return tuple(ranges), False
 
 
@@ -410,8 +411,10 @@ def plan_assembly(
                             items_by_id[box.item_id], t, item_id=box.item_id,
                             slide_number=number, warnings=warnings,
                         )
-                        if ranges is not None:
+                        if isinstance(ranges, tuple):
                             stacked_run_sizes[box.item_id] = ranges
+                        elif ranges is not None:
+                            stacked_text_sizes[box.item_id] = ranges
                         elif unresolved:
                             if t < 1.0:
                                 if text_fit == "warn":
@@ -423,6 +426,11 @@ def plan_assembly(
                                     f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
                                     f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
                                     "--text-fit shrink"
+                                )
+                            elif text_fit == "shrink":
+                                warnings.append(
+                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                    "flattening run sizes to the lead size under --text-fit shrink"
                                 )
                             else:
                                 warnings.append(
@@ -468,7 +476,9 @@ def plan_assembly(
                             else frozenset()
                         )
                         part_text_sizes: dict[ItemId, float] = {}
-                        if part_ranges is None and not part_unresolved:
+                        if isinstance(part_ranges, float):
+                            part_text_sizes[box.item_id] = part_ranges
+                        elif part_ranges is None and not part_unresolved:
                             part_text_sizes[box.item_id] = sizes1[box.item_id]
                         elif part_unresolved:
                             if t1 < 1.0:
@@ -482,6 +492,11 @@ def plan_assembly(
                                     f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
                                     "--text-fit shrink"
                                 )
+                            elif text_fit == "shrink":
+                                warnings.append(
+                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
+                                    "flattening run sizes to the lead size under --text-fit shrink"
+                                )
                             else:
                                 warnings.append(
                                     f"slide {number} box {box.item_id[1]}: run ranges leave a gap, "
@@ -492,7 +507,7 @@ def plan_assembly(
                             SplitPart(
                                 fits=part_fit, deletes=part_deletes,
                                 text_sizes=part_text_sizes,
-                                run_sizes={box.item_id: part_ranges} if part_ranges is not None else {},
+                                run_sizes={box.item_id: part_ranges} if isinstance(part_ranges, tuple) else {},
                                 stacked_ids=frozenset({box.item_id}),
                                 autosize=part_autosize,
                             )
