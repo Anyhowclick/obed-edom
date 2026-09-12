@@ -414,7 +414,8 @@ def _has_open_quote(text: str) -> bool:
     A ``"`` opens a quoted field only at the start of a field (start of
     text, or right after ``,`` or ``\\n``); a stray ``"`` elsewhere (e.g.
     ``O"Brien``) is just a literal character. Inside a quoted field, ``""``
-    is an escaped quote and a single ``"`` closes the field.
+    is an escaped quote and a single ``"`` closes the field. This mirrors
+    the default csv dialect used by ``_read_bounded_record``.
     """
     in_quotes = False
     at_field_start = True
