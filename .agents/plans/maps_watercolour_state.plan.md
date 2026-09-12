@@ -1,6 +1,6 @@
 ---
 name: Maps + Watercolour branch state
-overview: PR #63, #68, #79, #81, and #82 (feat/maps-save-status-snap-guide) are merged into main. Open, Codex-approved, owner-merge-owed: #86 (hop preview isolate fix), #88 (landmark scale-with-map), #90 (tolerant CSV + zoom ladder). Open, stacked, Codex-in-flight: #87 (CAS contract) → #91 (job names) → #92 (export destination). Records what landed on 2026-09-09, 2026-09-11, the backlog round, the 2026-09-11 evening round, and the 2026-09-12 round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63, #68, #79, #81, and #82 (feat/maps-save-status-snap-guide) are merged into main. #96 and #93 MERGED into main (f4203af); Hall PR #97 open. Next: dashboard React/DOM test harness — plan in dashboard_test_harness.plan.md (owner approved; to be done in a separate session). Records what landed on 2026-09-09, 2026-09-11, the backlog round, the 2026-09-11 evening round, and the 2026-09-12 round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
     content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie, Keynote re-render of restored pairs, and honest preview 2b QA (toner lines, pitched downtown, movie hops across relief/province/CG-crop gates, morph plate slide, centre-to-FW mixed hop, side-panel toggle on centre-only slide)."
@@ -14,8 +14,8 @@ todos:
     content: "Shipped in 89f9749: offline IWA patch of TSD.MovieArchive.posterTime via src/obed_edom/iwa_movies.py (movie_archives / plan_movie_posters / patch_movie_posters, one-to-one 1px frame match, refuse-not-guess), wired into maps_keynote.py's _apply_poster_frames per deck after _run_one_deck, gated OBED_MAPS_POSTER_FRAME=off|on|verify (default off). Probe script scripts/probe_movie_poster.py (dump/patch/reopen). Owner QA owed: run the probe to learn whether Keynote regenerates the poster from posterTime or keeps cached posterImageData; only then flip the gate on."
     status: probe owed
   - id: backlog
-    content: "Shipped: the race-tests/conflict-freeze package (7 concurrent-race tests + F1/F2/F3 backend fixes + dashboard conflict freeze, see 'Shipped 2026-09-11 (backlog round)'). Owner made all five CAS decisions 2026-09-12; PR #87 implements the contract, Codex-approved round 3, open. Stacked on top: PR #91 (job names) and PR #92 (export destination), both Codex-in-flight. Merge order #87 → #91 → #92."
-    status: pending
+    content: "Shipped: the race-tests/conflict-freeze package (7 concurrent-race tests + F1/F2/F3 backend fixes + dashboard conflict freeze, see 'Shipped 2026-09-11 (backlog round)'). Owner made all five CAS decisions 2026-09-12; implemented in PR #87, folded into mega PR #96 alongside #88/#90/#91/#92, MERGED (main f4203af). Next: dashboard React/DOM test harness — plan in dashboard_test_harness.plan.md (owner approved; to be done in a separate session)."
+    status: done
   - id: round-2026-09-12
     content: "Merged PR #82 (save-status pill + CG snap guide). Open, Codex-approved, owner-merge-owed: PR #86 (hop preview isolate fix), PR #88 (landmarks scale with map), PR #90 (tolerant CSV + zoom ladder). Open, stacked, Codex-in-flight: PR #87 → #91 → #92. Owner QA 2026-09-12: 1,2,4,5 PASS; 3,6-8 need the pill + two tabs (see QA items 23-27 below)."
     status: pending
@@ -190,7 +190,7 @@ Round from 2026-09-12 (add):
 
 ## Open backlog
 
-- **Dashboard needs a React/DOM test harness** — several review rounds could only pin pure predicates (conflict freeze, thumbnail gates, rename-during-edit).
+- **Dashboard needs a React/DOM test harness** — several review rounds could only pin pure predicates (conflict freeze, thumbnail gates, rename-during-edit). Plan: `.agents/plans/dashboard_test_harness.plan.md` (owner approved 2026-09-12).
 - **CAS atomic contract** — owner made all five decisions 2026-09-12 (frames lock-only, relocate 409, stills/plates `bump=False`, naming as implemented, failed import leaves tiles); implemented in PR #87, Codex-approved round 3, open. See "Shipped/open 2026-09-12" above. Known limit carried into #87: `_clear_derived_maps_output` is unstaged inside the import commit.
 - **Session assets/previews** are installed and backups removed before the document commit, so rollback is unreliable.
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
