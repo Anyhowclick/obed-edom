@@ -217,6 +217,9 @@ body::before {
   background: var(--job-colour, transparent);
   box-shadow: 0 0 0 1px rgba(7, 7, 10, 0.35);
 }
+/* No dot means no ring either — the fill is transparent but the ring is not. */
+.nav-btn[data-tab="history"]::before,
+.nav-btn[data-tab="settings"]::before { box-shadow: none; }
 .sidebar.collapsed .nav-btn::before { display: none; }
 .nav-btn[data-tab="generate"] { --job-colour: var(--job-generate); }
 .nav-btn[data-tab="check"] { --job-colour: var(--job-check); }
@@ -514,14 +517,14 @@ h3 {
 [data-feature="resize"] { --job-colour: var(--job-resize); }
 [data-feature="maps"] { --job-colour: var(--job-maps); }
 [data-feature="watercolour"] { --job-colour: var(--job-watercolour); }
-.job-list .cap[data-feature] { color: var(--job-colour); }
+.job-list .cap[data-feature] { color: var(--job-colour, var(--muted)); }
 .session-row {
   display: flex;
   gap: 6px;
   align-items: stretch;
   min-width: 0;
 }
-.session-row[data-feature] { border-left: 2px solid var(--job-colour); padding-left: 6px; }
+.session-row[data-feature] { border-left: 2px solid var(--job-colour, transparent); padding-left: 6px; }
 .session-pick-info {
   flex: 1 1 auto;
   min-width: 0;
@@ -807,7 +810,6 @@ h3 {
   align-items: center;
   justify-content: center;
 }
-.icon-expand { display: block; width: var(--icon-size); height: var(--icon-size); }
 /* DSK column shift (movement): green up / red down. */
 .btn.shift-up {
   background: var(--accent-primary);
@@ -1115,6 +1117,9 @@ label.check input[type="checkbox"]:disabled,
 .error-notice-message { min-width: 0; flex: 1; white-space: pre-wrap; user-select: text; }
 .error-notice-close {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 24px;
   height: 24px;
   margin: -2px -3px -2px 0;
@@ -1124,7 +1129,6 @@ label.check input[type="checkbox"]:disabled,
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 20px;
   line-height: 1;
   cursor: pointer;
 }
@@ -2542,6 +2546,9 @@ input.maps-thumb-title-input:focus {
 }
 .maps-insp-back {
   align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin: 0 0 4px;
   padding: 0;
   border: 0;
@@ -2570,19 +2577,20 @@ input.maps-thumb-title-input:focus {
   font-family: var(--font-sans);
   font-size: 13px;
 }
-/* Kind is the glyph and the spine; the swatch stays the operator's own colour. */
-.maps-pin-row.kind-dot { border-left: 2px solid var(--obj-dot); }
-.maps-pin-row.kind-droppin { border-left: 2px solid var(--obj-droppin); }
-.maps-pin-row.kind-landmark { border-left: 2px solid var(--obj-landmark); }
 .maps-pin-kind { display: inline-flex; flex: 0 0 auto; }
-.maps-pin-kind.kind-dot { color: var(--obj-dot); }
-.maps-pin-kind.kind-droppin { color: var(--obj-droppin); }
-.maps-pin-kind.kind-landmark { color: var(--obj-landmark); }
 .maps-pin-row:hover,
 .maps-pin-row.active {
   border-color: rgba(255, 255, 255, 0.28);
   background: rgba(255, 255, 255, 0.08);
 }
+/* Kind is the glyph and the spine; the swatch stays the operator's own colour.
+   After the hover/active block, whose border-color shorthand would erase the spine. */
+.maps-pin-row.kind-dot { border-left: 2px solid var(--obj-dot); }
+.maps-pin-row.kind-droppin { border-left: 2px solid var(--obj-droppin); }
+.maps-pin-row.kind-landmark { border-left: 2px solid var(--obj-landmark); }
+.maps-pin-kind.kind-dot { color: var(--obj-dot); }
+.maps-pin-kind.kind-droppin { color: var(--obj-droppin); }
+.maps-pin-kind.kind-landmark { color: var(--obj-landmark); }
 .maps-pin-select {
   display: flex;
   align-items: center;
@@ -2900,7 +2908,6 @@ input.maps-thumb-title-input:focus {
   cursor: pointer;
 }
 .maps-hl-chip:disabled { opacity: 0.45; cursor: not-allowed; }
-.maps-hl-chip span { font-size: 14px; line-height: 1; }
 .maps-inspector > label:not(.ae-scrub):not(.maps-check),
 .maps-inspector label:not(.maps-check):not(.ae-scrub) {
   display: flex;

@@ -559,7 +559,7 @@ export function FramingReview({
       </div>
 
       <div className="framing-filter">
-        <span className="framing-filter-icon">
+        <span className="framing-filter-icon" aria-hidden="true">
           <IconFilter />
         </span>
         <span className="framing-filter-label">Filter</span>

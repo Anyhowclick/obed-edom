@@ -445,7 +445,7 @@ export function DiffResultView({
               aria-label={focusMode ? "Exit maximise" : "Maximise"}
               onClick={() => setFocusMode(!focusMode)}
             >
-              <IconExpand className="icon-expand" collapse={focusMode} />
+              <IconExpand collapse={focusMode} />
             </button>
           </div>
         </div>
