@@ -266,6 +266,37 @@ test("reloadLatest and keepMyChanges clear the conflict so later edits are accep
   await queue.keepMyChanges();
   assert.equal(queue.conflict, null);
   assert.equal(live.slides[0].title, "Local");
+
+  const statuses = [];
+  attempts = 0;
+  live = doc("Local");
+  const recovering = new MapsSaveQueue({
+    document: () => live,
+    publish: (next) => { live = next; },
+    transport: async (sent, revision) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("network down");
+      if (attempts === 2) throw new MapsSaveConflictError({ document: doc("Remote"), revision: 1 });
+      return { document: sent, revision: revision + 1 };
+    },
+    onConflict: () => undefined,
+    onError: () => undefined,
+    onStatus: (status) => statuses.push(status),
+  });
+  recovering.setAcknowledged({ document: doc(), revision: 0 });
+  recovering.markDirty();
+  await assert.rejects(recovering.flush(), /network down/);
+  assert.equal(recovering.status, "error");
+
+  recovering.markDirty();
+  await assert.rejects(recovering.flush(), MapsSaveBlockedError);
+  assert.equal(recovering.status, "paused");
+  assert.ok(recovering.conflict);
+
+  recovering.reloadLatest();
+  assert.equal(recovering.conflict, null);
+  assert.equal(recovering.status, "saved");
+  assert.equal(statuses.at(-1), "saved");
 });
 
 test("flush resolves only after the acknowledged revision is updated", async () => {

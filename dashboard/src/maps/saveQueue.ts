@@ -106,6 +106,7 @@ export class MapsSaveQueue {
     this.options.publish(copy(this.blocked.remote.document));
     this.blocked = null;
     this.dirty = false;
+    this.lastError = false;
     this.emitStatus();
   }
 
