@@ -1341,6 +1341,43 @@ def test_plan_crops_refuses_duplicate_fileName_on_one_slide(tmp_path, monkeypatc
         )
 
 
+def test_plan_crops_unlinks_its_own_written_files_on_its_own_refusal(tmp_path, monkeypatch):
+    """image0's crop file is written, then image1's duplicate fileName raises -- the
+    file `plan_crops` itself wrote for image0 this call must not be left behind."""
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-0.jpg")
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    obj0, extra0 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m0")
+    obj0["data"] = {"identifier": "0"}
+    obj1, extra1 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m1")
+    obj1["data"] = {"identifier": "1"}
+    objects = {"img0": obj0, "img1": obj1, **extra0, **extra1}
+    monkeypatch.setattr(
+        dsk_plan, "_item_object_ids",
+        lambda slide_archive, objects: {("image", 0): "img0", ("image", 1): "img1"},
+    )
+    items = [
+        {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "a.jpg"},
+        {"kind": "image", "kindIndex": 1, "rotation": 0, "fileName": "a.jpg"},
+    ]
+    crop_dir = tmp_path / "crops"
+    with pytest.raises(CropRefusal, match="collides"):
+        plan_crops(
+            key_path, {}, objects, items, [("image", 0), ("image", 1)],
+            crop_dir=crop_dir, number=3,
+        )
+    assert not (crop_dir / "3" / "a.jpg").exists()
+
+
 def _empty_key(tmp_path):
     import zipfile as _zipfile
 

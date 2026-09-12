@@ -4690,7 +4690,14 @@ def test_restore_crop_zorder_real_pair_end_to_end(tmp_path):
     grp_o = _arch(350, "TSD.GroupArchive", {"super": _geom(500, 500, 30, 30), "children": [{"identifier": 351}]})
     child_o = _arch(351, "TSWP.ShapeInfoArchive", {"isTextBox": False, "super": _geom(0, 0, 30, 30)})
     img_o = _arch(330, "TSD.ImageArchive", {"data": {"identifier": 9}, "super": _geom(300, 100, 120, 60)})
-    slide_o = _arch(200, "KN.SlideArchive", {"drawablesZOrder": [{"identifier": 350}, {"identifier": 330}]})
+    slide_o = _arch(
+        200,
+        "KN.SlideArchive",
+        {
+            "drawablesZOrder": [{"identifier": 350}, {"identifier": 330}],
+            "ownedDrawables": [{"identifier": 350}, {"identifier": 330}],
+        },
+    )
     show_o = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 20}]}})
     node_o = _arch(20, "KN.SlideNodeArchive", {"slide": {"identifier": 200}, "isSkipped": False})
     out_path = tmp_path / "out.key"
@@ -4712,6 +4719,7 @@ def test_restore_crop_zorder_real_pair_end_to_end(tmp_path):
     assert result[1]["refused"] is False
     objects, _id_to_file, _file_ids = _load_deck(out_path)
     assert [ref["identifier"] for ref in objects["200"]["drawablesZOrder"]] == ["330", "350"]
+    assert [ref["identifier"] for ref in objects["200"]["ownedDrawables"]] == ["330", "350"]
     assert warnings == []
 
 
@@ -4743,6 +4751,15 @@ def test_split_override_refuses_on_part_count_mismatch():
     decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
     with pytest.raises(AssemblyRefusal, match="--split requests 3"):
         plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, split_overrides={17: 3})
+
+
+def test_split_override_refuses_when_slide_has_no_long_text_boxes():
+    slide = _slide(18, [_image_item(0)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {18: SlideDecision(18, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="slide 18: --split does not apply"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, split_overrides={18: 2})
 
 
 def test_min_text_pt_forces_split():

@@ -2505,6 +2505,17 @@ def test_reorder_drawables_refuses_when_owned_drawables_id_set_differs(tmp_path)
     assert deck.read_bytes() == before
 
 
+def test_reorder_drawables_refuses_when_owned_drawables_has_a_duplicate_id(tmp_path):
+    """``owned_ids = [220, 230, 230]`` is the same *set* as ``order`` but a different
+    length -- the set comparison alone would wrongly pass this."""
+    deck = _build_owned_drawables_deck(tmp_path / "owned.key", owned_ids=[220, 230, 230])
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert result["refused"]
+    assert "ownedDrawables" in result["reason"]
+    assert deck.read_bytes() == before
+
+
 def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
     deck = _build_builds_deck(tmp_path / "builds.key")
     before = deck.read_bytes()

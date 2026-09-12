@@ -53,6 +53,44 @@ def test_dsk_assemble_bad_split_spec_rejected(tmp_path, capsys, monkeypatch):
     assert "Bad --split" in capsys.readouterr().err
 
 
+def test_dsk_assemble_split_k_below_2_rejected(tmp_path, capsys, monkeypatch):
+    import obed_edom.offline_inspect as offline_inspect
+
+    source = tmp_path / "deck.key"
+    source.mkdir()
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload",
+        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 20},
+    )
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--split", "17=1",
+        ]
+    )
+    assert rc == 1
+    assert "k must be 2 or more" in capsys.readouterr().err
+
+
+def test_dsk_assemble_split_conflicts_with_no_split_rejected(tmp_path, capsys, monkeypatch):
+    import obed_edom.offline_inspect as offline_inspect
+
+    source = tmp_path / "deck.key"
+    source.mkdir()
+    monkeypatch.setattr(
+        offline_inspect, "offline_wall_payload",
+        lambda path, deck=None: {"slideWidth": 7680.0, "slideHeight": 1080.0, "slideCount": 20},
+    )
+    rc = cli.main(
+        [
+            "dsk-assemble", str(source), "--out", str(tmp_path / "out.key"), "--slides", "17",
+            "--no-split", "--split", "17=2",
+        ]
+    )
+    assert rc == 1
+    assert "conflicts with --no-split" in capsys.readouterr().err
+
+
 def test_dsk_assemble_split_slide_not_in_slides_rejected(tmp_path, capsys, monkeypatch):
     import obed_edom.offline_inspect as offline_inspect
 

@@ -301,6 +301,9 @@ its style, builds and z-order.
 - **Mask-aware content test**: after this, the item's content rect **is** the crop window, so
   everything downstream (fit, placement, the acceptance rect assertions) uses `V` and never the
   frame. Movies are unchanged: the clip file is already the LW-window render.
+- `plan_assembly`'s own `deck` parameter is optional: pass an already-loaded `(objects, ...)`
+  tuple (or raw `objects`) to reuse it, or leave it `None` to have `plan_assembly` load `fw_deck`
+  itself, gated on `not no_image_crop` (no need to load the IWA graph when cropping is off).
 
 ### D3. Placement by COUNT (R3, Q3)
 
@@ -401,10 +404,22 @@ its badges 40 pt, so 24 is a floor, not a target), `--no-dedupe`, `--no-auto-anc
 `--no-drop-panel-backdrop`, `--no-split`, `--split N=k` (operator override of the offline decision),
 `--crop-dir PATH`, `--no-image-crop` (fall back to the LWCROP note everywhere).
 
+`classes` must already have been built (via `classify_deck`/`classify_slide`) with the SAME
+`--no-dedupe`/`--no-drop-panel-backdrop` flags passed to `plan_assembly`, since `cls.kept` and
+`plan_assembly`'s own re-derivation of kept items (through `fit_slide`) must agree.
+
 `AssemblyRefusal` additions: >2 items sharing a content key on one slide; an identical-content pair
 failing the mirror test; the panel-backdrop drop would empty a slide with no `--include-side`; a
 single long box that cannot fit the band at the floor; a crop window under 8 px; a split requested
-on a slide whose parts disagree on transition.
+on a slide whose parts disagree on transition; a `--split N=k` slide that never went through the
+split path (no long text boxes to split); `--split` combined with `--no-split`; `--split N=k`
+with `k < 2`.
+
+`iwa_write.reorder_drawables`: `ownedDrawables` is a second reference list on a `KN.SlideArchive`
+that, on every real slide observed so far, is byte-for-byte the same order as `drawablesZOrder`.
+Since it's unknown which list Keynote treats as authoritative (KeynoteKit's own writer touches
+`drawablesZOrder` only), the safer premise is to mirror the same permutation into `ownedDrawables`
+when present and refuse outright if it is not a reordering of the exact same id set.
 
 ---
 
@@ -491,15 +506,21 @@ on a slide whose parts disagree on transition.
 
 Opus-C review round 2: fixing finding 1 (`_group_has_media` -- a badge group counts as
 content only when it has an `image:`/`movie:` leaf, not merely a non-`text:` one) flips
-anchor GW 44/50/51/53/54 from `right` to `centre` -- each keeps a single text-only badge
-group (shape + text, no media) and nothing else, so zero content items is correct, but
-this is a layout change on five slides the owner should eyeball on the next gold run,
-not only GW 7/37 (the bug the review actually caught).
+anchor GW 7/37 from `right` to `centre` -- each keeps a single text-only badge group
+(shape + text, no media) and nothing else, so zero content items is correct. GW
+44/50/51/53/54 flipped one commit earlier, under the pre-existing `_group_is_text_only`
+rule. All seven slides are a layout change the owner should eyeball on the next gold run.
 
 `dsk_plan.py`'s outward px-rounding of the crop box against the un-rounded `visible`
 rect (round 1 finding 13, knowingly deferred) is a non-uniform sub-pixel stretch of the
 cropped image against its frame -- below visual threshold on the GW deck's crops, but
 worth an eyeball on a crop with a very small visible window.
+
+`dsk-export-clips` (`dsk_movie_export.py:549,567,642`) still calls `visible_union`/
+`classify_deck` with the default dedupe filter, so it computes a movie slide's crop rect with
+dedupe on even when the operator ran `dsk-assemble --no-dedupe`. Not a bug in either subcommand
+today, but the two disagree under `--no-dedupe` -- worth fixing before that flag is used on a
+deck with a duplicated movie slide.
 
 **Live** — one hands-off run:
 

@@ -291,9 +291,7 @@ def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | N
 def _group_has_media(signature: str | None) -> bool:
     """True when `signature` (`slide['groupChildSignature']`, composite of ``text:``/
     ``shape:``/``image:``/``movie:``-tagged leaves) has an ``image:``/``movie:`` leaf.
-    Unresolved (``None``) signatures are conservatively treated as content; an empty
-    signature (every leaf normalised away) is not conservative in the same sense but is
-    harmless -- it counts as content, same as unresolved."""
+    Unresolved or empty signatures count as content."""
     if not signature:
         return True
     return any(part.startswith(("image:", "movie:")) for part in signature.split("\n") if part)
@@ -337,19 +335,7 @@ def plan_assembly(
 ) -> AssemblyPlan:
     """Pure planning over `payload`/`classes`, EXCEPT `plan_crops` (unless
     `no_image_crop`), which writes cropped image files under `crop_dir` as it plans.
-    Cropping needs the IWA object graph: pass it as `deck` (a `(objects, ...)` tuple or
-    the raw `objects` dict) to reuse one already loaded, or leave it `None` and this
-    loads `fw_deck` itself.
-
-    `no_dedupe`/`no_drop_panel_backdrop` are D6 operator escape hatches threaded down to
-    `_filter_kept_items` -- note `classes` must already have been built (via
-    `classify_deck`/`classify_slide`) with the SAME flags, since `cls.kept` and this
-    function's own re-derivation of kept items (through `fit_slide`) must agree.
-
-    `split_overrides` (D6 `--split N=k`) forces slide `N`'s stacked-text fit to be
-    treated as not fitting as one box, so it goes through the multi-part split path,
-    regardless of whether it would otherwise fit -- refuses if slide `N` does not have
-    exactly `k` long text boxes to split."""
+    `classes` must be built with the SAME flags passed here (see D2/D6 in the plan)."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -385,6 +371,7 @@ def plan_assembly(
     # `plan_crops` writes files as it plans (see the docstring above); a refusal on a
     # later slide must not leave an earlier slide's crop files behind on disk.
     crop_files_written: list[Path] = []
+    consumed_splits: set[int] = set()
 
     for number in kept_numbers:
         try:
@@ -523,6 +510,8 @@ def plan_assembly(
                         stack_band = _dc_replace(band, height=budget)
 
                     forced_parts = (split_overrides or {}).get(number)
+                    if forced_parts is not None:
+                        consumed_splits.add(number)
                     if forced_parts is not None and len(boxes) != forced_parts:
                         raise AssemblyRefusal(
                             f"slide {number}: --split requests {forced_parts} part(s) but the slide "
@@ -725,6 +714,13 @@ def plan_assembly(
                 except OSError:
                     pass
             raise
+
+    unconsumed_splits = sorted((split_overrides or {}).keys() - consumed_splits)
+    if unconsumed_splits:
+        raise AssemblyRefusal(
+            f"slide {unconsumed_splits[0]}: --split does not apply -- slide has no long "
+            "text boxes to split"
+        )
 
     ordinals = ordinal_map(kept_numbers, parts)
     ordinal_to_number: dict[int, int] = {}

@@ -200,9 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     dsk_assemble.add_argument(
         "--split", action="append", default=[], metavar="N=k",
-        help="Force slide N's text stack to split into exactly k parts, overriding the "
-        "offline fit decision; refuses if N does not have exactly k long text boxes. "
-        "Repeatable.",
+        help="Force slide N's text stack to split into exactly k parts, one per long text "
+        "box, overriding the offline fit decision; refuses if N does not have exactly k "
+        "long text boxes (k must be 2 or more). Repeatable.",
     )
     remap.add_argument(
         "--source-previews",
@@ -409,7 +409,13 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
         if slide_no not in slide_set:
             print(f"Bad --split {spec!r}; slide {slide_no} is not in --slides.", file=sys.stderr)
             return 1
+        if part_count < 2:
+            print(f"Bad --split {spec!r}; k must be 2 or more.", file=sys.stderr)
+            return 1
         split_overrides[slide_no] = part_count
+    if split_overrides and args.no_split:
+        print("Bad --split; conflicts with --no-split.", file=sys.stderr)
+        return 1
 
     clips: dict[int, Path] = {}
     for spec in args.clip:

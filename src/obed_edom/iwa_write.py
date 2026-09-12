@@ -1934,24 +1934,8 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
 
 def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
     """Move each id in ``moves`` (``{drawableId: newIndex}``) to ``newIndex`` within
-    ``slide_id``'s (a ``KN.SlideArchive``) ``drawablesZOrder``, single-member rewrite via
-    ``_rewrite_members``. Moves are applied in ``moves`` dict order, each against the
-    list left by the previous move.
-
-    ``ownedDrawables`` is a second reference list on the same archive that, on every
-    real slide observed so far, is byte-for-byte the same order as ``drawablesZOrder``.
-    This function does not know which list Keynote treats as the authoritative order
-    (KeynoteKit's own writer touches ``drawablesZOrder`` only), so as the safer premise
-    it mirrors the same permutation into ``ownedDrawables`` when present and refuses
-    outright if that list is not a reordering of the exact same id set (rather than
-    silently leaving it stale).
-
-    Refuses (deck untouched) unless ``slide_id`` resolves to a same-member
-    ``KN.SlideArchive`` with a ``drawablesZOrder``, every id in ``moves`` is currently
-    one of its entries, every ``newIndex`` is in range, ``ownedDrawables`` (if present)
-    is a permutation of the same ids, and the re-encoded archive set changed only
-    ``slide_id``.
-    """
+    ``slide_id``'s ``drawablesZOrder``, mirroring ``ownedDrawables`` (see D6); refuses,
+    deck untouched, on any precondition failure (see D6)."""
     deck = Path(deck)
     slide_id = str(slide_id)
     moves = {str(k): v for k, v in moves.items()}
@@ -1981,7 +1965,7 @@ def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
     mirror_owned = owned_raw is not None
     if mirror_owned:
         owned_ids = [str(ref["identifier"]) for ref in owned_raw if ref.get("identifier") is not None]
-        if set(owned_ids) != set(order):
+        if len(owned_ids) != len(order) or sorted(owned_ids) != sorted(order):
             return {
                 "refused": True,
                 "reason": f"slide {slide_id}: ownedDrawables id set differs from drawablesZOrder, refusing to reorder",

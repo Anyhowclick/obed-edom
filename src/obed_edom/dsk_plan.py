@@ -1050,6 +1050,11 @@ def plan_crops(
         return crops, warnings
 
     used_names: set[str] = set()
+
+    def _cleanup() -> None:
+        for spec in crops.values():
+            Path(spec.path).unlink(missing_ok=True)
+
     with zipfile.ZipFile(key_path) as zf:
         data_index = data_member_index(zf.namelist())
         for item_id in image_ids:
@@ -1078,6 +1083,7 @@ def plan_crops(
                 continue
 
             if (px_box[2] - px_box[0]) < MIN_CROP_PX or (px_box[3] - px_box[1]) < MIN_CROP_PX:
+                _cleanup()
                 raise CropRefusal(f"slide {number} image {item_id[1]}: crop window under {MIN_CROP_PX:.0f}px")
 
             data_id = _data_identifier(obj)
@@ -1108,6 +1114,7 @@ def plan_crops(
 
             source_name = item.get("fileName") or Path(member).name
             if source_name in used_names:
+                _cleanup()
                 raise CropRefusal(
                     f"slide {number} image {item_id[1]}: fileName {source_name!r} collides with another "
                     "kept image already cropped this slide"
