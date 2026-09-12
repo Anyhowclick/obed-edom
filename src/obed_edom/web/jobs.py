@@ -344,23 +344,29 @@ class JobRunner:
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
             finally:
-                with self._cv:
-                    if job.cancelled():
-                        job.status = "error"
-                        job.error = "Export cancelled."
-                        job.log("Cancelled.")
-                    elif error is not None:
-                        job.status = "error"
-                        job.error = error
-                        job.log(f"Error: {error}")
-                    else:
-                        job.result = result
-                        job.status = "done"
-                        job.log("Finished.")
-                    self._running.discard(job_id)
-                    job.updated_at = time.time()
-            with self._job_lock(job_id):
-                self.save(job)
+                with self._job_lock(job_id):
+                    with self._cv:
+                        if job.cancelled():
+                            job.status = "error"
+                            job.error = "Export cancelled."
+                            job.log("Cancelled.")
+                        elif error is not None:
+                            job.status = "error"
+                            job.error = error
+                            job.log(f"Error: {error}")
+                        else:
+                            previous_result, previous_status = job.result, job.status
+                            job.result = result
+                            job.status = "done"
+                            job.log("Finished.")
+                        self._running.discard(job_id)
+                        job.updated_at = time.time()
+                    try:
+                        self.save(job)
+                    except Exception:
+                        if error is None and not job.cancelled():
+                            job.result, job.status = previous_result, previous_status
+                        raise
 
 
 def serialize_flags(flags) -> list[dict]:
