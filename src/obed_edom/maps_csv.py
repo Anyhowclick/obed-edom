@@ -87,7 +87,7 @@ def resolve_zoom(place: Place, place_type: str | None = None, zoom_from_url: flo
 
 def looks_like_header(fields: list[str]) -> bool:
     non_empty = [f.strip().lower() for f in fields if f.strip()]
-    if not non_empty:
+    if len(non_empty) < 2:
         return False
     return all(field in KNOWN_HEADERS for field in non_empty)
 
@@ -97,6 +97,8 @@ _DMS_RE = re.compile(
     r"^(\d+)\s*°\s*(?:(\d+(?:\.\d+)?)\s*['′]\s*)?(?:(\d+(?:\.\d+)?)\s*[\"″]\s*)?([NSEWnsew])$"
 )
 _ZOOM_RE = re.compile(r"^(?:z\s*=\s*|@|zoom\s+)(-?\d+(?:\.\d+)?)$", re.I)
+_URL_RE = re.compile(r"https?://\S+")
+_KIND_CANON: dict[str, str] = {"dot": "dot", "droppin": "dropPin", "landmark": "landmark"}
 
 
 def _coord_one(token: str) -> tuple[float, str | None] | None:
@@ -109,16 +111,32 @@ def _coord_one(token: str) -> tuple[float, str | None] | None:
         value = deg + minutes / 60 + seconds / 3600
         hemi = dms.group(4).upper()
         if hemi in ("S", "W"):
-            value = -value
+            value = -abs(value)
         return value, hemi
     half = _HALF_RE.match(token)
     if half:
         value = float(half.group(1))
         hemi = half.group(2).upper() if half.group(2) else None
         if hemi in ("S", "W"):
-            value = -value
+            value = -abs(value)
+        elif hemi in ("N", "E"):
+            value = abs(value)
         return value, hemi
     return None
+
+
+def _extract_unquoted_url(raw_line: str) -> tuple[str, str | None]:
+    match = _URL_RE.search(raw_line)
+    if not match:
+        return raw_line, None
+    start = match.start()
+    if start > 0 and raw_line[start - 1] == '"':
+        return raw_line, None
+    matched = match.group(0)
+    stripped = matched.rstrip(",")
+    end = match.end() - (len(matched) - len(stripped))
+    remainder = raw_line[:start] + raw_line[end:]
+    return remainder, stripped
 
 
 def _order_halves(a: tuple[float, str | None], b: tuple[float, str | None]) -> tuple[float, float]:
@@ -171,7 +189,7 @@ def _is_number(field: str) -> bool:
     return True
 
 
-def _parse_headerless_row(fields: list[str], line: int) -> Place | str:
+def _parse_headerless_row(fields: list[str], line: int, extracted_url: str | None = None) -> Place | str:
     fields = [f.strip() for f in fields]
     while fields and fields[-1] == "":
         fields.pop()
@@ -179,11 +197,12 @@ def _parse_headerless_row(fields: list[str], line: int) -> Place | str:
     if not name:
         return f"Line {line}: no name"
     rest = fields[1:]
-    url: str | None = None
+    url: str | None = extracted_url
     lat: float | None = None
     lon: float | None = None
     zoom: float | None = None
     kind: str | None = None
+    query_parts: list[str] = []
     i = 0
     n = len(rest)
     while i < n:
@@ -222,37 +241,59 @@ def _parse_headerless_row(fields: list[str], line: int) -> Place | str:
             i += 1
             continue
         if _is_number(field):
-            return f"Line {line}: cannot tell if {field!r} is a zoom or a coordinate"
-        if kind is not None:
-            return f"Line {line}: two kinds"
-        kind = field
+            next_field = rest[i + 1] if i + 1 < n else None
+            if next_field is not None and _is_number(next_field):
+                a, b = float(field), float(next_field)
+                if abs(a) <= 90 and abs(b) <= 180:
+                    if lat is not None:
+                        return f"Line {line}: two coordinates"
+                    lat, lon = a, b
+                    i += 2
+                    continue
+            return (
+                f"Line {line}: cannot tell if {field!r} is a zoom or a coordinate"
+                " — use z=… for zoom or N/E for coordinates"
+            )
+        canon = _KIND_CANON.get(field.lower())
+        if canon is not None:
+            if kind is not None:
+                return f"Line {line}: two kinds"
+            kind = canon
+            i += 1
+            continue
+        query_parts.append(field)
         i += 1
     lat_c = clamp_lat(lat) if lat is not None else None
     lon_c = clamp_lon(lon) if lon is not None else None
-    return Place(line=line, name=name, url=url, lat=lat_c, lon=lon_c, zoom=zoom, kind=kind)
+    query = ", ".join(query_parts) or None
+    return Place(line=line, name=name, url=url, lat=lat_c, lon=lon_c, zoom=zoom, kind=kind, query=query)
 
 
 def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
     name = (row.get("name") or row.get("title") or "").strip()
-    if not name:
+    query = (row.get("place") or "").strip() or None
+    if not name and not query:
         return f"Line {line}: no name"
     lat_raw = (row.get("lat") or row.get("latitude") or "").strip()
     lon_raw = (row.get("lon") or row.get("lng") or row.get("longitude") or "").strip()
-    lat = clamp_lat(float(lat_raw)) if lat_raw else None
-    lon = clamp_lon(float(lon_raw)) if lon_raw else None
+    try:
+        lat = clamp_lat(float(lat_raw)) if lat_raw else None
+        lon = clamp_lon(float(lon_raw)) if lon_raw else None
+    except ValueError:
+        return f"Line {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
     url = (row.get("maps_url") or row.get("url") or "").strip() or None
     zoom_raw = (row.get("zoom") or "").strip()
     zoom = float(zoom_raw) if zoom_raw else None
     kind = (row.get("kind") or "").strip() or None
-    query = (row.get("place") or "").strip() or None
     return Place(line=line, name=name, url=url, lat=lat, lon=lon, zoom=zoom, kind=kind, query=query)
 
 
-def _parse_header_form(sample: str) -> tuple[list[Place], list[str]]:
+def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list[str]]:
     reader = csv.DictReader(io.StringIO(sample))
     places: list[Place] = []
     errors: list[str] = []
-    for line_no, raw in enumerate(reader, start=2):
+    for raw in reader:
+        line_no = line_offset + reader.line_num
         row = {str(key or "").strip().lower(): (value or "").strip() for key, value in raw.items()}
         if not any(row.values()):
             continue
@@ -272,12 +313,15 @@ def parse_places(text: str) -> tuple[list[Place], list[str]]:
         return [], []
     first_fields = next(csv.reader([numbered[0][1]]))
     if looks_like_header(first_fields):
-        return _parse_header_form(sample)
+        header_offset = numbered[0][0] - 1
+        header_sample = "\n".join(raw_lines[header_offset:])
+        return _parse_header_form(header_sample, header_offset)
     places: list[Place] = []
     errors: list[str] = []
     for line_no, raw_line in numbered:
-        fields = next(csv.reader([raw_line]))
-        result = _parse_headerless_row(fields, line_no)
+        remainder, extracted_url = _extract_unquoted_url(raw_line)
+        fields = next(csv.reader([remainder]))
+        result = _parse_headerless_row(fields, line_no, extracted_url)
         if isinstance(result, str):
             errors.append(result)
         else:

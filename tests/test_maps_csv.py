@@ -105,12 +105,12 @@ def test_bare_number_with_only_name_is_an_error():
 
 def test_mixed_line_name_url_zoom_kind_any_order():
     places, errors = parse_places(
-        'Kikuyo Church,building,z=9,"https://maps.google.com/?q=1.35,103.8"'
+        'Kikuyo Church,landmark,z=9,"https://maps.google.com/?q=1.35,103.8"'
     )
     assert errors == []
     place = places[0]
     assert place.name == "Kikuyo Church"
-    assert place.kind == "building"
+    assert place.kind == "landmark"
     assert place.zoom == pytest.approx(9.0)
     assert place.url == "https://maps.google.com/?q=1.35,103.8"
 
@@ -128,9 +128,22 @@ def test_error_lone_coordinate_half():
 
 
 def test_error_two_kinds():
-    places, errors = parse_places("Kikuyo Church,building,church")
+    places, errors = parse_places("Kikuyo Church,dot,landmark")
     assert places == []
     assert "two kinds" in errors[0]
+
+
+def test_arbitrary_leftover_words_become_query_context():
+    places, errors = parse_places("China,Asia")
+    assert errors == []
+    assert places[0].name == "China"
+    assert places[0].kind is None
+    assert places[0].query == "Asia"
+
+    places, errors = parse_places("Kikuyo Church,Kenya,building")
+    assert errors == []
+    assert places[0].kind is None
+    assert places[0].query == "Kenya, building"
 
 
 @pytest.mark.parametrize(
@@ -140,7 +153,7 @@ def test_error_two_kinds():
         ("China,", False),
         ("Name, Lat, Lon", True),
         ("China", False),
-        ("name", True),
+        ("name", False),
     ],
 )
 def test_header_detection(line, expect_header):
@@ -188,3 +201,75 @@ def test_resolve_zoom_precedence():
 
 def test_known_headers_includes_place():
     assert "place" in KNOWN_HEADERS
+
+
+def test_unquoted_google_maps_url_with_commas_is_not_split():
+    text = (
+        "City Harvest Church Kikuyo,"
+        "https://www.google.com/maps/place/City+Harvest+Church/@1.3431,103.6919,19.6z/"
+        "data=!4m6!3m5!1s0x0:0x0!8m2!3d1.3431!4d103.6919"
+    )
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].name == "City Harvest Church Kikuyo"
+    assert places[0].url == (
+        "https://www.google.com/maps/place/City+Harvest+Church/@1.3431,103.6919,19.6z/"
+        "data=!4m6!3m5!1s0x0:0x0!8m2!3d1.3431!4d103.6919"
+    )
+
+
+def test_quoted_google_maps_url_with_commas_still_works():
+    text = (
+        'City Harvest Church Kikuyo,"https://www.google.com/maps/place/@1.3431,103.6919,19.6z/"'
+    )
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].url == "https://www.google.com/maps/place/@1.3431,103.6919,19.6z/"
+
+
+def test_two_adjacent_bare_numbers_in_range_are_a_coordinate_pair():
+    places, errors = parse_places("Udaipur,24.58,73.68")
+    assert errors == []
+    assert places[0].lat == pytest.approx(24.58)
+    assert places[0].lon == pytest.approx(73.68)
+
+
+def test_single_bare_number_error_hints_zoom_or_coordinate():
+    places, errors = parse_places("China,6.8")
+    assert places == []
+    assert "use z=" in errors[0]
+    assert "N/E" in errors[0]
+
+
+def test_hemisphere_sign_applied_to_absolute_value():
+    places, errors = parse_places('Windhoek,"-24.58 S, -73.68 W"')
+    assert errors == []
+    assert places[0].lat == pytest.approx(-24.58)
+    assert places[0].lon == pytest.approx(-73.68)
+
+
+def test_header_form_bad_lat_lon_reports_error_not_crash():
+    places, errors = parse_places("name,lat,lon\nBadRow,notalat,103.8\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "bad lat/lon" in errors[0]
+
+
+def test_header_form_line_numbers_skip_blank_lines():
+    places, errors = parse_places("name,lat,lon\n\nSingapore,1.3521,103.8198\n")
+    assert errors == []
+    assert places[0].line == 3
+
+
+def test_header_form_leading_blank_line_before_header():
+    places, errors = parse_places("\nname,lat,lon\nSingapore,1.3521,103.8198\n")
+    assert errors == []
+    assert places[0].name == "Singapore"
+    assert places[0].line == 3
+
+
+def test_header_form_place_column_without_name_falls_back():
+    places, errors = parse_places("name,place\n,China\n")
+    assert errors == []
+    assert places[0].name == ""
+    assert places[0].query == "China"
