@@ -86,8 +86,9 @@ def validate_export_dir(raw: str | Path) -> Path:
 def ensure_export_dir(path: str | Path) -> Path:
     """Re-resolve and re-validate an export directory immediately before a deliverable write.
 
-    Defends against a symlink swapped into place after the original `validate_export_dir`
-    (or `export_destination`) call approved the path.
+    Narrows the window in which a symlink could be swapped into place after the original
+    `validate_export_dir` (or `export_destination`) call approved the path — it does not
+    close it (a swap between this check and the write itself is still possible).
     """
     resolved = Path(str(path)).expanduser().resolve()
     _check_export_dir_safe(resolved)

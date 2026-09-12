@@ -71,7 +71,7 @@ from obed_edom.outline_check import (
     slots_from_cues,
 )
 from obed_edom.outline_check import visible as visible_slides
-from obed_edom.paths import export_destination, find_repo_root, output_root, validate_export_dir
+from obed_edom.paths import ensure_export_dir, export_destination, find_repo_root, output_root, validate_export_dir
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import (
@@ -773,7 +773,7 @@ def _run_generate(
         docx,
         lw_template=lw_template,
         dsk_template=dsk_template,
-        output_dir=export_destination(job),
+        output_dir=ensure_export_dir(export_destination(job)),
     )
     lw_prev = result.output_dir / "previews" / "lw"
     dsk_prev = result.output_dir / "previews" / "dsk"
@@ -806,9 +806,9 @@ def _run_generate(
 
 
 def _carried_export_dir(job: Job) -> dict[str, Any]:
-    """`{"exportDir": ..., "exportDirFallback": True}` carried from `job.result`.
+    """`{"exportDir": ...}` carried from `job.result`.
 
-    Keys are present only when they have a truthy value — never a `None`
+    Key is present only when it has a truthy value — never a `None`
     `exportDir`, matching maps' `_run_export`.
     """
     current = job.result or {}
@@ -816,8 +816,6 @@ def _carried_export_dir(job: Job) -> dict[str, Any]:
     export_dir = current.get("exportDir")
     if export_dir:
         out["exportDir"] = export_dir
-    if current.get("exportDirFallback"):
-        out["exportDirFallback"] = True
     return out
 
 
@@ -1255,7 +1253,7 @@ def _write_outline_pdf(job: Job, dest: Path, report: dict[str, Any]) -> Path | N
     try:
         from obed_edom.report import write_outline_findings  # noqa: PLC0415
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        ensure_export_dir(dest.parent)
         return write_outline_findings(dest, report)
     except Exception as exc:  # noqa: BLE001
         job.log(f"Could not write the findings PDF ({exc}).")
@@ -1542,6 +1540,7 @@ def _run_resize(
     job.log(f"CG template (16:9 layouts copied onto the wall copy): {template.name}.")
     if not keep_side_panels and not side_content_slides:
         job.log("Side-panel content dropped (whitelist a slide in the framing review to keep it).")
+    ensure_export_dir(dest.parent)
     info = remap_and_inspect(
         path,
         dest,

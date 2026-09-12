@@ -1229,7 +1229,8 @@ def test_copy_into_export_dir_never_overwrites_under_concurrency(tmp_path):
     results: list[Path | None] = [None, None]
 
     def worker(index):
-        results[index] = _copy_into_export_dir(src, dest_dir)
+        dest, _error = _copy_into_export_dir(src, dest_dir)
+        results[index] = dest
 
     t1 = threading.Thread(target=worker, args=(0,))
     t2 = threading.Thread(target=worker, args=(1,))
@@ -1255,6 +1256,61 @@ def test_copy_into_export_dir_leaves_no_partial_file_on_failure(tmp_path, monkey
         raise OSError("injected mid-copy failure")
 
     monkeypatch.setattr(watercolour_web.shutil, "copy2", boom)
-    result = watercolour_web._copy_into_export_dir(src, dest_dir)
-    assert result is None
+    dest, error = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert dest is None
+    assert error is not None
+    assert list(dest_dir.iterdir()) == []
+
+
+def test_copy_into_export_dir_link_collision_falls_back_cleanly(tmp_path, monkeypatch):
+    from obed_edom.web import watercolour as watercolour_web
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"data")
+
+    real_link = watercolour_web.os.link
+    state = {"raised": False}
+
+    def flaky_link(*args, **kwargs):
+        if not state["raised"]:
+            state["raised"] = True
+            raise FileExistsError("injected collision")
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(watercolour_web.os, "link", flaky_link)
+    dest, error = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert error is None
+    assert dest is not None
+    assert dest.name == "shot-2.png"
+    assert dest.read_bytes() == b"data"
+    assert not list(dest_dir.glob("*.tmp"))
+
+
+def test_copy_into_export_dir_partial_fallback_copy_leaves_no_partial_file(tmp_path, monkeypatch):
+    from obed_edom.web import watercolour as watercolour_web
+
+    dest_dir = tmp_path / "exports"
+    dest_dir.mkdir()
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"data")
+
+    def boom_link(*args, **kwargs):
+        raise OSError("os.link not supported")
+
+    call_count = {"copy2": 0}
+    real_copy2 = watercolour_web.shutil.copy2
+
+    def flaky_copy2(source, dest, *args, **kwargs):
+        call_count["copy2"] += 1
+        if call_count["copy2"] == 2:
+            raise OSError("injected mid-copy failure on fallback")
+        return real_copy2(source, dest, *args, **kwargs)
+
+    monkeypatch.setattr(watercolour_web.os, "link", boom_link)
+    monkeypatch.setattr(watercolour_web.shutil, "copy2", flaky_copy2)
+    dest, error = watercolour_web._copy_into_export_dir(src, dest_dir)
+    assert dest is None
+    assert error is not None
     assert list(dest_dir.iterdir()) == []

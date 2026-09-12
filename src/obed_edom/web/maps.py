@@ -1227,11 +1227,18 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
     return commit.payload, {"tiles": len(tile_entries), "previews": len(imported_previews)}
 
 
-def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False, export_dir: Path | None = None) -> dict[str, Any]:
+def _run_export(
+    job,
+    export_lw: bool,
+    export_cg: bool,
+    export_dsk: bool = False,
+    export_dir: Path | None = None,
+    persist_export_dir: bool = True,
+) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
     result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir)
-    if export_dir is not None:
+    if persist_export_dir and export_dir is not None:
         result["exportDir"] = str(export_dir)
     else:
         result.pop("exportDir", None)
@@ -1681,6 +1688,7 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
             if not export_lw and not export_cg and not export_dsk:
                 raise HTTPException(400, "At least one export target must be on")
             raw_export_dir = result.get("exportDir") if payload is None or payload.exportDir is None else payload.exportDir
+            is_override = bool(raw_export_dir)
             if raw_export_dir:
                 try:
                     export_dir = validate_export_dir(raw_export_dir)
@@ -1689,17 +1697,20 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
             else:
                 # No active override (never set, or explicitly cleared by an empty
                 # `exportDir`): resolve the operator default rather than letting
-                # `_run_export` fall back to the job's private `.maps` directory.
+                # `_run_export` fall back to the job's private `.maps` directory. This
+                # resolved default is NOT persisted as a per-job override below — a
+                # default equal to `output_root()` is passed through as-is so the
+                # export lands flat under it, rather than in the private `.maps` dir.
                 default_source = SimpleNamespace(result={**result, "exportDir": None})
                 try:
                     export_dir = export_destination(default_source)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
-                if export_dir == output_root():
-                    export_dir = None
             updated = _runner().rerun(
                 job_id,
-                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir: _run_export(j, lw, cg, dsk, ed),
+                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, persist=is_override: _run_export(
+                    j, lw, cg, dsk, ed, persist_export_dir=persist
+                ),
             )
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
