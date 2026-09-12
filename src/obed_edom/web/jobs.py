@@ -346,6 +346,7 @@ class JobRunner:
             finally:
                 with self._job_lock(job_id):
                     with self._cv:
+                        previous_result, previous_status = job.result, job.status
                         if job.cancelled():
                             job.status = "error"
                             job.error = "Export cancelled."
@@ -355,7 +356,6 @@ class JobRunner:
                             job.error = error
                             job.log(f"Error: {error}")
                         else:
-                            previous_result, previous_status = job.result, job.status
                             job.result = result
                             job.status = "done"
                             job.log("Finished.")
@@ -363,10 +363,12 @@ class JobRunner:
                         job.updated_at = time.time()
                     try:
                         self.save(job)
-                    except Exception:
+                    except Exception as exc:  # noqa: BLE001
                         if error is None and not job.cancelled():
-                            job.result, job.status = previous_result, previous_status
-                        raise
+                            job.result = previous_result
+                            job.status = "error"
+                            job.error = str(exc)
+                            job.log(f"Error: {exc}")
 
 
 def serialize_flags(flags) -> list[dict]:

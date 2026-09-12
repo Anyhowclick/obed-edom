@@ -93,6 +93,14 @@ def test_completion_wins_when_job_finishes_before_cancel(tmp_path: Path):
 
 
 def test_loop_reverts_result_when_save_fails(tmp_path: Path, monkeypatch):
+    thread_errors: list[BaseException] = []
+    original_hook = threading.excepthook
+
+    def capturing_hook(args: threading.ExceptHookArgs) -> None:
+        thread_errors.append(args.exc_value)
+
+    monkeypatch.setattr(threading, "excepthook", capturing_hook)
+
     runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
     job = runner.submit("maps", lambda _job: {"new": True}, feature="maps", result={"old": True})
 
@@ -110,8 +118,18 @@ def test_loop_reverts_result_when_save_fails(tmp_path: Path, monkeypatch):
         time.sleep(0.02)
     time.sleep(0.1)
 
-    assert job.status == "running"
+    assert job.status == "error"
+    assert job.error == "disk full"
     assert job.result == {"old": True}
+    assert not thread_errors
+
+    monkeypatch.setattr(threading, "excepthook", original_hook)
+
+    monkeypatch.setattr(runner, "save", real_save)
+    other = runner.submit("maps", lambda _job: {"ok": True}, feature="maps")
+    _wait(runner, other.id)
+    assert other.status == "done"
+    assert other.result == {"ok": True}
 
 
 def test_delete_purges_output_under_root(tmp_path: Path):
