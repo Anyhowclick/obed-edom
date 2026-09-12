@@ -241,6 +241,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/relocate")
     def relocate_job(job_id: str, payload: RelocateBody) -> dict:
+        existing = RUNNER.get(job_id)
+        if existing and existing.feature == "maps":
+            raise HTTPException(409, "Maps jobs use POST /api/maps/{id}/state")
         try:
             job = RUNNER.relocate(
                 job_id,
