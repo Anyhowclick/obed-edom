@@ -4,7 +4,7 @@ overview: "Owner approved 2026-09-12. Decisions: Vitest + jsdom + Testing Librar
 todos:
   - id: pr1-harness
     content: "Harness + 3 seed tests: conflict-freeze, thumb-token, rename-unsaved; each must be shown red when its guard is reverted."
-    status: pending
+    status: done
   - id: pr2-thumb-status
     content: "Thumbnail + save-status coverage: stale-retry, reconcile, save-status pill label sequence."
     status: pending
@@ -45,6 +45,8 @@ dashboard/tests-ui/*.test.tsx
 
 `tests-ui/` (sibling of `tests/`) beats `src/**/__tests__`: it keeps test-only code out of the `tsc --noEmit && vite build` surface with a single `tsconfig` exclude, and mirrors the existing top-level `tests/` convention.
 
+Test files use a `.ui.test.tsx` suffix (e.g. `conflict-freeze.ui.test.tsx`) — several basenames collide with existing `tests/*.test.cjs` files; the CJS suite tests predicates, the `tests-ui` suite tests wiring.
+
 ## 3. Fakes
 
 **MapView** (`vi.mock("../src/maps/MapView")`). A `forwardRef` component that renders `<div data-testid="mapview" />`, records the props it was given (`previewing`, `isolate`, `camera`, `styleId`, `crop` — these are what the preview-sequence tests assert on), publishes every render's props into an ordered `viewLog` array, and installs a handle via `useImperativeHandle`:
@@ -63,7 +65,7 @@ Mocking the module (rather than adding an injectable-MapView prop) also keeps `m
 **api.ts** — `vi.mock("../src/api")` with a scriptable module rather than a fetch mock. Reason: `api.ts` is a thin fetch wrapper already covered by the Python API tests; mocking fetch would force us to re-encode its URL/JSON contract in the harness. The fake exports real `MapsStateConflictError` / `MapsStaleThumbnailError` / `MapsSaveConflictError` classes (re-exported from the real modules via `importActual`, so `instanceof` still works — this matters, `captureThumb` branches on both), plus a controller:
 
 ```
-api.script.saveMapsState.conflictOnce({ document, stateRevision, paths })
+api.script.saveMapsState.conflictOnce({ document, stateRevision })
 api.script.postMapsPng.staleOnce({ stateRevision })  // throws MapsStaleThumbnailError
 api.script.postMapsPng.calls                          // kind/slideId/audience/revision log
 api.script.renameJob.failOnce(err) / .calls
@@ -74,7 +76,7 @@ api.script.getJob.resolve(job)
 
 **Storage** — `setup.ts` installs a fresh in-memory `sessionStorage`/`localStorage` per test (jsdom's are shared across a file). Tests that care about `useSessionToggle`/`useSessionPath` seed keys before render (`obed-edom.maps.exportDir`, `MAPS_SIDE_PANELS_KEY`, `MAPS_INSPECTOR_KEY`).
 
-**Timers** — `vi.useFakeTimers()` in the render helper, with helpers `await tick(500)` (save debounce) and `await tick(750)` (thumb debounce) that wrap `vi.advanceTimersByTimeAsync` in `act()`. Async/timer interleaving is the main authoring hazard here: `captureThumb` awaits `waitUntilIdle` then `captureBlob` then `postMapsPng`, so `advanceTimersByTimeAsync` (not the sync variant) plus explicit `await flushMicrotasks()` is mandatory.
+**Timers** — `vi.useFakeTimers()` in each test file's `beforeEach` (not the render helper: fake timers must be installed before any module-scope code runs, which the helper can't guarantee), with helpers `await tick(500)` (save debounce) and `await tick(750)` (thumb debounce) that wrap `vi.advanceTimersByTimeAsync` in `act()`. Async/timer interleaving is the main authoring hazard here: `captureThumb` awaits `waitUntilIdle` then `captureBlob` then `postMapsPng`, so `advanceTimersByTimeAsync` (not the sync variant) plus explicit `await flushMicrotasks()` is mandatory.
 
 **Render helper** — `renderMapsTab({ doc, job })` wraps `<MapsTab />` in `RunNavContext.Provider` with `openRun = { feature: "maps", jobId }` and pre-scripts `getJob`. This is why no MapsTab refactor is required.
 
@@ -85,7 +87,7 @@ Everything MapsTab needs is already injectable-by-mock:
 - save queue: `useRef(new MapsSaveQueue(...))`, per instance — no cross-test leak;
 - MapView, stampOsm, api: module imports — `vi.mock`.
 
-Two module-level caches *do* leak between tests and should be reset in setup rather than refactored: `loadAdmin0()` in `dashboard/src/maps/overlays.ts` (stub it to resolve immediately) and `defaultExportDirRequest`/`defaultExportDirVersion` in `dashboard/src/prefs.ts` (reset via `vi.resetModules()` between files, or mock `useDefaultExportDir`). If a third such singleton turns up, prefer `vi.resetModules()` over touching product code.
+Two module-level caches *do* leak between tests and are handled via `vi.mock` in `renderMapsTab.tsx` rather than refactored: `loadAdmin0()` in `dashboard/src/maps/overlays.ts` (stubbed to resolve immediately) and `defaultExportDirRequest`/`defaultExportDirVersion` in `dashboard/src/prefs.ts` (the module is partially mocked with `importOriginal`, replacing only `useDefaultExportDir` with a stable stub so the singleton is never touched). If a third such singleton turns up, prefer the same partial-mock approach, or `vi.resetModules()`, over touching product code.
 
 The only product change I'd consider later, and only if tests get ugly: add `data-testid` to the save-status pill and the conflict banner. Prefer querying by the existing `aria-live` text and button labels ("Reload latest", "Keep my changes") first — free, and it tests what the operator sees.
 
@@ -93,8 +95,8 @@ The only product change I'd consider later, and only if tests get ugly: add `dat
 
 **PR 1 — harness + 3 seed tests** (the three with the widest blast radius and the simplest fakes):
 
-1. `conflict-freeze.test.tsx` — *conflict freeze does not edit the doc*. Script `saveMapsState` to conflict; assert the banner appears, then `mapFake.emit.cameraCommit(newCam)` and an object move leave `docRef`'s rendered camera unchanged (assert via the `camera` prop the MapView fake received), that `postMapsPng` is never called while frozen, and that "Reload latest" / "Keep my changes" each clear the banner and restore editing. Covers `applyLocalDoc`'s early return and the `captureThumb` guard.
-2. `thumb-token.test.tsx` — *token bump on conflict*. Hold `waitUntilIdle`, fire a conflict mid-capture, release; assert no `postMapsPng`. Second case: `sameView` abort — hold idle, `selectSlide` elsewhere, release, assert no POST for the stale slide.
+1. `conflict-freeze.test.tsx` — *conflict freeze does not edit the doc*. Script `saveMapsState` to conflict; assert the banner appears, then `mapFake.emit.cameraCommit(newCam)` and an object move leave `docRef`'s rendered camera unchanged (assert via the `camera` prop the MapView fake received), that `postMapsPng` is never called while frozen, and that "Reload latest" / "Keep my changes" each clear the banner and restore editing. Covers `applyLocalDoc`'s early return; the zero-POST assertion is not pinned to `captureThumb`'s own `frozen` guard in `shouldPublishThumb` — reverting `frozen: !!saveConflictRef.current` to `frozen: false` there still leaves the test green, because the token bump and the frozen `applyLocalDoc`/doc-unchanged path independently stop the capture. Pinning that specific guard is PR 2 work (see below).
+2. `thumb-token.test.tsx` — *token bump on conflict*. Hold `waitUntilIdle`, fire a conflict mid-capture, release; assert no `postMapsPng`. Second case: token invalidation — `selectSlide` awaits the in-flight `captureThumb(prev)` before moving `activeRef`, so both captures target the same slide; hold idle, select the same slide again, release, assert only the newer capture's token publishes. PR 2 adds a `sameView` case: flip audience via `selectSlide(id, { audience: "cg" })` mid-capture and assert no POST for the stale view.
 3. `rename-unsaved.test.tsx` — *rename persists first and preserves the doc*. Make an edit, click the JobName pencil, submit; assert `saveMapsState` is called **before** `renameJob`, and that after `mergeServerMeta` the local slides survive (the server echo must not clobber them).
 
 Each of these three must be verified red when its corresponding guard is reverted (the freeze early-return, the `sameView`/token gate, the save-before-rename ordering), per owner instruction.
@@ -104,6 +106,7 @@ Each of these three must be verified red when its corresponding guard is reverte
 4. `thumb-stale-retry.test.tsx` — `postMapsPng` throws `MapsStaleThumbnailError`; assert exactly one retry, only after a successful `flush()`, and only when `saveQueue.revision >= err.stateRevision`; a second case where the flush rejects asserts zero retries; a third where the queue is behind asserts zero retries.
 5. `thumb-reconcile.test.tsx` — after a successful thumb POST, `reconcileServerJob` runs; assert navigating slides mid-flight does not reconcile into the wrong slide (`shouldReconcileThumb` `sameJob` gate).
 6. `save-status-pill.test.tsx` — assert the label sequence `Saved → Unsaved → Saving… → Saved` across a debounced edit, and `→ Paused` on conflict, read through the `aria-live` node.
+7. Add a case (or extend `conflict-freeze.test.tsx`) that pins `captureThumb`'s own `frozen: !!saveConflictRef.current` input to `shouldPublishThumb` — a conflict that starts *after* a capture is already past its own freeze checks but before `gate()` runs, isolated from the token bump and from `applyLocalDoc`'s doc-unchanged effect.
 
 **PR 3 — components + preview**
 
@@ -113,7 +116,7 @@ Each of these three must be verified red when its corresponding guard is reverte
 
 ## 6. Scripts & CI
 
-- `"test:ui": "vitest run"` and `"test:ui:watch": "vitest"` in `dashboard/package.json`.
+- `"typecheck:ui": "tsc -p tests-ui --noEmit"`, `"test:ui": "npm run typecheck:ui && vitest run"`, and `"test:ui:watch": "vitest"` in `dashboard/package.json`.
 - There is **no `.github/workflows`** in this repo — `test:maps` is invoked only from the agent plans and `.agents/skills/obed-edom/SKILL.md`. So "CI wiring" here means: add `npm run test:ui` next to `npm run test:maps` in SKILL.md's dashboard command block and in the plan files' command notes, with the same bundled-Node PATH prefix (`PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`). If a workflow is added later, both scripts go in one `npm test` aggregate.
 
 ## 7. Owner decision needed
@@ -123,3 +126,7 @@ The repo commits `dashboard/dist`. Adding five devDependencies changes `package-
 ## Decisions 2026-09-12
 
 Owner: harness approved. Orchestrator: tests-only PR, no dist rebuild; tests in dashboard/tests-ui/.
+
+## Decisions
+
+PR 1 shipped: test files use a `.ui.test.tsx` suffix (basename collisions with `tests/*.test.cjs`); `vi.useFakeTimers()` lives in each file's `beforeEach`, not the render helper; `sameView` token-invalidation coverage deferred to PR 2.
