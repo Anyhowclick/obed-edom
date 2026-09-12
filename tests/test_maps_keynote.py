@@ -40,6 +40,7 @@ from obed_edom.maps_keynote import (
     project_into_camera,
     project_into_plate,
     split_cg_export_plan,
+    whole,
 )
 from obed_edom.maps_reveal import REVEAL_FPS
 from obed_edom.maps_movie import movie_path
@@ -187,7 +188,7 @@ def test_matching_rotation_uses_one_rotated_plate():
     )
 
 
-def test_cg_shift_clamp_used():
+def test_cg_shift_clamp_used(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0), cgShiftX=2000, cgShiftY=10)
     dx, dy = clamp_cg_shift(2000, 0)
     origin = cg_crop_origin(slide)
@@ -201,6 +202,7 @@ def test_cg_shift_clamp_used():
         still=Path("/tmp/missing-still.png"),
         movie=None,
         wall=False,
+        pin_root=tmp_path / "pins",
     )
     mapped = next(item for item in items if item.get("map"))
     assert mapped["x"] == whole_wall_to_cg(CENTRE_ORIGIN_X, origin[0])
@@ -339,8 +341,7 @@ def test_static_drop_pin_tip_is_anchored_to_the_projected_location(tmp_path: Pat
     pin = pins[0]
     projected_x, projected_y = project_into_camera(3.0, 101.0, camera)
     assert abs((pin["x"] + pin["w"] / 2) - projected_x) <= 1
-    assert abs((pin["y"] + pin["h"]) - projected_y) <= 1
-    assert pin["h"] == round(pin["w"] * 1.08)
+    assert pin["y"] + pin["h"] == whole(projected_y)
 
 
 def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
@@ -380,7 +381,8 @@ def test_landmark_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 200
 
@@ -391,7 +393,8 @@ def test_landmark_scale_with_map_zoom_out_halves_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 4)
     slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 50
 
@@ -404,7 +407,8 @@ def test_landmark_scale_with_map_zoom_in_doubles_width_on_morph_plate(tmp_path: 
     geom = morph_plate_geom([cam_a, cam_b])
     plate_path = _dummy_png(tmp_path / "plate.png")
     items = build_slide_items(
-        slide, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True, asset_root=asset_root
+        slide, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
     )
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 200
@@ -416,7 +420,8 @@ def test_landmark_scale_with_map_off_is_unchanged(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_landmark_church(sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 100
 
@@ -427,7 +432,8 @@ def test_landmark_scale_with_map_clamps_at_effective_size_max(tmp_path: Path):
     camera = _camera(3.0, 101.0, 40)
     slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5, size=100)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 20000
 
@@ -441,7 +447,8 @@ def test_landmark_sub_one_px_is_dropped_but_others_remain(tmp_path: Path):
     visible = {**_landmark_church(id="visible", assetId="asset2", size=100), "lon": 101.01}
     slide = _slide("s1", camera, churches=[tiny, visible])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmarks = [item for item in items if item.get("landmark")]
     assert len(landmarks) == 1
 
@@ -457,7 +464,8 @@ def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: 
     without_reveal = _slide("s1", camera, churches=[_landmark_church()])
     still = _dummy_png(tmp_path / "s1.png")
     baseline = build_slide_items(
-        without_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root
+        without_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
     )
     image_item = next(item for item in baseline if item.get("landmark"))
     assert image_item["kind"] == "image"
@@ -465,6 +473,7 @@ def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: 
     with_reveal = _slide("s1", camera, churches=[_landmark_church()])
     revealed = build_slide_items(
         with_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
         reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     movie_item = next(item for item in revealed if item.get("landmark"))
@@ -505,7 +514,8 @@ def test_landmark_reveal_suppressed_on_duplicate_slide(tmp_path: Path):
     slide = _slide("s1", camera, churches=[_landmark_church()])
     still = _dummy_png(tmp_path / "s1.png")
     items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root, allow_reveal=False,
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins", allow_reveal=False,
         reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     landmark_item = next(item for item in items if item.get("landmark"))
@@ -1436,7 +1446,9 @@ def test_lw_still_sits_on_centre_wall(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0))
     still = tmp_path / "s1.png"
     still.write_bytes(b"\x89PNG\r\n\x1a\n")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
     mapped = next(item for item in items if item.get("map"))
     assert mapped["x"] == CENTRE_ORIGIN_X
     assert mapped["w"] == CENTRE_WIDTH
@@ -1447,7 +1459,9 @@ def test_fw_still_fills_wall(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0), includeSidePanels=True)
     still = tmp_path / "s1.png"
     still.write_bytes(b"\x89PNG\r\n\x1a\n")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
     mapped = next(item for item in items if item.get("map"))
     assert mapped["x"] == 0
     assert mapped["w"] == WALL_WIDTH
@@ -1613,7 +1627,8 @@ def test_place_churches_stamps_reveal_key_only_on_reveal_movie_items(tmp_path: P
 
     with_reveal = _place_churches(
         churches, plate=None, placement=None, camera=camera, wall=True, movie=None,
-        asset_root=asset_root, reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
+        asset_root=asset_root, pin_root=tmp_path / "pins",
+        reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     revealed_item = next(item for item in with_reveal if item.get("landmark"))
     assert revealed_item["revealKey"] == ("lw", "s1", "lm")
@@ -1621,6 +1636,7 @@ def test_place_churches_stamps_reveal_key_only_on_reveal_movie_items(tmp_path: P
 
     without_reveal = _place_churches(
         churches, plate=None, placement=None, camera=camera, wall=True, movie=None, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
     )
     assert not any("revealKey" in item for item in without_reveal)
 

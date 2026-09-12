@@ -734,8 +734,8 @@ def _place_churches(
     movie: Path | None,
     origin_x: float = 0,
     capture_w: float = WALL_WIDTH,
+    pin_root: Path,
     asset_root: Path | None = None,
-    pin_root: Path | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
     reveal_audience: str = "lw",
@@ -821,9 +821,9 @@ def _place_churches(
                         items.append(item)
             elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
-            elif pin_root is not None:
+            else:
                 pin_kind = "droppin" if static_drop else "dot"
-                height = round(size * 1.08) if static_drop else size
+                height = whole(cy) - whole(y) if static_drop else size
                 items.append(
                     _item(
                         "image",
@@ -891,8 +891,8 @@ def build_slide_items(
     wall: bool,
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
+    pin_root: Path,
     asset_root: Path | None = None,
-    pin_root: Path | None = None,
     country_still: Path | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
@@ -1835,6 +1835,7 @@ def _render_reveals(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                pin_root=output_dir / "pins",
                 allow_reveal=False,
                 sid=sid,
             )

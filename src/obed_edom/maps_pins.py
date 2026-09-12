@@ -1,8 +1,11 @@
 """Raster dot and drop-pin markers.
 
-Keynote 15.3's `shape` class exposes no writable fill, so markers are rendered
-to PNG and placed as images. The rasters are scale-invariant: Keynote stretches
-them, so size and zoom stay out of the cache key.
+In Keynote 15.3 `make new shape with properties {shape type:...}` fails to
+compile (AppleScript error -2741), so markers are rendered to PNG and placed as
+images. The rasters are scale-invariant: Keynote stretches them, so size and
+zoom stay out of the cache key. Changing `_TAIL_W`, `_TAIL_TOP`, `_HOLE`,
+`PIN_ASPECT` or `DOT_PX` changes the pixels behind a cached filename and
+requires bumping `RENDER_VERSION`.
 """
 
 from __future__ import annotations
@@ -40,17 +43,19 @@ def _downscale(image: Image.Image, width: int, height: int) -> Image.Image:
 
 def render_dot(color: tuple[int, int, int]) -> Image.Image:
     size = DOT_PX * SUPERSAMPLE
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    ImageDraw.Draw(image).ellipse((0, 0, size - 1, size - 1), fill=(*_rgb8(color), 255))
+    rgb = _rgb8(color)
+    image = Image.new("RGBA", (size, size), (*rgb, 0))
+    ImageDraw.Draw(image).ellipse((0, 0, size - 1, size - 1), fill=(*rgb, 255))
     return _downscale(image, DOT_PX, DOT_PX)
 
 
 def render_drop_pin(color: tuple[int, int, int]) -> Image.Image:
     width, height = DOT_PX, round(DOT_PX * PIN_ASPECT)
     w, h = width * SUPERSAMPLE, height * SUPERSAMPLE
-    image = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    rgb = _rgb8(color)
+    image = Image.new("RGBA", (w, h), (*rgb, 0))
     draw = ImageDraw.Draw(image)
-    fill = (*_rgb8(color), 255)
+    fill = (*rgb, 255)
     tail_w = w * _TAIL_W
     draw.polygon(
         [((w - tail_w) / 2, w * _TAIL_TOP), ((w + tail_w) / 2, w * _TAIL_TOP), (w / 2, h)],

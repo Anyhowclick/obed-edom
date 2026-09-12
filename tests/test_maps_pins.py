@@ -78,7 +78,6 @@ def test_ensure_pin_png_writes_once_and_reuses_the_file(tmp_path: Path):
     first = ensure_pin_png(root, "droppin", ORANGE)
     assert first.is_file()
     assert first == pin_png_path(root, "droppin", ORANGE)
-    stamp = first.stat().st_mtime_ns
     marker = b"untouched"
     first.write_bytes(marker)
 
@@ -86,7 +85,6 @@ def test_ensure_pin_png_writes_once_and_reuses_the_file(tmp_path: Path):
 
     assert again == first
     assert first.read_bytes() == marker
-    assert stamp is not None
 
 
 def test_ensure_pin_png_renders_each_kind_at_its_own_aspect(tmp_path: Path):
