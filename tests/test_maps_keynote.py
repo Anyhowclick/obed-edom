@@ -1817,8 +1817,10 @@ def test_build_deck_script_creates_document_on_basic_black_theme(tmp_path: Path)
     _dummy_png(tmp_path / "stills" / "s2.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
-    assert 'set theDoc to make new document with properties {document theme:theme "Basic Black"}' in script
-    assert "set theDoc to make new document\n" in script  # the bare fallback branch
+    assert "set theDoc to make new document\n" in script
+    assert 'set document theme of theDoc to theme "Basic Black"' in script
+    assert 'log "theme=basicblack"' in script
+    assert 'log "theme=default"' in script
     assert 'set base slide of slide 1 of theDoc to master slide "Blank" of theDoc' in script
 
 
@@ -1830,14 +1832,10 @@ def test_build_deck_script_new_slides_use_blank_master_with_fallback(tmp_path: P
     _dummy_png(tmp_path / "stills" / "s2.png")
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
-    assert 'make new slide at after slide 1 with properties {base slide:master slide "Blank" of theDoc}' in script
-    assert "make new slide at after slide 1\n" in script  # the bare fallback branch
-    for marker in (
-        'make new slide at after slide 1 with properties {base slide:master slide "Blank" of theDoc}',
-        "on error",
-        "end try",
-    ):
-        assert marker in script
+    assert "make new slide at after slide 1\n" in script
+    assert 'set base slide of slide 2 of theDoc to master slide "Blank" of theDoc' in script
+    assert 'log "master=blank"' in script
+    assert 'log "master=default"' in script
 
 
 def test_build_deck_script_theme_and_master_scripts_compile(tmp_path: Path):
