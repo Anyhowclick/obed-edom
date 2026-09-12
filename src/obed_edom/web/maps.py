@@ -155,38 +155,45 @@ class MapsCommit:
 
 @contextmanager
 def maps_commit(job_id: str, expected_revision: int | None = None, *, bump: bool = True) -> Iterator[MapsCommit]:
+    """Hold `_mutation_lock` then the job's own `job_lock` for the whole transaction
+    (established order: mutation lock -> job lock -> jobs.py's internal `_lock`), so a
+    concurrent `JobRunner.delete` cannot remove the job between the folder/document
+    move and its persistence. `set_name`/`update_result` re-acquire the job lock, which
+    is reentrant, so they still work unchanged when called from inside a commit."""
     commit: MapsCommit | None = None
     saved = None
+    runner = _runner()
     with _mutation_lock(job_id):
-        job = _job_or_404(job_id)
-        _require_idle(job)
-        result = copy.deepcopy(job.result or {})
-        revision = int(result.get("stateRevision") or 0)
-        if expected_revision is not None and expected_revision != revision:
-            raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
-        if _COMMIT_HOOK:
-            _COMMIT_HOOK(job_id)
-        commit = MapsCommit(job_id=job_id, job=job, result=result)
-        try:
-            yield commit
-        except BaseException:
-            commit._abort()
-            raise
-        if bump:
-            commit.result["stateRevision"] = revision + 1
-        backups = commit._promote()
-        if _COMMIT_HOOK:
-            _COMMIT_HOOK(job_id)
-        try:
-            saved = _runner().update_result(job_id, commit.result)
-        except Exception:
-            commit._restore(backups)
-            raise
-        if not saved:
-            commit._restore(backups)
-            raise HTTPException(404, "Unknown maps job")
-        commit._cleanup_backups(backups)
-    commit.payload = _runner().public_dict(saved)
+        with runner.job_lock(job_id):
+            job = _job_or_404(job_id)
+            _require_idle(job)
+            result = copy.deepcopy(job.result or {})
+            revision = int(result.get("stateRevision") or 0)
+            if expected_revision is not None and expected_revision != revision:
+                raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
+            if _COMMIT_HOOK:
+                _COMMIT_HOOK(job_id)
+            commit = MapsCommit(job_id=job_id, job=job, result=result)
+            try:
+                yield commit
+            except BaseException:
+                commit._abort()
+                raise
+            if bump:
+                commit.result["stateRevision"] = revision + 1
+            backups = commit._promote()
+            if _COMMIT_HOOK:
+                _COMMIT_HOOK(job_id)
+            try:
+                saved = runner.update_result(job_id, commit.result)
+            except Exception:
+                commit._restore(backups)
+                raise
+            if not saved:
+                commit._restore(backups)
+                raise HTTPException(404, "Unknown maps job")
+            commit._cleanup_backups(backups)
+    commit.payload = runner.public_dict(saved)
 
 
 def mutate_document(job_id: str, expected_revision: int | None, fn) -> dict[str, Any]:
@@ -507,8 +514,10 @@ def rename_job_folder(job_id: str, raw_name: str):
     `Job.name` is assigned in memory only (`set_name(..., save=False)`); the commit's
     own `update_result` on exit persists name and result in a single session-file
     write, avoiding a crash window where the file would carry the new name against
-    stale paths. The target name is reserved for the whole transaction so a
-    concurrent submit or rename cannot claim it first.
+    stale paths. Both the target and the source name are reserved for the whole
+    transaction so a concurrent submit or rename cannot claim either first — the
+    source is otherwise briefly unclaimed once `set_name` reassigns `Job.name` but
+    before the commit's `update_result` persists it.
     """
     name = normalise_job_name(raw_name)
     runner = _runner()
@@ -522,12 +531,15 @@ def rename_job_folder(job_id: str, raw_name: str):
     new_dir: Path | None = None
     archive_renamed = False
     reserved = False
+    source_reserved = False
     try:
         with maps_commit(job_id, None, bump=False) as commit:
             job = commit.job
             previous_name = job.name
             runner.reserve_name(name, exclude_job_id=job_id)
             reserved = True
+            runner.reserve_name(previous_name, exclude_job_id=job_id)
+            source_reserved = True
             old_dir = Path(str(commit.result.get("outputDir") or ""))
             if old_dir.name != job.name:
                 raise HTTPException(500, "Maps job folder does not match its current name")
@@ -560,7 +572,13 @@ def rename_job_folder(job_id: str, raw_name: str):
     finally:
         if reserved:
             runner.release_name(name)
-    return runner.get(job_id)
+        if source_reserved:
+            runner.release_name(previous_name)
+    # Return the live `Job` instance mutated by the commit above, not a fresh
+    # `runner.get(job_id)`: a concurrent delete could otherwise land in the gap
+    # after the transaction's lock is released and turn a successful rename into
+    # a crash on `None` here.
+    return job
 
 
 def _safe_name(raw: str) -> str:
