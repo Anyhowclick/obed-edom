@@ -5,13 +5,11 @@ import math
 import os
 import re
 import shutil
-import subprocess
-import tempfile
-import time
 from pathlib import Path
 
 from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
+from obed_edom.osascript_runner import run_applescript as _run_applescript
 from obed_edom.paths import ensure_export_subdir, output_root, select_deck_template
 
 
@@ -618,18 +616,7 @@ def _run_superscript_fix(
     script = _build_superscript_fix_script(key_path, jobs, export_dir)
     if not script:
         return {"ok": True, "skipped": True}
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+    proc = _run_applescript(script)
     size_report = (proc.stdout or "").strip()
     verdict = _read_superscript_report(size_report)
     ok = proc.returncode == 0 and verdict["allSuperscript"]
@@ -1618,20 +1605,7 @@ def _run_stat_finalize(
     )
     if not script:
         return {"ok": True, "skipped": True, "done": 0, "jobs": 0, "exported": False}
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+    proc = _run_applescript(script, launch=True)
     raw = (proc.stdout or "").strip()
 
     def _num(key: str) -> int:
@@ -1772,17 +1746,11 @@ def _read_template_stat_sizes_via_keynote(template: Path) -> dict[str, float]:
         "end using terms from",
     ]
     script = "\n".join(lines)
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)], capture_output=True, text=True, check=False
+    proc = _run_applescript(script, launch=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Template stat-size read failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
         )
-    finally:
-        script_path.unlink(missing_ok=True)
     sizes: dict[str, float] = {}
     for line in (proc.stdout or "").splitlines():
         if "\t" not in line:
@@ -2078,29 +2046,15 @@ def _build_applescript(plan: dict) -> str:
 def run_applescript(plan: dict) -> dict:
     script = _build_applescript(plan)
     # File + LaunchServices, not stdin: uvicorn workers break osascript's HIServices and Keynote's dictionary never loads.
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+    debug = Path(plan["output"]).with_suffix(".applescript")
+    proc = _run_applescript(script, launch=True, dump_on_failure=debug)
     if proc.returncode != 0:
-        debug = Path(plan["output"]).with_suffix(".applescript")
-        debug.write_text(script, encoding="utf-8")
         raise RuntimeError(
             "Keynote AppleScript failed:\n"
             + (proc.stderr or "")
             + "\n"
             + (proc.stdout or "")
-            + f"\nScript saved to {debug}"
+            + f"\nScript saved to {proc.dump}"
         )
     raw = (proc.stdout or "").strip()
     parts = raw.split("\t")
