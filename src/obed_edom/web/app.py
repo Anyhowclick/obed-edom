@@ -25,7 +25,9 @@ from obed_edom.baseline import (
     save_pairing,
     slot_dict,
 )
+from obed_edom.diagnostics import DiagnosticsWriter
 from obed_edom.diff_keynotes import (
+    record_flag,
     compare_inspects,
     realign_gaps,
     slide_catalog,
@@ -69,7 +71,7 @@ from obed_edom.outline_check import (
     slots_from_cues,
 )
 from obed_edom.outline_check import visible as visible_slides
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import find_repo_root, output_root
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import (
@@ -284,6 +286,31 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "No evidence")
         path = _safe_file(Path(folder), filename)
         return FileResponse(path, media_type=preview_media_type(path))
+
+    @app.get("/api/jobs/{job_id}/diagnostics")
+    def job_diagnostics(job_id: str):
+        job = RUNNER.get(job_id)
+        path = _trusted_diagnostics_path(job, job_id)
+        if not job or path is None:
+            raise HTTPException(404, "No diagnostics")
+        date = time.strftime("%Y-%m-%d", time.localtime(job.created_at))
+        return FileResponse(
+            path,
+            media_type="application/x-ndjson",
+            filename=f"sermon-diagnostics-{date}-{job_id}.jsonl",
+        )
+
+    @app.post("/api/jobs/{job_id}/diagnostics/reveal")
+    def job_diagnostics_reveal(job_id: str) -> dict:
+        job = RUNNER.get(job_id)
+        path = _trusted_diagnostics_path(job, job_id)
+        if not job or path is None:
+            raise HTTPException(404, "No diagnostics")
+        try:
+            subprocess.run(["open", "-R", str(path)], check=False)
+        except OSError:
+            raise HTTPException(500, "Could not reveal the file")
+        return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/file/{kind}")
     def job_file(job_id: str, kind: str):
@@ -638,6 +665,30 @@ def _as_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _diagnostics_path(job_id: str) -> Path:
+    """Canonical diagnostics file location — does not create any directories."""
+    return output_root() / ".diff" / job_id / "diagnostics.jsonl"
+
+
+def _trusted_diagnostics_path(job: Job | None, job_id: str) -> Path | None:
+    """The job's `diagnosticsPath`, only if it is the diagnostics file `_run_diff_check`
+    actually wrote — `result` is client-patchable via PATCH /api/jobs/{id}."""
+    raw = (job.result or {}).get("diagnosticsPath") if job else None
+    if not raw:
+        return None
+    expected = _diagnostics_path(job_id).resolve()
+    candidate = Path(raw)
+    if candidate.is_symlink():
+        return None
+    try:
+        resolved_parent = candidate.parent.resolve()
+    except OSError:
+        return None
+    if resolved_parent / candidate.name != expected or not expected.is_file():
+        return None
+    return expected
+
+
 def _safe_file(folder: Path, filename: str) -> Path:
     if "/" in filename or "\\" in filename or filename.startswith("."):
         raise HTTPException(404, "Invalid path")
@@ -979,27 +1030,55 @@ def _run_diff_check(job: Job) -> dict[str, Any]:
     right_payload = json.loads(right_inspect.read_text(encoding="utf-8"))
     slots = slots_from_pairs(result.get("pairs") or [])
     job.log("Checking wording, photos, and house style…")
+    # Canonical, server-owned location — never derived from the (client-patchable)
+    # `result["workDir"]`.
+    diag_path = _diagnostics_path(job.id)
+    diag = None
+    try:
+        diag = DiagnosticsWriter(diag_path)
+    except OSError:
+        job.log("Could not open diagnostics file; continuing without it.")
     t_check = time.perf_counter()
-    compared = compare_inspects(
-        left_payload,
-        right_payload,
-        Path(result["leftPreviews"]),
-        Path(result["rightPreviews"]),
-        Path(result["heatDir"]),
-        left_label=str(result.get("leftLabel") or "LW"),
-        right_label=str(result.get("rightLabel") or "Other"),
-        slots=slots,
-        check=True,
-    )
-    job.log(f"Checked pairs in {time.perf_counter() - t_check:.1f}s.")
-    flags = compared.pop("flags")
-    pairs = compared["pairs"]
-    outline_flags = _apply_outline(job, result, compared, pairs)
+    diag_committed = False
+    try:
+        compared = compare_inspects(
+            left_payload,
+            right_payload,
+            Path(result["leftPreviews"]),
+            Path(result["rightPreviews"]),
+            Path(result["heatDir"]),
+            left_label=str(result.get("leftLabel") or "LW"),
+            right_label=str(result.get("rightLabel") or "Other"),
+            slots=slots,
+            check=True,
+            diag=diag,
+            diag_context={"jobId": job.id},
+        )
+        job.log(f"Checked pairs in {time.perf_counter() - t_check:.1f}s.")
+        flags = compared.pop("flags")
+        pairs = compared["pairs"]
+        outline_flags = _apply_outline(job, result, compared, pairs, diag=diag)
+        if diag is not None:
+            diag_committed = diag.commit()
+    finally:
+        if diag is not None and not diag_committed:
+            diag.close()
     for pair in pairs:
         pair["flags"] = serialize_flags(pair.get("flags") or [])
+    if diag is not None:
+        if diag_committed:
+            job.log(f"Wrote diagnostics for {len(pairs)} pair(s).")
+            if diag.error:
+                job.log(f"Some diagnostics records were dropped ({diag.error}).")
+        elif diag.error:
+            job.log(
+                f"Diagnostics were incomplete and have been discarded "
+                f"({diag.error}); the previous diagnostics file is unchanged."
+            )
     result.update(
         {
             "phase": "checked",
+            "diagnosticsPath": str(diag_path) if diag_committed else None,
             "sameType": compared.get("sameType"),
             "heatPngs": [p.name for p in preview_pngs(Path(result["heatDir"]))],
             "leftCatalog": compared.get("leftCatalog") or result.get("leftCatalog") or [],
@@ -1025,7 +1104,12 @@ def _attach_outline_rows(playlist, pairs: list[dict]) -> list:
 
 
 def _apply_outline(
-    job: Job, result: dict[str, Any], compared: dict[str, Any], pairs: list[dict]
+    job: Job,
+    result: dict[str, Any],
+    compared: dict[str, Any],
+    pairs: list[dict],
+    *,
+    diag: DiagnosticsWriter | None = None,
 ) -> list[Flag]:
     raw = result.get("outlinePath")
     if not raw or not Path(raw).is_file():
@@ -1046,6 +1130,8 @@ def _apply_outline(
 
     job.log("Checking the outline cues against the decks…")
     flags = correspondence(playlist, catalogs)
+    for flag in flags:
+        record_flag(diag, flag, None)
 
     rows = _attach_outline_rows(playlist, pairs)
     for pair, row in zip(pairs, rows):
@@ -1065,6 +1151,8 @@ def _apply_outline(
         )
         if found:
             pair.setdefault("flags", []).extend(found)
+            for flag in found:
+                record_flag(diag, flag, pair.get("index"))
     return flags
 
 

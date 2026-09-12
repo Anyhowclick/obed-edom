@@ -290,6 +290,11 @@ class JobRunner:
         left = result.get("leftPreviews")
         if left and job.feature != "visual":
             candidates.append(Path(left).parent)
+        if job.kind == "diff":
+            # Server-owned canonical dir, independent of the client-patchable `result["workDir"]`.
+            canonical = self._output_root / ".diff" / job.id
+            if not canonical.is_symlink():
+                candidates.append(canonical)
         from obed_edom.baseline import cache_root as _cache_root  # noqa: PLC0415
 
         root = self._output_root.resolve()

@@ -12,28 +12,28 @@ overview: >-
 todos:
   - id: writer
     content: New src/obed_edom/diagnostics.py — DiagnosticsWriter (header + JSONL records) and load_records
-    status: pending
+    status: done
   - id: select-sources
     content: Extract the typed-vs-clean branch out of compare_inspects into a pure select_text_sources() in diff_keynotes.py
-    status: pending
+    status: done
   - id: wire-text
     content: Record a text record per pair from compare_inspects (both compare() attempts, branch reason, outcome)
-    status: pending
+    status: done
   - id: wire-other
     content: Record every other Flag (photo.*, style.*, bible.*, bounds.*, diff.*, outline.*) as finding records
-    status: pending
+    status: done
   - id: app-wiring
     content: Open the writer in _run_diff_check, put diagnosticsPath in the result, add GET /api/jobs/{id}/diagnostics
-    status: pending
+    status: done
   - id: replay
     content: CLI `python -m obed_edom diag-replay <file>` — re-run select_text_sources + classify_text_diff, report mismatches
-    status: pending
+    status: done
   - id: ui
     content: One "Download diagnostics" link in the DiffResultView playlist-bar; npm install && npm run build
-    status: pending
+    status: done
   - id: tests
     content: tests/test_diagnostics.py (writer, replay round-trip), one endpoint test in tests/test_dashboard_api.py
-    status: pending
+    status: done
   - id: images-optin
     content: Opt-in ?images=1 zip bundling evidence/ + the pair PNGs — LAST, only if the owner says yes
     status: pending
@@ -161,20 +161,28 @@ structure and sermon title for no tuning value).
 ```
 pairIndex, pairNumber, leftIndex, rightIndexes, leftNumber, rightNumbers,
 score, leftSkipped, rightSkipped, ocrUsed, location
-left:  {text, typed, extracted, ocr, outsidePhotos}      # verbatim, untruncated
-right: {text, typed, extracted, ocr, outsidePhotos}      # right sides joined as compare_inspects joins them
+left:  {text, typed, extracted, ocr, outsidePhotos, ocrUsed}   # verbatim, untruncated
+right: {text, typed, extracted, ocr, outsidePhotos, ocrUsed}   # right sides joined as compare_inspects joins them
 shares: {typedLeft, typedRight, cleanLeft, cleanRight}   # the raw _share floats
+typedSkip: "typed-empty" | "typed-below-coverage" | null # why the typed attempt was not tried; null when it was
+carried: str | null                                      # accumulated `carried or dropped` across every attempt tried
 attempts: [
   {source: "typed"|"clean"|"full", reason: "...",
    inputLeft, inputRight,                                # post-strip_carried_point_title
-   ignoreLeftTokens: [...], carried: str|null,
+   ignoreLeftTokens: [...], carried: str|null,            # this attempt's own dropped title, not the accumulator above
    finding: {rule, message, default} | null}
 ]
 outcome: {rule, message, severity} | null                # after make_flag; null when the rule is `off` or nothing fired
 ```
 
-`reason` is a short constant string, not prose: `"typed-covers-both"`,
-`"typed-below-coverage"`, `"typed-empty"`, `"filter-symmetric"`, `"filter-asymmetric"`.
+`ocrUsed` at the top level is `left.ocrUsed or any(right ocrUsed)`; the per-side `ocrUsed`
+fields inside `left`/`right` are that side's own value.
+
+`reason` (per attempt, in `attempts[].reason`) is one of the three admitting-gate constants:
+`"typed-covers-both"`, `"filter-symmetric"`, `"filter-asymmetric"`. The two typed-skip causes
+(`"typed-empty"`, `"typed-below-coverage"`) live in the separate pair-level `typedSkip` field,
+not in `reason` — `select_text_sources` returns `(attempts, typed_skip)`, and `typed_skip` is
+non-null exactly when no `typed` attempt appears in `attempts`.
 
 **Every pair gets a text record, including the ones with no finding.** They are the
 near-misses, they are how a threshold change is evaluated against a real run, and they cost
@@ -209,19 +217,34 @@ whole UI change.
 `python -m obed_edom diag-replay <file>` — a new `sub.add_parser("diag-replay")` in
 [cli.py:18](src/obed_edom/cli.py), with `--rule`, `--pair`, `--verbose`.
 
-For each `kind: "text"` record it re-runs `select_text_sources(...)` + `classify_text_diff`
-over the recorded strings and compares against the recorded `attempts`/`outcome`:
+For each `kind: "text"` record it re-runs `select_text_sources(...)` and replays the **full
+attempt sequence** it returns (not just the one that fired): for every `(source, a, b, reason)`
+in order it applies `strip_carried_point_title`, accumulates `carried = carried or dropped`
+exactly as `compare_inspects` does, and calls `classify_text_diff`, stopping at the first
+non-`None` finding (or falling back to the last attempt tried when none fires). It then
+compares, against the recorded record:
+
+- the replayed `typed_skip` against `typedSkip`,
+- the whole replayed attempt list (source, reason, both inputs, ignore tokens, that attempt's
+  own `carried`, its raw finding) against `attempts`, entry for entry,
+- the accumulated `carried` against the pair-level `carried`,
+- the selected attempt's raw finding against the recorded selected attempt's finding,
+
+and only once all of those agree does it map the finding through `ruleSeverities` and compare
+the published `outcome` (rule, severity, then message separately as a softer signal):
 
 ```
 pair 37  text.word  MATCH
 pair 41  text.word  MISMATCH  recorded=text.word  replayed=None
-41 findings replayed, 2 mismatches
+41 findings replayed, 2 mismatches, 0 message-only
 ```
 
-Exit 0 when everything matches, 1 on any mismatch. That inverts into the tuning loop: run
-it before a change (expect all MATCH — proves the log is faithful), make the change, run it
-again, and the MISMATCHes are precisely the findings the change moved. `--verbose` prints
-the recorded inputs for a mismatching pair, ready to paste into a test.
+Exit 0 when everything matches, 1 on any mismatch (`--strict` also fails on message-only
+mismatches). That inverts into the tuning loop: run it before a change (expect all MATCH —
+proves the log is faithful), make the change, run it again, and the MISMATCHes are precisely
+the findings the change moved — including one on an attempt that was tried but not selected,
+which a check of only the selected attempt would miss. `--verbose` prints the recorded inputs
+for a mismatching pair, ready to paste into a test.
 
 Non-text records are counted and skipped with a note; `photo.*` cannot be replayed.
 
@@ -340,7 +363,10 @@ Run the full `pytest` suite — step 5 touches `app.py` and the work-dir contrac
 - **Record volume.** ~200 records of full slide text per run, a few MB. Acceptable. If a
   deck ever makes this unpleasant, the fix is gzip on the endpoint, never truncation.
 - **Schema drift.** `schema: 1` plus a hard raise in `load_records` means an old staff file
-  fails loudly rather than replaying against shifted field meanings.
+  fails loudly rather than replaying against shifted field meanings. `SCHEMA` has stayed `1`
+  through several field additions (`carried`, `typedSkip`, per-side `ocrUsed`) because no real
+  staff file exists yet to drift against; bump it on the next field change made after the
+  first staff file leaves a church laptop, not before.
 - **`diag` threading through `compare_inspects`.** That function is already long and has two
   callers. Keep the parameter keyword-only and defaulted to `None` so the match pass and
   every test are untouched.

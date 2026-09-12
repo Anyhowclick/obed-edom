@@ -1,4 +1,6 @@
 import copy
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -620,6 +622,249 @@ def test_side_content_slides_reads_whitelisted_pages():
         ]
     }
     assert _side_content_slides_from_result(result) == {5, 9}
+
+
+def test_diagnostics_endpoint_404_without_a_diagnostics_path():
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job = Job(id="diag-missing", kind="diff", result={})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
+
+
+def test_diagnostics_endpoint_serves_the_file_with_a_dated_filename():
+    from obed_edom.diagnostics import DiagnosticsWriter
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job_id = "diag-ready"
+    diag_path = diff_work_dir(job_id) / "diagnostics.jsonl"
+    with DiagnosticsWriter(diag_path) as diag:
+        diag.header(leftLabel="LW", rightLabel="DSK")
+
+    job = Job(id=job_id, kind="diff", result={"diagnosticsPath": str(diag_path)})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    res = client.get(f"/api/jobs/{job.id}/diagnostics")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/x-ndjson")
+    date = time.strftime("%Y-%m-%d", time.localtime(job.created_at))
+    assert f"sermon-diagnostics-{date}-{job.id}.jsonl" in res.headers["content-disposition"]
+    first_line = res.text.splitlines()[0]
+    assert json.loads(first_line)["kind"] == "header"
+
+
+def test_diagnostics_reveal_runs_open_dash_r_without_a_shell(monkeypatch):
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job_id = "diag-reveal"
+    diag_path = (diff_work_dir(job_id) / "diagnostics.jsonl").resolve()
+    diag_path.write_text('{"kind": "header", "schema": 1}\n', encoding="utf-8")
+    job = Job(id=job_id, kind="diff", result={"diagnosticsPath": str(diag_path)})
+    RUNNER._jobs[job.id] = job
+
+    calls = []
+    monkeypatch.setattr(
+        "obed_edom.web.app.subprocess.run",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    client = TestClient(app)
+    res = client.post(f"/api/jobs/{job.id}/diagnostics/reveal")
+    assert res.status_code == 200
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (["open", "-R", str(diag_path)],)
+    assert kwargs == {"check": False}
+
+
+def test_diagnostics_endpoints_404_when_the_result_path_escapes_the_work_dir(tmp_path):
+    """`result` is client-patchable via PATCH /api/jobs/{id}; a diagnosticsPath pointing
+    outside the job's own work dir must never be served or revealed."""
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    outside = tmp_path / "not-diagnostics.jsonl"
+    outside.write_text('{"kind": "header", "schema": 1}\n', encoding="utf-8")
+
+    job = Job(id="diag-escaped", kind="diff", result={"diagnosticsPath": str(outside)})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
+
+
+def test_diagnostics_endpoints_404_when_the_canonical_file_is_a_symlink():
+    """Replacing the canonical `diagnostics.jsonl` with a symlink must not be served
+    or revealed, even though its resolved path matches the expected location."""
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.app import RUNNER
+    from obed_edom.web.jobs import Job
+
+    job_id = "diag-symlinked"
+    work_dir = diff_work_dir(job_id)
+    secret = work_dir.parent / "secret.txt"
+    secret.write_text("do not touch", encoding="utf-8")
+    diag_path = work_dir / "diagnostics.jsonl"
+    diag_path.symlink_to(secret)
+
+    job = Job(id=job_id, kind="diff", result={"diagnosticsPath": str(diag_path)})
+    RUNNER._jobs[job.id] = job
+    client = TestClient(app)
+    assert client.get(f"/api/jobs/{job.id}/diagnostics").status_code == 404
+    assert client.post(f"/api/jobs/{job.id}/diagnostics/reveal").status_code == 404
+
+
+def test_run_diff_check_discards_diagnostics_when_the_writer_dies_mid_run(tmp_path, monkeypatch):
+    """A writer that fails partway through must not be published as though it succeeded:
+    the log line and the diagnosticsPath should both reflect the failure."""
+    import obed_edom.web.app as app_module
+    from obed_edom.web.jobs import Job
+
+    left_inspect = tmp_path / "left.json"
+    right_inspect = tmp_path / "right.json"
+    left_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    right_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+
+    class DyingWriter:
+        def __init__(self, path):
+            self.path = Path(path)
+            self.error = None
+
+        def commit(self):
+            self.error = "I/O operation on closed file."
+            return False
+
+        def close(self):
+            self.error = self.error or "I/O operation on closed file."
+
+    def fake_compare_inspects(*args, **kwargs):
+        return {"flags": [], "pairs": [], "sameType": True, "leftCatalog": [], "rightCatalog": []}
+
+    monkeypatch.setattr(app_module, "DiagnosticsWriter", DyingWriter)
+    monkeypatch.setattr(app_module, "compare_inspects", fake_compare_inspects)
+
+    job = Job(
+        id="diag-dies",
+        kind="diff",
+        result={
+            "leftInspect": str(left_inspect),
+            "rightInspect": str(right_inspect),
+            "leftPreviews": str(tmp_path),
+            "rightPreviews": str(tmp_path),
+            "heatDir": str(tmp_path / "heat"),
+            "workDir": str(tmp_path),
+            "pairs": [],
+        },
+    )
+    result = app_module._run_diff_check(job)
+
+    assert result["diagnosticsPath"] is None
+    assert any("Diagnostics were incomplete" in msg for msg in job.logs)
+
+
+def test_run_diff_check_ignores_a_patched_external_work_dir(tmp_path, monkeypatch):
+    """`result["workDir"]` is client-patchable via PATCH /api/jobs/{id}; the diagnostics
+    file must always land under the server-owned `diff_work_dir(job.id)`, never wherever
+    a patched `workDir` points."""
+    import obed_edom.web.app as app_module
+    from obed_edom.inspect import diff_work_dir
+    from obed_edom.web.jobs import Job
+
+    left_inspect = tmp_path / "left.json"
+    right_inspect = tmp_path / "right.json"
+    left_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    right_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+
+    outside_work_dir = tmp_path / "attacker-controlled"
+    outside_work_dir.mkdir()
+
+    def fake_compare_inspects(*args, **kwargs):
+        return {"flags": [], "pairs": [], "sameType": True, "leftCatalog": [], "rightCatalog": []}
+
+    monkeypatch.setattr(app_module, "compare_inspects", fake_compare_inspects)
+
+    job = Job(
+        id="diag-workdir-spoof",
+        kind="diff",
+        result={
+            "leftInspect": str(left_inspect),
+            "rightInspect": str(right_inspect),
+            "leftPreviews": str(tmp_path),
+            "rightPreviews": str(tmp_path),
+            "heatDir": str(tmp_path / "heat"),
+            "workDir": str(outside_work_dir),
+            "pairs": [],
+        },
+    )
+    result = app_module._run_diff_check(job)
+
+    canonical = diff_work_dir(job.id) / "diagnostics.jsonl"
+    assert result["diagnosticsPath"] == str(canonical)
+    assert canonical.is_file()
+    assert not any(outside_work_dir.iterdir())
+
+
+def test_diagnostics_writer_refuses_to_write_through_a_symlink(tmp_path):
+    """A pre-existing symlink at the canonical diagnostics path must be treated as a
+    writer failure — the target is never followed and truncated."""
+    from obed_edom.diagnostics import DiagnosticsWriter
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not touch", encoding="utf-8")
+    diag_path = tmp_path / "diagnostics.jsonl"
+    diag_path.symlink_to(secret)
+
+    with pytest.raises(OSError):
+        DiagnosticsWriter(diag_path)
+
+    assert secret.read_text(encoding="utf-8") == "do not touch"
+
+
+def test_run_diff_check_discards_diagnostics_when_the_path_is_unwritable(tmp_path, monkeypatch):
+    """The diagnostics path is computed without creating any directories; if its
+    parent can't be created (e.g. a file sits where a directory is needed), the
+    check pass must still complete with diagnosticsPath=None, not raise."""
+    import obed_edom.web.app as app_module
+    from obed_edom.web.jobs import Job
+
+    left_inspect = tmp_path / "left.json"
+    right_inspect = tmp_path / "right.json"
+    left_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    right_inspect.write_text(json.dumps({"slides": []}), encoding="utf-8")
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    unusable = blocker / "job" / "diagnostics.jsonl"
+
+    def fake_compare_inspects(*args, **kwargs):
+        return {"flags": [], "pairs": [], "sameType": True, "leftCatalog": [], "rightCatalog": []}
+
+    monkeypatch.setattr(app_module, "_diagnostics_path", lambda job_id: unusable)
+    monkeypatch.setattr(app_module, "compare_inspects", fake_compare_inspects)
+
+    job = Job(
+        id="diag-unwritable",
+        kind="diff",
+        result={
+            "leftInspect": str(left_inspect),
+            "rightInspect": str(right_inspect),
+            "leftPreviews": str(tmp_path),
+            "rightPreviews": str(tmp_path),
+            "heatDir": str(tmp_path / "heat"),
+            "workDir": str(tmp_path),
+            "pairs": [],
+        },
+    )
+    result = app_module._run_diff_check(job)
+
+    assert result["diagnosticsPath"] is None
+    assert any("Could not open diagnostics file" in msg for msg in job.logs)
 
 
 def test_resize_form_still_takes_validate():

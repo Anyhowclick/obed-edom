@@ -41,6 +41,19 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="DSK Keynote template (.key). Omit to skip the DSK deck. At least one of --lw-template / --dsk-template is required (unless --no-keynote).",
     )
+    replay = sub.add_parser(
+        "diag-replay",
+        help="Re-run the text classifier over a diagnostics.jsonl file and report mismatches.",
+    )
+    replay.add_argument("file", type=Path, help="diagnostics.jsonl written by a check pass.")
+    replay.add_argument("--rule", help="Only replay pairs whose recorded outcome has this rule.")
+    replay.add_argument("--pair", type=int, help="Only replay this pairIndex.")
+    replay.add_argument("--verbose", action="store_true", help="Print recorded inputs on a mismatch.")
+    replay.add_argument(
+        "--strict",
+        action="store_true",
+        help="Also fail (exit 1) on message-only mismatches, not just rule mismatches.",
+    )
     dash = sub.add_parser("dashboard", help="Run the local operator dashboard.")
     dash.add_argument("--host", default="127.0.0.1")
     dash.add_argument("--port", type=int, default=8765)
@@ -140,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Slides: {len(result.lw_slides)} LW, {len(result.dsk_slides)} DSK")
         print(f"Flags:  {len(warn)} warning/error, {len(result.flags)} total")
         return 0
+
+    if args.command == "diag-replay":
+        from obed_edom.diagnostics import replay as diag_replay
+
+        if not args.file.exists():
+            print(f"File not found: {args.file}", file=sys.stderr)
+            return 1
+        return diag_replay(args.file, rule=args.rule, pair=args.pair, verbose=args.verbose, strict=args.strict)
 
     if args.command == "dashboard":
         return _run_dashboard(args.host, args.port, open_browser=not args.no_browser)

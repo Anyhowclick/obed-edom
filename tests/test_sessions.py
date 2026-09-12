@@ -158,6 +158,60 @@ def test_delete_does_not_purge_preview_cache(tmp_path: Path, monkeypatch):
     assert not work.exists()
 
 
+def test_delete_purges_canonical_diff_dir_despite_patched_work_dir(tmp_path: Path):
+    """`result["workDir"]` is client-patchable via PATCH /api/jobs/{id}; purge must
+    still reach the server-owned `.diff/<job.id>` dir where diagnostics actually land."""
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    outside = tmp_path / "attacker-controlled"
+    outside.mkdir()
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit(
+        "diff",
+        lambda _j: {"workDir": str(outside)},
+        feature="diff",
+    )
+    _wait(runner, job.id)
+    canonical = output / ".diff" / job.id
+    canonical.mkdir(parents=True)
+    (canonical / "diagnostics.jsonl").write_text('{"sermon": "text"}\n')
+    runner.delete(job.id, purge=True)
+    assert not canonical.exists()
+
+
+def test_delete_does_not_follow_canonical_diff_symlink(tmp_path: Path):
+    """A symlink at `.diff/<job.id>` must not be followed for deletion; it must survive."""
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keepme.txt").write_text("still here")
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("diff", lambda _j: {}, feature="diff")
+    _wait(runner, job.id)
+    diff_dir = output / ".diff"
+    diff_dir.mkdir(parents=True)
+    canonical = diff_dir / job.id
+    canonical.symlink_to(victim, target_is_directory=True)
+    runner.delete(job.id, purge=True)
+    assert victim.is_dir()
+    assert (victim / "keepme.txt").is_file()
+
+
+def test_delete_leaves_non_diff_kind_canonical_dir_alone(tmp_path: Path):
+    """Only `kind == "diff"` jobs get the canonical-dir purge candidate."""
+    sessions = tmp_path / "sessions"
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=sessions, output_root=output)
+    job = runner.submit("generate", lambda _j: {}, feature="generate")
+    _wait(runner, job.id)
+    canonical = output / ".diff" / job.id
+    canonical.mkdir(parents=True)
+    (canonical / "diagnostics.jsonl").write_text('{"sermon": "text"}\n')
+    runner.delete(job.id, purge=True)
+    assert canonical.exists()
+
+
 def test_save_write_failure_leaves_no_partial_or_temp_session_file(tmp_path: Path, monkeypatch):
     sessions = tmp_path / "sessions"
     output = tmp_path / "output"
