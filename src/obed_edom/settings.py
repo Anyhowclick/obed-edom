@@ -11,6 +11,7 @@ DEFAULTS = {
     "reuseThreshold": 0.6,
     "reusePairings": True,
     "reusePreviews": True,
+    "defaultExportDir": "",
 }
 
 
@@ -30,6 +31,11 @@ def _clamp(data: dict) -> dict:
         out["reusePairings"] = bool(data["reusePairings"])
     if "reusePreviews" in data:
         out["reusePreviews"] = bool(data["reusePreviews"])
+    if "defaultExportDir" in data:
+        from obed_edom.paths import validate_export_dir  # noqa: PLC0415
+
+        raw = str(data["defaultExportDir"] or "").strip()
+        out["defaultExportDir"] = str(validate_export_dir(raw)) if raw else ""
     return out
 
 
