@@ -439,6 +439,7 @@ h3 {
 .session-del:hover { color: var(--err); border-color: var(--err); }
 .status-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
 .status-badge.status-err { color: var(--err); }
+.status-badge.status-busy { color: var(--ok); }
 .status-icon { width: 12px; height: 12px; }
 .job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
@@ -850,7 +851,7 @@ input.job-name-input {
 }
 input.job-name-input:focus {
   outline: none;
-  border-color: var(--border-glass);
+  border: var(--border-glass);
   box-shadow: none;
 }
 /* The OS renders the option list, so it needs the polarity told to it or the
