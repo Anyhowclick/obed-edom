@@ -2,12 +2,13 @@ import { act } from "@testing-library/react";
 import { forwardRef, useImperativeHandle } from "react";
 import { vi } from "vitest";
 import type { MapsCamera } from "../../src/maps/types";
+import type { MapViewHandle, MapViewProps } from "../../src/maps/MapView";
 
 export type ViewLogEntry = { type: string; props?: Record<string, unknown>; args?: unknown };
 
 export function createMapViewFake() {
   const viewLog: ViewLogEntry[] = [];
-  let latestProps: Record<string, unknown> = {};
+  let latestProps: MapViewProps = {} as MapViewProps;
   // Matches fakes/doc.ts's makeCamera() default so writeCameraInto (which reads this fake's
   // tracked camera back into the doc) is a no-op unless a test explicitly commits a new camera.
   let camera: MapsCamera = { lat: 1.3, lon: 103.8, zoom: 12, bearing: 0, pitch: 0 };
@@ -54,39 +55,33 @@ export function createMapViewFake() {
 
   function emitCameraCommit(cam: MapsCamera) {
     camera = cam;
-    const handler = latestProps.onCameraCommit as ((c: MapsCamera) => void) | undefined;
-    act(() => handler?.(cam));
+    act(() => latestProps.onCameraCommit(cam));
   }
 
   function emitObjectMove(id: string, lat: number, lon: number) {
-    const handler = latestProps.onMoveObject as ((id: string, lat: number, lon: number) => void) | undefined;
-    act(() => handler?.(id, lat, lon));
+    act(() => latestProps.onMoveObject(id, lat, lon));
   }
 
   function emitObjectCommit() {
-    const handler = latestProps.onObjectCommit as (() => void) | undefined;
-    act(() => handler?.());
+    act(() => latestProps.onObjectCommit());
   }
 
   function emitCgShift(dx: number) {
-    const handler = latestProps.onCgShift as ((dx: number) => void) | undefined;
-    act(() => handler?.(dx));
+    act(() => latestProps.onCgShift(dx));
   }
 
   function emitPreviewAbort() {
-    const handler = latestProps.onPreviewAbort as (() => void) | undefined;
-    act(() => handler?.());
+    act(() => latestProps.onPreviewAbort?.());
   }
 
   function emitToggleCountry(adm0: string) {
-    const handler = latestProps.onToggleCountry as ((adm0: string) => void) | undefined;
-    act(() => handler?.(adm0));
+    act(() => latestProps.onToggleCountry(adm0));
   }
 
-  const MapView = forwardRef<unknown, Record<string, unknown>>(function MapViewFake(props, ref) {
+  const MapView = forwardRef<MapViewHandle, MapViewProps>(function MapViewFake(props, ref) {
     latestProps = props;
-    viewLog.push({ type: "render", props });
-    useImperativeHandle(ref, () => ({
+    viewLog.push({ type: "render", props: props as unknown as Record<string, unknown> });
+    const handle: MapViewHandle = {
       jumpTo,
       easeTo,
       flyTo,
@@ -98,7 +93,8 @@ export function createMapViewFake() {
       capturePreviewBlob,
       waitUntilIdle,
       resize,
-    }));
+    };
+    useImperativeHandle(ref, () => handle);
     return <div data-testid="mapview" />;
   });
 
@@ -118,7 +114,7 @@ export function createMapViewFake() {
     resize,
     holdIdle,
     releaseIdle,
-    getLatestProps: () => latestProps,
+    getLatestProps: (): MapViewProps => latestProps,
     emit: {
       cameraCommit: emitCameraCommit,
       objectMove: emitObjectMove,

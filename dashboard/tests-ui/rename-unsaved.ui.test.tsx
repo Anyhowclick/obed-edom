@@ -31,7 +31,7 @@ describe("rename persists the unsaved edit first", () => {
       fireEvent.change(input, { target: { value: "renamed-deck" } });
       fireEvent.keyDown(input, { key: "Enter" });
     });
-    // captureThumb's promise chain awaits twice before publishing; one tick(0) per await.
+    // the save→rename await chain resolves over two microtask hops; one tick(0) per hop.
     await tick(0);
     await tick(0);
 
