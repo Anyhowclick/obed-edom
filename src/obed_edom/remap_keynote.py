@@ -24,6 +24,7 @@ from obed_edom.inspect import (
     wall_payload_carries_aspect,
 )
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
+from obed_edom.osascript_runner import parse_json_stdout, run_jxa
 from obed_edom.map_remap import (
     adjust_child_resize_indexes,
     navigator_numbering,
@@ -562,28 +563,8 @@ def _build_as_geometry(
 
 def _run_jxa(plan: dict[str, Any]) -> dict[str, Any]:
     plan = {**plan, "bundleId": keynote_app.bundle_id()}
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-        json.dump(plan, handle)
-        plan_path = handle.name
-    try:
-        proc = subprocess.run(
-            ["osascript", "-l", "JavaScript", str(REMAP_JS), plan_path],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        Path(plan_path).unlink(missing_ok=True)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "Keynote remap failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
-        )
-    raw = (proc.stdout or "").strip()
-    if not raw:
-        raise RuntimeError("Keynote remap returned no JSON.")
-    return json.loads(raw)
+    proc = run_jxa(REMAP_JS, plan, launch=True)
+    return parse_json_stdout(proc, "Keynote remap")
 
 
 def copy_keynote(source: Path, dest: Path) -> Path:
