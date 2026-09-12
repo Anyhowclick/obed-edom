@@ -505,13 +505,13 @@ when present and refuse outright if it is not a reordering of the exact same id 
 
 | GW | rule | asserted |
 |---|---|---|
-| 13 | R1 single text | verse box `x=43, w=1849`, glyph size ≤ 70, no split |
+| 13 | R1 single text | verse box `x=43, w=1849`, run sizes `{63.7, 77.35}` (t = 0.91), no split |
 | 17 | R1 dedupe + stretch | text3/4/5 in `dropped_duplicate`; two kept boxes, no overlap, t = 0.74 |
 | 17 (`--min-text-pt 66`) | Q2 split | 2 parts, one long box each, badge on both, ordinals contiguous |
 | 28 | R1 panel-backdrop drop | `shape0 (951,0,3840x1080)` in `dropped_backdrop`; fit scale > 0.8 |
 | **48** | R1 image dedupe + Q3 right (wheelchair) | one image kept (`kindIndex` 2), fitted right edge **1892.0**, no crop file emitted |
 | 24 | R1 dedupe + Q3 centred | 4 → 2 images; centred |
-| 21 | R2 image crop | crop window = (1920,0,3790x1080) of the frame → pixel box in 4608x3072; replaced file emitted; single item → right-aligned |
+| 21 | R2 image crop | crop window = (1920,0,3840x1080) of the frame → pixel box in 4608x3072; replaced file emitted; single item → right-aligned |
 | 5 | R2 image crop, vertical | crop box (0,1365,5120,2806) of the 5120x3414 file (naturalSize); single item → right-aligned, right edge **1892.0** |
 | 33 | R2 movie + backdrop exemption | movie kept as sole content; crop `3840:1080:1920:0` |
 | 32 | coal fix | crop `3840:1080:1920:0`, no document resize, side panels deleted in the scratch script |

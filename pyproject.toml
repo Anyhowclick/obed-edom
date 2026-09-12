@@ -56,3 +56,4 @@ obed_edom = ["*.yaml", "*.js", "data/ne/*", "data/*.jpg"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = ["deck: needs a local operator .key"]

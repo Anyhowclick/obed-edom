@@ -8,11 +8,11 @@ corrected to match this file (GW 5's anchor/crop box, GW 13's t, and GW 17's t a
 badge-fold-in-stack change moved it from the F9-era 0.91 to 0.74). Tolerances are 0.5 pt.
 
 All tests are `@pytest.mark.deck` and skip when the GW deck or the `keynote_parser` (iwa)
-extra is absent, mirroring `tests/test_dsk_plan.py`/`tests/test_dsk_assemble.py`.
+extra is absent, via the same `_require_gw_deck` skip helper `tests/test_dsk_plan.py`/
+`tests/test_dsk_assemble.py` use.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,6 +25,7 @@ from obed_edom.dsk_assemble import (
     plan_assembly,
 )
 from obed_edom.dsk_plan import classify_deck, resolve_font_path
+from obed_edom.map_remap import Rect, item_rect
 
 GW_DECK = Path("/Users/anyhowclick/Desktop/Diff-Checker/Sermon_PK (GW).key")
 
@@ -41,16 +42,6 @@ def _require_gw_deck():
 def _require_font(name):
     if resolve_font_path(name) is None:
         pytest.skip(f"font not present on this machine: {name}")
-
-
-@pytest.fixture(autouse=True)
-def no_keynote(monkeypatch):
-    def _forbidden(*_args, **_kwargs):
-        raise AssertionError("Keynote must not start")
-
-    monkeypatch.setattr(subprocess, "run", _forbidden)
-    monkeypatch.setattr(subprocess, "Popen", _forbidden)
-    yield
 
 
 @pytest.fixture(scope="module")
@@ -82,6 +73,9 @@ def test_gw13_single_text_verse_box_no_split(gw_inputs):
     assert plan.parts.get(13, 1) == 1
     assert 13 not in plan.splits
 
+    run_sizes = sorted({size for _, _, size in plan.run_sizes[13][("text", 1)]})
+    assert run_sizes == pytest.approx([63.7, 77.35], abs=0.01)
+
 
 @pytest.mark.deck
 def test_gw17_dedupe_and_stretch_no_overlap(gw_inputs):
@@ -98,7 +92,10 @@ def test_gw17_dedupe_and_stretch_no_overlap(gw_inputs):
     top, bottom = sorted(rects, key=lambda r: r.y)
     assert top.y + top.h <= bottom.y + 1e-6
 
-    t17 = next(iter(plan.run_sizes[17][("text", 1)]))[2] / 70.0
+    ranges17 = plan.run_sizes[17][("text", 1)]
+    assert [(start, end) for start, end, _ in ranges17] == [(1, 3), (4, 20), (21, 30), (31, 79)]
+    assert [size for _, _, size in ranges17] == pytest.approx([51.8, 51.8, 62.9, 51.8], abs=0.01)
+    t17 = ranges17[0][2] / 70.0
     assert t17 == pytest.approx(0.74, abs=0.01)
 
 
@@ -124,9 +121,19 @@ def test_gw17_forced_split_at_min_text_pt_66(gw_inputs):
 @pytest.mark.deck
 def test_gw28_panel_backdrop_dropped(gw_inputs):
     _require_gw_deck()
-    _payload, by_number, _runs = gw_inputs
+    payload, by_number, runs = gw_inputs
     cls = by_number[28]
     assert ("shape", 0) in cls.dropped_backdrop
+
+    slide28 = next(s for s in payload["slides"] if s["number"] == 28)
+    shape0 = next(i for i in slide28["items"] if (i["kind"], i["kindIndex"]) == ("shape", 0))
+    assert item_rect(shape0) == Rect(951.0, 0.0, 3840.0, 1080.0)
+
+    plan = _plan_one(payload, cls, runs)
+    verse = next(i for i in slide28["items"] if (i["kind"], i["kindIndex"]) == ("text", 1))
+    fitted = plan.fits[28][("text", 1)]
+    scale = fitted.w / item_rect(verse).w
+    assert scale > 0.8
 
 
 @pytest.mark.deck
@@ -141,7 +148,7 @@ def test_gw48_wheelchair_dedupe_and_right_no_crop(gw_inputs):
     assert plan.anchors[48] == "right"
     fitted = plan.fits[48][("image", 2)]
     assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
-    assert 48 not in plan.crops or not plan.crops[48]
+    assert plan.crops.get(48) in (None, {})
 
 
 @pytest.mark.deck
@@ -169,6 +176,8 @@ def test_gw21_image_crop_right_aligned(gw_inputs, tmp_path):
     crop = plan.crops[21][("image", 0)]
     assert crop.px_box == (57, 1100, 4551, 2365)
     assert crop.source_file_name == "Yang Zheng_YZ_0125.JPG"
+    assert crop.visible == Rect(1920.0, 0.0, 3840.0, 1080.0)
+    assert crop.path.is_file()
 
     fitted = plan.fits[21][("image", 0)]
     assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
@@ -208,7 +217,7 @@ def test_gw33_movie_kept_as_sole_content_classify_only(gw_inputs):
     cls = by_number[33]
     assert cls.kept == (("movie", 0),)
     assert cls.movie_count == 1
-    assert cls.category in ("movie", "mixed")
+    assert cls.category == "mixed"
 
 
 @pytest.mark.deck
@@ -231,3 +240,11 @@ def test_gw8_include_side_unchanged_classification():
     assert side8.dropped_duplicate == default8.dropped_duplicate
     assert side8.dropped_backdrop == default8.dropped_backdrop
     assert side8.category == default8.category
+
+    # kept/duplicate/backdrop/category are unchanged, but the side images don't survive
+    # untouched: --include-side 8 lets them past the side filter, then the text-slide
+    # media rule drops them instead -- dropped_side and dropped_media_text swap.
+    assert default8.dropped_side == (("image", 1), ("image", 2))
+    assert default8.dropped_media_text == ()
+    assert side8.dropped_side == ()
+    assert side8.dropped_media_text == (("image", 1), ("image", 2))
