@@ -1,6 +1,6 @@
 ---
 name: Maps + Watercolour branch state
-overview: PR #63, #68, #79, and #81 (feat/maps-backlog-races) are merged into main. PR #81 merged as 1a4ee00. Current branch feat/maps-save-status-snap-guide, off 1a4ee00, PR not yet opened, carries the save-status pill and the Keynote-style snap guide. Records what landed on 2026-09-09, 2026-09-11, the backlog round, and the 2026-09-11 evening round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63, #68, #79, #81, and #82 (feat/maps-save-status-snap-guide) are merged into main. Open, Codex-approved, owner-merge-owed: #86 (hop preview isolate fix), #88 (landmark scale-with-map), #90 (tolerant CSV + zoom ladder). Open, stacked, Codex-in-flight: #87 (CAS contract) → #91 (job names) → #92 (export destination). Records what landed on 2026-09-09, 2026-09-11, the backlog round, the 2026-09-11 evening round, and the 2026-09-12 round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
     content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie, Keynote re-render of restored pairs, and honest preview 2b QA (toner lines, pitched downtown, movie hops across relief/province/CG-crop gates, morph plate slide, centre-to-FW mixed hop, side-panel toggle on centre-only slide)."
@@ -14,7 +14,10 @@ todos:
     content: "Shipped in 89f9749: offline IWA patch of TSD.MovieArchive.posterTime via src/obed_edom/iwa_movies.py (movie_archives / plan_movie_posters / patch_movie_posters, one-to-one 1px frame match, refuse-not-guess), wired into maps_keynote.py's _apply_poster_frames per deck after _run_one_deck, gated OBED_MAPS_POSTER_FRAME=off|on|verify (default off). Probe script scripts/probe_movie_poster.py (dump/patch/reopen). Owner QA owed: run the probe to learn whether Keynote regenerates the poster from posterTime or keeps cached posterImageData; only then flip the gate on."
     status: probe owed
   - id: backlog
-    content: "Shipped: the race-tests/conflict-freeze package (7 concurrent-race tests + F1/F2/F3 backend fixes + dashboard conflict freeze, see 'Shipped 2026-09-11 (backlog round)'). Next: owner review of the CAS atomic contract plan (five decisions listed under Open backlog), then plan and implement it."
+    content: "Shipped: the race-tests/conflict-freeze package (7 concurrent-race tests + F1/F2/F3 backend fixes + dashboard conflict freeze, see 'Shipped 2026-09-11 (backlog round)'). Owner made all five CAS decisions 2026-09-12; PR #87 implements the contract, Codex-approved round 3, open. Stacked on top: PR #91 (job names) and PR #92 (export destination), both Codex-in-flight. Merge order #87 → #91 → #92."
+    status: pending
+  - id: round-2026-09-12
+    content: "Merged PR #82 (save-status pill + CG snap guide). Open, Codex-approved, owner-merge-owed: PR #86 (hop preview isolate fix), PR #88 (landmarks scale with map), PR #90 (tolerant CSV + zoom ladder). Open, stacked, Codex-in-flight: PR #87 → #91 → #92. Owner QA 2026-09-12: 1,2,4,5 PASS; 3,6-8 need the pill + two tabs (see QA items 23-27 below)."
     status: pending
 isProject: false
 ---
@@ -118,6 +121,19 @@ Items 1, 2, 4, 5 (below) PASS. Items 3, 6, 7, 8 could not be observed: there was
 ### Owner decisions 2026-09-10
 - No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
 
+## Shipped/open 2026-09-12
+
+- **PR #82** (`feat/maps-save-status-snap-guide`) merged.
+- **PR #86** (`feat/maps-isolate-hop-preview`, open, Codex-approved, owner merges): hop preview follows the export's isolate behaviour — the fly renders the source slide's isolate throughout, lands plain, then dissolves into the destination's isolate via shared `crossfadeTo`; `isolateDissolveNeeded`/`plainIsolateTarget` helpers pick when a dissolve is needed; abort-safe; `playHop`/`playFromHere` now catch rejections. Fixes the "isolate darken inconsistent in hop preview" backlog item below.
+- **PR #88** (`feat/maps-landmark-scale`, open, Codex-approved, owner merges): landmarks can scale with the map — `scaleWithMap` toggle + `sizeZoom`, exponential base-2 icon-size curve with `sizeZoomRef` folding in the surface scale, `_effective_size` as the single chokepoint in Keynote render and reveal; `revealMovie` cleared when the last painted landmark on a slide goes. Owner decision: shrink with no minimum.
+- **PR #90** (`feat/maps-csv-zoom-ladder`, open, Codex-approved, owner merges): tolerant CSV import + zoom ladder — new `maps_csv.py`, header/headerless auto-detection, bounded (≤4-line) records with dialect-aware `_has_open_quote`, linear URL peel capped at 8 tokens, zoom ladder country 4.3 / state 6.8 / city 10.5 / town 13 / neighbourhood 15.5 / building 18, precedence explicit-zoom > URL > ladder > 13 fallback, geocoder gains `placeType` + `zoomFromUrl`, cache key bumped to v2, `clamp_lon` uses modulo. Owner decision: headerless CSV gets auto zoom; ladder city/district boundary still to be honed by eye.
+- **PR #87 → #91 → #92** (stacked, Codex-in-flight, merge in this order):
+  - **#87 CAS contract** (`feat/maps-cas-contract`): `maps_commit`/`MapsCommit` is the one write contract; every Maps writer migrated onto it; `_bump_state_revision` runs on export/bootstrap completion (previously missed); `_loop` reverts to error state on a failed save; the generic relocate endpoint now 409s for Maps jobs. Owner decisions baked in: frames are lock-only (not routed through the contract); relocate 409s rather than going through the contract; stills/plates commit with `bump=False`; a failed import leaves tiles in place. Known limit: `_clear_derived_maps_output` is unstaged inside the import commit. Codex APPROVED round 3.
+  - **#91 job names** (`feat/job-names`): two-word `Job.name`, minted from a wordlist; rename now moves all six id-derived folders; `JobRunner.rename` + `PATCH /api/jobs/{id}/name`; Maps rename goes through `maps_commit(bump=False)` using plain `os.replace` with manual restore on failure (`stage_path`'s abort path deletes a moved source, so the contract's usual abort doesn't fit here); `_reserved_names` guards collisions; rename is taken under `_job_lock`; containment/symlink guards on the folder move. Opus reviewed ×3; Codex round 2 in flight. Owner decision: rename renames the folder.
+  - **#92 export destination** (`feat/export-destination`): `defaultExportDir` setting, validated only on save; `export_destination(job)` resolves per-job with a fallback flag; dashboard gets a per-tab `ExportDestinationRow` + `useSessionPath`/`useDefaultExportDir`; generator exports go to `<dest>/<stem>/`, other job types stay flat; watercolour copies out to the resolved destination. Opus reviewed ×2; Codex in flight. Owner decision: export destination is a global default with a per-tab override.
+- **Owner decisions 2026-09-12** (supersedes/extends 2026-09-10 decisions): CSV import is headerless-friendly with auto zoom; zoom ladder as above; session rename renames the folder; landmarks shrink with zoom, no minimum size; export destination = global default + per-tab override; all five CAS-contract recommendations from the plan accepted (frames lock-only, relocate 409, stills/plates `bump=False`, naming as implemented, failed import leaves tiles).
+- **Owner QA 2026-09-12**: items 1, 2, 4, 5 PASS (carried from 2026-09-11 evening). Items 3 and 6-8 still need PR #82's pill plus two open tabs to observe. New QA items below (23-27) cover #86/#88/#90/#91/#92.
+
 ## Known limits / assumptions
 
 - **Province tile floor.** `admin_level` 4 geometry starts at map z1; nothing renders provinces below it. Preview runs `previewZoomDelta` below authored, so low-zoom previews stay silent about provinces even though the 7680 export shows them.
@@ -163,15 +179,28 @@ Round from 2026-09-11 (honest preview 2b owner QA): cut-out PASS, flight PASS, r
 21. Save-status pill shows Unsaved→Saving…→Saved on an edit, Paused on a conflict, never flips on resize/inspector toggle.
 22. Yellow centre guide appears only while dragging the CG frame at snap.
 
+Round from 2026-09-12 (add):
+
+23. Hop preview A→B with isolate on B only, tried from A and from B (PR #86).
+24. Landmark shrinks when zooming out; toggling `scaleWithMap` off keeps its on-screen size (PR #88).
+25. Paste the three-line CSV sample end to end (PR #90).
+26. Rename a Maps job from History — the folder follows and export still works (PR #91).
+27. Set a default export folder, export a deck, then set a per-tab override once and export again (PR #92).
+
 ## Open backlog
 
-- **CAS atomic contract.** Mutations still do not share one atomic contract with job completion, CSV/export, history relocation, and the session status/commit window (F4: `post_png` writing into `previewDir` while `load_session` swaps it, remains open). A written plan exists (owner review owed) covering this and session-assets rollback; five owner decisions pending: frames go through the contract or lock-only (**rec: lock-only**); relocate on maps jobs via the contract or a 409 (**rec: 409**); stills/plates bump=False; naming; tile rollback on a failed import (**rec: leave tiles**). The plan's inventory also found: export/CSV-bootstrap completion never bumps `stateRevision`; `relocate_job` read-modify-writes `job.result` outside the mutation lock.
+- **CAS atomic contract** — owner made all five decisions 2026-09-12 (frames lock-only, relocate 409, stills/plates `bump=False`, naming as implemented, failed import leaves tiles); implemented in PR #87, Codex-approved round 3, open. See "Shipped/open 2026-09-12" above. Known limit carried into #87: `_clear_derived_maps_output` is unstaged inside the import commit.
 - **Session assets/previews** are installed and backups removed before the document commit, so rollback is unreliable.
 - **Keynote verification**: anchors, aspect ratio, world-copy/clipping, split CG output. Native Keynote opacity stays deferred — keep the derived PNG alpha path until separately approved. Never touch `A_PATCHED.key`.
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
 - **`selectSlide` unguarded thumbnail await.** `selectSlide` awaits `captureThumb(prev)` unguarded, and every caller does `void selectSlide(...)`, so a non-stale thumbnail POST failure on the first attempt silently prevents the slide switch (unhandled rejection) — asymmetric with the retry path, which surfaces via `setError`. Found in review; pre-existing, not introduced by this branch.
-- **Next: isolate darken inconsistent in hop preview** (owner bug, read-only investigation done, not yet fixed). Export ground truth: the fly renders every frame with the SOURCE slide's isolate (`MapsTab.tsx` ~L1633/1710 → `captureFly`), then Python inserts a plain landing slide + dissolve into the isolated destination (`isolate_landing_slides`, `maps_keynote.py` ~L589-608, wired ~L972). Preview: `previewLink`'s movie branch (~L1151-1201) sets no `previewView` before `animateHop`, so the fly shows the SELECTED slide's look; the destination is applied only as a snap at the end, then `stopPreview(true)` restores. Two minimal fixes: (a) `await applyPreviewView(fromView, run)` before `animateHop` (~L1176); (b) `isolate={renderedView?.isolate || active.isolate}` (~L2215) leaks the selected slide's isolate — use `(renderedView || active).isolate`. Optional: emulate the landing+dissolve via `dissolveFrame`. No test pins preview hop appearance (export side is pinned in `tests/test_maps_keynote.py` ~L1335-1390).
+- **Isolate darken inconsistent in hop preview** — fixed by PR #86 (`feat/maps-isolate-hop-preview`, open, Codex-approved): preview now matches export's source-appearance-during-fly, plain-landing-then-dissolve behaviour via shared `crossfadeTo`. QA item 23 owed once merged.
+- **CG "isolate off" doesn't persist**: `cgFromResult` drops an explicit `undefined` key, so turning isolate off on a CG slide doesn't stick; the Python landing-slide path also copies the CG override verbatim instead of accounting for this. Found 2026-09-12, not yet fixed.
+- **`artifact_status`** doesn't report a `suggestedPath` for external-generator folders. Found 2026-09-12, not yet fixed.
+- **Preview lacks the 20000 clamp / sub-1px drop** that scaled landmarks (PR #88) need — a very large or sub-pixel landmark can render oddly in preview even though export clamps it. Found 2026-09-12, not yet fixed.
+- **`search_places` hard-codes `placeType: "city"`** regardless of what's actually found (PR #90's ladder supports finer place types but the search endpoint doesn't pass them through). Found 2026-09-12, not yet fixed.
+- **Substring admin0 match** in the CSV/geocode path can mismatch country names that are substrings of one another. Found 2026-09-12, not yet fixed.
 
 ## Pointers
 
