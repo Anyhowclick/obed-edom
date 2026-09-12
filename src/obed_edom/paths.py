@@ -97,8 +97,25 @@ def ensure_export_dir(path: str | Path) -> Path:
     return resolved
 
 
-def export_destination(job) -> Path:
-    """Job override, else the operator default, else `output_root()`.
+def ensure_export_subdir(parent: Path, name: str) -> Path:
+    """Create (or reuse) `name` under an already-validated `parent` export root.
+
+    `parent` itself is trusted (validated by the caller); this only guards the child: a
+    pre-existing symlink at `parent / name` is refused rather than followed and written
+    into, and the resolved child is re-checked against the private-root guard before
+    `mkdir`.
+    """
+    child = parent / name
+    if child.is_symlink():
+        raise ValueError(f"Export directory cannot be a symlink: {child}")
+    resolved = child.resolve()
+    _check_export_dir_safe(resolved)
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def resolve_export_destination(override: str | Path | None) -> Path:
+    """`override`, else the operator default, else `output_root()`.
 
     Raises `ValueError` with an actionable message when a chosen directory (override or
     default) has since vanished or turned into a file — the export should fail rather than
@@ -106,8 +123,6 @@ def export_destination(job) -> Path:
     """
     from obed_edom.settings import load_settings  # noqa: PLC0415
 
-    result = getattr(job, "result", None)
-    override = (result or {}).get("exportDir")
     if override:
         candidate = Path(override)
         if candidate.is_dir():
@@ -126,6 +141,14 @@ def export_destination(job) -> Path:
         )
 
     return output_root()
+
+
+def export_destination(job) -> Path:
+    """Job override, else the operator default, else `output_root()`. See
+    `resolve_export_destination` for the resolution rules."""
+    result = getattr(job, "result", None)
+    override = (result or {}).get("exportDir")
+    return resolve_export_destination(override)
 
 
 def template_path(relative: str) -> Path:

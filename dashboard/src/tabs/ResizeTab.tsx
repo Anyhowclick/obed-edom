@@ -48,6 +48,7 @@ type ResizeResult = FramingProposal & {
   templatePath?: string;
   destPath?: string;
   exportDir?: string;
+  resolvedExportDir?: string;
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -156,9 +157,15 @@ export function ResizeTab() {
   const counts = result?.counts;
   const score = result?.templateScore || result?.goldScore;
   const awaitingFramings = result?.phase === "framing";
+  // A failed Apply leaves the proposal result (phase: "framing") in place so the review
+  // stays visible for a retry — but the export row must unlock, since "pick another
+  // folder" is a common fix for the error, and a locked row can't be changed.
+  const exportDirLocked = awaitingFramings && job?.status !== "error";
   // Once a proposal is captured, Apply always uses the destination it was proposed
   // against — freeze the row so it can't drift out from under the pending apply.
-  const frozenExportDir = awaitingFramings ? result?.exportDir || "" : undefined;
+  const frozenExportDir = exportDirLocked
+    ? result?.resolvedExportDir || result?.exportDir || ""
+    : undefined;
   const fitted = result?.fittedSlides || [];
   const offFrame = result?.offFrame || [];
   const overruled = (result?.framingReport || []).filter((r) => r.confirmed && r.fitted);
@@ -206,7 +213,7 @@ export function ResizeTab() {
           onChange={setExportDir}
           defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
           onError={setError}
-          disabled={awaitingFramings}
+          disabled={exportDirLocked}
         />
       </div>
       <label className="field">

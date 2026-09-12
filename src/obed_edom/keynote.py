@@ -12,7 +12,7 @@ from pathlib import Path
 
 from obed_edom import keynote_app
 from obed_edom.models import SlideSpec
-from obed_edom.paths import output_root, select_deck_template
+from obed_edom.paths import ensure_export_subdir, output_root, select_deck_template
 
 
 def _keynote_tell() -> str:
@@ -2163,8 +2163,7 @@ def generate_both(
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."
         )
-    out_dir = (output_dir / stem_for(docx)) if output_dir else output_dir_for(docx)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = ensure_export_subdir(output_dir, stem_for(docx)) if output_dir else output_dir_for(docx)
     stem = stem_for(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"

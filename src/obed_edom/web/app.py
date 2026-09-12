@@ -69,7 +69,13 @@ from obed_edom.outline_check import (
     slots_from_cues,
 )
 from obed_edom.outline_check import visible as visible_slides
-from obed_edom.paths import ensure_export_dir, export_destination, find_repo_root, validate_export_dir
+from obed_edom.paths import (
+    ensure_export_dir,
+    export_destination,
+    find_repo_root,
+    resolve_export_destination,
+    validate_export_dir,
+)
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import (
@@ -1162,10 +1168,10 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
 
 
 def _write_outline_pdf(job: Job, dest: Path, report: dict[str, Any]) -> Path | None:
-    try:
-        from obed_edom.report import write_outline_findings  # noqa: PLC0415
+    from obed_edom.report import write_outline_findings  # noqa: PLC0415
 
-        ensure_export_dir(dest.parent)
+    ensure_export_dir(dest.parent)
+    try:
         return write_outline_findings(dest, report)
     except Exception as exc:  # noqa: BLE001
         job.log(f"Could not write the findings PDF ({exc}).")
@@ -1415,6 +1421,7 @@ def _run_resize_propose(
             "templateSlide": None,
         }
         page["resurfaced"] = page["index"] in set(reuse.resurfaced)
+    resolved_export_dir = str(resolve_export_destination(export_dir or None))
     return {
         "phase": "framing",
         "path": str(path),
@@ -1423,6 +1430,7 @@ def _run_resize_propose(
         "validate": validate,
         "export": export,
         **({"exportDir": export_dir} if export_dir else {}),
+        "resolvedExportDir": resolved_export_dir,
         **proposal,
         "slideRange": sorted(slide_range) if slide_range else None,
         "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
@@ -1444,7 +1452,9 @@ def _run_resize(
     validate: bool = True,
 ) -> dict[str, Any]:
     dest_dir = default_output_root() / ".resize" / job.name
-    dest = export_destination(job) / f"{path.stem}_CG.key"
+    resolved_export_dir = (job.result or {}).get("resolvedExportDir")
+    export_root = Path(resolved_export_dir) if resolved_export_dir else export_destination(job)
+    dest = export_root / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
     scope = f"slide {label}" if label else "every slide"
