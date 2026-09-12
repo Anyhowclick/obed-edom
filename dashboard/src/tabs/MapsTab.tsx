@@ -48,7 +48,8 @@ import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
-import { OBJECT_SIZE_MAX, defaultObjectSize, rebaseForPaste, zoomSizeFactor } from "../maps/objects";
+import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
+import type { ObjectClipboard } from "../maps/objects";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
@@ -276,7 +277,7 @@ export function MapsTab() {
   const [dropIndicator, setDropIndicator] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [selectedPins, setSelectedPins] = useState<string[]>([]);
-  const [objectClipboard, setObjectClipboard] = useState<MapsChurch[]>([]);
+  const [objectClipboard, setObjectClipboard] = useState<ObjectClipboard<MapsChurch>>({ churches: [], sourceZoom: 0 });
   const [pasteTargets, setPasteTargets] = useState<string[]>([]);
   const [renamingSlide, setRenamingSlide] = useState<{ id: string; title: string } | null>(null);
   const [inspTab, setInspTab] = useState<InspectorTab>("properties");
@@ -1064,22 +1065,21 @@ export function MapsTab() {
   function copySelectedPins() {
     if (!activeView || !selectedPins.length) return;
     const selected = new Set(selectedPins);
-    const sourceZoom = activeView.camera.zoom;
-    setObjectClipboard(
-      activeView.churches.filter((church) => selected.has(church.id)).map((church) => rebaseForPaste({ ...church }, sourceZoom, sourceZoom))
-    );
+    setObjectClipboard({
+      churches: activeView.churches.filter((church) => selected.has(church.id)).map((church) => ({ ...church })),
+      sourceZoom: activeView.camera.zoom,
+    });
   }
 
   function pasteObjects(toAllSlides = false) {
-    if (!objectClipboard.length || !doc || locked) return;
+    if (!objectClipboard.churches.length || !doc || locked) return;
     const targets = toAllSlides ? new Set(pasteTargets) : new Set([active?.id]);
     const slides = doc.slides.map((slide) => {
       if (!targets.has(slide.id)) return slide;
       const targetView = activeAudience === "cg" && slide.cg ? slide.cg : slide;
       const targetZoom = targetView.camera.zoom;
       const copies: MapsChurch[] = [];
-      for (const church of objectClipboard) {
-        const rebased = rebaseForPaste(church, church.sizeZoom ?? targetZoom, targetZoom);
+      for (const rebased of pasteRebase(objectClipboard, targetZoom)) {
         copies.push({ ...rebased, id: nextPinId([...slide.churches, ...copies]) });
       }
       if (activeAudience === "cg" && slide.cg) return { ...slide, cg: { ...slide.cg, churches: [...slide.cg.churches, ...copies] } };
@@ -2848,17 +2848,17 @@ export function MapsTab() {
                         <button className="btn secondary icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={copySelectedPins} title="Copy" aria-label="Copy">
                           <IconCopy />
                         </button>
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(false)} title="Paste" aria-label="Paste">
                           <IconPaste />
                         </button>
-                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
+                        <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
                           <IconPasteSlides />
                         </button>
                         <button className="btn maps-delete maps-pin-bulk-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
-                      {objectClipboard.length > 0 && <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">{slides.map((slide) => <label key={slide.id}><input type="checkbox" checked={pasteTargets.includes(slide.id)} onChange={(event) => setPasteTargets((targets) => event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id))} /> {slide.title}</label>)}<button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>Paste selected slides</button></div>}
+                      {objectClipboard.churches.length > 0 && <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">{slides.map((slide) => <label key={slide.id}><input type="checkbox" checked={pasteTargets.includes(slide.id)} onChange={(event) => setPasteTargets((targets) => event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id))} /> {slide.title}</label>)}<button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>Paste selected slides</button></div>}
                       <div className="maps-pin-list">
                         {(activeView?.churches || []).map((church) => (
                           <div key={church.id} className={`maps-pin-row${selectedPin === church.id ? " active" : ""}`}>

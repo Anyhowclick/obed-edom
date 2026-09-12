@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { OBJECT_SIZE_MIN, OBJECT_SIZE_MAX, SIZE_ZOOM_MIN, SIZE_ZOOM_MAX, defaultLandmarkSize, defaultObjectSize, rebaseForPaste, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
+const { OBJECT_SIZE_MIN, OBJECT_SIZE_MAX, SIZE_ZOOM_MIN, SIZE_ZOOM_MAX, defaultLandmarkSize, defaultObjectSize, pasteRebase, rebaseForPaste, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
 
 test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and the landmark default", () => {
   assert.equal(defaultObjectSize("dot"), 28);
@@ -126,12 +126,36 @@ test("copy-then-paste to many slides holds the source on-screen size at every ta
   const sourceZoom = 7;
   const church = { kind: "dropPin", size: 100, scaleWithMap: true, sizeZoom: 5 };
   const onScreen = effectiveObjectSize(church, sourceZoom);
-  // copySelectedPins materialises against the source camera; pasteObjects rebases per target.
-  const clipboard = rebaseForPaste({ ...church }, sourceZoom, sourceZoom);
+  // copySelectedPins stores the raw church + source camera; pasteObjects materialises once per target.
+  const clipboard = { churches: [{ ...church }], sourceZoom };
   for (const targetZoom of [3, 7, 10, 12.5]) {
-    const pasted = rebaseForPaste(clipboard, clipboard.sizeZoom, targetZoom);
+    const [pasted] = pasteRebase(clipboard, targetZoom);
     assert.equal(pasted.sizeZoom, targetZoom);
     assert.equal(effectiveObjectSize(pasted, targetZoom), onScreen);
+  }
+});
+
+test("copy-then-paste holds a clamped oversized on-screen size at every target camera", () => {
+  // size 120 at sizeZoom 5 on a zoom-11 camera -> 7680 px, past the API max 4000.
+  const sourceZoom = 11;
+  const clipboard = { churches: [{ kind: "landmark", size: 120, scaleWithMap: true, sizeZoom: 5 }], sourceZoom };
+  assert.equal(effectiveObjectSize(clipboard.churches[0], sourceZoom), 7680);
+  for (const targetZoom of [3, 11, 14]) {
+    const [pasted] = pasteRebase(clipboard, targetZoom);
+    assert.equal(pasted.size, OBJECT_SIZE_MAX);
+    assert.ok(Math.abs(effectiveObjectSize(pasted, targetZoom) - 7680) < 1);
+  }
+});
+
+test("copy-then-paste holds a clamped sub-pixel on-screen size at every target camera", () => {
+  const sourceZoom = 0;
+  const clipboard = { churches: [{ kind: "landmark", size: 120, scaleWithMap: true, sizeZoom: 18 }], sourceZoom };
+  const eff = effectiveObjectSize(clipboard.churches[0], sourceZoom);
+  assert.ok(eff < 1);
+  for (const targetZoom of [0, 5, 10]) {
+    const [pasted] = pasteRebase(clipboard, targetZoom);
+    assert.equal(pasted.size, OBJECT_SIZE_MIN);
+    assert.ok(Math.abs(effectiveObjectSize(pasted, targetZoom) - eff) < 1e-9);
   }
 });
 

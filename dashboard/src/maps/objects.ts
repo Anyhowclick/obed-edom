@@ -99,3 +99,14 @@ export function rebaseForPaste<T extends { size?: number; scaleWithMap?: boolean
   const sizeZoom = Math.max(SIZE_ZOOM_MIN, Math.min(SIZE_ZOOM_MAX, targetZoom + Math.log2(size / eff)));
   return { ...church, size, sizeZoom };
 }
+
+/** Objects copied from one slide, with the camera zoom they were copied at. */
+export type ObjectClipboard<T> = { churches: T[]; sourceZoom: number };
+
+/** Rebase a whole clipboard onto one target camera: exactly one materialisation per object. */
+export function pasteRebase<T extends { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }>(
+  clipboard: ObjectClipboard<T>,
+  targetZoom: number
+): T[] {
+  return clipboard.churches.map((church) => rebaseForPaste(church, clipboard.sourceZoom, targetZoom));
+}
