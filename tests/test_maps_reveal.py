@@ -14,6 +14,7 @@ from obed_edom.maps_reveal import (
     render_slide_reveal_movie,
     reveal_fingerprint,
     reveal_frames,
+    reveal_movie_fingerprint,
     reveal_path,
     reveal_seed,
     reveal_stale,
@@ -141,6 +142,18 @@ def test_reveal_fingerprint_changes_with_duration_and_opacity(tmp_path: Path):
     assert base != reveal_fingerprint(asset, duration=2.0, opacity=1.0, seed=1, width=10, height=10)
     assert base != reveal_fingerprint(asset, duration=1.0, opacity=0.5, seed=1, width=10, height=10)
     assert base != reveal_fingerprint(asset, duration=1.0, opacity=1.0, seed=2, width=10, height=10)
+
+
+def test_reveal_movie_fingerprint_changes_with_geometry_from_size_zoom(tmp_path: Path):
+    base_png = tmp_path / "base.png"
+    Image.new("RGB", (10, 10), (1, 2, 3)).save(base_png)
+
+    def landmark(w: float, h: float) -> dict:
+        return {"asset": tmp_path / "a.png", "x": 0, "y": 0, "w": w, "h": h, "duration": 1.2, "seed": 1}
+
+    at_sizezoom_5 = reveal_movie_fingerprint(base_png, [landmark(100, 80)])
+    at_sizezoom_6 = reveal_movie_fingerprint(base_png, [landmark(200, 160)])
+    assert at_sizezoom_5 != at_sizezoom_6
 
 
 def test_reveal_stale_true_without_dest_or_sidecar_true_on_mismatch_false_on_match(tmp_path: Path):

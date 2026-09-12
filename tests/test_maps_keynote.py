@@ -328,6 +328,39 @@ def _landmark_church(**extra) -> dict:
     return row
 
 
+def test_landmark_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 200
+
+
+def test_landmark_scale_with_map_zoom_out_halves_width(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 4)
+    slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 50
+
+
+def test_landmark_scale_with_map_off_is_unchanged(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_landmark_church(sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 100
+
+
 def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: Path):
     asset_root = tmp_path / "assets"
     _dummy_png(asset_root / "asset1.png")

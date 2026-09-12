@@ -188,6 +188,8 @@ class MapsChurch(BaseModel):
     size: float | None = Field(default=None, ge=1, le=4000)
     opacity: float | None = Field(default=None, ge=0, le=1)
     reveal: MapsReveal | None = None
+    scaleWithMap: bool | None = None
+    sizeZoom: float | None = Field(default=None, ge=0, le=22)
 
 
 class MapsAsset(BaseModel):
@@ -459,7 +461,7 @@ def append_landmark(result: dict[str, Any], slide_id: str, audience: Literal["lw
     while church_id in used:
         church_id = f"w{uuid.uuid4().hex[:8]}"
     camera = view.get("camera") or {}
-    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1})
+    churches.append({"id": church_id, "name": name, "lat": float(camera.get("lat") or 0), "lon": float(camera.get("lon") or 0), "kind": "landmark", "color": "#c44a42", "showLabel": True, "assetId": asset_id, "assetVersion": version, "assetWidth": width, "assetHeight": height, "size": _default_landmark_size(width), "opacity": 1, "scaleWithMap": True, "sizeZoom": float(camera.get("zoom") or 0)})
     view["churches"] = churches
     result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
     view.pop("stillPng", None)
@@ -542,6 +544,10 @@ def _validate_asset_document(doc: MapsDocument, result: dict[str, Any]) -> MapsD
                     raise HTTPException(400, "Landmark objects require an uploaded Maps asset")
                 if church.reveal and church.kind != "landmark":
                     raise HTTPException(400, "Paint-on reveal is only available for landmark objects")
+                if church.scaleWithMap and church.kind != "landmark":
+                    raise HTTPException(400, "Scale with map is only available for landmark objects")
+                if church.scaleWithMap and church.sizeZoom is None:
+                    raise HTTPException(400, "Scale with map requires sizeZoom")
             if view.revealMovie and not any(c.kind == "landmark" and c.reveal for c in view.churches):
                 raise HTTPException(400, "Reveal as slide movie needs a landmark with a paint-on reveal")
     available = {asset.id: asset for asset in (MapsAsset.model_validate(row) for row in result.get("assets") or [])}
