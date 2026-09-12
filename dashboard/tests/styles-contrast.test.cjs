@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const css = fs.readFileSync(path.join(__dirname, "../src/styles.css"), "utf8");
+const css = fs.readFileSync(path.join(__dirname, "../src/styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 test("no rule block sets both --bg-surface-solid background and --ink-primary color", () => {
   const blocks = css.match(/\{[^{}]*\}/g) || [];
@@ -36,6 +36,7 @@ test("component input overrides are prefixed with `input` and ordered after the 
   assert.ok(jobNameFocusBlock, ".job-name-input:focus rule not found or not prefixed with `input`");
   assert.ok(mapsThumbFocusBlock, ".maps-thumb-title-input:focus rule not found or not prefixed with `input`");
 
+  assert.ok(jobNameBlock.index > baseBlock.index, "input.job-name-input must come after the base input rule");
   assert.ok(jobNameBlock.index > baseFocusBlock.index, "input.job-name-input must come after the base input:focus block");
   assert.ok(jobNameFocusBlock.index > baseFocusBlock.index, "input.job-name-input:focus must come after the base input:focus block");
   assert.ok(mapsThumbFocusBlock.index > baseFocusBlock.index, "input.maps-thumb-title-input:focus must come after the base input:focus block");
