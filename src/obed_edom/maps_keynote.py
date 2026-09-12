@@ -1489,11 +1489,25 @@ def _log(job: Any, message: str) -> None:
         log(message)
 
 
+_OFF_ALIASES = {"off", "0", "false", "no"}
+
+
 def maps_poster_frame_mode(explicit: str | None = None) -> str:
     """`off` (default), `on` (surgical offline posterTime patch), or `verify` (patch +
     read-back log). Env `OBED_MAPS_POSTER_FRAME`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_POSTER_FRAME", "")).strip().lower()
+    if raw in _OFF_ALIASES:
+        return "off"
     return raw if raw in {"on", "verify"} else "off"
+
+
+def maps_movie_autoplay_mode(explicit: str | None = None) -> str:
+    """`on` (default; surgical offline autoplay-after-transition patch), `off`, or
+    `verify` (patch + read-back log). Env `OBED_MAPS_MOVIE_AUTOPLAY`."""
+    raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_MOVIE_AUTOPLAY", "")).strip().lower()
+    if raw in _OFF_ALIASES:
+        return "off"
+    return raw if raw == "verify" else "on"
 
 
 def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[str, str, str], float]) -> list[dict[str, Any]]:
@@ -1516,6 +1530,129 @@ def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[s
                 }
             )
     return targets
+
+
+def _autoplay_targets(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for op in ops:
+        for item in op.get("items") or []:
+            if item.get("landmark") and item.get("kind") == "movie":
+                targets.append(
+                    {"x": float(item["x"]), "y": float(item["y"]), "w": float(item["w"]), "h": float(item["h"]),
+                     "name": item.get("path")}
+                )
+    return targets
+
+
+def _apply_movie_autoplay(
+    dest: Path,
+    ops: list[dict[str, Any]],
+    job: Any,
+    deck_label: str,
+    *,
+    width: int,
+    height: int,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any] | None:
+    """Patch reveal movies in ``dest`` to start right after their slide's build-in
+    transition, no click needed (owner 2026-09-12 probe: Keynote's AppleScript movie
+    class exposes no autoplay-style property -- only file name/volume/reflection/
+    repetition method/rotation, see Keynote.sdef -- so this is patched offline the
+    same way Keynote itself saves "Start = After Transition"). Gated behind
+    `OBED_MAPS_MOVIE_AUTOPLAY` (default on); a refusal is never fatal to export, same
+    containment as `_apply_poster_frames`."""
+    mode = maps_movie_autoplay_mode()
+    from obed_edom.offline_write import probe_iwa_extra
+
+    mode = probe_iwa_extra(mode, lambda m: _log(job, m))
+    if mode == "off":
+        return None
+    targets = _autoplay_targets(ops)
+    if not targets:
+        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": False, "reason": None, "regenerated": False}
+
+    from obed_edom.iwa_movies import movie_autoplay_state, patch_movie_autoplay, plan_movie_autoplay
+    from obed_edom.iwa_write import OfflineWriteCorrupted
+
+    try:
+        plan = plan_movie_autoplay(dest, targets)
+        if plan["refused"]:
+            _log(job, f"movieAutoplay {deck_label}: refused ({plan['reason']})")
+            return {
+                "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": plan["reason"],
+                "regenerated": False,
+            }
+
+        patched = patch_movie_autoplay(dest, plan["ids"])
+        if patched["refused"]:
+            _log(job, f"movieAutoplay {deck_label}: refused ({patched['reason']})")
+            return {
+                "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": patched["reason"],
+                "regenerated": False,
+            }
+
+        _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} reveal movie(s)")
+        if mode == "verify":
+            state = movie_autoplay_state(dest, patched["touched"])
+            bad: list[str] = []
+            for oid in patched["touched"]:
+                read = state.get(oid, {})
+                _log(
+                    job,
+                    f"movieAutoplay {deck_label}: {oid} playsAcrossSlides={read.get('playsAcrossSlides')} "
+                    f"automatic={read.get('automatic')}",
+                )
+                if read.get("playsAcrossSlides") is not False or read.get("automatic") is not True:
+                    bad.append(
+                        f"{oid} playsAcrossSlides={read.get('playsAcrossSlides')} automatic={read.get('automatic')}"
+                    )
+            if bad:
+                reason = "verify read-back mismatch: " + "; ".join(bad)
+                _log(job, f"movieAutoplay {deck_label}: refused ({reason})")
+                return {
+                    "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": reason,
+                    "regenerated": False,
+                }
+        return {
+            "deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None,
+            "regenerated": False,
+        }
+    except OfflineWriteCorrupted as exc:
+        _log(job, f"movieAutoplay {deck_label}: deck truncated during patch ({exc}); regenerating unpatched…")
+        _run_one_deck(
+            ops, dest, width=width, height=height, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
+        from obed_edom.iwa_write import recovery_tmp_path
+
+        recovery_tmp_path(dest).unlink(missing_ok=True)
+        return {
+            "deck": deck_label,
+            "mode": mode,
+            "applied": 0,
+            "refused": True,
+            "reason": f"deck truncated during patch, regenerated unpatched: {exc}",
+            "regenerated": True,
+        }
+    except Exception as exc:  # noqa: BLE001 — every optional-patch failure refuses, never fatal
+        _log(job, f"movieAutoplay {deck_label}: refused (unexpected error: {exc})")
+        return {
+            "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": f"unexpected error: {exc}",
+            "regenerated": False,
+        }
+
+
+def _invalidate_poster_on_regeneration(
+    poster_record: dict[str, Any] | None, autoplay_record: dict[str, Any] | None
+) -> None:
+    """If autoplay patching left the deck truncated, `_apply_movie_autoplay` regenerates
+    it unpatched -- which also wipes any poster-frame patch already applied to that same
+    deck. Mark the stale poster record refused so it doesn't survive into `result`."""
+    if autoplay_record is None or not autoplay_record.get("regenerated"):
+        return
+    if poster_record is not None and not poster_record["refused"]:
+        poster_record["applied"] = 0
+        poster_record["refused"] = True
+        poster_record["reason"] = "discarded by autoplay regeneration"
 
 
 def _apply_poster_frames(
@@ -1833,6 +1970,7 @@ def export_maps_job(
     flags: list[Any] = []
     flags_cg: list[Any] = []
     poster_frame: list[dict[str, Any]] = []
+    movie_autoplay: list[dict[str, Any]] = []
     if export_dir is not None:
         export_dir = ensure_export_dir(export_dir)
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -1850,12 +1988,18 @@ def export_maps_job(
         )
         result["destPath"] = str(dest)
         _raise_if_cancelled(is_cancelled)
-        record = _apply_poster_frames(
+        record_lw = _apply_poster_frames(
             dest, ops, reveal_poster_times, job, "lw",
             width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_lw is not None:
+            poster_frame.append(record_lw)
+        autoplay_record = _apply_movie_autoplay(
+            dest, ops, job, "lw", width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled
+        )
+        if autoplay_record is not None:
+            movie_autoplay.append(autoplay_record)
+        _invalidate_poster_on_regeneration(record_lw, autoplay_record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
         if export_dir is not None:
@@ -1872,12 +2016,18 @@ def export_maps_job(
             ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )
         result["destPathDsk"] = str(dest_dsk)
-        record = _apply_poster_frames(
+        record_dsk = _apply_poster_frames(
             dest_dsk, ops_dsk, reveal_poster_times, job, "dsk",
             width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_dsk is not None:
+            poster_frame.append(record_dsk)
+        autoplay_record = _apply_movie_autoplay(
+            dest_dsk, ops_dsk, job, "dsk", width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled
+        )
+        if autoplay_record is not None:
+            movie_autoplay.append(autoplay_record)
+        _invalidate_poster_on_regeneration(record_dsk, autoplay_record)
     if export_cg:
         if export_dir is not None:
             export_dir = ensure_export_dir(export_dir)
@@ -1918,12 +2068,19 @@ def export_maps_job(
         )
         result["destPathCg"] = str(dest_cg)
         _raise_if_cancelled(is_cancelled)
-        record = _apply_poster_frames(
+        record_cg = _apply_poster_frames(
             dest_cg, ops_cg, reveal_poster_times, job, "cg",
             width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_cg is not None:
+            poster_frame.append(record_cg)
+        autoplay_record = _apply_movie_autoplay(
+            dest_cg, ops_cg, job, "cg", width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled
+        )
+        if autoplay_record is not None:
+            movie_autoplay.append(autoplay_record)
+        _invalidate_poster_on_regeneration(record_cg, autoplay_record)
+
         flags_cg = _inspect_dest(dest_cg, job, is_cancelled=is_cancelled)
     if not export_lw:
         result.pop("destPath", None)
@@ -1940,6 +2097,10 @@ def export_maps_job(
         # Gate off (or no reveal movies to patch): never let a stale record from a
         # prior on/verify run survive in `result`, which starts as a copy of it.
         result.pop("posterFrame", None)
+    if movie_autoplay:
+        result["movieAutoplay"] = movie_autoplay
+    else:
+        result.pop("movieAutoplay", None)
     from obed_edom.validate import flag_dict
 
     if export_lw:

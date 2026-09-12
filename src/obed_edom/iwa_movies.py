@@ -1,8 +1,8 @@
-"""Offline poster-frame patch for ``TSD.MovieArchive`` (reveal movies), separate from
-``iwa_write.py`` which is geometry-scoped. Same surgical single-member-rewrite shape as
-``iwa_write.patch_slide_builds``: locate the owning member via ``id_to_file``, patch only
-that member, verify the re-encode touched exactly the intended archives, and refuse
-(deck untouched) otherwise.
+"""Offline poster-frame/autoplay patches for ``TSD.MovieArchive`` (reveal movies),
+separate from ``iwa_write.py`` which is geometry-scoped. Same surgical
+single-member-rewrite shape as ``iwa_write.patch_slide_builds``: locate the owning
+member via ``id_to_file``, patch only that member, verify the re-encode touched
+exactly the intended archives, and refuse (deck untouched) otherwise.
 """
 from __future__ import annotations
 
@@ -53,6 +53,7 @@ def movie_archives(deck: Path) -> list[dict]:
                     "startTime": float(obj.get("startTime") or 0.0),
                     "endTime": float(obj.get("endTime") or 0.0),
                     "autoPlay": bool(obj.get("autoPlay") or False),
+                    "playsAcrossSlides": bool(obj.get("playsAcrossSlides") or False),
                     "hasPosterImageData": bool((obj.get("posterImageData") or {}).get("identifier")),
                     "naturalSize": (natural.get("width"), natural.get("height")),
                     "dataId": data_id,
@@ -62,15 +63,15 @@ def movie_archives(deck: Path) -> list[dict]:
     return out
 
 
-def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
-    """Match each ``target`` ({x,y,w,h,posterTime,name}) to exactly one composed movie
-    archive frame within ``_FRAME_TOL`` px on all four of x/y/w/h. Refuses (nothing
-    written -- this is planning only) on zero or ambiguous matches; this selection
-    deliberately excludes full-width ``map:True`` background fly movies, whose first
-    frame is already the correct poster.
+def _match_one_to_one(deck: Path, targets: list[dict]) -> dict:
+    """Match each ``target`` ({x,y,w,h,name}) to exactly one composed movie archive
+    frame within ``_FRAME_TOL`` px on all four of x/y/w/h. Refuses (nothing planned)
+    on zero or ambiguous matches. Returns ``{"refused", "reason", "ids"}`` with ``ids``
+    in target order; this selection deliberately excludes full-width ``map:True``
+    background fly movies, whose geometry never matches a landmark target.
     """
     archives = movie_archives(deck)
-    posters: dict[str, float] = {}
+    ids: list[str] = []
     claimed_by: dict[str, Any] = {}
     for i, target in enumerate(targets):
         matches = [
@@ -83,11 +84,7 @@ def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
         ]
         if len(matches) != 1:
             name = target.get("name", i)
-            return {
-                "refused": True,
-                "reason": f"target {name!r} matched {len(matches)} movie archive(s)",
-                "posters": {},
-            }
+            return {"refused": True, "reason": f"target {name!r} matched {len(matches)} movie archive(s)", "ids": []}
         aid = matches[0]["id"]
         if aid in claimed_by:
             name = target.get("name", i)
@@ -95,37 +92,56 @@ def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
             return {
                 "refused": True,
                 "reason": f"movie archive {aid} matched both target {other!r} and target {name!r}",
-                "posters": {},
+                "ids": [],
             }
         claimed_by[aid] = target.get("name", i)
-        posters[aid] = float(target["posterTime"])
+        ids.append(aid)
+    return {"refused": False, "reason": None, "ids": ids}
+
+
+def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
+    """Match each ``target`` ({x,y,w,h,posterTime,name}) to exactly one composed movie
+    archive frame. See `_match_one_to_one`.
+    """
+    match = _match_one_to_one(deck, targets)
+    if match["refused"]:
+        return {"refused": True, "reason": match["reason"], "posters": {}}
+    posters = {aid: float(target["posterTime"]) for aid, target in zip(match["ids"], targets)}
     return {"refused": False, "reason": None, "posters": posters}
 
 
-def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
-    """Patch each named ``TSD.MovieArchive``'s ``posterTime`` in place. Modelled
-    line-for-line on ``iwa_write.patch_slide_builds``: refuses (deck untouched) unless
-    every id resolves to a same-member ``TSD.MovieArchive`` and the re-encode changed
-    exactly the intended archive(s). Never touches ``posterImageData``/``endTime``.
+def plan_movie_autoplay(deck: Path, targets: list[dict]) -> dict:
+    """Same one-to-one geometry match as `plan_movie_posters`, for landmark reveal
+    movies that should start playing right after the slide's build-in transition.
+    `target` needs only x/y/w/h/name.
+    """
+    match = _match_one_to_one(deck, targets)
+    if match["refused"]:
+        return {"refused": True, "reason": match["reason"], "ids": []}
+    return {"refused": False, "reason": None, "ids": match["ids"]}
+
+
+def _patch_archive_fields(deck: Path, patches: list[tuple[str, str, dict[str, Any]]]) -> dict:
+    """Patch ``field: value`` pairs onto each named archive in place. ``patches`` is a
+    list of ``(archive_id, pbtype, {field: value})``; the same archive id may not
+    appear twice. Refuses (deck untouched) unless every id resolves to a same-member
+    archive of the stated ``pbtype`` and, per member, the re-encode changed exactly
+    the intended archive(s) -- the same self-check gate as `iwa_write.patch_slide_builds`.
     """
     deck = Path(deck)
-    posters = {str(k): float(v) for k, v in posters.items()}
-    if not posters:
+    if not patches:
         return {"refused": False, "reason": None, "touched": [], "applied": 0}
 
     objects, id_to_file, _file_ids = _load_deck(deck)
-    for oid in posters:
+    fields_by_id: dict[str, dict[str, Any]] = {}
+    for oid, pbtype, fields in patches:
         obj = objects.get(oid)
-        if obj is None or obj.get("_pbtype") != "TSD.MovieArchive":
-            return {
-                "refused": True,
-                "reason": f"{oid} does not resolve to a TSD.MovieArchive",
-                "touched": [],
-                "applied": 0,
-            }
+        if obj is None or obj.get("_pbtype") != pbtype:
+            return {"refused": True, "reason": f"{oid} does not resolve to a {pbtype}", "touched": [], "applied": 0}
+        fields_by_id[oid] = fields
 
     by_member: dict[str, list[str]] = {}
-    for oid in posters:
+    for oid, _pbtype, _fields in patches:
         member = id_to_file.get(oid)
         if member is None:
             return {"refused": True, "reason": f"{oid} has no owning member", "touched": [], "applied": 0}
@@ -147,13 +163,14 @@ def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
                     if aid not in wanted:
                         continue
                     for o in arch.get("objects") or []:
-                        o["posterTime"] = float(posters[aid])
+                        for field, value in fields_by_id[aid].items():
+                            o[field] = value
                         touched += 1
 
             if touched != len(wanted):
                 return {
                     "refused": True,
-                    "reason": f"expected to touch {len(wanted)} movie(s) in {member}, touched {touched}",
+                    "reason": f"expected to touch {len(wanted)} archive(s) in {member}, touched {touched}",
                     "touched": [],
                     "applied": 0,
                 }
@@ -164,7 +181,7 @@ def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
             if removed or added or not set(changed) <= wanted:
                 return {
                     "refused": True,
-                    "reason": f"{member}: re-encode touched fewer/other than the intended movie(s) "
+                    "reason": f"{member}: re-encode touched fewer/other than the intended archive(s) "
                     f"(removed={sorted(removed)}, added={sorted(added)}, changed={sorted(changed)})",
                     "touched": [],
                     "applied": 0,
@@ -181,3 +198,119 @@ def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
         return {"refused": True, "reason": f"rewrite failed: {exc}", "touched": [], "applied": 0}
 
     return {"refused": False, "reason": None, "touched": sorted(touched_ids), "applied": applied}
+
+
+def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
+    """Patch each named ``TSD.MovieArchive``'s ``posterTime`` in place. Never touches
+    ``posterImageData``/``endTime``.
+    """
+    posters = {str(k): float(v) for k, v in posters.items()}
+    patches = [(oid, "TSD.MovieArchive", {"posterTime": value}) for oid, value in posters.items()]
+    return _patch_archive_fields(deck, patches)
+
+
+def _movie_slide(objects: dict, movie_id: str) -> str | None:
+    """The one ``KN.SlideArchive`` whose ``drawablesZOrder`` holds ``movie_id``
+    (``None`` on zero or several -- reveal movies are always top-level drawables,
+    the same assumption ``iwa_builds.deck_builds`` makes of a build's target)."""
+    owners = [
+        slide_id
+        for slide_id, _skipped in slide_order(objects)
+        if any(
+            str((ref or {}).get("identifier")) == movie_id
+            for ref in (objects.get(slide_id) or {}).get("drawablesZOrder") or []
+        )
+    ]
+    return owners[0] if len(owners) == 1 else None
+
+
+def _movie_build_chunk(objects: dict, id_to_file: dict, movie_id: str) -> tuple[str | None, str | None]:
+    """Resolve the single ``KN.BuildChunkArchive`` for ``movie_id``'s
+    ``apple:movie-start`` build, THROUGH the owning slide's own ``builds``/
+    ``buildChunks`` timeline -- this repo deliberately leaves orphaned build/chunk
+    archives in place (``iwa_write.patch_slide_builds``), so a global search could
+    patch an archive Keynote never plays. Returns ``(chunk_id, error)``; refuses
+    (``chunk_id`` ``None``) rather than guess.
+    """
+    slide_id = _movie_slide(objects, movie_id)
+    if slide_id is None:
+        return None, f"movie {movie_id} does not resolve to exactly one owning slide"
+    slide = objects.get(slide_id) or {}
+    listed_builds = {str((ref or {}).get("identifier")) for ref in slide.get("builds") or []}
+
+    chunks: list[str] = []
+    for ref in slide.get("buildChunks") or []:
+        chunk_id = str((ref or {}).get("identifier"))
+        chunk = objects.get(chunk_id)
+        if not chunk or chunk.get("_pbtype") != "KN.BuildChunkArchive":
+            continue
+        build_id = str((chunk.get("build") or {}).get("identifier"))
+        if build_id not in listed_builds:
+            continue
+        build = objects.get(build_id) or {}
+        if build.get("_pbtype") != "KN.BuildArchive":
+            continue
+        if str((build.get("drawable") or {}).get("identifier")) != movie_id:
+            continue
+        if ((build.get("attributes") or {}).get("animationAttributes") or {}).get("effect") != "apple:movie-start":
+            continue
+        if id_to_file.get(build_id) != id_to_file.get(movie_id):
+            return None, f"movie {movie_id} build {build_id} lives in another member"
+        chunks.append(chunk_id)
+
+    if len(chunks) != 1:
+        return None, f"movie {movie_id} has {len(chunks)} listed apple:movie-start build chunk(s) on slide {slide_id}"
+    chunk_id = chunks[0]
+    if id_to_file.get(chunk_id) != id_to_file.get(movie_id):
+        return None, f"movie {movie_id} chunk {chunk_id} lives in another member"
+    return chunk_id, None
+
+
+def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Read back each movie's ``playsAcrossSlides`` and its ``apple:movie-start`` build
+    chunk's ``automatic``, for verify-mode logging after `patch_movie_autoplay`."""
+    deck = Path(deck)
+    objects, id_to_file, _file_ids = _load_deck(deck)
+    out: dict[str, dict[str, Any]] = {}
+    for oid in ids:
+        obj = objects.get(oid) or {}
+        chunk_id, _error = _movie_build_chunk(objects, id_to_file, oid)
+        chunk = objects.get(chunk_id) if chunk_id else None
+        out[oid] = {
+            "playsAcrossSlides": bool(obj.get("playsAcrossSlides") or False),
+            "automatic": bool(chunk.get("automatic")) if chunk is not None else None,
+        }
+    return out
+
+
+def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
+    """Start each named landmark reveal movie right after its slide's build-in
+    transition: set the movie's ``apple:movie-start`` build chunk's ``automatic`` to
+    ``True`` and the movie's own ``playsAcrossSlides`` to ``False`` (probe-confirmed
+    against Keynote's own "Start = After Transition" save). Refuses (deck untouched)
+    unless every id resolves to a ``TSD.MovieArchive`` with exactly one such build
+    and chunk.
+    """
+    deck = Path(deck)
+    ids = sorted({str(i) for i in ids})
+    if not ids:
+        return {"refused": False, "reason": None, "touched": [], "applied": 0}
+
+    objects, id_to_file, _file_ids = _load_deck(deck)
+    for oid in ids:
+        obj = objects.get(oid)
+        if obj is None or obj.get("_pbtype") != "TSD.MovieArchive":
+            return {"refused": True, "reason": f"{oid} does not resolve to a TSD.MovieArchive", "touched": [], "applied": 0}
+
+    patches: list[tuple[str, str, dict[str, Any]]] = []
+    for movie_id in ids:
+        chunk_id, error = _movie_build_chunk(objects, id_to_file, movie_id)
+        if error:
+            return {"refused": True, "reason": error, "touched": [], "applied": 0}
+        patches.append((chunk_id, "KN.BuildChunkArchive", {"automatic": True}))
+        patches.append((movie_id, "TSD.MovieArchive", {"playsAcrossSlides": False}))
+
+    result = _patch_archive_fields(deck, patches)
+    if result["refused"]:
+        return {"refused": True, "reason": result["reason"], "touched": [], "applied": 0}
+    return {"refused": False, "reason": None, "touched": ids, "applied": len(ids)}
