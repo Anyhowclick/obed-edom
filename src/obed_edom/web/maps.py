@@ -131,9 +131,11 @@ class MapsCommit:
                 if dest.exists():
                     backup = dest.with_name(f"{dest.name}.obedbak-{uuid.uuid4().hex}")
                     dest.replace(backup)
+                    promoted.append((dest, backup))
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 tmp.replace(dest)
-                promoted.append((dest, backup))
+                if backup is None:
+                    promoted.append((dest, None))
         except Exception:
             self._restore(promoted)
             self._abort()
@@ -1502,13 +1504,16 @@ async def bootstrap_csv(
     if not places:
         raise HTTPException(400, ["No places found"])
     try:
-        if targetSlideId:
-            updated = _runner().rerun(
-                job_id,
-                lambda j, rows=places, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
-            )
-        else:
-            updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
+        with _mutation_lock(job_id):
+            job = _job_or_404(job_id)
+            _require_idle(job)
+            if targetSlideId:
+                updated = _runner().rerun(
+                    job_id,
+                    lambda j, rows=places, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
+                )
+            else:
+                updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:
@@ -1548,7 +1553,10 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
     except ImportError as exc:
         raise HTTPException(501, "Maps Keynote export is not available yet") from exc
     try:
-        updated = _runner().rerun(job_id, lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk: _run_export(j, lw, cg, dsk))
+        with _mutation_lock(job_id):
+            job = _job_or_404(job_id)
+            _require_idle(job)
+            updated = _runner().rerun(job_id, lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk: _run_export(j, lw, cg, dsk))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:
