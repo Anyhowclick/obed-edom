@@ -334,6 +334,41 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     assert client.get("/api/settings").json()["reuseThreshold"] == 0.8
 
 
+def test_settings_rejects_private_root_export_dir(monkeypatch, tmp_path):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "settings_path", lambda root=None: tmp_path / "settings.json")
+    client = TestClient(app)
+    from obed_edom.paths import output_root
+
+    res = client.put("/api/settings", json={"defaultExportDir": str(output_root() / ".maps")})
+    assert res.status_code == 400
+
+
+def test_outline_endpoint_writes_findings_pdf_to_export_dir(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    export_dir = tmp_path / "exports"
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path), "export_dir": str(export_dir)})
+    assert started.status_code == 200
+    job = _wait(client, started.json()["id"])
+    assert job["status"] == "done", job.get("error")
+    outline_report = Path(job["result"]["outlineReport"])
+    assert outline_report.parent == export_dir.resolve()
+    assert outline_report.is_file()
+
+
+def test_outline_endpoint_rejects_private_root_export_dir(tmp_path):
+    from obed_edom.paths import output_root
+
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    res = client.post(
+        "/api/outline", data={"path": str(path), "export_dir": str(output_root() / ".outline")}
+    )
+    assert res.status_code == 400
+
+
 def _wait(client, job_id, tries=120):
     import time
 
@@ -537,6 +572,71 @@ def test_resize_asks_for_framings_before_remapping(tmp_path, monkeypatch):
     assert seen["slide_range"] is None
     assert seen["framing_overrides"] == {1: 5}
     assert any("every slide" in line for line in job["logs"])
+
+
+def test_resize_apply_writes_cg_to_export_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    seen = {}
+
+    def fake_remap(path, dest, **kwargs):
+        seen["dest"] = dest
+        dest.write_text("cg")
+        return {"dest": str(dest), "counts": {}, "applied": 1, "missed": 0}
+
+    def fake_acquire(source, *, slide_range, mode, say):
+        return {"slideWidth": 7680, "slideHeight": 1080, "slideCount": 1, "slides": []}
+
+    def fake_inspect(path, **kwargs):
+        return {"slideWidth": 1920, "slideHeight": 1080, "slides": []}
+
+    def fake_propose(wall, template, **kwargs):
+        return {
+            "wallPath": str(wall),
+            "templatePath": str(template),
+            "wallDigests": ["d0"],
+            "templateDigest": "t0",
+            "destWidth": 1920,
+            "destHeight": 1080,
+            "wallWidth": 7680,
+            "wallHeight": 1080,
+            "pages": [
+                {"slide": 1, "index": 0, "autoTemplateSlide": 2, "autoFellBack": False,
+                 "needsAttention": False, "noUsableFraming": False, "candidates": []}
+            ],
+            "needAttention": [],
+            "noUsableFraming": [],
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap)
+    monkeypatch.setattr(app_mod, "acquire_wall_payload", fake_acquire)
+    monkeypatch.setattr(app_mod, "inspect_keynote", fake_inspect)
+    monkeypatch.setattr(app_mod, "propose_framings", fake_propose)
+    client = TestClient(app)
+    deck = tmp_path / "Wall.key"
+    deck.write_text("placeholder")
+    template = tmp_path / "Base_CG_Assets.key"
+    template.write_text("placeholder")
+    export_dir = tmp_path / "exports"
+    started = client.post(
+        "/api/resize",
+        data={
+            "path": str(deck),
+            "template_path": str(template),
+            "export": "false",
+            "export_dir": str(export_dir),
+        },
+    )
+    assert started.status_code == 200
+    job_id = started.json()["id"]
+    _wait(client, job_id)
+
+    confirmed = client.post(f"/api/resize/{job_id}/apply")
+    assert confirmed.status_code == 200
+    job = _wait(client, job_id)
+    assert job["status"] == "done", job.get("error")
+    assert seen["dest"].parent == export_dir.resolve()
+    assert Path(job["result"]["destPath"]).parent == export_dir.resolve()
 
 
 def test_side_content_whitelist_and_undo_round_trip(tmp_path, monkeypatch):
