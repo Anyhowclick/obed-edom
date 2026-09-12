@@ -49,9 +49,9 @@ def load_settings(root: Path | None = None) -> dict:
     return _clamp(data)
 
 
-def save_settings(data: dict, root: Path | None = None) -> dict:
+def save_settings(data: dict, root: Path | None = None, *, validate_dir: bool = True) -> dict:
     out = _clamp(data)
-    if out["defaultExportDir"]:
+    if validate_dir and out["defaultExportDir"]:
         from obed_edom.paths import validate_export_dir  # noqa: PLC0415
 
         out["defaultExportDir"] = str(validate_export_dir(out["defaultExportDir"]))

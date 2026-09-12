@@ -119,10 +119,35 @@ def test_validate_export_dir_accepts_sibling_of_output_root(tmp_path: Path, monk
 
 
 def test_export_destination_job_override_wins(tmp_path: Path):
-    class FakeJob:
-        result = {"exportDir": str(tmp_path / "override")}
+    override = tmp_path / "override"
+    override.mkdir()
 
-    assert export_destination(FakeJob()) == Path(tmp_path / "override")
+    class FakeJob:
+        result = {"exportDir": str(override)}
+
+    assert export_destination(FakeJob()) == override
+    assert "exportDirFallback" not in FakeJob.result
+
+
+def test_export_destination_job_override_removed_falls_back(tmp_path: Path):
+    override = tmp_path / "override"  # never created — removed between submit and run
+
+    class FakeJob:
+        result = {"exportDir": str(override)}
+
+    assert export_destination(FakeJob()) == output_root()
+    assert FakeJob.result["exportDirFallback"] is True
+
+
+def test_export_destination_job_override_now_a_file_falls_back(tmp_path: Path):
+    override = tmp_path / "override"
+    override.write_text("now a file")
+
+    class FakeJob:
+        result = {"exportDir": str(override)}
+
+    assert export_destination(FakeJob()) == output_root()
+    assert FakeJob.result["exportDirFallback"] is True
 
 
 def test_export_destination_setting_wins_over_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

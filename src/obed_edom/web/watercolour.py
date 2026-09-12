@@ -294,7 +294,7 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
             "watercolour",
             lambda job: _run_batch(job, staged, options, mask_specs),
             feature="watercolour",
-            result={"stagingDir": str(staged_root), "exportDir": resolved_export_dir or None},
+            result={"stagingDir": str(staged_root), **({"exportDir": resolved_export_dir} if resolved_export_dir else {})},
         )
     except Exception:
         shutil.rmtree(staged_root, ignore_errors=True)

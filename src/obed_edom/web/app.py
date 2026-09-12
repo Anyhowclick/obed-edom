@@ -158,7 +158,7 @@ def create_app() -> FastAPI:
         if payload.defaultExportDir is not None:
             current["defaultExportDir"] = payload.defaultExportDir
         try:
-            return save_settings(current)
+            return save_settings(current, validate_dir=payload.defaultExportDir is not None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -750,8 +750,24 @@ def _run_generate(
         "dskCount": len(result.dsk_slides) if result.dsk_key else 0,
         "lwTemplate": str(lw_template) if lw_template else None,
         "dskTemplate": str(dsk_template) if dsk_template else None,
-        "exportDir": (job.result or {}).get("exportDir"),
+        **_carried_export_dir(job),
     }
+
+
+def _carried_export_dir(job: Job) -> dict[str, Any]:
+    """`{"exportDir": ..., "exportDirFallback": True}` carried from `job.result`.
+
+    Keys are present only when they have a truthy value — never a `None`
+    `exportDir`, matching maps' `_run_export`.
+    """
+    current = job.result or {}
+    out: dict[str, Any] = {}
+    export_dir = current.get("exportDir")
+    if export_dir:
+        out["exportDir"] = export_dir
+    if current.get("exportDirFallback"):
+        out["exportDirFallback"] = True
+    return out
 
 
 def _form_flag(value: str | None) -> bool:
@@ -1143,7 +1159,7 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
         "kind": "outline",
         "outputDir": str(dest_dir),
         "outlineReport": str(written) if written else None,
-        "exportDir": (job.result or {}).get("exportDir"),
+        **_carried_export_dir(job),
     }
 
 
@@ -1408,7 +1424,7 @@ def _run_resize_propose(
         "includeLists": keep_side_panels,
         "validate": validate,
         "export": export,
-        "exportDir": export_dir or None,
+        **({"exportDir": export_dir} if export_dir else {}),
         **proposal,
         "slideRange": sorted(slide_range) if slide_range else None,
         "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
@@ -1473,7 +1489,7 @@ def _run_resize(
         "path": str(path),
         "outputDir": str(dest_dir),
         "destPath": str(dest),
-        "exportDir": (job.result or {}).get("exportDir"),
+        **_carried_export_dir(job),
         "templatePath": str(template),
         "slideWidth": inspect.get("slideWidth") or info.get("width"),
         "slideHeight": inspect.get("slideHeight") or info.get("height"),
