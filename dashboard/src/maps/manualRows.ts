@@ -1,6 +1,6 @@
 /** Row shape posted to `POST /api/maps/{id}/bootstrap-rows` (BootstrapRow in src/obed_edom/web/maps.py). */
 export type MapsBootstrapRow = {
-  name: string;
+  name?: string;
   place?: string;
   url?: string;
   lat?: number;
@@ -21,7 +21,7 @@ export type ManualRow = {
   kind: ManualPinKind;
 };
 
-export type ManualRowField = "name" | "place" | "lat" | "lon";
+export type ManualRowField = "name" | "lat" | "lon";
 
 export type ManualRowError = { key: string; index: number; message: string; field?: ManualRowField };
 
@@ -91,7 +91,9 @@ export function validateManualRows(
       return;
     }
     const name = row.name.trim();
-    const entry: MapsBootstrapRow = { name: mode === "pins" ? name || "Pin" : name };
+    const entry: MapsBootstrapRow = {};
+    if (name) entry.name = name;
+    else if (!row.place.trim()) entry.name = "Pin";
     if (row.place.trim()) entry.place = row.place.trim();
     if (row.url.trim()) entry.url = row.url.trim();
     if (row.lat.trim() && row.lon.trim()) {

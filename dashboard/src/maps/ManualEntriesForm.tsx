@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { IconPlus } from "./icons";
 import {
   blankRow,
+  rowIsEmpty,
   validateManualRows,
   MANUAL_MAX_ROWS,
   type ManualMode,
@@ -41,8 +42,12 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
   }, [rows]);
 
   function edit(key: string, patch: Partial<ManualRow>) {
-    setRows((current) => current.map((row) => (row.key === key ? { ...row, ...patch } : row)));
-    setErrors((current) => current.filter((error) => error.key !== key));
+    const row = rows.find((entry) => entry.key === key);
+    setRows((current) => current.map((entry) => (entry.key === key ? { ...entry, ...patch } : entry)));
+    setErrors((current) => {
+      if (!row || rowIsEmpty(row) !== rowIsEmpty({ ...row, ...patch })) return [];
+      return current.filter((error) => error.key && error.key !== key);
+    });
   }
 
   function add() {
@@ -103,7 +108,6 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
               value={row.place}
               disabled={busy}
               aria-label={`Place row ${position}`}
-              aria-invalid={failed === "place" || undefined}
               placeholder="Bedok, Singapore"
               onChange={(event) => edit(row.key, { place: event.target.value })}
             />

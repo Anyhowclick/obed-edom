@@ -26,6 +26,7 @@ let getJobResolution: Job | null = null;
 let saveDeferOnce: Promise<Job> | null = null;
 
 let bootstrapRowsFailOnce: Error | null = null;
+let bootstrapRowsDeferOnce: Promise<Job> | null = null;
 let bootstrapRowsCalls: Array<{ id: string; body: BootstrapRowsArgs[1] }> = [];
 
 let pollJobResolution: Job | null = null;
@@ -77,6 +78,11 @@ export const bootstrapMapsRows = vi.fn<typeof actual.bootstrapMapsRows>(async (i
     bootstrapRowsFailOnce = null;
     throw err;
   }
+  if (bootstrapRowsDeferOnce) {
+    const deferred = bootstrapRowsDeferOnce;
+    bootstrapRowsDeferOnce = null;
+    return deferred;
+  }
   return makeJob({ id, status: "queued" });
 });
 
@@ -105,6 +111,7 @@ export function resetMapsApiScript() {
   renameCalls = [];
   getJobResolution = null;
   bootstrapRowsFailOnce = null;
+  bootstrapRowsDeferOnce = null;
   bootstrapRowsCalls = [];
   pollJobResolution = null;
   saveMapsState.mockClear();
@@ -152,6 +159,9 @@ export const mapsApiScript = {
   bootstrapMapsRows: {
     failOnce(err: Error) {
       bootstrapRowsFailOnce = err;
+    },
+    deferOnce(promise: Promise<Job>) {
+      bootstrapRowsDeferOnce = promise;
     },
     get calls() {
       return bootstrapRowsCalls;

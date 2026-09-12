@@ -253,7 +253,9 @@ export function MapsTab() {
   const layersRef = useRef<HTMLDivElement | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
   const [manualMode, setManualMode] = useState<ManualMode | null>(null);
+  const [manualBusy, setManualBusy] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
@@ -1257,8 +1259,13 @@ export function MapsTab() {
     await selectSlide(last.id, { flush: false, audience: activeAudienceRef.current });
   }
 
+  function closeManual() {
+    setManualMode(null);
+    addButtonRef.current?.focus();
+  }
+
   async function onManualRows(rows: MapsBootstrapRow[], mode: ManualMode) {
-    if (!job || !rows.length) return;
+    if (!job || !rows.length || manualBusy) return;
     const target = mode === "pins" ? active : null;
     if (mode === "pins" && !target) {
       setError("Select a slide first.");
@@ -1266,6 +1273,7 @@ export function MapsTab() {
     }
     const targetJobId = job.id;
     setError(null);
+    setManualBusy(true);
     const beforeIds = new Set((docRef.current?.slides || []).map((slide) => slide.id));
     try {
       await persistCurrentState();
@@ -1282,13 +1290,15 @@ export function MapsTab() {
       if (jobRef.current?.id !== targetJobId) return;
       if (done.status === "error") return;
       reconcileServerJob(done);
-      setManualMode(null);
+      closeManual();
       if (mode === "slides") {
         const created = (docRef.current?.slides || []).find((slide) => !beforeIds.has(slide.id));
         if (created) void selectSlide(created.id, { flush: false });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setManualBusy(false);
     }
   }
 
@@ -1897,6 +1907,7 @@ export function MapsTab() {
         <div className="maps-deck-actions" ref={addMenuRef}>
           <button
             className="btn secondary"
+            ref={addButtonRef}
             type="button"
             disabled={locked}
             aria-expanded={addMenuOpen}
@@ -2154,8 +2165,8 @@ export function MapsTab() {
         <ManualEntriesForm
           key={manualMode}
           mode={manualMode}
-          busy={locked}
-          onCancel={() => setManualMode(null)}
+          busy={locked || manualBusy}
+          onCancel={closeManual}
           onDone={(payload) => void onManualRows(payload, manualMode)}
         />
       )}

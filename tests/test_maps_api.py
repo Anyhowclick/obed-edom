@@ -3755,6 +3755,24 @@ def test_bootstrap_rows_place_field_overrides_the_geocode_query(monkeypatch):
     assert new_slide["title"] == "Home"
 
 
+def test_bootstrap_rows_nameless_place_row_takes_the_geocoded_label(monkeypatch):
+    def fake_geocode(query, *, wait=False):
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": "Bedok, Singapore"}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"place": "Bedok, Singapore", "kind": "dropPin"}]},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert new_slide["title"] == "Bedok, Singapore"
+    assert new_slide["churches"][0]["name"] == "Bedok, Singapore"
+
+
 def test_bootstrap_rows_url_supplies_the_camera(monkeypatch):
     _forbid_nominatim(monkeypatch)
     job = _seed()
