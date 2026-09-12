@@ -2212,6 +2212,7 @@ export function MapsTab() {
 
       {manualMode && (
         <ManualEntriesForm
+          key={manualMode}
           mode={manualMode}
           busy={locked}
           onCancel={() => setManualMode(null)}

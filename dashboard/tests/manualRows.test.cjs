@@ -63,8 +63,19 @@ test("validateManualRows rejects a pins row whose only locator is a link", () =>
   const { payload, errors } = validateManualRows([row({ url: "https://maps.app.goo.gl/x1Y2z3" })], "pins");
   assert.deepEqual(payload, []);
   assert.deepEqual(errors.map((e) => e.message), [
-    "Row 1: enter a name, a place or coordinates — a link on its own is not enough.",
+    "Row 1: enter a name, a place or coordinates — a link alone has nothing to name the pin with.",
   ]);
+});
+
+test("validateManualRows names the field that failed", () => {
+  const noName = validateManualRows([row({ place: "Bedok, Singapore" })], "slides");
+  assert.equal(noName.errors[0].field, "name");
+  const halfPair = validateManualRows([row({ name: "X", lat: "1.3" })], "slides");
+  assert.equal(halfPair.errors[0].field, "lon");
+  const badLat = validateManualRows([row({ name: "X", lat: "86", lon: "10" })], "slides");
+  assert.equal(badLat.errors[0].field, "lat");
+  const badLon = validateManualRows([row({ name: "X", lat: "1", lon: "181" })], "slides");
+  assert.equal(badLon.errors[0].field, "lon");
 });
 
 test("validateManualRows requires both a latitude and a longitude", () => {

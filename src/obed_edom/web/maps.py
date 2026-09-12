@@ -985,13 +985,15 @@ def _run_pin_bootstrap(job, places: list[Place], slide_id: str, audience: str) -
     view = dict(target.get("cg") or {}) if audience == "cg" and isinstance(target.get("cg"), dict) else target
     churches = [dict(church) for church in (view.get("churches") or [])]
     view_zoom = (view.get("camera") or {}).get("zoom")
+    try:
+        size_zoom: float | None = clamp_zoom(float(view_zoom))
+    except (TypeError, ValueError):
+        size_zoom = None
     for place in places:
         generated = _row_slide(place, "csv")["churches"][0]
         pin = {**generated, "id": _next_pin_id(churches)}
-        try:
-            pin["sizeZoom"] = clamp_zoom(float(view_zoom))
-        except (TypeError, ValueError):
-            pass
+        if size_zoom is not None:
+            pin["sizeZoom"] = size_zoom
         churches.append(pin)
     if view is target:
         target["churches"] = churches
