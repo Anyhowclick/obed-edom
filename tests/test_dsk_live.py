@@ -236,3 +236,29 @@ def test_live_batch_1712_retry_recopies_scratch(monkeypatch, tmp_path):
 
     assert calls.count("copy_keynote") == 2
     assert "quit_and_wait" in calls
+
+
+def test_live_batch_run_no_retry_flag(monkeypatch, tmp_path):
+    calls, state = _stub_batch(monkeypatch)
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+
+    monkeypatch.setattr(dl, "_quit_and_wait_for_exit", lambda *a: calls.append("quit_and_wait"))
+
+    def fake_run_osascript(script_path, *, timeout=3600, register_proc=None, on_progress=None):
+        calls.append("run_osascript")
+        return _FakeCompleted(returncode=1, stderr="-1712")
+
+    monkeypatch.setattr(dl, "_run_osascript", fake_run_osascript)
+
+    with dl.LiveBatch(fw, out_dir) as batch:
+        script_path = batch.work / "script.applescript"
+        script_path.write_text("script")
+        proc = batch.run(script_path, retry_on_1712=False)
+        assert proc.returncode == 1
+
+    assert calls.count("run_osascript") == 1
+    assert calls.count("copy_keynote") == 1
+    assert "quit_and_wait" not in calls

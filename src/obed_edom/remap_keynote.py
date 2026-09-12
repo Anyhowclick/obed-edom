@@ -52,6 +52,52 @@ _AS_KIND_NAMES = {
     "line": "line",
 }
 
+
+def _as_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", '" & return & "')
+    )
+
+
+def _delete_or_hide_placeholder_lines(
+    number: int, ordinal: int, addr: str, *, indent: str = "        "
+) -> list[str]:
+    """``delete theObj``, except Keynote refuses to delete the shape bound as the slide's
+    default title/body item (errNum -10003, read-only per Keynote.sdef) -- for that one,
+    hide it instead via the read-write ``title showing``/``body showing`` slide properties.
+    Identity is compared by ``id of``, inside a ``try`` (F3: AppleScript ``is`` between
+    object specifiers is not a documented identity test; a raising ``default ... item``
+    -- e.g. no title item on the slide -- falls through to plain delete, as before). Each
+    hide branch logs ``HIDDEN\\t<number>\\t<addr>\\ttitle``/``body`` so the saved deck's
+    log states which object tripped it (F1). Shared by `dsk_assemble` and
+    `dsk_movie_export`; `indent` lets each call site nest it at its own depth."""
+    escaped_addr = _as_escape(addr)
+    body = [
+        "set isTitle to false",
+        "set isBody to false",
+        "try",
+        f"  set isTitle to (id of theObj is (id of default title item of slide {ordinal}))",
+        "end try",
+        "try",
+        f"  if not isTitle then set isBody to (id of theObj is (id of default body item of slide {ordinal}))",
+        "end try",
+        "if isTitle then",
+        f"  set title showing of slide {ordinal} to false",
+        f'  log ("HIDDEN" & tab & "{number}" & tab & "{escaped_addr}" & tab & "title")',
+        "else if isBody then",
+        f"  set body showing of slide {ordinal} to false",
+        f'  log ("HIDDEN" & tab & "{number}" & tab & "{escaped_addr}" & tab & "body")',
+        "else",
+        "  delete theObj",
+        "end if",
+    ]
+    return [f"{indent}{ln}" for ln in body]
+
 # Emitted by `_build_slide_geometry_script`'s per-spec `on error` and parsed back out of
 # osascript's stderr by `offline_write._run_fallback_scripts`. Pass 1 runs the same body
 # via JXA's `runAppleScript` -> `doShellScript`, which discards stderr on a zero exit, so

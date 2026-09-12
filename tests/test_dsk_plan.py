@@ -17,6 +17,7 @@ from obed_edom.dsk_plan import (
     BandRefusal,
     CropFallback,
     CropRefusal,
+    Run,
     TextBox,
     classify_deck,
     classify_slide,
@@ -30,6 +31,7 @@ from obed_edom.dsk_plan import (
     read_band,
     resolve_font_path,
     wrapped_height,
+    wrapped_height_runs,
 )
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect
 
@@ -1223,6 +1225,46 @@ def test_fit_text_stack_bare_band_ordering():
     t17, t38, t49 = _t_for(17), _t_for(38), _t_for(49)
     assert t17 > t49  # heavier GW 49 badge needs more shrink than the two-box GW 17
     assert t17 == pytest.approx(0.87, abs=0.02)
+
+
+def test_wrapped_height_runs_charges_emphasis_run_font():
+    # GW 17 text:2's mixed-run shape (F2): a 51.8pt lead run followed by a 62.9pt
+    # ArgentCF-Bold emphasis run at the same wrap width. The single-font estimator only
+    # ever sees the lead style, so it under-predicts the emphasis run's own wrap.
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    lead_text = "Steadfast love of the LORD never ceases,"
+    emphasis_text = "his mercies never come to an end;"
+    single = wrapped_height(f"{lead_text} {emphasis_text}", "AzoSans-Regular", 51.8, 1849.0)
+    runs = (Run(lead_text, "AzoSans-Regular", 51.8), Run(emphasis_text, "ArgentCF-Bold", 62.9))
+    predicted = wrapped_height_runs(runs, 1849.0)
+    assert single is not None and predicted is not None
+    lines = (predicted - 21.0) / (1.157 * 62.9)
+    assert lines >= 1.9
+    assert predicted >= 1.9 * single
+
+
+def test_delete_order_dedupes_dual_shape_text_address():
+    # GW 17's shape:1 (`shape 2`) and text:3 (`text item 4`) are the same underlying
+    # object addressed under two kinds; id_by_item marks the dual so _delete_order keeps
+    # only the first survivor in delete order (F2).
+    ids = [("shape", 1), ("text", 5), ("text", 4), ("text", 3)]
+    id_by_item = {("shape", 1): "obj-shared", ("text", 3): "obj-shared", ("text", 4): "obj-x", ("text", 5): "obj-y"}
+    assert dsk_plan._delete_order(ids, id_by_item) == (("shape", 1), ("text", 5), ("text", 4))
+
+
+def test_delete_order_without_id_map_keeps_every_address():
+    ids = [("shape", 1), ("text", 3)]
+    assert dsk_plan._delete_order(ids) == (("shape", 1), ("text", 3))
+
+
+def test_fit_text_stack_height_correction_shrinks_t():
+    _require_font("AzoSans-Regular")
+    box = TextBox(("text", 1), " ".join(["word"] * 60), "AzoSans-Regular", 60.0)
+    without = fit_text_stack([box], TEXT_BAND, 24.0)
+    with_correction = fit_text_stack([box], TEXT_BAND, 24.0, height_correction={box.item_id: 1.4})
+    assert without is not None and with_correction is not None
+    assert with_correction[0] < without[0]
 
 
 def _image_obj(*, x, y, w, h, angle=0.0, mask=None, natural=None, mask_id="mask0"):

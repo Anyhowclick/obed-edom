@@ -453,9 +453,13 @@ class LiveBatch:
         script_path: Path,
         *,
         on_progress: Callable[[int], None] | None = None,
+        retry_on_1712: bool = True,
     ) -> subprocess.CompletedProcess:
         """Runs `script_path` under the RSS watchdog, retrying once on a -1712 timeout
-        (quit-and-wait for a clean exit, then a pristine re-copy of the scratch)."""
+        (quit-and-wait for a clean exit, then a pristine re-copy of the scratch).
+        `retry_on_1712=False` (a refit pass against an already-written scratch, D2 step 5)
+        disables the retry -- re-copying would discard the earlier pass's writes -- so a
+        -1712 there aborts the batch instead."""
         assert self.scratch is not None and self.work is not None
         stem_name = self.scratch.stem
         doc_name = self.scratch.name
@@ -481,7 +485,7 @@ class LiveBatch:
             if attempts > 1:
                 copy_keynote(self.deck, self.scratch)
             proc = _run_osascript(script_path, register_proc=register_proc, on_progress=on_progress)
-            if proc.returncode == 0 or "-1712" not in (proc.stderr or "") or attempts >= 2:
+            if proc.returncode == 0 or "-1712" not in (proc.stderr or "") or attempts >= 2 or not retry_on_1712:
                 break
             self.log("AppleScript -1712 timeout; retrying export batch once.")
             _quit_and_wait_for_exit(stem_name, doc_name, self.out_dir)

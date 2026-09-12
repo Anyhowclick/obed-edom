@@ -35,8 +35,24 @@ from obed_edom.offline_inspect import _round_pt, offline_wall_payload
 ItemId = tuple[str, int]
 
 
-def _delete_order(ids: Sequence[ItemId]) -> tuple[ItemId, ...]:
-    return tuple(sorted(ids, key=lambda iid: (iid[0], -iid[1])))
+def _delete_order(ids: Sequence[ItemId], id_by_item: Mapping[ItemId, str] | None = None) -> tuple[ItemId, ...]:
+    """Deletion order: reverse ``kindIndex`` within each ``kind`` (deleting high-to-low so
+    a not-yet-deleted index never shifts). ``id_by_item`` dedupes duals -- the same
+    underlying object addressed under two kinds, e.g. a text box also enumerated as its
+    owning shape -- to a single address, keeping the first survivor in that order (F2)."""
+    ordered = sorted(ids, key=lambda iid: (iid[0], -iid[1]))
+    if not id_by_item:
+        return tuple(ordered)
+    seen: set[str] = set()
+    deduped: list[ItemId] = []
+    for iid in ordered:
+        obj_id = id_by_item.get(iid)
+        if obj_id is not None:
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+        deduped.append(iid)
+    return tuple(deduped)
 
 
 def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bool = False) -> bool:
@@ -896,22 +912,105 @@ def wrapped_height(text: str, font_name: str, size: float, width: float) -> floa
 
 
 @dataclass(frozen=True)
-class TextBox:
-    item_id: ItemId
+class Run:
     text: str
     font_name: str
     size: float
 
 
+def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
+    """Run-aware sibling of ``wrapped_height`` (F2): wraps across each run's own
+    resolved font at its own size, charging every wrapped line's height by the
+    tallest run on that line. ``None`` when a run's font cannot be resolved."""
+    import re as _re  # noqa: PLC0415
+    from PIL import ImageFont  # noqa: PLC0415
+
+    fonts: dict[tuple[str, float], Any] = {}
+
+    def _font_for(name: str, size: float) -> Any | None:
+        key = (name, size)
+        font = fonts.get(key)
+        if font is None:
+            path = resolve_font_path(name)
+            if path is None:
+                return None
+            font = ImageFont.truetype(str(path), int(round(size * _WRAP_OVERSAMPLE)))
+            fonts[key] = font
+        return font
+
+    break_pattern = "[" + "".join(_WRAP_BREAK_CHARS) + "]"
+    para_pattern = "\r\n|[" + "".join(_PARA_BREAK_CHARS) + "]"
+
+    paragraphs: list[list[tuple[str, Any, float]]] = [[]]
+    last_size = 0.0
+    for run in runs:
+        font = _font_for(run.font_name, run.size)
+        if font is None:
+            return None
+        last_size = run.size
+        pieces = _re.split(para_pattern, run.text or "")
+        for i, piece in enumerate(pieces):
+            if i > 0:
+                paragraphs.append([])
+            if piece == "":
+                continue
+            for word in _re.split(break_pattern, piece):
+                paragraphs[-1].append((word, font, run.size))
+
+    scaled_width = width * _WRAP_OVERSAMPLE
+    lines: list[list[tuple[str, Any, float]]] = []
+    for paragraph in paragraphs:
+        if not paragraph:
+            lines.append([])
+            continue
+        current: list[tuple[str, Any, float]] = []
+        current_width = 0.0
+        for word, font, size in paragraph:
+            word_width = font.getlength(word)
+            space_width = font.getlength(" ") if current else 0.0
+            trial_width = current_width + space_width + word_width
+            if not current or trial_width <= scaled_width:
+                current.append((word, font, size))
+                current_width = trial_width
+            else:
+                lines.append(current)
+                current = [(word, font, size)]
+                current_width = word_width
+        lines.append(current)
+
+    total = 0.0
+    for line in lines:
+        max_size = max((size for _w, _f, size in line), default=last_size)
+        total += _LINE_HEIGHT_FACTOR * max_size
+    return total + _BOX_PADDING_PT
+
+
+@dataclass(frozen=True)
+class TextBox:
+    item_id: ItemId
+    text: str
+    font_name: str
+    size: float
+    runs: tuple[Run, ...] | None = None
+
+
 def fit_text_stack(
-    boxes: Sequence[TextBox], band: Band, min_text_pt: float, *, gap: float = _TEXT_GAP_PT
+    boxes: Sequence[TextBox],
+    band: Band,
+    min_text_pt: float,
+    *,
+    gap: float = _TEXT_GAP_PT,
+    height_correction: Mapping[ItemId, float] | None = None,
 ) -> tuple[float, dict[ItemId, float], dict[ItemId, float]] | None:
     """Largest ``t`` in ``(0, 1]`` fitting ``boxes`` stacked with ``gap`` into ``band``, or
-    ``None``. A fixed safety term against the estimator's own measured under-prediction
-    is charged for every box count; the live ``OVERFLOW`` read-back is the final authority
-    on wrap."""
+    ``None``. Uses ``wrapped_height_runs`` when a box carries ``runs``, else the single-font
+    ``wrapped_height``; either way ``height_correction`` (a per-box multiplier from a live
+    ``MEASURE`` round, D2 step 4) scales the estimate before the fit check. A fixed safety
+    term against the estimator's own measured under-prediction is charged for every box
+    count; the live ``OVERFLOW`` read-back is the final authority on wrap."""
     if not boxes:
         return None
+    height_correction = height_correction or {}
     t = 1.00
     while t > 0.0:
         sizes = {box.item_id: box.size * t for box in boxes}
@@ -919,9 +1018,14 @@ def fit_text_stack(
             return None
         heights: dict[ItemId, float] = {}
         for box in boxes:
-            h = wrapped_height(box.text, box.font_name, sizes[box.item_id], band.width)
+            if box.runs:
+                scaled_runs = tuple(Run(r.text, r.font_name, r.size * t) for r in box.runs)
+                h = wrapped_height_runs(scaled_runs, band.width)
+            else:
+                h = wrapped_height(box.text, box.font_name, sizes[box.item_id], band.width)
             if h is None:
                 return None
+            h *= height_correction.get(box.item_id, 1.0)
             heights[box.item_id] = h
         total = sum(heights.values()) + gap * (len(boxes) - 1) + _TEXT_SAFETY_PT
         if total <= band.height:

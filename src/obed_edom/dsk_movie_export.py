@@ -60,13 +60,12 @@ from obed_edom.dsk_live import (
     release_lock,
     run_osascript,
 )
-from obed_edom.dsk_assemble import _delete_or_hide_placeholder_lines
 from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
 from obed_edom.iwa_runs import attach_group_content_signature
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall
 from obed_edom.maps_movie import ffmpeg_exe
 from obed_edom.offline_inspect import offline_wall_payload
-from obed_edom.remap_keynote import _AS_KIND_NAMES, copy_keynote
+from obed_edom.remap_keynote import _AS_KIND_NAMES, _delete_or_hide_placeholder_lines, copy_keynote
 
 _DELETEFAIL_RE = re.compile(r"^DELETEFAIL\t(\d+)\t([^\t]*)\t(-?\d+)\t(.*)$")
 
@@ -309,7 +308,7 @@ def _build_export_script(
                 "      try",
                 f"        set theObj to {addr}",
                 "        if locked of theObj then set locked of theObj to false",
-                *(f"  {ln}" for ln in _delete_or_hide_placeholder_lines(j.ordinal)),
+                *_delete_or_hide_placeholder_lines(j.slide, j.ordinal, addr, indent="          "),
                 "      on error errMsg number errNum",
                 f'        log ("DELETEFAIL" & tab & "{j.slide}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
                 "      end try",

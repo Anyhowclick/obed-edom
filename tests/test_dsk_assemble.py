@@ -16,8 +16,11 @@ from obed_edom.dsk_assemble import (
     AssemblyRefusal,
     SlideDecision,
     SplitPart,
+    TextRefit,
+    _parse_measure_lines,
     assemble_dsk_deck,
     build_assembly_script,
+    build_refit_script,
     load_assembly_inputs,
     plan_assembly,
 )
@@ -319,6 +322,44 @@ def test_script_overflow_readback_omitted_for_uniform_run_text():
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
     )
     assert 'OVERFLOW" & tab & "text:0"' not in script
+
+
+def test_assembly_script_finalize_false_has_no_save():
+    item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"), finalize=False
+    )
+    assert "save theDoc in POSIX file" not in script
+    assert "close theDoc saving no" not in script
+
+
+def test_refit_script_reopens_and_saves():
+    item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    refits = {1: {("text", 0): TextRefit(Rect(43.0, 704.0, 1892.0, 200.0), run_sizes=44.0)}}
+    script = build_refit_script(
+        plan, refits, ordinals=plan.ordinals, scratch_path=Path("/tmp/scratch.key"),
+        staging_path=Path("/tmp/staged.key"),
+    )
+    assert 'set theDoc to open theFile' in script
+    assert "save theDoc in POSIX file" in script
+    assert "close theDoc saving no" in script
+    assert "set size of object text of theObj to 44" in script
+    assert 'MEASURE" & tab & "text:0"' in script
+
+
+def test_assemble_parses_measure_lines():
+    stderr = 'OBED\t13\tMEASURE\ttext:1\t269.0\nOBED\t13\tOVERFLOW\ttext:1\t269.0\n'
+    assert _parse_measure_lines(stderr) == {(13, "text:1"): 269.0}
 
 
 def test_stacked_unresolved_run_gap_below_full_size_refuses(monkeypatch):
@@ -1000,20 +1041,44 @@ def test_delete_or_hide_placeholder_lines_branches_on_title_and_body():
     """Keynote refuses ``delete`` on the shape bound as the slide's default title/body
     item (errNum -10003, ``default title item``/``default body item`` are read-only per
     Keynote.sdef) -- hide it via the read-write ``title showing``/``body showing``
-    properties instead, matching plain delete for every other shape."""
-    lines = dsa._delete_or_hide_placeholder_lines(17)
+    properties instead, matching plain delete for every other shape. Identity is an
+    ``id of`` comparison inside a ``try`` (F3), and each hide branch logs a ``HIDDEN``
+    marker naming the object and slot (F1)."""
+    from obed_edom.remap_keynote import _delete_or_hide_placeholder_lines
+
+    lines = _delete_or_hide_placeholder_lines(17, 17, "shape 2 of slide 17")
     script = "\n".join(lines)
     assert "delete theObj" in script
     assert "set title showing of slide 17 to false" in script
     assert "set body showing of slide 17 to false" in script
-    assert "default title item of slide 17" in script
-    assert "default body item of slide 17" in script
+    assert "id of default title item of slide 17" in script
+    assert "id of default body item of slide 17" in script
+    assert 'HIDDEN" & tab & "17" & tab & "shape 2 of slide 17" & tab & "title"' in script
+    assert 'HIDDEN" & tab & "17" & tab & "shape 2 of slide 17" & tab & "body"' in script
+    assert script.count("try") >= 2  # each id-of probe is wrapped, not the bare `is`
 
 
-def test_script_mirror_dedupe_delete_hides_placeholder_instead_of_failing():
-    """GW-17-shaped case: a text slide whose mirror dedupe deletes text3/text4/text5 +
-    shape1 on the excluded side. Every delete -- text and shape alike -- must go through
-    the title/body placeholder guard, not a bare unconditional ``delete theObj``."""
+def test_delete_or_hide_placeholder_lines_missing_title_item_falls_through_to_delete():
+    """No title item on the slide: ``default title item`` raises inside the wrapping
+    ``try``, ``isTitle``/``isBody`` stay false, and the object is plainly deleted --
+    the F3 ``missing value`` fall-through, unchanged by the F1/F3 fixes."""
+    from obed_edom.remap_keynote import _delete_or_hide_placeholder_lines
+
+    lines = _delete_or_hide_placeholder_lines(9, 9, "shape 3 of slide 9")
+    script = "\n".join(lines)
+    else_idx = script.index("else")
+    delete_idx = script.index("delete theObj")
+    title_idx = script.index("if isTitle then")
+    assert title_idx < else_idx < delete_idx
+
+
+def test_script_shape_text_dual_dedupes_to_one_delete_address():
+    """GW-17-shaped case: ``shape 2`` and ``text item 4`` are the *same* underlying
+    object (dual: one id under two kinds), so the planned delete set for this slide
+    carries a single address per underlying object; ``build_assembly_script`` must
+    still route every one of those addresses through the title/body placeholder guard,
+    in the given order, not a bare unconditional ``delete theObj`` (F2/F8: the dedupe
+    itself lives in ``dsk_plan._delete_order`` and is covered directly there)."""
     import dataclasses  # noqa: PLC0415
 
     kept_text = _text_item(0, x=2385, y=20, w=626, h=92, runs=[{"size": 40.0}])
@@ -1023,12 +1088,15 @@ def test_script_mirror_dedupe_delete_hides_placeholder_instead_of_failing():
     decisions = {17: SlideDecision(17, "in_deck")}
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
     ordinal = plan.ordinals[17]
-    gw17_deletes = (("shape", 1), ("text", 5), ("text", 4), ("text", 3))
-    plan = dataclasses.replace(plan, deletes={17: gw17_deletes})
+    gw17_deletes_deduped = (("shape", 1), ("text", 5), ("text", 3))  # ("text", 4) is shape 1's dual
+    plan = dataclasses.replace(plan, deletes={17: gw17_deletes_deduped})
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
-    assert script.count(f"set title showing of slide {ordinal} to false") == 4
-    assert script.count(f"set body showing of slide {ordinal} to false") == 4
+    assert script.count(f"set title showing of slide {ordinal} to false") == 3
+    assert script.count(f"set body showing of slide {ordinal} to false") == 3
     assert "delete theObj" in script
+    addrs = [f"shape 2 of slide {ordinal}", f"text item 6 of slide {ordinal}", f"text item 4 of slide {ordinal}"]
+    positions = [script.index(f"set theObj to {addr}") for addr in addrs]
+    assert positions == sorted(positions)
 
 
 def test_script_no_literal_keynote_and_has_obed_err_markers():
@@ -1255,7 +1323,7 @@ def _make_fake_live_batch(stderr_text, returncode=0):
         def __exit__(self, exc_type, exc, _tb):
             return False
 
-        def run(self, script_path, *, on_progress=None):
+        def run(self, script_path, *, on_progress=None, retry_on_1712=True):
             return subprocess.CompletedProcess([], returncode, "", stderr_text)
 
     return _FakeLiveBatch
@@ -1380,6 +1448,139 @@ def test_assemble_parses_overflow_lines_into_result_and_warnings(tmp_path, monke
     assert result.overflows == ({"slide": 13, "item": "text:2", "height": 269.3},)
     assert any("slide 13: text text:2 overflow" in w for w in result.warnings)
     assert 13 not in result.movie_props or "OVERFLOW" not in result.movie_props[13]
+
+
+# --------------------------------------------------------------------------
+# Design-B refit loop (D2 step 4).
+# --------------------------------------------------------------------------
+def _stacked_assemble_fixture(tmp_path):
+    fw_deck = tmp_path / "source.key"
+    fw_deck.mkdir()
+    (fw_deck / "stub").write_bytes(b"x" * 32)
+    out_path = tmp_path / "out" / "assembled.key"
+    text_item = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": " ".join(["word"] * 30), "font": "Helvetica", "size": 40.0,
+    }
+    slide = _slide(13, [text_item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    return fw_deck, out_path, payload, classes, decisions
+
+
+def _make_seq_live_batch(stderr_by_call):
+    calls: list[Path] = []
+
+    class _SeqFakeLiveBatch:
+        def __init__(self, deck, out_dir, *, rss_limit_bytes=0, log=print):
+            self.deck = Path(deck)
+            self.out_dir = Path(out_dir)
+            self.work = self.out_dir / "fake-work"
+            self.scratch = self.work / self.deck.name
+
+        def __enter__(self):
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch.mkdir(parents=True, exist_ok=True)
+            (self.scratch / "marker").write_bytes(b"scratch")
+            return self
+
+        def __exit__(self, exc_type, exc, _tb):
+            return False
+
+        def run(self, script_path, *, on_progress=None, retry_on_1712=True):
+            idx = len(calls)
+            calls.append(script_path)
+            stderr = stderr_by_call[min(idx, len(stderr_by_call) - 1)]
+            return subprocess.CompletedProcess([], 0, "", stderr)
+
+    return _SeqFakeLiveBatch, calls
+
+
+def _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls):
+    monkeypatch.setattr(
+        dsa, "load_assembly_inputs",
+        lambda deck, include_side=frozenset(), text_slide_words=10, no_dedupe=False,
+        no_drop_panel_backdrop=False: (payload, classes, {}),
+    )
+    monkeypatch.setattr(dsa, "LiveBatch", live_batch_cls)
+    monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
+    monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
+    monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
+    monkeypatch.setattr(
+        iwa_write, "match_card_stroke_styles",
+        lambda out_styles, src_styles, *, canvas_scale, min_refs: {
+            "widths": {}, "chosen": [], "notes": [], "out_selected": []
+        },
+    )
+    monkeypatch.setattr(iwa_write, "patch_stroke_widths", lambda deck, widths: {"refused": False})
+    monkeypatch.setattr(
+        iwa_write, "patch_media_stroke", lambda deck, strokes: {"refused": False, "patched": [], "created": []}
+    )
+    monkeypatch.setattr(iwa_builds, "deck_builds", lambda path, *, deck=None: {})
+    monkeypatch.setattr(
+        iwa_builds, "verify_builds",
+        lambda src_by_number, out_by_number, slides=None: {
+            "surplus": [], "missing": [], "transitions": [], "order": []
+        },
+    )
+
+
+def _require_helvetica():
+    if resolve_font_path("Helvetica") is None:
+        pytest.skip("font not present on this machine: Helvetica")
+
+
+def test_refit_loop_converges_in_two_rounds(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t269.0",
+        "OBED\t13\tOVERFLOW\ttext:0\t269.0",
+        "OBED\t13\tdone",
+    ])
+    refit_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t270.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, refit_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 2
+    assert result.overflows == ()
+
+
+def test_refit_loop_refuses_when_still_overflowing(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t500.0",
+        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
+        "OBED\t13\tdone",
+    ])
+    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, still_over_stderr, still_over_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    with pytest.raises(AssemblyRefusal, match="still overflows after refit"):
+        assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 1 + dsa._MAX_REFITS
+
+
+def test_refit_loop_shrinks(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "\n".join([
+        "OBED\t13\tMEASURE\ttext:0\t500.0",
+        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
+        "OBED\t13\tdone",
+    ])
+    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, still_over_stderr, still_over_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+    )
+    assert result.overflows == ()
+    assert any("shrunk to --min-text-pt" in w for w in result.warnings)
+    assert len(calls) == 1 + dsa._MAX_REFITS + 1
 
 
 def test_assemble_dsk_deck_calls_restore_crop_zorder(tmp_path, monkeypatch):
