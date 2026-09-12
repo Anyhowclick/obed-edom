@@ -359,46 +359,36 @@ def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
     return Place(line=line, name=name, url=url, lat=lat, lon=lon, zoom=zoom, kind=kind, query=query, full_query=bool(query))
 
 
-_RESTKEY = "__extra__"
-
-
-def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list[str]]:
-    reader = csv.DictReader(io.StringIO(sample), restkey=_RESTKEY)
+def _parse_header_form(raw_lines: list[str], first_idx: int) -> tuple[list[Place], list[str]]:
     try:
-        fieldnames = [str(f or "").strip().lower() for f in (reader.fieldnames or [])]
+        fieldnames_raw = next(csv.reader([raw_lines[first_idx]]))
     except csv.Error as exc:
-        return [], [f"Line {line_offset + 1}: unreadable row ({exc})"]
+        return [], [f"Line {first_idx + 1}: unreadable row ({exc})"]
+    fieldnames = [str(f or "").strip().lower() for f in fieldnames_raw]
     seen: set[str] = set()
     for field in fieldnames:
         if field in seen:
-            return [], [f"Line {line_offset + 1}: duplicate column {field!r}"]
+            return [], [f"Line {first_idx + 1}: duplicate column {field!r}"]
         seen.add(field)
     single_joinable_header = len(fieldnames) == 1 and fieldnames[0] in _SINGLE_FIELD_HEADERS
     places: list[Place] = []
     errors: list[str] = []
-    row_iter = iter(reader)
-    while True:
-        prev_line_num = reader.line_num
-        try:
-            raw = next(row_iter)
-        except StopIteration:
-            break
-        except csv.Error as exc:
-            errors.append(f"Line {line_offset + prev_line_num + 1}: unreadable row ({exc})")
+    idx = first_idx + 1
+    total = len(raw_lines)
+    while idx < total:
+        line_no = idx + 1
+        fields, consumed, err = _read_bounded_record(raw_lines, idx)
+        idx += consumed
+        if err is not None:
+            errors.append(f"Line {line_no}: unreadable row ({err})")
             continue
-        extra = raw.pop(_RESTKEY, None)
-        row = {str(key or "").strip().lower(): (value or "").strip() for key, value in raw.items()}
+        if fields is None or not any(f.strip() for f in fields):
+            continue
+        extra = fields[len(fieldnames) :] or None
+        raw = dict(zip(fieldnames, fields))
+        row = {key: (value or "").strip() for key, value in raw.items()}
         if not any(row.values()) and not extra:
             continue
-        # A quoted multiline value makes this record span more than one
-        # physical line; report the record's starting line, not its end
-        # (reader.line_num, which DictReader also advances past any
-        # blank lines it silently swallowed before this record).
-        newline_counts = [v.count("\n") for v in row.values()]
-        if extra:
-            newline_counts += [str(e).count("\n") for e in extra]
-        span = 1 + max(newline_counts, default=0)
-        line_no = line_offset + reader.line_num - span + 1
         if extra:
             if single_joinable_header:
                 key = fieldnames[0]
@@ -416,6 +406,41 @@ def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list
 
 
 _MAX_RECORD_LINES = 4
+
+
+def _has_open_quote(text: str) -> bool:
+    """Return True if ``text`` ends inside a still-open quoted CSV field.
+
+    A ``"`` opens a quoted field only at the start of a field (start of
+    text, or right after ``,`` or ``\\n``); a stray ``"`` elsewhere (e.g.
+    ``O"Brien``) is just a literal character. Inside a quoted field, ``""``
+    is an escaped quote and a single ``"`` closes the field.
+    """
+    in_quotes = False
+    at_field_start = True
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_quotes:
+            if ch == '"':
+                if i + 1 < n and text[i + 1] == '"':
+                    i += 2
+                    continue
+                in_quotes = False
+                at_field_start = False
+                i += 1
+                continue
+            i += 1
+            continue
+        if ch == '"' and at_field_start:
+            in_quotes = True
+            at_field_start = False
+            i += 1
+            continue
+        at_field_start = ch in (",", "\n")
+        i += 1
+    return in_quotes
 
 
 def _read_bounded_record(lines: list[str], start: int) -> tuple[list[str] | None, int, str | None]:
@@ -441,7 +466,7 @@ def _read_bounded_record(lines: list[str], start: int) -> tuple[list[str] | None
         # is still unclosed, it would have kept consuming past our bound
         # (or to EOF) rather than stopping here on its own.
         record_text = "\n".join(chunk[:consumed])
-        if record_text.count('"') % 2 == 1:
+        if _has_open_quote(record_text):
             return None, 1, "unterminated quote"
     return fields, consumed, None
 
@@ -458,8 +483,7 @@ def parse_places(text: str) -> tuple[list[Place], list[str]]:
         return [], [f"Line {first_idx + 1}: unreadable row ({exc})"]
     has_more_lines = any(line.strip() for line in raw_lines[first_idx + 1 :])
     if looks_like_header(first_fields, has_more_lines=has_more_lines):
-        header_sample = "\n".join(raw_lines[first_idx:])
-        return _parse_header_form(header_sample, first_idx)
+        return _parse_header_form(raw_lines, first_idx)
 
     places: list[Place] = []
     errors: list[str] = []

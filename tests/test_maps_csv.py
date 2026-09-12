@@ -489,7 +489,11 @@ def test_legitimate_two_line_quoted_name_still_works():
     assert [p.name for p in places] == ["Foo\nBar", "Singapore"]
 
 
-def test_multiline_record_bound_at_four_lines_reports_unterminated():
+def test_multiline_record_bound_at_four_lines_reports_unterminated_and_resumes_per_line():
+    # Past the 4-line bound the record is reported as unterminated, and
+    # parsing resumes per remaining physical line (the resume-per-line
+    # policy), so lines B/C/D/E are ingested individually as bogus places
+    # rather than being swallowed as part of the failed record.
     text = '"A\nB\nC\nD\nE",1,2\nSingapore\n'
     places, errors = parse_places(text)
     assert "Line 1" in errors[0]
@@ -527,6 +531,30 @@ def test_header_form_multiline_record_reports_starting_line():
     places, errors = parse_places(text)
     assert errors == []
     assert places[0].line == 2
+
+
+def test_header_form_multiline_record_is_bounded_and_resumes():
+    text = 'name,lat,lon\nParis,1,2\n"London\nRome,3,4\nTokyo,5,6\n'
+    places, errors = parse_places(text)
+    assert [p.name for p in places] == ["Paris", "Rome", "Tokyo"]
+    assert places[1].lat == pytest.approx(3.0)
+    assert places[1].lon == pytest.approx(4.0)
+    assert places[2].lat == pytest.approx(5.0)
+    assert places[2].lon == pytest.approx(6.0)
+    assert len(errors) == 1
+    assert "Line 3" in errors[0]
+    assert "unreadable row" in errors[0]
+    assert "unterminated quote" in errors[0]
+
+
+def test_header_form_multiline_start_line_sums_embedded_newlines():
+    text = 'name,url,lat,lon\n"Foo\nBar","http://x\nyz",1,2\nSingapore,,3,4\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].name == "Foo\nBar"
+    assert places[0].line == 2
+    assert places[1].name == "Singapore"
+    assert places[1].line == 5
 
 
 def test_nul_byte_in_field_parses_without_error():
