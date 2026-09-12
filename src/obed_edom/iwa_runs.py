@@ -1,11 +1,13 @@
 """Offline per-run character style from a finalized .key IWA graph.
 
-keynote_parser is imported lazily in _load_deck so the module loads without the
+keynote_parser is imported lazily in _load_deck_full so the module loads without the
 optional iwa extra; attach_runs raises ImportError (caller leaves runs=[]).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import zipfile
 from collections import defaultdict, deque
@@ -13,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from obed_edom.inspect import is_duplicate_item
+from obed_edom.iwa_geometry import _path_source
 
 # Keynote inline-object placeholder; strip in _normalize_text (JXA vs IWA differ).
 _OBJECT_REPLACEMENT = "￼"
@@ -200,20 +203,31 @@ def slide_order(objects: dict[str, dict]) -> list[tuple[str, bool]]:
     return out
 
 
-def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]]]:
-    """(objects, id_to_file, file_ids). keynote_parser imported lazily (optional iwa extra)."""
+class UndecodableIWAMember(Exception):
+    """Raised by _load_deck_full(strict=True) when an .iwa member fails to decode."""
+
+
+def _load_deck_full(
+    path: str | Path, *, strict: bool = False,
+) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]], set[str]]:
+    """(objects, id_to_file, file_ids, header_object_references). keynote_parser imported
+    lazily (optional iwa extra). ``strict`` raises UndecodableIWAMember naming the member
+    instead of skipping it."""
     from keynote_parser.codec import IWAFile  # noqa: PLC0415 (optional extra)
 
     objects: dict[str, dict] = {}
     id_to_file: dict[str, str] = {}
     file_ids: dict[str, list[str]] = {}
+    header_object_references: set[str] = set()
     with zipfile.ZipFile(path) as zf:
         for name in zf.namelist():
             if not name.endswith(".iwa"):
                 continue
             try:
                 decoded = IWAFile.from_buffer(zf.read(name), name).to_dict()
-            except Exception:  # noqa: BLE001 — a single bad chunk must not sink the deck
+            except Exception as exc:  # noqa: BLE001 — a single bad chunk must not sink the deck
+                if strict:
+                    raise UndecodableIWAMember(name) from exc
                 continue
             for chunk in decoded["chunks"]:
                 for arch in chunk["archives"]:
@@ -223,7 +237,15 @@ def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[
                         objects[ident] = objs[0]
                     id_to_file.setdefault(ident, name)
                     file_ids.setdefault(name, []).append(ident)
-    return objects, id_to_file, file_ids
+                    for mi in arch["header"].get("messageInfos") or []:
+                        for ref in mi.get("objectReferences") or []:
+                            header_object_references.add(str(ref))
+    return objects, id_to_file, file_ids, header_object_references
+
+
+def _load_deck(path: str | Path) -> tuple[dict[str, dict], dict[str, str], dict[str, list[str]]]:
+    """(objects, id_to_file, file_ids)."""
+    return _load_deck_full(path)[:3]
 
 
 def _slide_text_objects(
@@ -248,37 +270,12 @@ def _collect_group_text(
     seen: set[str],
     out: list[dict],
 ) -> None:
-    """DFS GroupArchive children; seen prevents double-counting nested groups."""
-    if group_id in seen:
-        return
-    seen.add(group_id)
-    group = objects.get(group_id)
-    if not group:
-        return
-    for ref in group.get("children") or []:
-        child_id = ref.get("identifier")
-        if child_id is None:
-            continue
-        child_id = str(child_id)
-        child = objects.get(child_id)
-        if not child:
-            continue
-        ptype = child.get("_pbtype")
-        if ptype == "TSD.GroupArchive":
-            _collect_group_text(child_id, objects, cache, seen, out)
-            continue
-        if ptype != "TSWP.ShapeInfoArchive":
-            continue
-        stor_id = (child.get("ownedStorage") or {}).get("identifier")
-        if stor_id is None:
-            continue
-        storage = objects.get(str(stor_id))
-        if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
-            continue
-        runs = storage_runs(storage, objects, cache)
-        if not runs:
-            continue
-        out.append({"text": "".join(storage.get("text") or []), "runs": runs})
+    """DFS GroupArchive children, text leaves only; seen prevents double-counting nested groups."""
+    content: list[tuple[str, str | None, list | None]] = []
+    _collect_group_content(group_id, objects, cache, None, seen, content)
+    for kind, value, runs in content:
+        if kind == "text":
+            out.append({"text": value, "runs": runs})
 
 
 def _slide_grouped_text(
@@ -344,6 +341,79 @@ def attach_runs(key_path: str | Path, payload: dict, *, deck: Any = None) -> Non
 # Must match keynote._norm_sig_handler / sigOfGroup (linefeed) or reuse dedup misses.
 _SIG_JOIN = "\n"
 
+_MEDIA_PBTYPE_KIND = {"TSD.ImageArchive": "image", "TSD.MovieArchive": "movie"}
+
+
+def _collect_group_content(
+    group_id: str,
+    objects: dict[str, dict],
+    cache: dict,
+    data_index: dict[str, str] | None,
+    seen: set[str],
+    out: list[tuple[str, str | None, list | None]],
+) -> None:
+    """DFS GroupArchive children: every child as an ordered (kind, value, runs) leaf.
+    Callers with ``data_index=None`` keep only ``text`` leaves; ``value=None`` marks unresolved."""
+    from obed_edom.offline_inspect import _data_identifier  # noqa: PLC0415
+
+    if group_id in seen:
+        return
+    seen.add(group_id)
+    group = objects.get(group_id)
+    if not group:
+        return
+    for ref in group.get("children") or []:
+        child_id = ref.get("identifier")
+        if child_id is None:
+            if data_index is not None:
+                out.append(("unresolved", None, None))
+            continue
+        child_id = str(child_id)
+        child = objects.get(child_id)
+        if not child:
+            if data_index is not None:
+                out.append(("unresolved", None, None))
+            continue
+        ptype = child.get("_pbtype")
+        if ptype == "TSD.GroupArchive":
+            _collect_group_content(child_id, objects, cache, data_index, seen, out)
+            continue
+        media_kind = _MEDIA_PBTYPE_KIND.get(ptype)
+        if media_kind is not None:
+            if data_index is None:
+                continue
+            data_id = _data_identifier(child)
+            out.append((media_kind, data_index.get(data_id) if data_id else None, None))
+            continue
+        if ptype != "TSWP.ShapeInfoArchive":
+            if data_index is not None:
+                out.append(("unknown", None, None))
+            continue
+        stor_id = (child.get("ownedStorage") or {}).get("identifier")
+        storage = objects.get(str(stor_id)) if stor_id is not None else None
+        runs = None
+        text = None
+        if storage and storage.get("_pbtype") == "TSWP.StorageArchive":
+            runs = storage_runs(storage, objects, cache)
+            if runs:
+                text = "".join(storage.get("text") or [])
+        if text is not None:
+            out.append(("text", text, runs))
+            continue
+        if data_index is None:
+            continue
+        found = _path_source(child)
+        if not found:
+            out.append(("shape", None, None))
+            continue
+        key, sub = found
+        ns = sub.get("naturalSize") or {}
+        digest = hashlib.sha1(json.dumps(sub, sort_keys=True, default=str).encode()).hexdigest()[:12]
+        shape_id = (
+            f"{key}:{sub.get('type', '')}:{round(ns.get('width', 0), 1)}x{round(ns.get('height', 0), 1)}:{digest}"
+        )
+        out.append(("shape", shape_id, None))
+
 
 def _group_child_signature(group_id: str, objects: dict[str, dict], cache: dict) -> str:
     """DFS-order join of normalized leaf text (not a sorted multiset; AppleScript has no code-point sort)."""
@@ -385,6 +455,64 @@ def attach_group_child_text(
         gct = gct_by_index.get(slide.get("index"))
         if gct:
             slide["groupChildText"] = gct
+
+
+def _group_content_signature(
+    group_id: str, objects: dict[str, dict], cache: dict, data_index: dict[str, str]
+) -> str | None:
+    """DFS-order composite of tagged leaves (``text:``, ``shape:``, ``image:``, ...);
+    ``None`` if any leaf's identity can't be resolved."""
+    leaves: list[tuple[str, str | None, list | None]] = []
+    _collect_group_content(str(group_id), objects, cache, data_index, set(), leaves)
+    parts: list[str] = []
+    for kind, value, _runs in leaves:
+        if kind == "text":
+            norm = _normalize_text(value)
+            if norm:
+                parts.append(f"text:{norm}")
+            continue
+        if value is None:
+            return None
+        parts.append(f"{kind}:{value}")
+    return _SIG_JOIN.join(parts)
+
+
+def _slide_group_content_signature(
+    slide_archive: dict, objects: dict[str, dict], cache: dict, data_index: dict[str, str]
+) -> dict[int, str | None]:
+    """{kindIndex: contentSig} for top-level groups, complete (text + media) unlike groupChildText."""
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
+
+    out: dict[int, str | None] = {}
+    for rec in derive_kind_index(slide_archive, objects):
+        if rec.get("kind") != "group":
+            continue
+        out[int(rec["kindIndex"])] = _group_content_signature(rec["id"], objects, cache, data_index)
+    return out
+
+
+def attach_group_content_signature(
+    key_path: str | Path, payload: dict, *, deck: Any = None
+) -> None:
+    """Attach slide['groupChildSignature'] (text + media identity, for mirror dedup). Read-only."""
+    from obed_edom.offline_inspect import _build_data_index  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
+    with zipfile.ZipFile(key_path) as zf:
+        data_index = _build_data_index(zf.namelist())
+    cache: dict = {}
+    sig_by_index: dict[int, dict[int, str | None]] = {}
+    for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
+        slide_archive = objects.get(slide_id)
+        if slide_archive is None:
+            continue
+        sig = _slide_group_content_signature(slide_archive, objects, cache, data_index)
+        if sig:
+            sig_by_index[idx] = sig
+    for slide in payload.get("slides") or []:
+        sig = sig_by_index.get(slide.get("index"))
+        if sig:
+            slide["groupChildSignature"] = sig
 
 
 def attach_slide_builds(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:

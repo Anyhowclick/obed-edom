@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -96,6 +97,71 @@ def main(argv: list[str] | None = None) -> int:
             "badges). Bare flag = every slide; '4,7' or '4-9' = those slides only."
         ),
     )
+    dsk_export = sub.add_parser(
+        "dsk-export-clips",
+        help="Export per-slide movie clips from a wall Keynote for the DSK generator.",
+    )
+    dsk_export.add_argument("keynote", type=Path, help="Source FW/LW .key (7680x1080 or 3840x1080).")
+    dsk_export.add_argument("--slides", required=True, help="Slides to export, e.g. 32,33 or 32-34.")
+    dsk_export.add_argument("--out", type=Path, required=True, help="Destination folder for .mov clips.")
+    dsk_export.add_argument(
+        "--include-side",
+        help="Slides to export at full wall width with side content kept, e.g. 44 or 44,46.",
+    )
+    dsk_export.add_argument("--codec", default="AppleProRes422LT", help="Keynote movie codec for the export.")
+    dsk_export.add_argument("--fps", type=float, default=30, help="Export framerate.")
+    dsk_assemble = sub.add_parser(
+        "dsk-assemble",
+        help="Assemble a DSK deck from a wall Keynote via copy-and-transform.",
+    )
+    dsk_assemble.add_argument("keynote", type=Path, help="Source FW deck, 7680x1080 wall canvas only.")
+    dsk_assemble.add_argument("--out", type=Path, required=True, help="Destination .key path for the assembled deck.")
+    dsk_assemble.add_argument("--slides", required=True, help="Slides to keep, e.g. 8,13,17,32 or 8-12.")
+    dsk_assemble.add_argument(
+        "--include-side", help="Slides to keep with side content, e.g. 8 or 8,10."
+    )
+    dsk_assemble.add_argument(
+        "--anchor",
+        action="append",
+        default=[],
+        help="Per-slide anchor override, e.g. 32=centre. SLIDE must be in --slides; "
+        "anchor is one of centre, left, right. Repeatable.",
+    )
+    dsk_assemble.add_argument(
+        "--clip",
+        action="append",
+        default=[],
+        help="Per-slide clip path, e.g. 32=/path/to/clip.mov. SLIDE must be in --slides; "
+        "path must exist and end in .mov. Repeatable.",
+    )
+    dsk_assemble.add_argument(
+        "--reference-deck", type=Path, help="Reference deck to derive the centre band from."
+    )
+    dsk_assemble.add_argument(
+        "--layout",
+        choices=("preserve", "import"),
+        default="import",
+        help="import (default): always import the alpha-safe layout named --layout-name "
+        "from the layout template -- a full-canvas drawable on a kept slide's own layout "
+        "exports opaque even off an alpha-native PNG stage export. preserve: leave kept "
+        "slides' base layouts untouched.",
+    )
+    dsk_assemble.add_argument(
+        "--layout-name",
+        default=None,
+        help="Override the imported layout's name (default: 'Blank Black').",
+    )
+    dsk_assemble.add_argument(
+        "--stroke-min-refs", type=int, default=1, help="Minimum refs for the card-border stroke classifier."
+    )
+    dsk_assemble.add_argument(
+        "--text-fit",
+        choices=("warn", "shrink"),
+        default="warn",
+        help="warn (default): log an overflow for a mixed-run text box that autosizes past "
+        "its fitted band, leave it for the operator to adjust. shrink: also set that box's "
+        "size to its largest source run size, flattening run sizes to fit.",
+    )
     remap.add_argument(
         "--source-previews",
         help=(
@@ -143,7 +209,218 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "remap":
         return _run_remap(args)
+
+    if args.command == "dsk-export-clips":
+        return _run_dsk_export_clips(args)
+
+    if args.command == "dsk-assemble":
+        return _run_dsk_assemble(args)
     return 2
+
+
+def _run_dsk_export_clips(args: argparse.Namespace) -> int:
+    from obed_edom.dsk_movie_export import CODECS, export_slide_clips, fps_enum_name
+
+    source = Path(args.keynote).expanduser()
+    if not source.exists():
+        print(f"File not found: {source}", file=sys.stderr)
+        return 1
+    if args.codec not in CODECS:
+        print(f"Unsupported --codec {args.codec!r}; expected one of {sorted(CODECS)}", file=sys.stderr)
+        return 1
+    try:
+        fps_enum_name(args.fps)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    try:
+        slide_numbers = sorted(parse_slide_spec(args.slides) or ())
+        include_side = set(parse_slide_spec(args.include_side) or ()) if args.include_side else set()
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    if not slide_numbers:
+        print("No slides given (--slides).", file=sys.stderr)
+        return 1
+
+    out_dir = Path(args.out).expanduser()
+    t0 = time.monotonic()
+    try:
+        results = export_slide_clips(
+            source,
+            slide_numbers,
+            out_dir,
+            include_side=include_side,
+            codec=args.codec,
+            fps=args.fps,
+            log=print,
+        )
+    except Exception as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        return 1
+
+    for r in results:
+        print(
+            f"slide {r.slide}: {r.path} {r.width}x{r.height} @ {r.duration_s:.2f}s "
+            f"(crop {r.crop_width}px, {r.wall_s:.1f}s wall)"
+        )
+    print(f"Total wall time: {time.monotonic() - t0:.1f}s")
+    return 0
+
+
+_DSK_ASSEMBLE_ANCHORS = frozenset({"centre", "left", "right"})
+
+
+def _run_dsk_assemble(args: argparse.Namespace) -> int:
+    from obed_edom.dsk_assemble import (
+        DEFAULT_LAYOUT_TEMPLATE,
+        DEFAULT_TRANSPARENT_LAYOUT_NAMES,
+        AssemblyRefusal,
+        SlideDecision,
+        assemble_dsk_deck,
+    )
+    from obed_edom.offline_inspect import offline_wall_payload
+
+    source = Path(args.keynote).expanduser()
+    if not source.exists():
+        print(f"File not found: {source}", file=sys.stderr)
+        return 1
+    try:
+        slide_numbers = sorted(parse_slide_spec(args.slides) or ())
+        include_side = set(parse_slide_spec(args.include_side) or ()) if args.include_side else set()
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    if not slide_numbers:
+        print("No slides given (--slides).", file=sys.stderr)
+        return 1
+
+    try:
+        payload = offline_wall_payload(source)
+    except Exception as exc:
+        print(f"Could not read source deck: {exc}", file=sys.stderr)
+        return 1
+    wall = (payload.get("slideWidth"), payload.get("slideHeight"))
+    if wall != (7680.0, 1080.0) and wall != (7680, 1080):
+        print(
+            f"Source canvas is {wall[0]}x{wall[1]}; dsk-assemble requires a 7680x1080 FW deck.",
+            file=sys.stderr,
+        )
+        return 1
+
+    slide_count = int(payload.get("slideCount") or 0)
+    out_of_range = sorted(n for n in set(slide_numbers) | include_side if not (1 <= n <= slide_count))
+    if out_of_range:
+        print(
+            f"Bad --slides/--include-side; slide(s) {out_of_range} out of range (deck has {slide_count} slides).",
+            file=sys.stderr,
+        )
+        return 1
+    if not include_side <= set(slide_numbers):
+        print(
+            f"Bad --include-side; {sorted(include_side - set(slide_numbers))} not in --slides.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.reference_deck:
+        reference_deck_check = Path(args.reference_deck).expanduser()
+        if not reference_deck_check.is_file():
+            print(f"Reference deck not found: {reference_deck_check}", file=sys.stderr)
+            return 1
+    if args.layout == "import" and not DEFAULT_LAYOUT_TEMPLATE.is_file():
+        print(f"Layout template not found: {DEFAULT_LAYOUT_TEMPLATE}", file=sys.stderr)
+        return 1
+
+    slide_set = set(slide_numbers)
+    anchors: dict[int, str] = {}
+    for spec in args.anchor:
+        slide_text, sep, anchor = spec.partition("=")
+        if not sep:
+            print(f"Bad --anchor {spec!r}; expected SLIDE=anchor.", file=sys.stderr)
+            return 1
+        try:
+            slide_no = int(slide_text)
+        except ValueError:
+            print(f"Bad --anchor {spec!r}; expected SLIDE=anchor.", file=sys.stderr)
+            return 1
+        if slide_no not in slide_set:
+            print(f"Bad --anchor {spec!r}; slide {slide_no} is not in --slides.", file=sys.stderr)
+            return 1
+        if anchor not in _DSK_ASSEMBLE_ANCHORS:
+            print(f"Bad --anchor {spec!r}; anchor must be one of {sorted(_DSK_ASSEMBLE_ANCHORS)}.", file=sys.stderr)
+            return 1
+        anchors[slide_no] = anchor
+
+    clips: dict[int, Path] = {}
+    for spec in args.clip:
+        slide_text, sep, clip_text = spec.partition("=")
+        if not sep:
+            print(f"Bad --clip {spec!r}; expected SLIDE=/path/to/clip.mov.", file=sys.stderr)
+            return 1
+        try:
+            slide_no = int(slide_text)
+        except ValueError:
+            print(f"Bad --clip {spec!r}; expected SLIDE=/path/to/clip.mov.", file=sys.stderr)
+            return 1
+        if slide_no not in slide_set:
+            print(f"Bad --clip {spec!r}; slide {slide_no} is not in --slides.", file=sys.stderr)
+            return 1
+        clip_path = Path(clip_text).expanduser()
+        if clip_path.suffix.lower() != ".mov":
+            print(f"Bad --clip {spec!r}; clip path must end with .mov.", file=sys.stderr)
+            return 1
+        if not clip_path.is_file():
+            print(f"Bad --clip {spec!r}; clip path does not exist: {clip_path}", file=sys.stderr)
+            return 1
+        clips[slide_no] = clip_path
+
+    decisions = {
+        n: SlideDecision(
+            n, "both" if n in clips else "in_deck", anchor=anchors.get(n, "centre"), keep_side=n in include_side
+        )
+        for n in slide_numbers
+    }
+
+    out_path = Path(args.out).expanduser()
+    reference_deck = Path(args.reference_deck).expanduser() if args.reference_deck else None
+    black_layout_names = (args.layout_name,) if args.layout_name else DEFAULT_TRANSPARENT_LAYOUT_NAMES
+    try:
+        result = assemble_dsk_deck(
+            source,
+            out_path,
+            decisions=decisions,
+            reference_deck=reference_deck,
+            clips=clips,
+            log=print,
+            layout_policy=args.layout,
+            black_layout_names=black_layout_names,
+            stroke_min_refs=args.stroke_min_refs,
+            text_fit=args.text_fit,
+        )
+    except AssemblyRefusal as exc:
+        print(f"Assembly refused: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Assembly failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Assembled: {result.path}")
+    print(f"Slides kept: {list(result.slides_kept)}")
+    print(f"Clips inserted: {result.clips_inserted}")
+    print(f"Movie props: {result.movie_props}")
+    print(f"Stroke: {result.stroke}")
+    print(f"Builds: {result.builds}")
+    print(f"Size: {result.size_bytes} bytes (source {result.source_size_bytes} bytes)")
+    print(f"Wall time: {result.wall_s:.1f}s")
+    if result.overflows:
+        print(f"Overflows ({len(result.overflows)}):")
+        for o in result.overflows:
+            print(f"  - slide {o['slide']} {o['item']}: {o['height']}")
+    if result.warnings:
+        print(f"Warnings ({len(result.warnings)}):")
+        for w in result.warnings:
+            print(f"  - {w}")
+    return 0
 
 
 def _run_remap(args: argparse.Namespace) -> int:

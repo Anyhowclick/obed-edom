@@ -8,6 +8,7 @@ image drawables.
 """
 from __future__ import annotations
 
+import copy
 import io
 import re
 import zipfile
@@ -46,27 +47,65 @@ _WHITE_EMPTY_STROKE = {
 }
 
 
-def _build_deck(path, *, extra_stylesheet_archives=(), extra_slide_archives=(), extra_zorder=()):
-    """Two-member deck: 4 images with style 900 (one nested in a group), 1 with 901."""
+_STYLESHEET_ROOT_ID = 950
+_METADATA_ARCHIVE_ID = 5
+
+
+def _with_refs(arch, refs):
+    """Set a built ``_arch()`` archive's header ``messageInfos[0].objectReferences``
+    (real drawable headers carry it; the base fixture's headers don't need it)."""
+    arch = copy.deepcopy(arch)
+    arch["header"]["messageInfos"][0]["objectReferences"] = [str(r) for r in refs]
+    return arch
+
+
+def _with_version(arch, version):
+    arch = copy.deepcopy(arch)
+    arch["header"]["messageInfos"][0]["version"] = version
+    return arch
+
+
+def _build_deck(
+    path, *, extra_stylesheet_archives=(), extra_slide_archives=(), extra_zorder=(),
+    stylesheet_root=False, metadata=False,
+):
+    """Two-member deck: 4 images with style 900 (one nested in a group), 1 with 901.
+
+    ``stylesheet_root=True`` adds a ``TSS.StylesheetArchive`` (id 950) naming 900/901
+    and gives them ``super.stylesheet = {identifier: 950}``. ``metadata=True`` adds
+    ``Index/Metadata.iwa`` (``TSP.PackageMetadata``, ``lastObjectIdentifier: "1000"``,
+    components for the stylesheet/document/slide members with 900/901 uuid entries on
+    the stylesheet component).
+    """
+    style_super = {"stylesheet": {"identifier": _STYLESHEET_ROOT_ID}} if stylesheet_root else {}
     stylesheet = [
-        _arch(900, "TSD.MediaStyleArchive", {
-            "super": {"styleIdentifier": "image-0-imageStyle"},
+        _with_version(_arch(900, "TSD.MediaStyleArchive", {
+            "super": {"styleIdentifier": "image-0-imageStyle", **style_super},
             "mediaProperties": {"stroke": _WHITE_SOLID_STROKE},
-        }),
+        }), [1, 0, 5]),
         _arch(901, "TSD.MediaStyleArchive", {
-            "super": {"styleIdentifier": "image-1-imageStyle"},
+            "super": {"styleIdentifier": "image-1-imageStyle", **style_super},
             "mediaProperties": {"stroke": _BLACK_SOLID_STROKE},
         }),
         *extra_stylesheet_archives,
     ]
+    if stylesheet_root:
+        stylesheet.append(_with_refs(_arch(_STYLESHEET_ROOT_ID, "TSS.StylesheetArchive", {
+            "styles": [{"identifier": 900}, {"identifier": 901}],
+            "identifierToStyleMap": [
+                {"identifier": "image-0-imageStyle", "style": {"identifier": 900}},
+                {"identifier": "image-1-imageStyle", "style": {"identifier": 901}},
+            ],
+            "parentToChildrenStyleMap": [],
+        }), [900, 901]))
 
     slide_member = [
-        _arch(300, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(0, 0, 50, 50)}),
-        _arch(301, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(60, 0, 50, 50)}),
-        _arch(302, "TSD.ImageArchive", {"style": {"identifier": 901}, "super": _geom(120, 0, 50, 50)}),
-        _arch(303, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(0, 0, 50, 50)}),
+        _with_refs(_arch(300, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(0, 0, 50, 50)}), [900]),
+        _with_refs(_arch(301, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(60, 0, 50, 50)}), [900]),
+        _with_refs(_arch(302, "TSD.ImageArchive", {"style": {"identifier": 901}, "super": _geom(120, 0, 50, 50)}), [901]),
+        _with_refs(_arch(303, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(0, 0, 50, 50)}), [900]),
         _arch(250, "TSD.GroupArchive", {"super": _geom(500, 500, 0, 0), "children": [{"identifier": 303}]}),
-        _arch(304, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(180, 0, 50, 50)}),
+        _with_refs(_arch(304, "TSD.ImageArchive", {"style": {"identifier": 900}, "super": _geom(180, 0, 50, 50)}), [900]),
         *extra_slide_archives,
     ]
     zorder = [300, 301, 302, 250, 304, *extra_zorder]
@@ -77,11 +116,34 @@ def _build_deck(path, *, extra_stylesheet_archives=(), extra_slide_archives=(), 
     })
     node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
 
+    members = {
+        "Index/DocumentStylesheet.iwa": _member(stylesheet),
+        "Index/Document.iwa": _member([show, node]),
+        "Index/Slide-100.iwa": _member(slide_member + [slide]),
+    }
+    if metadata:
+        components = [
+            {
+                "identifier": _STYLESHEET_ROOT_ID, "locator": None,
+                "preferredLocator": "DocumentStylesheet",
+                "objectUuidMapEntries": [
+                    {"identifier": 900, "uuid": {"lower": 1, "upper": 0}},
+                    {"identifier": 901, "uuid": {"lower": 2, "upper": 0}},
+                ],
+            },
+            {"identifier": 2, "locator": None, "preferredLocator": "Document"},
+            {"identifier": 100, "locator": "Slide-100", "preferredLocator": "Slide"},
+        ]
+        package_metadata = _arch(_METADATA_ARCHIVE_ID, "TSP.PackageMetadata", {
+            "lastObjectIdentifier": "1000",
+            "components": components,
+        })
+        members["Index/Metadata.iwa"] = _member([package_metadata])
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("Index/DocumentStylesheet.iwa", _member(stylesheet))
-        z.writestr("Index/Document.iwa", _member([show, node]))
-        z.writestr("Index/Slide-100.iwa", _member(slide_member + [slide]))
+        for name, data in members.items():
+            z.writestr(name, data)
     path.write_bytes(buf.getvalue())
     return path
 
@@ -199,6 +261,22 @@ def test_patch_stroke_widths_normalises_int_keys(deck):
     objects, id_to_file, _file_ids = _load_deck(deck)
     styles = {s["id"]: s for s in card_styles(objects, id_to_file)}
     assert styles["900"]["width"] == pytest.approx(3.0)
+
+
+def test_patch_stroke_widths_refuses_nan_width(deck):
+    before = deck.read_bytes()
+    result = patch_stroke_widths(deck, {"900": float("nan")})
+    assert result["refused"]
+    assert "finite positive width" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_patch_stroke_widths_refuses_bool_width(deck):
+    before = deck.read_bytes()
+    result = patch_stroke_widths(deck, {"900": True})
+    assert result["refused"]
+    assert "finite positive width" in result["reason"]
+    assert deck.read_bytes() == before
 
 
 def test_patch_refuses_style_id_from_a_different_member(tmp_path):

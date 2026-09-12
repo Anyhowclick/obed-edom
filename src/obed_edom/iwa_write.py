@@ -20,13 +20,15 @@ from __future__ import annotations
 import copy
 import math
 import os
+import secrets
 import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from keynote_parser.codec import IWAFile
+from google.protobuf.json_format import MessageToDict, ParseDict
+from keynote_parser.codec import IWAFile, import_version
 
 from obed_edom.iwa_builds import _contains_identifier
 from obed_edom.iwa_geometry import _geom_dict, _is_rotated, _path_source, _xywha, compose_geometry
@@ -35,7 +37,7 @@ from obed_edom.iwa_kindindex import (
     derived_kind_counts,
     reconcile_counts,
 )
-from obed_edom.iwa_runs import _load_deck, slide_order
+from obed_edom.iwa_runs import UndecodableIWAMember, _load_deck, _load_deck_full, slide_order
 from obed_edom.offline_inspect import _line_direction
 
 
@@ -1099,10 +1101,12 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
     """
     deck = Path(deck)
     target_member = _STROKE_STYLESHEET_MEMBER
-    widths = {str(k): float(v) for k, v in widths.items()}
+    widths = {str(k): v for k, v in widths.items()}
     objects, id_to_file, _file_ids = _load_deck(deck)
 
     for sid in widths:
+        if not _is_finite_real(widths[sid]) or widths[sid] <= 0:
+            return {"refused": True, "reason": f"style {sid} needs a finite positive width"}
         obj = objects.get(sid)
         if obj is None:
             return {"refused": True, "reason": f"style {sid} not found in deck"}
@@ -1111,6 +1115,7 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
         if id_to_file.get(sid) != target_member:
             return {"refused": True,
                     "reason": f"style {sid} lives in {id_to_file.get(sid)!r}, not {target_member!r}"}
+    widths = {sid: float(w) for sid, w in widths.items()}
 
     with zipfile.ZipFile(deck) as zf:
         if target_member not in zf.namelist():
@@ -1165,12 +1170,209 @@ def patch_stroke_widths(deck: Path, widths: dict[str, float]) -> dict:
     }
 
 
+def _stroke_submessage(spec: dict) -> dict:
+    """Build a ``mediaProperties.stroke`` submessage shaped like a real solid stroke
+    (e.g. deck style 15303898): colour/width/cap/join/miterLimit/pattern, with the
+    pattern's zero-filled ``pattern`` array Keynote itself writes for a solid stroke."""
+    r, g, b, a = spec["color"]
+    return {
+        "color": {
+            "model": "rgb", "r": float(r), "g": float(g), "b": float(b), "a": float(a),
+            "rgbspace": spec.get("rgbspace", "srgb"),
+        },
+        "width": float(spec["width"]),
+        "cap": "ButtCap",
+        "join": "MiterJoin",
+        "miterLimit": 4.0,
+        "pattern": {
+            "type": spec.get("pattern", "TSDSolidPattern"),
+            "phase": 0.0,
+            "count": 0,
+            "pattern": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        },
+    }
+
+
+def patch_media_stroke(deck: Path, strokes: dict) -> dict:
+    """Set/overwrite ``mediaProperties.stroke`` for each ``TSD.MediaStyleArchive`` id in
+    ``strokes`` (``{id: {"width", "color": (r,g,b,a), "pattern"?, "rgbspace"?}}``, or
+    ``{id: {"stroke_message": dict}}`` to write a complete resolved stroke submessage
+    verbatim instead of synthesizing one), single-member rewrite of
+    ``Index/DocumentStylesheet.iwa`` via ``_rewrite_members``.
+
+    Unlike ``patch_stroke_widths``, an id with no OWN stroke is not refused: its
+    ``mediaProperties.stroke`` is CREATED (shaped like a real solid stroke) and the id
+    is reported under ``created`` rather than ``patched``. Refuses (deck untouched) if
+    an id is absent, not a ``TSD.MediaStyleArchive``, lives in a different member, the
+    stylesheet member is missing, or fewer ids matched an archive than requested.
+    """
+    deck = Path(deck)
+    target_member = _STROKE_STYLESHEET_MEMBER
+    strokes = {str(k): dict(v) for k, v in strokes.items()}
+    objects, id_to_file, _file_ids = _load_deck(deck)
+
+    for sid in strokes:
+        obj = objects.get(sid)
+        if obj is None:
+            return {"refused": True, "reason": f"style {sid} not found in deck"}
+        if obj.get("_pbtype") != "TSD.MediaStyleArchive":
+            return {"refused": True, "reason": f"style {sid} is {obj.get('_pbtype')!r}, not TSD.MediaStyleArchive"}
+        if id_to_file.get(sid) != target_member:
+            return {"refused": True,
+                    "reason": f"style {sid} lives in {id_to_file.get(sid)!r}, not {target_member!r}"}
+        stroke_message = strokes[sid].get("stroke_message")
+        if stroke_message is not None:
+            width = stroke_message.get("width") if isinstance(stroke_message, dict) else None
+            if not isinstance(stroke_message, dict) or not _is_finite_real(width) or width <= 0:
+                return {"refused": True, "reason": f"style {sid} stroke_message needs a numeric positive width"}
+            if not _all_reals_finite(stroke_message):
+                return {"refused": True, "reason": f"style {sid} stroke_message has a non-finite value"}
+        else:
+            spec = strokes[sid]
+            width = spec.get("width")
+            color = spec.get("color")
+            valid_color = (
+                isinstance(color, (tuple, list)) and len(color) == 4
+                and all(_is_finite_real(c) for c in color)
+            )
+            if not valid_color or not _is_finite_real(width) or width <= 0:
+                return {"refused": True,
+                        "reason": f"style {sid} needs a 4-tuple color and a numeric positive width"}
+
+    with zipfile.ZipFile(deck) as zf:
+        if target_member not in zf.namelist():
+            return {"refused": True, "reason": f"member {target_member} missing from deck"}
+        buf = zf.read(target_member)
+
+    decoded = IWAFile.from_buffer(buf, target_member).to_dict()
+    patched = copy.deepcopy(decoded)
+    applied = 0
+    created: list[str] = []
+    expected_strokes: dict[str, dict] = {}
+    for ch in patched["chunks"]:
+        for arch in ch["archives"]:
+            aid = str(arch["header"]["identifier"])
+            if aid not in strokes:
+                continue
+            for o in arch.get("objects") or []:
+                media = o.setdefault("mediaProperties", {})
+                if media.get("stroke") is None:
+                    created.append(aid)
+                spec = strokes[aid]
+                stroke_message = spec.get("stroke_message")
+                media["stroke"] = (
+                    copy.deepcopy(stroke_message) if stroke_message is not None
+                    else _stroke_submessage(spec)
+                )
+                if stroke_message is not None:
+                    expected_strokes[aid] = media["stroke"]
+                applied += 1
+                break
+
+    if applied != len(strokes):
+        return {"refused": True,
+                "reason": f"only {applied}/{len(strokes)} styles matched an archive in {target_member}"}
+
+    new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
+    reparsed = IWAFile.from_buffer(new_member, target_member).to_dict()
+    obj_diffs = 0
+    header_diffs = 0
+    for c0, c1 in zip(decoded["chunks"], reparsed["chunks"]):
+        for a0, a1 in zip(c0["archives"], c1["archives"]):
+            if (a0.get("objects") or []) != (a1.get("objects") or []):
+                obj_diffs += 1
+            if a0["header"] != a1["header"]:
+                header_diffs += 1
+    value_clean = obj_diffs <= len(strokes) and header_diffs == 0
+
+    if applied != len(strokes) or not value_clean:
+        return {"refused": True, "reason": "partial apply on reparse"}
+
+    reparsed_by_id = _archives_by_id(reparsed)
+    for aid, expected in expected_strokes.items():
+        if strokes[aid].get("stroke_message") is None:
+            continue
+        arch = reparsed_by_id.get(aid)
+        stroke = None
+        for o in (arch.get("objects") or []) if arch else []:
+            stroke = (o.get("mediaProperties") or {}).get("stroke")
+            break
+        if stroke != expected:
+            return {"refused": True, "reason": f"style {aid} reparsed stroke does not match requested message"}
+
+    try:
+        _rewrite_members(deck, {target_member: new_member})
+    except OfflineWriteCorrupted:
+        raise  # deck IS truncated: must reach the caller, never a refused result
+    except Exception as exc:  # noqa: BLE001 — every result refuses, deck left untouched
+        return {"refused": True, "reason": f"rewrite failed: {exc}"}
+
+    return {
+        "patched": sorted(strokes, key=str),
+        "created": sorted(created, key=str),
+        "refused": False,
+        "notes": [],
+        "target_member": target_member,
+        "applied": applied,
+        "obj_diffs": obj_diffs,
+        "header_diffs": header_diffs,
+        "value_clean": value_clean,
+    }
+
+
 def _archives_by_id(decoded: dict) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for ch in decoded["chunks"]:
         for arch in ch["archives"]:
             out[str(arch["header"]["identifier"])] = arch
     return out
+
+
+def _strip_pbtype(value):
+    """``value`` with every ``_pbtype`` schema-selector key removed, recursively."""
+    if isinstance(value, dict):
+        return {k: _strip_pbtype(v) for k, v in value.items() if k != "_pbtype"}
+    if isinstance(value, list):
+        return [_strip_pbtype(v) for v in value]
+    return value
+
+
+def _archives_equal(a: dict, b: dict) -> bool:
+    """Whether archives ``a`` and ``b`` (header + objects) are equal, ignoring ``_pbtype`` keys."""
+    return _strip_pbtype(a) == _strip_pbtype(b)
+
+
+def _canonicalise(pbtype: str, obj: dict) -> dict:
+    """``obj`` round-tripped through its protobuf schema, restoring the top-level ``_pbtype``."""
+    cls = import_version()[1][pbtype]
+    msg = ParseDict({k: v for k, v in obj.items() if k != "_pbtype"}, cls(), ignore_unknown_fields=True)
+    canonical = MessageToDict(msg)
+    canonical["_pbtype"] = pbtype
+    return canonical
+
+
+def _first_dropped_key(authored, canonical, path: str = "") -> str | None:
+    """The first dotted path present in ``authored`` but missing from ``canonical``, or ``None``."""
+    if isinstance(authored, dict):
+        for k, v in authored.items():
+            if k == "_pbtype":
+                continue
+            child_path = f"{path}.{k}" if path else k
+            if not isinstance(canonical, dict) or k not in canonical:
+                return child_path
+            found = _first_dropped_key(v, canonical[k], child_path)
+            if found is not None:
+                return found
+        return None
+    if isinstance(authored, list):
+        if not isinstance(canonical, list) or len(canonical) < len(authored):
+            return path or "<root>"
+        for i, v in enumerate(authored):
+            found = _first_dropped_key(v, canonical[i], f"{path}[{i}]")
+            if found is not None:
+                return found
+        return None
+    return None
 
 
 def _archive_diff(before: dict, after: dict) -> tuple[set[str], set[str], list[str]]:
@@ -1184,6 +1386,455 @@ def _archive_diff(before: dict, after: dict) -> tuple[set[str], set[str], list[s
         if (b[aid].get("objects") or []) != (a[aid].get("objects") or []) or b[aid]["header"] != a[aid]["header"]
     ]
     return removed, added, changed
+
+
+_MEDIA_STYLE_PBTYPE = "TSD.MediaStyleArchive"
+_STYLESHEET_ROOT_PBTYPE = "TSS.StylesheetArchive"
+_PACKAGE_METADATA_PBTYPE = "TSP.PackageMetadata"
+_MEDIA_STYLE_HEADER_TYPE = 3016
+_MEDIA_STYLE_HEADER_VERSION = [1, 0, 5]
+_METADATA_MEMBER = "Index/Metadata.iwa"
+_MEDIA_DRAWABLE_PBTYPES = ("TSD.ImageArchive", "TSD.MovieArchive")
+
+
+def _is_finite_real(x: Any) -> bool:
+    """True for a non-bool int/float that is finite (excludes NaN/inf)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _all_reals_finite(obj: Any) -> bool:
+    """True if every int/float leaf in ``obj`` (dicts/lists walked recursively) is a
+    finite, non-bool real; non-numeric leaves are ignored."""
+    if isinstance(obj, dict):
+        return all(_all_reals_finite(v) for v in obj.values())
+    if isinstance(obj, list):
+        return all(_all_reals_finite(v) for v in obj)
+    if isinstance(obj, bool):
+        return False
+    if isinstance(obj, (int, float)):
+        return math.isfinite(obj)
+    return True
+
+
+def _mint_refused(reason: str, source_style_id: str) -> dict:
+    return {
+        "refused": True, "reason": reason, "new_id": None, "source_id": source_style_id,
+        "drawables": [], "members": [],
+    }
+
+
+def _member_locator(member: str) -> str:
+    """A member path's component locator: the basename without ``Index/`` or ``.iwa``."""
+    name = member.rsplit("/", 1)[-1]
+    return name[:-4] if name.endswith(".iwa") else name
+
+
+def _components_by_locator(components: list[dict]) -> dict[str, list[dict]]:
+    """Components grouped by locator (``locator`` when present, else ``preferredLocator``)."""
+    by_locator: dict[str, list[dict]] = {}
+    for component in components:
+        locator = component.get("locator") or component.get("preferredLocator")
+        if locator is None:
+            continue
+        by_locator.setdefault(locator, []).append(component)
+    return by_locator
+
+
+def _resolve_member_components(
+    components: list[dict], members: set[str]
+) -> tuple[dict[str, dict], str | None]:
+    """Resolve each of ``members`` to its unique metadata component by locator; ``({}, reason)`` on the first miss."""
+    by_locator = _components_by_locator(components)
+    resolved: dict[str, dict] = {}
+    for member in sorted(members):
+        locator = _member_locator(member)
+        matches = by_locator.get(locator, [])
+        if not matches:
+            return {}, f"no component for member {member!r}"
+        if len(matches) > 1:
+            return {}, f"duplicate component locator {locator!r} needed by member {member!r}"
+        resolved[member] = matches[0]
+    return resolved, None
+
+
+def _stylesheet_root(
+    objects: dict[str, dict], id_to_file: dict[str, str], style_id: str
+) -> tuple[str | None, str | None]:
+    """(stylesheet_root_id, member) resolved from ``style_id``'s ``super.stylesheet.identifier``,
+    or ``(None, None)`` if unresolvable or not a ``TSS.StylesheetArchive``."""
+    obj = objects.get(style_id)
+    if obj is None:
+        return None, None
+    root_id = ((obj.get("super") or {}).get("stylesheet") or {}).get("identifier")
+    if root_id is None:
+        return None, None
+    root_id = str(root_id)
+    root = objects.get(root_id)
+    if root is None or root.get("_pbtype") != _STYLESHEET_ROOT_PBTYPE:
+        return None, None
+    return root_id, id_to_file.get(root_id)
+
+
+def _find_archive(decoded: dict, archive_id: str) -> dict | None:
+    for ch in decoded["chunks"]:
+        for arch in ch["archives"]:
+            if str(arch["header"]["identifier"]) == archive_id:
+                return arch
+    return None
+
+
+def _find_package_metadata_archive(decoded: dict) -> dict | None:
+    for ch in decoded["chunks"]:
+        for arch in ch["archives"]:
+            objs = arch.get("objects") or []
+            if objs and objs[0].get("_pbtype") == _PACKAGE_METADATA_PBTYPE:
+                return arch
+    return None
+
+
+def mint_media_style(
+    deck: Path,
+    source_style_id: str,
+    drawable_ids: list[str],
+    stroke_spec: dict,
+) -> dict:
+    """Mint a Keynote-shaped variation of ``source_style_id`` carrying ``stroke_spec``, register it,
+    and re-point ``drawable_ids`` at it; refuses (deck untouched) on any precondition or reparse failure."""
+    try:
+        try:
+            source_style_id = str(source_style_id)
+        except Exception:
+            return _mint_refused("source_style_id is not str()-coercible", "<unresolvable>")
+        deck = Path(deck)
+        drawable_ids = [str(d) for d in drawable_ids]
+        stroke_spec = dict(stroke_spec)
+
+        if not drawable_ids:
+            return _mint_refused("drawable_ids is empty", source_style_id)
+
+        try:
+            objects, id_to_file, file_ids, header_object_references = _load_deck_full(deck, strict=True)
+        except UndecodableIWAMember as exc:
+            return _mint_refused(f"member {exc} is undecodable", source_style_id)
+
+        source = objects.get(source_style_id)
+        if source is None:
+            return _mint_refused(f"style {source_style_id} not found in deck", source_style_id)
+        if source.get("_pbtype") != _MEDIA_STYLE_PBTYPE:
+            return _mint_refused(
+                f"style {source_style_id} is {source.get('_pbtype')!r}, not {_MEDIA_STYLE_PBTYPE}", source_style_id
+            )
+        if (source.get("super") or {}).get("isVariation"):
+            return _mint_refused(f"style {source_style_id} is itself a variation", source_style_id)
+        stylesheet_member = id_to_file.get(source_style_id)
+        if stylesheet_member != _STROKE_STYLESHEET_MEMBER:
+            return _mint_refused(
+                f"style {source_style_id} lives in {stylesheet_member!r}, not {_STROKE_STYLESHEET_MEMBER!r}",
+                source_style_id,
+            )
+
+        root_id, root_member = _stylesheet_root(objects, id_to_file, source_style_id)
+        if root_id is None:
+            return _mint_refused(f"style {source_style_id} has no resolvable super.stylesheet", source_style_id)
+        if root_member != stylesheet_member:
+            return _mint_refused(
+                f"stylesheet root {root_id} lives in {root_member!r}, not {stylesheet_member!r}", source_style_id
+            )
+
+        for d in drawable_ids:
+            dobj = objects.get(d)
+            if dobj is None:
+                return _mint_refused(f"drawable {d} not found in deck", source_style_id)
+            if dobj.get("_pbtype") not in _MEDIA_DRAWABLE_PBTYPES:
+                return _mint_refused(f"drawable {d} is {dobj.get('_pbtype')!r}, not image/movie", source_style_id)
+            if str((dobj.get("style") or {}).get("identifier")) != source_style_id:
+                return _mint_refused(f"drawable {d} does not point at style {source_style_id}", source_style_id)
+            member = id_to_file.get(d)
+            if member is None:
+                return _mint_refused(f"drawable {d} has no owning member", source_style_id)
+            if member == stylesheet_member:
+                return _mint_refused(
+                    f"drawable {d} lives in the stylesheet member {stylesheet_member!r}", source_style_id
+                )
+
+        stroke_message = stroke_spec.get("stroke_message")
+        if stroke_message is not None:
+            width = stroke_message.get("width") if isinstance(stroke_message, dict) else None
+            if not isinstance(stroke_message, dict) or not _is_finite_real(width) or width <= 0:
+                return _mint_refused("stroke_spec stroke_message needs a numeric positive width", source_style_id)
+            if not _all_reals_finite(stroke_message):
+                return _mint_refused("stroke_spec stroke_message has a non-finite value", source_style_id)
+            minted_stroke = copy.deepcopy(stroke_message)
+        else:
+            color = stroke_spec.get("color")
+            width = stroke_spec.get("width")
+            valid_color = (
+                isinstance(color, (tuple, list)) and len(color) == 4
+                and all(_is_finite_real(c) for c in color)
+            )
+            if not valid_color or not _is_finite_real(width) or width <= 0:
+                return _mint_refused(
+                    "stroke_spec needs a 4-tuple color and a numeric positive width", source_style_id
+                )
+            minted_stroke = _stroke_submessage(stroke_spec)
+
+        if _METADATA_MEMBER not in file_ids:
+            return _mint_refused(f"member {_METADATA_MEMBER} missing from deck", source_style_id)
+
+        drawable_members = sorted({id_to_file[d] for d in drawable_ids})
+
+        with zipfile.ZipFile(deck) as zf:
+            namelist = set(zf.namelist())
+            if _METADATA_MEMBER not in namelist:
+                return _mint_refused(f"member {_METADATA_MEMBER} missing from deck", source_style_id)
+            meta_buf = zf.read(_METADATA_MEMBER)
+            sheet_buf = zf.read(stylesheet_member)
+            member_bufs = {m: zf.read(m) for m in drawable_members}
+
+        meta_decoded = IWAFile.from_buffer(meta_buf, _METADATA_MEMBER).to_dict()
+        meta_arch = _find_package_metadata_archive(meta_decoded)
+        if meta_arch is None:
+            return _mint_refused(f"no {_PACKAGE_METADATA_PBTYPE} archive in {_METADATA_MEMBER}", source_style_id)
+        package_meta = meta_arch["objects"][0]
+
+        try:
+            last_id = int(package_meta.get("lastObjectIdentifier"))
+        except (TypeError, ValueError):
+            last = package_meta.get("lastObjectIdentifier")
+            return _mint_refused(f"lastObjectIdentifier {last!r} is not numeric", source_style_id)
+
+        new_id = str(last_id + 1)
+        root_obj_existing = objects.get(root_id) or {}
+        registered_style_ids = {str(s.get("identifier")) for s in (root_obj_existing.get("styles") or [])}
+        for entry in root_obj_existing.get("parentToChildrenStyleMap") or []:
+            parent_id = (entry.get("parent") or {}).get("identifier")
+            if parent_id is not None:
+                registered_style_ids.add(str(parent_id))
+            for child in entry.get("children") or []:
+                child_id = child.get("identifier")
+                if child_id is not None:
+                    registered_style_ids.add(str(child_id))
+        if (
+            new_id in id_to_file or new_id in objects or new_id in registered_style_ids
+            or new_id in header_object_references
+        ):
+            return _mint_refused(f"candidate id {new_id} already exists in the package", source_style_id)
+        for component in package_meta.get("components") or []:
+            for entry in component.get("objectUuidMapEntries") or []:
+                if str(entry.get("identifier")) == new_id:
+                    return _mint_refused(f"candidate id {new_id} already exists in the package", source_style_id)
+            for ref in component.get("externalReferences") or []:
+                if str(ref.get("objectIdentifier")) == new_id:
+                    return _mint_refused(f"candidate id {new_id} already exists in the package", source_style_id)
+
+        needed_members = set(drawable_members) | {stylesheet_member}
+        _, reason = _resolve_member_components(
+            package_meta.get("components") or [], needed_members
+        )
+        if reason is not None:
+            return _mint_refused(reason, source_style_id)
+
+        sheet_decoded = IWAFile.from_buffer(sheet_buf, stylesheet_member).to_dict()
+        source_arch = _find_archive(sheet_decoded, source_style_id)
+        if source_arch is None:
+            return _mint_refused(f"style {source_style_id} archive header not found", source_style_id)
+        source_msg_infos = source_arch["header"].get("messageInfos") or []
+        if not source_msg_infos or source_msg_infos[0].get("type") is None:
+            return _mint_refused(f"style {source_style_id} archive header has no messageInfos type", source_style_id)
+        msg_type = source_msg_infos[0].get("type")
+        if msg_type != _MEDIA_STYLE_HEADER_TYPE:
+            return _mint_refused(
+                f"style {source_style_id} archive header type is {msg_type!r}, not {_MEDIA_STYLE_HEADER_TYPE}",
+                source_style_id,
+            )
+        header_pbtype = import_version()[0][msg_type].DESCRIPTOR.full_name
+        if header_pbtype != _MEDIA_STYLE_PBTYPE:
+            return _mint_refused(
+                f"style {source_style_id} archive header type {msg_type!r} is {header_pbtype!r}, "
+                f"not {_MEDIA_STYLE_PBTYPE}",
+                source_style_id,
+            )
+        msg_version = list(_MEDIA_STYLE_HEADER_VERSION)
+
+        patched_sheet = copy.deepcopy(sheet_decoded)
+        minted_object = {
+            "_pbtype": _MEDIA_STYLE_PBTYPE,
+            "super": {
+                "parent": {"identifier": source_style_id},
+                "isVariation": True,
+                "stylesheet": {"identifier": root_id},
+            },
+            "overrideCount": 1,
+            "mediaProperties": {"stroke": minted_stroke},
+        }
+        minted_object = _canonicalise(_MEDIA_STYLE_PBTYPE, minted_object)
+        dropped = _first_dropped_key(minted_stroke, (minted_object.get("mediaProperties") or {}).get("stroke") or {})
+        if dropped is not None:
+            return _mint_refused(f"stroke_spec field {dropped!r} was dropped by the schema", source_style_id)
+        new_archive = {
+            "header": {
+                "_pbtype": "TSP.ArchiveInfo",
+                "identifier": new_id,
+                "messageInfos": [{
+                    "_pbtype": "TSP.MessageInfo",
+                    "type": msg_type,
+                    "version": msg_version,
+                    "objectReferences": [source_style_id],
+                }],
+            },
+            "objects": [minted_object],
+        }
+        patched_sheet["chunks"][0]["archives"].append(new_archive)
+
+        root_arch = _find_archive(patched_sheet, root_id)
+        if root_arch is None:
+            return _mint_refused(f"stylesheet root {root_id} archive not found in {stylesheet_member}", source_style_id)
+        root_obj = root_arch["objects"][0]
+        root_obj.setdefault("styles", []).append({"identifier": new_id})
+        parent_map = root_obj.setdefault("parentToChildrenStyleMap", [])
+        entry = next(
+            (e for e in parent_map if str((e.get("parent") or {}).get("identifier")) == source_style_id), None
+        )
+        if entry is None:
+            entry = {"parent": {"identifier": source_style_id}, "children": []}
+            parent_map.append(entry)
+        entry.setdefault("children", []).append({"identifier": new_id})
+
+        new_sheet_bytes = IWAFile.from_dict(copy.deepcopy(patched_sheet)).to_buffer()
+        reparsed_sheet = IWAFile.from_buffer(new_sheet_bytes, stylesheet_member).to_dict()
+        removed, added, changed = _archive_diff(sheet_decoded, reparsed_sheet)
+        if removed or added != {new_id} or set(changed) != {root_id}:
+            return _mint_refused("stylesheet reparse gate failed", source_style_id)
+        for aid, intended in ((new_id, new_archive), (root_id, root_arch)):
+            reparsed_arch = _find_archive(reparsed_sheet, aid)
+            if reparsed_arch is None or not _archives_equal(reparsed_arch, intended):
+                return _mint_refused(
+                    f"{stylesheet_member}: archive {aid} does not match intended patch after reparse", source_style_id
+                )
+
+        edits: dict[str, bytes] = {stylesheet_member: new_sheet_bytes}
+
+        by_member: dict[str, list[str]] = {}
+        for d in drawable_ids:
+            by_member.setdefault(id_to_file[d], []).append(d)
+
+        for member, ids in by_member.items():
+            decoded = IWAFile.from_buffer(member_bufs[member], member).to_dict()
+            patched = copy.deepcopy(decoded)
+            wanted = set(ids)
+            intended_by_id: dict[str, dict] = {}
+            for ch in patched["chunks"]:
+                for arch in ch["archives"]:
+                    aid = str(arch["header"]["identifier"])
+                    if aid not in wanted:
+                        continue
+                    objs = arch.get("objects") or []
+                    if not objs:
+                        continue
+                    objs[0]["style"]["identifier"] = new_id
+                    replaced = 0
+                    for mi in arch["header"].get("messageInfos") or []:
+                        refs = mi.get("objectReferences")
+                        if not refs:
+                            continue
+                        positions = [i for i, r in enumerate(refs) if str(r) == source_style_id]
+                        if not positions:
+                            continue
+                        if len(positions) != 1:
+                            return _mint_refused(
+                                f"drawable {aid} header lists {source_style_id} {len(positions)} times, not 1",
+                                source_style_id,
+                            )
+                        refs[positions[0]] = new_id
+                        replaced += 1
+                    if replaced != 1:
+                        return _mint_refused(
+                            f"drawable {aid} header does not reference {source_style_id} exactly once", source_style_id
+                        )
+                    intended_by_id[aid] = arch
+
+            if len(intended_by_id) != len(wanted):
+                return _mint_refused(
+                    f"expected to touch {len(wanted)} drawable(s) in {member}, touched {len(intended_by_id)}",
+                    source_style_id,
+                )
+
+            new_member_bytes = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
+            reparsed = IWAFile.from_buffer(new_member_bytes, member).to_dict()
+            removed, added, changed = _archive_diff(decoded, reparsed)
+            if removed or added or set(changed) != wanted:
+                return _mint_refused(
+                    f"{member}: re-encode touched fewer/other than the intended drawable(s)", source_style_id
+                )
+            for aid, intended in intended_by_id.items():
+                reparsed_arch = _find_archive(reparsed, aid)
+                if reparsed_arch is None or not _archives_equal(reparsed_arch, intended):
+                    return _mint_refused(
+                        f"{member}: archive {aid} does not match intended patch after reparse", source_style_id
+                    )
+            edits[member] = new_member_bytes
+
+        meta_patched = copy.deepcopy(meta_decoded)
+        meta_arch2 = _find_package_metadata_archive(meta_patched)
+        pm = meta_arch2["objects"][0]
+        pm["lastObjectIdentifier"] = new_id
+        components_by_member2, reason = _resolve_member_components(
+            pm.get("components") or [], needed_members
+        )
+        if reason is not None:
+            return _mint_refused(reason, source_style_id)
+
+        existing_uuids: set[tuple] = set()
+        for component in pm.get("components") or []:
+            for uentry in component.get("objectUuidMapEntries") or []:
+                uuid = uentry.get("uuid") or {}
+                existing_uuids.add((str(uuid.get("lower")), str(uuid.get("upper"))))
+        lower, upper = secrets.randbits(64), secrets.randbits(64)
+        while (lower, upper) == (0, 0) or (str(lower), str(upper)) in existing_uuids:
+            lower, upper = secrets.randbits(64), secrets.randbits(64)
+        stylesheet_component2 = components_by_member2[stylesheet_member]
+        stylesheet_component2.setdefault("objectUuidMapEntries", []).append(
+            {"identifier": new_id, "uuid": {"lower": str(lower), "upper": str(upper)}}
+        )
+        stylesheet_component_id = str(stylesheet_component2.get("identifier"))
+        for member in drawable_members:
+            component = components_by_member2[member]
+            ext_refs = component.setdefault("externalReferences", [])
+            ext_refs.append({"componentIdentifier": stylesheet_component_id, "objectIdentifier": new_id})
+
+        new_meta_bytes = IWAFile.from_dict(copy.deepcopy(meta_patched)).to_buffer()
+        reparsed_meta = IWAFile.from_buffer(new_meta_bytes, _METADATA_MEMBER).to_dict()
+        removed, added, changed = _archive_diff(meta_decoded, reparsed_meta)
+        meta_arch_id = str(meta_arch["header"]["identifier"])
+        if removed or added or set(changed) != {meta_arch_id}:
+            return _mint_refused(
+                f"{_METADATA_MEMBER}: re-encode touched fewer/other than the metadata archive", source_style_id
+            )
+        reparsed_meta_arch = _find_archive(reparsed_meta, meta_arch_id)
+        if reparsed_meta_arch is None or not _archives_equal(reparsed_meta_arch, meta_arch2):
+            return _mint_refused(
+                f"{_METADATA_MEMBER}: archive {meta_arch_id} does not match intended patch after reparse",
+                source_style_id,
+            )
+        edits[_METADATA_MEMBER] = new_meta_bytes
+    except Exception as exc:  # noqa: BLE001 — decode/encode region refuses on any failure
+        return _mint_refused(f"decode/encode failed: {exc}", source_style_id)
+
+    try:
+        _rewrite_members(deck, edits)
+    except OfflineWriteCorrupted:
+        raise  # deck IS truncated: must reach the caller, never a refused result
+    except Exception as exc:  # noqa: BLE001 — every result refuses, deck left untouched
+        return _mint_refused(f"rewrite failed: {exc}", source_style_id)
+
+    return {
+        "refused": False,
+        "reason": None,
+        "new_id": new_id,
+        "source_id": source_style_id,
+        "drawables": sorted(drawable_ids, key=str),
+        "members": sorted(edits),
+    }
 
 
 def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
