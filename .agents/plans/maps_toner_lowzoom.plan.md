@@ -27,7 +27,7 @@ isProject: false
 - Do **not** edit `dashboard/src/maps/vendor/maptiler-toner-8688fbd.json` or `maptiler-toner-LICENSE.md`. All changes are load-time overrides.
 - Do not touch `boundary_country_z5-`. Nothing above map zoom 5 changes.
 - Layer ids stay `boundary_*` so `filterForLayer` ([layers.ts:35](dashboard/src/maps/layers.ts)) keeps mapping them to the **boundaries** toggle.
-- Node for dashboard commands: `PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`. Tests `npm run test:maps`, build `npm run build`.
+- Node for dashboard commands: `PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`. Tests `npm run test:maps` and `npm run test:ui`, build `npm run build`.
 - Option 2 below is **parked**. Do not implement it.
 
 ## Why borders vanish
@@ -86,7 +86,7 @@ Two tests in [dashboard/tests/camera-flight.test.cjs](dashboard/tests/camera-fli
 - `boundary_country_z5-`: untouched, deep-equal to the vendored layer.
 - Output has exactly one more layer than the vendored array; stripping `boundary_state_z1-4` out reproduces the vendored id order exactly, and the new layer sits immediately before `boundary_state`.
 
-`npm run test:maps` then `npm run build` (runs `tsc`).
+`npm run test:maps` and `npm run test:ui`, then `npm run build` (runs `tsc`).
 
 ## Provenance
 
