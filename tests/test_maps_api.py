@@ -5,6 +5,7 @@ import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
@@ -1839,14 +1840,14 @@ def test_two_concurrent_appends_both_land_with_distinct_ids_and_assets(monkeypat
     from obed_edom.web import maps
 
     barrier = threading.Barrier(2)
-    real_decode = maps._decode_png
+    real_decode = maps.decode_png
 
     def gated_decode(raw):
         payload = real_decode(raw)
         barrier.wait(5)
         return payload
 
-    monkeypatch.setattr(maps, "_decode_png", gated_decode)
+    monkeypatch.setattr(maps, "decode_png", gated_decode)
 
     def upload(name):
         return client.post(
@@ -1990,13 +1991,13 @@ def test_stale_thumbnail_after_an_append_is_dropped(monkeypatch):
     monkeypatch.setattr(maps, "_validate_raster", gated_validate_raster)
 
     write_calls = []
-    real_write_atomic = maps._write_atomic
+    real_stage_bytes = maps.MapsCommit.stage_bytes
 
-    def spy_write_atomic(path, data):
+    def spy_stage_bytes(self, path, data):
         write_calls.append(Path(path))
-        return real_write_atomic(path, data)
+        return real_stage_bytes(self, path, data)
 
-    monkeypatch.setattr(maps, "_write_atomic", spy_write_atomic)
+    monkeypatch.setattr(maps.MapsCommit, "stage_bytes", spy_stage_bytes)
 
     stale_image = Image.new("RGBA", (40, 20), (10, 200, 10, 255))
     stale_buffer = BytesIO()
@@ -2123,19 +2124,24 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
 
     tail_reached = threading.Event()
     release_tail = threading.Event()
-    real_mutate_document = maps._mutate_document
+    real_maps_commit = maps.maps_commit
     tail_lock_state = {}
-
-    def spy_mutate_document(job_id, expected_revision, mutate):
-        if job_id == job_b["id"] and "owned" not in tail_lock_state:
-            tail_lock_state["owned"] = maps._mutation_lock(job_id)._is_owned()
-            tail_reached.set()
-            release_tail.wait(5)
-        return real_mutate_document(job_id, expected_revision, mutate)
-
-    monkeypatch.setattr(maps, "_mutate_document", spy_mutate_document)
-
     append_lock_reached = threading.Event()
+
+    @contextmanager
+    def spy_maps_commit(job_id, expected_revision=None, *, bump=True):
+        if job_id == job_b["id"]:
+            if "owned" not in tail_lock_state:
+                tail_lock_state["owned"] = maps._mutation_lock(job_id)._is_owned()
+                tail_reached.set()
+                release_tail.wait(5)
+            else:
+                append_lock_reached.set()
+        with real_maps_commit(job_id, expected_revision, bump=bump) as commit:
+            yield commit
+
+    monkeypatch.setattr(maps, "maps_commit", spy_maps_commit)
+
     landmark_bytes = _landmark_png()
 
     import_outcome_b = {}
@@ -2152,15 +2158,6 @@ def test_session_import_and_a_concurrent_append_do_not_lose_each_other(monkeypat
     # The status flip and the publish call must already be running under the
     # job's own mutation lock, held by the import thread.
     assert tail_lock_state.get("owned") is True
-
-    real_mutate_document_with_asset = maps._mutate_document_with_asset
-
-    def spy_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate):
-        if job_id == job_b["id"] and not append_lock_reached.is_set():
-            append_lock_reached.set()
-        return real_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate)
-
-    monkeypatch.setattr(maps, "_mutate_document_with_asset", spy_mutate_document_with_asset)
 
     append_outcome = {}
 
@@ -2241,14 +2238,16 @@ def test_load_session_locks_idle_check_and_status_flip_together(monkeypatch):
         )
 
     append_lock_reached = threading.Event()
-    real_mutate_document_with_asset = maps._mutate_document_with_asset
+    real_maps_commit = maps.maps_commit
 
-    def spy_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate):
+    @contextmanager
+    def spy_maps_commit(job_id, expected_revision=None, *, bump=True):
         if job_id == job["id"] and not append_lock_reached.is_set():
             append_lock_reached.set()
-        return real_mutate_document_with_asset(job_id, expected_revision, asset_id, payload, mutate)
+        with real_maps_commit(job_id, expected_revision, bump=bump) as commit:
+            yield commit
 
-    monkeypatch.setattr(maps, "_mutate_document_with_asset", spy_mutate_document_with_asset)
+    monkeypatch.setattr(maps, "maps_commit", spy_maps_commit)
 
     append_thread = threading.Thread(target=do_append)
     append_thread.start()
@@ -2358,3 +2357,227 @@ def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch
     tmps = set(asset_dir.glob("*.tmp")) if asset_dir.is_dir() else set()
     assert not pngs
     assert not tmps
+
+
+# --- maps_commit contract tests -----------------------------------------------
+
+
+def test_asset_upload_rolls_back_on_save_failure(monkeypatch):
+    job = _seed()
+    before_revision = int(job["result"].get("stateRevision") or 0)
+    before_assets = job["result"].get("assets") or []
+
+    def boom(_job_id, _result):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(RUNNER, "update_result", boom)
+    with pytest.raises(RuntimeError):
+        client.post(
+            f"/api/maps/{job['id']}/assets",
+            files={"file": ("church.png", _landmark_png(), "image/png")},
+        )
+    monkeypatch.undo()
+
+    latest = client.get(f"/api/jobs/{job['id']}").json()
+    assert int(latest["result"].get("stateRevision") or 0) == before_revision
+    assert latest["result"].get("assets") == before_assets
+    asset_dir = Path(latest["result"]["outputDir"]) / "assets"
+    leftover = set(asset_dir.glob("*")) if asset_dir.is_dir() else set()
+    assert not leftover
+
+
+def test_session_import_restores_assets_and_previews_when_commit_fails(monkeypatch):
+    from obed_edom.web import maps
+
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    thumb = client.post(f"/api/maps/{map_job['id']}/png?slideId={slide_id}&kind=thumb", content=_landmark_png())
+    assert thumb.status_code == 200, thumb.text
+    landmark = client.post(
+        f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+        files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    )
+    assert landmark.status_code == 200, landmark.text
+    before = client.get(f"/api/jobs/{map_job['id']}").json()
+    before_revision = int(before["result"]["stateRevision"] or 0)
+    asset_dir = Path(before["result"]["outputDir"]) / "assets"
+    preview_dir = Path(before["result"]["previewDir"])
+    before_asset_names = sorted(p.name for p in asset_dir.glob("*.png"))
+    before_asset_bytes = {p.name: p.read_bytes() for p in asset_dir.glob("*.png")}
+    before_preview_names = sorted(p.name for p in preview_dir.glob("*.png"))
+    before_preview_bytes = {p.name: p.read_bytes() for p in preview_dir.glob("*.png")}
+
+    session = client.get(f"/api/maps/{map_job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    real_update_result = RUNNER.update_result
+
+    def failing_update_result(job_id, result):
+        if job_id == map_job["id"]:
+            raise RuntimeError("simulated save failure")
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+    with pytest.raises(RuntimeError, match="simulated save failure"):
+        client.post(
+            f"/api/maps/{map_job['id']}/session",
+            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+        )
+    monkeypatch.undo()
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert int(latest["result"]["stateRevision"] or 0) == before_revision
+    after_asset_names = sorted(p.name for p in asset_dir.glob("*.png"))
+    after_preview_names = sorted(p.name for p in preview_dir.glob("*.png"))
+    assert after_asset_names == before_asset_names
+    assert after_preview_names == before_preview_names
+    for name, data in before_asset_bytes.items():
+        assert (asset_dir / name).read_bytes() == data
+    for name, data in before_preview_bytes.items():
+        assert (preview_dir / name).read_bytes() == data
+    assert not list(asset_dir.glob("*.obedbak-*"))
+    assert not list(preview_dir.glob("*.obedbak-*"))
+    assert not list(asset_dir.parent.glob(".session-import-*"))
+
+
+def test_session_import_bumps_revision_and_invalidates_stale_save():
+    job = _seed()
+    doc = _doc(job)
+    stale_revision = int(job["result"].get("stateRevision") or 0)
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    loaded = client.post(
+        f"/api/maps/{job['id']}/session",
+        files={"file": ("saved.obedmaps", session.content, "application/zip")},
+    )
+    assert loaded.status_code == 200, loaded.text
+    new_revision = int(loaded.json()["result"]["stateRevision"] or 0)
+    assert new_revision == stale_revision + 1
+
+    stale_save = client.post(
+        f"/api/maps/{job['id']}/state",
+        json={"expectedRevision": stale_revision, "document": doc},
+    )
+    assert stale_save.status_code == 409, stale_save.text
+    assert stale_save.json()["detail"]["stateRevision"] == new_revision
+
+
+def test_export_bumps_state_revision(monkeypatch):
+    job = _seed()
+    before_revision = int(job["result"].get("stateRevision") or 0)
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False):
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    response = client.post(f"/api/maps/{job['id']}/export")
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert int(done["result"]["stateRevision"] or 0) == before_revision + 1
+
+
+def test_bootstrap_csv_bumps_state_revision(monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    job = _seed()
+    before_revision = int(job["result"].get("stateRevision") or 0)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nSingapore,1.3521,103.8198\n", "replace": "true"},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert int(done["result"]["stateRevision"] or 0) == before_revision + 1
+
+    slide_id = done["result"]["slides"][0]["id"]
+    before_pin_revision = int(done["result"]["stateRevision"] or 0)
+    pinned = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name,lat,lon\nHanoi,21.0278,105.8342\n", "targetSlideId": slide_id},
+    )
+    assert pinned.status_code == 200, pinned.text
+    done_pin = _wait(job["id"])
+    assert done_pin["status"] == "done", done_pin.get("error")
+    assert int(done_pin["result"]["stateRevision"] or 0) == before_pin_revision + 1
+
+
+def test_still_and_plate_writes_take_the_mutation_lock():
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    still_body = _landmark_png()
+
+    def post_still():
+        return client.post(f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=still", content=still_body)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(post_still) for _ in range(4)]
+        responses = [future.result(timeout=5) for future in futures]
+    for response in responses:
+        assert response.status_code == 200, response.text
+
+    output_dir = Path(job["result"]["outputDir"])
+    stills = list((output_dir / "stills").glob("*.png"))
+    assert len(stills) == 1
+    assert stills[0].read_bytes() == still_body
+    assert not list((output_dir / "stills").glob("*.tmp"))
+    assert not list((output_dir / "stills").glob("*.obedbak-*"))
+
+
+def test_session_export_snapshot_is_consistent(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    slide_id = job["result"]["slides"][0]["id"]
+    landmark_started = threading.Event()
+    release_landmark = threading.Event()
+    fired = threading.Event()
+
+    def hook(job_id):
+        if job_id == job["id"] and not fired.is_set():
+            fired.set()
+            landmark_started.set()
+            release_landmark.wait(5)
+
+    monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
+
+    outcome = {}
+
+    def do_export():
+        outcome["response"] = client.get(f"/api/maps/{job['id']}/session")
+
+    thread = threading.Thread(target=do_export)
+    thread.start()
+    assert landmark_started.wait(5)
+
+    landmark_outcome = {}
+
+    def do_landmark():
+        landmark_outcome["response"] = client.post(
+            f"/api/maps/{job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    landmark_thread = threading.Thread(target=do_landmark)
+    landmark_thread.start()
+    time.sleep(0.1)
+    assert landmark_thread.is_alive()
+
+    release_landmark.set()
+    thread.join(5)
+    landmark_thread.join(5)
+    monkeypatch.undo()
+
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
+
+    with zipfile.ZipFile(BytesIO(outcome["response"].content)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        manifest_asset_ids = {asset["id"] for asset in manifest["document"]["assets"]}
+        archive_asset_ids = {
+            name.split("/", 1)[1][: -len(".png")]
+            for name in archive.namelist()
+            if name.startswith("assets/") and name.endswith(".png")
+        }
+    assert manifest_asset_ids == archive_asset_ids

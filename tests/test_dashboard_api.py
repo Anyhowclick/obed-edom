@@ -635,3 +635,13 @@ def test_resize_form_still_takes_validate():
     body = schema["components"]["schemas"][ref.rsplit("/", 1)[-1]]
     assert "validate" in body["properties"]
     assert "run_validation" not in body["properties"]
+
+
+def test_relocate_maps_job_is_rejected():
+    """Maps jobs never relocate: their outputDir is stable and stateRevision-gated
+    writes go through POST /api/maps/{id}/state, not the generic relocate endpoint."""
+    client = TestClient(app)
+    job = client.post("/api/maps").json()
+    response = client.post(f"/api/jobs/{job['id']}/relocate", json={"folder": "/tmp"})
+    assert response.status_code == 409, response.text
+    assert "state" in response.json()["detail"]
