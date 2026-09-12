@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { MapsStyleId } from "./types";
 import { MAP_STYLE_REGISTRY, STYLE_SWATCHES } from "./styles";
 import { nextGridIndex } from "./stylePickerNav";
+import { IconCaret } from "../components/icons";
 
 const COLS = 3;
 
@@ -83,7 +84,8 @@ export function StylePicker({ value, disabled, onChange }: { value: MapsStyleId;
         onClick={() => (open ? setOpen(false) : openPicker())}
       >
         <img className="style-picker-thumb" src={`/style-thumbs/${value}.png`} alt="" />
-        {selected.label} ▾
+        {selected.label}
+        <IconCaret />
       </button>
       {open && (
         <div className="style-picker-pop">

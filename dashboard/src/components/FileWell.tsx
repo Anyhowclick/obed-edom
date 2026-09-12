@@ -79,7 +79,7 @@ export function FileWell({
             type="file"
             accept={accept}
             multiple={multiple}
-            style={{ display: "none" }}
+            hidden
             id={inputId}
             onChange={(e) => {
               const files = e.target.files ? [...e.target.files] : [];

@@ -6,6 +6,7 @@ import type { OutlineRow } from "../outline";
 import { SHOW_INFO_KEY, SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
 import { OutlineStrip } from "./OutlineStrip";
 import { isPreviewVideo } from "./PreviewGrid";
+import { IconExpand } from "./icons";
 import { JobName } from "./JobName";
 import { SlideFindings } from "./SlideFindings";
 import { ValidationPanel } from "./ValidationPanel";
@@ -180,30 +181,6 @@ function PairSplit({
         window.addEventListener("pointerup", onUp);
       }}
     />
-  );
-}
-
-function ExpandIcon({ collapse }: { collapse?: boolean }) {
-  return (
-    <svg className="icon-expand" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-      {collapse ? (
-        <path
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6"
-        />
-      ) : (
-        <path
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"
-        />
-      )}
-    </svg>
   );
 }
 
@@ -468,7 +445,7 @@ export function DiffResultView({
               aria-label={focusMode ? "Exit maximise" : "Maximise"}
               onClick={() => setFocusMode(!focusMode)}
             >
-              <ExpandIcon collapse={focusMode} />
+              <IconExpand className="icon-expand" collapse={focusMode} />
             </button>
           </div>
         </div>
