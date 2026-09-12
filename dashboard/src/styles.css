@@ -165,6 +165,9 @@ body::before {
 }
 .sidebar.collapsed .sidebar-top { justify-content: center; }
 .sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--bg-surface-glass);
   border: var(--border-glass);
   color: var(--ink-secondary);
@@ -581,6 +584,9 @@ h3 {
 .job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
 .job-name-edit {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: none;
   color: inherit;
