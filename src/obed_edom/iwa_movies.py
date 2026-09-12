@@ -206,10 +206,7 @@ def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
     """
     posters = {str(k): float(v) for k, v in posters.items()}
     patches = [(oid, "TSD.MovieArchive", {"posterTime": value}) for oid, value in posters.items()]
-    result = _patch_archive_fields(deck, patches)
-    if result["refused"] or not posters:
-        return result
-    return {"refused": False, "reason": None, "touched": sorted(posters), "applied": len(posters)}
+    return _patch_archive_fields(deck, patches)
 
 
 def _movie_build_chunk(objects: dict, movie_id: str) -> tuple[str | None, str | None]:
@@ -235,6 +232,23 @@ def _movie_build_chunk(objects: dict, movie_id: str) -> tuple[str | None, str | 
     if len(chunks) != 1:
         return None, f"movie {movie_id} build {build_id} has {len(chunks)} chunk(s)"
     return chunks[0], None
+
+
+def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Read back each movie's ``playsAcrossSlides`` and its ``apple:movie-start`` build
+    chunk's ``automatic``, for verify-mode logging after `patch_movie_autoplay`."""
+    deck = Path(deck)
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    out: dict[str, dict[str, Any]] = {}
+    for oid in ids:
+        obj = objects.get(oid) or {}
+        chunk_id, _error = _movie_build_chunk(objects, oid)
+        chunk = objects.get(chunk_id) if chunk_id else None
+        out[oid] = {
+            "playsAcrossSlides": bool(obj.get("playsAcrossSlides") or False),
+            "automatic": bool(chunk.get("automatic")) if chunk is not None else None,
+        }
+    return out
 
 
 def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:

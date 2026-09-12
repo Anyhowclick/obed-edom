@@ -2108,3 +2108,92 @@ def test_export_maps_job_invalidates_poster_record_on_autoplay_regeneration(tmp_
     assert result["posterFrame"][0]["reason"] == "discarded by autoplay regeneration"
     assert result["movieAutoplay"][0]["refused"] is True
     assert "truncated" in result["movieAutoplay"][0]["reason"]
+
+
+def test_export_maps_job_plain_autoplay_refusal_leaves_poster_record_intact(tmp_path: Path, monkeypatch):
+    """A plain (non-truncating) autoplay refusal must not invalidate a successful
+    poster-frame record for the same deck -- only regeneration does that."""
+    monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
+    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": False, "reason": None, "posters": {"300": 1.0}},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.patch_movie_posters",
+        lambda deck, posters: {"refused": False, "reason": None, "touched": ["300"], "applied": 1},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_autoplay",
+        lambda deck, targets: {"refused": True, "reason": "x", "ids": []},
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert result["posterFrame"][0]["refused"] is False
+    assert result["posterFrame"][0]["applied"] == 1
+    assert result["movieAutoplay"][0]["refused"] is True
+    assert result["movieAutoplay"][0]["reason"] == "x"
+
+
+def test_export_maps_job_cg_autoplay_regeneration_invalidates_cg_poster_record(tmp_path: Path, monkeypatch):
+    """Export-level case for the cg call site: regeneration must only touch the cg
+    poster record, and leave the lw record (a separate deck) untouched."""
+    from obed_edom.iwa_write import OfflineWriteCorrupted, recovery_tmp_path
+
+    monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
+    monkeypatch.delenv("OBED_MAPS_MOVIE_AUTOPLAY", raising=False)
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_posters",
+        lambda deck, targets: {"refused": False, "reason": None, "posters": {"300": 1.0}},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.patch_movie_posters",
+        lambda deck, posters: {"refused": False, "reason": None, "touched": ["300"], "applied": 1},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_autoplay",
+        lambda deck, targets: {"refused": False, "reason": None, "ids": ["300"]},
+    )
+
+    def _autoplay_patch(deck: Path, ids: list[str]):
+        if "_CG" in deck.name:
+            Path(deck).write_bytes(b"truncated")
+            recovery_tmp_path(Path(deck)).write_bytes(b"recovery")
+            raise OfflineWriteCorrupted("simulated truncation")
+        return {"refused": False, "reason": None, "touched": ["300"], "applied": 1}
+
+    monkeypatch.setattr("obed_edom.iwa_movies.patch_movie_autoplay", _autoplay_patch)
+
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=True)
+    lw_poster = next(r for r in result["posterFrame"] if r["deck"] == "lw")
+    cg_poster = next(r for r in result["posterFrame"] if r["deck"] == "cg")
+    assert lw_poster["refused"] is False
+    assert lw_poster["applied"] == 1
+    assert cg_poster["refused"] is True
+    assert cg_poster["reason"] == "discarded by autoplay regeneration"
+    cg_autoplay = next(r for r in result["movieAutoplay"] if r["deck"] == "cg")
+    assert cg_autoplay["refused"] is True
+    assert "truncated" in cg_autoplay["reason"]

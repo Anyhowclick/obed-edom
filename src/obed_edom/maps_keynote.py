@@ -1489,10 +1489,15 @@ def _log(job: Any, message: str) -> None:
         log(message)
 
 
+_OFF_ALIASES = {"off", "0", "false", "no"}
+
+
 def maps_poster_frame_mode(explicit: str | None = None) -> str:
     """`off` (default), `on` (surgical offline posterTime patch), or `verify` (patch +
     read-back log). Env `OBED_MAPS_POSTER_FRAME`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_POSTER_FRAME", "")).strip().lower()
+    if raw in _OFF_ALIASES:
+        return "off"
     return raw if raw in {"on", "verify"} else "off"
 
 
@@ -1500,7 +1505,9 @@ def maps_movie_autoplay_mode(explicit: str | None = None) -> str:
     """`on` (default; surgical offline autoplay-after-transition patch), `off`, or
     `verify` (patch + read-back log). Env `OBED_MAPS_MOVIE_AUTOPLAY`."""
     raw = (explicit if explicit is not None else os.environ.get("OBED_MAPS_MOVIE_AUTOPLAY", "")).strip().lower()
-    return raw if raw in {"off", "verify"} else "on"
+    if raw in _OFF_ALIASES:
+        return "off"
+    return raw if raw == "verify" else "on"
 
 
 def _poster_targets(ops: list[dict[str, Any]], reveal_poster_times: dict[tuple[str, str, str], float]) -> list[dict[str, Any]]:
@@ -1562,28 +1569,42 @@ def _apply_movie_autoplay(
         return None
     targets = _autoplay_targets(ops)
     if not targets:
-        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": False, "reason": None}
+        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": False, "reason": None, "regenerated": False}
 
-    from obed_edom.iwa_movies import movie_archives, patch_movie_autoplay, plan_movie_autoplay
+    from obed_edom.iwa_movies import movie_autoplay_state, patch_movie_autoplay, plan_movie_autoplay
     from obed_edom.iwa_write import OfflineWriteCorrupted
 
     try:
         plan = plan_movie_autoplay(dest, targets)
         if plan["refused"]:
             _log(job, f"movieAutoplay {deck_label}: refused ({plan['reason']})")
-            return {"deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": plan["reason"]}
+            return {
+                "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": plan["reason"],
+                "regenerated": False,
+            }
 
         patched = patch_movie_autoplay(dest, plan["ids"])
         if patched["refused"]:
             _log(job, f"movieAutoplay {deck_label}: refused ({patched['reason']})")
-            return {"deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": patched["reason"]}
+            return {
+                "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": patched["reason"],
+                "regenerated": False,
+            }
 
         _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} reveal movie(s)")
         if mode == "verify":
-            by_id = {a["id"]: a["playsAcrossSlides"] for a in movie_archives(dest)}
+            state = movie_autoplay_state(dest, patched["touched"])
             for oid in patched["touched"]:
-                _log(job, f"movieAutoplay {deck_label}: {oid} playsAcrossSlides={by_id.get(oid)}")
-        return {"deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None}
+                s = state.get(oid, {})
+                _log(
+                    job,
+                    f"movieAutoplay {deck_label}: {oid} playsAcrossSlides={s.get('playsAcrossSlides')} "
+                    f"automatic={s.get('automatic')}",
+                )
+        return {
+            "deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None,
+            "regenerated": False,
+        }
     except OfflineWriteCorrupted as exc:
         _log(job, f"movieAutoplay {deck_label}: deck truncated during patch ({exc}); regenerating unpatched…")
         _run_one_deck(
@@ -1598,10 +1619,28 @@ def _apply_movie_autoplay(
             "applied": 0,
             "refused": True,
             "reason": f"deck truncated during patch, regenerated unpatched: {exc}",
+            "regenerated": True,
         }
     except Exception as exc:  # noqa: BLE001 — every optional-patch failure refuses, never fatal
         _log(job, f"movieAutoplay {deck_label}: refused (unexpected error: {exc})")
-        return {"deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": f"unexpected error: {exc}"}
+        return {
+            "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": f"unexpected error: {exc}",
+            "regenerated": False,
+        }
+
+
+def _invalidate_poster_on_regeneration(
+    poster_record: dict[str, Any] | None, autoplay_record: dict[str, Any] | None
+) -> None:
+    """If autoplay patching left the deck truncated, `_apply_movie_autoplay` regenerates
+    it unpatched -- which also wipes any poster-frame patch already applied to that same
+    deck. Mark the stale poster record refused so it doesn't survive into `result`."""
+    if autoplay_record is None or not autoplay_record.get("regenerated"):
+        return
+    if poster_record is not None and not poster_record["refused"]:
+        poster_record["applied"] = 0
+        poster_record["refused"] = True
+        poster_record["reason"] = "discarded by autoplay regeneration"
 
 
 def _apply_poster_frames(
@@ -1937,24 +1976,18 @@ def export_maps_job(
         )
         result["destPath"] = str(dest)
         _raise_if_cancelled(is_cancelled)
-        record = _apply_poster_frames(
+        record_lw = _apply_poster_frames(
             dest, ops, reveal_poster_times, job, "lw",
             width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_lw is not None:
+            poster_frame.append(record_lw)
         autoplay_record = _apply_movie_autoplay(
             dest, ops, job, "lw", width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled
         )
         if autoplay_record is not None:
             movie_autoplay.append(autoplay_record)
-            regenerated = (autoplay_record["reason"] or "").startswith(
-                "deck truncated during patch, regenerated unpatched"
-            )
-            if regenerated and record is not None and not record["refused"]:
-                record["applied"] = 0
-                record["refused"] = True
-                record["reason"] = "discarded by autoplay regeneration"
+        _invalidate_poster_on_regeneration(record_lw, autoplay_record)
         flags = _inspect_dest(dest, job, is_cancelled=is_cancelled)
     if export_dsk:
         if export_dir is not None:
@@ -1971,24 +2004,18 @@ def export_maps_job(
             ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )
         result["destPathDsk"] = str(dest_dsk)
-        record = _apply_poster_frames(
+        record_dsk = _apply_poster_frames(
             dest_dsk, ops_dsk, reveal_poster_times, job, "dsk",
             width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_dsk is not None:
+            poster_frame.append(record_dsk)
         autoplay_record = _apply_movie_autoplay(
             dest_dsk, ops_dsk, job, "dsk", width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled
         )
         if autoplay_record is not None:
             movie_autoplay.append(autoplay_record)
-            regenerated = (autoplay_record["reason"] or "").startswith(
-                "deck truncated during patch, regenerated unpatched"
-            )
-            if regenerated and record is not None and not record["refused"]:
-                record["applied"] = 0
-                record["refused"] = True
-                record["reason"] = "discarded by autoplay regeneration"
+        _invalidate_poster_on_regeneration(record_dsk, autoplay_record)
     if export_cg:
         if export_dir is not None:
             export_dir = ensure_export_dir(export_dir)
@@ -2029,24 +2056,18 @@ def export_maps_job(
         )
         result["destPathCg"] = str(dest_cg)
         _raise_if_cancelled(is_cancelled)
-        record = _apply_poster_frames(
+        record_cg = _apply_poster_frames(
             dest_cg, ops_cg, reveal_poster_times, job, "cg",
             width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled,
         )
-        if record is not None:
-            poster_frame.append(record)
+        if record_cg is not None:
+            poster_frame.append(record_cg)
         autoplay_record = _apply_movie_autoplay(
             dest_cg, ops_cg, job, "cg", width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled
         )
         if autoplay_record is not None:
             movie_autoplay.append(autoplay_record)
-            regenerated = (autoplay_record["reason"] or "").startswith(
-                "deck truncated during patch, regenerated unpatched"
-            )
-            if regenerated and record is not None and not record["refused"]:
-                record["applied"] = 0
-                record["refused"] = True
-                record["reason"] = "discarded by autoplay regeneration"
+        _invalidate_poster_on_regeneration(record_cg, autoplay_record)
 
         flags_cg = _inspect_dest(dest_cg, job, is_cancelled=is_cancelled)
     if not export_lw:
