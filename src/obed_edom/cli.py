@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
+import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -224,6 +227,17 @@ def _run_remap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_when_ready(host: str, port: int, url: str, *, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                webbrowser.open(url)
+                return
+        except OSError:
+            time.sleep(0.2)
+
+
 def _run_dashboard(host: str, port: int, *, open_browser: bool) -> int:
     dist = find_repo_root() / "dashboard" / "dist"
     if not dist.is_dir():
@@ -236,7 +250,8 @@ def _run_dashboard(host: str, port: int, *, open_browser: bool) -> int:
     url = f"http://{host}:{port}"
     print(f"Dashboard API: {url}")
     if open_browser:
-        webbrowser.open(url)
+        connect_host = "127.0.0.1" if host == "0.0.0.0" else host
+        threading.Thread(target=_open_when_ready, args=(connect_host, port, url), daemon=True).start()
     import uvicorn
 
     uvicorn.run("obed_edom.web.app:app", host=host, port=port, reload=False)
