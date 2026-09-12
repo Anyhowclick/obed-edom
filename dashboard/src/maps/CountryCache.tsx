@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clearMapsTileCache, mapsTileCacheStats } from "../api";
 import { loadAdmin0 } from "./overlays";
+import { IconCaret, IconGlobe, IconTrash } from "../components/icons";
 
 export const PINNED_CACHE_COUNTRIES = ["PHL", "IND", "IDN", "MYS"] as const;
 
@@ -16,35 +17,6 @@ function sortCacheCountries(rows: CountryRow[]): CountryRow[] {
     if (pb != null) return 1;
     return a.name.localeCompare(b.name);
   });
-}
-
-function IconGlobe() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path
-        d="M3.8 12h16.4M12 3.8c2.4 2.6 3.6 5.4 3.6 8.2s-1.2 5.6-3.6 8.2c-2.4-2.6-3.6-5.4-3.6-8.2s1.2-5.6 3.6-8.2z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
-}
-
-function IconTrash() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M7 7h10M9.5 7V6a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 6v1M8 7l.7 12.5h6.6L16 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
 }
 
 function formatCacheBytes(n: number): string {
@@ -152,6 +124,7 @@ export function CountryCachePicker({
       >
         <IconGlobe />
         {selected.length ? <span className="maps-layers-count">{selected.length}</span> : null}
+        <IconCaret />
       </button>
       {open && (
         <div className="maps-layers-menu maps-cache-menu" role="group" aria-label="Countries to cache">

@@ -76,6 +76,7 @@ export function SettingsTab() {
             <div className="settings-row">
               <span className="muted">{settings.defaultExportDir || "output/ (default)"}</span>
               <button
+                className="btn secondary"
                 type="button"
                 onClick={async () => {
                   try {
@@ -89,7 +90,7 @@ export function SettingsTab() {
                 Choose…
               </button>
               {settings.defaultExportDir && (
-                <button type="button" onClick={() => update({ defaultExportDir: "" })}>
+                <button className="btn secondary" type="button" onClick={() => update({ defaultExportDir: "" })}>
                   Use output/
                 </button>
               )}

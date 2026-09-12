@@ -3,29 +3,7 @@ import type { Job } from "../api";
 import { FEATURE_LABELS, asFeature } from "../nav";
 import { JobName } from "./JobName";
 import { statusLabel } from "../statusLabel";
-
-function IconTick() {
-  return (
-    <svg className="status-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconTrashSmall() {
-  return (
-    <svg className="status-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M7 7h10M9.5 7V6a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 6v1M8 7l.7 12.5h6.6L16 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+import { IconTick, IconTrash } from "./icons";
 
 type Props = {
   jobs: Job[];
@@ -58,7 +36,7 @@ export function SessionList({ jobs, activeId, onSelect, onDelete, onRename }: Pr
                   {!onRename && jobLabel(job)}
                   <div className="cap">
                     <span className={`status-badge status-${tone}`}>
-                      {tone === "ok" && <IconTick />}
+                      {tone === "ok" && <IconTick className="status-icon" />}
                       {text}
                     </span>
                   </div>
@@ -76,7 +54,7 @@ export function SessionList({ jobs, activeId, onSelect, onDelete, onRename }: Pr
                     onDelete(job.id);
                   }}
                 >
-                  <IconTrashSmall />
+                  <IconTrash className="status-icon" />
                 </button>
               )}
             </div>

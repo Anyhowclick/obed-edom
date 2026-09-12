@@ -47,6 +47,25 @@
   --border-glass: 1px solid rgba(255, 255, 255, 0.12);
   --border-glass-subtle: 1px solid rgba(255, 255, 255, 0.06);
 
+  /* Control size tiers. A container declares its tier; controls only read --ctl-*. */
+  --ctl-h-lg: 40px;   --ctl-pad-lg: 18px;  --ctl-font-lg: 14px;  --icon-lg: 16px;
+  --ctl-h-md: 36px;   --ctl-pad-md: 14px;  --ctl-font-md: 13px;  --icon-md: 16px;
+  --ctl-h-sm: 28px;   --ctl-pad-sm: 12px;  --ctl-font-sm: 13px;  --icon-sm: 14px;
+  --ctl-h-xs: 24px;   --ctl-pad-xs: 10px;  --ctl-font-xs: 12px;  --icon-xs: 12px;
+  --ctl-h-round: 32px;
+
+  /* The ambient tier — page level by default. Never declared inside a control rule. */
+  --ctl-h: var(--ctl-h-lg);
+  --ctl-pad: var(--ctl-pad-lg);
+  --ctl-font: var(--ctl-font-lg);
+  --icon-size: var(--icon-lg);
+
+  --gap-ctl: 8px;
+  --gap-group: 16px;
+  --gap-tight: 4px;
+
+  --radius-2xs: 4px;
+
   --navy: var(--bg-canvas);
   --navy-2: var(--bg-surface-highlight);
   --ink: var(--ink-primary);
@@ -75,6 +94,7 @@ body {
   background: var(--bg-canvas);
   color: var(--ink-primary);
 }
+button, input, select, textarea { font-family: inherit; }
 body::before {
   content: "";
   position: fixed;
@@ -130,8 +150,8 @@ body::before {
   border: var(--border-glass);
   color: var(--ink-secondary);
   border-radius: var(--radius-pill);
-  width: 32px;
-  height: 32px;
+  width: var(--ctl-h-round);
+  height: var(--ctl-h-round);
   cursor: pointer;
   font: inherit;
   flex-shrink: 0;
@@ -149,16 +169,20 @@ body::before {
   margin: 0;
 }
 .nav-btn {
+  display: flex;
+  align-items: center;
+  min-height: var(--ctl-h-md);
   text-align: left;
   background: transparent;
   color: var(--ink-secondary);
   border: 0;
   border-radius: var(--radius-pill);
-  padding: 10px 14px;
+  padding: 0 14px;
   cursor: pointer;
   font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 600;
+  line-height: 1.2;
   letter-spacing: -0.01em;
   transition: var(--transition);
 }
@@ -168,8 +192,9 @@ body::before {
   color: var(--ink-inverse);
 }
 .sidebar.collapsed .nav-btn {
+  justify-content: center;
   text-align: center;
-  padding: 10px 4px;
+  padding: 0 4px;
   font-size: 11px;
 }
 .diff-tab.focus .diff-setup { display: none; }
@@ -239,14 +264,23 @@ h3 {
 .well-tone-document .btn.secondary { border-color: rgba(255, 199, 44, 0.45); color: var(--accent-collab); }
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--ctl-h);
   background: var(--accent-cta);
   color: var(--accent-cta-fg);
-  border: 0;
+  /* Transparent, not 0: box-sizing keeps it inside min-height, so a primary and a
+     bordered secondary in one row measure the same. */
+  border: 1px solid transparent;
   border-radius: var(--radius-pill);
-  padding: 10px 18px;
+  padding: 0 var(--ctl-pad);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--ctl-font);
   font-weight: 700;
+  line-height: 1.2;
+  text-decoration: none;
   cursor: pointer;
   box-shadow: var(--shadow-cta-glow);
   transition: var(--transition);
@@ -266,6 +300,23 @@ h3 {
   box-shadow: none;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn:focus-visible,
+.nav-btn:focus-visible,
+.seg button:focus-visible,
+.icon-btn:focus-visible,
+.thumb-btn:focus-visible,
+.session-pick:focus-visible,
+.session-del:focus-visible,
+.sidebar-toggle:focus-visible,
+.maps-insp-tab:focus-visible,
+.maps-pin-open:focus-visible,
+.framing-chip:focus-visible,
+.framing-option:focus-visible,
+.job-name-edit:focus-visible,
+.info-chip:focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
 .btn.run-checks {
   background: var(--accent-danger);
   color: var(--accent-danger-fg);
@@ -296,8 +347,24 @@ h3 {
 .btn.save-pairing.saved {
   box-shadow: 0 0 28px rgba(255, 199, 44, 0.45);
 }
-.actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
+.actions { display: flex; gap: var(--gap-ctl); margin: 16px 0; flex-wrap: wrap; }
 .export-actions { align-items: center; }
+
+/* Control tiers. A container names its tier and every control inside inherits it;
+   nothing below reads a raw pixel height. Anything unlisted stays on the lg page tier. */
+.maps-toolbar, .maps-stylebar, .maps-nav-actions, .maps-insp-body, .settings-row {
+  --ctl-h: var(--ctl-h-md); --ctl-pad: var(--ctl-pad-md);
+  --ctl-font: var(--ctl-font-md); --icon-size: var(--icon-md);
+}
+.playlist-controls, .framing-tabs, .framing-filter,
+.maps-pin-bulk, .maps-landmark-pop, .maps-cache-menu, .maps-deck-actions-menu, .wash-mask-tools {
+  --ctl-h: var(--ctl-h-sm); --ctl-pad: var(--ctl-pad-sm);
+  --ctl-font: var(--ctl-font-sm); --icon-size: var(--icon-sm);
+}
+.row-acts, .hop-phase-toggles, .plan-modes, .maps-gutter, .maps-hl-list {
+  --ctl-h: var(--ctl-h-xs); --ctl-pad: var(--ctl-pad-xs);
+  --ctl-font: var(--ctl-font-xs); --icon-size: var(--icon-xs);
+}
 
 .overlay {
   position: fixed;
@@ -320,6 +387,7 @@ h3 {
   padding: 24px;
   width: min(520px, 90vw);
 }
+.overlay-card h2 { margin-top: 0; }
 .spinner {
   width: 28px;
   height: 28px;
@@ -387,6 +455,7 @@ h3 {
   flex-direction: column;
   gap: 4px;
 }
+.cap { font-size: 12px; color: var(--muted); }
 .job-list .cap { font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
 .session-group:first-child .cap { margin-top: 0; }
 .session-row {
@@ -423,8 +492,8 @@ h3 {
 .session-pick .cap { margin: 4px 0 0; }
 .session-del {
   flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
+  width: var(--ctl-h-round);
+  height: var(--ctl-h-round);
   padding: 0;
   display: flex;
   align-items: center;
@@ -440,7 +509,11 @@ h3 {
 .session-del:hover { color: var(--err); border-color: var(--err); }
 .status-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
 .status-badge.status-err { color: var(--err); }
-.status-icon { width: 12px; height: 12px; }
+/* The active row turns solid white, where lime and red both vanish. Same
+   semantics, darkened until they read on it. */
+.session-row.active .status-badge { color: #3C7A00; }
+.session-row.active .status-badge.status-err { color: #C11B1B; }
+.status-icon { --icon-size: 12px; }
 .job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
 .job-name-edit {
@@ -647,7 +720,7 @@ h3 {
   font-size: 15px;
 }
 .settings-block { flex-direction: column; align-items: stretch; }
-.settings-block input[type="range"] { width: 100%; }
+.settings-block input[type="range"] { width: 100%; height: 22px; accent-color: var(--sky); cursor: pointer; }
 .ok { color: var(--ok); }
 .playlist-bar {
   position: sticky;
@@ -666,18 +739,17 @@ h3 {
   margin: 0;
   gap: 8px;
 }
-.playlist-bar .btn {
-  padding: 5px 12px;
-  font-size: 13px;
-}
+/* A square of the row's tier. min-width rather than width so the few that carry a
+   count badge or a menu caret grow instead of spilling out of the pill. */
 .icon-btn {
-  padding: 4px 6px;
-  min-width: 28px;
+  min-width: var(--ctl-h);
+  height: var(--ctl-h);
+  padding: 0 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-.icon-expand { display: block; width: 15px; height: 15px; }
+.icon-expand { display: block; width: var(--icon-size); height: var(--icon-size); }
 /* DSK column shift (movement): green up / red down. */
 .btn.shift-up {
   background: var(--accent-primary);
@@ -739,7 +811,6 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   gap: 8px;
   margin-top: 8px;
 }
-.row-acts .btn { font-size: 12px; padding: 5px 10px; }
 .slide-slot { min-width: 0; }
 .slide-slot .cap { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .slide-slot img, .slide-slot video, .slide-ph {
@@ -794,7 +865,8 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   cursor: pointer;
 }
 .info-chip:hover { color: var(--ink-primary); background: var(--bg-surface-highlight); }
-.btn.toggle.on {
+.btn.toggle.on,
+.btn.icon-btn.on {
   background: var(--bg-surface-solid);
   color: var(--ink-inverse);
   border-color: transparent;
@@ -829,7 +901,8 @@ input[type="text"], input[type="number"], input:not([type]), select {
   border: var(--border-glass);
   color: var(--ink-primary);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 0 10px;
+  min-height: var(--ctl-h);
   font-family: var(--font-sans);
   font-size: 16px;
   width: 100%;
@@ -841,6 +914,7 @@ input[type="text"]:focus, input[type="number"]:focus, input:not([type]):focus, s
 }
 input.job-name-input {
   min-width: 0;
+  min-height: 0;
   flex: 1 1 auto;
   background: var(--bg-surface-glass-sub);
   color: var(--ink-primary);
@@ -941,6 +1015,34 @@ label.check input[type="checkbox"]:disabled,
   .maps-save-status-saving { animation: none; }
 }
 .err { color: var(--err); }
+.muted { color: var(--ink-secondary); }
+.notice {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: var(--border-glass);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-glass);
+}
+.notice p { margin: 0 0 6px; }
+.notice .actions { margin: 10px 0 0; }
+.notice.warning { border-left-color: var(--warn); background: rgba(255, 199, 44, 0.10); }
+.notice.warning > p:first-child { color: var(--warn); font-weight: 600; }
+/* Green for every status but Failed — the owner's call, written down. */
+.status-badge.status-busy { color: var(--ok); }
+.maps-hl { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
+.flag-body { min-width: 0; overflow-wrap: anywhere; }
+.thumb-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .error-notice {
   display: flex;
   align-items: flex-start;
@@ -970,14 +1072,19 @@ label.check input[type="checkbox"]:disabled,
 }
 .error-notice-close:hover,
 .error-notice-close:focus-visible { background: rgba(255, 77, 77, 0.2); }
-.seg { display: flex; gap: 6px; margin: 12px 0; }
+.seg { display: flex; gap: var(--gap-ctl); margin: 12px 0; }
 .seg button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--ctl-h);
   background: var(--bg-surface-glass);
   border: var(--border-glass);
   color: var(--ink-secondary);
   border-radius: var(--radius-pill);
-  padding: 6px 12px;
+  padding: 0 var(--ctl-pad);
   cursor: pointer;
+  font-size: var(--ctl-font);
   font-weight: 600;
 }
 .seg button.on { background: var(--bg-surface-solid); color: var(--ink-inverse); border-color: transparent; }
@@ -1118,7 +1225,7 @@ label.check input[type="checkbox"]:disabled,
 .framing-group .actions { flex-wrap: wrap; align-items: center; }
 .framing-group label.field { margin: 0; min-width: 0; }
 label.inline-field { display: flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
-label.inline-field select { width: auto; padding: 5px 8px; }
+label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h); }
 
 /* The crop: a 16:9 window with the wall image positioned inside it.
    The border is near-white on purpose — it marks the 1920x1080 edge, and a muted
@@ -1726,11 +1833,6 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   background: rgba(0, 0, 0, 0.6);
   color: #fff;
 }
-.maps-relief-btn.on {
-  background: var(--sky);
-  color: var(--ink-inverse);
-  border-color: transparent;
-}
 .maps-cache-menu {
   max-height: min(70vh, 420px);
   overflow: auto;
@@ -1758,11 +1860,6 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   white-space: nowrap;
   color: var(--accent-collab);
   font-weight: 700;
-}
-.maps-cache-usage .btn.maps-cache-delete {
-  flex: 0 0 30px;
-  width: 30px;
-  height: 30px;
 }
 .maps-cache-rule {
   border: 0;
@@ -1924,6 +2021,7 @@ input.maps-thumb-title-input {
   display: block;
   width: 100%;
   margin: 0;
+  min-height: 0;
   padding: 6px 8px;
   border: 0;
   border-radius: 0;
@@ -1972,38 +2070,29 @@ input.maps-thumb-title-input:focus {
   color: var(--accent-collab);
 }
 .maps-gutter-play {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px 6px;
-  min-width: 28px;
-  font-size: 11px;
   text-transform: none;
   letter-spacing: 0;
 }
-.maps-hop .btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.maps-icon {
-  width: 14px;
-  height: 14px;
+.ui-icon, .maps-icon {
+  width: var(--icon-size, 16px);
+  height: var(--icon-size, 16px);
   display: block;
   flex-shrink: 0;
   fill: none;
   stroke: currentColor;
 }
-.maps-icon.filled {
+.ui-icon.filled, .maps-icon.filled {
   fill: currentColor;
   stroke: none;
 }
+.ui-icon.flip { transform: scaleX(-1); }
+.btn.on .ui-icon .fill-on { fill: currentColor; }
 .maps-nav-actions {
   display: flex;
   gap: 8px;
   margin-top: 4px;
 }
-.maps-nav-actions .btn { flex: 1; padding: 6px 8px; }
+.maps-nav-actions .btn { flex: 1; }
 .maps-landmark-pop { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
 .maps-landmark-grid { grid-template-columns: repeat(3, 96px); margin-top: 4px; }
 .maps-landmark-tile {
@@ -2019,9 +2108,9 @@ input.maps-thumb-title-input:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 36px;
-  width: 36px;
-  height: 36px;
+  flex: 0 0 var(--ctl-h);
+  width: var(--ctl-h);
+  height: var(--ctl-h);
   padding: 0;
   background: var(--accent-danger);
   color: var(--accent-danger-fg);
@@ -2289,7 +2378,8 @@ input.maps-thumb-title-input:focus {
   border: var(--border-glass);
   color: var(--ink-primary);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 0 10px;
+  min-height: var(--ctl-h);
   font-family: var(--font-sans);
   font-size: 16px;
 }
@@ -2470,8 +2560,6 @@ input.maps-thumb-title-input:focus {
   margin-bottom: 4px;
 }
 .maps-pin-bulk .note { flex: 1 1 100%; margin: 0; }
-.maps-pin-bulk .btn { padding: 5px 7px; font-size: 11px; }
-.maps-pin-bulk .icon-btn { padding: 4px 6px; }
 .hop-tl-wrap { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
 .hop-phase-toggles {
   display: grid;
@@ -2740,7 +2828,8 @@ input.maps-thumb-title-input:focus {
   border: var(--border-glass);
   color: var(--ink-primary);
   border-radius: var(--radius-sm);
-  padding: 7px 9px;
+  padding: 0 9px;
+  min-height: var(--ctl-h);
   font-family: var(--font-sans);
   font-size: 16px;
   flex: 1;
@@ -2830,7 +2919,8 @@ input.maps-thumb-title-input:focus {
   border: var(--border-glass);
   color: var(--ink-primary);
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
+  padding: 0 8px;
+  min-height: var(--ctl-h);
   font-family: var(--font-sans);
   font-size: 16px;
   cursor: ew-resize;

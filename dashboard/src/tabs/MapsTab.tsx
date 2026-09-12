@@ -27,6 +27,20 @@ import {
 } from "../api";
 import { ArtifactActions } from "../components/ArtifactActions";
 import { ErrorNotice } from "../components/ErrorNotice";
+import {
+  IconCaret,
+  IconCopy,
+  IconLabel,
+  IconLabelOff,
+  IconLayers,
+  IconLibrary,
+  IconPaste,
+  IconPasteSlides,
+  IconPlay,
+  IconPlus,
+  IconRelief,
+  IconTrash,
+} from "../components/icons";
 import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { type Item as WcItem } from "../components/WatercolourResultView";
@@ -119,109 +133,6 @@ const INSPECTOR_TABS: { id: InspectorTab; label: string }[] = [
   { id: "animation", label: "Animation" },
   { id: "export", label: "Export" },
 ];
-
-function IconPlay() {
-  return (
-    <svg className="maps-icon filled" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 5v14l11-7z" />
-    </svg>
-  );
-}
-
-function IconTrash() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M7 7h10M9.5 7V6a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 6v1M8 7l.7 12.5h6.6L16 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function IconLibrary() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="4.5" width="17" height="15" rx="2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M16.5 4.5v15" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconLayers() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 4.2 21 8.5 12 12.8 3 8.5 12 4.2z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M5.2 12.2 12 15.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M5.2 16.2 12 19.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconRelief() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M3 17 8.5 8l4 6.5L15 10l6 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconLabelOff() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M4 20 20 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconPlus() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconLabel() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconCopy() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconPaste() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="5.5" y="5.5" width="13" height="15" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="9" y="3.5" width="6" height="3.5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconPasteSlides() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="5.5" width="11" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="7" y="3.5" width="4" height="3" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M15.5 12h5M17.5 9.5 20.5 12l-3 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
 
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
   return {
@@ -1897,17 +1808,19 @@ export function MapsTab() {
         <h1>Maps</h1>
         <p className="lede">Author LED-wall cameras, then export Keynote stills. Nothing is created until you start a deck.</p>
         <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
-        <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
-          New map deck
-        </button>
-        <button
-          className="btn secondary"
-          type="button"
-          disabled={sessionBusy}
-          onClick={() => sessionInput.current?.click()}
-        >
-          Load map session + cache…
-        </button>
+        <div className="actions">
+          <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
+            New map deck
+          </button>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={sessionBusy}
+            onClick={() => sessionInput.current?.click()}
+          >
+            Load map session + cache…
+          </button>
+        </div>
         <input
           ref={sessionInput}
           type="file"
@@ -1938,7 +1851,8 @@ export function MapsTab() {
             title="Add"
             onClick={() => setAddMenuOpen((open) => !open)}
           >
-            ＋
+            <IconPlus />
+            <IconCaret />
           </button>
           {addMenuOpen && (
             <div className="maps-deck-actions-menu" role="group" aria-label="Add">
@@ -1997,7 +1911,8 @@ export function MapsTab() {
             aria-haspopup="true"
             onClick={() => setSessionMenuOpen((open) => !open)}
           >
-            Session ▾
+            Session
+            <IconCaret />
           </button>
           {sessionMenuOpen && (
             <div className="maps-deck-actions-menu" role="group" aria-label="Session">
@@ -2102,6 +2017,7 @@ export function MapsTab() {
           >
             <IconLayers />
             {activeHiddenLayers.length ? <span className="maps-layers-count">{activeHiddenLayers.length}</span> : null}
+            <IconCaret />
           </button>
           {layersOpen && (
             <div className="maps-layers-menu" role="group" aria-label="Hide map layers">
@@ -2146,14 +2062,16 @@ export function MapsTab() {
         <div className="notice warning" role="alert">
           <p>This map was changed elsewhere. Your draft is paused until you choose which version to keep.</p>
           <p className="muted">{saveConflict.paths.join(", ")}</p>
-          <button className="btn secondary" type="button" onClick={() => {
-            saveQueue.current?.reloadLatest();
-            setSaveConflict(null);
-          }}>Reload latest</button>
-          <button className="btn" type="button" onClick={() => {
-            setSaveConflict(null);
-            void saveQueue.current?.keepMyChanges();
-          }}>Keep my changes</button>
+          <div className="actions">
+            <button className="btn secondary" type="button" onClick={() => {
+              saveQueue.current?.reloadLatest();
+              setSaveConflict(null);
+            }}>Reload latest</button>
+            <button className="btn" type="button" onClick={() => {
+              setSaveConflict(null);
+              void saveQueue.current?.keepMyChanges();
+            }}>Keep my changes</button>
+          </div>
         </div>
       )}
 
@@ -2263,8 +2181,8 @@ export function MapsTab() {
             );
           })}
           <div className="maps-nav-actions">
-            <button className="btn secondary" type="button" onClick={addSlide} disabled={locked}>
-              +
+            <button className="btn secondary icon-btn" type="button" onClick={addSlide} disabled={locked} title="Add slide" aria-label="Add slide">
+              <IconPlus />
             </button>
             <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />
@@ -2790,6 +2708,7 @@ export function MapsTab() {
                       }}
                     >
                       <IconPlus />
+                      <IconCaret />
                     </button>
                     {landmarkPicker && (
                       <div className="style-picker-pop maps-landmark-pop">
@@ -2854,7 +2773,7 @@ export function MapsTab() {
                         <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
                           <IconPasteSlides />
                         </button>
-                        <button className="btn maps-delete maps-pin-bulk-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
+                        <button className="btn maps-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
