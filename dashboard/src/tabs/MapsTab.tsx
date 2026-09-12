@@ -747,6 +747,11 @@ export function MapsTab() {
     if (next) patchDoc(next);
   }
 
+  function revealMovieGuard(churches: MapsChurch[]): Partial<MapsSlide> {
+    if (!activeView?.revealMovie) return {};
+    return churches.some((c) => c.kind === "landmark" && c.reveal) ? {} : { revealMovie: undefined };
+  }
+
   function updateActive(partial: Partial<MapsSlide>) {
     const current = docRef.current;
     const id = activeRef.current;
@@ -1023,7 +1028,8 @@ export function MapsTab() {
     if (!activeView || selectedPins.length === 0 || locked) return;
     if (!window.confirm(`Remove ${selectedPins.length} selected object${selectedPins.length === 1 ? "" : "s"}?`)) return;
     const selected = new Set(selectedPins);
-    updateActive({ churches: activeView.churches.filter((church) => !selected.has(church.id)) });
+    const churches = activeView.churches.filter((church) => !selected.has(church.id));
+    updateActive({ churches, ...revealMovieGuard(churches) });
     if (selectedPin && selected.has(selectedPin)) setSelectedPin(null);
     setSelectedPins([]);
   }
@@ -2378,15 +2384,14 @@ export function MapsTab() {
                       onChange={(event) => {
                         const kind = event.target.value as MapsPinKind;
                         if (kind === "landmark" && !pin.assetId) return;
-                        updateActive({
-                          churches: (activeView?.churches || []).map((c) =>
-                            c.id === pin.id
-                              ? kind === "landmark"
-                                ? { ...c, kind }
-                                : { ...c, kind, scaleWithMap: undefined, sizeZoom: undefined, reveal: undefined }
-                              : c
-                          ),
-                        });
+                        const churches = (activeView?.churches || []).map((c) =>
+                          c.id === pin.id
+                            ? kind === "landmark"
+                              ? { ...c, kind }
+                              : { ...c, kind, scaleWithMap: undefined, sizeZoom: undefined, reveal: undefined }
+                            : c
+                        );
+                        updateActive({ churches, ...revealMovieGuard(churches) });
                       }}
                     >
                       <option value="dot">Dot</option>
@@ -2412,7 +2417,7 @@ export function MapsTab() {
                                 if (c.id !== pin.id) return c;
                                 if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
                                 const size = c.sizeZoom != null ? (c.size || 120) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || 120;
-                                return { ...c, scaleWithMap: false, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
+                                return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
                               }),
                             });
                           }}
@@ -2497,7 +2502,8 @@ export function MapsTab() {
                     type="button"
                     disabled={locked}
                     onClick={() => {
-                      updateActive({ churches: (activeView?.churches || []).filter((c) => c.id !== pin.id) });
+                      const churches = (activeView?.churches || []).filter((c) => c.id !== pin.id);
+                      updateActive({ churches, ...revealMovieGuard(churches) });
                       setSelectedPin(null);
                       setSelectedPins((ids) => ids.filter((id) => id !== pin.id));
                     }}

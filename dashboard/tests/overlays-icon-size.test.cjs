@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createExpression } = require("@maplibre/maplibre-gl-style-spec");
+const { createExpression, validateStyleMin } = require("@maplibre/maplibre-gl-style-spec");
 
 const root = path.resolve(__dirname, "..");
 const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-overlays-icon-size-"));
@@ -46,6 +46,18 @@ test("iconSizeStops is exactly geometric (base 2) for a scaleWithMap feature", (
   assert.equal(evaluate(6), base * 2);
   assert.ok(Math.abs(evaluate(7.3) - base * Math.pow(2, 2.3)) < 1e-9);
   assert.equal(evaluate(22), base * 131072);
+});
+
+test("iconSizeStops as icon-size validates with the real maplibre style spec", () => {
+  const style = {
+    version: 8,
+    name: "x",
+    sources: { src: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
+    layers: [
+      { id: "l", type: "symbol", source: "src", layout: { "icon-image": "x", "icon-size": iconSizeStops(["get", "base"]) } },
+    ],
+  };
+  assert.deepEqual(validateStyleMin(style), []);
 });
 
 test("iconSizeStops holds a scaleWithMap:false feature constant at every zoom", () => {

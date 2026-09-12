@@ -24,8 +24,8 @@ export function effectiveObjectSize(church: { size?: number; scaleWithMap?: bool
  */
 export function iconSizeStops(base: unknown): ExpressionSpecification {
   const swm = ["boolean", ["get", "scaleWithMap"], false];
-  const stopAt = (z: number) => ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
-  return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)] as unknown as ExpressionSpecification;
+  const stopAt = (z: number): ExpressionSpecification => ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base] as unknown as ExpressionSpecification;
+  return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)];
 }
 
 export type ObjectCorner = "nw" | "ne" | "sw" | "se";
