@@ -2653,17 +2653,18 @@ def test_bootstrap_csv_enqueue_waits_for_admitted_commit(monkeypatch):
     before_revision = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
 
     bootstrap_outcome = {}
+    bootstrap_returned = threading.Event()
 
     def do_bootstrap():
         bootstrap_outcome["response"] = client.post(
             f"/api/maps/{map_job['id']}/bootstrap-csv",
             data={"csv_text": "name,lat,lon\nSt Marks,51.5,-0.1\n", "replace": "true"},
         )
+        bootstrap_returned.set()
 
     bootstrap_thread = threading.Thread(target=do_bootstrap)
     bootstrap_thread.start()
-    time.sleep(0.1)
-    assert bootstrap_thread.is_alive()
+    assert not bootstrap_returned.wait(0.1)
 
     revision_while_blocked = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
     assert revision_while_blocked == before_revision
@@ -2671,7 +2672,6 @@ def test_bootstrap_csv_enqueue_waits_for_admitted_commit(monkeypatch):
     release_landmark.set()
     landmark_thread.join(5)
     bootstrap_thread.join(5)
-    monkeypatch.undo()
 
     assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
     assert bootstrap_outcome["response"].status_code == 200, bootstrap_outcome["response"].text
@@ -2691,54 +2691,71 @@ def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
     from obed_edom.web import maps
 
     map_job = _seed()
-    slide_id = map_job["result"]["slides"][0]["id"]
-    landmark_started = threading.Event()
-    release_landmark = threading.Event()
+    commit_started = threading.Event()
+    release_commit = threading.Event()
     fired = threading.Event()
 
     def hook(job_id):
         if job_id == map_job["id"] and not fired.is_set():
             fired.set()
-            landmark_started.set()
-            release_landmark.wait(5)
+            commit_started.set()
+            release_commit.wait(5)
 
     monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
 
-    landmark_outcome = {}
+    captured = {}
 
-    def do_landmark():
-        landmark_outcome["response"] = client.post(
-            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
-            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+    def fake_run_export(job, export_lw, export_cg, export_dsk=False):
+        captured["export_lw"] = export_lw
+        captured["export_cg"] = export_cg
+        captured["export_dsk"] = export_dsk
+        return {**(job.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr(maps, "_run_export", fake_run_export)
+
+    doc = _doc(map_job)
+    assert doc["exportLw"] is True
+    doc["exportLw"] = False
+
+    state_outcome = {}
+
+    def do_state_save():
+        state_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/state",
+            json={"expectedRevision": 0, "document": doc},
         )
 
-    landmark_thread = threading.Thread(target=do_landmark)
-    landmark_thread.start()
-    assert landmark_started.wait(5)
+    state_thread = threading.Thread(target=do_state_save)
+    state_thread.start()
+    assert commit_started.wait(5)
 
     before_revision = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
 
     export_outcome = {}
+    export_returned = threading.Event()
 
     def do_export():
         export_outcome["response"] = client.post(f"/api/maps/{map_job['id']}/export")
+        export_returned.set()
 
     export_thread = threading.Thread(target=do_export)
     export_thread.start()
-    time.sleep(0.1)
-    assert export_thread.is_alive()
+    assert not export_returned.wait(0.1)
 
     revision_while_blocked = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
     assert revision_while_blocked == before_revision
 
-    release_landmark.set()
-    landmark_thread.join(5)
+    release_commit.set()
+    state_thread.join(5)
     export_thread.join(5)
-    monkeypatch.undo()
 
-    assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
+    assert state_outcome["response"].status_code == 200, state_outcome["response"].text
     assert export_outcome["response"].status_code == 200, export_outcome["response"].text
-    RUNNER.cancel(map_job["id"])
+
+    done = _wait(map_job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_lw"] is False
+    assert captured["export_cg"] is True
 
 
 def test_session_export_snapshot_is_consistent(monkeypatch):

@@ -129,11 +129,9 @@ class MapsCommit:
                 if dest.exists():
                     backup = dest.with_name(f"{dest.name}.obedbak-{uuid.uuid4().hex}")
                     dest.replace(backup)
-                    promoted.append((dest, backup))
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                promoted.append((dest, backup))
                 tmp.replace(dest)
-                if backup is None:
-                    promoted.append((dest, None))
         except Exception:
             self._restore(promoted)
             self._abort()
@@ -1529,13 +1527,7 @@ def ne_places() -> JSONResponse:
 
 @router.post("/{job_id}/export")
 def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
-    job = _job_or_404(job_id)
-    result = job.result or {}
-    export_lw = result.get("exportLw", True) if payload is None or payload.exportLw is None else payload.exportLw
-    export_cg = result.get("exportCg", True) if payload is None or payload.exportCg is None else payload.exportCg
-    export_dsk = result.get("exportDsk", False) if payload is None or payload.exportDsk is None else payload.exportDsk
-    if not export_lw and not export_cg and not export_dsk:
-        raise HTTPException(400, "At least one export target must be on")
+    _job_or_404(job_id)
     try:
         from obed_edom import maps_keynote as _maps_keynote  # noqa: F401
     except ImportError as exc:
@@ -1544,6 +1536,12 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
         with _mutation_lock(job_id):
             job = _job_or_404(job_id)
             _require_idle(job)
+            result = job.result or {}
+            export_lw = result.get("exportLw", True) if payload is None or payload.exportLw is None else payload.exportLw
+            export_cg = result.get("exportCg", True) if payload is None or payload.exportCg is None else payload.exportCg
+            export_dsk = result.get("exportDsk", False) if payload is None or payload.exportDsk is None else payload.exportDsk
+            if not export_lw and not export_cg and not export_dsk:
+                raise HTTPException(400, "At least one export target must be on")
             updated = _runner().rerun(job_id, lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk: _run_export(j, lw, cg, dsk))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
