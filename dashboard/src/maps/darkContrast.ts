@@ -51,9 +51,10 @@ function splitArgs(body: string): string[] | null {
   const sides = trimmed.split("/");
   if (sides.length > 2) return null;
   const parts = sides[0].trim().split(/\s+/).filter((part) => part.length > 0);
+  if (parts.length !== 3) return null;
   if (sides.length === 2) {
     const alpha = sides[1].trim().split(/\s+/).filter((part) => part.length > 0);
-    if (alpha.length !== 1 || parts.length !== 3) return null;
+    if (alpha.length !== 1) return null;
     parts.push(alpha[0]);
   }
   return parts;

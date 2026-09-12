@@ -177,13 +177,13 @@ test("withBrighterDarkLines stamps the style it returns", () => {
 });
 
 test("withBrighterDarkLines leaves malformed colour literals untouched", () => {
-  const bad = ["rgb(1oops 2 3)", "hsl(0 20 30)", "rgb(10,20,30,)", "rgb(10 20 / 30)", "rgb(10 20)", "rgb(10, 20 30)", "rgb(0,0,0,0.5,1)"];
+  const bad = ["rgb(1oops 2 3)", "hsl(0 20 30)", "rgb(10,20,30,)", "rgb(10 20 / 30)", "rgb(10 20)", "rgb(10, 20 30)", "rgb(0,0,0,0.5,1)", "rgb(10 20 30 0.5)", "hsl(0 20% 30% 0.5)"];
   const layers = bad.map((colour, i) => ({ id: `bad_${i}`, type: "line", paint: { "line-color": colour } }));
   const result = withBrighterDarkLines({ version: 8, sources: {}, layers });
   assert.deepEqual(result.layers.map((layer) => layer.paint["line-color"]), bad);
 
   // the well-formed counterparts are still lifted.
-  const good = ["rgb(1 2 3)", "hsl(0 20% 30%)", "rgb(10,20,30)", "rgb(10 20 30 / 0.5)"];
+  const good = ["rgb(1 2 3)", "hsl(0 20% 30%)", "rgb(10,20,30)", "rgb(10 20 30 / 0.5)", "hsl(0 20% 30% / 50%)"];
   const okLayers = good.map((colour, i) => ({ id: `ok_${i}`, type: "line", paint: { "line-color": colour } }));
   const lifted = withBrighterDarkLines({ version: 8, sources: {}, layers: okLayers });
   for (const layer of lifted.layers) assert.match(layer.paint["line-color"], /^rgba\(/);
