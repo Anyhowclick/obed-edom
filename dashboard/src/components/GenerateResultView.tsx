@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { previewUrl, reveal, type Flag, type Job } from "../api";
+import { previewUrl, type Flag, type Job } from "../api";
+import { ArtifactActions } from "./ArtifactActions";
 import { PreviewGrid } from "./PreviewGrid";
 import { ErrorNotice } from "./ErrorNotice";
 import { JobName } from "./JobName";
@@ -29,10 +30,12 @@ export function GenerateResultView({
   job,
   onOpen,
   onRename,
+  onError,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onRename?: (id: string, name: string) => Promise<Job>;
+  onError?: (message: string) => void;
 }) {
   const [deck, setDeck] = useState<"lw" | "dsk">("lw");
   const result = (job.result || null) as GenResult | null;
@@ -75,28 +78,15 @@ export function GenerateResultView({
         {" · "}
         {result.outputDir}
       </p>
-      <div className="actions">
-        {result.lwKey && present(job, "LW.key") && (
-          <button className="btn secondary" type="button" onClick={() => reveal(result.lwKey!)}>
-            Show LW.key
-          </button>
-        )}
-        {result.dskKey && present(job, "DSK.key") && (
-          <button className="btn secondary" type="button" onClick={() => reveal(result.dskKey!)}>
-            Show DSK.key
-          </button>
-        )}
-        {result.cuedDocx && present(job, "cued outline") && (
-          <button className="btn secondary" type="button" onClick={() => reveal(result.cuedDocx!)}>
-            Show cued outline
-          </button>
-        )}
-        {result.reviewPath && present(job, "review.pdf") && (
-          <button className="btn secondary" type="button" onClick={() => reveal(result.reviewPath!)}>
-            Show review.pdf
-          </button>
-        )}
-      </div>
+      <ArtifactActions
+        artifacts={[
+          result.lwKey && present(job, "LW.key") ? { label: "LW.key", path: result.lwKey } : null,
+          result.dskKey && present(job, "DSK.key") ? { label: "DSK.key", path: result.dskKey } : null,
+          result.cuedDocx && present(job, "cued outline") ? { label: "cued outline", path: result.cuedDocx } : null,
+          result.reviewPath && present(job, "review.pdf") ? { label: "review.pdf", path: result.reviewPath } : null,
+        ].filter((artifact): artifact is { label: string; path: string } => artifact != null)}
+        onError={onError}
+      />
       {(hasLw || hasDsk) && (
         <div className="seg">
           {hasLw && (

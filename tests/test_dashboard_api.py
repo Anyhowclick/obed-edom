@@ -220,6 +220,29 @@ def test_health_and_stubs():
     assert missing_file.status_code == 400
 
 
+def test_open_path_missing_is_404():
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": "/no/such/deck.key"})
+    assert res.status_code == 404
+    assert "Not found" in res.json()["detail"]
+
+
+def test_open_path_launches_open(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    calls = []
+    monkeypatch.setattr(
+        app_mod.subprocess, "run", lambda argv, **kw: calls.append(argv)
+    )
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert calls == [["open", str(target)]]
+
+
 def test_resize_requires_template(tmp_path):
     client = TestClient(app)
     wall = tmp_path / "wall.key"

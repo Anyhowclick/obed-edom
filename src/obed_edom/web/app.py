@@ -229,6 +229,14 @@ def create_app() -> FastAPI:
         subprocess.run(["open", "-R", str(target)], check=False)
         return {"ok": True}
 
+    @app.post("/api/open")
+    def open_path(path: str = Form(...)) -> dict:
+        target = Path(path).expanduser()
+        if not target.exists():
+            raise HTTPException(404, f"Not found: {path}")
+        subprocess.run(["open", str(target)], check=False)
+        return {"ok": True}
+
     @app.get("/api/jobs")
     def list_jobs(kind: str | None = None, feature: str | None = None) -> dict:
         return {"jobs": [RUNNER.public_dict(j) for j in RUNNER.list(kind, feature)]}
