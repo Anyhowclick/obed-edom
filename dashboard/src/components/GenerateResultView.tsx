@@ -88,12 +88,12 @@ export function GenerateResultView({
       {(hasLw || hasDsk) && (
         <div className="seg">
           {hasLw && (
-            <button type="button" className={shown === "lw" ? "on" : ""} onClick={() => setDeck("lw")}>
+            <button type="button" className={`aud-lw${shown === "lw" ? " on" : ""}`} onClick={() => setDeck("lw")}>
               LW previews
             </button>
           )}
           {hasDsk && (
-            <button type="button" className={shown === "dsk" ? "on" : ""} onClick={() => setDeck("dsk")}>
+            <button type="button" className={`aud-dsk${shown === "dsk" ? " on" : ""}`} onClick={() => setDeck("dsk")}>
               DSK previews
             </button>
           )}

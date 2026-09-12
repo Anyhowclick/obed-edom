@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { Job } from "../api";
 import { jobLabel } from "../sessions";
+import { IconPencil } from "./icons";
 
 function previewNormalise(raw: string): string {
   return raw
@@ -81,7 +82,7 @@ export function JobName({ job, onRename, onSelect, className }: Props) {
             aria-label={`Rename ${label}`}
             onClick={startEditing}
           >
-            ✎
+            <IconPencil />
           </button>
         )}
       </span>

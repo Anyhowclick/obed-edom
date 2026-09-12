@@ -13,7 +13,7 @@ type Props = {
   onClear?: () => void;
   multiple?: boolean;
   folder?: boolean;
-  tone?: "keynote" | "document";
+  tone?: "lw" | "cg" | "dsk" | "document";
   browseLabel?: string;
 };
 

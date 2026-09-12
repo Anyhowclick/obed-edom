@@ -105,7 +105,7 @@ export function GeneratorTab() {
         <FileWell
           label="LW template (.key)"
           hint="Optional. Drop Sermon_GW.key or choose on this Mac"
-          tone="keynote"
+          tone="lw"
           file={lwTemplate}
           onChoose={() => pickTemplate("lw")}
           onPath={(path) => rememberLw({ path, name: path.split("/").pop() || path })}
@@ -118,7 +118,7 @@ export function GeneratorTab() {
         <FileWell
           label="DSK template (.key)"
           hint="Optional. Drop the lower-thirds .key or choose on this Mac"
-          tone="keynote"
+          tone="dsk"
           file={dskTemplate}
           onChoose={() => pickTemplate("dsk")}
           onPath={(path) => rememberDsk({ path, name: path.split("/").pop() || path })}

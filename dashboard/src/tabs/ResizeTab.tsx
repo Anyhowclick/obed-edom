@@ -183,6 +183,7 @@ export function ResizeTab() {
         <FileWell
           label="Finalised LW / FW .key"
           hint="Choose the source LED or full-wall deck"
+          tone="lw"
           file={lw}
           onChoose={async () => {
             try {
@@ -197,6 +198,7 @@ export function ResizeTab() {
         <FileWell
           label="CG_Template.key"
           hint="The 16:9 deck showing where things should end up"
+          tone="cg"
           file={template}
           onChoose={async () => {
             try {
