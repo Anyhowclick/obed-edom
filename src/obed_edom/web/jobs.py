@@ -88,6 +88,7 @@ class JobRunner:
         self._job_locks: dict[str, threading.Lock] = {}
         self._deleted_ids: set[str] = set()
         self._deleted_names: set[str] = set()
+        self._reserved_names: set[str] = set()
         self._cv = threading.Condition(self._lock)
         self._load_sessions()
         self._worker = threading.Thread(target=self._loop, daemon=True)
@@ -122,7 +123,7 @@ class JobRunner:
         return str(uuid.uuid4())[:8]
 
     def _new_job_name(self) -> str:
-        taken = {job.name.lower() for job in self._jobs.values()} | self._deleted_names
+        taken = {job.name.lower() for job in self._jobs.values()} | self._deleted_names | self._reserved_names
         for _ in range(200):
             candidate = generate_job_name(taken)
             if not self._name_folder_exists(candidate):
@@ -140,19 +141,20 @@ class JobRunner:
         return self._jobs.get(job_id)
 
     def rerun(self, job_id: str, fn: Callable[[Job], dict[str, Any]]) -> Job | None:
-        with self._cv:
-            job = self._jobs.get(job_id)
-            if not job:
-                return None
-            if job_id in self._running or job.status == "running":
-                raise RuntimeError("Job is already running")
-            job.status = "queued"
-            job.error = None
-            job._cancelled.clear()
-            job.updated_at = time.time()
-            self._fns[job.id] = fn
-            self._queue.append(job.id)
-            self._cv.notify()
+        with self._job_lock(job_id):
+            with self._cv:
+                job = self._jobs.get(job_id)
+                if not job:
+                    return None
+                if job_id in self._running or job.status == "running":
+                    raise RuntimeError("Job is already running")
+                job.status = "queued"
+                job.error = None
+                job._cancelled.clear()
+                job.updated_at = time.time()
+                self._fns[job.id] = fn
+                self._queue.append(job.id)
+                self._cv.notify()
         return job
 
     def cancel(self, job_id: str) -> Job | None:
@@ -262,13 +264,28 @@ class JobRunner:
             result["destPathDsk"] = str(Path(dest_path_dsk).expanduser())
         return self.update_result(job_id, result)
 
-    def is_name_taken(self, name: str, *, exclude_job_id: str | None = None) -> bool:
+    def _is_name_taken_locked(self, name: str, *, exclude_job_id: str | None = None) -> bool:
         lowered = name.lower()
+        for job in self._jobs.values():
+            if job.id != exclude_job_id and job.name.lower() == lowered:
+                return True
+        return lowered in self._deleted_names or lowered in self._reserved_names
+
+    def is_name_taken(self, name: str, *, exclude_job_id: str | None = None) -> bool:
         with self._lock:
-            for job in self._jobs.values():
-                if job.id != exclude_job_id and job.name.lower() == lowered:
-                    return True
-            return lowered in self._deleted_names
+            return self._is_name_taken_locked(name, exclude_job_id=exclude_job_id)
+
+    def reserve_name(self, name: str, *, exclude_job_id: str | None = None) -> None:
+        """Claim a target name for an in-flight rename transaction so a concurrent
+        submit or rename can't take it before the transaction commits or aborts."""
+        with self._lock:
+            if self._is_name_taken_locked(name, exclude_job_id=exclude_job_id):
+                raise FileExistsError(f"A job named '{name}' already exists")
+            self._reserved_names.add(name.lower())
+
+    def release_name(self, name: str) -> None:
+        with self._lock:
+            self._reserved_names.discard(name.lower())
 
     def set_name(self, job_id: str, name: str, *, save: bool = True) -> Job:
         """Assign an already-validated name, optionally saving immediately. Used directly
@@ -303,30 +320,32 @@ class JobRunner:
             name = normalise_job_name(raw_name)
             if name == job.name.lower():
                 return job
-            if self.is_name_taken(name, exclude_job_id=job_id):
-                raise FileExistsError(f"A job named '{name}' already exists")
-            result = dict(job.result or {})
-            old_dir = self._id_derived_dir(result)
-            new_dir: Path | None = None
-            if old_dir is not None and old_dir.name == job.name:
-                new_dir = old_dir.parent / name
-                if new_dir.exists():
-                    raise FileExistsError(f"A folder named '{name}' already exists")
-                os.replace(old_dir, new_dir)
-                result = rewrite_result_paths(result, old_dir, new_dir)
-                if result.get("stem") == job.name:
-                    result["stem"] = name
-            previous_name, previous_result, previous_updated_at = job.name, job.result, job.updated_at
-            job.name = name
-            job.result = result
-            job.updated_at = time.time()
+            self.reserve_name(name, exclude_job_id=job_id)
             try:
-                self.save(job)
-            except Exception:
-                job.name, job.result, job.updated_at = previous_name, previous_result, previous_updated_at
-                if new_dir is not None and old_dir is not None:
-                    os.replace(new_dir, old_dir)
-                raise
+                result = dict(job.result or {})
+                old_dir = self._id_derived_dir(result)
+                new_dir: Path | None = None
+                if old_dir is not None and old_dir.name == job.name:
+                    new_dir = old_dir.parent / name
+                    if new_dir.exists():
+                        raise FileExistsError(f"A folder named '{name}' already exists")
+                    os.replace(old_dir, new_dir)
+                    result = rewrite_result_paths(result, old_dir, new_dir)
+                    if result.get("stem") == job.name:
+                        result["stem"] = name
+                previous_name, previous_result, previous_updated_at = job.name, job.result, job.updated_at
+                job.name = name
+                job.result = result
+                job.updated_at = time.time()
+                try:
+                    self.save(job)
+                except Exception:
+                    job.name, job.result, job.updated_at = previous_name, previous_result, previous_updated_at
+                    if new_dir is not None and old_dir is not None:
+                        os.replace(new_dir, old_dir)
+                    raise
+            finally:
+                self.release_name(name)
         return job
 
     def _id_derived_dir(self, result: dict[str, Any]) -> Path | None:
@@ -337,6 +356,10 @@ class JobRunner:
         root = self._output_root.resolve()
         for root_name in _ID_DERIVED_ROOTS:
             private_root = (root / root_name).resolve()
+            try:
+                private_root.relative_to(root)
+            except ValueError:
+                continue
             try:
                 resolved = candidate.resolve()
                 resolved.relative_to(private_root)
