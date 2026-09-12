@@ -199,15 +199,17 @@ Running the estimator over every GW text slide (after mirror dedupe, band 1849x3
 | GW | long boxes | best t | GW | long boxes | best t |
 |---|---|---|---|---|---|
 | 7,11,14 | 1 | 1.00 | 12,18,19,20,35 | 1 | 0.81 |
-| 8,10,13,30,37 | 1 | 1.00 | 36 | 1 | 0.98 |
+| 8,10,30,37 | 1 | 1.00 | 36 | 1 | 0.98 |
 | 28,29,46,52 | 1 | 1.00 | 38 | 1 | 0.58 |
-| **17** | **2** | **0.91** | 49 | 1 | 0.39 |
+| 13 | 1 | 0.91 | 49 | 1 | 0.39 |
+| **17** | **2** | **0.74** | | | |
 
 **No slide in this deck needs a split at the default floor** — GW 17, the only two-box slide,
-fits at t=0.91 (63.7 pt), which is also why golden 14 keeps both boxes. A split case therefore has
-to be provoked: at `--min-text-pt 66` (t ≥ 0.943) GW 17 needs 173.7+173.7+10 = **357.4 > 350** and
-must split; each part alone is 183 pt (badge 96 pt) at t=1.0, comfortably inside the band. That is
-the live split case in Acceptance.
+fits at t=0.74 (measured, with the chapter badge folded into the stack budget) once its long
+boxes are stacked with the badge, which is also why golden 14 keeps both boxes. A split case
+therefore has to be provoked: at `--min-text-pt 66` (t ≥ 0.943) GW 17 needs 173.7+173.7+10 =
+**357.4 > 350** and must split; each part alone is 183 pt (badge 96 pt) at t=1.0, comfortably
+inside the band. That is the live split case in Acceptance.
 
 ---
 
@@ -460,7 +462,7 @@ when present and refuse outright if it is not a reordering of the exact same id 
 5. **Wrap estimator.** `wrapped_height` + font index. *Tests*
    `tests/test_dsk_plan.py::test_wrapped_height_matches_golden_boxes` (the F9 golden rows whose
    height varies with content, ±1 line), `::test_wrapped_height_missing_font_warns`,
-   `::test_fit_search_returns_measured_t` (GW 17 → t = 0.91; GW 38 → 0.58; GW 49 → 0.39).
+   `::test_fit_search_returns_measured_t` (GW 17 → t = 0.74; GW 38 → 0.58; GW 49 → 0.39).
    Skipped when the fonts are absent.
 6. **Split.** `parts`/`ordinal_to_number`/`splits`, `ordinal_map` over parts, descending
    `duplicate slide`, per-part `_slide_lines`. *Tests*
@@ -504,13 +506,13 @@ when present and refuse outright if it is not a reordering of the exact same id 
 | GW | rule | asserted |
 |---|---|---|
 | 13 | R1 single text | verse box `x=43, w=1849`, glyph size ≤ 70, no split |
-| 17 | R1 dedupe + stretch | text3/4/5 in `dropped_duplicate`; two kept boxes, no overlap, t = 0.91 |
+| 17 | R1 dedupe + stretch | text3/4/5 in `dropped_duplicate`; two kept boxes, no overlap, t = 0.74 |
 | 17 (`--min-text-pt 66`) | Q2 split | 2 parts, one long box each, badge on both, ordinals contiguous |
 | 28 | R1 panel-backdrop drop | `shape0 (951,0,3840x1080)` in `dropped_backdrop`; fit scale > 0.8 |
 | **48** | R1 image dedupe + Q3 right (wheelchair) | one image kept (`kindIndex` 2), fitted right edge **1892.0**, no crop file emitted |
 | 24 | R1 dedupe + Q3 centred | 4 → 2 images; centred |
 | 21 | R2 image crop | crop window = (1920,0,3790x1080) of the frame → pixel box in 4608x3072; replaced file emitted; single item → right-aligned |
-| 5 | R2 image crop, vertical | crop window (1920,0,3840x1080) of a (1920,−1024.3,3840x2560.5) frame → 5120x2160-ish pixel box |
+| 5 | R2 image crop, vertical | crop box (0,1365,5120,2806) of the 5120x3414 file (naturalSize); single item → right-aligned, right edge **1892.0** |
 | 33 | R2 movie + backdrop exemption | movie kept as sole content; crop `3840:1080:1920:0` |
 | 32 | coal fix | crop `3840:1080:1920:0`, no document resize, side panels deleted in the scratch script |
 | 8 | regression | unchanged vs r7 with `--include-side 8` |
