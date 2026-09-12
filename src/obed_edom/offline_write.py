@@ -15,15 +15,12 @@ module at its own top level, so a module-level import back would cycle.
 """
 from __future__ import annotations
 
-import subprocess
-import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from obed_edom import keynote_app
 from obed_edom.keynote import _as_escape, _keynote_tell, _keynote_terms
+from obed_edom.osascript_runner import run_applescript
 
 # Line omitted: a line spec's x/y is an ordinary bbox, a composed line's is `_line_rect`'s
 # anchor — see `_spec_box`. Comparing them is a guaranteed-failing number on ANY deck.
@@ -270,21 +267,18 @@ def _run_fallback_scripts(
     """
     from obed_edom.remap_keynote import GEOM_UNWRITABLE_MARKER  # noqa: PLC0415 (avoid a module cycle)
 
-    subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-    time.sleep(0.4)
     ok = True
     failed_dumps: list[Path] = []
     unwritable: list[str] = []
     for i, script in enumerate(scripts):
-        with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-            handle.write(script)
-            script_path = Path(handle.name)
-        try:
-            proc = subprocess.run(
-                ["osascript", str(script_path)], capture_output=True, text=True, check=False
-            )
-        finally:
-            script_path.unlink(missing_ok=True)
+        suffix = (
+            ".offline-fallback.applescript"
+            if len(scripts) == 1
+            else f".offline-fallback-{i + 1}.applescript"
+        )
+        proc = run_applescript(
+            script, launch=(i == 0), dump_on_failure=dest.with_suffix(suffix)
+        )
         unwritable += [
             ln.strip()
             for ln in (proc.stderr or "").splitlines()
@@ -292,13 +286,7 @@ def _run_fallback_scripts(
         ]
         if proc.returncode != 0:
             ok = False
-            suffix = (
-                ".offline-fallback.applescript"
-                if len(scripts) == 1
-                else f".offline-fallback-{i + 1}.applescript"
-            )
-            debug = dest.with_suffix(suffix)
-            debug.write_text(script, encoding="utf-8")
+            debug = proc.dump
             failed_dumps.append(debug)
             say(
                 f"Offline-write AppleScript fallback session {i + 1}/{len(scripts)} failed "

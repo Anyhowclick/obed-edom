@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import _fake_osascript
 from obed_edom.iwa_geometry import audit_natural_consistency, compose_geometry
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.paths import find_repo_root
@@ -282,16 +283,9 @@ def test_fallback_script_chunks_over_size_limit(tmp_path):
 
 
 def test_run_fallback_scripts_parses_unwritable_log_lines(monkeypatch):
-    import obed_edom.offline_write as ow_mod
-
-    monkeypatch.setattr(ow_mod.time, "sleep", lambda *a, **k: None)
-    monkeypatch.setattr(ow_mod.keynote_app, "bundle_id", lambda: "com.apple.iWork.Keynote")
-    monkeypatch.setattr(
-        ow_mod.subprocess, "run",
-        lambda *a, **k: SimpleNamespace(
-            returncode=0, stdout="",
-            stderr="noise\nOBED_GEOM_UNWRITABLE slide=96 kind=image kindIndex=8\nmore noise\n",
-        ),
+    _fake_osascript(
+        monkeypatch,
+        stderr="noise\nOBED_GEOM_UNWRITABLE slide=96 kind=image kindIndex=8\nmore noise\n",
     )
     ok, dumps, unwritable = _run_fallback_scripts(Path("/tmp/x.key"), ["SCRIPT"], lambda m: None)
     assert ok is True
@@ -300,16 +294,10 @@ def test_run_fallback_scripts_parses_unwritable_log_lines(monkeypatch):
 
 
 def test_run_fallback_scripts_reports_unwritable_alongside_session_failure(monkeypatch, tmp_path):
-    import obed_edom.offline_write as ow_mod
-
-    monkeypatch.setattr(ow_mod.time, "sleep", lambda *a, **k: None)
-    monkeypatch.setattr(ow_mod.keynote_app, "bundle_id", lambda: "com.apple.iWork.Keynote")
-    monkeypatch.setattr(
-        ow_mod.subprocess, "run",
-        lambda *a, **k: SimpleNamespace(
-            returncode=1, stdout="",
-            stderr="OBED_GEOM_UNWRITABLE slide=1 kind=shape kindIndex=0\n",
-        ),
+    _fake_osascript(
+        monkeypatch,
+        returncode=1,
+        stderr="OBED_GEOM_UNWRITABLE slide=1 kind=shape kindIndex=0\n",
     )
     dest = tmp_path / "x.key"
     ok, dumps, unwritable = _run_fallback_scripts(dest, ["SCRIPT"], lambda m: None)
