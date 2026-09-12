@@ -359,11 +359,12 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
     name = str(item.get("name") or "Landmark").rsplit(".", 1)[0]
     source = _result_file(job_id, item_id, "result")
     from obed_edom.web import maps
-    payload, width, height, version = maps._decode_png(source.read_bytes())
+    payload, width, height, version = maps.decode_png(source.read_bytes())
     asset_id = uuid.uuid4().hex
-    def append(result: dict[str, Any]) -> dict[str, Any]:
-        return maps.append_landmark(result, slide_id, "lw", name, width, height, version, asset_id)
-    updated = maps._mutate_document_with_asset(maps_job_id, None, asset_id, payload, append)
+    with maps.maps_commit(maps_job_id, None) as commit:
+        commit.result = maps.append_landmark(commit.result, slide_id, "lw", name, width, height, version, asset_id)
+        commit.stage_bytes(maps.asset_path(commit.result, asset_id), payload)
+    updated = commit.payload
     result = dict(updated["result"] or {})
     slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
     churches = (slide or {}).get("churches") or []

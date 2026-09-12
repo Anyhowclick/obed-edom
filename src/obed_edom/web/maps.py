@@ -12,9 +12,11 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Any, Callable, Iterator, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -74,34 +76,84 @@ def _mutation_lock(job_id: str) -> threading.RLock:
     return _MUTATION_LOCKS.setdefault(job_id, threading.RLock())
 
 
-def _mutate_document(job_id: str, expected_revision: int | None, mutate) -> dict[str, Any]:
-    with _mutation_lock(job_id):
-        job = _job_or_404(job_id)
-        _require_idle(job)
-        result = copy.deepcopy(job.result or {})
-        revision = int(result.get("stateRevision") or 0)
-        if expected_revision is not None and expected_revision != revision:
-            raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
-        updated = mutate(result)
-        updated["stateRevision"] = revision + 1
-        saved = _runner().update_result(job_id, updated)
-        if not saved:
-            raise HTTPException(404, "Unknown maps job")
-        return _runner().public_dict(saved)
+_COMMIT_HOOK: Callable[[str], None] | None = None
 
 
-def _mutate_document_with_asset(job_id: str, expected_revision: int | None, asset_id: str, payload: bytes, mutate) -> dict[str, Any]:
-    """Like _mutate_document, but commits a new asset file in lockstep with the document.
+@dataclass
+class MapsCommit:
+    """Mutable state for one `maps_commit` body: the document to edit and files to stage.
 
-    Ordering: `mutate` builds and validates the new document in memory first (it can 404
-    before anything touches disk). The asset is then written to a `.tmp` path and
-    atomically promoted (`os.replace`) onto its final path *before* the document is
-    published — so no reader can ever observe a church whose asset 404s. Only once the
-    asset is durably on disk is the document handed to `update_result`, which publishes
-    it (in-memory) and persists it (to disk) together. If that fails, the now-unreferenced
-    asset is removed and the error re-raised; the document was never mutated, so there is
-    nothing to roll back.
+    Files staged via `stage_bytes`/`stage_dir` are written under unique temp names and
+    only swapped onto their final path once the body exits without raising — anything
+    already on that final path is moved aside to a `.obedbak-<hex>` sibling first, so a
+    later failure (promoting another file, or `update_result` itself) can put it back.
+    Backups are only deleted once the document is durably committed.
     """
+
+    job_id: str
+    job: Any
+    result: dict[str, Any]
+    payload: dict[str, Any] | None = dataclass_field(default=None, init=False)
+    _promotions: list[tuple[Path, Path]] = dataclass_field(default_factory=list, init=False)
+    _new_paths: list[Path] = dataclass_field(default_factory=list, init=False)
+
+    def stage_bytes(self, path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        self._promotions.append((path, tmp))
+        self._new_paths.append(tmp)
+
+    def stage_dir(self, dest: Path, source: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.tmp")
+        source.replace(tmp)
+        self._promotions.append((dest, tmp))
+        self._new_paths.append(tmp)
+
+    def stage_new(self, path: Path) -> None:
+        self._new_paths.append(path)
+
+    def _remove(self, path: Path) -> None:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+
+    def _abort(self) -> None:
+        for path in self._new_paths:
+            self._remove(path)
+
+    def _promote(self) -> list[tuple[Path, Path | None]]:
+        promoted: list[tuple[Path, Path | None]] = []
+        try:
+            for dest, tmp in self._promotions:
+                backup: Path | None = None
+                if dest.exists():
+                    backup = dest.with_name(f"{dest.name}.obedbak-{uuid.uuid4().hex}")
+                    dest.replace(backup)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                tmp.replace(dest)
+                promoted.append((dest, backup))
+        except Exception:
+            self._restore(promoted)
+            raise
+        return promoted
+
+    def _restore(self, promoted: list[tuple[Path, Path | None]]) -> None:
+        for dest, backup in reversed(promoted):
+            self._remove(dest)
+            if backup is not None:
+                backup.replace(dest)
+
+    def _cleanup_backups(self, promoted: list[tuple[Path, Path | None]]) -> None:
+        for _dest, backup in promoted:
+            if backup is not None:
+                self._remove(backup)
+
+
+@contextmanager
+def maps_commit(job_id: str, expected_revision: int | None = None, *, bump: bool = True) -> Iterator[MapsCommit]:
     with _mutation_lock(job_id):
         job = _job_or_404(job_id)
         _require_idle(job)
@@ -109,25 +161,35 @@ def _mutate_document_with_asset(job_id: str, expected_revision: int | None, asse
         revision = int(result.get("stateRevision") or 0)
         if expected_revision is not None and expected_revision != revision:
             raise HTTPException(409, {"stateRevision": revision, "document": _dump_document(_parse_document(result))})
-        updated = mutate(result)
-        updated["stateRevision"] = revision + 1
-        path = _asset_path(updated, asset_id)
-        temp = path.with_suffix(".tmp")
+        if _COMMIT_HOOK:
+            _COMMIT_HOOK(job_id)
+        commit = MapsCommit(job_id=job_id, job=job, result=result)
         try:
-            temp.write_bytes(payload)
-            temp.replace(path)
-        except Exception:
-            temp.unlink(missing_ok=True)
+            yield commit
+        except BaseException:
+            commit._abort()
             raise
+        if bump:
+            commit.result["stateRevision"] = revision + 1
+        backups = commit._promote()
+        if _COMMIT_HOOK:
+            _COMMIT_HOOK(job_id)
         try:
-            saved = _runner().update_result(job_id, updated)
+            saved = _runner().update_result(job_id, commit.result)
         except Exception:
-            path.unlink(missing_ok=True)
+            commit._restore(backups)
             raise
         if not saved:
-            path.unlink(missing_ok=True)
+            commit._restore(backups)
             raise HTTPException(404, "Unknown maps job")
-        return _runner().public_dict(saved)
+        commit._cleanup_backups(backups)
+        commit.payload = _runner().public_dict(saved)
+
+
+def mutate_document(job_id: str, expected_revision: int | None, fn) -> dict[str, Any]:
+    with maps_commit(job_id, expected_revision) as commit:
+        commit.result = fn(commit.result)
+    return commit.payload
 
 
 STYLE_IDS = ("positron", "liberty", "bright", "dark", "fiord", "buildings3d", "toner", "toner-background", "toner-lines", "watercolour")
@@ -421,13 +483,13 @@ def _asset_root(result: dict[str, Any]) -> Path:
     return root
 
 
-def _asset_path(result: dict[str, Any], asset_id: str) -> Path:
+def asset_path(result: dict[str, Any], asset_id: str) -> Path:
     if not asset_id or Path(asset_id).name != asset_id:
         raise HTTPException(400, "Invalid Maps asset id")
     return _asset_root(result) / f"{asset_id}.png"
 
 
-def _decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
+def decode_png(raw: bytes) -> tuple[bytes, int, int, str]:
     if not raw or len(raw) > 20 * 1024 * 1024:
         raise HTTPException(413, "Image exceeds the 20 MB upload limit")
     try:
@@ -512,13 +574,6 @@ def _validate_raster(raw: bytes, *, max_side: int | None = None) -> tuple[int, i
     return width, height
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_bytes(data)
-    tmp.replace(path)
-
-
 def _referenced_asset_ids(doc: MapsDocument) -> set[str]:
     return {
         church.assetId
@@ -549,7 +604,7 @@ def _validate_asset_document(doc: MapsDocument, result: dict[str, Any]) -> MapsD
     if referenced - set(available):
         raise HTTPException(400, "Maps document references an unknown asset")
     for asset_id in referenced:
-        if not _asset_path(result, asset_id).is_file():
+        if not asset_path(result, asset_id).is_file():
             raise HTTPException(400, "Maps document references an unavailable asset")
     for slide in doc.slides:
         for view in (slide, slide.cg):
@@ -728,6 +783,17 @@ def _parse_csv(text: str) -> list[dict[str, str]]:
     return rows
 
 
+def _bump_state_revision(job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Job-completion writes run outside `maps_commit` (the job is still "running"),
+    so only the revision bump — not the full commit — happens under the mutation lock.
+    """
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        revision = int((job.result or {}).get("stateRevision") or 0)
+    result["stateRevision"] = revision + 1
+    return result
+
+
 def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
     result = inherit_hidden_layers(dict(job.result or {}))
     if replace:
@@ -753,7 +819,7 @@ def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
         slides.append(slide)
     result["slides"] = slides
     result["links"] = links
-    return result
+    return _bump_state_revision(job.id, result)
 
 
 def _next_pin_id(churches: list[dict[str, Any]]) -> str:
@@ -780,14 +846,13 @@ def _run_pin_bootstrap(job, csv_text: str, slide_id: str, audience: str) -> dict
     else:
         target["cg"] = {**view, "churches": churches}
     result["slides"] = slides
-    return result
+    return _bump_state_revision(job.id, result)
 
 
-def _session_path(job) -> Path:
-    result = job.result or {}
+def _session_path(job_id: str, result: dict[str, Any]) -> Path:
     output_dir = Path(str(result.get("outputDir") or ""))
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / f"{str(result.get('stem') or f'maps-{job.id}')}.obedmaps"
+    return output_dir / f"{str(result.get('stem') or f'maps-{job_id}')}.obedmaps"
 
 
 def _clear_derived_maps_output(result: dict[str, Any], *, clear_preview: bool = True) -> Path:
@@ -820,46 +885,51 @@ def _clear_derived_maps_output(result: dict[str, Any], *, clear_preview: bool = 
     return preview_dir
 
 
-def _write_session_archive(job) -> Path:
-    result = dict(job.result or {})
-    doc = _validate_asset_document(_parse_document(result), result)
-    path = _session_path(job)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    manifest = {
-        "format": "obed-edom-maps",
-        "version": SESSION_VERSION,
-        "isolateDefaultVersion": int(result.get("isolateDefaultVersion") or 0),
-        "document": _dump_document(doc),
-    }
-    preview_dir = Path(str(result.get("previewDir") or ""))
-    preview_names = {
-        Path(str(name)).name
-        for name in ((result.get("previewFiles") or {}).get("maps") or [])
-        if Path(str(name)).name == str(name)
-    }
-    entries: list[tuple[Path, str]] = []
-    for name in sorted(preview_names):
-        source = preview_dir / name
-        if source.is_file():
-            entries.append((source, f"previews/{name}"))
-    referenced = _referenced_asset_ids(doc)
-    for asset_id in sorted(referenced):
-        source = _asset_path(result, asset_id)
-        if not source.is_file():
-            raise HTTPException(400, "Maps document references an unavailable asset")
-        entries.append((source, f"assets/{asset_id}.png"))
-    root = cache_root()
-    for source in sorted(root.rglob("*")):
-        if source.is_file() and not source.name.endswith(".tmp"):
-            entries.append((source, f"tile-cache/{source.relative_to(root).as_posix()}"))
-    total_bytes = len(json.dumps(manifest, indent=2).encode("utf-8")) + sum(source.stat().st_size for source, _ in entries)
-    if len(entries) + 1 > SESSION_MAX_FILES or total_bytes > SESSION_MAX_BYTES:
-        raise HTTPException(413, "Maps session is too large; clear or reduce the tile cache before saving")
-    with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_STORED) as archive:
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2).encode("utf-8"))
-        for source, archive_name in entries:
-            archive.write(source, archive_name)
-    temp_path.replace(path)
+def _write_session_archive(job_id: str) -> Path:
+    with maps_commit(job_id, None, bump=False) as commit:
+        result = commit.result
+        doc = _validate_asset_document(_parse_document(result), result)
+        path = _session_path(job_id, result)
+        temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        manifest = {
+            "format": "obed-edom-maps",
+            "version": SESSION_VERSION,
+            "isolateDefaultVersion": int(result.get("isolateDefaultVersion") or 0),
+            "document": _dump_document(doc),
+        }
+        preview_dir = Path(str(result.get("previewDir") or ""))
+        preview_names = {
+            Path(str(name)).name
+            for name in ((result.get("previewFiles") or {}).get("maps") or [])
+            if Path(str(name)).name == str(name)
+        }
+        entries: list[tuple[Path, str]] = []
+        for name in sorted(preview_names):
+            source = preview_dir / name
+            if source.is_file():
+                entries.append((source, f"previews/{name}"))
+        referenced = _referenced_asset_ids(doc)
+        for asset_id in sorted(referenced):
+            source = asset_path(result, asset_id)
+            if not source.is_file():
+                raise HTTPException(400, "Maps document references an unavailable asset")
+            entries.append((source, f"assets/{asset_id}.png"))
+        root = cache_root()
+        for source in sorted(root.rglob("*")):
+            if source.is_file() and not source.name.endswith(".tmp"):
+                entries.append((source, f"tile-cache/{source.relative_to(root).as_posix()}"))
+        total_bytes = len(json.dumps(manifest, indent=2).encode("utf-8")) + sum(source.stat().st_size for source, _ in entries)
+        if len(entries) + 1 > SESSION_MAX_FILES or total_bytes > SESSION_MAX_BYTES:
+            raise HTTPException(413, "Maps session is too large; clear or reduce the tile cache before saving")
+        try:
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("manifest.json", json.dumps(manifest, indent=2).encode("utf-8"))
+                for source, archive_name in entries:
+                    archive.write(source, archive_name)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        commit.stage_dir(path, temp_path)
     return path
 
 
@@ -941,13 +1011,10 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             raise HTTPException(400, "Version 1 Maps sessions cannot contain image assets")
         if {asset_id for _, asset_id in asset_entries} != referenced or set(assets_by_id) != referenced:
             raise HTTPException(400, "Maps session assets do not match the manifest")
-        result = dict(job.result or {})
-        output_dir = Path(str(result.get("outputDir") or ""))
+        output_dir = Path(str((job.result or {}).get("outputDir") or ""))
         output_dir.mkdir(parents=True, exist_ok=True)
-        preview_dir = Path(str(result.get("previewDir") or output_dir / "previews"))
         tile_root = cache_root()
         imported_previews = {name for _, name in preview_entries}
-        created_tiles: list[Path] = []
         with tempfile.TemporaryDirectory(prefix=".session-import-", dir=output_dir) as staging_raw:
             staging = Path(staging_raw)
             staged_previews = staging / "previews"
@@ -965,7 +1032,7 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
                         shutil.copyfileobj(src, dest)
                 for info, asset_id in asset_entries:
                     with archive.open(info) as src:
-                        payload, width, height, version = _decode_png(_read_limited(src))
+                        payload, width, height, version = decode_png(_read_limited(src))
                     meta = assets_by_id[asset_id]
                     if (meta.width, meta.height, meta.version) != (width, height, version):
                         raise HTTPException(400, "Maps session asset metadata does not match its image")
@@ -973,87 +1040,69 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
                     (staged_assets / f"{asset_id}.png").write_bytes(payload)
             except zipfile.BadZipFile as exc:
                 raise HTTPException(400, "Maps session archive is corrupt") from exc
-            try:
-                for _, rel in tile_entries:
-                    dest = tile_root / rel
-                    if dest.exists():
-                        continue
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    staged = staged_tiles / rel
-                    with tempfile.NamedTemporaryFile(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent, delete=False) as temp:
-                        temp_path = Path(temp.name)
-                    try:
-                        shutil.copyfile(staged, temp_path)
-                        temp_path.replace(dest)
-                    finally:
-                        temp_path.unlink(missing_ok=True)
-                    created_tiles.append(dest)
-            except Exception:
-                for created in created_tiles:
-                    created.unlink(missing_ok=True)
-                raise
+            # Tiles are global (cache_root()) and shared with other jobs; a failed
+            # import leaves whatever landed here in place rather than rolling it back.
+            for _, rel in tile_entries:
+                dest = tile_root / rel
+                if dest.exists():
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                staged = staged_tiles / rel
+                with tempfile.NamedTemporaryFile(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent, delete=False) as temp:
+                    temp_path = Path(temp.name)
+                try:
+                    shutil.copyfile(staged, temp_path)
+                    temp_path.replace(dest)
+                finally:
+                    temp_path.unlink(missing_ok=True)
             remap = {old_id: uuid.uuid4().hex for _info, old_id in asset_entries}
             installed_assets = staging / "installed-assets"
             installed_assets.mkdir()
             for old_id, new_id in remap.items():
                 shutil.copyfile(staged_assets / f"{old_id}.png", installed_assets / f"{new_id}.png")
-            asset_root = Path(str(result.get("outputDir") or "")) / "assets"
-            previous_assets = staging / "previous-assets"
-            if asset_root.exists():
-                asset_root.replace(previous_assets)
-            try:
-                installed_assets.replace(asset_root)
-            except Exception:
-                if previous_assets.exists():
-                    previous_assets.replace(asset_root)
-                for created in created_tiles:
-                    created.unlink(missing_ok=True)
-                raise
-            previous_previews = staging / "previous-previews"
-            if preview_dir.exists():
-                preview_dir.replace(previous_previews)
-            try:
-                staged_previews.replace(preview_dir)
-            except Exception:
-                if previous_previews.exists():
-                    previous_previews.replace(preview_dir)
-                shutil.rmtree(asset_root, ignore_errors=True)
-                if previous_assets.exists():
-                    previous_assets.replace(asset_root)
-                for created in created_tiles:
-                    created.unlink(missing_ok=True)
-                raise
-            _clear_derived_maps_output(result, clear_preview=False)
-    dumped = _dump_document(doc)
-    if asset_entries:
-        for slide in dumped["slides"]:
-            for view in [slide, *([slide["cg"]] if isinstance(slide.get("cg"), dict) else [])]:
-                for church in view.get("churches") or []:
-                    if church.get("assetId") in remap:
-                        church["assetId"] = remap[church["assetId"]]
-        dumped["assets"] = [{**asset.model_dump(), "id": remap[asset.id]} for asset in doc.assets]
-    for slide in dumped["slides"]:
-        slide.pop("movieMov", None)
-        slide.pop("movieDuration", None)
-        if slide.get("stillPng") not in imported_previews:
-            slide.pop("stillPng", None)
-        if isinstance(slide.get("cg"), dict):
-            slide["cg"].pop("movieMov", None)
-            slide["cg"].pop("movieDuration", None)
-            if slide["cg"].get("stillPng") not in imported_previews:
-                slide["cg"].pop("stillPng", None)
-    dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
-    result.update(dumped)
-    result["previewFiles"] = {"maps": sorted(imported_previews)}
-    result["isolateDefaultVersion"] = isolate_default_version
-    _bump_legacy_isolate(result)
-    return result, {"tiles": len(tile_entries), "previews": len(imported_previews)}
+
+            dumped = _dump_document(doc)
+            if asset_entries:
+                for slide in dumped["slides"]:
+                    for view in [slide, *([slide["cg"]] if isinstance(slide.get("cg"), dict) else [])]:
+                        for church in view.get("churches") or []:
+                            if church.get("assetId") in remap:
+                                church["assetId"] = remap[church["assetId"]]
+                dumped["assets"] = [{**asset.model_dump(), "id": remap[asset.id]} for asset in doc.assets]
+            for slide in dumped["slides"]:
+                slide.pop("movieMov", None)
+                slide.pop("movieDuration", None)
+                if slide.get("stillPng") not in imported_previews:
+                    slide.pop("stillPng", None)
+                if isinstance(slide.get("cg"), dict):
+                    slide["cg"].pop("movieMov", None)
+                    slide["cg"].pop("movieDuration", None)
+                    if slide["cg"].get("stillPng") not in imported_previews:
+                        slide["cg"].pop("stillPng", None)
+            dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
+
+            with _mutation_lock(job.id):
+                job.status = "done"
+                job.error = None
+                with maps_commit(job.id, None) as commit:
+                    result = commit.result
+                    preview_dir = Path(str(result.get("previewDir") or output_dir / "previews"))
+                    asset_root = Path(str(result.get("outputDir") or "")) / "assets"
+                    commit.stage_dir(asset_root, installed_assets)
+                    commit.stage_dir(preview_dir, staged_previews)
+                    _clear_derived_maps_output(result, clear_preview=False)
+                    result.update(dumped)
+                    result["previewFiles"] = {"maps": sorted(imported_previews)}
+                    result["isolateDefaultVersion"] = isolate_default_version
+                    _bump_legacy_isolate(result)
+    return commit.payload, {"tiles": len(tile_entries), "previews": len(imported_previews)}
 
 
 def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
-    return export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk)
+    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk)
+    return _bump_state_revision(job.id, result)
 
 
 @router.post("")
@@ -1064,14 +1113,12 @@ def create_maps() -> dict:
 
 @router.post("/{job_id}/assets")
 async def upload_asset(job_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    payload, width, height, version = _decode_png(_read_limited(file.file))
+    payload, width, height, version = decode_png(_read_limited(file.file))
     asset_id = uuid.uuid4().hex
-    def register(result: dict[str, Any]) -> dict[str, Any]:
-        path = _asset_path(result, asset_id); temp = path.with_suffix(".tmp")
-        temp.write_bytes(payload); temp.replace(path)
-        result["assets"] = [*(result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
-        return result
-    updated = _mutate_document(job_id, None, register)
+    with maps_commit(job_id, None) as commit:
+        commit.stage_bytes(asset_path(commit.result, asset_id), payload)
+        commit.result["assets"] = [*(commit.result.get("assets") or []), {"id": asset_id, "version": version, "width": width, "height": height}]
+    updated = commit.payload
     result = dict(updated["result"] or {})
     return {
         "asset": {"id": asset_id, "version": version, "width": width, "height": height},
@@ -1082,12 +1129,13 @@ async def upload_asset(job_id: str, file: UploadFile = File(...)) -> dict[str, A
 
 @router.post("/{job_id}/slides/{slide_id}/landmark")
 async def add_landmark(job_id: str, slide_id: str, file: UploadFile = File(...), audience: Literal["lw", "cg"] = Query("lw")) -> dict[str, Any]:
-    payload, width, height, version = _decode_png(_read_limited(file.file))
+    payload, width, height, version = decode_png(_read_limited(file.file))
     asset_id = uuid.uuid4().hex
     name = Path(file.filename or "Landmark").stem
-    def apply(result: dict[str, Any]) -> dict[str, Any]:
-        return append_landmark(result, slide_id, audience, name, width, height, version, asset_id)
-    updated = _mutate_document_with_asset(job_id, None, asset_id, payload, apply)
+    with maps_commit(job_id, None) as commit:
+        commit.result = append_landmark(commit.result, slide_id, audience, name, width, height, version, asset_id)
+        commit.stage_bytes(asset_path(commit.result, asset_id), payload)
+    updated = commit.payload
     result = dict(updated["result"] or {})
     slide = next((row for row in result.get("slides") or [] if row.get("id") == slide_id), None)
     view = (slide.get("cg") if audience == "cg" and slide and slide.get("cg") else slide) or {}
@@ -1101,7 +1149,7 @@ def get_asset(job_id: str, asset_id: str):
     result = dict(job.result or {})
     if asset_id not in {str(row.get("id") or "") for row in (result.get("assets") or [])}:
         raise HTTPException(404, "Unknown Maps asset")
-    path = _asset_path(result, asset_id)
+    path = asset_path(result, asset_id)
     if not path.is_file():
         raise HTTPException(404, "Maps asset is unavailable")
     return FileResponse(path, media_type="image/png", headers={"Content-Disposition": f'inline; filename="{asset_id}.png"'})
@@ -1212,9 +1260,7 @@ def tile_cache_clear() -> dict[str, int]:
 
 @router.get("/{job_id}/session")
 def save_session(job_id: str):
-    job = _job_or_404(job_id)
-    _require_idle(job)
-    path = _write_session_archive(job)
+    path = _write_session_archive(job_id)
     return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
@@ -1238,17 +1284,14 @@ async def load_session(job_id: str, file: UploadFile = File(...)) -> dict:
             return _read_session_archive(job, uploaded.name)
 
     try:
-        result, imported = await run_in_threadpool(import_uploaded)
+        payload, imported = await run_in_threadpool(import_uploaded)
     except BaseException:
         with _mutation_lock(job_id):
-            job.status = previous_status
+            if job.status == "running":
+                job.status = previous_status
         raise
     finally:
         await file.close()
-    with _mutation_lock(job_id):
-        job.status = "done"
-        job.error = None
-        payload = _mutate_document(job_id, None, lambda _latest: result)
     payload["sessionImport"] = imported
     return payload
 
@@ -1285,7 +1328,7 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
       dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
       result.update(dumped)
       return result
-    return _mutate_document(job_id, expected, apply)
+    return mutate_document(job_id, expected, apply)
 
 
 @router.post("/{job_id}/png")
@@ -1318,8 +1361,9 @@ async def post_png(
         folder = output_dir / "plates"
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
         path = folder / plate_filename(plate_name)
-        _write_atomic(path, body)
-        return _runner().public_dict(job)
+        with maps_commit(job_id, None, bump=False) as commit:
+            commit.stage_bytes(path, body)
+        return commit.payload
     if not slideId:
         raise HTTPException(400, "slideId is required")
     landing_base = slideId[: -len("__landing")] if slideId.endswith("__landing") else None
@@ -1338,16 +1382,18 @@ async def post_png(
         name = Path(safe).name
         if variant == "country":
             name = f"{Path(name).stem}-country{Path(name).suffix}"
-        _write_atomic(folder / name, body)
-        return _runner().public_dict(job)
+        with maps_commit(job_id, None, bump=False) as commit:
+            commit.stage_bytes(folder / name, body)
+        return commit.payload
     folder = Path(str(result.get("previewDir") or ""))
     path = folder / Path(safe).name
 
-    def publish(latest: dict[str, Any]) -> dict[str, Any]:
+    with maps_commit(job_id, None) as commit:
+        latest = commit.result
         current_revision = int(latest.get("stateRevision") or 0)
         if revision is not None and revision != current_revision:
             raise HTTPException(409, {"staleThumbnail": True, "stateRevision": current_revision})
-        _write_atomic(path, body)
+        commit.stage_bytes(path, body)
         fresh_slides = []
         for slide in latest.get("slides") or []:
             if slide.get("id") == slideId:
@@ -1363,9 +1409,7 @@ async def post_png(
             fresh_names.append(safe)
         latest["slides"] = fresh_slides
         latest["previewFiles"] = {**(latest.get("previewFiles") or {}), "maps": fresh_names}
-        return latest
-
-    return _mutate_document(job_id, None, publish)
+    return commit.payload
 
 
 @router.post("/{job_id}/frame")
@@ -1396,11 +1440,14 @@ async def post_frame(
         raise HTTPException(400, "Frame body required")
     _validate_raster(body)
     content_type = request.headers.get("content-type", "")
-    output_dir = Path(str(result.get("outputDir") or ""))
     from obed_edom.maps_movie import write_frame, write_frames_meta
 
-    write_frame(output_dir, slideId, index, body, content_type, audience)
-    write_frames_meta(output_dir, slideId, fps=fps, count=count, audience=audience)
+    with _mutation_lock(job_id):
+        job = _job_or_404(job_id)
+        _require_idle(job)
+        output_dir = Path(str((job.result or {}).get("outputDir") or ""))
+        write_frame(output_dir, slideId, index, body, content_type, audience)
+        write_frames_meta(output_dir, slideId, fps=fps, count=count, audience=audience)
     return {"ok": True, "index": index, "count": count}
 
 
