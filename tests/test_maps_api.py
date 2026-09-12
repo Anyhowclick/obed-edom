@@ -469,7 +469,7 @@ def test_bootstrap_csv_infers_hop_kind_against_deck_resolved_legacy_slide(monkey
     job = _seed()
     stored = RUNNER.get(job["id"])
     assert stored is not None
-    camera = camera_dict(1.3521, 103.8198, 8)
+    camera = camera_dict(1.3521, 103.8198, 13)
     stored.result["hiddenLayers"] = ["pois"]
     stored.result["slides"][0]["camera"] = camera
     stored.result["slides"][0]["hiddenLayers"] = None
@@ -2358,3 +2358,73 @@ def test_append_to_a_job_deleted_mid_flight_404s_and_leaves_no_asset(monkeypatch
     tmps = set(asset_dir.glob("*.tmp")) if asset_dir.is_dir() else set()
     assert not pngs
     assert not tmps
+
+
+def test_bootstrap_csv_headerless_paste_zooms_via_ladder(monkeypatch):
+    job = _seed()
+
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": 'China\nUdaipur,"24.58, 73.68"\n', "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert len(new_slides) == 2
+    china_slide = next(s for s in new_slides if s["title"] == "China")
+    udaipur_slide = next(s for s in new_slides if s["title"] == "Udaipur")
+    assert china_slide["camera"]["zoom"] == pytest.approx(4.3)
+    assert udaipur_slide["camera"]["zoom"] == pytest.approx(13.0)
+
+
+def test_bootstrap_csv_row_error_returns_400_with_line_detail():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China\n,24.5 N, 73.6 E\n", "replace": "false"},
+    )
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail[0].startswith("Line 2:")
+
+
+def test_bootstrap_csv_headerless_paste_into_pins(monkeypatch):
+    job = _seed()
+
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China\n", "targetSlideId": "s1", "audience": "lw"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    pins = done["result"]["slides"][0]["churches"]
+    assert [pin["name"] for pin in pins] == ["China"]
+
+
+def test_bootstrap_csv_headerless_explicit_zoom_wins_over_ladder(monkeypatch):
+    job = _seed()
+
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China,z=6.8\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    china_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert china_slide["camera"]["zoom"] == pytest.approx(6.8)
