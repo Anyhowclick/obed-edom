@@ -102,6 +102,39 @@ def plan_movie_posters(deck: Path, targets: list[dict]) -> dict:
     return {"refused": False, "reason": None, "posters": posters}
 
 
+def plan_movie_autoplay(deck: Path, targets: list[dict]) -> dict:
+    """Same one-to-one geometry match as `plan_movie_posters`, for landmark reveal
+    movies that should autoplay on slide appear. `target` needs only x/y/w/h/name.
+    """
+    archives = movie_archives(deck)
+    ids: list[str] = []
+    claimed_by: dict[str, Any] = {}
+    for i, target in enumerate(targets):
+        matches = [
+            a
+            for a in archives
+            if abs(a["x"] - target["x"]) <= _FRAME_TOL
+            and abs(a["y"] - target["y"]) <= _FRAME_TOL
+            and abs(a["w"] - target["w"]) <= _FRAME_TOL
+            and abs(a["h"] - target["h"]) <= _FRAME_TOL
+        ]
+        if len(matches) != 1:
+            name = target.get("name", i)
+            return {"refused": True, "reason": f"target {name!r} matched {len(matches)} movie archive(s)", "ids": []}
+        aid = matches[0]["id"]
+        if aid in claimed_by:
+            name = target.get("name", i)
+            other = claimed_by[aid]
+            return {
+                "refused": True,
+                "reason": f"movie archive {aid} matched both target {other!r} and target {name!r}",
+                "ids": [],
+            }
+        claimed_by[aid] = target.get("name", i)
+        ids.append(aid)
+    return {"refused": False, "reason": None, "ids": ids}
+
+
 def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
     """Patch each named ``TSD.MovieArchive``'s ``posterTime`` in place. Modelled
     line-for-line on ``iwa_write.patch_slide_builds``: refuses (deck untouched) unless
@@ -172,6 +205,87 @@ def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
             edits[member] = new_member
             applied += touched
             touched_ids.extend(ids)
+
+    try:
+        _rewrite_members(deck, edits)
+    except OfflineWriteCorrupted:
+        raise  # deck IS truncated: must reach the caller, never a refused result
+    except Exception as exc:  # noqa: BLE001 — every result refuses, deck left untouched
+        return {"refused": True, "reason": f"rewrite failed: {exc}", "touched": [], "applied": 0}
+
+    return {"refused": False, "reason": None, "touched": sorted(touched_ids), "applied": applied}
+
+
+def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
+    """Patch each named ``TSD.MovieArchive``'s ``autoPlay`` to ``True`` in place.
+    Same shape as `patch_movie_posters`; refuses (deck untouched) unless every id
+    resolves to a same-member ``TSD.MovieArchive`` and the re-encode changed exactly
+    the intended archive(s).
+    """
+    deck = Path(deck)
+    ids = sorted({str(i) for i in ids})
+    if not ids:
+        return {"refused": False, "reason": None, "touched": [], "applied": 0}
+
+    objects, id_to_file, _file_ids = _load_deck(deck)
+    for oid in ids:
+        obj = objects.get(oid)
+        if obj is None or obj.get("_pbtype") != "TSD.MovieArchive":
+            return {
+                "refused": True,
+                "reason": f"{oid} does not resolve to a TSD.MovieArchive",
+                "touched": [],
+                "applied": 0,
+            }
+
+    by_member: dict[str, list[str]] = {}
+    for oid in ids:
+        member = id_to_file.get(oid)
+        if member is None:
+            return {"refused": True, "reason": f"{oid} has no owning member", "touched": [], "applied": 0}
+        by_member.setdefault(member, []).append(oid)
+
+    edits: dict[str, bytes] = {}
+    applied = 0
+    touched_ids: list[str] = []
+    with zipfile.ZipFile(deck) as zf:
+        for member, member_ids in by_member.items():
+            buf = zf.read(member)
+            decoded = IWAFile.from_buffer(buf, member).to_dict()
+            patched = copy.deepcopy(decoded)
+            wanted = set(member_ids)
+            touched = 0
+            for ch in patched["chunks"]:
+                for arch in ch["archives"]:
+                    aid = str(arch["header"]["identifier"])
+                    if aid not in wanted:
+                        continue
+                    for o in arch.get("objects") or []:
+                        o["autoPlay"] = True
+                        touched += 1
+
+            if touched != len(wanted):
+                return {
+                    "refused": True,
+                    "reason": f"expected to touch {len(wanted)} movie(s) in {member}, touched {touched}",
+                    "touched": [],
+                    "applied": 0,
+                }
+
+            new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
+            reparsed = IWAFile.from_buffer(new_member, member).to_dict()
+            removed, added, changed = _archive_diff(decoded, reparsed)
+            if removed or added or not set(changed) <= wanted:
+                return {
+                    "refused": True,
+                    "reason": f"{member}: re-encode touched fewer/other than the intended movie(s) "
+                    f"(removed={sorted(removed)}, added={sorted(added)}, changed={sorted(changed)})",
+                    "touched": [],
+                    "applied": 0,
+                }
+            edits[member] = new_member
+            applied += touched
+            touched_ids.extend(member_ids)
 
     try:
         _rewrite_members(deck, edits)

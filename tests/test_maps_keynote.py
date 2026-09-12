@@ -1620,6 +1620,33 @@ def test_export_maps_job_never_calls_patcher_when_gate_unset(tmp_path: Path, mon
     assert "posterFrame" not in result
 
 
+def test_export_maps_job_records_movie_autoplay_refusal_reason(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OBED_MAPS_POSTER_FRAME", raising=False)
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_autoplay",
+        lambda deck, targets: {"refused": True, "reason": "x", "ids": []},
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    assert "posterFrame" not in result
+    assert result["movieAutoplay"]
+    assert result["movieAutoplay"][0]["refused"] is True
+    assert result["movieAutoplay"][0]["reason"] == "x"
+    # never fatal to export
+    assert result["destPath"]
+
+
 def test_export_maps_job_records_refusal_reason_when_gated_on(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OBED_MAPS_POSTER_FRAME", "on")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)

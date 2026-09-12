@@ -17,7 +17,13 @@ pytest.importorskip("keynote_parser")
 
 from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
-from obed_edom.iwa_movies import movie_archives, patch_movie_posters, plan_movie_posters  # noqa: E402
+from obed_edom.iwa_movies import (  # noqa: E402
+    movie_archives,
+    patch_movie_autoplay,
+    patch_movie_posters,
+    plan_movie_autoplay,
+    plan_movie_posters,
+)
 from obed_edom.iwa_runs import _load_deck  # noqa: E402
 
 _ID_NAME_MAP, _, _ = import_version()
@@ -239,4 +245,68 @@ def test_patch_refuses_a_target_id_pointing_at_a_non_movie_archive(deck):
 
 def test_patch_empty_posters_is_a_noop(deck):
     result = patch_movie_posters(deck, {})
+    assert result == {"refused": False, "reason": None, "touched": [], "applied": 0}
+
+
+def _autoplay_target(frame, name="reveal"):
+    x, y, w, h = frame
+    return {"x": x, "y": y, "w": w, "h": h, "name": name}
+
+
+def test_plan_autoplay_picks_only_the_landmark_sized_movie(deck):
+    plan = plan_movie_autoplay(deck, [_autoplay_target(_LANDMARK_FRAME)])
+    assert plan["refused"] is False
+    assert plan["ids"] == ["300"]
+
+
+def test_plan_autoplay_refuses_a_target_matching_no_archive(deck):
+    plan = plan_movie_autoplay(deck, [_autoplay_target((999, 999, 10, 10))])
+    assert plan["refused"] is True
+
+
+def test_plan_autoplay_refuses_an_ambiguous_target(tmp_path):
+    deck = _build_movies_deck(tmp_path / "movies.key", extra_movie_same_frame=True)
+    plan = plan_movie_autoplay(deck, [_autoplay_target(_LANDMARK_FRAME)])
+    assert plan["refused"] is True
+    assert "matched 2" in plan["reason"]
+
+
+def test_patch_autoplay_writes_true_and_reread_matches(deck):
+    before = deck.read_bytes()
+    result = patch_movie_autoplay(deck, ["300"])
+    assert result["refused"] is False
+    assert result["applied"] == 1
+    archives = {a["id"]: a for a in movie_archives(deck)}
+    assert archives["300"]["autoPlay"] is True
+    assert archives["310"]["autoPlay"] is False
+    assert deck.read_bytes() != before
+
+
+def test_patch_autoplay_leaves_other_members_and_archives_byte_identical(deck):
+    objects_before, _, _ = _load_deck(deck)
+    image_before = objects_before["320"]
+    bg_before = objects_before["310"]
+    with zipfile.ZipFile(deck) as zf:
+        names_before = set(zf.namelist())
+        doc_before = zf.read("Index/Document.iwa")
+
+    patch_movie_autoplay(deck, ["300"])
+
+    objects_after, _, _ = _load_deck(deck)
+    assert objects_after["320"] == image_before
+    assert objects_after["310"] == bg_before
+    with zipfile.ZipFile(deck) as zf:
+        assert set(zf.namelist()) == names_before
+        assert zf.read("Index/Document.iwa") == doc_before
+
+
+def test_patch_autoplay_refuses_a_target_id_pointing_at_a_non_movie_archive(deck):
+    before = deck.read_bytes()
+    result = patch_movie_autoplay(deck, ["320"])
+    assert result["refused"] is True
+    assert deck.read_bytes() == before
+
+
+def test_patch_autoplay_empty_ids_is_a_noop(deck):
+    result = patch_movie_autoplay(deck, [])
     assert result == {"refused": False, "reason": None, "touched": [], "applied": 0}
