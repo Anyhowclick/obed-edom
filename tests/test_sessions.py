@@ -971,6 +971,7 @@ def test_rename_reserves_target_name_for_whole_transaction(tmp_path: Path, monke
     monkeypatch.undo()
 
     assert result_a["job"].name == "shared-name"
+    assert runner.get(job_b.id).name != "shared-name"
 
 
 def test_rename_reserves_source_name_for_whole_transaction(tmp_path: Path, monkeypatch):

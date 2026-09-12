@@ -528,7 +528,7 @@ def rename_job_folder(job_id: str, raw_name: str):
     maps_root = _resolved_maps_root()
     job = _job_or_404(job_id)
     _require_idle(job)
-    if name == runner.get(job_id).name.lower():
+    if name == job.name.lower():
         return job
     previous_name: str | None = None
     old_dir: Path | None = None
@@ -536,48 +536,55 @@ def rename_job_folder(job_id: str, raw_name: str):
     archive_renamed = False
     reserved = False
     source_reserved = False
-    try:
-        with maps_commit(job_id, None, bump=False) as commit:
-            job = commit.job
-            previous_name = job.name
-            runner.reserve_name(name, exclude_job_id=job_id)
-            reserved = True
-            runner.reserve_name(previous_name, exclude_job_id=job_id)
-            source_reserved = True
-            old_dir = Path(str(commit.result.get("outputDir") or ""))
-            if old_dir.name != job.name:
-                raise HTTPException(500, "Maps job folder does not match its current name")
-            _require_direct_child(maps_root, old_dir)
-            new_dir = old_dir.parent / name
-            if new_dir.exists():
-                raise FileExistsError(f"A folder named '{name}' already exists")
-            os.replace(old_dir, new_dir)
-            if commit.result.get("stem") == job.name:
-                old_archive = new_dir / f"{job.name}.obedmaps"
-                new_archive = new_dir / f"{name}.obedmaps"
-                if old_archive.exists():
-                    os.replace(old_archive, new_archive)
-                    archive_renamed = True
-                commit.result["stem"] = name
-            commit.result = rewrite_result_paths(commit.result, old_dir, new_dir)
-            runner.set_name(job_id, name, save=False)
-    except BaseException:
-        if old_dir is not None and new_dir is not None and new_dir.exists() and not old_dir.exists():
-            if archive_renamed:
-                new_archive = new_dir / f"{name}.obedmaps"
-                old_archive = new_dir / f"{previous_name}.obedmaps"
-                if new_archive.exists():
-                    os.replace(new_archive, old_archive)
-            os.replace(new_dir, old_dir)
-        current = runner.get(job_id)
-        if current is not None and current.name == name and previous_name is not None:
-            runner.set_name(job_id, previous_name, save=False)
-        raise
-    finally:
-        if reserved:
-            runner.release_name(name)
-        if source_reserved:
-            runner.release_name(previous_name)
+    # Hold both locks across the whole try/except (not just `maps_commit`'s own
+    # `with` block) so the rollback below runs under the same lock as a concurrent
+    # `JobRunner.delete`: otherwise a delete could land in the gap after
+    # `maps_commit` releases its locks but before rollback's `os.replace` runs,
+    # and the rollback would resurrect a folder that delete just purged.
+    with _mutation_lock(job_id):
+        with runner.job_lock(job_id):
+            try:
+                with maps_commit(job_id, None, bump=False) as commit:
+                    job = commit.job
+                    previous_name = job.name
+                    runner.reserve_name(name, exclude_job_id=job_id)
+                    reserved = True
+                    runner.reserve_name(previous_name, exclude_job_id=job_id)
+                    source_reserved = True
+                    old_dir = Path(str(commit.result.get("outputDir") or ""))
+                    if old_dir.name != job.name:
+                        raise HTTPException(500, "Maps job folder does not match its current name")
+                    _require_direct_child(maps_root, old_dir)
+                    new_dir = old_dir.parent / name
+                    if new_dir.exists():
+                        raise FileExistsError(f"A folder named '{name}' already exists")
+                    os.replace(old_dir, new_dir)
+                    if commit.result.get("stem") == job.name:
+                        old_archive = new_dir / f"{job.name}.obedmaps"
+                        new_archive = new_dir / f"{name}.obedmaps"
+                        if old_archive.exists():
+                            os.replace(old_archive, new_archive)
+                            archive_renamed = True
+                        commit.result["stem"] = name
+                    commit.result = rewrite_result_paths(commit.result, old_dir, new_dir)
+                    runner.set_name(job_id, name, save=False)
+            except BaseException:
+                if old_dir is not None and new_dir is not None and new_dir.exists() and not old_dir.exists():
+                    if archive_renamed:
+                        new_archive = new_dir / f"{name}.obedmaps"
+                        old_archive = new_dir / f"{previous_name}.obedmaps"
+                        if new_archive.exists():
+                            os.replace(new_archive, old_archive)
+                    os.replace(new_dir, old_dir)
+                current = runner.get(job_id)
+                if current is not None and current.name == name and previous_name is not None:
+                    runner.set_name(job_id, previous_name, save=False)
+                raise
+            finally:
+                if reserved:
+                    runner.release_name(name)
+                if source_reserved:
+                    runner.release_name(previous_name)
     # Return the live `Job` instance mutated by the commit above, not a fresh
     # `runner.get(job_id)`: a concurrent delete could otherwise land in the gap
     # after the transaction's lock is released and turn a successful rename into
