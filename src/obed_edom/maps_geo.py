@@ -108,11 +108,11 @@ def clamp_lat(lat: float) -> float:
 
 def clamp_lon(lon: float) -> float:
     lon = float(lon)
-    while lon > 180:
-        lon -= 360
-    while lon < -180:
-        lon += 360
-    return lon
+    if not math.isfinite(lon):
+        raise ValueError(f"non-finite longitude: {lon!r}")
+    if lon == 180.0:
+        return 180.0
+    return ((lon + 180.0) % 360.0) - 180.0
 
 
 def min_zoom_for_width(width: float) -> float:

@@ -381,3 +381,56 @@ def test_header_form_lon_without_lat_reports_error():
     assert places == []
     assert "Line 2" in errors[0]
     assert "lon without lat" in errors[0]
+
+
+@pytest.mark.parametrize("bad_lon", ["inf", "-inf", "1e400"])
+def test_header_form_non_finite_lon_reports_bad_lat_lon_not_hang(bad_lon):
+    places, errors = parse_places(f"name,lat,lon\nX,1,{bad_lon}\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "bad lat/lon" in errors[0]
+
+
+def test_header_form_nan_lon_reports_bad_lat_lon():
+    places, errors = parse_places("name,lat,lon\nX,1,nan\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "bad lat/lon" in errors[0]
+
+
+def test_header_form_non_finite_lon_does_not_hang():
+    import signal
+
+    def _timeout(_signum, _frame):
+        raise TimeoutError("clamp_lon hung on non-finite input")
+
+    old_handler = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(2)
+    try:
+        places, errors = parse_places("name,lat,lon\nX,1,inf\n")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+    assert places == []
+    assert "bad lat/lon" in errors[0]
+
+
+def test_headerless_non_finite_lat_hemisphere_reports_error_not_hang():
+    places, errors = parse_places("Paris, inf N, 3 E")
+    assert places == []
+    assert "Line 1" in errors[0]
+
+
+def test_headerless_bad_zoom_out_of_range_reports_error():
+    places, errors = parse_places("Paris,z=500")
+    assert places == []
+    assert "Line 1" in errors[0]
+    assert "zoom out of range" in errors[0]
+
+
+def test_duplicate_header_column_reports_error():
+    places, errors = parse_places("name,lat,lon,name\nX,1,2,dup\n")
+    assert places == []
+    assert "Line 1" in errors[0]
+    assert "duplicate column" in errors[0]
+    assert "'name'" in errors[0]
