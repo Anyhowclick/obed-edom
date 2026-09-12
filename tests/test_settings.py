@@ -33,3 +33,21 @@ def test_default_export_dir_empty_string_is_valid(tmp_path: Path):
 def test_default_export_dir_rejects_bad_path(tmp_path: Path):
     with pytest.raises(ValueError):
         save_settings({"defaultExportDir": "relative/path"}, tmp_path)
+
+
+def test_load_settings_succeeds_with_deleted_export_dir(tmp_path: Path):
+    export_dir = tmp_path / "exports"
+    save_settings({"defaultExportDir": str(export_dir)}, tmp_path)
+    export_dir.rmdir()
+    again = load_settings(tmp_path)
+    assert again["defaultExportDir"] == str(export_dir.resolve())
+    assert not export_dir.exists()
+
+
+def test_load_settings_succeeds_with_stored_path_now_a_file(tmp_path: Path):
+    export_dir = tmp_path / "exports"
+    save_settings({"defaultExportDir": str(export_dir)}, tmp_path)
+    export_dir.rmdir()
+    export_dir.write_text("now a file")
+    again = load_settings(tmp_path)
+    assert again["defaultExportDir"] == str(export_dir.resolve())

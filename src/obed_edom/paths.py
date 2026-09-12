@@ -39,18 +39,20 @@ def validate_export_dir(raw: str | Path) -> Path:
     resolved = Path(str(raw)).expanduser()
     if not resolved.is_absolute():
         raise ValueError(f"Export directory must be an absolute path: {raw}")
+    resolved = resolved.resolve()
 
+    output = output_root().resolve()
     for root_name in _PRIVATE_ROOT_NAMES:
-        private_root = (output_root() / root_name).resolve()
+        private_root = output / root_name
         try:
-            resolved.resolve().relative_to(private_root)
+            resolved.relative_to(private_root)
         except (ValueError, FileNotFoundError):
             pass
         else:
             raise ValueError(f"Export directory cannot be inside {private_root}")
 
     try:
-        resolved.resolve().relative_to(cache_root().resolve())
+        resolved.relative_to(cache_root().resolve())
     except (ValueError, FileNotFoundError):
         pass
     else:
@@ -77,7 +79,9 @@ def export_destination(job) -> Path:
 
     default_dir = (load_settings().get("defaultExportDir") or "").strip()
     if default_dir:
-        return Path(default_dir)
+        candidate = Path(default_dir)
+        if candidate.is_dir():
+            return candidate
 
     return output_root()
 
