@@ -3,7 +3,7 @@ import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 const TARGET_PROPS = ["line-color", "text-color"] as const;
 const LIFT = 96;
 const KNEE = 160;
-const EXPRESSION_OPS = ["interpolate", "step", "match", "case"];
+const EXPRESSION_OPS = ["interpolate", "interpolate-hcl", "interpolate-lab", "step", "match", "case"];
 
 type Rgba = { r: number; g: number; b: number; a: number };
 
@@ -32,11 +32,13 @@ function parseChannel(token: string): number {
 
 function parseColor(value: string): Rgba | null {
   const trimmed = value.trim();
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(trimmed);
+  const hex = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(trimmed);
   if (hex) {
-    const digits = hex[1].length === 3 ? hex[1].split("").map((d) => d + d) : [hex[1].slice(0, 2), hex[1].slice(2, 4), hex[1].slice(4, 6)];
-    const [r, g, b] = digits.map((d) => parseInt(d, 16));
-    return finite({ r, g, b, a: 1 });
+    const short = hex[1].length <= 4;
+    const pairs = short ? hex[1].split("").map((d) => d + d) : (hex[1].match(/../g) as string[]);
+    const [r, g, b] = pairs.slice(0, 3).map((d) => parseInt(d, 16));
+    const a = pairs.length === 4 ? parseInt(pairs[3], 16) / 255 : 1;
+    return finite({ r, g, b, a });
   }
   const fn = /^(rgb|rgba|hsl|hsla)\(([^)]+)\)$/i.exec(trimmed);
   if (!fn) return null;
@@ -67,10 +69,9 @@ function brighten(rgba: Rgba): Rgba {
   if (rgba.a === 0) return rgba;
   const mean = (rgba.r + rgba.g + rgba.b) / 3;
   if (mean >= KNEE) return rgba;
-  if (mean <= 0) return { r: LIFT, g: LIFT, b: LIFT, a: rgba.a };
-  const factor = liftMean(mean) / mean;
-  const scale = (c: number) => Math.max(0, Math.min(255, Math.round(c * factor)));
-  return { r: scale(rgba.r), g: scale(rgba.g), b: scale(rgba.b), a: rgba.a };
+  const delta = liftMean(mean) - mean;
+  const shift = (c: number) => Math.max(0, Math.min(255, Math.round(c + delta)));
+  return { r: shift(rgba.r), g: shift(rgba.g), b: shift(rgba.b), a: rgba.a };
 }
 
 function isOutputIndex(op: string, i: number, length: number): boolean {
@@ -78,6 +79,8 @@ function isOutputIndex(op: string, i: number, length: number): boolean {
   switch (op) {
     // ["interpolate", interpolation, input, stop, output, ...]
     case "interpolate":
+    case "interpolate-hcl":
+    case "interpolate-lab":
       return i >= 4 && i % 2 === 0;
     // ["step", input, default, stop, output, ...]
     case "step":
@@ -117,8 +120,8 @@ function transformColorValue(value: unknown): unknown {
   return value;
 }
 
-/** Lifts grey road/rail/boundary/label line-and-text colours toward white with a
- * proportional, luminance-preserving scale; fills and backgrounds are never touched.
+/** Lifts grey road/rail/boundary/label line-and-text colours toward white with an
+ * additive, chroma-preserving offset; fills and backgrounds are never touched.
  * Only for the Dark style, applied after it is fetched. */
 export function withBrighterDarkLines(style: StyleSpecification): StyleSpecification {
   return {

@@ -79,7 +79,7 @@ test("withBrighterDarkLines parses CSS Color 4 space, slash-alpha and percentage
 
   const byId = (id) => result.layers.find((layer) => layer.id === id);
   // space-separated rgb() and comma rgb() of the same colour lift to the same result.
-  assert.deepEqual(channels(byId("highway_minor_space").paint["line-color"]), [104, 104, 112, 1]);
+  assert.deepEqual(channels(byId("highway_minor_space").paint["line-color"]), [106, 106, 108, 1]);
   // slash alpha and comma alpha of the same colour lift to the same rgb channels.
   assert.deepEqual(
     channels(byId("highway_major_casing_slash").paint["line-color"]),
@@ -212,4 +212,45 @@ test("withBrighterDarkLines recurses into expression outputs and leaves inputs, 
   assert.deepEqual(caseExpr[1], beforeOf("highway_case")[1]);
   assert.equal(avg(caseExpr[2]), 100);
   assert.equal(avg(caseExpr[3]), 104);
+});
+
+test("withBrighterDarkLines shifts every channel by the same delta, so chroma survives and nothing blows up", () => {
+  const result = withBrighterDarkLines(darkStyle);
+  const byId = (id) => result.layers.find((layer) => layer.id === id);
+
+  // a near-black saturated red must not saturate to rgb(255,0,0): the lift is additive.
+  assert.deepEqual(channels(byId("tint_rgb").paint["line-color"]), [97, 96, 96, 1]);
+
+  // a tinted dark blue keeps its channel spread exactly.
+  const before = [13, 26, 38];
+  const after = channels(byId("tint_hsl").paint["line-color"]).slice(0, 3);
+  assert.deepEqual(after, [94, 107, 119]);
+  const deltas = after.map((c, i) => c - before[i]);
+  assert.deepEqual(deltas, [deltas[0], deltas[0], deltas[0]]);
+});
+
+test("withBrighterDarkLines accepts 4- and 8-digit hex with a trailing alpha", () => {
+  const result = withBrighterDarkLines(darkStyle);
+  const byId = (id) => result.layers.find((layer) => layer.id === id);
+
+  const eight = channels(byId("hex_8").paint["line-color"]);
+  assert.deepEqual(eight.slice(0, 3), [96, 96, 96]);
+  assert.ok(Math.abs(eight[3] - 0.5) < 0.01, `alpha ${eight[3]} should be ~0.5`);
+
+  const four = channels(byId("hex_4").paint["line-color"]);
+  assert.deepEqual(four.slice(0, 3), [86, 103, 120]);
+  assert.ok(Math.abs(four[3] - 0.2) < 0.01, `alpha ${four[3]} should be ~0.2`);
+});
+
+test("withBrighterDarkLines lifts interpolate-hcl outputs and leaves its stops alone", () => {
+  const result = withBrighterDarkLines(darkStyle);
+  const after = result.layers.find((layer) => layer.id === "highway_hcl").paint["line-color"];
+
+  assert.equal(after[0], "interpolate-hcl");
+  assert.deepEqual(after[1], ["linear"]);
+  assert.deepEqual(after[2], ["zoom"]);
+  assert.equal(after[3], 5);
+  assert.deepEqual(channels(after[4]), [96, 96, 96, 1]);
+  assert.equal(after[5], 10);
+  assert.equal(avg(after[6]), 102);
 });
