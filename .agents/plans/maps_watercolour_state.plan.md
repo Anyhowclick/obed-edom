@@ -23,8 +23,11 @@ todos:
     content: "Late round, all Codex-gated. MERGED: #99 dashboard UI test harness, #100 dashboard polish stack, #101 Basic Black theme + Blank masters. #102 reveal movie autoplay (offline IWA patch) is being rebased after a conflict. Still open for the owner to merge in order: #103 style pass (toner hatch, Dark contrast), then #105 dots/static pins as PNG image items → #106 pins/dots scale with map → #109 label pills. Owner QA 2026-09-12: 24 works (led to #106), 26 PASS, 4 and 6 deferred, 7-ish as designed. One live check owed per PR (items 28-33 below)."
     status: pending
   - id: label-bg
-    content: "Editable text labels over a rounded filled background, like Gold_Wall_Input.key slide 8 (text item + red rounded-rect shape). Corner radius is not scriptable, so a PNG pill under the text item is the recommended route; owner to choose PNG vs native shape and the pill colour. Planned, not implemented."
+    content: "Editable text labels over a rounded filled background, like Gold_Wall_Input.key slide 8 (text item + red rounded-rect shape). Corner radius is not scriptable, so a PNG pill under the text item is the chosen route: opened as **PR #109** (`feat/maps-label-pills`, base #106) with a fixed gold red and bold 24 pt editable text. The native-shape alternative is tracked separately as `label-bg-native`."
     status: planned
+  - id: label-bg-native
+    content: "Native label background (follow-up to the PNG pill in PR #109 (`feat/maps-label-pills`)): after export, an offline IWA patch in the shape of `_apply_poster_frames` / `_apply_movie_autoplay` replaces the pill image with a real rounded-rect shape — write `TSD.ShapeInfo` `super.pathsource.scalarPathSource {type: kTSDRoundedRectangle, scalar ≈ 9.57 at h≈46}` and a PER-SHAPE `TSWP.ShapeStyleArchive` variation with `shapeProperties.fill.color` = gold red rgb(0.9339, 0.1347, 0.0472) (never mutate the shared DocumentStylesheet style); new `iwa_write.patch_shape_fills` + fixture tests; env gate like the other patches. Unlocks editing fill and corners in Keynote (corner radius is not scriptable via AppleScript). Reference: Gold_Wall_Input.key slide 8."
+    status: pending
 isProject: false
 ---
 
@@ -245,7 +248,7 @@ Older owed items 3 (poster probe — the dump is done, the patch + reopen on the
 - **CORS tightening + diagnostics reveal guard** — follow-up chip from #100; `POST /api/open` has a local-origin guard, the diagnostics reveal path does not.
 - **`nextPinId` in CG paste derives from `slide.churches`** — chip from #106.
 - **Preview drop pin has a white rim, Keynote has none** — parity note from #105/#106; Keynote geometry is the reference.
-- **Optional native rounded-rect label background via an IWA fill patch** — the alternative to the recommended PNG pill (see the `label-bg` todo); owner has not chosen yet.
+- **Native rounded-rect label background via an offline IWA shape-fill patch** (`label-bg-native` todo, owner request 2026-09-12) — follow-up to the PNG pill in **PR #109** (`feat/maps-label-pills`, base #106, open). After export, a patch in the shape of `_apply_poster_frames` / `_apply_movie_autoplay` swaps the pill image for a real rounded-rect: `TSD.ShapeInfo` `super.pathsource.scalarPathSource {type: kTSDRoundedRectangle, scalar ≈ 9.57 at h≈46}` plus a per-shape `TSWP.ShapeStyleArchive` variation with `shapeProperties.fill.color` = gold red rgb(0.9339, 0.1347, 0.0472) — never mutate the shared DocumentStylesheet style. Needs `iwa_write.patch_shape_fills` + fixture tests and an env gate like the other patches; unlocks editing fill and corners in Keynote. Reference: `Gold_Wall_Input.key` slide 8.
 - **`_apply_poster_frames` is still gated off** (`OBED_MAPS_POSTER_FRAME` default off) — unlike `_apply_movie_autoplay`, which ships default on in #102.
 - **CAS atomic contract** — owner made all five decisions 2026-09-12 (frames lock-only, relocate 409, stills/plates `bump=False`, naming as implemented, failed import leaves tiles); implemented in PR #87, Codex-approved round 3, open. See "Shipped/open 2026-09-12" above. Known limit carried into #87: `_clear_derived_maps_output` is unstaged inside the import commit.
 - **Session assets/previews** are installed and backups removed before the document commit, so rollback is unreliable.
