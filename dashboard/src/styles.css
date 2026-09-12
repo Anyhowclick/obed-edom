@@ -454,16 +454,6 @@ h3 {
 }
 .job-name-edit:hover { opacity: 1; }
 .job-name-editing { flex-wrap: wrap; }
-input.job-name-input {
-  min-width: 0;
-  flex: 1 1 auto;
-  background: var(--bg-surface-glass-sub);
-  color: var(--ink-primary);
-  border: var(--border-glass);
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
-  font: inherit;
-}
 .job-name-preview { font-size: 11px; color: var(--ink-tertiary); }
 .job-name-error { font-size: 11px; color: var(--err); flex-basis: 100%; }
 .library-detail { min-width: 0; }
@@ -847,6 +837,21 @@ input[type="text"]:focus, input[type="number"]:focus, input:not([type]):focus, s
   outline: none;
   border-color: rgba(255, 255, 255, 0.3);
   box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.18);
+}
+input.job-name-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  background: var(--bg-surface-glass-sub);
+  color: var(--ink-primary);
+  border: var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font: inherit;
+}
+input.job-name-input:focus {
+  outline: none;
+  border-color: var(--border-glass);
+  box-shadow: none;
 }
 /* The OS renders the option list, so it needs the polarity told to it or the
    text comes out dark on dark. */
@@ -1916,6 +1921,11 @@ input.maps-thumb-title-input {
   color: var(--ink-primary);
   font: inherit;
   font-size: 12px;
+}
+input.maps-thumb-title-input:focus {
+  outline: 2px solid var(--accent-collab);
+  outline-offset: -2px;
+  box-shadow: none;
 }
 .maps-gutter {
   display: flex;
