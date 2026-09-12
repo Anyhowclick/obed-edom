@@ -1281,6 +1281,16 @@ def test_crop_silent_on_rotated_frame_needing_no_crop():
     assert crop_geometry(obj, objects, CENTRE_PANEL_RECT) is None
 
 
+def test_crop_geometry_unmasked_rotated_uses_frame_aabb():
+    # No mask: mask_abs must be the frame's rotated AABB, not `_frame_rect`'s unrotated
+    # w/h -- a frame whose unrotated rect exactly fills the window but whose true AABB
+    # overflows it must refuse (the unrotated rect would wrongly look fully visible).
+    obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=10.0, natural=(3840, 1080))
+    objects = {"img": obj, **extra}
+    with pytest.raises(CropRefusal):
+        crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+
+
 def test_crop_refused_on_rotated_frame_needing_crop():
     obj, extra = _image_obj(
         x=1920, y=-981.6, w=3840, h=2560, angle=5.0, mask=(0, 808, 3840, 1472), natural=(6000, 4000)
@@ -1344,7 +1354,7 @@ def test_crop_falls_back_on_exif_before_min_window_refusal(tmp_path, monkeypatch
     assert any("EXIF" in w for w in warnings)
 
 
-def test_plan_crops_refuses_rotated_item(tmp_path, monkeypatch):
+def test_plan_crops_falls_back_on_rotated_item(tmp_path, monkeypatch):
     from PIL import Image
     import zipfile as _zipfile
 
@@ -1368,7 +1378,7 @@ def test_plan_crops_refuses_rotated_item(tmp_path, monkeypatch):
     assert any("rotated" in w for w in warnings)
 
 
-def test_plan_crops_refuses_rotated_frame(tmp_path, monkeypatch):
+def test_plan_crops_falls_back_on_rotated_frame(tmp_path, monkeypatch):
     from PIL import Image
     import zipfile as _zipfile
 
@@ -1486,6 +1496,82 @@ def test_plan_crops_unlinks_its_own_written_files_on_its_own_refusal(tmp_path, m
             crop_dir=crop_dir, number=3,
         )
     assert not (crop_dir / "3" / "a.jpg").exists()
+
+
+def test_plan_crops_refuses_collision_with_kept_uncropped_image(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-0.jpg")
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    # image0's visible rect already equals its mask -- kept uncropped, source name unchanged.
+    obj0, extra0 = _image_obj(x=1954, y=27, w=1381, h=921, mask=(0, 0, 1381, 921), natural=(1600, 1056), mask_id="m0")
+    obj0["data"] = {"identifier": "0"}
+    # image1 genuinely needs a crop, but shares image0's fileName.
+    obj1, extra1 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m1")
+    obj1["data"] = {"identifier": "1"}
+    objects = {"img0": obj0, "img1": obj1, **extra0, **extra1}
+    monkeypatch.setattr(
+        dsk_plan, "_item_object_ids",
+        lambda slide_archive, objects: {("image", 0): "img0", ("image", 1): "img1"},
+    )
+    items = [
+        {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "dup.jpg"},
+        {"kind": "image", "kindIndex": 1, "rotation": 0, "fileName": "dup.jpg"},
+    ]
+    with pytest.raises(CropRefusal, match="collides"):
+        plan_crops(
+            key_path, {}, objects, items, [("image", 0), ("image", 1)],
+            crop_dir=tmp_path / "crops", number=3,
+        )
+
+
+def test_plan_crops_leaves_pre_existing_file_on_refusal(tmp_path, monkeypatch):
+    """A file already at the crop output path before this call must survive a
+    later refusal's cleanup -- only files this call itself wrote are unlinked."""
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-0.jpg")
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    obj0, extra0 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m0")
+    obj0["data"] = {"identifier": "0"}
+    obj1, extra1 = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000), mask_id="m1")
+    obj1["data"] = {"identifier": "1"}
+    objects = {"img0": obj0, "img1": obj1, **extra0, **extra1}
+    monkeypatch.setattr(
+        dsk_plan, "_item_object_ids",
+        lambda slide_archive, objects: {("image", 0): "img0", ("image", 1): "img1"},
+    )
+    items = [
+        {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "a.jpg"},
+        {"kind": "image", "kindIndex": 1, "rotation": 0, "fileName": "a.jpg"},
+    ]
+    crop_dir = tmp_path / "crops"
+    out_path = crop_dir / "3" / "a.jpg"
+    out_path.parent.mkdir(parents=True)
+    out_path.write_bytes(b"pre-existing")
+
+    with pytest.raises(CropRefusal, match="collides"):
+        plan_crops(
+            key_path, {}, objects, items, [("image", 0), ("image", 1)],
+            crop_dir=crop_dir, number=3,
+        )
+    assert out_path.exists()
 
 
 def _empty_key(tmp_path):

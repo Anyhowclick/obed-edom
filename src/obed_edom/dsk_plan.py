@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from obed_edom.iwa_builds import _ref_id, _transition_effect_duration, build_identity, deck_builds
-from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _mask_geom, _masked_rect, _xywha
+from obed_edom.iwa_geometry import _frame_aabb, _frame_rect, _geom_dict, _mask_geom, _masked_rect, _xywha
 from obed_edom.iwa_kindindex import derive_kind_index
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.map_remap import (
@@ -982,11 +982,7 @@ def crop_geometry(
     obj: dict, objects: dict[str, dict], window: Rect
 ) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
     """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
-    ``window`` (unmasked uses its frame); ``None`` when nothing is visible.
-    Raises ``CropRefusal`` only when a crop is actually needed on a rotated
-    frame or mask (axis-aligned only) — callers fall back to the source, same
-    as EXIF≠1; a rotated image that needs no crop (nothing visible, or the
-    visible rect already matches ``mask_abs``) returns ``None`` silently."""
+    ``window``, or ``None`` when nothing is visible; raises ``CropRefusal`` when a crop is needed on rotated geometry (D2/D6)."""
     geom = _geom_dict(obj)
     mask_geom = _mask_geom(obj, objects)
     frame_angle = _xywha(geom)[4]
@@ -996,7 +992,7 @@ def crop_geometry(
         mask_abs = Rect(*masked_rect)
         rotated = frame_rotated or mask_rotated
     else:
-        mask_abs = Rect(*_frame_rect(geom))
+        mask_abs = Rect(*_frame_aabb(geom))
         rotated = frame_rotated
     visible = _intersect(mask_abs, window)
     if visible is None:
@@ -1057,10 +1053,21 @@ def plan_crops(
         return crops, warnings
 
     used_names: set[str] = set()
+    kept_uncropped_names: set[str] = set()
+    created_paths: set[Path] = set()
+
+    def _mark_kept(it: dict) -> None:
+        name = it.get("fileName")
+        if name:
+            kept_uncropped_names.add(name)
 
     def _cleanup() -> None:
         for spec in crops.values():
-            Path(spec.path).unlink(missing_ok=True)
+            path = Path(spec.path)
+            if path in created_paths:
+                path.unlink(missing_ok=True)
+            else:
+                warnings.append(f"left pre-existing file {path} untouched on refusal")
 
     with zipfile.ZipFile(key_path) as zf:
         data_index = data_member_index(zf.namelist())
@@ -1074,25 +1081,31 @@ def plan_crops(
                 continue
             if item_id in build_target_set:
                 warnings.append(f"image {item_id[1]}: a build targets this image, keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
             try:
                 result = crop_geometry(obj, objects, window)
             except CropRefusal as exc:
                 warnings.append(f"image {item_id[1]}: {exc}, keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
             if result is None:
+                _mark_kept(item)
                 continue
             mask_abs, visible, px_box = result
             if _rects_close(visible, mask_abs):
+                _mark_kept(item)
                 continue
             if (item.get("rotation") or 0) % 360 != 0:
                 warnings.append(f"image {item_id[1]}: rotated, keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
 
             data_id = _data_identifier(obj)
             member = data_index.get(str(data_id)) if data_id is not None else None
             if member is None:
                 warnings.append(f"image {item_id[1]}: unresolved data member, keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
 
             from PIL import Image  # noqa: PLC0415
@@ -1103,6 +1116,7 @@ def plan_crops(
                     src_img.load()
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"image {item_id[1]}: could not open {member} ({exc}), keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
 
             orientation = None
@@ -1113,6 +1127,7 @@ def plan_crops(
             natural = _asset_natural_size(obj)
             if orientation not in (None, 1) or src_img.size != (round(natural[0]), round(natural[1])):
                 warnings.append(f"image {item_id[1]}: EXIF/pixel-size mismatch, keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
 
             if (px_box[2] - px_box[0]) < MIN_CROP_PX or (px_box[3] - px_box[1]) < MIN_CROP_PX:
@@ -1126,19 +1141,30 @@ def plan_crops(
                     f"slide {number} image {item_id[1]}: fileName {source_name!r} collides with another "
                     "kept image already cropped this slide"
                 )
+            if source_name in kept_uncropped_names:
+                _cleanup()
+                raise CropRefusal(
+                    f"slide {number} image {item_id[1]}: fileName {source_name!r} collides with another "
+                    "kept image left uncropped this slide"
+                )
             out_dir = Path(crop_dir) / str(number)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / source_name
+            pre_existing = out_path.exists()
             ext = Path(source_name).suffix.lower()
             save_kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
             try:
                 src_img.crop(px_box).save(out_path, **save_kwargs)
             except Exception as exc:  # noqa: BLE001
-                out_path.unlink(missing_ok=True)
+                if not pre_existing:
+                    out_path.unlink(missing_ok=True)
                 warnings.append(f"image {item_id[1]}: could not save crop as {source_name!r} ({exc}), keeping source (LWCROP)")
+                _mark_kept(item)
                 continue
 
             used_names.add(source_name)
+            if not pre_existing:
+                created_paths.add(out_path)
             crops[item_id] = CropSpec(path=out_path, source_file_name=source_name, px_box=px_box, visible=visible)
 
     return crops, warnings
