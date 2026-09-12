@@ -92,6 +92,7 @@ export function JobName({ job, onRename, onSelect, className }: Props) {
     <span className={`job-name job-name-editing ${className || ""}`} onClick={(event) => event.stopPropagation()}>
       <input
         autoFocus
+        type="text"
         className="job-name-input"
         value={draft}
         disabled={saving}

@@ -3090,20 +3090,23 @@ export function MapsTab() {
                     />
                     DSK lower third (1920×1080)
                   </label>
-                  <ExportDestinationRow
-                    value={exportDir}
-                    onChange={setExportDir}
-                    defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
-                    onError={setError}
-                  />
-                  <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
-                    Export
-                  </button>
-                  {exporting ? (
-                    <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
-                      Cancel
+                  <div className="actions">
+                    <ExportDestinationRow
+                      value={exportDir}
+                      onChange={setExportDir}
+                      defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+                      onError={setError}
+                      inline
+                    />
+                    <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
+                      Export
                     </button>
-                  ) : null}
+                    {exporting ? (
+                      <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               )}
             </div>
