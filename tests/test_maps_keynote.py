@@ -1864,9 +1864,11 @@ def test_run_one_deck_forwards_the_combined_status_line(tmp_path: Path, monkeypa
         )
 
     monkeypatch.setattr(mod, "run_osascript", _fake_run)
-    logs: list[str] = []
-    mod._run_one_deck(ops, tmp_path / "Deck.key", width=7680, height=1080, log=logs.append)
-    assert logs == ["theme=basicblack master=blank"]
+    job = _job(tmp_path, [a], [])
+    mod._run_one_deck(
+        ops, tmp_path / "Deck.key", width=7680, height=1080, log=lambda message: mod._log(job, message)
+    )
+    assert job.logs == ["theme=basicblack master=blank"]
 
 
 def test_build_deck_script_theme_and_master_scripts_compile(tmp_path: Path):
@@ -1904,13 +1906,14 @@ def test_build_deck_script_theme_and_master_scripts_compile(tmp_path: Path):
     ops.append(
         {
             "duplicate": True,
-            "transition": {"kind": "magicMove", "duration": 1.0, "playWithoutClick": True},
+            "transition": {"effect": "magic_move", "duration": 1.0, "automatic": True},
             "items": list(ops[0]["items"][:1]),
         }
     )
     script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
     assert "duplicate slide" in script
     assert "make new text item" in script
+    assert "transition effect:magic move" in script
 
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
         handle.write(script)
