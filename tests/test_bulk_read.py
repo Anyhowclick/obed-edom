@@ -42,19 +42,26 @@ def test_flag_forced_off_values(monkeypatch):
 def _capture_plan(monkeypatch):
     """Run inspect_keynote with osascript stubbed; return the plan dict it wrote."""
     captured: dict = {}
+    from obed_edom import osascript_runner
 
-    def on_argv(args):
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
         # inspect_keynote calls: ["osascript", "-l", "JavaScript", JS, plan_path]
-        plan_path = args[-1]
-        captured["plan"] = json.loads(open(plan_path, encoding="utf-8").read())
+        plan_path = argv[-1]
+        plan = json.loads(open(plan_path, encoding="utf-8").read())
+        captured["plan"] = plan
+        payload = {
+            "path": plan["path"],
+            "slideWidth": 1920,
+            "slideHeight": 1080,
+            "slideCount": 1,
+            "slides": [{"index": 0, "number": 1, "skipped": False, "items": []}],
+        }
+        return osascript_runner.OsaResult(
+            argv=argv, returncode=0, stdout=json.dumps(payload), stderr="", elapsed=0.0
+        )
 
-    payload = {
-        "slideWidth": 1920,
-        "slideHeight": 1080,
-        "slideCount": 1,
-        "slides": [{"index": 0, "number": 1, "skipped": False, "items": []}],
-    }
-    _fake_osascript(monkeypatch, stdout=json.dumps(payload), on_argv=on_argv)
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
     return captured
 
 
@@ -181,7 +188,7 @@ def _boom_jxa(monkeypatch):
 
     from obed_edom import osascript_runner
 
-    monkeypatch.setattr(osascript_runner.subprocess, "Popen", boom)
+    monkeypatch.setattr(osascript_runner, "_execute", boom)
 
 
 def test_legacy_cache_hit_export_only_skips_jxa(cached_deck, monkeypatch, tmp_path):

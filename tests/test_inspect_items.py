@@ -252,7 +252,7 @@ def test_inspect_items_empty_returns_empty(tmp_path, monkeypatch):
 
     from obed_edom import osascript_runner
 
-    monkeypatch.setattr(osascript_runner.subprocess, "Popen", boom)
+    monkeypatch.setattr(osascript_runner, "_execute", boom)
     assert inspect_mod.inspect_items(key, []) == {}
 
 

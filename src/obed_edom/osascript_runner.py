@@ -93,6 +93,8 @@ def _execute(
     timeout: float | None,
     is_cancelled: Callable[[], bool] | None,
 ) -> OsaResult:
+    if is_cancelled is not None and is_cancelled():
+        raise OsascriptCancelled("Export cancelled.")
     limit = keynote_timeout(timeout)
     deadline = None if limit <= 0 else time.monotonic() + limit
     start = time.monotonic()

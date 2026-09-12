@@ -286,6 +286,7 @@ def _run_fallback_scripts(
         ]
         if proc.returncode != 0:
             ok = False
+            assert proc.dump is not None
             debug = proc.dump
             failed_dumps.append(debug)
             say(

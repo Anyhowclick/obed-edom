@@ -570,6 +570,7 @@ def test_run_stat_finalize_result_dict_exposes_raise_liveness_counters(monkeypat
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -820,6 +821,7 @@ def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_p
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -1394,6 +1396,7 @@ def test_badge_probe_blind_token_round_trips_through_the_parsers(monkeypatch):
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -1873,6 +1876,7 @@ def test_run_stat_finalize_exposes_front_err_and_tokens(monkeypatch, tmp_path):
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -1906,6 +1910,7 @@ def test_run_stat_finalize_front_err_empty_when_absent(monkeypatch, tmp_path):
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -2415,6 +2420,7 @@ def test_run_stat_finalize_result_dict_exposes_raise_blind_counters(monkeypatch,
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -2443,6 +2449,7 @@ def test_run_stat_finalize_result_dict_exposes_raise_click_retried(monkeypatch, 
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -2474,6 +2481,7 @@ def test_front_err_retry_tag_round_trips_through_both_parsers(monkeypatch, tmp_p
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
@@ -2505,6 +2513,7 @@ def test_front_err_entry_round_trips_through_both_parsers(monkeypatch, tmp_path)
     from obed_edom import osascript_runner
 
     def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        assert argv[0] == "osascript"
         return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
 
     monkeypatch.setattr(osascript_runner, "_execute", fake_execute)

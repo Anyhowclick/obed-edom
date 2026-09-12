@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -24,7 +22,6 @@ from obed_edom.inspect import (
     wall_payload_carries_aspect,
 )
 from obed_edom.keynote import _run_stat_finalize, read_template_stat_sizes
-from obed_edom.osascript_runner import parse_json_stdout, run_jxa
 from obed_edom.map_remap import (
     adjust_child_resize_indexes,
     navigator_numbering,
@@ -41,6 +38,7 @@ from obed_edom.map_remap import (
     slides_for_plan,
     summarize_plan,
 )
+from obed_edom.osascript_runner import parse_json_stdout, run_jxa
 
 REMAP_JS = Path(__file__).resolve().parent / "remap_keynote.js"
 

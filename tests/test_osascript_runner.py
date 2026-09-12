@@ -92,7 +92,7 @@ def test_timeout_kills_child_and_raises(tmp_path, monkeypatch, live_osascript):
     stub.write_text(
         "#!/bin/sh\n"
         f"echo $$ > {pid_file}\n"
-        "sleep 30\n"
+        "exec sleep 30\n"
     )
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
@@ -102,7 +102,7 @@ def test_timeout_kills_child_and_raises(tmp_path, monkeypatch, live_osascript):
         runner.run_applescript("script", timeout=0.5)
     elapsed = time.monotonic() - start
 
-    assert elapsed < 15
+    assert elapsed < 5
     for _ in range(100):
         if pid_file.exists():
             break
@@ -142,6 +142,16 @@ def test_cancellation_poll_terminates(monkeypatch, live_osascript):
     with pytest.raises(runner.OsascriptCancelled, match=r"^Export cancelled\.$"):
         runner._execute(["osascript", "x"], timeout=None, is_cancelled=is_cancelled)
     assert fake.terminated is True
+
+
+def test_cancelled_before_spawn_never_calls_popen(monkeypatch, live_osascript):
+    def boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("Popen must not run when already cancelled")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", boom)
+
+    with pytest.raises(runner.OsascriptCancelled, match=r"^Export cancelled\.$"):
+        runner._execute(["osascript", "x"], timeout=None, is_cancelled=lambda: True)
 
 
 def test_lock_is_rlock_and_serialises(monkeypatch):

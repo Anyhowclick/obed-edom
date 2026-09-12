@@ -4,8 +4,6 @@ import functools
 import json
 import os
 import re
-import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -124,11 +122,11 @@ def _close_document_by_name(key_path: Path) -> None:
 
 
 def _run_applescript_export(
-    script: str, export_dir: Path, *, expected: int | None = None
+    script: str, export_dir: Path, *, expected: int | None = None, launch: bool = False
 ) -> str | None:
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
-    proc = run_applescript(script)
+    proc = run_applescript(script, launch=launch)
     err = (proc.stderr or proc.stdout or "").strip() or "Keynote did not write PNG previews."
     if proc.returncode != 0:
         return f"Preview export failed: {err}"
@@ -147,9 +145,7 @@ def export_slide_images(
 ) -> str | None:
     with _KEYNOTE_LOCK:
         script = export_applescript(key_path, export_dir)
-        subprocess.run(["open", "-b", keynote_app.bundle_id()], check=False)
-        time.sleep(0.4)
-        return _run_applescript_export(script, export_dir, expected=expected)
+        return _run_applescript_export(script, export_dir, expected=expected, launch=True)
 
 
 def _export_open_slide_images(
