@@ -2689,6 +2689,35 @@ def test_session_import_restores_assets_and_previews_when_commit_fails(monkeypat
     assert not list(asset_dir.parent.glob(".session-import-*"))
 
 
+def test_session_import_restores_prior_error_status_when_update_result_fails(monkeypatch):
+    map_job = _seed()
+    session = client.get(f"/api/maps/{map_job['id']}/session")
+    assert session.status_code == 200, session.text
+
+    job = RUNNER.get(map_job["id"])
+    job.status = "error"
+    job.error = "prior failure"
+
+    real_update_result = RUNNER.update_result
+
+    def failing_update_result(job_id, result):
+        if job_id == map_job["id"]:
+            raise RuntimeError("simulated save failure")
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+    with pytest.raises(RuntimeError, match="simulated save failure"):
+        client.post(
+            f"/api/maps/{map_job['id']}/session",
+            files={"file": ("saved.obedmaps", session.content, "application/zip")},
+        )
+    monkeypatch.undo()
+
+    latest = client.get(f"/api/jobs/{map_job['id']}").json()
+    assert latest["status"] == "error"
+    assert latest["error"] == "prior failure"
+
+
 def test_session_import_bumps_revision_and_invalidates_stale_save():
     job = _seed()
     doc = _doc(job)
@@ -2756,12 +2785,16 @@ def test_still_and_plate_writes_take_the_mutation_lock():
     job = _seed()
     slide_id = job["result"]["slides"][0]["id"]
     still_body = _landmark_png()
+    plate_body = _landmark_png()
 
     def post_still():
         return client.post(f"/api/maps/{job['id']}/png?slideId={slide_id}&kind=still", content=still_body)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(post_still) for _ in range(4)]
+    def post_plate():
+        return client.post(f"/api/maps/{job['id']}/png?plateId=plate-a&kind=plate", content=plate_body)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(post_still) for _ in range(4)] + [pool.submit(post_plate) for _ in range(4)]
         responses = [future.result(timeout=5) for future in futures]
     for response in responses:
         assert response.status_code == 200, response.text
@@ -2772,6 +2805,41 @@ def test_still_and_plate_writes_take_the_mutation_lock():
     assert stills[0].read_bytes() == still_body
     assert not list((output_dir / "stills").glob("*.tmp"))
     assert not list((output_dir / "stills").glob("*.obedbak-*"))
+
+    plates = list((output_dir / "plates").glob("*.png"))
+    assert len(plates) == 1
+    assert plates[0].read_bytes() == plate_body
+    assert not list((output_dir / "plates").glob("*.tmp"))
+    assert not list((output_dir / "plates").glob("*.obedbak-*"))
+
+
+def test_promote_removes_unpromoted_tmp_files_when_a_later_staged_path_fails(tmp_path, monkeypatch):
+    import os
+
+    from obed_edom.web import maps
+
+    commit = maps.MapsCommit(job_id="job", job=None, result={})
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    commit.stage_bytes(first, b"a")
+    commit.stage_bytes(second, b"b")
+
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    with pytest.raises(OSError):
+        commit._promote()
+
+    assert not first.exists()
+    assert not second.exists()
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_session_export_snapshot_is_consistent(monkeypatch):

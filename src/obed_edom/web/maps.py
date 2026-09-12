@@ -85,7 +85,7 @@ _COMMIT_HOOK: Callable[[str], None] | None = None
 class MapsCommit:
     """Mutable state for one `maps_commit` body: the document to edit and files to stage.
 
-    Files staged via `stage_bytes`/`stage_dir` are written under unique temp names and
+    Files staged via `stage_bytes`/`stage_path` are written under unique temp names and
     only swapped onto their final path once the body exits without raising — anything
     already on that final path is moved aside to a `.obedbak-<hex>` sibling first, so a
     later failure (promoting another file, or `update_result` itself) can put it back.
@@ -106,15 +106,12 @@ class MapsCommit:
         self._promotions.append((path, tmp))
         self._new_paths.append(tmp)
 
-    def stage_dir(self, dest: Path, source: Path) -> None:
+    def stage_path(self, dest: Path, source: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.tmp")
         source.replace(tmp)
         self._promotions.append((dest, tmp))
         self._new_paths.append(tmp)
-
-    def stage_new(self, path: Path) -> None:
-        self._new_paths.append(path)
 
     def _remove(self, path: Path) -> None:
         if path.is_dir():
@@ -139,6 +136,7 @@ class MapsCommit:
                 promoted.append((dest, backup))
         except Exception:
             self._restore(promoted)
+            self._abort()
             raise
         return promoted
 
@@ -933,7 +931,7 @@ def _write_session_archive(job_id: str) -> Path:
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
-        commit.stage_dir(path, temp_path)
+        commit.stage_path(path, temp_path)
     return path
 
 
@@ -1086,19 +1084,24 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
             dumped["links"] = coerce_link_kinds(dumped["slides"], dumped["links"])
 
             with _mutation_lock(job.id):
+                prior_status, prior_error = job.status, job.error
                 job.status = "done"
                 job.error = None
-                with maps_commit(job.id, None) as commit:
-                    result = commit.result
-                    preview_dir = Path(str(result.get("previewDir") or output_dir / "previews"))
-                    asset_root = Path(str(result.get("outputDir") or "")) / "assets"
-                    commit.stage_dir(asset_root, installed_assets)
-                    commit.stage_dir(preview_dir, staged_previews)
-                    _clear_derived_maps_output(result, clear_preview=False)
-                    result.update(dumped)
-                    result["previewFiles"] = {"maps": sorted(imported_previews)}
-                    result["isolateDefaultVersion"] = isolate_default_version
-                    _bump_legacy_isolate(result)
+                try:
+                    with maps_commit(job.id, None) as commit:
+                        result = commit.result
+                        preview_dir = Path(str(result.get("previewDir") or output_dir / "previews"))
+                        asset_root = Path(str(result.get("outputDir") or "")) / "assets"
+                        commit.stage_path(asset_root, installed_assets)
+                        commit.stage_path(preview_dir, staged_previews)
+                        _clear_derived_maps_output(result, clear_preview=False)
+                        result.update(dumped)
+                        result["previewFiles"] = {"maps": sorted(imported_previews)}
+                        result["isolateDefaultVersion"] = isolate_default_version
+                        _bump_legacy_isolate(result)
+                except BaseException:
+                    job.status, job.error = prior_status, prior_error
+                    raise
     return commit.payload, {"tiles": len(tile_entries), "previews": len(imported_previews)}
 
 
