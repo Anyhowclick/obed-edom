@@ -923,6 +923,17 @@ label.check input[type="checkbox"]:disabled,
 }
 .maps-save-status-paused,
 .maps-save-status-error { color: var(--warn); }
+.maps-save-status-saved { color: var(--accent-primary-fg); background: var(--ok); }
+.maps-save-status-saving {
+  animation: save-pulse 1.1s ease-in-out infinite;
+}
+@keyframes save-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 transparent; }
+  50% { opacity: 0.6; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .maps-save-status-saving { animation: none; }
+}
 .err { color: var(--err); }
 .error-notice {
   display: flex;

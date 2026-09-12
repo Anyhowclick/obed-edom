@@ -17,8 +17,15 @@ let renameCalls: Array<{ id: string; name: string }> = [];
 
 let getJobResolution: Job | null = null;
 
+let saveDeferOnce: Promise<Job> | null = null;
+
 export const saveMapsState = vi.fn(async (id: string, document: Record<string, unknown>, expectedRevision: number): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
+  if (saveDeferOnce) {
+    const deferred = saveDeferOnce;
+    saveDeferOnce = null;
+    return deferred;
+  }
   if (saveConflictOnce) {
     const { conflict } = saveConflictOnce;
     saveConflictOnce = null;
@@ -63,6 +70,7 @@ export const getSettings = vi.fn(
 
 export function resetMapsApiScript() {
   saveConflictOnce = null;
+  saveDeferOnce = null;
   saveCalls = [];
   staleOnce = null;
   postMapsPngCalls = [];
@@ -80,6 +88,9 @@ export const mapsApiScript = {
   saveMapsState: {
     conflictOnce(conflict: { document: Record<string, unknown>; stateRevision: number }) {
       saveConflictOnce = { conflict: { document: conflict.document, stateRevision: conflict.stateRevision } };
+    },
+    deferOnce(promise: Promise<Job>) {
+      saveDeferOnce = promise;
     },
     get calls() {
       return saveCalls;
