@@ -3,12 +3,12 @@ import {
   applyResize,
   chooseKeynote,
   pollJob,
-  reveal,
   saveResizeFramings,
   startResize,
   type ChosenFile,
   type FramingDecision,
 } from "../api";
+import { ArtifactActions } from "../components/ArtifactActions";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { ExportDestinationRow } from "../components/ExportDestinationRow";
@@ -304,18 +304,14 @@ export function ResizeTab() {
       {result?.destPath && (
         <>
           <p className="note path-note">
-            Wrote {result.destPath}
+            Wrote CG.key
             {counts ? ` — ${counts.pin ?? 0} pins, ${counts.map ?? 0} map, ${counts.list ?? 0} list` : ""}
             {typeof result.applied === "number" ? ` (applied ${result.applied}` : ""}
             {typeof result.missed === "number" ? `, missed ${result.missed})` : result.applied != null ? ")" : ""}
             {score?.pinRmse != null ? `. Template pin RMSE ${score.pinRmse}px` : ""}
             {result.recipe?.source ? `. Recipe: ${result.recipe.source}` : ""}
           </p>
-          <div className="actions">
-            <button className="btn secondary" type="button" onClick={() => reveal(result.destPath!)}>
-              Show CG.key
-            </button>
-          </div>
+          <ArtifactActions artifacts={[{ label: "CG.key", path: result.destPath }]} onError={setError} />
         </>
       )}
       <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />

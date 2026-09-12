@@ -25,6 +25,7 @@ import {
   renameJob,
   type Job,
 } from "../api";
+import { ArtifactActions } from "../components/ArtifactActions";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
@@ -531,6 +532,13 @@ export function MapsTab() {
   }, [addMenuOpen, sessionMenuOpen]);
 
   const locked = job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || !!saveConflict;
+
+  const exportResult = (job?.result || {}) as { destPath?: string; destPathCg?: string; destPathDsk?: string };
+  const exportArtifacts = [
+    exportResult.destPath ? { label: "LED wall", path: exportResult.destPath } : null,
+    exportResult.destPathCg ? { label: "CG", path: exportResult.destPathCg } : null,
+    exportResult.destPathDsk ? { label: "DSK", path: exportResult.destPathDsk } : null,
+  ].filter((artifact): artifact is { label: string; path: string } => artifact != null);
 
   function onNavResizeStart(event: React.PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -3107,6 +3115,9 @@ export function MapsTab() {
                       </button>
                     ) : null}
                   </div>
+                  {job?.status === "done" && exportArtifacts.length > 0 && (
+                    <ArtifactActions artifacts={exportArtifacts} onError={setError} />
+                  )}
                 </div>
               )}
             </div>
