@@ -1204,8 +1204,19 @@ export function MapsTab() {
       if (isolateDissolveNeeded(fromView, toView)) {
         await applyPreviewView(plainIsolateTarget(toView), run);
         if (previewAbort.current || previewRun.current !== run) return;
-        await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, link.duration * 1000)));
-        if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
+        const duration = link.duration || 1;
+        const blob = await mapRef.current?.capturePreviewBlob();
+        if (!blob || previewAbort.current || previewRun.current !== run) return;
+        clearDissolveFrame();
+        const url = URL.createObjectURL(blob);
+        dissolveUrl.current = url;
+        setDissolveFrame({ url, fading: false, duration });
+        await applyPreviewView(toView, run);
+        if (previewAbort.current || previewRun.current !== run) return;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        setDissolveFrame({ url, fading: true, duration });
+        await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, duration * 1000)));
+        clearDissolveFrame(url);
       } else {
         await applyPreviewView(toView, run);
       }
@@ -2224,7 +2235,7 @@ export function MapsTab() {
                 camera={renderedView?.camera || active.camera}
                 styleId={renderedView?.style || active.style}
                 highlights={renderedView?.highlights || active.highlights}
-                isolate={(renderedView || active).isolate}
+                isolate={renderedView ? renderedView.isolate : active.isolate}
                 churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
