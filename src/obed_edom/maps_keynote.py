@@ -34,7 +34,7 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
-from obed_edom.maps_pins import PIN_ASPECT, ensure_pin_png
+from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, ensure_label_pill_png, ensure_pin_png
 from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
@@ -54,6 +54,8 @@ DOT_SIZE = 28
 DROP_SIZE = 64
 PHOTO_SIZE = 96
 NAME_HEIGHT = 32
+PILL_PAD_X = 6
+PILL_PAD_Y = 2
 MAP_BG_RE = re.compile(r"map\s*bg", re.I)
 PIN_WAVE_RE = re.compile(r"PIN\s*DROP\s*WAVE.*\.mov$", re.I)
 _SKIP_WALK = {
@@ -850,6 +852,19 @@ def _place_churches(
                 ny = y + (size - NAME_HEIGHT) / 2.0
                 if wall:
                     nx = avoid_straddle(nx, nw)
+                pw = nw + 2 * PILL_PAD_X
+                ph = NAME_HEIGHT + 2 * PILL_PAD_Y
+                items.append(
+                    _item(
+                        "image",
+                        nx - PILL_PAD_X,
+                        ny - PILL_PAD_Y,
+                        pw,
+                        ph,
+                        path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw / ph)),
+                        labelPill=True,
+                    )
+                )
                 items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
     return items
 

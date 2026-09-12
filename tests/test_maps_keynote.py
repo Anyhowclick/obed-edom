@@ -17,7 +17,10 @@ from obed_edom.maps_keynote import (
     DSK_SCALE,
     DSK_WIDTH,
     MAP_BG_RE,
+    NAME_HEIGHT,
     PANEL_EDGES,
+    PILL_PAD_X,
+    PILL_PAD_Y,
     WALL_HEIGHT,
     WALL_WIDTH,
     _place_churches,
@@ -46,7 +49,7 @@ from obed_edom.maps_keynote import (
     split_cg_export_plan,
     whole,
 )
-from obed_edom.maps_pins import PIN_ASPECT
+from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, label_pill_png_path
 from obed_edom.maps_reveal import REVEAL_FPS
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
@@ -106,10 +109,14 @@ def _dummy_png(path: Path) -> Path:
 
 
 def _pin_items(items: list[dict]) -> list[dict]:
-    """Dots and static drop pins are plain images: not the map, not a landmark."""
+    """Dots and static drop pins are plain images: not the map, not a landmark,
+    not a label pill."""
     return [
         item for item in items
-        if item["kind"] == "image" and not item.get("map") and not item.get("landmark")
+        if item["kind"] == "image"
+        and not item.get("map")
+        and not item.get("landmark")
+        and not item.get("labelPill")
     ]
 
 
@@ -2487,3 +2494,123 @@ def test_static_drop_pin_geometry_survives_the_dsk_scale(tmp_path: Path):
     assert scaled["w"] == round(pin["w"] * DSK_SCALE)
     assert scaled["h"] == round(pin["h"] * DSK_SCALE)
     assert abs(scaled["h"] / scaled["w"] - pin["h"] / pin["w"]) < 0.02
+
+
+def _label_churches() -> list[dict]:
+    return [
+        {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"},
+        {"id": "c2", "name": "Pin City", "lat": 3.05, "lon": 101.05, "kind": "dropPin", "color": "#ff8a00"},
+    ]
+
+
+def _place_labels(tmp_path: Path, churches: list[dict], **kwargs) -> list[dict]:
+    params = {
+        "plate": None,
+        "placement": None,
+        "camera": _camera(3.0, 101.0, 8),
+        "wall": True,
+        "movie": None,
+        "pin_root": tmp_path / "pins",
+    }
+    params.update(kwargs)
+    return _place_churches(churches, **params)
+
+
+def test_label_pill_is_emitted_before_its_text_and_inflated_by_the_pad_constants(tmp_path: Path):
+    items = _place_labels(tmp_path, _label_churches())
+    texts = [index for index, item in enumerate(items) if item.get("kind") == "text"]
+    pills = [index for index, item in enumerate(items) if item.get("labelPill")]
+    assert len(texts) == 2
+    assert len(pills) == 2
+    for pill_index, text_index in zip(pills, texts):
+        # Creation order is stacking order: the pill must precede its text.
+        assert pill_index == text_index - 1
+        pill, text = items[pill_index], items[text_index]
+        assert pill["kind"] == "image"
+        assert pill["x"] == text["x"] - PILL_PAD_X
+        assert pill["y"] == text["y"] - PILL_PAD_Y
+        assert pill["w"] == text["w"] + 2 * PILL_PAD_X
+        assert pill["h"] == text["h"] + 2 * PILL_PAD_Y
+        assert text["h"] == NAME_HEIGHT
+
+
+def test_label_pill_uses_the_fixed_gold_red_regardless_of_marker_colour(tmp_path: Path):
+    items = _place_labels(tmp_path, _label_churches())
+    pills = [item for item in items if item.get("labelPill")]
+    assert len(pills) == 2
+    for pill in pills:
+        path = Path(pill["path"])
+        assert path.is_file()
+        assert path.name.startswith("labelpill-ee220c-")
+        expected = label_pill_png_path(tmp_path / "pins", LABEL_PILL_RGB, pill["w"] / pill["h"])
+        assert path == expected
+
+
+def test_show_label_false_emits_neither_pill_nor_text(tmp_path: Path):
+    churches = [dict(church, showLabel=False) for church in _label_churches()]
+    items = _place_labels(tmp_path, churches)
+    assert not any(item.get("kind") == "text" for item in items)
+    assert not any(item.get("labelPill") for item in items)
+
+
+def test_label_geometry_is_invariant_under_scale_with_map(tmp_path: Path):
+    plain = _place_labels(tmp_path, _label_churches())
+    scaled = _place_labels(
+        tmp_path,
+        [dict(church, scaleWithMap=True, sizeZoom=4) for church in _label_churches()],
+    )
+
+    def labels(items):
+        return [
+            (item["w"], item["h"])
+            for item in items
+            if item.get("kind") == "text" or item.get("labelPill")
+        ]
+
+    assert labels(plain) == labels(scaled)
+
+
+def test_dsk_and_cg_keep_the_pill_registered_with_its_text(tmp_path: Path):
+    import obed_edom.maps_keynote as mod
+
+    items = _place_labels(tmp_path, _label_churches())
+    pairs = [
+        (items[index], items[index + 1])
+        for index, item in enumerate(items)
+        if item.get("labelPill")
+    ]
+    assert pairs
+    for pill, text in pairs:
+        for mapped_pill, mapped_text in (
+            (dsk_item(pill), dsk_item(text)),
+            tuple(mod._to_cg([pill, text], (CENTRE_ORIGIN_X, 0.0))),
+        ):
+            assert mapped_pill["x"] == mapped_text["x"] - round(
+                PILL_PAD_X * (DSK_SCALE if "fontSize" in mapped_text else 1)
+            )
+            assert mapped_pill["w"] - mapped_text["w"] == round(
+                2 * PILL_PAD_X * (DSK_SCALE if "fontSize" in mapped_text else 1)
+            )
+            assert mapped_pill["h"] - mapped_text["h"] == round(
+                2 * PILL_PAD_Y * (DSK_SCALE if "fontSize" in mapped_text else 1)
+            )
+
+
+def test_movie_backdrop_slides_emit_no_label_pills(tmp_path: Path):
+    bg_movie = tmp_path / "movies" / "s1.mov"
+    bg_movie.parent.mkdir(parents=True, exist_ok=True)
+    bg_movie.write_bytes(b"mov")
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=_label_churches())
+    items = build_slide_items(
+        slide,
+        plate=None,
+        plate_path=None,
+        still=None,
+        movie=None,
+        wall=True,
+        bg_movie=bg_movie,
+        pin_root=tmp_path / "pins",
+        sid="s1",
+    )
+    assert not any(item.get("labelPill") for item in items)
+    assert not any(item.get("kind") == "text" for item in items)
