@@ -60,6 +60,7 @@ from obed_edom.dsk_live import (
     release_lock,
     run_osascript,
 )
+from obed_edom.dsk_assemble import _delete_or_hide_placeholder_lines
 from obed_edom.dsk_plan import ItemId, SlideClass, _delete_order, classify_deck, visible_union
 from obed_edom.iwa_runs import attach_group_content_signature
 from obed_edom.map_remap import CENTRE_PANEL_RECT, Rect, is_lw_wall
@@ -308,7 +309,7 @@ def _build_export_script(
                 "      try",
                 f"        set theObj to {addr}",
                 "        if locked of theObj then set locked of theObj to false",
-                "        delete theObj",
+                *(f"  {ln}" for ln in _delete_or_hide_placeholder_lines(j.ordinal)),
                 "      on error errMsg number errNum",
                 f'        log ("DELETEFAIL" & tab & "{j.slide}" & tab & "{addr}" & tab & errNum & tab & errMsg)',
                 "      end try",

@@ -265,6 +265,16 @@ def test_script_deletes_non_content_drawables():
     assert delete_idx < export_idx
 
 
+def test_script_deletes_route_through_title_body_placeholder_guard():
+    # Same Keynote refusal as the assembly script (errNum -10003 on the shape bound as
+    # the slide's default title/body item) -- the clip-export scratch script must hide it
+    # via title/body showing too, not just log a DELETEFAIL and leave stale content in view.
+    script = _sample_script()
+    assert "if theObj is (default title item of slide 2) then" in script
+    assert "set title showing of slide 2 to false" in script
+    assert "set body showing of slide 2 to false" in script
+
+
 def test_script_raises_on_unaddressable_delete_kind():
     jobs = [
         dme._SlideJob(

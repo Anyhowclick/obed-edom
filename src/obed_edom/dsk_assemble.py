@@ -1113,6 +1113,21 @@ def verify_staged_layouts_alpha_safe(staging_path: Path, plan: AssemblyPlan) -> 
             )
 
 
+def _delete_or_hide_placeholder_lines(ordinal: int) -> list[str]:
+    """``delete theObj``, except Keynote refuses to delete the shape bound as the slide's
+    default title/body item (errNum -10003, read-only per Keynote.sdef) -- for that one,
+    hide it instead via the read-write ``title showing``/``body showing`` slide properties."""
+    return [
+        f"        if theObj is (default title item of slide {ordinal}) then",
+        f"          set title showing of slide {ordinal} to false",
+        f"        else if theObj is (default body item of slide {ordinal}) then",
+        f"          set body showing of slide {ordinal} to false",
+        "        else",
+        "          delete theObj",
+        "        end if",
+    ]
+
+
 def _locked_write_block(
     number: int, addr: str, body: list[str], *, obj_var: str = "theObj", locked_var: str = "wasLocked"
 ) -> list[str]:
@@ -1339,7 +1354,7 @@ def _slide_lines(
             "        try",
             "          if locked of theObj then set locked of theObj to false",
             "        end try",
-            "        delete theObj",
+            *_delete_or_hide_placeholder_lines(ordinal),
         ]
 
     for item_id, spec in slide_crops.items():

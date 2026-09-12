@@ -996,6 +996,41 @@ def test_script_deletes_after_geometry_per_slide():
     assert geometry_idx < delete_idx
 
 
+def test_delete_or_hide_placeholder_lines_branches_on_title_and_body():
+    """Keynote refuses ``delete`` on the shape bound as the slide's default title/body
+    item (errNum -10003, ``default title item``/``default body item`` are read-only per
+    Keynote.sdef) -- hide it via the read-write ``title showing``/``body showing``
+    properties instead, matching plain delete for every other shape."""
+    lines = dsa._delete_or_hide_placeholder_lines(17)
+    script = "\n".join(lines)
+    assert "delete theObj" in script
+    assert "set title showing of slide 17 to false" in script
+    assert "set body showing of slide 17 to false" in script
+    assert "default title item of slide 17" in script
+    assert "default body item of slide 17" in script
+
+
+def test_script_mirror_dedupe_delete_hides_placeholder_instead_of_failing():
+    """GW-17-shaped case: a text slide whose mirror dedupe deletes text3/text4/text5 +
+    shape1 on the excluded side. Every delete -- text and shape alike -- must go through
+    the title/body placeholder guard, not a bare unconditional ``delete theObj``."""
+    import dataclasses  # noqa: PLC0415
+
+    kept_text = _text_item(0, x=2385, y=20, w=626, h=92, runs=[{"size": 40.0}])
+    slide = _slide(17, [kept_text])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+    ordinal = plan.ordinals[17]
+    gw17_deletes = (("shape", 1), ("text", 5), ("text", 4), ("text", 3))
+    plan = dataclasses.replace(plan, deletes={17: gw17_deletes})
+    script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
+    assert script.count(f"set title showing of slide {ordinal} to false") == 4
+    assert script.count(f"set body showing of slide {ordinal} to false") == 4
+    assert "delete theObj" in script
+
+
 def test_script_no_literal_keynote_and_has_obed_err_markers():
     plan = _clip_plan()
     script = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"))
