@@ -2155,6 +2155,7 @@ def generate_both(
     *,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
+    output_dir: Path | None = None,
 ) -> tuple[Path, Path | None, Path | None, dict, dict]:
     lw_src = select_deck_template(lw_template)
     dsk_src = select_deck_template(dsk_template)
@@ -2162,7 +2163,8 @@ def generate_both(
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."
         )
-    out_dir = output_dir_for(docx)
+    out_dir = (output_dir / _stem(docx)) if output_dir else output_dir_for(docx)
+    out_dir.mkdir(parents=True, exist_ok=True)
     stem = _stem(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"

@@ -17,7 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
-from obed_edom.paths import output_root
+from obed_edom.paths import export_destination, output_root, validate_export_dir
 from obed_edom.watercolour import MAX_ENCODED_BYTES, Cancel, WatercolourCancelled, WatercolourError, WatercolourOptions, _has_paint, convert, decode_image, grabcut_mask, render
 
 router = APIRouter(prefix="/api/watercolour", tags=["watercolour"])
@@ -222,11 +222,32 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
       sidecar_tmp.replace(sidecar)
       job.result["cancelled"] = job.cancelled()
       job.result["partial"] = job.cancelled() and any(row.get("status") == "done" for row in rows)
+      job.result["exportedResults"] = _export_done_results(job, results, rows)
     return dict(job.result)
 
 
+def _export_done_results(job, results: Path, rows: list[dict[str, Any]]) -> list[str]:
+    dest_dir = export_destination(job)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    exported: list[str] = []
+    for row in rows:
+        if row.get("status") != "done" or not row.get("result"):
+            continue
+        src = results / row["result"]
+        if not src.is_file():
+            continue
+        dest = dest_dir / src.name
+        counter = 2
+        while dest.exists():
+            dest = dest_dir / f"{src.stem}-{counter}{src.suffix}"
+            counter += 1
+        shutil.copy2(src, dest)
+        exported.append(str(dest))
+    return exported
+
+
 @router.post("")
-async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42), masks: str = Form("{}")) -> dict:
+async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: float = Form(0.65), ink_amount: float = Form(0.42), masks: str = Form("{}"), export_dir: str = Form("")) -> dict:
     if not files or len(files) > MAX_BATCH_FILES:
         raise HTTPException(400, f"Choose between one and {MAX_BATCH_FILES} photos")
     if len(masks.encode("utf-8")) > 2 * 1024 * 1024:
@@ -242,6 +263,12 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
     valid_keys = {str(i) for i in range(len(files))}
     if any(key not in valid_keys for key in mask_specs):
         raise HTTPException(400, "Mask settings must be keyed by photo index")
+    resolved_export_dir = ""
+    if export_dir.strip():
+        try:
+            resolved_export_dir = str(validate_export_dir(export_dir))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     staged_root = output_root() / ".watercolour" / ".uploads" / uuid.uuid4().hex
     staged_root.mkdir(parents=True, exist_ok=False)
     staged: list[tuple[str, Path]] = []
@@ -267,7 +294,7 @@ async def start_watercolour(files: list[UploadFile] = File(...), wash_softness: 
             "watercolour",
             lambda job: _run_batch(job, staged, options, mask_specs),
             feature="watercolour",
-            result={"stagingDir": str(staged_root)},
+            result={"stagingDir": str(staged_root), "exportDir": resolved_export_dir or None},
         )
     except Exception:
         shutil.rmtree(staged_root, ignore_errors=True)

@@ -27,6 +27,7 @@ def generate(
     check_visuals: bool = True,
     lw_template: Path | str | None = None,
     dsk_template: Path | str | None = None,
+    output_dir: Path | None = None,
 ) -> GenerationResult:
     docx = Path(docx).expanduser().resolve()
     if docx.suffix.lower() != ".docx":
@@ -38,7 +39,8 @@ def generate(
     flags.extend(map_flags)
     flags.extend(validate_slide_specs(lw, dsk))
 
-    out_dir = output_dir_for(docx)
+    out_dir = (output_dir / docx.stem.replace(" ", "_")) if output_dir else output_dir_for(docx)
+    out_dir.mkdir(parents=True, exist_ok=True)
     review_path = out_dir / "review.pdf"
     lw_key = None
     dsk_key = None
@@ -53,6 +55,7 @@ def generate(
             export=check_visuals,
             lw_template=lw_template,
             dsk_template=dsk_template,
+            output_dir=output_dir,
         )
         for result, deck in ((lw_result, "LW"), (dsk_result, "DSK")):
             if result.get("skipped"):
