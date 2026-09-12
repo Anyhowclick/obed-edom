@@ -1,4 +1,5 @@
 import type { ExpressionSpecification } from "maplibre-gl";
+import { ML_MAX_ZOOM, ML_MIN_ZOOM } from "./types";
 
 /** Server bounds for `size` / `sizeZoom` (MapsChurch in src/obed_edom/web/maps.py). */
 export const OBJECT_SIZE_MIN = 1;
@@ -47,9 +48,11 @@ export function zoomScaledStops(base: unknown, max?: number): ExpressionSpecific
   // endpoints are both below the clamp stays exact, a segment fully past the clamp is flat at max,
   // and the one segment straddling the clamp is still base-2 interpolated between its two (unequal)
   // endpoints, so it undershoots max in between (e.g. 949 vs 1024 at z14.5).
-  if (max == null) return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)];
+  // The stops span the render map's full zoom range, not 0..22: wall exports render at authored
+  // zoom + exportZoomDelta(WALL_W) === -2, and below the first stop MapLibre clamps to it.
+  if (max == null) return ["interpolate", ["exponential", 2], ["zoom"], ML_MIN_ZOOM, stopAt(ML_MIN_ZOOM), ML_MAX_ZOOM, stopAt(ML_MAX_ZOOM)];
   const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
-  for (let z = 0; z <= 22; z++) stops.push(z, stopAt(z));
+  for (let z = ML_MIN_ZOOM; z <= ML_MAX_ZOOM; z++) stops.push(z, stopAt(z));
   return stops as unknown as ExpressionSpecification;
 }
 

@@ -20,13 +20,23 @@ function stopValues(stops) {
   assert.equal(stops[0], "interpolate");
   assert.deepEqual(stops[1], ["exponential", 2]);
   assert.deepEqual(stops[2], ["zoom"]);
-  return { z0: stops[4], z22: stops[6] };
+  assert.equal(stops[3], -2);
+  assert.equal(stops[5], 22);
+  assert.equal(stops.length, 7);
+  return { zMin: stops[4], zMax: stops[6] };
 }
 
 test("zoomScaledStops folds a non-scaling feature to the same value at both stops", () => {
-  const { z0, z22 } = stopValues(zoomScaledStops(["get", "base"]));
-  assert.deepEqual(z0, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", 0, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
-  assert.deepEqual(z22, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", 22, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
+  const { zMin, zMax } = stopValues(zoomScaledStops(["get", "base"]));
+  assert.deepEqual(zMin, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", -2, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
+  assert.deepEqual(zMax, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", 22, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
+});
+
+test("zoomScaledStops keeps a per-integer clamped ramp over the whole -2..22 range", () => {
+  const stops = zoomScaledStops(["get", "base"], 1024);
+  assert.equal(stops[3], -2);
+  assert.equal(stops[stops.length - 2], 22);
+  assert.equal(stops.length, 3 + 2 * 25);
 });
 
 function evaluateIconSize(base, properties) {
@@ -46,6 +56,46 @@ test("zoomScaledStops is exactly geometric (base 2) for a scaleWithMap feature",
   assert.equal(evaluate(6), base * 2);
   assert.ok(Math.abs(evaluate(7.3) - base * Math.pow(2, 2.3)) < 1e-9);
   assert.equal(evaluate(22), base * 131072);
+});
+
+test("zoomScaledStops stays exact at the wall-export zoom -2", () => {
+  // Wall (7680) exports render at authored zoom + exportZoomDelta(7680) === -2.
+  const base = 40;
+  const sizeZoomRef = 3;
+  const evaluate = evaluateIconSize(base, { sizeZoomRef, scaleWithMap: true });
+  assert.ok(Math.abs(evaluate(-2) - base * Math.pow(2, -2 - sizeZoomRef)) < 1e-9);
+  assert.ok(Math.abs(evaluate(-1.5) - base * Math.pow(2, -1.5 - sizeZoomRef)) < 1e-9);
+  assert.ok(Math.abs(evaluate(-0.5) - base * Math.pow(2, -0.5 - sizeZoomRef)) < 1e-9);
+});
+
+test("a default scaling dot at wall-export zoom -2 renders its analytic size, not the zoom-0 value", () => {
+  // objectScale 0.25 with sizeZoomRef adjusted by log2(objectScale) (see churchesGeo).
+  const objectScale = 0.25;
+  const size = 28;
+  const sizeZoom = 0;
+  const sizeZoomRef = sizeZoom + Math.log2(objectScale);
+  const expr = zoomScaledStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024);
+  const parsed = createExpression(expr, { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  const props = { size, objectScale, scaleWithMap: true, sizeZoomRef };
+  const analytic = (z) => 0.5 * size * objectScale * Math.pow(2, z - sizeZoomRef);
+  for (const z of [-2, -1.5, -1, 0]) {
+    assert.ok(Math.abs(parsed.value.evaluate({ zoom: z }, { properties: props }) - analytic(z)) < 1e-9, `z=${z}`);
+  }
+  // Rendered radius at the export zoom, versus the 4x value a zoom-0 first stop would clamp to.
+  assert.ok(Math.abs(parsed.value.evaluate({ zoom: -2 }, { properties: props }) - 0.5 * size * objectScale) < 1e-9);
+  assert.ok(Math.abs(analytic(0) - 4 * analytic(-2)) < 1e-9);
+});
+
+test("landmark icon-size at zoom >= 0 is unchanged by the widened stop range", () => {
+  const base = ["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]];
+  const parsed = createExpression(zoomScaledStops(base), { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  const props = { size: 480, objectScale: 1, assetRenderWidth: 960, scaleWithMap: true, sizeZoomRef: 6 };
+  for (const z of [0, 1, 5.5, 6, 12, 22]) {
+    const expected = (480 / 960) * Math.pow(2, z - 6);
+    assert.ok(Math.abs(parsed.value.evaluate({ zoom: z }, { properties: props }) - expected) < 1e-9, `z=${z}`);
+  }
 });
 
 test("zoomScaledStops as icon-size validates with the real maplibre style spec", () => {

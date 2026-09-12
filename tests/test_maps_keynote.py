@@ -467,8 +467,10 @@ def test_dot_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    oval = next(item for item in items if item.get("shape") == "oval")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    oval = _pin_items(items)[0]
     assert oval["w"] == 200
 
 
@@ -476,8 +478,10 @@ def test_dot_scale_with_map_zoom_out_halves_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 4)
     slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    oval = next(item for item in items if item.get("shape") == "oval")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    oval = _pin_items(items)[0]
     assert oval["w"] == 50
 
 
@@ -485,8 +489,10 @@ def test_dot_scale_with_map_off_is_unchanged(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_dot_church(sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    oval = next(item for item in items if item.get("shape") == "oval")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    oval = _pin_items(items)[0]
     assert oval["w"] == 100
 
 
@@ -494,8 +500,10 @@ def test_drop_pin_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    head = next(item for item in items if item.get("shape") == "oval" and item.get("color") != (65535, 65535, 65535))
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    head = _pin_items(items)[0]
     assert head["w"] == 200
 
 
@@ -503,8 +511,10 @@ def test_drop_pin_scale_with_map_zoom_out_halves_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 4)
     slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    head = next(item for item in items if item.get("shape") == "oval" and item.get("color") != (65535, 65535, 65535))
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    head = _pin_items(items)[0]
     assert head["w"] == 50
 
 
@@ -512,8 +522,10 @@ def test_drop_pin_scale_with_map_off_is_unchanged(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_drop_pin_church(sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    head = next(item for item in items if item.get("shape") == "oval" and item.get("color") != (65535, 65535, 65535))
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    head = _pin_items(items)[0]
     assert head["w"] == 100
 
 
