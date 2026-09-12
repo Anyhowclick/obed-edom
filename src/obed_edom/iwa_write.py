@@ -1933,9 +1933,8 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
 
 
 def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
-    """Move each id in ``moves`` (``{drawableId: newIndex}``) to ``newIndex`` within
-    ``slide_id``'s ``drawablesZOrder``, mirroring ``ownedDrawables`` (see D6); refuses,
-    deck untouched, on any precondition failure (see D6)."""
+    """Move each id in ``moves`` to ``newIndex`` within ``slide_id``'s ``drawablesZOrder``,
+    mirroring ``ownedDrawables``; refuses, deck untouched, on any precondition failure."""
     deck = Path(deck)
     slide_id = str(slide_id)
     moves = {str(k): v for k, v in moves.items()}

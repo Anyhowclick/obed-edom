@@ -251,22 +251,21 @@ def slide_affine_scale(
     anchor: str,
     wall: tuple[float, float],
     group_child_text: Mapping[int, str | None] | None = None,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
 ) -> float | None:
-    """The one shared uniform scale ``fit_slide`` applies across a slide, recomputed from
-    its two public results rather than as a private ``fit_slide`` attribute. ``None`` when
-    the slide has no visible/fit content. Used for group children -- never derive a
-    group's scale from a live group width, which is wrong once the fit has clipped it."""
+    """The one shared uniform scale ``fit_slide`` applies across a slide; ``None`` when
+    the slide has no visible/fit content."""
     union = visible_union(
         items, include_side=include_side, wall=wall, group_child_text=group_child_text,
-        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
+        text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if union is None:
         return None
     fit = fit_slide(
         items, band, include_side=include_side, anchor=anchor, wall=wall, group_child_text=group_child_text,
-        no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
+        text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if not fit:
         return None
@@ -276,6 +275,15 @@ def slide_affine_scale(
     if union.h > 0:
         return fitted_union.h / union.h
     return None
+
+
+def _unlink_crop_files(paths: Sequence[Path]) -> None:
+    """Best-effort delete of crop files already written for earlier slides on refusal."""
+    for path in paths:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | None:
@@ -289,18 +297,14 @@ def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | N
 
 
 def _group_has_media(signature: str | None) -> bool:
-    """True when `signature` (`slide['groupChildSignature']`, composite of ``text:``/
-    ``shape:``/``image:``/``movie:``-tagged leaves) has an ``image:``/``movie:`` leaf.
-    Unresolved or empty signatures count as content."""
+    """True when `signature` has an ``image:``/``movie:`` leaf; unresolved/empty counts as content."""
     if not signature:
         return True
     return any(part.startswith(("image:", "movie:")) for part in signature.split("\n") if part)
 
 
 def _content_item_count(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> int:
-    """Count of kept image/movie/group items -- placement is by COUNT (D3); text
-    (and a badge group with no image/movie leaf, e.g. a text-only or a
-    shape-plus-text pill) never counts towards it."""
+    """Count of kept image/movie/group items; text-only content never counts towards it."""
     group_signature = group_signature or {}
     count = 0
     for kind, kind_index in cls.kept:
@@ -321,6 +325,7 @@ def plan_assembly(
     clips: Mapping[int, Path],
     runs: Mapping[int, Mapping[ItemId, Sequence[float]]] | None = None,
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     allow_split: bool = True,
     text_fit: Literal["warn", "shrink"] = "warn",
     deck: Any = None,
@@ -368,8 +373,6 @@ def plan_assembly(
     if objects_graph is None and fw_deck is not None and not no_image_crop:
         objects_graph = _load_deck(fw_deck)[0]
 
-    # `plan_crops` writes files as it plans (see the docstring above); a refusal on a
-    # later slide must not leave an earlier slide's crop files behind on disk.
     crop_files_written: list[Path] = []
     consumed_splits: set[int] = set()
 
@@ -398,6 +401,7 @@ def plan_assembly(
                 anchor=anchor,
                 wall=wall,
                 group_child_text=group_child_text,
+                text_slide_words=text_slide_words,
                 no_dedupe=no_dedupe,
                 no_drop_panel_backdrop=no_drop_panel_backdrop,
             )
@@ -443,6 +447,7 @@ def plan_assembly(
                     anchor=anchor,
                     wall=wall,
                     group_child_text=group_child_text,
+                    text_slide_words=text_slide_words,
                     no_dedupe=no_dedupe,
                     no_drop_panel_backdrop=no_drop_panel_backdrop,
                 )
@@ -708,15 +713,12 @@ def plan_assembly(
             if stacked_ids:
                 stacked_id_map[number] = frozenset(stacked_ids)
         except Exception:
-            for crop_path in crop_files_written:
-                try:
-                    Path(crop_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            _unlink_crop_files(crop_files_written)
             raise
 
     unconsumed_splits = sorted((split_overrides or {}).keys() - consumed_splits)
     if unconsumed_splits:
+        _unlink_crop_files(crop_files_written)
         raise AssemblyRefusal(
             f"slide {unconsumed_splits[0]}: --split does not apply -- slide has no long "
             "text boxes to split"
@@ -1929,10 +1931,6 @@ def _restore_crop_zorder(
             str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
         ]
         deleted = set(plan.deletes.get(number, ()))
-        # A cropped source is `deleted` (its own drawable is gone) but its replacement
-        # still occupies a slot in the output order, so it must count as a survivor
-        # when deriving another crop's target index -- only a plain (non-cropped)
-        # delete actually removes a slot.
         deleted_not_cropped = deleted - set(crop_specs)
 
         targets: dict[str, int] = {}
@@ -1975,13 +1973,6 @@ def _restore_crop_zorder(
             used_out_ids.add(out_id)
             targets[out_id] = target_index
 
-        # `reorder_drawables` applies moves in dict order, each against the list left by
-        # the previous move (its own contract). `target_index` above already treats every
-        # OTHER cropped source as a surviving slot (not a deletion), so the full set of
-        # `target_index`es is exactly the desired final positions in one consistent list;
-        # applying them in ascending order (each earlier, lower-index id already seated
-        # before a later one is placed) reproduces that list via `reorder_drawables`'
-        # own remove+insert semantics.
         moves = dict(sorted(targets.items(), key=lambda kv: kv[1]))
 
         if not moves:
@@ -2279,7 +2270,7 @@ def assemble_dsk_deck(
     builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=resolved_band, clips=clips, runs=runs, text_fit=text_fit,
-        min_text_pt=min_text_pt, allow_split=allow_split,
+        min_text_pt=min_text_pt, text_slide_words=text_slide_words, allow_split=allow_split,
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop, split_overrides=split_overrides,

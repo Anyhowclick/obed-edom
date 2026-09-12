@@ -1308,6 +1308,78 @@ def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
     assert any("EXIF" in w for w in warnings)
 
 
+def test_crop_falls_back_on_exif_before_min_window_refusal(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    exif = Image.Exif()
+    exif[274] = 6
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, exif=exif, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo-1.jpg")
+
+    obj, extra = _image_obj(
+        x=1920, y=-981.6, w=3840, h=2560, mask=(0, 2058.6, 3840, 50), natural=(6000, 4000)
+    )
+    obj["data"] = {"identifier": "1"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+    crops, warnings = plan_crops(
+        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert any("EXIF" in w for w in warnings)
+
+
+def test_plan_crops_refuses_rotated_item(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo.jpg")
+
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    obj["data"] = {"identifier": "1"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 5.0, "fileName": "photo.jpg"}
+    with pytest.raises(CropRefusal):
+        plan_crops(key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3)
+
+
+def test_plan_crops_refuses_rotated_frame(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo.jpg")
+
+    obj, extra = _image_obj(
+        x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080), natural=(6000, 4000)
+    )
+    obj["data"] = {"identifier": "1"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+    with pytest.raises(CropRefusal):
+        plan_crops(key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3)
+
+
 def test_plan_crops_refuses_duplicate_fileName_on_one_slide(tmp_path, monkeypatch):
     from PIL import Image
     import zipfile as _zipfile

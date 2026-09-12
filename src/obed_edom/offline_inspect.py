@@ -56,9 +56,8 @@ def _build_data_index(zip_names: list[str]) -> dict[str, str]:
 
 
 def data_member_index(zip_names: list[str]) -> dict[str, str]:
-    """``{data id: raw zip member name}`` -- the reverse of ``_build_data_index``'s
-    reconstructed filename, keeping Keynote's ``-<dataId>`` suffix so the member can be
-    opened directly (F1/D2)."""
+    """``{data id: raw zip member name}``, matched via the CP437-normalized name but
+    keyed by the raw ``namelist()`` entry so ``ZipFile.open`` can use it directly."""
     index: dict[str, str] = {}
     for raw_name in zip_names:
         try:
@@ -68,7 +67,7 @@ def data_member_index(zip_names: list[str]) -> dict[str, str]:
         m = _DATA_MEMBER.match(name)
         if not m:
             continue
-        index[m.group("id")] = name
+        index[m.group("id")] = raw_name
     return index
 
 

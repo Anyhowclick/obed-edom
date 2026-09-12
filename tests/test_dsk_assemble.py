@@ -21,7 +21,8 @@ from obed_edom.dsk_assemble import (
     load_assembly_inputs,
     plan_assembly,
 )
-from obed_edom.dsk_plan import Band, classify_slide, resolve_font_path
+import obed_edom.dsk_plan as dsk_plan
+from obed_edom.dsk_plan import Band, CropRefusal, classify_slide, resolve_font_path
 from obed_edom.map_remap import Rect
 
 BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
@@ -3604,6 +3605,21 @@ def test_text_slide_drops_media_keeps_badge():
     assert ("text", 0) in plan.fits[13]
 
 
+def test_text_slide_words_threaded_into_fit():
+    _require_font("AzoSans-Regular")
+    text_item = _long_text_item(1, _VERSE_1)
+    image = _image_item(2, x=2500, y=300, w=800, h=400)
+    slide = _slide(13, [text_item, image])
+    payload = _payload([slide])
+    classes = [_classify(slide, text_slide_words=30)]
+    assert not classes[0].is_text
+    assert ("image", 2) in classes[0].kept
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, text_slide_words=30)
+    assert ("image", 2) in plan.fits[13]
+    assert ("image", 2) not in plan.deletes[13]
+
+
 def test_text_slide_box_stretches_to_band():
     _require_font("AzoSans-Regular")
     text_item = _long_text_item(1, _VERSE_1)
@@ -4459,6 +4475,64 @@ def test_refusal_cleans_up_earlier_slides_crop_files(tmp_path, monkeypatch):
         plan_assembly(
             payload, classes, decisions=decisions, band=BAND, clips={},
             deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+        )
+    assert not crop_path.exists()
+
+
+def test_rotated_image_refuses_through_plan_assembly(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo.jpg")
+
+    obj = {
+        "super": {"geometry": {
+            "position": {"x": 1954, "y": 27}, "size": {"width": 1381, "height": 921}, "angle": 5.0,
+        }},
+        "naturalSize": {"width": 6000, "height": 4000},
+        "data": {"identifier": "1"},
+    }
+    objects = {"img": obj}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+
+    image = {"kind": "image", "kindIndex": 0, "rotation": 0, "x": 1954, "y": 27, "w": 1381, "h": 921}
+    slide = _slide(5, [image])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {5: SlideDecision(5, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="rotated"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            deck=(objects, {}, {}), fw_deck=key_path, crop_dir=tmp_path / "crops",
+        )
+
+
+def test_unconsumed_split_refusal_cleans_up_earlier_crop_files(tmp_path, monkeypatch):
+    from obed_edom.dsk_plan import CropSpec
+
+    crop_path = tmp_path / "3" / "photo.jpg"
+    crop_path.parent.mkdir(parents=True)
+    crop_path.write_bytes(b"fake")
+    fake_spec = CropSpec(path=crop_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+
+    monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    slide3 = _slide(3, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide3])
+    classes = [_classify(slide3)]
+    decisions = {3: SlideDecision(3, "in_deck", anchor="auto")}
+    assert crop_path.exists()
+    with pytest.raises(AssemblyRefusal, match="does not apply"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+            split_overrides={3: 2},
         )
     assert not crop_path.exists()
 

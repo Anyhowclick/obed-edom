@@ -33,6 +33,7 @@ from obed_edom.offline_inspect import (
     _build_data_index,
     _canvas_size,
     _data_identifier,
+    data_member_index,
     _guard_tripped,
     _item_from_record,
     _item_text_style,
@@ -381,6 +382,25 @@ def test_data_member_names_decode_as_utf8(tmp_path):
 
     index = _build_data_index(names)
     assert index["1"] == "x y.png"
+
+
+def test_data_member_index_returns_raw_name_openable_via_zipfile(tmp_path):
+    name = "Data/x y-1.png"
+    path = tmp_path / "mojibake.zip"
+    zi = zipfile.ZipInfo(name)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(zi, b"payload")
+    raw = _clear_utf8_flag(bytearray(path.read_bytes()), name.encode("utf-8"))
+    path.write_bytes(raw)
+
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        assert names != [name]
+        index = data_member_index(names)
+        raw_name = index["1"]
+        assert raw_name == names[0]
+        with zf.open(raw_name) as fh:
+            assert fh.read() == b"payload"
 
 
 def test_filename_clean_resolves_and_dirty_id_flags():

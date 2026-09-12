@@ -1069,22 +1069,18 @@ def plan_crops(
                 warnings.append(f"image {item_id[1]}: a build targets this image, keeping source (LWCROP)")
                 continue
             if (item.get("rotation") or 0) % 360 != 0:
-                warnings.append(f"image {item_id[1]}: rotated, keeping source (LWCROP)")
-                continue
+                _cleanup()
+                raise CropRefusal(f"slide {number} image {item_id[1]}: rotated, refusing crop")
             try:
                 result = crop_geometry(obj, objects, window)
             except CropRefusal as exc:
-                warnings.append(f"image {item_id[1]}: {exc}, keeping source (LWCROP)")
-                continue
+                _cleanup()
+                raise CropRefusal(f"slide {number} image {item_id[1]}: {exc}") from exc
             if result is None:
                 continue
             mask_abs, visible, px_box = result
             if _rects_close(visible, mask_abs):
                 continue
-
-            if (px_box[2] - px_box[0]) < MIN_CROP_PX or (px_box[3] - px_box[1]) < MIN_CROP_PX:
-                _cleanup()
-                raise CropRefusal(f"slide {number} image {item_id[1]}: crop window under {MIN_CROP_PX:.0f}px")
 
             data_id = _data_identifier(obj)
             member = data_index.get(str(data_id)) if data_id is not None else None
@@ -1111,6 +1107,10 @@ def plan_crops(
             if orientation not in (None, 1) or src_img.size != (round(natural[0]), round(natural[1])):
                 warnings.append(f"image {item_id[1]}: EXIF/pixel-size mismatch, keeping source (LWCROP)")
                 continue
+
+            if (px_box[2] - px_box[0]) < MIN_CROP_PX or (px_box[3] - px_box[1]) < MIN_CROP_PX:
+                _cleanup()
+                raise CropRefusal(f"slide {number} image {item_id[1]}: crop window under {MIN_CROP_PX:.0f}px")
 
             source_name = item.get("fileName") or Path(member).name
             if source_name in used_names:
