@@ -62,7 +62,7 @@ export function SessionList({ jobs, activeId, onSelect, onDelete, onRename }: Pr
                       {text}
                     </span>
                   </div>
-                  {job.artifacts && !job.artifacts.ok ? <div className="cap">· files missing</div> : null}
+                  {job.artifacts && !job.artifacts.ok ? <div className="cap">files missing</div> : null}
                 </button>
               </div>
               {onDelete && (

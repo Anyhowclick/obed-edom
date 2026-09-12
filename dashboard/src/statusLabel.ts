@@ -5,7 +5,7 @@ export type StatusTone = "ok" | "busy" | "err";
 
 type StatusPair = { done: string; running: string };
 
-const FEATURE_STATUS: Partial<Record<FeatureId, StatusPair>> = {
+const FEATURE_STATUS: Record<FeatureId, StatusPair> = {
   generate: { done: "Generated", running: "Generating…" },
   dsk: { done: "Generated", running: "Generating…" },
   maps: { done: "Exported", running: "Exporting…" },

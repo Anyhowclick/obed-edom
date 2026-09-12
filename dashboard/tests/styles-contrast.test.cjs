@@ -12,3 +12,16 @@ test("no rule block sets both --bg-surface-solid background and --ink-primary co
   );
   assert.deepEqual(offenders, []);
 });
+
+test(".maps-thumb-title-input and .job-name-input selectors stay prefixed with `input`", () => {
+  const selectors = css.match(/[^{}]+(?=\{)/g) || [];
+  const offenders = selectors.filter((selector) =>
+    selector
+      .split(",")
+      .some(
+        (part) =>
+          /\.(maps-thumb-title-input|job-name-input)\b/.test(part) && !/\binput\.(maps-thumb-title-input|job-name-input)\b/.test(part)
+      )
+  );
+  assert.deepEqual(offenders, []);
+});
