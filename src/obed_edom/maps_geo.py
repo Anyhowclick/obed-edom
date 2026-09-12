@@ -335,14 +335,18 @@ def parse_maps_query(raw: str) -> dict[str, Any] | None:
     if at:
         lat = float(at.group(1))
         lon = float(at.group(2))
-        zoom = float(at.group(3)) if at.group(3) is not None else DEFAULT_POINT_ZOOM
+        zoom_from_url = at.group(3) is not None
+        zoom = float(at.group(3)) if zoom_from_url else DEFAULT_POINT_ZOOM
         z_extra = _COMMA_ZOOM_RE.search(text[at.end() :])
         if z_extra and at.group(3) is None:
             zoom = float(z_extra.group(1))
+            zoom_from_url = True
         return {
             "source": "parse",
             "label": text,
             "camera": camera_from_point(lat, lon, zoom),
+            "placeType": None,
+            "zoomFromUrl": zoom_from_url,
         }
     parsed = urlparse(text)
     host = (parsed.netloc or "").lower()
@@ -359,6 +363,8 @@ def parse_maps_query(raw: str) -> dict[str, Any] | None:
                     "source": "parse",
                     "label": text,
                     "camera": camera_from_point(float(pair.group(1)), float(pair.group(2))),
+                    "placeType": None,
+                    "zoomFromUrl": False,
                 }
     pair = _LATLNG_RE.match(text)
     if pair:
@@ -366,6 +372,8 @@ def parse_maps_query(raw: str) -> dict[str, Any] | None:
             "source": "parse",
             "label": text,
             "camera": camera_from_point(float(pair.group(1)), float(pair.group(2))),
+            "placeType": None,
+            "zoomFromUrl": False,
         }
     return None
 
@@ -409,6 +417,7 @@ def search_places(query: str) -> dict[str, Any] | None:
                 "source": "places",
                 "label": name,
                 "camera": camera_from_point(float(coords[1]), float(coords[0])),
+                "placeType": "city",
             }
             if score == 0:
                 break
@@ -423,7 +432,7 @@ def geocode_cache_dir() -> Path:
 
 def _cache_key(query: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", query.strip().lower())[:80] or "q"
-    return safe
+    return f"v2-{safe}"
 
 
 def _read_geocode_cache(query: str) -> dict[str, Any] | None:
@@ -484,6 +493,7 @@ def nominatim_search(query: str, *, wait: bool = False) -> dict[str, Any]:
         "source": "nominatim",
         "label": str(hit.get("display_name") or query),
         "camera": camera,
+        "placeType": hit.get("addresstype") or hit.get("type"),
     }
     _write_geocode_cache(query, payload)
     return payload
@@ -504,5 +514,10 @@ def geocode(query: str, *, wait: bool = False) -> dict[str, Any]:
         bbox = geometry_bbox(country.get("geometry") or {})
         name = str((country.get("properties") or {}).get("NAME") or text)
         if bbox:
-            return {"source": "admin0", "label": name, "camera": camera_from_bbox(bbox)}
+            return {
+                "source": "admin0",
+                "label": name,
+                "camera": camera_from_bbox(bbox),
+                "placeType": "country",
+            }
     return nominatim_search(text, wait=wait)
