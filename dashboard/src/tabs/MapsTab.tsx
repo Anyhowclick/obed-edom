@@ -38,6 +38,7 @@ import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
+import { zoomSizeFactor } from "../maps/objects";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
@@ -2393,6 +2394,25 @@ export function MapsTab() {
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
                   {pin.kind === "landmark" && (
                     <>
+                      <label className="maps-check">
+                        <input
+                          type="checkbox"
+                          checked={!!pin.scaleWithMap}
+                          disabled={locked}
+                          onChange={(event) => {
+                            const zoom = activeView?.camera.zoom ?? 0;
+                            updateActive({
+                              churches: (activeView?.churches || []).map((c) => {
+                                if (c.id !== pin.id) return c;
+                                if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
+                                const size = c.sizeZoom != null ? (c.size || 120) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || 120;
+                                return { ...c, scaleWithMap: false, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
+                              }),
+                            });
+                          }}
+                        />{" "}
+                        Scale with map
+                      </label>
                       <label className="maps-check">
                         <input
                           type="checkbox"

@@ -48,6 +48,8 @@ export type MapsChurch = {
   size?: number;
   opacity?: number;
   reveal?: { kind: "brush"; duration: number; strokes?: number };
+  scaleWithMap?: boolean;
+  sizeZoom?: number;
 };
 
 export type MapsCgOverride = {
