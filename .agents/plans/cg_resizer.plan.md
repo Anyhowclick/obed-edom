@@ -129,9 +129,17 @@ todos:
       Events process once per script instead of per tell (H1)."
     status: completed
   - id: badge-probe-on-blind
-    content: "BUG BACKLOG (B), medium priority, NEW 2026-09-12 from the 2026-09-12 full W1 gate run 1
+    content: "IMPLEMENTED 2026-09-12 on branch fix/badge-probe-on-blind (PR pending): `lastFrontBlind`
+      global set in obedFrontReady's not-ready arm, cleared at the top of obedFront; obedRaiseItem
+      `_reprobe = _frontResult is not 0 or lastFrontBlind is not 0`, `_probeOnly` crediting; token
+      `badgeProbeBlind(s=,k=)`; return string/result dict/_RAISE_TOKEN_KINDS/PASS2 keys unchanged;
+      8 new tests, suite 1799/84; opus r1 APPROVE-WITH-NITS + Codex APPROVE. Replay: run-1 arm A
+      would have latched badgeFrontDead(s=42) → RED at run time. Status stays pending until the
+      next full gate confirms no behaviour change on a blind-free run.
+
+      BUG BACKLOG (B), medium priority, NEW 2026-09-12 from the 2026-09-12 full W1 gate run 1
       (`output/bank/2026-09-12/w1-gate/{gate-run1.log,ENV.txt,A_unflagged.run.json}`), diagnosed
-      read-only offline (`.../scratchpad/armA-blind-diag.md`). On the FIRST 2026-09-12 arm-A run,
+      read-only offline (`output/bank/2026-09-12/w1-gate/armA-blind-diag.md`). On the FIRST 2026-09-12 arm-A run,
       232 `raiseBlind(phase=badge)` fired on exactly the 45 badge slides ≥42 (of 63 badge slides,
       318 planned members) — a perfect suffix of the badge pass, no interleaving, no recovery over
       ~24 min. `raiseClickRetried=0` and `frontErr=''` throughout, so PR #80's new retry branch
