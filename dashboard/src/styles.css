@@ -280,6 +280,15 @@ h3 {
   animation: none;
   box-shadow: none;
 }
+.btn.collab {
+  background: var(--accent-collab);
+  color: var(--accent-collab-fg);
+  box-shadow: 0 0 20px rgba(255, 199, 44, 0.28);
+}
+.btn.collab:hover:not(:disabled) {
+  background: #ffd45c;
+  box-shadow: 0 0 28px rgba(255, 199, 44, 0.4);
+}
 .btn.save-pairing {
   background: var(--accent-collab);
   color: var(--accent-collab-fg);
@@ -418,18 +427,24 @@ h3 {
 .session-pick .cap { margin: 4px 0 0; }
 .session-del {
   flex: 0 0 auto;
-  width: auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   color: var(--ink-tertiary);
   border: var(--border-glass);
   border-radius: var(--radius-pill);
-  padding: 8px 10px;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
 }
 .session-row.active .session-del,
 .session-del:hover { color: var(--err); border-color: var(--err); }
+.status-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
+.status-badge.status-err { color: var(--err); }
+.status-icon { width: 12px; height: 12px; }
 .job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
 .job-name-edit {
@@ -447,7 +462,7 @@ h3 {
 .job-name-input {
   min-width: 0;
   flex: 1 1 auto;
-  background: var(--bg-surface-solid);
+  background: var(--bg-surface-glass-sub);
   color: var(--ink-primary);
   border: var(--border-glass);
   border-radius: var(--radius-sm);
@@ -823,7 +838,7 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   box-shadow: var(--shadow-card);
 }
 .slide-card.flagged { border-color: rgba(255, 199, 44, 0.45); }
-input[type="text"], input[type="number"], select {
+input[type="text"], input[type="number"], input:not([type]), select {
   background: var(--bg-surface-glass-sub);
   border: var(--border-glass);
   color: var(--ink-primary);
@@ -833,7 +848,7 @@ input[type="text"], input[type="number"], select {
   font-size: 16px;
   width: 100%;
 }
-input[type="text"]:focus, input[type="number"]:focus, select:focus {
+input[type="text"]:focus, input[type="number"]:focus, input:not([type]):focus, select:focus {
   outline: none;
   border-color: rgba(255, 255, 255, 0.3);
   box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.18);
