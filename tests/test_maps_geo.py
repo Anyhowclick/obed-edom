@@ -1,3 +1,5 @@
+import pytest
+
 from obed_edom.maps_geo import (
     CG_MIN_ZOOM,
     CG_WIDTH,
@@ -68,6 +70,22 @@ def test_lon_wraps_across_the_dateline():
     assert clamp_lon(-190) == 170
     assert clamp_lon(180) == 180
     assert clamp_lon(-180) == -180
+
+
+def test_lon_wraps_large_multiples_without_looping():
+    assert clamp_lon(720 + 190) == -170
+    assert clamp_lon(-720 - 190) == 170
+
+
+def test_clamp_lon_rejects_non_finite():
+    with pytest.raises(ValueError):
+        clamp_lon(float("inf"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("-inf"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("nan"))
+    with pytest.raises(ValueError):
+        clamp_lon(float("1e400"))
 
 
 def test_clamp_zoom_allows_below_wrap_thresholds():

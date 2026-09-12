@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from dataclasses import dataclass
 
@@ -223,6 +224,14 @@ def _is_number(field: str) -> bool:
     return True
 
 
+def _check_zoom_range(zoom: float, line: int, raw: str) -> str | None:
+    if not math.isfinite(zoom):
+        return f"Line {line}: bad zoom {raw!r}"
+    if not (0 <= zoom <= 22):
+        return f"Line {line}: zoom out of range {raw!r} (must be 0-22)"
+    return None
+
+
 def _parse_headerless_row(fields: list[str], line: int, extracted_url: str | None = None) -> Place | str:
     fields = [f.strip() for f in fields]
     while fields and fields[-1] == "":
@@ -271,6 +280,9 @@ def _parse_headerless_row(fields: list[str], line: int, extracted_url: str | Non
         if zoom_val is not None:
             if zoom is not None:
                 return f"Line {line}: two zooms"
+            zoom_error = _check_zoom_range(zoom_val, line, field)
+            if zoom_error is not None:
+                return zoom_error
             zoom = zoom_val
             i += 1
             continue
@@ -297,6 +309,8 @@ def _parse_headerless_row(fields: list[str], line: int, extracted_url: str | Non
             continue
         query_parts.append(field)
         i += 1
+    if lat is not None and not (math.isfinite(lat) and math.isfinite(lon)):
+        return f"Line {line}: bad lat/lon {lat!r}, {lon!r}"
     lat_c = clamp_lat(lat) if lat is not None else None
     lon_c = clamp_lon(lon) if lon is not None else None
     query = ", ".join(query_parts) or None
@@ -311,8 +325,14 @@ def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
     lat_raw = (row.get("lat") or row.get("latitude") or "").strip()
     lon_raw = (row.get("lon") or row.get("lng") or row.get("longitude") or "").strip()
     try:
-        lat = clamp_lat(float(lat_raw)) if lat_raw else None
-        lon = clamp_lon(float(lon_raw)) if lon_raw else None
+        lat_val = float(lat_raw) if lat_raw else None
+        lon_val = float(lon_raw) if lon_raw else None
+        if (lat_val is not None and not math.isfinite(lat_val)) or (
+            lon_val is not None and not math.isfinite(lon_val)
+        ):
+            return f"Line {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
+        lat = clamp_lat(lat_val) if lat_val is not None else None
+        lon = clamp_lon(lon_val) if lon_val is not None else None
     except ValueError:
         return f"Line {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
     url = (row.get("maps_url") or row.get("url") or "").strip() or None
@@ -321,8 +341,10 @@ def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
         zoom = float(zoom_raw) if zoom_raw else None
     except ValueError:
         return f"Line {line}: bad zoom {zoom_raw!r}"
-    if zoom is not None and not (0 <= zoom <= 22):
-        return f"Line {line}: zoom out of range {zoom_raw!r} (must be 0-22)"
+    if zoom is not None:
+        zoom_error = _check_zoom_range(zoom, line, zoom_raw)
+        if zoom_error is not None:
+            return zoom_error
     if (lat_raw and not lon_raw) or (lon_raw and not lat_raw):
         return f"Line {line}: lat without lon" if lat_raw else f"Line {line}: lon without lat"
     kind_raw = (row.get("kind") or "").strip()
@@ -340,6 +362,11 @@ _RESTKEY = "__extra__"
 def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list[str]]:
     reader = csv.DictReader(io.StringIO(sample), restkey=_RESTKEY)
     fieldnames = [str(f or "").strip().lower() for f in (reader.fieldnames or [])]
+    seen: set[str] = set()
+    for field in fieldnames:
+        if field in seen:
+            return [], [f"Line {line_offset + 1}: duplicate column {field!r}"]
+        seen.add(field)
     single_joinable_header = len(fieldnames) == 1 and fieldnames[0] in _SINGLE_FIELD_HEADERS
     places: list[Place] = []
     errors: list[str] = []
