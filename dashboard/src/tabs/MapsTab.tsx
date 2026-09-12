@@ -64,8 +64,10 @@ import {
   exportZoomDelta,
   plateSurfaceWidth,
   hasOutgoingMovie,
+  isolateDissolveNeeded,
   minZoomForView,
   movieAppearanceMismatch,
+  plainIsolateTarget,
   worldCopyWarning,
   nextPinId,
   nextSlideId,
@@ -1198,7 +1200,15 @@ export function MapsTab() {
         stopPreview(true);
         return;
       }
-      if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      if (isolateDissolveNeeded(fromView, toView)) {
+        await applyPreviewView(plainIsolateTarget(toView), run);
+        if (previewAbort.current || previewRun.current !== run) return;
+        await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, link.duration * 1000)));
+        if (!previewAbort.current && previewRun.current === run) await applyPreviewView(toView, run);
+      } else {
+        await applyPreviewView(toView, run);
+      }
       return;
     }
     await mapRef.current?.easeTo(toView.camera, link.duration * 1000);
@@ -2214,7 +2224,7 @@ export function MapsTab() {
                 camera={renderedView?.camera || active.camera}
                 styleId={renderedView?.style || active.style}
                 highlights={renderedView?.highlights || active.highlights}
-                isolate={renderedView ? renderedView.isolate : active.isolate}
+                isolate={(renderedView || active).isolate}
                 churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
