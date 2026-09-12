@@ -374,7 +374,7 @@ def test_export_slide_images_launch_is_caught_by_tripwire(deck, tmp_path):
     """``export_slide_images`` must route its ``open -b`` through the runner's
     launch path so an under-mocked test trips the autouse tripwire instead of
     launching the owner's real Keynote."""
-    with pytest.raises(AssertionError, match="real osascript in tests"):
+    with pytest.raises(AssertionError, match="real Keynote launch in tests"):
         inspect_mod.export_slide_images(deck, tmp_path / "job")
 
 

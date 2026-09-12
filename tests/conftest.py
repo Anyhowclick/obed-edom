@@ -71,6 +71,9 @@ def _no_real_osascript(request, monkeypatch):
     def _boom(*args, **kwargs):
         raise AssertionError(f"real osascript in tests: {args}")
 
+    def _boom_launch(*args, **kwargs):
+        raise AssertionError("real Keynote launch in tests")
+
     monkeypatch.setattr(osascript_runner, "_execute", _boom)
-    monkeypatch.setattr(osascript_runner, "_launch_keynote", _boom)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", _boom_launch)
     yield

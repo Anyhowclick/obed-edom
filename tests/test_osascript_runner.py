@@ -87,15 +87,19 @@ def test_launch_true_opens_bundle_id_once(monkeypatch):
 def test_timeout_kills_child_and_raises(tmp_path, monkeypatch, live_osascript):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    pid_file = tmp_path / "pid"
     stub = bin_dir / "osascript"
-    stub.write_text(
-        "#!/bin/sh\n"
-        f"echo $$ > {pid_file}\n"
-        "exec sleep 30\n"
-    )
+    stub.write_text("#!/bin/sh\nexec sleep 30\n")
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    seen = {}
+    real_popen = runner.subprocess.Popen
+
+    def spy_popen(*args, **kwargs):
+        seen["proc"] = real_popen(*args, **kwargs)
+        return seen["proc"]
+
+    monkeypatch.setattr(runner.subprocess, "Popen", spy_popen)
 
     start = time.monotonic()
     with pytest.raises(runner.OsascriptTimeout):
@@ -103,11 +107,7 @@ def test_timeout_kills_child_and_raises(tmp_path, monkeypatch, live_osascript):
     elapsed = time.monotonic() - start
 
     assert elapsed < 5
-    for _ in range(100):
-        if pid_file.exists():
-            break
-        time.sleep(0.05)
-    pid = int(pid_file.read_text().strip())
+    pid = seen["proc"].pid
     time.sleep(0.2)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
