@@ -453,7 +453,7 @@ def test_bootstrap_csv_preserves_empty_deck_layers(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name\nSingapore\n", "replace": "false"},
+        data={"csv_text": "name,lat\nSingapore\n", "replace": "false"},
     )
     assert started.status_code == 200
     done = _wait(job["id"])
@@ -606,7 +606,7 @@ def test_bootstrap_csv_queues_then_adds_slides(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name\nKuala Lumpur\nSingapore\n", "replace": "false"},
+        data={"csv_text": "name,lat\nKuala Lumpur\nSingapore\n", "replace": "false"},
     )
     assert started.status_code == 200
     assert started.json()["status"] in {"queued", "running", "done"}
@@ -636,7 +636,7 @@ def test_bootstrap_csv_replace_clears_prior_outputs(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name\nSingapore\n", "replace": "true"},
+        data={"csv_text": "name,lat\nSingapore\n", "replace": "true"},
     )
     assert started.status_code == 200
     done = _wait(job["id"])
@@ -653,7 +653,7 @@ def test_bootstrap_csv_can_add_pins_to_one_slide(monkeypatch):
     monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
     started = client.post(
         f"/api/maps/{job['id']}/bootstrap-csv",
-        data={"csv_text": "name\nKuala Lumpur\nSingapore\n", "targetSlideId": "s1", "audience": "lw"},
+        data={"csv_text": "name,lat\nKuala Lumpur\nSingapore\n", "targetSlideId": "s1", "audience": "lw"},
     )
     assert started.status_code == 200
     done = _wait(job["id"])
