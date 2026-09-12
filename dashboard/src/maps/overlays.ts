@@ -1,4 +1,4 @@
-import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
+import { GeoJSONSource, type LayerSpecification, type Map as MapLibreMap } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
@@ -239,8 +239,8 @@ function dropPinImageId(color: string): string {
   return `church-drop-${hash >>> 0}`;
 }
 
-/** Head diameter (px) of the 48x60 @2x `dropPinImage`, measured from its `arc(24, 22, 7, ...)` circle. */
-const DROP_PIN_HEAD_PX = 17;
+/** Head diameter (px) of the 48x60 @2x `dropPinImage`: the bulb's bezier extent (x 7->41 device, /2). */
+export const DROP_PIN_HEAD_PX = 17;
 
 function dropPinImage(color: string): ImageData {
   const canvas = document.createElement("canvas");
@@ -294,6 +294,72 @@ export async function ensureLandmarkImages(map: MapLibreMap, churches: MapsChurc
   }
 }
 
+/** Layer specs `addOverlays` installs on the `churches` source; factored out so tests can validate them directly. */
+export function churchesLayers(): LayerSpecification[] {
+  return [
+    {
+      id: "churches-dots",
+      type: "circle",
+      source: "churches",
+      filter: ["==", ["get", "kind"], "dot"],
+      paint: {
+        // MapLibre clamps circle-radius to 1024px; Keynote's EFFECTIVE_SIZE_MAX (20000) never binds in the preview.
+        "circle-radius": zoomScaledStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024),
+        "circle-color": ["get", "color"],
+        "circle-opacity": ["coalesce", ["get", "opacity"], 1],
+        "circle-stroke-opacity": ["coalesce", ["get", "opacity"], 1],
+        "circle-stroke-width": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"], ["/", ["get", "size"], defaultObjectSize("dot")]]),
+        "circle-stroke-color": "#FFFFFF",
+      },
+    },
+    {
+      id: "churches-landmarks",
+      type: "symbol",
+      source: "churches",
+      filter: ["==", ["get", "kind"], "landmark"],
+      layout: {
+        "icon-image": ["concat", "landmark-", ["get", "assetId"], "-", ["coalesce", ["get", "assetVersion"], "v1"]],
+        "icon-anchor": "bottom",
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
+        "icon-size": zoomScaledStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]),
+        "icon-rotation-alignment": "viewport",
+        "icon-pitch-alignment": "viewport",
+      },
+      paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
+    },
+    {
+      id: "churches-drops",
+      type: "symbol",
+      source: "churches",
+      filter: ["==", ["get", "kind"], "dropPin"],
+      layout: {
+        "icon-image": ["get", "pinImage"],
+        "icon-anchor": "bottom",
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
+        // DROP_PIN_HEAD_PX (17) is the drop image's head diameter at pixelRatio 2 (see dropPinImage), so
+        // size/DROP_PIN_HEAD_PX brings icon-size to church.size px measured head-to-head, like Keynote's drop pin.
+        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]),
+      },
+      paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
+    },
+    {
+      id: "churches-labels",
+      type: "symbol",
+      source: "churches",
+      filter: ["==", ["get", "showLabel"], true],
+      layout: {
+        "text-field": ["get", "name"],
+        "text-size": ["*", 24, ["get", "objectScale"]],
+        "text-offset": [0, 1.35],
+        "text-anchor": "top",
+      },
+      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": ["*", 1.2, ["get", "objectScale"]], "text-opacity": ["coalesce", ["get", "opacity"], 1] },
+    },
+  ] as LayerSpecification[];
+}
+
 export async function addOverlays(
   map: MapLibreMap,
   highlights: string[],
@@ -311,66 +377,7 @@ export async function addOverlays(
   const pins = churchesGeo(churches, selectedPinId, numberPins, objectScale);
   if (!map.getSource("churches")) {
     map.addSource("churches", { type: "geojson", data: pins, promoteId: "id" });
-    map.addLayer({
-      id: "churches-dots",
-      type: "circle",
-      source: "churches",
-      filter: ["==", ["get", "kind"], "dot"],
-      paint: {
-        // MapLibre clamps circle-radius to 1024px; Keynote's EFFECTIVE_SIZE_MAX (20000) never binds in the preview.
-        "circle-radius": zoomScaledStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024),
-        "circle-color": ["get", "color"],
-        "circle-opacity": ["coalesce", ["get", "opacity"], 1],
-        "circle-stroke-opacity": ["coalesce", ["get", "opacity"], 1],
-        "circle-stroke-width": ["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"], ["/", ["get", "size"], 28], zoomScaledStops(1)],
-        "circle-stroke-color": "#FFFFFF",
-      },
-    });
-    map.addLayer({
-      id: "churches-landmarks",
-      type: "symbol",
-      source: "churches",
-      filter: ["==", ["get", "kind"], "landmark"],
-      layout: {
-        "icon-image": ["concat", "landmark-", ["get", "assetId"], "-", ["coalesce", ["get", "assetVersion"], "v1"]],
-        "icon-anchor": "bottom",
-        "icon-allow-overlap": true,
-        "icon-ignore-placement": true,
-        "icon-size": zoomScaledStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]),
-        "icon-rotation-alignment": "viewport",
-        "icon-pitch-alignment": "viewport",
-      },
-      paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
-    });
-    map.addLayer({
-      id: "churches-drops",
-      type: "symbol",
-      source: "churches",
-      filter: ["==", ["get", "kind"], "dropPin"],
-      layout: {
-        "icon-image": ["get", "pinImage"],
-        "icon-anchor": "bottom",
-        "icon-allow-overlap": true,
-        "icon-ignore-placement": true,
-        // DROP_PIN_HEAD_PX (17) is the drop image's head diameter at pixelRatio 2 (see dropPinImage), so
-        // size/DROP_PIN_HEAD_PX brings icon-size to church.size px measured head-to-head, like Keynote's drop pin.
-        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]),
-      },
-      paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
-    });
-    map.addLayer({
-      id: "churches-labels",
-      type: "symbol",
-      source: "churches",
-      filter: ["==", ["get", "showLabel"], true],
-      layout: {
-        "text-field": ["get", "name"],
-        "text-size": ["*", 24, ["get", "objectScale"]],
-        "text-offset": [0, 1.35],
-        "text-anchor": "top",
-      },
-      paint: { "text-color": "#FFFFFF", "text-halo-color": "#07070A", "text-halo-width": ["*", 1.2, ["get", "objectScale"]], "text-opacity": ["coalesce", ["get", "opacity"], 1] },
-    });
+    for (const layer of churchesLayers()) map.addLayer(layer);
   } else {
     (map.getSource("churches") as GeoJSONSource).setData(pins);
   }

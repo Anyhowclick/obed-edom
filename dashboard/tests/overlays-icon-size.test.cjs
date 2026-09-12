@@ -14,7 +14,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { iconSizeStops } = require(path.join(out, "objects.js"));
+const { zoomScaledStops } = require(path.join(out, "objects.js"));
 
 function stopValues(stops) {
   assert.equal(stops[0], "interpolate");
@@ -23,21 +23,21 @@ function stopValues(stops) {
   return { z0: stops[4], z22: stops[6] };
 }
 
-test("iconSizeStops folds a non-scaling feature to the same value at both stops", () => {
-  const { z0, z22 } = stopValues(iconSizeStops(["get", "base"]));
+test("zoomScaledStops folds a non-scaling feature to the same value at both stops", () => {
+  const { z0, z22 } = stopValues(zoomScaledStops(["get", "base"]));
   assert.deepEqual(z0, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", 0, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
   assert.deepEqual(z22, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", 22, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
 });
 
 function evaluateIconSize(base, properties) {
-  const expr = iconSizeStops(base);
+  const expr = zoomScaledStops(base);
   const parsed = createExpression(expr, { type: "number" });
   assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
   const feature = { properties };
   return (zoom) => parsed.value.evaluate({ zoom }, feature);
 }
 
-test("iconSizeStops is exactly geometric (base 2) for a scaleWithMap feature", () => {
+test("zoomScaledStops is exactly geometric (base 2) for a scaleWithMap feature", () => {
   const base = 40;
   const sizeZoomRef = 5;
   const evaluate = evaluateIconSize(base, { sizeZoomRef, scaleWithMap: true });
@@ -48,19 +48,19 @@ test("iconSizeStops is exactly geometric (base 2) for a scaleWithMap feature", (
   assert.equal(evaluate(22), base * 131072);
 });
 
-test("iconSizeStops as icon-size validates with the real maplibre style spec", () => {
+test("zoomScaledStops as icon-size validates with the real maplibre style spec", () => {
   const style = {
     version: 8,
     name: "x",
     sources: { src: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
     layers: [
-      { id: "l", type: "symbol", source: "src", layout: { "icon-image": "x", "icon-size": iconSizeStops(["get", "base"]) } },
+      { id: "l", type: "symbol", source: "src", layout: { "icon-image": "x", "icon-size": zoomScaledStops(["get", "base"]) } },
     ],
   };
   assert.deepEqual(validateStyleMin(style), []);
 });
 
-test("iconSizeStops holds a scaleWithMap:false feature constant at every zoom", () => {
+test("zoomScaledStops holds a scaleWithMap:false feature constant at every zoom", () => {
   const base = 40;
   const evaluate = evaluateIconSize(base, { scaleWithMap: false });
   for (const zoom of [3, 5, 6, 7.3, 22]) {
@@ -74,7 +74,17 @@ const overlaysCompile = spawnSync(runtime, [
   "--outDir", overlaysOut, path.join(root, "src/maps/overlays.ts"), path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(overlaysCompile.status, 0, overlaysCompile.stderr || overlaysCompile.stdout);
-const { churchesGeo } = require(path.join(overlaysOut, "overlays.js"));
+const { churchesGeo, churchesLayers } = require(path.join(overlaysOut, "overlays.js"));
+
+test("churchesLayers (churches-dots/-drops/-landmarks) validates with the real maplibre style spec", () => {
+  const style = {
+    version: 8,
+    name: "x",
+    sources: { churches: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
+    layers: churchesLayers(),
+  };
+  assert.deepEqual(validateStyleMin(style), []);
+});
 
 test("churchesGeo folds sizeZoom and log2(objectScale) into sizeZoomRef", () => {
   const church = { id: "a", name: "a", lat: 0, lon: 0, kind: "landmark", color: "#fff", scaleWithMap: true, sizeZoom: 5 };
@@ -84,7 +94,7 @@ test("churchesGeo folds sizeZoom and log2(objectScale) into sizeZoomRef", () => 
 });
 
 test("churches-dots circle-radius is exactly geometric (base 2) for a scaleWithMap dot and validates with the style spec", () => {
-  const expr = iconSizeStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024);
+  const expr = zoomScaledStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024);
   const parsed = createExpression(expr, { type: "number" });
   assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
   const evaluate = (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
@@ -108,7 +118,7 @@ test("churches-dots circle-radius is exactly geometric (base 2) for a scaleWithM
 
 test("churches-drops icon-size scales geometrically off the drop-pin head px and validates with the style spec", () => {
   const DROP_PIN_HEAD_PX = 17;
-  const expr = iconSizeStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]);
+  const expr = zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]);
   const parsed = createExpression(expr, { type: "number" });
   assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
   const evaluate = (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });

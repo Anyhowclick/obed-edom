@@ -37,16 +37,15 @@ export function zoomScaledStops(base: unknown, max?: number): ExpressionSpecific
   };
   // A pair of interpolate stops reproduces an exact 2^z curve between them (algebraically, base-2
   // interpolation of two true samples of A*2^z recovers A*2^z everywhere in between) but NOT when a
-  // stop is min()-clamped, so a clamped max needs one stop per integer zoom: any segment whose two
-  // endpoints are both below the clamp stays exact, and a segment past the clamp is flat at max.
+  // stop is min()-clamped, so a clamped max needs one stop per integer zoom: a segment whose two
+  // endpoints are both below the clamp stays exact, a segment fully past the clamp is flat at max,
+  // and the one segment straddling the clamp is still base-2 interpolated between its two (unequal)
+  // endpoints, so it undershoots max in between (e.g. 949 vs 1024 at z14.5).
   if (max == null) return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)];
   const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
   for (let z = 0; z <= 22; z++) stops.push(z, stopAt(z));
   return stops as unknown as ExpressionSpecification;
 }
-
-/** @deprecated alias for `zoomScaledStops`, kept for existing icon-size callers/tests. */
-export const iconSizeStops = zoomScaledStops;
 
 export type ObjectCorner = "nw" | "ne" | "sw" | "se";
 
