@@ -3,13 +3,13 @@ name: Dashboard React/DOM test harness
 overview: "Owner approved 2026-09-12. Decisions: Vitest + jsdom + Testing Library; tests live in `dashboard/tests-ui/`; tests-only PRs do not rebuild `dist`; no MapsTab refactor in PR 1. Three PRs: PR 1 builds the harness plus three seed regression tests (conflict-freeze, thumb-token, rename-unsaved), each of which must be shown red when its guard is reverted; PR 2 adds thumbnail + save-status coverage; PR 3 adds component + preview-sequence coverage."
 todos:
   - id: pr1-harness
-    content: "Harness + 3 seed tests: conflict-freeze, thumb-token, rename-unsaved; each must be shown red when its guard is reverted."
+    content: "Done: shipped as PR #99 (merged, Codex APPROVE). Harness + 3 seed tests: conflict-freeze, thumb-token, rename-unsaved; each proven red with its guard reverted. Deferred to PR 2: the captureThumb `frozen` input is not yet mutation-pinned, and the `sameView` case."
     status: done
   - id: pr2-thumb-status
-    content: "Thumbnail + save-status coverage: stale-retry, reconcile, save-status pill label sequence."
+    content: "Partly covered by PR #100 (save-status pill test exists). Remaining: thumb stale-retry, thumb reconcile, and the deferred frozen-gate pin + sameView case from PR 1."
     status: pending
   - id: pr3-components-preview
-    content: "Component + preview-sequence coverage: JobName double-submit, export-destination freeze, isolate hop preview viewLog ordering."
+    content: "Partly covered by PR #100 (artifact-actions and result-view tests). Remaining: JobName double-submit, export-destination freeze, isolate hop preview viewLog ordering."
     status: pending
 isProject: false
 ---
@@ -116,7 +116,7 @@ Each of these three must be verified red when its corresponding guard is reverte
 
 ## 6. Scripts & CI
 
-- `"typecheck:ui": "tsc -p tests-ui --noEmit"`, `"test:ui": "npm run typecheck:ui && vitest run"`, and `"test:ui:watch": "vitest"` in `dashboard/package.json`.
+- `"typecheck:ui": "tsc -p tests-ui --noEmit"`, `"test:ui": "npm run typecheck:ui && vitest run"`, and `"test:ui:watch": "vitest"` in `dashboard/package.json`. Shipped on #99, with `test:ui` running `typecheck:ui` before vitest.
 - There is **no `.github/workflows`** in this repo — `test:maps` is invoked only from the agent plans and `.agents/skills/obed-edom/SKILL.md`. So "CI wiring" here means: add `npm run test:ui` next to `npm run test:maps` in SKILL.md's dashboard command block and in the plan files' command notes, with the same bundled-Node PATH prefix (`PATH=/Users/anyhowclick/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH`). If a workflow is added later, both scripts go in one `npm test` aggregate.
 
 ## 7. Owner decision needed
@@ -130,3 +130,19 @@ Owner: harness approved. Orchestrator: tests-only PR, no dist rebuild; tests in 
 ## Decisions
 
 PR 1 shipped: test files use a `.ui.test.tsx` suffix (basename collisions with `tests/*.test.cjs`); `vi.useFakeTimers()` lives in each file's `beforeEach`, not the render helper; `sameView` token-invalidation coverage deferred to PR 2.
+
+## Status 2026-09-12 (late round)
+
+**PR 1 shipped as PR #99** (`feat/dashboard-ui-harness`, **merged** into `main`, Codex APPROVE after opus ×4). As built: `npm run test:ui` runs `typecheck:ui` then vitest; `test:maps` untouched; no `dist` rebuild. The MapView fake is typed against `MapViewHandle`/`MapViewProps` (the one product change is the type-only `export type MapViewProps = Props;`) with a controllable `waitUntilIdle`; the `api` mock is scriptable and re-exports the real error classes; stampOsm, `loadAdmin0` and prefs are stubbed. All three seed tests were proven red with their guard reverted: `conflict-freeze` (the `applyLocalDoc` early return), `thumb-token` (the `tokenStillValid` gate), `rename-unsaved` (save before rename, and `mergeServerMeta` keeping the local slides while applying the new name).
+
+Two items in §5's PR 1 description turned out not to hold and moved to PR 2: the `captureThumb` **`frozen` input is not yet mutation-pinned**, and the **`sameView` abort case** from `thumb-token.test.tsx`.
+
+**PR #100** (the dashboard polish stack, based on #99; both now merged) added UI tests of its own, so parts of PR 2 and PR 3 are already covered:
+
+- covered by #100 — the **save-status pill** label/appearance test (item 6), plus **artifact-actions** tests (Open / Show in enclosing folder, including the absence of printed paths) and **result-view** tests.
+- still to write —
+  - thumbnail **stale-retry** (item 4) and **reconcile** (item 5);
+  - the deferred **`frozen`-gate mutation pin** and the **`sameView`** abort case from PR 1;
+  - **JobName double-submit** (item 7);
+  - **export-destination freeze** (item 8);
+  - **isolate hop preview `viewLog` ordering** (item 9).
