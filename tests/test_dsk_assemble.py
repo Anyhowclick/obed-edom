@@ -4536,6 +4536,34 @@ def test_commit_pending_crop_writes_unlinks_remaining_temps_on_mid_loop_failure(
     assert not pending[2][1].exists()
 
 
+def test_commit_pending_crop_writes_removes_empty_slide_directory_on_mid_loop_failure(tmp_path, monkeypatch):
+    """Same mid-loop failure as above, but with each pending write in its own slide
+    directory: the unaffected slides committed before the failure keep their dirs,
+    but the third slide's dir -- never committed, only unlinked -- must not survive."""
+    pending = []
+    for i in range(3):
+        slide_dir = tmp_path / str(i)
+        slide_dir.mkdir()
+        final_path = slide_dir / "final.jpg"
+        temp_path = slide_dir / "temp.jpg"
+        temp_path.write_bytes(b"crop")
+        pending.append((temp_path, final_path))
+
+    real_replace = dsa.os.replace
+
+    def flaky_replace(src, dst):
+        if str(src) == str(pending[1][0]):
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dsa.os, "replace", flaky_replace)
+    with pytest.raises(AssemblyRefusal, match=str(pending[1][1])):
+        dsa._commit_pending_crop_writes(pending)
+
+    assert (tmp_path / "0").exists()
+    assert not (tmp_path / "2").exists()
+
+
 def test_discard_pending_crop_writes_removes_empty_slide_directory(tmp_path):
     slide_dir = tmp_path / "5"
     slide_dir.mkdir()

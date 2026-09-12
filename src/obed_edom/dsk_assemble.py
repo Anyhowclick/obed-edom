@@ -301,6 +301,11 @@ def _commit_pending_crop_writes(pending: Sequence[tuple[Path, Path]]) -> None:
         except OSError as exc:
             for remaining_temp, _final_path in pending[i + 1 :]:
                 Path(remaining_temp).unlink(missing_ok=True)
+            for remaining_temp, _final_path in pending[i + 1 :]:
+                try:
+                    Path(remaining_temp).parent.rmdir()
+                except OSError:
+                    pass
             raise AssemblyRefusal(
                 f"could not commit crop {final_path}: {exc}; already replaced: "
                 f"{', '.join(str(p) for p in committed) or 'none'}"

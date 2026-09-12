@@ -1074,6 +1074,11 @@ def plan_crops(
     def _cleanup() -> None:
         for temp_path, _out_path in pending_writes:
             temp_path.unlink(missing_ok=True)
+        for temp_path, _out_path in pending_writes:
+            try:
+                temp_path.parent.rmdir()
+            except OSError:
+                pass
 
     with zipfile.ZipFile(key_path) as zf:
         data_index = data_member_index(zf.namelist())
