@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/types.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { isolateDissolveNeeded, plainIsolateTarget } = require(path.join(out, "types.js"));
+const { isolateDissolveNeeded, plainIsolateTarget, movieAppearanceMismatch } = require(path.join(out, "types.js"));
 
 const camera = (lat) => ({ lat, lon: 0, zoom: 5, bearing: 0, pitch: 0 });
 const slide = (id, overrides) => ({
@@ -35,4 +35,22 @@ test("isolateDissolveNeeded is false when the destination has no isolate", () =>
   const from = slide("a");
   const to = slide("b", { highlights: ["FR"] });
   assert.equal(isolateDissolveNeeded(from, to), false);
+});
+
+test("isolateDissolveNeeded is false when the destination has isolate but no highlights", () => {
+  const from = slide("a");
+  const to = slide("b", { isolate: { mode: "darken", strength: 0.65 } });
+  assert.equal(isolateDissolveNeeded(from, to), false);
+});
+
+test("movieAppearanceMismatch is false when only isolate/highlights differ", () => {
+  const from = slide("a");
+  const to = slide("b", { highlights: ["FR"], isolate: { mode: "darken", strength: 0.65 } });
+  assert.equal(movieAppearanceMismatch(from, to), false);
+});
+
+test("movieAppearanceMismatch is true when style also differs", () => {
+  const from = slide("a");
+  const to = slide("b", { style: "buildings3d", highlights: ["FR"], isolate: { mode: "darken", strength: 0.65 } });
+  assert.equal(movieAppearanceMismatch(from, to), true);
 });
