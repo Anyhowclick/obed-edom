@@ -2644,3 +2644,61 @@ def test_movie_backdrop_slides_emit_no_label_pills(tmp_path: Path):
     )
     assert not any(item.get("labelPill") for item in items)
     assert not any(item.get("kind") == "text" for item in items)
+
+
+def test_reveal_backdrop_slides_still_label_their_non_landmark_churches(tmp_path: Path):
+    """The reveal backdrop is `render_slide_reveal_movie(still, ...)`, and the dashboard
+    exports stills with no `churches` in its opts (MapsTab.tsx ~1550), so `addOverlays` —
+    and with it the `churches-labels` symbol layer — never runs. The movie bakes only the
+    painted landmark artwork, so pins and labels must still be placed over it."""
+    movie = tmp_path / "reveal.mov"
+    movie.write_bytes(b"mov")
+    churches = [
+        *_label_churches(),
+        {"id": "lm", "name": "Landmark", "lat": 3.1, "lon": 101.1, "kind": "landmark", "reveal": {"duration": 1.2}},
+    ]
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=churches, revealMovie=True)
+    ops = plan_deck(
+        [slide],
+        [],
+        {},
+        output_dir=tmp_path,
+        preview_dir=tmp_path,
+        movie=None,
+        wall=True,
+        reveal_movies={("lw", "s1"): str(movie)},
+    )
+    items = ops[0]["items"]
+    assert any(item.get("map") and item["kind"] == "movie" for item in items)
+    labelled = [church for church in churches if church["kind"] != "landmark"]
+    assert len([item for item in items if item.get("labelPill")]) == len(labelled)
+    assert len([item for item in items if item.get("kind") == "text"]) == len(labelled)
+
+
+def test_odd_length_names_scale_to_dsk_without_distorting_the_pill(tmp_path: Path):
+    church = dict(_label_churches()[0], name="Odd Name")
+    items = _place_labels(tmp_path, [church])
+    pill = next(item for item in items if item.get("labelPill"))
+    text = next(item for item in items if item.get("kind") == "text")
+    for item in (pill, text):
+        assert item["w"] % 2 == 0
+        assert item["h"] % 2 == 0
+        scaled = dsk_item(item)
+        assert scaled["w"] / item["w"] == DSK_SCALE
+        assert scaled["h"] / item["h"] == DSK_SCALE
+
+
+def test_label_pill_outer_bounds_clear_the_wall_seam(tmp_path: Path):
+    church = {"id": "c1", "name": "Seam Church", "lat": 3.0, "lon": 95.673, "kind": "dot", "color": "#c44a42"}
+    unguarded = _place_labels(tmp_path, [church], wall=False)
+    straddler = next(item for item in unguarded if item.get("labelPill"))
+    assert straddler["x"] < 1920 < straddler["x"] + straddler["w"]
+
+    items = _place_labels(tmp_path, [church])
+    pill = next(item for item in items if item.get("labelPill"))
+    text = next(item for item in items if item.get("kind") == "text")
+    for item in (pill, text):
+        assert not (item["x"] < 1920 < item["x"] + item["w"])
+    assert pill["x"] <= text["x"]
+    assert text["x"] + text["w"] <= pill["x"] + pill["w"]
+    assert pill["x"] == text["x"] - PILL_PAD_X

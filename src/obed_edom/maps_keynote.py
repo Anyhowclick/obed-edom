@@ -851,12 +851,14 @@ def _place_churches(
                 )
             if name and church.get("showLabel", True):
                 nw = max(48, min(420, LABEL_CHAR_W * len(name)))
+                nw += nw % 2
                 nx = x + size + 8
                 ny = y + (size - NAME_HEIGHT) / 2.0
-                if wall:
-                    nx = avoid_straddle(nx, nw)
                 pw = nw + 2 * PILL_PAD_X
                 ph = NAME_HEIGHT + 2 * PILL_PAD_Y
+                if wall:
+                    px = nx - PILL_PAD_X
+                    nx += avoid_straddle(px, pw) - px
                 items.append(
                     _item(
                         "image",
