@@ -75,8 +75,6 @@ export function GenerateResultView({
         {hasLw ? `${result.lwCount} LW` : "No LW"}
         {" · "}
         {hasDsk ? `${result.dskCount} DSK` : "No DSK"}
-        {" · "}
-        {result.outputDir}
       </p>
       <ArtifactActions
         artifacts={[

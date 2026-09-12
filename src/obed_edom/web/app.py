@@ -8,9 +8,10 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -140,6 +141,18 @@ class SettingsBody(BaseModel):
 
 OPENABLE_SUFFIXES = {".key", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".mov", ".mp4"}
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _require_local_origin(request: Request) -> None:
+    """Reject cross-origin calls to filesystem-touching endpoints; same-origin/no-origin requests pass."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    host = urlsplit(origin).hostname
+    if host not in _LOCAL_HOSTS:
+        raise HTTPException(403, "Forbidden origin")
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Obed-Edom dashboard")
@@ -224,17 +237,17 @@ def create_app() -> FastAPI:
             )
         return {"path": str(found), "name": found.name}
 
-    @app.post("/api/reveal")
+    @app.post("/api/reveal", dependencies=[Depends(_require_local_origin)])
     def reveal(path: str = Form(...)) -> dict:
-        target = Path(path).expanduser()
+        target = Path(path).expanduser().resolve()
         if not target.exists():
             raise HTTPException(404, f"Not found: {path}")
         subprocess.run(["open", "-R", str(target)], check=False)
         return {"ok": True}
 
-    @app.post("/api/open")
+    @app.post("/api/open", dependencies=[Depends(_require_local_origin)])
     def open_path(path: str = Form(...)) -> dict:
-        target = Path(path).expanduser()
+        target = Path(path).expanduser().resolve()
         if not target.exists():
             raise HTTPException(404, f"Not found: {path}")
         suffix = target.suffix.lower()

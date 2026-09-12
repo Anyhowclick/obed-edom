@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { chooseFolder, chooseKeynote, relocateJob } from "../api";
+import { ArtifactActions } from "../components/ArtifactActions";
 import { CheckResultView } from "../components/CheckResultView";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { DiffResultView } from "../components/DiffResultView";
@@ -106,7 +107,17 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                 {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} onRename={rename} />}
                 {feature === "check" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
                 {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} onRename={rename} />}
-                {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "resize" && (
+                  <>
+                    {(active.result as { destPath?: string } | null)?.destPath && (
+                      <ArtifactActions
+                        artifacts={[{ label: "CG deck", path: (active.result as { destPath: string }).destPath }]}
+                        onError={setError}
+                      />
+                    )}
+                    <InspectResultView job={active} onOpen={setOpen} onRename={rename} />
+                  </>
+                )}
                 {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} onRename={rename} onError={setError} />}
                 {feature === "watercolour" && <WatercolourResultView job={active} onOpen={setOpen} onError={setError} onRename={rename} />}
               </>

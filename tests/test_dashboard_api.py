@@ -277,6 +277,46 @@ def test_open_path_rejects_non_artifact_suffix(tmp_path):
     assert "Not an openable artifact" in res.json()["detail"]
 
 
+def test_open_and_reveal_reject_foreign_origin(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    monkeypatch.setattr(app_mod.subprocess, "run", lambda argv, **kw: None)
+    client = TestClient(app)
+    headers = {"Origin": "https://evil.example.com"}
+    res_open = client.post("/api/open", data={"path": str(target)}, headers=headers)
+    assert res_open.status_code == 403
+    res_reveal = client.post("/api/reveal", data={"path": str(target)}, headers=headers)
+    assert res_reveal.status_code == 403
+
+
+@pytest.mark.parametrize("origin", [None, "http://localhost:5173", "http://127.0.0.1:5173"])
+def test_open_and_reveal_allow_local_or_missing_origin(tmp_path, monkeypatch, origin):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    monkeypatch.setattr(app_mod.subprocess, "run", lambda argv, **kw: None)
+    client = TestClient(app)
+    headers = {"Origin": origin} if origin else {}
+    res_open = client.post("/api/open", data={"path": str(target)}, headers=headers)
+    assert res_open.status_code == 200
+    res_reveal = client.post("/api/reveal", data={"path": str(target)}, headers=headers)
+    assert res_reveal.status_code == 200
+
+
+def test_open_path_rejects_key_symlink_to_app_bundle(tmp_path):
+    client = TestClient(app)
+    app_bundle = tmp_path / "Applications" / "Foo.app"
+    app_bundle.mkdir(parents=True)
+    evil = tmp_path / "evil.key"
+    evil.symlink_to(app_bundle)
+    res = client.post("/api/open", data={"path": str(evil)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
 def test_resize_requires_template(tmp_path):
     client = TestClient(app)
     wall = tmp_path / "wall.key"
