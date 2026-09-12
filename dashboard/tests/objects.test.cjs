@@ -13,7 +13,19 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { defaultLandmarkSize, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
+const { defaultLandmarkSize, defaultObjectSize, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
+
+test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and the landmark default", () => {
+  assert.equal(defaultObjectSize("dot"), 28);
+  assert.equal(defaultObjectSize("dropPin"), 64);
+  assert.equal(defaultObjectSize("landmark"), 120);
+});
+
+test("effectiveObjectSize falls back to the per-kind default when size is missing", () => {
+  assert.equal(effectiveObjectSize({ kind: "dot" }, 6), 28);
+  assert.equal(effectiveObjectSize({ kind: "dropPin" }, 6), 64);
+  assert.equal(effectiveObjectSize({ kind: "landmark" }, 6), 120);
+});
 
 test("defaultLandmarkSize floors tiny assets at 240", () => {
   assert.equal(defaultLandmarkSize(10), 240);

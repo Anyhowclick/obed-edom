@@ -2,7 +2,7 @@ import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
-import { iconSizeStops } from "./objects";
+import { defaultObjectSize, zoomScaledStops } from "./objects";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -193,7 +193,7 @@ export function churchesGeo(
         assetWidth: church.assetWidth || 1,
         assetRenderWidth: landmarkRenderWidths.get(`landmark-${church.assetId}-${church.assetVersion || "v1"}`) || church.assetWidth || 1,
         assetHeight: church.assetHeight || 1,
-        size: church.size || 120,
+        size: church.size || defaultObjectSize(church.kind),
         opacity: church.opacity ?? 1,
         sel: church.id === selectedPinId,
         objectScale,
@@ -238,6 +238,9 @@ function dropPinImageId(color: string): string {
   }
   return `church-drop-${hash >>> 0}`;
 }
+
+/** Head diameter (px) of the 48x60 @2x `dropPinImage`, measured from its `arc(24, 22, 7, ...)` circle. */
+const DROP_PIN_HEAD_PX = 17;
 
 function dropPinImage(color: string): ImageData {
   const canvas = document.createElement("canvas");
@@ -314,11 +317,12 @@ export async function addOverlays(
       source: "churches",
       filter: ["==", ["get", "kind"], "dot"],
       paint: {
-        "circle-radius": ["*", 14, ["get", "objectScale"]],
+        // MapLibre clamps circle-radius to 1024px; Keynote's EFFECTIVE_SIZE_MAX (20000) never binds in the preview.
+        "circle-radius": zoomScaledStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024),
         "circle-color": ["get", "color"],
         "circle-opacity": ["coalesce", ["get", "opacity"], 1],
         "circle-stroke-opacity": ["coalesce", ["get", "opacity"], 1],
-        "circle-stroke-width": ["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"]],
+        "circle-stroke-width": ["*", ["case", ["boolean", ["get", "sel"], false], 3, 1.5], ["get", "objectScale"], ["/", ["get", "size"], 28], zoomScaledStops(1)],
         "circle-stroke-color": "#FFFFFF",
       },
     });
@@ -332,7 +336,7 @@ export async function addOverlays(
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
-        "icon-size": iconSizeStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]),
+        "icon-size": zoomScaledStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]),
         "icon-rotation-alignment": "viewport",
         "icon-pitch-alignment": "viewport",
       },
@@ -348,7 +352,9 @@ export async function addOverlays(
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
-        "icon-size": ["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "objectScale"]],
+        // DROP_PIN_HEAD_PX (17) is the drop image's head diameter at pixelRatio 2 (see dropPinImage), so
+        // size/DROP_PIN_HEAD_PX brings icon-size to church.size px measured head-to-head, like Keynote's drop pin.
+        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]),
       },
       paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
     });

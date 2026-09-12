@@ -451,6 +451,72 @@ def test_landmark_scale_with_map_clamps_at_effective_size_max(tmp_path: Path):
     assert landmark["w"] == 20000
 
 
+def _dot_church(**extra) -> dict:
+    row = {"id": "dot", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "size": 100}
+    row.update(extra)
+    return row
+
+
+def _drop_pin_church(**extra) -> dict:
+    row = {"id": "drop", "name": "Drop", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#c44a42", "size": 100}
+    row.update(extra)
+    return row
+
+
+def test_dot_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    oval = next(item for item in items if item.get("shape") == "oval")
+    assert oval["w"] == 200
+
+
+def test_dot_scale_with_map_zoom_out_halves_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 4)
+    slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    oval = next(item for item in items if item.get("shape") == "oval")
+    assert oval["w"] == 50
+
+
+def test_dot_scale_with_map_off_is_unchanged(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_dot_church(sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    oval = next(item for item in items if item.get("shape") == "oval")
+    assert oval["w"] == 100
+
+
+def test_drop_pin_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    head = next(item for item in items if item.get("shape") == "oval" and item["w"] > 20)
+    assert head["w"] == 200
+
+
+def test_drop_pin_scale_with_map_zoom_out_halves_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 4)
+    slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    head = next(item for item in items if item.get("shape") == "oval" and item["w"] > 20)
+    assert head["w"] == 50
+
+
+def test_drop_pin_scale_with_map_off_is_unchanged(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_drop_pin_church(sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    head = next(item for item in items if item.get("shape") == "oval" and item["w"] > 20)
+    assert head["w"] == 100
+
+
 def test_landmark_sub_one_px_is_dropped_but_others_remain(tmp_path: Path):
     asset_root = tmp_path / "assets"
     _dummy_png(asset_root / "asset1.png")

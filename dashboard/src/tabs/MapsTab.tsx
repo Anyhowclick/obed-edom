@@ -48,7 +48,7 @@ import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
-import { zoomSizeFactor } from "../maps/objects";
+import { defaultObjectSize, zoomSizeFactor } from "../maps/objects";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
@@ -1072,8 +1072,13 @@ export function MapsTab() {
     const targets = toAllSlides ? new Set(pasteTargets) : new Set([active?.id]);
     const slides = doc.slides.map((slide) => {
       if (!targets.has(slide.id)) return slide;
+      const targetView = activeAudience === "cg" && slide.cg ? slide.cg : slide;
+      const targetZoom = targetView.camera.zoom;
       const copies: MapsChurch[] = [];
-      for (const church of objectClipboard) copies.push({ ...church, id: nextPinId([...slide.churches, ...copies]) });
+      for (const church of objectClipboard) {
+        const rebased = church.scaleWithMap ? { ...church, sizeZoom: targetZoom } : church;
+        copies.push({ ...rebased, id: nextPinId([...slide.churches, ...copies]) });
+      }
       if (activeAudience === "cg" && slide.cg) return { ...slide, cg: { ...slide.cg, churches: [...slide.cg.churches, ...copies] } };
       return { ...slide, churches: [...slide.churches, ...copies] };
     });
@@ -2307,6 +2312,9 @@ export function MapsTab() {
                     lon,
                     kind: "dropPin",
                     color: "#c44a42",
+                    size: defaultObjectSize("dropPin"),
+                    scaleWithMap: true,
+                    sizeZoom: activeView.camera.zoom,
                   };
                   updateActive({ churches: [...activeView.churches, church] });
                   openPin(church.id);
@@ -2414,11 +2422,12 @@ export function MapsTab() {
                       onChange={(event) => {
                         const kind = event.target.value as MapsPinKind;
                         if (kind === "landmark" && !pin.assetId) return;
+                        const zoom = activeView?.camera.zoom ?? 0;
                         const churches = (activeView?.churches || []).map((c) =>
                           c.id === pin.id
                             ? kind === "landmark"
-                              ? { ...c, kind }
-                              : { ...c, kind, scaleWithMap: undefined, sizeZoom: undefined, reveal: undefined }
+                              ? { ...c, kind, sizeZoom: c.sizeZoom ?? zoom }
+                              : { ...c, kind, sizeZoom: c.sizeZoom ?? zoom, reveal: undefined }
                             : c
                         );
                         updateActive({ churches, ...revealMovieGuard(churches) });
@@ -2431,29 +2440,30 @@ export function MapsTab() {
                       )}
                     </select>
                   </label>
-                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || 120} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
+                  <label>Size <input type="range" min="24" max="4000" step="10" value={pin.size || defaultObjectSize(pin.kind)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /><input type="number" min="24" max="4000" value={pin.size || defaultObjectSize(pin.kind)} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, size: Number(event.target.value) } : c) })} /></label>
                   <label>Opacity <input type="range" min="0" max="1" step="0.05" value={pin.opacity ?? 1} disabled={locked} onChange={(event) => updateActive({ churches: (activeView?.churches || []).map((c) => c.id === pin.id ? { ...c, opacity: Number(event.target.value) } : c) })} /></label>
+                  <label className="maps-check">
+                    <input
+                      type="checkbox"
+                      checked={!!pin.scaleWithMap}
+                      disabled={locked}
+                      onChange={(event) => {
+                        const zoom = activeView?.camera.zoom ?? 0;
+                        updateActive({
+                          churches: (activeView?.churches || []).map((c) => {
+                            if (c.id !== pin.id) return c;
+                            const defaultSize = defaultObjectSize(c.kind);
+                            if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
+                            const size = c.sizeZoom != null ? (c.size || defaultSize) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || defaultSize;
+                            return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
+                          }),
+                        });
+                      }}
+                    />{" "}
+                    Scale with map
+                  </label>
                   {pin.kind === "landmark" && (
                     <>
-                      <label className="maps-check">
-                        <input
-                          type="checkbox"
-                          checked={!!pin.scaleWithMap}
-                          disabled={locked}
-                          onChange={(event) => {
-                            const zoom = activeView?.camera.zoom ?? 0;
-                            updateActive({
-                              churches: (activeView?.churches || []).map((c) => {
-                                if (c.id !== pin.id) return c;
-                                if (event.target.checked) return { ...c, scaleWithMap: true, sizeZoom: zoom };
-                                const size = c.sizeZoom != null ? (c.size || 120) * zoomSizeFactor(c.sizeZoom, zoom) : c.size || 120;
-                                return { ...c, scaleWithMap: undefined, size: Math.round(Math.max(24, Math.min(4000, size))), sizeZoom: undefined };
-                              }),
-                            });
-                          }}
-                        />{" "}
-                        Scale with map
-                      </label>
                       <label className="maps-check">
                         <input
                           type="checkbox"

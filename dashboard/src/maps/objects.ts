@@ -10,23 +10,43 @@ export function zoomSizeFactor(sizeZoom: number, authoredZoom: number): number {
   return Math.pow(2, authoredZoom - sizeZoom);
 }
 
+/** Default authored px per object kind when a church carries no `size`. */
+export function defaultObjectSize(kind: string): number {
+  if (kind === "dot") return 28;
+  if (kind === "dropPin") return 64;
+  return 120;
+}
+
 /** Authored px for `church` at `authoredZoom`, honouring "scale with map" when set. */
-export function effectiveObjectSize(church: { size?: number; scaleWithMap?: boolean; sizeZoom?: number }, authoredZoom: number): number {
-  const size = church.size ?? 120;
+export function effectiveObjectSize(church: { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }, authoredZoom: number): number {
+  const size = church.size ?? defaultObjectSize(church.kind || "landmark");
   if (!church.scaleWithMap || church.sizeZoom == null) return size;
   return size * zoomSizeFactor(church.sizeZoom, authoredZoom);
 }
 
 /**
- * `icon-size` stops for a top-level `["zoom"]` interpolate. `base` is the current
- * (non-scaling) icon-size expression; the stops fold in the geometric zoom growth for
+ * `size`-like stops for a top-level `["zoom"]` interpolate. `base` is the current
+ * (non-scaling) size expression; the stops fold in the geometric zoom growth for
  * features with `scaleWithMap` via `sizeZoomRef` (see overlays.ts `churchesGeo`).
  */
-export function iconSizeStops(base: unknown): ExpressionSpecification {
+export function zoomScaledStops(base: unknown, max?: number): ExpressionSpecification {
   const swm = ["boolean", ["get", "scaleWithMap"], false];
-  const stopAt = (z: number): ExpressionSpecification => ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base] as unknown as ExpressionSpecification;
-  return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)];
+  const stopAt = (z: number): ExpressionSpecification => {
+    const value = ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
+    return (max == null ? value : ["min", max, value]) as unknown as ExpressionSpecification;
+  };
+  // A pair of interpolate stops reproduces an exact 2^z curve between them (algebraically, base-2
+  // interpolation of two true samples of A*2^z recovers A*2^z everywhere in between) but NOT when a
+  // stop is min()-clamped, so a clamped max needs one stop per integer zoom: any segment whose two
+  // endpoints are both below the clamp stays exact, and a segment past the clamp is flat at max.
+  if (max == null) return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)];
+  const stops: unknown[] = ["interpolate", ["exponential", 2], ["zoom"]];
+  for (let z = 0; z <= 22; z++) stops.push(z, stopAt(z));
+  return stops as unknown as ExpressionSpecification;
 }
+
+/** @deprecated alias for `zoomScaledStops`, kept for existing icon-size callers/tests. */
+export const iconSizeStops = zoomScaledStops;
 
 export type ObjectCorner = "nw" | "ne" | "sw" | "se";
 

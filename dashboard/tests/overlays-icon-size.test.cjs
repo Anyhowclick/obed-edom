@@ -82,3 +82,49 @@ test("churchesGeo folds sizeZoom and log2(objectScale) into sizeZoomRef", () => 
   assert.equal(geo.features[0].properties.sizeZoomRef, 5 + 2);
   assert.equal(geo.features[0].properties.scaleWithMap, true);
 });
+
+test("churches-dots circle-radius is exactly geometric (base 2) for a scaleWithMap dot and validates with the style spec", () => {
+  const expr = iconSizeStops(["*", 0.5, ["get", "size"], ["get", "objectScale"]], 1024);
+  const parsed = createExpression(expr, { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  const evaluate = (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
+  const size = 28;
+  const sizeZoomRef = 8;
+  assert.equal(evaluate(8, { size, objectScale: 1, scaleWithMap: true, sizeZoomRef }), 0.5 * size);
+  assert.equal(evaluate(11, { size, objectScale: 1, scaleWithMap: true, sizeZoomRef }), 0.5 * size * 8);
+  assert.equal(evaluate(5, { size, objectScale: 1, scaleWithMap: true, sizeZoomRef }), 0.5 * size * 0.125);
+  assert.equal(evaluate(11, { size, objectScale: 1, scaleWithMap: false, sizeZoomRef }), 0.5 * size);
+  // Past the clamp threshold (0.5*size*2^(z-ref) > 1024) the radius flattens at 1024.
+  assert.equal(evaluate(20, { size, objectScale: 1, scaleWithMap: true, sizeZoomRef }), 1024);
+
+  const style = {
+    version: 8,
+    name: "x",
+    sources: { src: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
+    layers: [{ id: "l", type: "circle", source: "src", paint: { "circle-radius": expr } }],
+  };
+  assert.deepEqual(validateStyleMin(style), []);
+});
+
+test("churches-drops icon-size scales geometrically off the drop-pin head px and validates with the style spec", () => {
+  const DROP_PIN_HEAD_PX = 17;
+  const expr = iconSizeStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]);
+  const parsed = createExpression(expr, { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  const evaluate = (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
+  const size = 64;
+  const sizeZoomRef = 8;
+  const base = size / DROP_PIN_HEAD_PX;
+  assert.equal(evaluate(8, { size, objectScale: 1, sel: false, scaleWithMap: true, sizeZoomRef }), base);
+  assert.equal(evaluate(9, { size, objectScale: 1, sel: false, scaleWithMap: true, sizeZoomRef }), base * 2);
+  assert.equal(evaluate(8, { size, objectScale: 1, sel: true, scaleWithMap: true, sizeZoomRef }), base * 1.08);
+  assert.equal(evaluate(9, { size, objectScale: 1, sel: false, scaleWithMap: false, sizeZoomRef }), base);
+
+  const style = {
+    version: 8,
+    name: "x",
+    sources: { src: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
+    layers: [{ id: "l", type: "symbol", source: "src", layout: { "icon-image": "x", "icon-size": expr } }],
+  };
+  assert.deepEqual(validateStyleMin(style), []);
+});
