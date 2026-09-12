@@ -997,7 +997,7 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
 
     t13 = next(iter(plan.run_sizes[13][("text", 1)]))[2] / 70.0
-    assert t13 == pytest.approx(0.95, abs=0.01)
+    assert t13 == pytest.approx(0.91, abs=0.01)
 
     t17 = next(iter(plan.run_sizes[17][("text", 1)]))[2] / 70.0
     assert t17 == pytest.approx(0.74, abs=0.01)
@@ -1055,25 +1055,37 @@ def test_short_row_rects_regression_moves_badge_out_of_band():
     assert tight[("shape", 0)].y == pytest.approx(band_top - 1.0, abs=1e-6)
 
 
-def test_gw13_17_28_forced_split_at_floor_66_leaves_gw13_unsplit():
-    # Acceptance table: forcing --min-text-pt 66 across GW 13/17/28 must split only
+def test_gw17_28_forced_split_at_floor_66_leaves_gw28_unsplit():
+    # Acceptance table: forcing --min-text-pt 66 across GW 17/28 must split only
     # GW 17 (its two-box stack can't clear the floor at any single t), assembling to
-    # 4 slides total, not refuse GW 13 or GW 28 (their single boxes clear the floor
-    # unsplit).
+    # 3 slides total, not refuse GW 28 (its single box clears the floor unsplit).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
-    decisions = {n: SlideDecision(n, "in_deck") for n in (13, 17, 28)}
+    decisions = {n: SlideDecision(n, "in_deck") for n in (17, 28)}
     plan = plan_assembly(
-        payload, [by_number[13], by_number[17], by_number[28]], decisions=decisions,
+        payload, [by_number[17], by_number[28]], decisions=decisions,
         band=BAND, clips={}, runs=runs, min_text_pt=66.0,
     )
-    assert plan.kept == (13, 17, 28)
-    assert 13 not in plan.splits
+    assert plan.kept == (17, 28)
     assert 28 not in plan.splits
     assert plan.parts.get(17) == 2
-    assert sum(plan.parts.get(n, 1) for n in plan.kept) == 4
+    assert sum(plan.parts.get(n, 1) for n in plan.kept) == 3
+
+
+def test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box():
+    # GW 13's own natural fit dropped from t=0.95 to t=0.91 once the stack budget
+    # correctly charges the badge gap once, not zero times (finding 1) -- 0.91 * 70
+    # is below the 66pt floor, and a single box can't split, so this now refuses
+    # rather than assembling unsplit.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {13: SlideDecision(13, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
+        plan_assembly(payload, [by_number[13]], decisions=decisions, band=BAND, clips={}, runs=runs, min_text_pt=66.0)
 
 
 def test_gw13_stacked_text_does_not_overlap_badge():
@@ -3742,6 +3754,39 @@ def test_verify_builds_merges_split_parts(monkeypatch):
     assert len(builds["out_rekeyed"][17]["builds"]) == 2
     assert builds["tolerated_missing"] == []
     assert builds["report"]["surplus"] == []
+
+
+def test_verify_builds_sums_two_long_boxes_sharing_an_identity_key(monkeypatch):
+    # Two split boxes with identical text share an (effect, animationType, identity)
+    # key -- each part's own long box must still be summed, not merged to the common-key
+    # max meant for a short item repeated across parts, or this spuriously refuses a
+    # missing build.
+    from obed_edom import iwa_builds
+
+    shared = _dissolve_build(1, ("text", "shared verse"))
+    src_builds = {17: {"slideId": "s", "builds": [shared, shared], "transition": None}}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [_dissolve_build(0, ("text", "shared verse"))], "transition": None},
+        3: {"slideId": "o2", "builds": [_dissolve_build(0, ("text", "shared verse"))], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}, stacked_ids=frozenset({("text", 0)})),
+            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}, stacked_ids=frozenset({("text", 0)})),
+        )},
+    )
+    warnings: list[str] = []
+    builds = dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+    assert len(builds["out_rekeyed"][17]["builds"]) == 2
+    assert builds["report"]["surplus"] == []
+    assert builds["report"]["missing"] == []
 
 
 def test_verify_builds_refuses_a_long_box_build_dropped_from_one_part(monkeypatch):

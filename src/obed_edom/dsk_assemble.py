@@ -103,11 +103,13 @@ class SplitPart:
     run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = field(default_factory=dict)
     stacked_ids: frozenset[ItemId] = frozenset()
     autosize: frozenset[ItemId] = frozenset()
-    shrink_text_sizes: dict[ItemId, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class AssemblyPlan:
+    """For a slide in ``splits``, ``fits[number]`` holds only the short items' part-0
+    row rects -- each part's own long-box rect lives in ``splits[number][part].fits``."""
+
     kept: tuple[int, ...]
     ordinals: dict[int, int]
     fits: dict[int, dict[ItemId, Rect]]
@@ -166,11 +168,7 @@ def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: flo
     sits one gap above ``stack_top`` -- the badge moves with the verse, per the golden deck."""
     row_bottom = stack_top - _TEXT_STACK_GAP
     row_top = row_bottom - row_h
-    out = {iid: _dc_replace(rect, y=row_top + (row_h - rect.h)) for iid, rect in short_fit.items()}
-    for rect in out.values():
-        if rect.y + rect.h > row_bottom + 1e-6:
-            raise AssemblyRefusal("short row overlaps the long-box stack")
-    return out
+    return {iid: _dc_replace(rect, y=row_top + (row_h - rect.h)) for iid, rect in short_fit.items()}
 
 
 def _run_size_ranges(
@@ -387,7 +385,7 @@ def plan_assembly(
                 short_row_h = 0.0
                 if short_fit:
                     short_row_h = max(rect.h for rect in short_fit.values())
-                    budget = max(0.0, band.height - short_row_h)
+                    budget = max(0.0, band.height - short_row_h - _TEXT_STACK_GAP)
                     stack_band = _dc_replace(band, height=budget)
 
                 result = fit_text_stack(boxes, stack_band, min_text_pt)
@@ -450,13 +448,14 @@ def plan_assembly(
                                 run_sizes={box.item_id: part_ranges} if part_ranges is not None else {},
                                 stacked_ids=frozenset({box.item_id}),
                                 autosize=part_autosize,
-                                shrink_text_sizes={box.item_id: sizes1[box.item_id]},
                             )
                         )
                     parts[number] = len(part_list)
                     splits[number] = tuple(part_list)
                     for iid in long_ids:
                         fit.pop(iid, None)
+                    if short_fit:
+                        fit.update({iid: r for iid, r in part_list[0].fits.items() if iid in short_fit})
 
         if cls.category in ("movie", "mixed"):
             clip_path = clips.get(number)
@@ -1028,7 +1027,7 @@ def _slide_lines(
         run_sizes_here = split_part.run_sizes
         stacked_ids_here = split_part.stacked_ids
         autosize_ids = plan.autosize.get(number, frozenset()) | split_part.autosize
-        shrink_text_sizes = {**plan.shrink_text_sizes.get(number, {}), **split_part.shrink_text_sizes}
+        shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
     else:
         fit = plan.fits.get(number, {})
         deletes_here = plan.deletes.get(number, ())
@@ -1688,6 +1687,36 @@ def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> s
     return retained
 
 
+def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: AssemblyPlan, number: int) -> list[dict]:
+    """Each part's own long-box builds are always summed; a short item's build, repeated
+    on every part, is counted by max across parts common to it and summed otherwise."""
+    split_parts = plan.splits.get(number, ())
+    long_builds: list[dict] = []
+    short_counts: list[Counter] = []
+    short_reps: dict[tuple, dict] = {}
+    for ordinal, rec in ordinal_recs:
+        part = ordinal - plan.ordinals[number]
+        long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
+        counts: Counter = Counter()
+        for b in rec["builds"]:
+            if (b["kind"], b["kindIndex"]) == long_id:
+                long_builds.append(b)
+                continue
+            key = (b["effect"], b["animationType"], b["identity"])
+            counts[key] += 1
+            short_reps.setdefault(key, b)
+        short_counts.append(counts)
+    common_keys = set.intersection(*(set(c) for c in short_counts)) if short_counts else set()
+    merged_counts: Counter = Counter()
+    for key in common_keys:
+        merged_counts[key] = max(c[key] for c in short_counts)
+    for c in short_counts:
+        for key, n in c.items():
+            if key not in common_keys:
+                merged_counts[key] += n
+    return long_builds + [short_reps[key] for key, n in merged_counts.items() for _ in range(n)]
+
+
 def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: list[str]) -> dict:
     """Re-keys the output builds by inverse ordinal and multiset-compares against the
     kept source slides. Raises `AssemblyRefusal` on a surplus, on a missing build not
@@ -1713,15 +1742,16 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
         return builds
 
     inverse_ordinals = plan.ordinal_to_number or {ordinal: number for number, ordinal in plan.ordinals.items()}
-    number_recs: dict[int, list[dict]] = {}
+    number_recs: dict[int, list[tuple[int, dict]]] = {}
     for ordinal, rec in out.items():
         number = inverse_ordinals.get(ordinal)
         if number is None:
             continue
-        number_recs.setdefault(number, []).append(rec)
+        number_recs.setdefault(number, []).append((ordinal, rec))
 
     out_by_number: dict[int, dict] = {}
-    for number, recs in number_recs.items():
+    for number, ordinal_recs in number_recs.items():
+        recs = [rec for _ordinal, rec in ordinal_recs]
         transition = recs[0].get("transition")
         for rec in recs[1:]:
             if rec.get("transition") != transition:
@@ -1732,29 +1762,7 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
         if len(recs) == 1:
             merged_builds = list(recs[0]["builds"])
         else:
-            # A short item (badge/chapter-label) is repeated on every part of a split
-            # slide, so its build shows up once per part -- merge by count, not by first
-            # occurrence, so a source slide's own repeated identical build isn't lost:
-            # a key common to every part keeps the max per-part count (it is the same
-            # short item's build re-seen, not a new one), any other key sums.
-            per_part_counts = [
-                Counter((b["effect"], b["animationType"], b["identity"]) for b in rec["builds"])
-                for rec in recs
-            ]
-            common_keys = set.intersection(*(set(c) for c in per_part_counts)) if per_part_counts else set()
-            merged_counts: Counter = Counter()
-            for key in common_keys:
-                merged_counts[key] = max(c[key] for c in per_part_counts)
-            for c in per_part_counts:
-                for key, n in c.items():
-                    if key not in common_keys:
-                        merged_counts[key] += n
-            reps: dict[tuple, dict] = {}
-            for rec in recs:
-                for b in rec["builds"]:
-                    key = (b["effect"], b["animationType"], b["identity"])
-                    reps.setdefault(key, b)
-            merged_builds = [reps[key] for key, n in merged_counts.items() for _ in range(n)]
+            merged_builds = _merge_split_part_builds(ordinal_recs, plan, number)
         out_by_number[number] = {"slideId": recs[0]["slideId"], "builds": merged_builds, "transition": transition}
     src_by_number = {number: rec for number, rec in src.items() if number in plan.kept}
     builds["out_rekeyed"] = out_by_number

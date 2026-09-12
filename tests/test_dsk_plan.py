@@ -1082,8 +1082,11 @@ def _require_font(name):
 
 def test_wrapped_height_matches_golden_boxes():
     # F9's golden-box height model, exercised against every long text box of the actual
-    # golden deck (the DSK deck, not GW): predicted lines within a one-sided
-    # bound of the item's own laid-out height at its own (unscaled) size and width.
+    # golden deck (the DSK deck, not GW): predicted lines within a one-sided upper bound
+    # of the item's own laid-out height at its own (unscaled) size and width. Only the
+    # over-prediction direction is policed: `observed` is the item's frame height, an
+    # upper bound on the actual laid-out text, so under-prediction is not necessarily
+    # estimator error.
     # ArgentCF-Bold over-predicts by >2 lines (golden slide 33) -- a known predictor
     # limit on that font, xfailed by name rather than hidden by scoping the test down.
     _require_deck(DSK_DECK)
@@ -1110,7 +1113,7 @@ def test_wrapped_height_matches_golden_boxes():
             observed_lines = (item["h"] - 21.0) / (1.157 * size)
             predicted_lines = (predicted - 21.0) / (1.157 * size)
             checked += 1
-            if not (-2.0 - 1e-2 <= predicted_lines - observed_lines <= 1.0 + 1e-2):
+            if not (predicted_lines - observed_lines <= 1.0 + 1e-2):
                 failures.append((number, item_id, predicted_lines - observed_lines))
     assert checked >= 29
     assert not failures, failures
