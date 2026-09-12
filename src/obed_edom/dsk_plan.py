@@ -781,6 +781,7 @@ _TEXT_GAP_PT = 10.0
 _WRAP_OVERSAMPLE = 8
 _LINE_HEIGHT_FACTOR = 1.157
 _BOX_PADDING_PT = 21.0
+_TEXT_SAFETY_PT = 15.0
 
 
 def _norm_font_key(name: str) -> str:
@@ -878,7 +879,9 @@ def fit_text_stack(
     boxes: Sequence[TextBox], band: Band, min_text_pt: float, *, gap: float = _TEXT_GAP_PT
 ) -> tuple[float, dict[ItemId, float], dict[ItemId, float]] | None:
     """Largest ``t`` in ``(0, 1]`` fitting ``boxes`` stacked with ``gap`` into ``band``, or
-    ``None``. A 2+-box stack pays one line of wrap-margin against the budget; one box doesn't."""
+    ``None``. A fixed safety term against the estimator's own measured under-prediction
+    is charged for every box count; the live ``OVERFLOW`` read-back is the final authority
+    on wrap."""
     if not boxes:
         return None
     t = 1.00
@@ -892,9 +895,7 @@ def fit_text_stack(
             if h is None:
                 return None
             heights[box.item_id] = h
-        dominant = max(boxes, key=lambda b: sizes[b.item_id])
-        margin = _LINE_HEIGHT_FACTOR * sizes[dominant.item_id] if len(boxes) > 1 else 0.0
-        total = sum(heights.values()) + gap * (len(boxes) - 1) + margin
+        total = sum(heights.values()) + gap * (len(boxes) - 1) + _TEXT_SAFETY_PT
         if total <= band.height:
             return t, sizes, heights
         t = round(t - 0.01, 2)

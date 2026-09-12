@@ -987,10 +987,9 @@ def test_load_and_plan_against_gw_deck():
 
 
 def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
-    # MEDIUM 6: pin the actual shipped result (plan.text_sizes/run_sizes scale, and the
-    # stack budget itself) so finding 1's badge-fold-in-stack change has to be re-blessed
-    # by a future edit, unlike the old test which asserted a bare-band t no shipped path
-    # produces.
+    # Pin the actual shipped result (plan.text_sizes/run_sizes scale, and the stack
+    # budget itself) so the badge-fold-in-stack change has to be re-blessed by a future
+    # edit, unlike the old test which asserted a bare-band t no shipped path produces.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
@@ -998,10 +997,10 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
 
     t13 = next(iter(plan.run_sizes[13][("text", 1)]))[2] / 70.0
-    assert t13 == pytest.approx(1.0, abs=0.01)
+    assert t13 == pytest.approx(0.95, abs=0.01)
 
     t17 = next(iter(plan.run_sizes[17][("text", 1)]))[2] / 70.0
-    assert t17 == pytest.approx(0.72, abs=0.01)
+    assert t17 == pytest.approx(0.74, abs=0.01)
 
     badge13 = plan.fits[13][("shape", 0)]
     stack13 = [r for iid, r in plan.fits[13].items() if iid in plan.stacked_ids[13]]
@@ -1009,28 +1008,76 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     assert stack_top13 - (badge13.y + badge13.h) == pytest.approx(dsa._TEXT_STACK_GAP, abs=0.5)
 
 
-def test_gw13_17_21_forced_split_at_floor_66_leaves_gw13_unsplit():
-    # Acceptance table: forcing --min-text-pt 66 across GW 13/17/21 must split only
+def test_gw_text_slides_stay_within_band_top():
+    # Band-containment measured through the real placement path (_stacked_text_rects +
+    # _short_row_rects via plan_assembly), for every GW text slide -- the defect that
+    # put 11 of 21 slides out of band. Not an algebraic identity: this exercises the
+    # actual rects plan_assembly writes, so a regression in either placement function
+    # is caught here even if the budget math still looks right on paper.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    band_top = BAND.bottom - BAND.height
+    checked = 0
+    for number, cls in by_number.items():
+        if not cls.is_text:
+            continue
+        decisions = {number: SlideDecision(number, "in_deck")}
+        plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs)
+        fit = dict(plan.fits.get(number, {}))
+        for part in plan.splits.get(number, ()):
+            fit.update(part.fits)
+        if not fit:
+            continue
+        checked += 1
+        assert min(r.y for r in fit.values()) >= band_top - 1e-6, number
+    assert checked >= 20
+
+
+def test_short_row_rects_regression_moves_badge_out_of_band():
+    # Tight synthetic case: stack_top set exactly gap + row_h above band top 704, so a
+    # correctly gapped badge lands right on the band boundary. This pins the gap
+    # subtraction in _short_row_rects -- a regression that drops or changes it would
+    # move the badge off this boundary, out of the band.
+    band_top = 704.0
+    row_h = 50.0
+    stack_top = band_top + dsa._TEXT_STACK_GAP + row_h
+    short_fit = {("shape", 0): Rect(43.0, 0.0, 1849.0, row_h)}
+    out = dsa._short_row_rects(short_fit, row_h, stack_top)
+    badge = out[("shape", 0)]
+    assert badge.y == pytest.approx(band_top, abs=1e-6)
+
+    # One point less headroom above the stack moves the badge one point above the band
+    # top -- exactly what a dropped or shortened gap in _short_row_rects would do.
+    tight = dsa._short_row_rects(short_fit, row_h, stack_top - 1.0)
+    assert tight[("shape", 0)].y == pytest.approx(band_top - 1.0, abs=1e-6)
+
+
+def test_gw13_17_28_forced_split_at_floor_66_leaves_gw13_unsplit():
+    # Acceptance table: forcing --min-text-pt 66 across GW 13/17/28 must split only
     # GW 17 (its two-box stack can't clear the floor at any single t), assembling to
-    # 4 slides total, not refuse GW 13 (its single box clears the floor unsplit).
+    # 4 slides total, not refuse GW 13 or GW 28 (their single boxes clear the floor
+    # unsplit).
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
-    decisions = {n: SlideDecision(n, "in_deck") for n in (13, 17, 21)}
+    decisions = {n: SlideDecision(n, "in_deck") for n in (13, 17, 28)}
     plan = plan_assembly(
-        payload, [by_number[13], by_number[17], by_number[21]], decisions=decisions,
+        payload, [by_number[13], by_number[17], by_number[28]], decisions=decisions,
         band=BAND, clips={}, runs=runs, min_text_pt=66.0,
     )
-    assert plan.kept == (13, 17, 21)
+    assert plan.kept == (13, 17, 28)
     assert 13 not in plan.splits
-    assert 21 not in plan.splits
+    assert 28 not in plan.splits
     assert plan.parts.get(17) == 2
     assert sum(plan.parts.get(n, 1) for n in plan.kept) == 4
 
 
 def test_gw13_stacked_text_does_not_overlap_badge():
-    # HIGH 2: GW 13's chapter badge and its long verse box must not overlap once the
+    # GW 13's chapter badge and its long verse box must not overlap once the
     # verse is stacked -- the owner's reference slide for this bug.
     _require_gw_deck()
     payload, classes, runs = load_assembly_inputs(GW_DECK)
@@ -2804,7 +2851,7 @@ def test_staged_retained_ids_group_child_traversal_unaffected_by_deletion():
 
 
 def test_staged_retained_ids_reads_the_split_parts_own_fits_and_deletes():
-    # HIGH 5: a split slide's staged ranking must come from that part's own fits/deletes,
+    # A split slide's staged ranking must come from that part's own fits/deletes,
     # not the unsplit slide's -- otherwise part 1's staged indices are computed against
     # a fit set that still contains the other part's long box.
     plan = AssemblyPlan(
@@ -3455,7 +3502,7 @@ def test_text_slide_box_stretches_to_band():
 
 
 def test_stacked_mixed_run_box_preserves_run_size_ratios():
-    # HIGH 1: a stacked mixed-run box must scale each run by t, not flatten to one size.
+    # A stacked mixed-run box must scale each run by t, not flatten to one size.
     _require_font("AzoSans-Regular")
     text = _VERSE_1
     split_at = 20
@@ -3491,7 +3538,7 @@ def test_stacked_mixed_run_box_preserves_run_size_ratios():
 
 
 def test_stacked_mixed_run_box_keeps_run_ranges_under_text_fit_shrink():
-    # nit 7: shrink no longer flattens a stacked mixed-run box -- it writes the same
+    # Shrink no longer flattens a stacked mixed-run box -- it writes the same
     # per-run ranges (scaled by the fit factor) as warn mode, since flattening it was
     # the one path that contradicted "source gives style".
     _require_font("AzoSans-Regular")
@@ -3697,6 +3744,39 @@ def test_verify_builds_merges_split_parts(monkeypatch):
     assert builds["report"]["surplus"] == []
 
 
+def test_verify_builds_refuses_a_long_box_build_dropped_from_one_part(monkeypatch):
+    # A box deleted in one part but kept in the other must still show its build in the
+    # part that keeps it -- tolerating missing builds only for boxes deleted in every
+    # part must not paper over a genuinely lost build on a surviving box.
+    from obed_edom import iwa_builds
+
+    src_builds = {17: {
+        "slideId": "s",
+        "builds": [_dissolve_build(1, ("text", "part one")), _dissolve_build(2, ("text", "part two"))],
+        "transition": None,
+    }}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [_dissolve_build(0, ("text", "part one"))], "transition": None},
+        3: {"slideId": "o2", "builds": [], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}),
+        )},
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
 def test_verify_builds_refuses_surplus_across_parts(monkeypatch):
     from obed_edom import iwa_builds
 
@@ -3726,7 +3806,7 @@ def test_verify_builds_refuses_surplus_across_parts(monkeypatch):
 
 
 def test_verify_builds_tolerates_badge_build_repeated_on_every_part(monkeypatch):
-    # HIGH 4: a build on a short item (badge) repeated on every part must be counted
+    # A build on a short item (badge) repeated on every part must be counted
     # once against the single source build, not refused as surplus.
     from obed_edom import iwa_builds
 
@@ -3756,7 +3836,7 @@ def test_verify_builds_tolerates_badge_build_repeated_on_every_part(monkeypatch)
 
 
 def test_verify_builds_tolerates_badge_build_repeated_twice_on_every_part(monkeypatch):
-    # HIGH 2: a source slide carrying two identical builds on a repeated short item
+    # A source slide carrying two identical builds on a repeated short item
     # must merge to two, not collapse to one via first-occurrence dedupe -- that traded
     # a surplus refusal for a missing-build refusal.
     from obed_edom import iwa_builds

@@ -103,6 +103,7 @@ class SplitPart:
     run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = field(default_factory=dict)
     stacked_ids: frozenset[ItemId] = frozenset()
     autosize: frozenset[ItemId] = frozenset()
+    shrink_text_sizes: dict[ItemId, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -167,7 +168,8 @@ def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: flo
     row_top = row_bottom - row_h
     out = {iid: _dc_replace(rect, y=row_top + (row_h - rect.h)) for iid, rect in short_fit.items()}
     for rect in out.values():
-        assert rect.y + rect.h <= row_bottom + 1e-6, "short row overlaps the long-box stack"
+        if rect.y + rect.h > row_bottom + 1e-6:
+            raise AssemblyRefusal("short row overlaps the long-box stack")
     return out
 
 
@@ -176,7 +178,7 @@ def _run_size_ranges(
     warnings: list[str] | None = None,
 ) -> tuple[tuple[int, int, float], ...] | None:
     """Per-run 1-indexed character ranges ``(start, end, size * scale)`` from ``item['runs']``,
-    or ``None`` (caller keeps the flat write) for a uniform size or a gap in coverage (HIGH 5)."""
+    or ``None`` (caller keeps the flat write) for a uniform size or a gap in coverage."""
     runs = item.get("runs") or []
     full_len = len(item.get("text") or "")
     ranges: list[tuple[int, int, float]] = []
@@ -381,11 +383,6 @@ def plan_assembly(
             if boxes and len(boxes) == len(long_ids):
                 long_id_set = set(long_ids)
                 short_fit = {iid: rect for iid, rect in fit.items() if iid not in long_id_set}
-                # Fold the short row (badge/chapter-label) into the stack itself (HIGH 1):
-                # budget is band.height minus the short row's own scaled height, and the
-                # row is repositioned (with a gap) to sit directly above the long-box
-                # stack once it is placed -- never pinned to its own affine y, so the
-                # band top is left empty exactly as the golden deck lays it out.
                 stack_band = band
                 short_row_h = 0.0
                 if short_fit:
@@ -417,7 +414,7 @@ def plan_assembly(
                     )
                 elif len(boxes) < 2:
                     raise AssemblyRefusal(
-                        f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone"
+                        f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
                     )
                 else:
                     stacked_ids = set(long_ids)
@@ -426,7 +423,7 @@ def plan_assembly(
                         single = fit_text_stack([box], stack_band, min_text_pt)
                         if single is None:
                             raise AssemblyRefusal(
-                                f"slide {number} box {box.item_id[1]} does not fit the band even alone"
+                                f"slide {number} box {box.item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
                             )
                         t1, sizes1, heights1 = single
                         rect = _stacked_text_rects([box], heights1, stack_band)[box.item_id]
@@ -453,10 +450,13 @@ def plan_assembly(
                                 run_sizes={box.item_id: part_ranges} if part_ranges is not None else {},
                                 stacked_ids=frozenset({box.item_id}),
                                 autosize=part_autosize,
+                                shrink_text_sizes={box.item_id: sizes1[box.item_id]},
                             )
                         )
                     parts[number] = len(part_list)
                     splits[number] = tuple(part_list)
+                    for iid in long_ids:
+                        fit.pop(iid, None)
 
         if cls.category in ("movie", "mixed"):
             clip_path = clips.get(number)
@@ -508,9 +508,6 @@ def plan_assembly(
             slide_text_sizes[iid] = next(iter(distinct)) * scale
 
         slide_text_sizes.update(stacked_text_sizes)
-        # Every stacked box gets a shrink-mode entry, uniform or mixed-run alike (nit 7):
-        # a mixed-run box's is a flat fallback only, never written -- shrink mode instead
-        # writes the same per-run ranges as warn mode (see `_slide_lines`).
         slide_shrink_sizes.update(stacked_text_sizes)
         for iid, ranges in stacked_run_sizes.items():
             slide_shrink_sizes[iid] = max(size for _s, _e, size in ranges)
@@ -1031,6 +1028,7 @@ def _slide_lines(
         run_sizes_here = split_part.run_sizes
         stacked_ids_here = split_part.stacked_ids
         autosize_ids = plan.autosize.get(number, frozenset()) | split_part.autosize
+        shrink_text_sizes = {**plan.shrink_text_sizes.get(number, {}), **split_part.shrink_text_sizes}
     else:
         fit = plan.fits.get(number, {})
         deletes_here = plan.deletes.get(number, ())
@@ -1038,7 +1036,7 @@ def _slide_lines(
         run_sizes_here = plan.run_sizes.get(number, {})
         stacked_ids_here = plan.stacked_ids.get(number, frozenset())
         autosize_ids = plan.autosize.get(number, frozenset())
-    shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
+        shrink_text_sizes = plan.shrink_text_sizes.get(number, {})
     known_children = plan.group_children.get(number, {})
     group_text_sizes = plan.group_text_sizes.get(number, {})
     group_origin = plan.group_origin.get(number, {})
@@ -1082,8 +1080,6 @@ def _slide_lines(
                 f"          set size of object text of theObj to {_as_num(shrink_text_sizes[item_id])}"
             )
         lines += _locked_write_block(number, addr, body)
-        # A stacked/split box's size is a predictor estimate, never authoritative (HIGH 3):
-        # always read back its live height, even though it did get an explicit size write.
         if kind == "text" and (item_id not in text_sizes or item_id in stacked_ids_here):
             overflow_ordinal = ordinal if split_parts is not None else None
             lines += _text_overflow_lines(number, kind_index, addr, rect.h, ordinal=overflow_ordinal)
@@ -1667,7 +1663,7 @@ def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> s
     ids -- with any `plan.deletes[number]` id excluded first, deleted or not, so a deleted
     movie never occupies a staged index -- are ranked by source kindIndex to get the new
     (staged) index; an inserted clip becomes the last staged movie. A split slide reads
-    that ``part``'s own fits/deletes, not the unsplit slide's (HIGH 5)."""
+    that ``part``'s own fits/deletes, not the unsplit slide's."""
     split_parts = plan.splits.get(number)
     if split_parts is not None:
         split_part = split_parts[part]
@@ -1738,9 +1734,9 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
         else:
             # A short item (badge/chapter-label) is repeated on every part of a split
             # slide, so its build shows up once per part -- merge by count, not by first
-            # occurrence, so a source slide's own repeated identical build isn't lost
-            # (HIGH 2): a key common to every part keeps the max per-part count (it is
-            # the same short item's build re-seen, not a new one), any other key sums.
+            # occurrence, so a source slide's own repeated identical build isn't lost:
+            # a key common to every part keeps the max per-part count (it is the same
+            # short item's build re-seen, not a new one), any other key sums.
             per_part_counts = [
                 Counter((b["effect"], b["animationType"], b["identity"]) for b in rec["builds"])
                 for rec in recs
@@ -1813,8 +1809,9 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
     real_missing: list[dict] = []
     for m in report["missing"]:
         deleted_ids = set(plan.deletes.get(m["slide"], ()))
-        for split_part in plan.splits.get(m["slide"], ()):
-            deleted_ids |= set(split_part.deletes)
+        parts = plan.splits.get(m["slide"], ())
+        if parts:
+            deleted_ids |= set.intersection(*(set(p.deletes) for p in parts))
         key = (m["effect"], m["animationType"], m["identity"])
         candidates = src_identity_ids.get(m["slide"], {}).get(key, [])
         deleted_count = sum(1 for c in candidates if c in deleted_ids)
