@@ -439,6 +439,26 @@ For remap, use the **two-tier geometry read**:
 PPTX export is a useful complementary geometry source, especially for autosize
 text width, but lines and groups still need their specialised offline handling.
 
+A cached `reader: jxa` wall payload reports a JXA-live union frame, not the
+archive-composed frame the planner plans against; under `OBED_OFFLINE_READ=on` such
+a cache entry is now refused and forces an offline re-read, served as-is only if
+that re-read genuinely fails. `groupChildrenUnavailable` (slide flag, set whenever
+`attach_group_children` was skipped) and `groupAutosize` (reader-independent,
+derived from the IWA archive by `attach_group_autosize`) together gate whether a
+group's size is safe to write: on a `groupChildrenUnavailable` slide, an
+autosize-marked group refuses its size write (`sizeRefused=group-children-unavailable`,
+or `group-collapse-guard` on an unmarked ≥3× shrink) rather than take Keynote's
+aspect-locked group write, which scales about the group's LIVE frame and can
+collapse a word-wrapped badge ~12× (Gold slide 2, root-caused 2026-09-12 — see
+`badge-width-collapse-gold-slide-2`). Codex r2: a slide whose two-tier read fell back to
+per-slide live JXA (`_merge_legacy_slides`) is also stamped `groupChildrenUnavailable` and
+skipped by `attach_group_children`; a fresh two-tier read stamps a top-level
+`offlineFallbackTagged` cache marker, and `OBED_OFFLINE_READ=on` re-reads offline once
+(`stale_mixed`) if a cached `reader: offline` payload lacks it — no `INSPECT_VERSION` bump,
+so banked JXA/kind-count fixtures need no re-stamp. A spec with no `w`/`h` means position-only:
+every consumer must key off presence (`"w" in spec`), never infer it from role or
+kind — that crashed `framing.planned_rects` once already.
+
 Round geometry to whole points where matching Keynote values; sub-pixel noise can
 change affine fitting.
 
