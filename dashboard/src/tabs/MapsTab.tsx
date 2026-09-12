@@ -1150,6 +1150,25 @@ export function MapsTab() {
     if (!previewAbort.current && previewRun.current === run) await mapRef.current?.waitUntilIdle(view.style);
   }
 
+  async function crossfadeTo(toView: MapsSlide, duration: number, run: number) {
+    const blob = await mapRef.current?.capturePreviewBlob();
+    if (!blob || previewAbort.current || previewRun.current !== run) return;
+    clearDissolveFrame();
+    const url = URL.createObjectURL(blob);
+    dissolveUrl.current = url;
+    try {
+      setDissolveFrame({ url, fading: false, duration });
+      await applyPreviewView(toView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (previewAbort.current || previewRun.current !== run) return;
+      setDissolveFrame({ url, fading: true, duration });
+      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, duration * 1000)));
+    } finally {
+      clearDissolveFrame(url);
+    }
+  }
+
   async function previewLink(link: MapsLink, from: MapsSlide, to: MapsSlide) {
     const run = previewRun.current;
     const audience = activeAudienceRef.current;
@@ -1160,18 +1179,7 @@ export function MapsTab() {
       return;
     }
     if (link.kind === "dissolve") {
-      const blob = await mapRef.current?.capturePreviewBlob();
-      if (!blob || previewAbort.current || previewRun.current !== run) return;
-      clearDissolveFrame();
-      const url = URL.createObjectURL(blob);
-      dissolveUrl.current = url;
-      setDissolveFrame({ url, fading: false, duration: link.duration });
-      await applyPreviewView(toView, run);
-      if (previewAbort.current || previewRun.current !== run) return;
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      setDissolveFrame({ url, fading: true, duration: link.duration });
-      await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, link.duration * 1000)));
-      clearDissolveFrame(url);
+      await crossfadeTo(toView, link.duration, run);
       return;
     }
     if (link.kind === "movie") {
@@ -1204,19 +1212,7 @@ export function MapsTab() {
       if (isolateDissolveNeeded(fromView, toView)) {
         await applyPreviewView(plainIsolateTarget(toView), run);
         if (previewAbort.current || previewRun.current !== run) return;
-        const duration = link.duration || 1;
-        const blob = await mapRef.current?.capturePreviewBlob();
-        if (!blob || previewAbort.current || previewRun.current !== run) return;
-        clearDissolveFrame();
-        const url = URL.createObjectURL(blob);
-        dissolveUrl.current = url;
-        setDissolveFrame({ url, fading: false, duration });
-        await applyPreviewView(toView, run);
-        if (previewAbort.current || previewRun.current !== run) return;
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        setDissolveFrame({ url, fading: true, duration });
-        await new Promise((resolve) => window.setTimeout(resolve, Math.max(0, duration * 1000)));
-        clearDissolveFrame(url);
+        await crossfadeTo(toView, link.duration || 1, run);
       } else {
         await applyPreviewView(toView, run);
       }
