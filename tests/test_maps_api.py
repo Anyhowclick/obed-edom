@@ -3315,3 +3315,98 @@ def test_rename_maps_reserves_target_name_across_concurrent_rename(monkeypatch):
     assert outcome["response"].status_code == 200, outcome["response"].text
     assert outcome["response"].json()["name"] == target
     assert RUNNER.get(job_b["id"]).name != target
+
+
+def test_rename_maps_reserves_source_name_across_concurrent_rename(monkeypatch):
+    from obed_edom.web import maps
+
+    job_a = _seed()
+    job_b = _seed()
+    target = f"shared-name-{job_a['id']}"
+    old_name_a = job_a["name"]
+
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+    old_dir_a = Path(job_a["result"]["outputDir"])
+
+    def hooked_replace(src, dst):
+        if str(src) == str(old_dir_a):
+            started.set()
+            release.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    outcome = {}
+
+    def do_rename_a():
+        outcome["response"] = client.patch(f"/api/jobs/{job_a['id']}/name", json={"name": target})
+
+    thread = threading.Thread(target=do_rename_a)
+    thread.start()
+    assert started.wait(2)
+
+    # job_a's old name is briefly absent from `_jobs` (its in-memory name is
+    # already the target), but the transaction must have reserved it too.
+    dup = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
+    assert dup.status_code == 409
+
+    release.set()
+    thread.join(5)
+    monkeypatch.undo()
+
+    assert outcome["response"].status_code == 200, outcome["response"].text
+    assert outcome["response"].json()["name"] == target
+    assert RUNNER.get(job_b["id"]).name != old_name_a
+
+
+def test_rename_maps_job_serializes_with_concurrent_delete(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    target = f"quiet-jordan-{job['id']}"
+
+    started = threading.Event()
+    release = threading.Event()
+    real_replace = os.replace
+
+    def hooked_replace(src, dst):
+        if str(src) == str(old_output_dir):
+            started.set()
+            release.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    rename_outcome = {}
+
+    def do_rename():
+        rename_outcome["response"] = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+
+    thread = threading.Thread(target=do_rename)
+    thread.start()
+    assert started.wait(2)
+
+    delete_outcome = {}
+
+    def do_delete():
+        delete_outcome["response"] = client.delete(f"/api/jobs/{job['id']}")
+
+    delete_thread = threading.Thread(target=do_delete)
+    delete_thread.start()
+    time.sleep(0.2)
+    assert delete_thread.is_alive(), "delete must block behind the rename's held job lock"
+
+    release.set()
+    thread.join(5)
+    delete_thread.join(5)
+    monkeypatch.undo()
+
+    assert rename_outcome["response"].status_code == 200, rename_outcome["response"].text
+    new_output_dir = Path(rename_outcome["response"].json()["result"]["outputDir"])
+    assert delete_outcome["response"].status_code == 200, delete_outcome["response"].text
+    assert RUNNER.get(job["id"]) is None
+    assert not new_output_dir.exists()
+    assert not old_output_dir.exists()

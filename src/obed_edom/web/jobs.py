@@ -85,7 +85,7 @@ class JobRunner:
         self._queue: deque[str] = deque()
         self._running: set[str] = set()
         self._lock = threading.Lock()
-        self._job_locks: dict[str, threading.Lock] = {}
+        self._job_locks: dict[str, threading.RLock] = {}
         self._deleted_ids: set[str] = set()
         self._deleted_names: set[str] = set()
         self._reserved_names: set[str] = set()
@@ -193,12 +193,18 @@ class JobRunner:
         data["artifacts"] = artifact_status(job, self._output_root)
         return data
 
-    def _job_lock(self, job_id: str) -> threading.Lock:
+    def _job_lock(self, job_id: str) -> threading.RLock:
         with self._lock:
             lock = self._job_locks.get(job_id)
             if lock is None:
-                lock = self._job_locks[job_id] = threading.Lock()
+                lock = self._job_locks[job_id] = threading.RLock()
             return lock
+
+    def job_lock(self, job_id: str) -> threading.RLock:
+        """Public accessor so a feature's own commit transaction (e.g. maps' `rename_job_folder`)
+        can hold this job's lock across `set_name`/`update_result` calls that re-acquire it;
+        the lock is an `RLock` so those inner acquisitions do not deadlock."""
+        return self._job_lock(job_id)
 
     def save(self, job: Job) -> None:
         if job.status not in {"done", "error"}:
@@ -316,7 +322,13 @@ class JobRunner:
             name = normalise_job_name(raw_name)
             if name == job.name.lower():
                 return job
+            old_name = job.name
             self.reserve_name(name, exclude_job_id=job_id)
+            try:
+                self.reserve_name(old_name, exclude_job_id=job_id)
+            except Exception:
+                self.release_name(name)
+                raise
             try:
                 result = dict(job.result or {})
                 old_dir = self._id_derived_dir(result)
@@ -342,6 +354,7 @@ class JobRunner:
                     raise
             finally:
                 self.release_name(name)
+                self.release_name(old_name)
         return job
 
     def _id_derived_dir(self, result: dict[str, Any]) -> Path | None:

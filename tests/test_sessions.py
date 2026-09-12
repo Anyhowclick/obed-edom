@@ -971,4 +971,89 @@ def test_rename_reserves_target_name_for_whole_transaction(tmp_path: Path, monke
     monkeypatch.undo()
 
     assert result_a["job"].name == "shared-name"
-    assert runner.get(job_b.id).name != "shared-name"
+
+
+def test_rename_reserves_source_name_for_whole_transaction(tmp_path: Path, monkeypatch):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job_a = runner.submit("resize", work, feature="resize")
+    job_b = runner.submit("resize", work, feature="resize")
+    _wait(runner, job_a.id)
+    _wait(runner, job_b.id)
+    old_name_a = job_a.name
+
+    started = threading.Event()
+    release = threading.Event()
+    real_save = JobRunner.save
+
+    def hooked_save(self, target_job):
+        if target_job.id == job_a.id:
+            started.set()
+            release.wait(2)
+        return real_save(self, target_job)
+
+    monkeypatch.setattr(JobRunner, "save", hooked_save)
+
+    result_a: dict = {}
+
+    def do_rename_a():
+        result_a["job"] = runner.rename(job_a.id, "renamed-a")
+
+    thread_a = threading.Thread(target=do_rename_a)
+    thread_a.start()
+    assert started.wait(1)
+
+    # The old name is still nominally free from `_jobs` (job_a.name is already
+    # "renamed-a" in memory), but the transaction must have reserved it too.
+    with pytest.raises(FileExistsError):
+        runner.rename(job_b.id, old_name_a)
+
+    release.set()
+    thread_a.join(2)
+    monkeypatch.undo()
+
+    assert result_a["job"].name == "renamed-a"
+
+    # Once the transaction completes, the old name is free again with no duplicate.
+    renamed_b = runner.rename(job_b.id, old_name_a)
+    assert renamed_b.name == old_name_a
+
+
+def test_rename_rollback_releases_source_reservation_no_duplicate(tmp_path: Path, monkeypatch):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job = runner.submit("resize", work, feature="resize")
+    done = _wait(runner, job.id)
+    old_name = done.name
+
+    def failing_save(self, _job):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(JobRunner, "save", failing_save)
+    with pytest.raises(RuntimeError):
+        runner.rename(job.id, "brand-new-name")
+    monkeypatch.undo()
+
+    reloaded = runner.get(job.id)
+    assert reloaded.name == old_name
+    # The failed transaction must not leave the source name stuck in the
+    # reservation set: only `job`'s own (legitimate) ownership of `old_name`
+    # should still block a second job from claiming it.
+    assert old_name not in runner._reserved_names
+
+    other = runner.submit("resize", work, feature="resize")
+    _wait(runner, other.id)
+    with pytest.raises(FileExistsError):
+        runner.rename(other.id, old_name)
