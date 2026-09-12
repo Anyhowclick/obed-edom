@@ -4,10 +4,10 @@ from pathlib import Path
 
 from obed_edom.annotate import annotate_outline
 from obed_edom.contrast import check_contrast
-from obed_edom.keynote import generate_both, output_dir_for, stem_for
+from obed_edom.keynote import generate_both, stem_for
 from obed_edom.models import Flag, GenerationResult
 from obed_edom.parse_outline import parse_outline
-from obed_edom.paths import ensure_export_subdir
+from obed_edom.paths import ensure_export_subdir, output_root
 from obed_edom.report import write_review
 from obed_edom.slide_map import map_slides
 from obed_edom.validate import validate_outline, validate_slide_specs
@@ -40,7 +40,8 @@ def generate(
     flags.extend(map_flags)
     flags.extend(validate_slide_specs(lw, dsk))
 
-    out_dir = ensure_export_subdir(output_dir, stem_for(docx)) if output_dir else output_dir_for(docx)
+    parent = output_dir or output_root()
+    out_dir = ensure_export_subdir(parent, stem_for(docx))
     review_path = out_dir / "review.pdf"
     lw_key = None
     dsk_key = None

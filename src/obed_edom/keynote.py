@@ -15,6 +15,7 @@ from obed_edom.models import SlideSpec
 from obed_edom.paths import ensure_export_subdir, output_root, select_deck_template
 
 
+
 def _keynote_tell() -> str:
     """Tell header: address by bundle id, never by name."""
     return f'tell application id "{keynote_app.bundle_id()}"'
@@ -2172,7 +2173,8 @@ def generate_both(
         raise FileNotFoundError(
             "At least one Keynote template is required (LW, DSK, or both)."
         )
-    out_dir = ensure_export_subdir(output_dir, stem_for(docx)) if output_dir else output_dir_for(docx)
+    parent = output_dir or output_root()
+    out_dir = ensure_export_subdir(parent, stem_for(docx))
     stem = stem_for(docx)
     lw_path = out_dir / f"{stem}_LW.key"
     dsk_path = out_dir / f"{stem}_DSK.key"
