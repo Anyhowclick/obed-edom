@@ -1,6 +1,6 @@
 ---
 name: CG resizer — optimizations (read + write tracks), bug backlog, features
-overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; next is `badge-width-collapse-gold-slide-2` (Gold slide 2 badge groups collapsed ~12x narrower), then a shared osascript runner, the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
+overview: "Single active plan for the CG resizer. As of 2026-09-11 morning, main is `86c41f5`: PR #73 (`fix/w1-d10-group-union`, W1 group-union + gate-integrity fixes) and PR #74 (`fix/framing-pin-continuity`, commits 6cd2088/6f2a7ce/0b11586/2093594) both merged 2026-09-10, followed by PR #70 (maps-ux-round). R0.1-R0.4, R2 readback, R2b, `surface-raise-tokens`, a six-survey refactor assessment, and the framing-pin-continuity fix (with its report-only sibling `framing-coverage-report`) are all complete. The 2026-09-10 W1 whole-deck gate ran on the Full wall and came back RED: the offline writer (arm B) is now clean (1 plan-oracle failure, the owner-accepted slide 36), but the production AppleScript path (arm A) fails the plan oracle on 14 slides at 1.19-1.92px — see the new `as-geometry-rounding` item. The same 2026-09-10 gate log-localised `stat-raise-dead-4` by log alone for the first time (2 dead, slides 40/106, both idx=1, deterministic across arms). Open sequence: `stat-raise-dead-4` is FIXED and live-verified 2026-09-11, PR #75 ready to merge (owner merges); `as-geometry-rounding` is RESOLVED on PR #78 (`b0dfa43`, hybrid planner-snap + aspect-aware arm-A oracle) and LIVE-CONFIRMED 2026-09-11 by the full W1 gate on `bb69e3f` (geometry half of the W1 flip bar now MET); the pass-2 half is now ALSO MET as of the 2026-09-12 full W1 strict gate (`badge-raise-readiness-poll` DONE, PR #80 merged `b390466`, GREEN bar slide 36, `output/bank/2026-09-12/w1-gate/results.md`) — strict is now the W1 gate bar. `kindindex-guard-test-vacuous` is on PR #77; `badge-width-collapse-gold-slide-2` is DONE (PR #94 @ 1ad51ed, owner merges; live acceptance PASSED 2026-09-12 18:07, `output/bank/2026-09-12/badge-width-live/results.md`); next = a shared osascript runner, then IWA natural-size/sentinel unification, then the W1 default flip, then W2; new bug-backlog item `badge-probe-on-blind` (2026-09-12 W1 gate run 1: a global-`badgeMoved`-guard blind spot let 232 badge raises silently not land on a GREEN-looking report; arm-A re-run clean, gate itself unaffected). Owner soft deadline: W2 within ~1.5 weeks of 2026-09-09. Read `.agents/skills/obed-edom/SKILL.md` first. Measure first, never run Keynote concurrently, use copies for live probes, and obtain the owner's explicit hands-off acknowledgement for long Keynote runs. No PRs unless asked."
 todos:
   - id: output-bugs-batch1
     content: "DONE 2026-09-03. Batch 1 of Map-deck output defects: the badge buried under the map, backdrop not at y=0, card stroke lost against the source, and caption-bearing groups misclassified as pins. Shipped `171fc65` ... `8e5d3b2`, including a geometry-guarded badge raise after the first live run raised the MAP on a reuse slide (index drift of one). Live-verified on the Map remap: `verify_batch1.py` and `verify_slide9.py` PASS, stroke 3.0 after pass 2, 66/66 slide-9 text groups at 0.483x, `score_resize` identical before/after. Full detail: the commit range plus the `Shipped record` row below; the verify deck and its previews were deleted with `output/`."
@@ -129,7 +129,7 @@ todos:
       Events process once per script instead of per tell (H1)."
     status: completed
   - id: badge-probe-on-blind
-    content: "IMPLEMENTED 2026-09-12 on branch fix/badge-probe-on-blind (PR pending): `lastFrontBlind`
+    content: "IMPLEMENTED 2026-09-12 on branch fix/badge-probe-on-blind (PR #84 open): `lastFrontBlind`
       global set in obedFrontReady's not-ready arm, cleared at the top of obedFront; obedRaiseItem
       `_reprobe = _frontResult is not 0 or lastFrontBlind is not 0`, `_probeOnly` crediting; token
       `badgeProbeBlind(s=,k=)`; return string/result dict/_RAISE_TOKEN_KINDS/PASS2 keys unchanged;
@@ -372,22 +372,98 @@ todos:
       the point the value is PRODUCED, not where it is consumed."
     status: pending
   - id: badge-width-collapse-gold-slide-2
-    content: "BUG BACKLOG (B), owner-reported from the 2026-09-10 16:31 Gold CG run
-      (`obed-edom-wt-maps-tab` worktree, `feat/maps-ux-round` @ `5acc709`, PRODUCTION AppleScript
-      path, `OBED_OFFLINE_WRITE` off). Slide 2's two yellow badge groups ('Ps George'/'Ps Joanna',
-      Amplitude-Bold, [255,251,0]) collapsed from group 278x88 to 23x88 (text-box stored width
-      268.2 -> 22.6, ~12x narrower, height untouched, text 55->54pt normal caption step-down,
-      STRING INTACT byte-for-byte — NOT the owner's stray typing). Both badges shrank by the same
-      ratio independently = systematic. Region: `src/obed_edom/map_remap.py:100-152`
-      (`ItemTransform` / `_child_payload`), whose own docstring names this object ('union of a
-      word-wrapped autosize child (measured 278x88 -> 69x261 on Gold slide 2)'); `_child_payload`
-      refuses a child-level write unless sx~=sy (+-1%), and what landed is sx~=0.083, sy=1.0. The
-      observed failure (width collapse) differs from the docstring's historical one (height
-      explosion), so the region is certain but the branch is not — needs a live trace or an
-      offline replay of the plan for slide 2 to see which spec produced w=22.6. Evidence:
-      `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab/output/.resize/646073cf/Gold_Wall_Input_CG.key`
-      and session `output/.sessions/646073cf.json` in that worktree (may be gone). Queue: bug
-      backlog, after `stat-raise-dead-4`/`as-geometry-rounding`."
+    content: "DONE 2026-09-12 — PR #94 (fix/badge-width-collapse @ 1ad51ed, owner merges); live
+      acceptance PASSED 18:07 (bank `output/bank/2026-09-12/badge-width-live/results.md`: badges
+      278.0×88.0 exact, strings intact; caveat: cached-jxa refusal not exercised live, v4 cache
+      version-stale, covered by the real-payload test). Root
+      cause measured offline: the 2026-09-10 16:31 run consumed a cached `reader: jxa` payload
+      with no `groupChildren`, so the planner fell back to a bare group-level
+      `set properties {width:278,height:88}` write; Keynote 15.3.1 aspect-locks a group size
+      write about its LIVE frame, which after `setSlideSize` was the wrapped-autosize union
+      69x261, not the planned 278x88 — deriving width from height gives 88 x 69/261 = 23.3,
+      matching the observed 23x88 (and the autosize text child's 268.2 -> 22.6) exactly.
+      Gold slides 13-17 have similarly-shrinking groups that never collapsed because on the
+      OFFLINE path the planned rect IS the live archive-composed frame the group was planned
+      against (sx approx sy, ~0.85 both axes) — the aspect lock is a near no-op there. The
+      discriminator is the reader's coordinate space (JXA union frame vs offline archive frame),
+      not child availability.
+      Fix: (a) mode `on` now refuses a cached `jxa` payload and forces an offline re-read; the
+      cache is served as-is only when the offline re-read genuinely fails. (b) a
+      `groupChildrenUnavailable` slide flag plus a reader-independent `groupAutosize` marker
+      derived from the IWA archive (`attach_group_autosize`, sharing the `_is_autosize_text_child`
+      predicate with `_group_child_records` so the two callers cannot drift). (c) for an
+      autosize-marked group on a `groupChildrenUnavailable` slide, `ItemTransform` refuses the
+      size write: the spec carries position only, `sizeRefused=group-children-unavailable`,
+      no `w`/`h` at all — the group keeps its source size, wrong-positioned-size but intact and
+      hand-fixable, instead of destroyed with no repair path; a >=3x shrink on either axis
+      additionally emits a `groupCollapseRefused(s=,idx=)` report token (boundary inclusive,
+      Codex r1); `child_resize_report` records `s=1.0` on a refused group so pass 2 never scales
+      its fonts; a deck-wide `WARNING remap:` summary lists every refusal.
+      (d) `framing.py`'s plan consumer (`planned_rects`) now keys off actual `w`/`h` presence in
+      the spec instead of inferring it from role, which had crashed with `KeyError: 'w'` on a
+      refused group of role `other` — fixed structurally (`\"w\" in applied`, `role != \"line\"`
+      excluded, falls back to the source rect for a refused group). No legacy handling.
+      Golden `planSha256` is unchanged on the offline path (`groupAutosize`/`sizeRefused` never
+      appear there) — no re-bank needed. Tests: a real-payload fixture
+      `tests/fixtures/jxa-wall/gold_slide2_badges.json` (sliced from the run's own cached jxa
+      payload, slide 2's items byte-identical) plus `tests/test_jxa_wall_regression.py`, which
+      drives the real `remap_keynote()` entry point over it — fails on `b390466` (w=278,h=88
+      present) and passes on this branch (no w/h, `sizeRefused=group-children-unavailable`,
+      `s=1.0`); re-slice the fixture from a fresh inspect payload only if the payload schema
+      drifts, and it is separately gated to skip (not fail) if the Gold deck's own digest drifts.
+      Suite 1800 passed / 84 skipped. Review: opus r1 REVISE (over-broad refusal rule, inert
+      guard, unrelated golden-sha moves) -> r2 REVISE (BLOCKER: the `framing.py` `KeyError: 'w'`
+      above, plus the guard not excluded from card/badge-slot groups) -> r3 APPROVE-WITH-NITS
+      (N1 applied: deleted the unreachable `group-collapse-guard is None` assignment as dead-by-
+      construction, per repo's no-dead-machinery rule; kept the `groupCollapseRefused` report
+      token, which is not dead) -> Codex r1 REVISE (guard boundary `<` -> `<=`) -> fixed
+      -> Codex r2 REVISE (partial-fallback slides got archive-space groupChildren) -> fixed
+      (opus r5 pending). Codex r2 finding: slides replaced by the per-slide live-JXA fallback
+      inside an otherwise offline two-tier read (`_merge_legacy_slides`) are now stamped
+      `groupChildrenUnavailable` and `attach_group_children` skips them; a fresh two-tier read
+      stamps a top-level cache marker `offlineFallbackTagged`, and in `on` mode a cached
+      `reader: offline` payload without it is re-read offline once (`stale_mixed`, mirrors the
+      cached-jxa refusal) — chosen over an `INSPECT_VERSION` bump so the banked JXA digest /
+      kind-count fixtures need no re-stamp. 4 tests; suite 1808 passed / 84 skipped.
+      -> opus r5 REVISE (stale_mixed except-branch; wording) -> fixed -> opus r6 APPROVE
+      -> Codex r3 REVISE (offframe_rows used the rejected w/h for a refused group) -> fixed
+      (effective size = src rect, test visible==0.12) -> opus r7 APPROVE -> Codex r4 REVISE
+      (HIGH: autosize groups classified `pin` bypassed the refusal — all group safety
+      bookkeeping sat under role==other) -> fixed (`group_src_rect`/`group_kind_index` +
+      refusal + s=1.0 + >=3x token now for every group; card/caption logic nested under
+      role==other; test `test_autosize_marked_pin_group_also_refuses_the_collapsing_write`)
+      -> opus r8 APPROVE (note: pins must not gain pass-2 font rows) -> orchestrator ruling:
+      no behaviour widening, statJob row stays role==other -> opus r9 REVISE (token asymmetry:
+      pin tokens reached neither run record nor log) -> fixed (groupCollapseRefused emitted
+      unconditionally on the transform dict for all roles, dropped from the statJob row, both
+      remap_keynote collection sites + the sizeRefused WARNING read transform_dicts) -> opus r10
+      APPROVE -> Codex r5 APPROVE-WITH-NITS (docstrings, applied) → PR #94 OPEN (1ad51ed).
+      Note on the stale_mixed except-branch: it is reached only when the offline re-read
+      genuinely fails (not merely stale), in which case the cached payload is served as-is
+      with every slide flagged `groupChildrenUnavailable` rather than partially trusted.
+      Separately, `inspect_keynote_checker` payloads are deliberately left untagged: the
+      checker splices per-item JXA geometry onto an otherwise-offline payload, so a blanket
+      `groupChildrenUnavailable` rejection whenever `on` mode sees one is intended, not a gap.
+      Suite now 1809 passed / 84 skipped.
+      Residual, not fixed here: F4 (a refused rect carries no
+      `sizeRefused` token through to the framing UI, so it can't tell 'kept at source size' from
+      'planned at source size') and F12 (a live-JXA path with a raised IWA decode error has no
+      guard). DONE 2026-09-12 — PR #94 (fix/badge-width-collapse @ 1ad51ed, owner merges); live
+      acceptance PASSED 18:07 (bank `output/bank/2026-09-12/badge-width-live/results.md`: badges
+      278.0×88.0 exact (source 277.97×87.57), strings intact; caveat: cached-jxa refusal not
+      exercised live (v4 cache version-stale vs INSPECT_VERSION 5), covered instead by
+      `tests/test_jxa_wall_regression.py`)."
+    status: completed
+  - id: refused-group-score-centre
+    content: "BUG BACKLOG (C), low priority, NEW 2026-09-12. `score_against_gold`
+      (map_remap.py ~4419) builds the match centre from the rejected w/h for a `size_refused`
+      group, off by (src.w-w)/2 (and the analogous term on height). Only reachable via
+      role=pin groups on `groupChildrenUnavailable` slides, and `templateScore` gates
+      nothing today (cli.py / web/app.py readout only), so no gate currently regresses.
+      Fix needs its own reasoning, not a reflex patch: `gold_aff.apply_rect(item_rect(source))`
+      already scales the source rect, so simply swapping in the source w/h there may be a
+      no-op rather than a fix — check what `item_rect` actually returns for a refused group
+      before touching the centre math. Golden sha must not move."
     status: pending
   - id: kindindex-guard-test-vacuous
     content: "HOUSEKEEPING, small, can ride any branch. VERIFIED 2026-09-11 (orchestrator
