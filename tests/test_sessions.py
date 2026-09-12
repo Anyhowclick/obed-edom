@@ -728,6 +728,7 @@ def test_rename_moves_folder_and_rewrites_result_paths(tmp_path: Path, monkeypat
     output = tmp_path / "output"
     runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
     monkeypatch.setattr(app_module, "default_output_root", lambda: output)
+    monkeypatch.setattr("obed_edom.paths.output_root", lambda: output)
 
     def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -758,14 +759,17 @@ def test_rename_moves_folder_and_rewrites_result_paths(tmp_path: Path, monkeypat
     old_name = done.name
     old_output_dir = Path(done.result["outputDir"])
     assert old_output_dir.name == old_name
-    assert Path(done.result["destPath"]).is_file()
+    old_dest_path = done.result["destPath"]
+    assert Path(old_dest_path).is_file()
 
     renamed = runner.rename(job.id, "Quiet Jordan")
     assert renamed.name == "quiet-jordan"
     new_output_dir = Path(renamed.result["outputDir"])
     assert new_output_dir.name == "quiet-jordan"
     assert not old_output_dir.exists()
-    assert renamed.result["destPath"] == str(new_output_dir / "source_CG.key")
+    # destPath lives under the flat export destination (not the id-derived
+    # working folder), so renaming the job does not move it.
+    assert renamed.result["destPath"] == old_dest_path
     assert Path(renamed.result["destPath"]).is_file()
     assert old_name != renamed.name
 
