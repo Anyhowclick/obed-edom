@@ -33,7 +33,7 @@ describe("ArtifactActions", () => {
 
     expect(openWall).toHaveAttribute("title", "/tmp/out/wall.key");
     expect(openCg).toHaveAttribute("title", "/tmp/out/cg.key");
-    expect(reveal_).toHaveAttribute("title", "/tmp/out/wall.key");
+    expect(reveal_).toHaveAttribute("title", "/tmp/out");
 
     await act(async () => {
       fireEvent.click(openCg);
@@ -49,6 +49,23 @@ describe("ArtifactActions", () => {
   it("renders nothing when there are no artifacts", () => {
     const { container } = render(<ArtifactActions artifacts={[]} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("reports the error message when openPath rejects", async () => {
+    openPath.mockRejectedValueOnce(new Error("Not an openable artifact: /tmp/out/wall.key"));
+    const onError = vi.fn();
+    render(
+      <ArtifactActions
+        artifacts={[{ label: "LED wall", path: "/tmp/out/wall.key" }]}
+        onError={onError}
+      />
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Open LED wall/ }));
+    });
+
+    expect(onError).toHaveBeenCalledWith("Not an openable artifact: /tmp/out/wall.key");
   });
 });
 

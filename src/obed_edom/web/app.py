@@ -138,6 +138,9 @@ class SettingsBody(BaseModel):
     defaultExportDir: str | None = None
 
 
+OPENABLE_SUFFIXES = {".key", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".mov", ".mp4"}
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Obed-Edom dashboard")
     app.add_middleware(
@@ -234,6 +237,8 @@ def create_app() -> FastAPI:
         target = Path(path).expanduser()
         if not target.exists():
             raise HTTPException(404, f"Not found: {path}")
+        if not target.is_file() or target.suffix.lower() not in OPENABLE_SUFFIXES:
+            raise HTTPException(400, f"Not an openable artifact: {path}")
         subprocess.run(["open", str(target)], check=False)
         return {"ok": True}
 
