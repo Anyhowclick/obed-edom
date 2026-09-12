@@ -9,6 +9,7 @@ import {
   type Job,
 } from "../api";
 import { jobLabel } from "../sessions";
+import { JobName } from "./JobName";
 
 export type Item = {
   id: string;
@@ -34,11 +35,13 @@ export function WatercolourResultView({
   onOpen,
   onError,
   onEdit,
+  onRename,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onError: (message: string | null) => void;
   onEdit?: (payload: { files: File[]; masks: Record<string, unknown>; transparent: boolean; wash: number; ink: number }) => void;
+  onRename?: (id: string, name: string) => Promise<Job>;
 }) {
   const [mapJobs, setMapJobs] = useState<Job[]>([]);
   const [target, setTarget] = useState("");
@@ -104,6 +107,7 @@ export function WatercolourResultView({
 
   return (
     <div>
+      {onRename && <JobName job={job} onRename={onRename} className="note" />}
       {hasDone && (
         <div className="actions">
           <a className="btn secondary" href={watercolourDownloadUrl(job.id)}>

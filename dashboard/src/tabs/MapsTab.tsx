@@ -25,11 +25,12 @@ import {
   type Job,
 } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { type Item as WcItem } from "../components/WatercolourResultView";
 import { useRunNav } from "../nav";
 import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
-import { jobLabel, useCurrentJob } from "../sessions";
+import { jobLabel, renameAndApply, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
@@ -1995,7 +1996,7 @@ export function MapsTab() {
         >
           <IconLibrary />
         </button>
-        <span className="note">{job.id}</span>
+        <JobName job={job} onRename={(id, name) => renameAndApply(id, name, setJob)} className="note" />
       </div>
       <div className="maps-stylebar">
         <StylePicker

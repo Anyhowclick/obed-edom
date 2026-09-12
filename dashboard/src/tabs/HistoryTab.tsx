@@ -13,7 +13,7 @@ import { OPEN_IN_LABELS, asFeature, useRunNav } from "../nav";
 import { useJobSessions } from "../sessions";
 
 export function HistoryTab({ active: visible }: { active: boolean }) {
-  const { jobs, active, activeId, setActiveId, upsert, remove, removeAll, reload, sessionError } = useJobSessions();
+  const { jobs, active, activeId, setActiveId, upsert, rename, remove, removeAll, reload, sessionError } = useJobSessions();
   const { openInFeature } = useRunNav();
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,7 +72,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         <p className="note">No saved runs yet. Generate, compare, or validate from the other tabs.</p>
       ) : (
         <div className="split library">
-          <SessionList jobs={jobs} activeId={activeId} onSelect={setActiveId} onDelete={remove} />
+          <SessionList jobs={jobs} activeId={activeId} onSelect={setActiveId} onDelete={remove} onRename={rename} />
           <div className="library-detail">
             {active && (
               <>
@@ -101,14 +101,14 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                     </button>
                   )}
                 </div>
-                {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} />}
-                {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} />}
-                {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} />}
-                {feature === "check" && <CheckResultView job={active} onOpen={setOpen} />}
-                {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} />}
-                {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} />}
-                {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} />}
-                {feature === "watercolour" && <WatercolourResultView job={active} onOpen={setOpen} onError={setError} />}
+                {feature === "generate" && <GenerateResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "diff" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {isLeftoverVisual && <DiffResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "check" && <CheckResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "dsk" && <InspectResultView job={active} labelPrefix="LW" onOpen={setOpen} onRename={rename} />}
+                {feature === "resize" && <InspectResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "maps" && <MapsResultView job={active} onOpen={setOpen} onRename={rename} />}
+                {feature === "watercolour" && <WatercolourResultView job={active} onOpen={setOpen} onError={setError} onRename={rename} />}
               </>
             )}
           </div>

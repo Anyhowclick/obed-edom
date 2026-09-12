@@ -21,6 +21,7 @@ export type Job = {
   id: string;
   kind: string;
   feature?: string;
+  name?: string;
   status: "queued" | "running" | "done" | "error";
   logs: string[];
   error?: string | null;
@@ -105,6 +106,16 @@ export async function patchJob(id: string, result: Record<string, unknown>): Pro
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ result }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function renameJob(id: string, name: string): Promise<Job> {
+  const res = await fetch(`/api/jobs/${id}/name`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

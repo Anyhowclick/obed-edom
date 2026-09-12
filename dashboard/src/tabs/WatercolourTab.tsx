@@ -1013,7 +1013,7 @@ const LandmarkMask = forwardRef<LandmarkMaskHandle, {
 });
 
 export function WatercolourTab() {
-  const { job, upsert, error: openError } = useCurrentJob("watercolour");
+  const { job, upsert, rename, error: openError } = useCurrentJob("watercolour");
   const [files, setFiles] = useState<File[]>([]);
   const [wash, setWash] = useState(0.65);
   const [ink, setInk] = useState(0.42);
@@ -1148,6 +1148,7 @@ export function WatercolourTab() {
           job={job}
           onOpen={setOpen}
           onError={setError}
+          onRename={rename}
           onEdit={(p) => {
             setFiles(p.files);
             setMasks(p.masks as Record<string, MaskSpec>);
