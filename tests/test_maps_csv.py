@@ -434,3 +434,40 @@ def test_duplicate_header_column_reports_error():
     assert "Line 1" in errors[0]
     assert "duplicate column" in errors[0]
     assert "'name'" in errors[0]
+
+
+def test_field_over_size_limit_reports_unreadable_row_not_crash():
+    huge = "a" * 200_000
+    places, errors = parse_places(f"Paris\n{huge},1,2\n")
+    assert places == [Place(line=1, name="Paris")]
+    assert "Line 2" in errors[0]
+    assert "unreadable row" in errors[0]
+
+
+def test_header_form_oversized_field_reports_unreadable_row_not_crash():
+    huge = "a" * 200_000
+    places, errors = parse_places(f"name,lat,lon\nOK,1,2\n{huge},3,4\n")
+    assert places == [Place(line=2, name="OK", lat=1.0, lon=2.0)]
+    assert any("unreadable row" in e for e in errors)
+
+
+def test_headerless_multiline_quoted_name_is_one_place():
+    text = '"Foo\nBar",1,2\nSingapore\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Foo\nBar", "Singapore"]
+    assert places[0].line == 1
+    assert places[0].lat == pytest.approx(1.0)
+    assert places[0].lon == pytest.approx(2.0)
+    assert places[1].line == 3
+
+
+def test_url_peeling_is_fast_for_adversarial_input():
+    import time
+
+    text = "Landmark,https://maps.google.com/?q=1.35,103.8" + ",landmark" * 25_000
+    assert len(text) > 200_000
+    start = time.perf_counter()
+    parse_places(text)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0

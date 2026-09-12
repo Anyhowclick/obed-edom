@@ -1434,7 +1434,10 @@ async def bootstrap_csv(
         raise HTTPException(409, "Maps job is already running")
     text = csv_text or ""
     if file is not None:
-        text = (await file.read()).decode("utf-8")
+        try:
+            text = (await file.read()).decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(400, "File is not valid UTF-8")
     if not text.strip():
         raise HTTPException(400, "CSV is empty")
     places, errors = parse_places(text)
