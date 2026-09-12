@@ -13,7 +13,8 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/overlays.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { DROP_PIN_HEAD_PX, DROP_PIN_TOTAL_PX, dropPinSelectionBox } = require(path.join(out, "overlays.js"));
+const { DROP_PIN_HEAD_PX, DROP_PIN_TOTAL_PX, DROP_PIN_SELECTED_SCALE, dropPinSelectionBox, selectedDragScale } = require(path.join(out, "overlays.js"));
+const { resizeFromCorner } = require(path.join(out, "objects.js"));
 
 // `dropPinImage` needs a DOM canvas, which node has no implementation of here, so these
 // assert the exported geometry the raster is drawn from and the maths derived off it.
@@ -41,4 +42,33 @@ test("the selection box tracks the selected pin's rendered head and 1.08 aspect"
   const box = dropPinSelectionBox(64);
   assert.equal(box.w, 64 * 1.08);
   assert.equal(box.h / box.w, DROP_PIN_TOTAL_PX / DROP_PIN_HEAD_PX);
+});
+
+test("selectedDragScale only inflates drop pins", () => {
+  assert.equal(selectedDragScale("dropPin", 2), 2 * DROP_PIN_SELECTED_SCALE);
+  assert.equal(selectedDragScale("dot", 2), 2);
+  assert.equal(selectedDragScale("landmark", 2), 2);
+});
+
+test("a drag that returns the se handle to its start leaves a selected drop pin's size alone", () => {
+  const layoutScale = 1.5;
+  const startSize = 200;
+  const targetSize = 320;
+  const aspect = DROP_PIN_TOTAL_PX / DROP_PIN_HEAD_PX;
+  const scale = selectedDragScale("dropPin", layoutScale);
+  // The se handle sits at half the rendered box width, right of the anchor.
+  const handleX = (size) => dropPinSelectionBox(size * layoutScale).w / 2;
+
+  const grown = resizeFromCorner({ x: handleX(startSize), y: 0 }, { x: handleX(targetSize), y: 0 }, startSize, scale, "se", aspect);
+  assert.equal(grown, targetSize);
+
+  const back = resizeFromCorner({ x: handleX(targetSize), y: 0 }, { x: handleX(startSize), y: 0 }, grown, scale, "se", aspect);
+  assert.equal(back, startSize);
+});
+
+test("a dot's handle drag needs no selection scale", () => {
+  const layoutScale = 1.5;
+  const handleX = (size) => (size * layoutScale) / 2;
+  const grown = resizeFromCorner({ x: handleX(100), y: 0 }, { x: handleX(180), y: 0 }, 100, selectedDragScale("dot", layoutScale), "se");
+  assert.equal(grown, 180);
 });

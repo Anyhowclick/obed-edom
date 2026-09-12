@@ -5,7 +5,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
+import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, selectedDragScale, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
 import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
@@ -994,7 +994,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!drag || !map || !selectedPinId) return;
     const church = overlay.current.churches.find((c) => c.id === selectedPinId);
     const zoomFactor = church?.scaleWithMap && church.sizeZoom != null ? zoomSizeFactor(church.sizeZoom, map.getZoom() - deltaRef.current) : 1;
-    const scale = objectDragScale(map, authoredWidthRef.current) * zoomFactor;
+    const scale = selectedDragScale(church?.kind || "", objectDragScale(map, authoredWidthRef.current) * zoomFactor);
     const size = resizeFromCorner(
       { x: drag.startX, y: drag.startY },
       { x: event.clientX, y: event.clientY },

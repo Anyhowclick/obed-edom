@@ -254,6 +254,12 @@ export const DROP_PIN_TOTAL_PX = DROP_PIN_HEAD_PX * 1.08;
 /** Emphasis applied to a selected drop pin's `icon-size`. */
 export const DROP_PIN_SELECTED_SCALE = 1.08;
 
+/** Screen-px-per-authored-px for a selected object's resize handles: the drop pin's box and
+ * raster both carry `DROP_PIN_SELECTED_SCALE`, so its drag must read the handle through it too. */
+export function selectedDragScale(kind: string, objectScale: number): number {
+  return kind === "dropPin" ? objectScale * DROP_PIN_SELECTED_SCALE : objectScale;
+}
+
 /** Selection-box size for a drop pin whose unselected head measures `headPx` on screen. */
 export function dropPinSelectionBox(headPx: number): { w: number; h: number } {
   const w = headPx * DROP_PIN_SELECTED_SCALE;
