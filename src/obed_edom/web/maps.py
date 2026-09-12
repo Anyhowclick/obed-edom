@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import copy
 import hashlib
 import io
@@ -22,11 +21,14 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from obed_edom.maps_csv import COORD_DEFAULT_ZOOM, Place, parse_places, resolve_zoom
 from obed_edom.maps_geo import (
     DEFAULT_HIDDEN_LAYERS,
     GeocodeError,
     camera_dict,
+    camera_from_bbox,
     clamp_cg_shift,
+    clamp_zoom,
     find_country,
     geocode,
     geometry_bbox,
@@ -665,38 +667,40 @@ def _next_slide_id(slides: list[dict[str, Any]]) -> str:
     return f"s{index}"
 
 
-def _row_slide(row: dict[str, str], slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
-    name = (row.get("name") or row.get("title") or "Untitled").strip() or "Untitled"
-    lat_raw = (row.get("lat") or row.get("latitude") or "").strip()
-    lon_raw = (row.get("lon") or row.get("lng") or row.get("longitude") or "").strip()
-    maps_url = (row.get("maps_url") or row.get("url") or "").strip()
-    place = (row.get("place") or "").strip()
-    camera = None
-    if lat_raw and lon_raw:
-        camera = camera_dict(float(lat_raw), float(lon_raw), 8)
-    elif maps_url:
-        parsed = parse_maps_query(maps_url)
+def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = None) -> dict[str, Any]:
+    name = place.name.strip() or "Untitled"
+    camera: dict[str, float] | None = None
+    place_type: str | None = None
+    zoom_from_url: float | None = None
+    if place.lat is not None and place.lon is not None:
+        camera = camera_dict(place.lat, place.lon, COORD_DEFAULT_ZOOM)
+    elif place.url:
+        parsed = parse_maps_query(place.url)
         if parsed:
-            camera = parsed["camera"]
-    query = place or name
-    country = find_country(query) if query else None
-    if camera is None and country:
-        bbox = geometry_bbox(country.get("geometry") or {})
-        if bbox:
-            from obed_edom.maps_geo import camera_from_bbox
-
-            camera = camera_from_bbox(bbox)
+            camera = dict(parsed["camera"])
+            if parsed.get("zoomFromUrl"):
+                zoom_from_url = camera["zoom"]
+    query = place.query or name
+    if camera is None:
+        country = find_country(query) if query else None
+        if country:
+            bbox = geometry_bbox(country.get("geometry") or {})
+            if bbox:
+                camera = camera_from_bbox(bbox)
+                place_type = "country"
     if camera is None:
         hit = geocode(query, wait=True)
-        camera = hit["camera"]
+        camera = dict(hit["camera"])
+        place_type = hit.get("placeType")
         if not name or name == "Untitled":
             name = str(hit.get("label") or name)
+    camera["zoom"] = clamp_zoom(resolve_zoom(place, place_type=place_type, zoom_from_url=zoom_from_url))
     church = {
         "id": f"{slide_id}-pin",
         "name": name,
         "lat": camera["lat"],
         "lon": camera["lon"],
-        "kind": "dropPin",
+        "kind": place.kind or "dropPin",
         "color": "#c44a42",
     }
     return {
@@ -713,22 +717,7 @@ def _row_slide(row: dict[str, str], slide_id: str, hidden_layers: list[str] | No
     }
 
 
-def _parse_csv(text: str) -> list[dict[str, str]]:
-    sample = text.lstrip("\ufeff")
-    reader = csv.DictReader(io.StringIO(sample))
-    if not reader.fieldnames:
-        raise HTTPException(400, "CSV needs a header row with a name column")
-    rows: list[dict[str, str]] = []
-    for raw in reader:
-        row = {str(key or "").strip().lower(): (value or "").strip() for key, value in raw.items()}
-        if any(row.values()):
-            rows.append(row)
-    if not rows:
-        raise HTTPException(400, "CSV has no data rows")
-    return rows
-
-
-def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
+def _run_bootstrap(job, places: list[Place], replace: bool) -> dict[str, Any]:
     result = inherit_hidden_layers(dict(job.result or {}))
     if replace:
         _clear_derived_maps_output(result)
@@ -736,8 +725,8 @@ def _run_bootstrap(job, csv_text: str, replace: bool) -> dict[str, Any]:
     links = [] if replace else list(result.get("links") or [])
     stored_hidden_layers = result.get("hiddenLayers")
     hidden_layers = list(DEFAULT_HIDDEN_LAYERS) if stored_hidden_layers is None else stored_hidden_layers
-    for row in _parse_csv(csv_text):
-        slide = _row_slide(row, _next_slide_id(slides), hidden_layers)
+    for place in places:
+        slide = _row_slide(place, _next_slide_id(slides), hidden_layers)
         if slides:
             prev = slides[-1]
             links.append(
@@ -764,7 +753,7 @@ def _next_pin_id(churches: list[dict[str, Any]]) -> str:
     return f"p{index}"
 
 
-def _run_pin_bootstrap(job, csv_text: str, slide_id: str, audience: str) -> dict[str, Any]:
+def _run_pin_bootstrap(job, places: list[Place], slide_id: str, audience: str) -> dict[str, Any]:
     result = dict(job.result or {})
     slides = [dict(slide) for slide in (result.get("slides") or [])]
     target = next((slide for slide in slides if str(slide.get("id") or "") == slide_id), None)
@@ -772,8 +761,8 @@ def _run_pin_bootstrap(job, csv_text: str, slide_id: str, audience: str) -> dict
         raise ValueError("Target slide is not in this deck")
     view = dict(target.get("cg") or {}) if audience == "cg" and isinstance(target.get("cg"), dict) else target
     churches = [dict(church) for church in (view.get("churches") or [])]
-    for row in _parse_csv(csv_text):
-        generated = _row_slide(row, "csv")["churches"][0]
+    for place in places:
+        generated = _row_slide(place, "csv")["churches"][0]
         churches.append({**generated, "id": _next_pin_id(churches)})
     if view is target:
         target["churches"] = churches
@@ -1439,14 +1428,19 @@ async def bootstrap_csv(
         text = (await file.read()).decode("utf-8")
     if not text.strip():
         raise HTTPException(400, "CSV is empty")
+    places, errors = parse_places(text)
+    if errors:
+        raise HTTPException(400, errors)
+    if not places:
+        raise HTTPException(400, ["No places found"])
     try:
         if targetSlideId:
             updated = _runner().rerun(
                 job_id,
-                lambda j, raw=text, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, raw, sid, aud),
+                lambda j, rows=places, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
             )
         else:
-            updated = _runner().rerun(job_id, lambda j, raw=text, rep=replace: _run_bootstrap(j, raw, rep))
+            updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:
