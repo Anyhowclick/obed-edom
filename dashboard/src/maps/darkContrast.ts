@@ -1,9 +1,9 @@
 import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 
 const TARGET_PROPS = ["line-color", "text-color"] as const;
-const BRIGHTEN_SCALE = 2.6;
-const BRIGHTEN_FLOOR = 70;
-const EXPRESSION_OPS = ["interpolate", "step", "match", "case", "literal"];
+const LIFT = 96;
+const KNEE = 160;
+const EXPRESSION_OPS = ["interpolate", "step", "match", "case"];
 
 type Rgba = { r: number; g: number; b: number; a: number };
 
@@ -20,6 +20,16 @@ function finite(rgba: Rgba): Rgba | null {
   return Number.isFinite(rgba.r) && Number.isFinite(rgba.g) && Number.isFinite(rgba.b) && Number.isFinite(rgba.a) ? rgba : null;
 }
 
+function parseAlpha(token: string | undefined): number | null {
+  if (token === undefined) return 1;
+  const a = token.endsWith("%") ? parseFloat(token) / 100 : parseFloat(token);
+  return Number.isFinite(a) && a >= 0 && a <= 1 ? a : null;
+}
+
+function parseChannel(token: string): number {
+  return token.endsWith("%") ? parseFloat(token) * 2.55 : parseFloat(token);
+}
+
 function parseColor(value: string): Rgba | null {
   const trimmed = value.trim();
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(trimmed);
@@ -34,9 +44,10 @@ function parseColor(value: string): Rgba | null {
   // CSS Color 4 allows both "r, g, b" and "r g b" with an optional "/ a" alpha.
   const parts = fn[2].split(/[\s,/]+/).filter((part) => part.length > 0);
   if (parts.length < 3) return null;
-  const a = parts[3] !== undefined ? parseFloat(parts[3]) : 1;
+  const a = parseAlpha(parts[3]);
+  if (a === null) return null;
   if (kind === "rgb" || kind === "rgba") {
-    const [r, g, b] = parts.slice(0, 3).map((p) => parseFloat(p));
+    const [r, g, b] = parts.slice(0, 3).map(parseChannel);
     return finite({ r, g, b, a });
   }
   const h = parseFloat(parts[0]);
@@ -46,16 +57,40 @@ function parseColor(value: string): Rgba | null {
   return finite({ r, g, b, a });
 }
 
-// The floor doubles as the "already bright enough" cutoff: every lifted mean lands at
-// or above it, so a second pass always sees mean >= BRIGHTEN_FLOOR and leaves it alone.
+/** Continuous, strictly monotone lift: full LIFT at black, tapering linearly to
+ * identity at KNEE and above. Applied exactly once, at style load. */
+function liftMean(mean: number): number {
+  return mean >= KNEE ? mean : mean + LIFT * (1 - mean / KNEE);
+}
+
 function brighten(rgba: Rgba): Rgba {
+  if (rgba.a === 0) return rgba;
   const mean = (rgba.r + rgba.g + rgba.b) / 3;
-  if (mean >= BRIGHTEN_FLOOR) return rgba;
-  if (mean <= 0) return { r: BRIGHTEN_FLOOR, g: BRIGHTEN_FLOOR, b: BRIGHTEN_FLOOR, a: rgba.a };
-  const target = Math.min(255, Math.max(mean * BRIGHTEN_SCALE, BRIGHTEN_FLOOR));
-  const factor = target / mean;
+  if (mean >= KNEE) return rgba;
+  if (mean <= 0) return { r: LIFT, g: LIFT, b: LIFT, a: rgba.a };
+  const factor = liftMean(mean) / mean;
   const scale = (c: number) => Math.max(0, Math.min(255, Math.round(c * factor)));
   return { r: scale(rgba.r), g: scale(rgba.g), b: scale(rgba.b), a: rgba.a };
+}
+
+function isOutputIndex(op: string, i: number, length: number): boolean {
+  const last = length - 1;
+  switch (op) {
+    // ["interpolate", interpolation, input, stop, output, ...]
+    case "interpolate":
+      return i >= 4 && i % 2 === 0;
+    // ["step", input, default, stop, output, ...]
+    case "step":
+      return i >= 2 && i % 2 === 0;
+    // ["match", input, label, output, ..., fallback]
+    case "match":
+      return (i >= 3 && i % 2 === 1) || i === last;
+    // ["case", condition, output, ..., fallback]
+    case "case":
+      return (i >= 2 && i % 2 === 0) || i === last;
+    default:
+      return false;
+  }
 }
 
 function transformColorValue(value: unknown): unknown {
@@ -69,7 +104,14 @@ function transformColorValue(value: unknown): unknown {
   if (Array.isArray(value)) {
     const op = value[0];
     if (typeof op === "string" && EXPRESSION_OPS.includes(op)) {
-      return value.map((item, i) => (i === 0 ? item : transformColorValue(item)));
+      let changed = false;
+      const next = value.map((item, i) => {
+        if (!isOutputIndex(op, i, value.length)) return item;
+        const transformed = transformColorValue(item);
+        if (transformed !== item) changed = true;
+        return transformed;
+      });
+      return changed ? next : value;
     }
   }
   return value;
