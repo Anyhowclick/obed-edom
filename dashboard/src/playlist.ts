@@ -1,4 +1,4 @@
-export const MAX_COMBINED_RIGHTS = 2;
+export const MAX_COMBINED_RIGHTS = 5;
 
 export type Slot = {
   leftIndex: number | null;
@@ -153,7 +153,7 @@ export function combineNext(slots: Slot[], row: number): Slot[] {
   const next = slots[row + 1];
   const hereRights = rightsOf(here);
   const nextRights = rightsOf(next);
-  if (here.leftIndex == null || hereRights.length !== 1 || nextRights.length < 1) return slots;
+  if (here.leftIndex == null || hereRights.length < 1 || nextRights.length < 1) return slots;
   if (hereRights.length >= MAX_COMBINED_RIGHTS) return slots;
   const [taken, ...rest] = nextRights;
   const copy = slots.map((slot) => ({ ...slot, rightIndexes: [...rightsOf(slot)] }));
@@ -174,7 +174,12 @@ export function canCombineNext(slots: Slot[], row: number): boolean {
   if (row < 0 || row >= slots.length - 1) return false;
   const here = slots[row];
   const next = slots[row + 1];
-  return here.leftIndex != null && rightsOf(here).length === 1 && rightsOf(next).length >= 1;
+  return (
+    here.leftIndex != null &&
+    rightsOf(here).length >= 1 &&
+    rightsOf(here).length < MAX_COMBINED_RIGHTS &&
+    rightsOf(next).length >= 1
+  );
 }
 
 export function splitRights(slots: Slot[], row: number): Slot[] {
