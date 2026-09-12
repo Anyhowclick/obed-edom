@@ -8,11 +8,10 @@ from obed_edom.maps_keynote import parse_color
 from obed_edom.maps_pins import (
     LABEL_PILL_RGB,
     LABEL_RADIUS_FRAC,
-    PILL_PX,
+    SUPERSAMPLE,
     PIN_ASPECT,
     RENDER_VERSION,
     ensure_label_pill_png,
-    label_aspect_bucket,
     label_pill_png_path,
     render_label_pill,
     ensure_pin_png,
@@ -103,9 +102,9 @@ def test_ensure_pin_png_renders_each_kind_at_its_own_aspect(tmp_path: Path):
 
 
 def test_label_pill_is_rounded_with_transparent_corners_and_a_filled_centre():
-    image = render_label_pill(LABEL_PILL_RGB, 4.0)
+    image = render_label_pill(LABEL_PILL_RGB, 144, 36)
     assert image.mode == "RGBA"
-    assert image.size == (PILL_PX * 4, PILL_PX)
+    assert image.size == (144 * SUPERSAMPLE, 36 * SUPERSAMPLE)
     # Every corner sits outside the rounded edge.
     for x, y in ((0, 0), (image.width - 1, 0), (0, image.height - 1), (image.width - 1, image.height - 1)):
         assert image.getpixel((x, y))[3] == 0, (x, y)
@@ -115,7 +114,7 @@ def test_label_pill_is_rounded_with_transparent_corners_and_a_filled_centre():
 
 
 def test_label_pill_fill_is_fully_opaque_across_the_middle_band():
-    image = render_label_pill(LABEL_PILL_RGB, 3.0)
+    image = render_label_pill(LABEL_PILL_RGB, 108, 36)
     alpha = image.getchannel("A")
     row = image.height // 2
     assert all(alpha.getpixel((x, row)) == 255 for x in range(image.width))
@@ -125,32 +124,30 @@ def test_label_pill_fill_is_fully_opaque_across_the_middle_band():
     assert alpha.getpixel((inset, 0)) == 255
 
 
-def test_label_pill_aspect_is_bucketed_to_a_quarter_step():
-    assert label_aspect_bucket(3.06) == 3.0
-    assert label_aspect_bucket(3.2) == 3.25
-    assert label_aspect_bucket(0.01) == 0.25
-    assert render_label_pill(LABEL_PILL_RGB, 3.06).size == render_label_pill(LABEL_PILL_RGB, 3.0).size
+def test_label_pill_renders_at_the_exact_placement_size_supersampled():
+    image = render_label_pill(LABEL_PILL_RGB, 111, 36)
+    assert image.size == (111 * SUPERSAMPLE, 36 * SUPERSAMPLE)
 
 
-def test_label_pill_path_carries_the_colour_bucket_and_version(tmp_path: Path):
-    path = label_pill_png_path(tmp_path, LABEL_PILL_RGB, 3.2)
-    assert path.name == f"labelpill-ee220c-a3_25-v{RENDER_VERSION}.png"
-    assert label_pill_png_path(tmp_path, ORANGE, 3.2).name != path.name
-    assert label_pill_png_path(tmp_path, LABEL_PILL_RGB, 5.0).name != path.name
+def test_label_pill_path_carries_the_colour_size_and_version(tmp_path: Path):
+    path = label_pill_png_path(tmp_path, LABEL_PILL_RGB, 111, 36)
+    assert path.name == f"labelpill-ee220c-111x36-v{RENDER_VERSION}.png"
+    assert label_pill_png_path(tmp_path, ORANGE, 111, 36).name != path.name
+    assert label_pill_png_path(tmp_path, LABEL_PILL_RGB, 122, 36).name != path.name
 
 
 def test_label_pill_render_is_deterministic():
-    first = render_label_pill(LABEL_PILL_RGB, 2.5)
-    second = render_label_pill(LABEL_PILL_RGB, 2.5)
+    first = render_label_pill(LABEL_PILL_RGB, 90, 36)
+    second = render_label_pill(LABEL_PILL_RGB, 90, 36)
     assert first.tobytes() == second.tobytes()
 
 
 def test_ensure_label_pill_png_writes_once_and_reuses_the_file(tmp_path: Path):
     root = tmp_path / "pins"
-    path = ensure_label_pill_png(root, LABEL_PILL_RGB, 3.0)
+    path = ensure_label_pill_png(root, LABEL_PILL_RGB, 108, 36)
     assert path.is_file()
     stamp = path.stat().st_mtime_ns
     payload = path.read_bytes()
-    assert ensure_label_pill_png(root, LABEL_PILL_RGB, 3.0) == path
+    assert ensure_label_pill_png(root, LABEL_PILL_RGB, 108, 36) == path
     assert path.stat().st_mtime_ns == stamp
     assert path.read_bytes() == payload

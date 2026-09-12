@@ -861,7 +861,7 @@ def _place_churches(
                         ny - PILL_PAD_Y,
                         pw,
                         ph,
-                        path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw / ph)),
+                        path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw, ph)),
                         labelPill=True,
                     )
                 )

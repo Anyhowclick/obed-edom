@@ -6,12 +6,13 @@ images. The rasters are scale-invariant: Keynote stretches them, so size and
 zoom stay out of the cache key.
 
 Label pills are the exception: a rounded rectangle is NOT scale-invariant
-(stretching one ovals its corners), so `render_label_pill` renders at the
-requested aspect and the cache key carries a quantised aspect bucket.
+(stretching one ovals its corners), so `render_label_pill` renders at the exact
+placement size in points and the cache key carries that size (36 widths x 1
+colour bounds the file count).
 
 Changing `_TAIL_W`, `_TAIL_TOP`, `_HOLE`, `PIN_ASPECT`, `DOT_PX`,
-`PILL_PX`, `LABEL_RADIUS_FRAC` or `LABEL_ASPECT_STEP` changes the pixels
-behind a cached filename and requires bumping `RENDER_VERSION`.
+`SUPERSAMPLE` or `LABEL_RADIUS_FRAC` changes the pixels behind a cached
+filename and requires bumping `RENDER_VERSION`.
 """
 
 from __future__ import annotations
@@ -29,8 +30,6 @@ SUPERSAMPLE = 4
 # Gold_Wall_Input.key slide 8: corner scalar 9.57 at h~46 -> radius ~= 0.21*h.
 LABEL_PILL_RGB = (0xEE * 257, 0x22 * 257, 0x0C * 257)
 LABEL_RADIUS_FRAC = 0.21
-LABEL_ASPECT_STEP = 0.25
-PILL_PX = 128
 
 _TAIL_W = 0.46
 _TAIL_TOP = 0.68
@@ -82,20 +81,12 @@ def render_drop_pin(color: tuple[int, int, int]) -> Image.Image:
     return _downscale(image, width, height)
 
 
-def label_aspect_bucket(aspect: float) -> float:
-    steps = max(1, round(float(aspect) / LABEL_ASPECT_STEP))
-    return round(steps * LABEL_ASPECT_STEP, 2)
+def label_pill_png_path(root: Path, color: tuple[int, int, int], width: int, height: int) -> Path:
+    return Path(root) / f"labelpill-{_hex6(color)}-{int(width)}x{int(height)}-v{RENDER_VERSION}.png"
 
 
-def label_pill_png_path(root: Path, color: tuple[int, int, int], aspect: float) -> Path:
-    bucket = f"{label_aspect_bucket(aspect):.2f}".replace(".", "_")
-    return Path(root) / f"labelpill-{_hex6(color)}-a{bucket}-v{RENDER_VERSION}.png"
-
-
-def render_label_pill(color: tuple[int, int, int], aspect: float) -> Image.Image:
-    height = PILL_PX
-    width = max(1, round(height * label_aspect_bucket(aspect)))
-    w, h = width * SUPERSAMPLE, height * SUPERSAMPLE
+def render_label_pill(color: tuple[int, int, int], width: int, height: int) -> Image.Image:
+    w, h = max(1, int(width)) * SUPERSAMPLE, max(1, int(height)) * SUPERSAMPLE
     rgb = _rgb8(color)
     image = Image.new("RGBA", (w, h), (*rgb, 0))
     ImageDraw.Draw(image).rounded_rectangle(
@@ -103,15 +94,15 @@ def render_label_pill(color: tuple[int, int, int], aspect: float) -> Image.Image
         radius=LABEL_RADIUS_FRAC * h,
         fill=(*rgb, 255),
     )
-    return _downscale(image, width, height)
+    return image
 
 
-def ensure_label_pill_png(root: Path, color: tuple[int, int, int], aspect: float) -> Path:
-    path = label_pill_png_path(root, color, aspect)
+def ensure_label_pill_png(root: Path, color: tuple[int, int, int], width: int, height: int) -> Path:
+    path = label_pill_png_path(root, color, width, height)
     if path.is_file():
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    render_label_pill(color, aspect).save(path, "PNG")
+    render_label_pill(color, width, height).save(path, "PNG")
     return path
 
 

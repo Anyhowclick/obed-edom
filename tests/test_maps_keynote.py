@@ -2542,7 +2542,7 @@ def test_label_pill_uses_the_fixed_gold_red_regardless_of_marker_colour(tmp_path
         path = Path(pill["path"])
         assert path.is_file()
         assert path.name.startswith("labelpill-ee220c-")
-        expected = label_pill_png_path(tmp_path / "pins", LABEL_PILL_RGB, pill["w"] / pill["h"])
+        expected = label_pill_png_path(tmp_path / "pins", LABEL_PILL_RGB, pill["w"], pill["h"])
         assert path == expected
 
 
