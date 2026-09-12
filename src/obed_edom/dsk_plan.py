@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from obed_edom.iwa_builds import _ref_id, _transition_effect_duration, build_identity, deck_builds
-from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _mask_geom, _masked_rect, _natural_size, _xywha
+from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _mask_geom, _masked_rect, _xywha
 from obed_edom.iwa_kindindex import derive_kind_index
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.map_remap import (
@@ -926,18 +926,14 @@ MIN_CROP_PX = 8.0
 
 
 class CropRefusal(ValueError):
-    """A crop precondition failed hard enough to refuse the slide (D2/D6): only a
-    crop window under ``MIN_CROP_PX`` on either axis. Every other precondition
-    failure (rotation, EXIF, an unresolved data member, a build on the image) is a
-    per-item fallback -- warned, source kept -- handled inside ``plan_crops``."""
+    """A crop window under ``MIN_CROP_PX`` (D2/D6); every other crop precondition
+    failure is a per-item fallback handled inside ``plan_crops`` instead."""
 
 
 @dataclass(frozen=True)
 class CropSpec:
     """One image replaced by a cropped file (D2, Q1). ``path``'s basename is
-    ``source_file_name`` verbatim -- Keynote's live insert then reports that same
-    fileName in the output package, so build_identity (file-keyed) and the
-    card-stroke pass's filename match both keep working with no extra bookkeeping."""
+    ``source_file_name`` verbatim, matching Keynote's own re-import."""
 
     path: Path
     source_file_name: str
@@ -964,20 +960,20 @@ def crop_geometry(
     obj: dict, objects: dict[str, dict], window: Rect
 ) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
     """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
-    ``window`` (D2 crop math). ``None`` when the object carries no mask (nothing to
-    crop against) or nothing of it is visible in ``window``. Raises ``CropRefusal``
-    on a rotated frame or a rotated mask -- this pixel mapping is axis-aligned only."""
+    ``window`` (unmasked uses its frame); ``None`` when nothing is visible.
+    Raises ``CropRefusal`` on a rotated frame or mask (axis-aligned only)."""
     geom = _geom_dict(obj)
     mask_geom = _mask_geom(obj, objects)
-    if not mask_geom:
-        return None
     frame_angle = _xywha(geom)[4]
     if abs((frame_angle % 360.0 + 180.0) % 360.0 - 180.0) > 0.01:
         raise CropRefusal("rotated frame")
-    masked_rect, rotated = _masked_rect(geom, mask_geom)
-    if rotated:
-        raise CropRefusal("rotated-masked geometry")
-    mask_abs = Rect(*masked_rect)
+    if mask_geom:
+        masked_rect, rotated = _masked_rect(geom, mask_geom)
+        if rotated:
+            raise CropRefusal("rotated-masked geometry")
+        mask_abs = Rect(*masked_rect)
+    else:
+        mask_abs = Rect(*_frame_rect(geom))
     visible = _intersect(mask_abs, window)
     if visible is None:
         return None
@@ -1017,12 +1013,8 @@ def plan_crops(
     number: int,
     build_targets: Iterable[ItemId] = (),
 ) -> tuple[dict[ItemId, CropSpec], list[str]]:
-    """Offline image-crop planning for one slide (D2, step 8). A kept image whose
-    visible rect (frame ∩ mask) is a PROPER SUBSET of ``window`` (the centre panel,
-    or the whole wall under ``include_side``) is replaced by a cropped file written
-    under ``crop_dir``; a visible rect already inside ``window`` (GW 48, GW 24) is
-    left untouched. Never opens Keynote. Raises ``CropRefusal`` only for a crop
-    window under ``MIN_CROP_PX``; every other precondition failure is a fallback."""
+    """Offline per-slide crop planning: a kept image whose visible rect is a proper
+    subset of ``window`` is replaced by a cropped file under ``crop_dir``."""
     from obed_edom.offline_inspect import _data_identifier, data_member_index  # noqa: PLC0415
 
     crops: dict[ItemId, CropSpec] = {}
@@ -1036,6 +1028,7 @@ def plan_crops(
     if not image_ids:
         return crops, warnings
 
+    used_names: set[str] = set()
     with zipfile.ZipFile(key_path) as zf:
         data_index = data_member_index(zf.namelist())
         for item_id in image_ids:
@@ -1093,13 +1086,21 @@ def plan_crops(
                 continue
 
             source_name = item.get("fileName") or Path(member).name
+            if source_name in used_names:
+                warnings.append(f"image {item_id[1]}: fileName {source_name!r} already cropped this slide, keeping source (LWCROP)")
+                continue
             out_dir = Path(crop_dir) / str(number)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / source_name
             ext = Path(source_name).suffix.lower()
             save_kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
-            src_img.crop(px_box).save(out_path, **save_kwargs)
+            try:
+                src_img.crop(px_box).save(out_path, **save_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"image {item_id[1]}: could not save crop as {source_name!r} ({exc}), keeping source (LWCROP)")
+                continue
 
+            used_names.add(source_name)
             crops[item_id] = CropSpec(path=out_path, source_file_name=source_name, px_box=px_box, visible=visible)
 
     return crops, warnings

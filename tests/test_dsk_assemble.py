@@ -2944,6 +2944,21 @@ def test_staged_retained_ids_reads_the_split_parts_own_fits_and_deletes():
     assert dsa._staged_retained_ids(17, plan, part=1) == {("text", 0)}
 
 
+def test_cropped_image_keeps_source_file_name_for_stroke():
+    # GW 21 shaped: fits={image0}, deletes={image0,1,2}; the crop id is deleted, but
+    # the crop's re-insert must still rank as a retained staged image (finding 3).
+    from obed_edom.dsk_plan import CropSpec
+
+    spec = CropSpec(path=Path("/tmp/crop.jpg"), source_file_name="crop.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    plan = AssemblyPlan(
+        kept=(21,), ordinals={21: 1}, fits={21: {("image", 0): Rect(0, 0, 1, 1)}},
+        deletes={21: (("image", 0), ("image", 1), ("image", 2))}, clips={},
+        text_sizes={}, autosize={}, warnings=(),
+        crops={21: {("image", 0): spec}},
+    )
+    assert dsa._staged_retained_ids(21, plan) == {("image", 0)}
+
+
 # --------------------------------------------------------------------------
 # _verify_builds surplus tolerance: Keynote auto-attaches an
 # apple:movie-start build to an inserted clip; tolerate it only on that clip's own
@@ -3259,6 +3274,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
             fits={},
             clips_inserted={},
             stroke={},
+            zorder={},
             builds={},
             size_bytes=1,
             source_size_bytes=1,
@@ -3326,7 +3342,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
-            path=out, slides_kept=(13,), ordinals={13: 1}, fits={}, clips_inserted={}, stroke={}, builds={},
+            path=out, slides_kept=(13,), ordinals={13: 1}, fits={}, clips_inserted={}, stroke={}, zorder={}, builds={},
             size_bytes=1, source_size_bytes=1, wall_s=0.1, warnings=(), movie_props={},
         )
 
@@ -4293,6 +4309,31 @@ def test_text_items_do_not_count_towards_placement():
     assert plan.anchors[48] == "right"
 
 
+def test_text_only_group_does_not_count_towards_placement():
+    # GW 5 shaped: image0 + a text-only badge group0 -- one content item, so "right".
+    image = _image_item(0, x=1954, y=27, w=1381, h=921)
+    badge = _group_item(0, x=4702, y=15, w=645, h=92)
+    slide = _slide(5, [image, badge])
+    slide["groupChildSignature"] = {0: "text:Matthew 18 19 Again, truly I tell you"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {5: SlideDecision(5, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[5] == "right"
+
+
+def test_group_with_media_child_counts_towards_placement():
+    image = _image_item(0, x=1954, y=27, w=1381, h=921)
+    group = _group_item(0, x=4702, y=15, w=645, h=92)
+    slide = _slide(6, [image, group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:caption"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {6: SlideDecision(6, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[6] == "centre"
+
+
 def test_no_auto_anchor_flag_forces_centre():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
     payload = _payload([slide])
@@ -4308,7 +4349,7 @@ def test_no_auto_anchor_flag_forces_centre():
 def test_deletes_include_backdrop_duplicate_and_cropped(monkeypatch):
     from obed_edom.dsk_plan import CropSpec
 
-    scrim = _shape_item = {"kind": "shape", "kindIndex": 0, "x": 951, "y": 0, "w": 3840, "h": 1080, "text": ""}
+    scrim = {"kind": "shape", "kindIndex": 0, "x": 951, "y": 0, "w": 3840, "h": 1080, "text": ""}
     badge = _text_item(0, x=2000, y=900, w=400, h=100)
     image = _image_item(0, x=1954, y=27, w=1381, h=921)
     slide = _slide(28, [scrim, badge, image])
@@ -4372,21 +4413,74 @@ def test_crop_insert_lines_match_clip_idiom(monkeypatch):
     assert "did not import" in text
 
 
-def test_min_text_pt_forces_split():
-    from obed_edom.iwa_builds import build_identity
+def test_restore_crop_zorder_moves_cropped_image_to_source_index(tmp_path, monkeypatch):
+    # GW-5-shaped: source z-order [imgS, grpS], imgS (the crop source) deleted -- the
+    # re-inserted image (last in the out z-order) must move back to index 0.
+    from obed_edom.dsk_plan import CropSpec
+    import zipfile as _zipfile
 
-    text = " ".join(["word"] * 20)
-    long_a = _text_item(0, x=1980, y=200, w=0, h=0)
-    long_a["text"] = text
-    long_a["font"] = "AzoSans-Bold"
-    long_a["size"] = 70.0
-    long_b = _text_item(1, x=5700, y=200, w=0, h=0)
-    long_b["text"] = text + " twin"
-    long_b["font"] = "AzoSans-Bold"
-    long_b["size"] = 70.0
-    slide = _slide(17, [long_a, long_b])
+    src_slide = {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "imgS"}, {"identifier": "grpS"}]}
+    out_slide = {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "grpO"}, {"identifier": "imgO"}]}
+    out_image = {"_pbtype": "TSD.ImageArchive", "data": {"identifier": "d1"}}
+    src_objects = {"slideS": src_slide}
+    out_objects = {"slideO": out_slide, "imgO": out_image, "grpO": {"_pbtype": "TSD.GroupArchive"}}
+
+    def fake_load_deck(path):
+        return (src_objects, {}, {}) if str(path) == "src.key" else (out_objects, {}, {})
+
+    def fake_slide_order(objects):
+        return [("slideS", False)] if objects is src_objects else [("slideO", False)]
+
+    def fake_derive_kind_index(slide_archive, objects):
+        if slide_archive is src_slide:
+            return [
+                {"id": "imgS", "kind": "image", "kindIndex": 0},
+                {"id": "grpS", "kind": "group", "kindIndex": 0},
+            ]
+        return []
+
+    out_path = tmp_path / "out.key"
+    with _zipfile.ZipFile(out_path, "w"):
+        pass
+
+    monkeypatch.setattr(dsa, "_load_deck", fake_load_deck)
+    monkeypatch.setattr(dsa, "slide_order", fake_slide_order)
+    monkeypatch.setattr(dsa, "derive_kind_index", fake_derive_kind_index)
+    monkeypatch.setattr(dsa, "_build_data_index", lambda names: {"d1": "photo.jpg"})
+    monkeypatch.setattr(dsa, "_data_identifier", lambda obj: (obj.get("data") or {}).get("identifier"))
+
+    spec = CropSpec(path=Path("/tmp/photo.jpg"), source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    plan = AssemblyPlan(
+        kept=(1,), ordinals={1: 1}, fits={1: {}},
+        deletes={1: (("image", 0),)}, clips={}, text_sizes={}, autosize={}, warnings=(),
+        crops={1: {("image", 0): spec}},
+    )
+
+    captured: dict = {}
+
+    def fake_reorder(out_path_arg, slide_id, moves):
+        captured["slide_id"] = slide_id
+        captured["moves"] = moves
+        return {"refused": False}
+
+    monkeypatch.setattr(dsa, "reorder_drawables", fake_reorder)
+
+    warnings: list = []
+    result = dsa._restore_crop_zorder("src.key", out_path, plan, warnings)
+    assert captured["slide_id"] == "slideO"
+    assert captured["moves"] == {"imgO": 0}
+    assert result[1] == {"refused": False}
+    assert warnings == []
+
+
+def test_min_text_pt_forces_split():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    slide = _slide(17, [box1, box2])
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
-    assert plan.parts.get(17, 1) >= 1
+    assert plan.parts[17] == 2
+    assert len(plan.splits[17]) == 2

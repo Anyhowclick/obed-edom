@@ -1930,3 +1930,87 @@ def patch_slide_builds(deck: Path, plans: dict[str, dict]) -> dict:
 
     _rewrite_members(deck, edits)
     return {"refused": False, "touched": sorted(plans), "applied": applied}
+
+
+def reorder_drawables(deck: Path, slide_id: str, moves: dict[str, int]) -> dict:
+    """Move each id in ``moves`` (``{drawableId: newIndex}``) to ``newIndex`` within
+    ``slide_id``'s (a ``KN.SlideArchive``) ``drawablesZOrder``, single-member rewrite via
+    ``_rewrite_members``. Moves are applied in ``moves`` dict order, each against the
+    list left by the previous move.
+
+    Refuses (deck untouched) unless ``slide_id`` resolves to a same-member
+    ``KN.SlideArchive`` with a ``drawablesZOrder``, every id in ``moves`` is currently
+    one of its entries, every ``newIndex`` is in range, and the re-encoded archive set
+    changed only ``slide_id``.
+    """
+    deck = Path(deck)
+    slide_id = str(slide_id)
+    moves = {str(k): v for k, v in moves.items()}
+    if not moves:
+        return {"refused": False, "moved": []}
+
+    objects, id_to_file, _file_ids = _load_deck(deck)
+    obj = objects.get(slide_id)
+    if obj is None:
+        return {"refused": True, "reason": f"slide {slide_id} not found in deck"}
+    if obj.get("_pbtype") != "KN.SlideArchive":
+        return {"refused": True, "reason": f"{slide_id} is not a KN.SlideArchive"}
+    member = id_to_file.get(slide_id)
+    if member is None:
+        return {"refused": True, "reason": f"slide {slide_id} has no owning member"}
+
+    order = [str(ref["identifier"]) for ref in obj.get("drawablesZOrder") or [] if ref.get("identifier") is not None]
+    for drawable_id, new_index in moves.items():
+        if drawable_id not in order:
+            return {"refused": True, "reason": f"drawable {drawable_id} not in {slide_id}'s drawablesZOrder"}
+        if not (0 <= new_index < len(order)):
+            return {"refused": True, "reason": f"drawable {drawable_id}: index {new_index} out of range"}
+        order.remove(drawable_id)
+        order.insert(new_index, drawable_id)
+
+    with zipfile.ZipFile(deck) as zf:
+        if member not in zf.namelist():
+            return {"refused": True, "reason": f"member {member} missing from deck"}
+        buf = zf.read(member)
+
+    decoded = IWAFile.from_buffer(buf, member).to_dict()
+    patched = copy.deepcopy(decoded)
+    touched = 0
+    for ch in patched["chunks"]:
+        for arch in ch["archives"]:
+            if str(arch["header"]["identifier"]) != slide_id:
+                continue
+            for o in arch.get("objects") or []:
+                o["drawablesZOrder"] = [{"identifier": did} for did in order]
+                touched += 1
+
+    if touched != 1:
+        return {"refused": True, "reason": f"expected to touch slide {slide_id} once, touched {touched}"}
+
+    new_member = IWAFile.from_dict(copy.deepcopy(patched)).to_buffer()
+    reparsed = IWAFile.from_buffer(new_member, member).to_dict()
+    removed, added, changed = _archive_diff(decoded, reparsed)
+    if removed or added or set(changed) - {slide_id}:
+        return {
+            "refused": True,
+            "reason": f"{member}: re-encode touched other than slide {slide_id} "
+            f"(removed={sorted(removed)}, added={sorted(added)}, changed={sorted(changed)})",
+        }
+
+    reparsed_by_id = _archives_by_id(reparsed)
+    arch = reparsed_by_id.get(slide_id)
+    new_order = None
+    for o in (arch.get("objects") or []) if arch else []:
+        new_order = [str(ref["identifier"]) for ref in o.get("drawablesZOrder") or []]
+        break
+    if new_order != order:
+        return {"refused": True, "reason": f"slide {slide_id} reparsed drawablesZOrder does not match requested order"}
+
+    try:
+        _rewrite_members(deck, {member: new_member})
+    except OfflineWriteCorrupted:
+        raise
+    except Exception as exc:  # noqa: BLE001 — every result refuses, deck left untouched
+        return {"refused": True, "reason": f"rewrite failed: {exc}"}
+
+    return {"refused": False, "moved": sorted(moves), "order": order}

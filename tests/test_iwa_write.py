@@ -67,6 +67,7 @@ from obed_edom.iwa_write import (  # noqa: E402
     patch_slide_builds,
     patch_deck_geometry,
     patch_slide_geometry,
+    reorder_drawables,
 )
 from obed_edom.offline_inspect import _line_endpoints  # noqa: E402
 
@@ -2438,3 +2439,51 @@ def test_restore_source_builds_warns_the_operator_of_an_ambiguous_pairing(tmp_pa
         "within them is arbitrary." in m
         for m in messages
     )
+
+
+# --------------------------------------------------------------------------
+# reorder_drawables (D2 z-order restore for a re-inserted cropped image)
+# --------------------------------------------------------------------------
+def test_reorder_drawables_moves_id_to_new_index(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    result = reorder_drawables(deck, "100", {"230": 0})
+    assert not result["refused"]
+    objects, _id_to_file, _file_ids = _load_deck(deck)
+    assert [ref["identifier"] for ref in objects["100"]["drawablesZOrder"]] == ["230", "220", "250"]
+
+
+def test_reorder_drawables_value_clean_touches_only_the_slide_archive(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    with zipfile.ZipFile(deck) as z:
+        before = {name: z.read(name) for name in z.namelist()}
+    result = reorder_drawables(deck, "100", {"250": 0})
+    assert not result["refused"]
+    with zipfile.ZipFile(deck) as z:
+        after = {name: z.read(name) for name in z.namelist()}
+    assert set(before) == set(after)
+    changed = [name for name in before if before[name] != after[name]]
+    assert changed == ["Index/Slide-100.iwa"]
+
+
+def test_reorder_drawables_refuses_an_id_not_in_zorder(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"999": 0})
+    assert result["refused"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_an_out_of_range_index(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "100", {"230": 5})
+    assert result["refused"]
+    assert deck.read_bytes() == before
+
+
+def test_reorder_drawables_refuses_a_non_slide_archive(tmp_path):
+    deck = _build_builds_deck(tmp_path / "builds.key")
+    before = deck.read_bytes()
+    result = reorder_drawables(deck, "230", {"230": 0})
+    assert result["refused"]
+    assert deck.read_bytes() == before

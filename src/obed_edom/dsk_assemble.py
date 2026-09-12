@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import re
 import time
+import zipfile
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace as _dc_replace
@@ -46,14 +47,7 @@ from obed_edom.dsk_plan import (
     visible_union,
     wrapped_height,
 )
-from obed_edom.iwa_runs import (
-    _load_deck,
-    attach_group_captions,
-    attach_group_child_text,
-    attach_group_content_signature,
-    attach_runs,
-    slide_order,
-)
+from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
     _frame_rect,
     _geom_dict,
@@ -64,10 +58,18 @@ from obed_edom.iwa_geometry import (
     _xywha,
     compose_geometry,
 )
-from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
+from obed_edom.iwa_runs import (
+    _load_deck,
+    attach_group_captions,
+    attach_group_child_text,
+    attach_group_content_signature,
+    attach_runs,
+    slide_order,
+)
+from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
 from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
-from obed_edom.offline_inspect import _canvas_size, offline_wall_payload
+from obed_edom.offline_inspect import _build_data_index, _canvas_size, _data_identifier, offline_wall_payload
 from obed_edom.remap_keynote import _AS_KIND_NAMES, _as_num, copy_keynote
 
 DEFAULT_BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
@@ -280,10 +282,27 @@ def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | N
     return objects.get(slide_id)
 
 
-def _content_item_count(cls: SlideClass) -> int:
+def _group_is_text_only(signature: str | None) -> bool:
+    """True when `signature` (`slide['groupChildSignature']`, composite of ``text:``/
+    ``shape:``/``image:``-tagged leaves) has no non-text leaf. Unresolved/empty
+    signatures are conservatively NOT text-only."""
+    if not signature:
+        return False
+    return all(part.startswith("text:") for part in signature.split("\n") if part)
+
+
+def _content_item_count(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> int:
     """Count of kept image/movie/group items -- placement is by COUNT (D3); text
-    (and text-bearing badge shapes) never count towards it."""
-    return sum(1 for iid in cls.kept if iid[0] in ("image", "movie", "group"))
+    (and text-only badge groups with no media child) never count towards it."""
+    group_signature = group_signature or {}
+    count = 0
+    for kind, kind_index in cls.kept:
+        if kind not in ("image", "movie", "group"):
+            continue
+        if kind == "group" and _group_is_text_only(group_signature.get(kind_index)):
+            continue
+        count += 1
+    return count
 
 
 def plan_assembly(
@@ -304,6 +323,8 @@ def plan_assembly(
     builds: Mapping[int, dict] | None = None,
     no_auto_anchor: bool = False,
 ) -> AssemblyPlan:
+    """Pure planning over `payload`/`classes`, EXCEPT `plan_crops` (unless
+    `no_image_crop`), which writes cropped image files under `crop_dir` as it plans."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -344,7 +365,9 @@ def plan_assembly(
         warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
         if decision.anchor in (None, "auto"):
-            anchor = "centre" if no_auto_anchor else ("right" if _content_item_count(cls) == 1 else "centre")
+            anchor = "centre" if no_auto_anchor else (
+                "right" if _content_item_count(cls, slide.get("groupChildSignature")) == 1 else "centre"
+            )
         else:
             anchor = decision.anchor
         anchors_out[number] = anchor
@@ -514,6 +537,10 @@ def plan_assembly(
                         f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
                     )
                 else:
+                    if slide_crops:
+                        raise AssemblyRefusal(
+                            f"slide {number}: text split and image crop both apply -- unsupported"
+                        )
                     stacked_ids = set(long_ids)
                     part_list: list[SplitPart] = []
                     for box in boxes:
@@ -1409,6 +1436,7 @@ class AssembleResult:
     fits: dict
     clips_inserted: dict[int, Path]
     stroke: dict
+    zorder: dict
     builds: dict
     size_bytes: int
     source_size_bytes: int
@@ -1812,6 +1840,94 @@ def _restore_stroke(
     return stroke
 
 
+def _restore_crop_zorder(
+    fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: list[str]
+) -> dict[int, dict]:
+    """Move each re-inserted cropped image (D2/plan step 2) back to its deleted source
+    item's z-order index, per slide, via ``reorder_drawables``. Refuses per slide, not
+    the whole deck; a slide with nothing found to move is simply absent from the result."""
+    result: dict[int, dict] = {}
+    if not plan.crops:
+        return result
+
+    src_objects, _src_i2f, _src_fi = _load_deck(fw_deck)
+    out_objects, _out_i2f, _out_fi = _load_deck(out_path)
+    with zipfile.ZipFile(out_path) as zf:
+        out_data_index = _build_data_index(zf.namelist())
+
+    src_order = slide_order(src_objects)
+    out_order = slide_order(out_objects)
+
+    for number, crop_specs in plan.crops.items():
+        if not crop_specs or plan.splits.get(number) is not None:
+            continue
+        ordinal = plan.ordinals.get(number)
+        if ordinal is None or number > len(src_order) or ordinal > len(out_order):
+            continue
+        src_slide_id, _skipped = src_order[number - 1]
+        out_slide_id, _skipped = out_order[ordinal - 1]
+        src_slide = src_objects.get(src_slide_id)
+        out_slide = out_objects.get(out_slide_id)
+        if src_slide is None or out_slide is None:
+            warnings.append(f"slide {number}: crop z-order restore skipped, slide archive missing")
+            continue
+
+        src_addr = {rec["id"]: (rec["kind"], rec["kindIndex"]) for rec in derive_kind_index(src_slide, src_objects)}
+        src_z = [
+            str(ref["identifier"]) for ref in (src_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
+        ]
+        out_z = [
+            str(ref["identifier"]) for ref in (out_slide.get("drawablesZOrder") or []) if ref.get("identifier") is not None
+        ]
+        deleted = set(plan.deletes.get(number, ()))
+
+        moves: dict[str, int] = {}
+        used_out_ids: set[str] = set()
+        for source_iid in sorted(crop_specs):
+            spec = crop_specs[source_iid]
+            pos = next((i for i, zid in enumerate(src_z) if src_addr.get(zid) == source_iid), None)
+            if pos is None:
+                warnings.append(
+                    f"slide {number} image {source_iid[1]}: source not found in z-order, crop z-order not restored"
+                )
+                continue
+            target_index = sum(1 for zid in src_z[:pos] if src_addr.get(zid) not in deleted)
+
+            out_id = None
+            for zid in reversed(out_z):
+                if zid in used_out_ids:
+                    continue
+                out_obj = out_objects.get(zid)
+                if out_obj is None or out_obj.get("_pbtype") != "TSD.ImageArchive":
+                    continue
+                data_id = _data_identifier(out_obj)
+                if data_id is not None and out_data_index.get(data_id) == spec.source_file_name:
+                    out_id = zid
+                    break
+            if out_id is None:
+                warnings.append(
+                    f"slide {number} image {source_iid[1]}: cropped insert not found by fileName, "
+                    "z-order not restored"
+                )
+                continue
+            used_out_ids.add(out_id)
+            moves[out_id] = min(target_index, len(out_z) - 1)
+
+        if not moves:
+            continue
+        try:
+            move_result = reorder_drawables(out_path, out_slide_id, moves)
+        except OfflineWriteCorrupted:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            move_result = {"refused": True, "reason": f"reorder_drawables raised: {exc}"}
+        result[number] = move_result
+        if move_result.get("refused"):
+            warnings.append(f"slide {number}: crop z-order restore refused: {move_result.get('reason')}")
+
+    return result
+
+
 def _staged_kind_ranks(number: int, plan: AssemblyPlan, *, part: int = 0) -> dict[str, list[int]]:
     """Per-kind source ``kindIndex`` lists, sorted by post-delete staged index, for this
     slide/part's kept items (own fits/deletes for a split part)."""
@@ -1840,6 +1956,9 @@ def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> s
     retained = {(kind, rank) for kind, idxs in by_kind.items() for rank in range(len(idxs))}
     if number in plan.clips:
         retained.add(("movie", len(by_kind.get("movie", []))))
+    if plan.splits.get(number) is None:
+        for i, _iid in enumerate(sorted(plan.crops.get(number, {}))):
+            retained.add(("image", len(by_kind.get("image", [])) + i))
     return retained
 
 
@@ -2087,6 +2206,8 @@ def assemble_dsk_deck(
         deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
         builds=builds_by_number, no_auto_anchor=no_auto_anchor,
     )
+    for number in sorted(plan.anchors):
+        log(f"slide {number}: anchor {plan.anchors[number]}")
 
     warnings: list[str] = list(plan.warnings)
     movie_props: dict[int, dict[str, str]] = {}
@@ -2145,6 +2266,7 @@ def assemble_dsk_deck(
             verify_staged_layouts_alpha_safe(staging_path, plan)
 
         stroke = _restore_stroke(fw_deck, staging_path, plan, payload, stroke_min_refs, warnings, log)
+        zorder = _restore_crop_zorder(fw_deck, staging_path, plan, warnings)
         builds = _verify_builds(fw_deck, staging_path, plan, warnings)
 
         copy_keynote(staging_path, out_path)
@@ -2158,6 +2280,7 @@ def assemble_dsk_deck(
         fits=plan.fits,
         clips_inserted={number: clip_path for number, (clip_path, _iid) in plan.clips.items()},
         stroke=stroke,
+        zorder=zorder,
         builds=builds,
         size_bytes=_package_size(out_path),
         source_size_bytes=_package_size(fw_deck),
