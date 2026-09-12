@@ -82,10 +82,7 @@ def _filter_kept_items(
     bool, tuple[ItemId, ...], tuple[ItemId, ...],
 ]:
     """Shared filter dropping backdrops/off-canvas/side-panel/scrim/text-slide-media/mirror
-    duplicates. Returns ``(kept, dropped_side, dropped_backdrop, dropped_duplicate, ...)``.
-    ``no_dedupe``/``no_drop_panel_backdrop`` are operator escape hatches (D6, `--no-dedupe`/
-    `--no-drop-panel-backdrop`) that keep the mirror-duplicate pair, resp. the panel scrim,
-    instead of dropping them."""
+    duplicates; ``no_dedupe``/``no_drop_panel_backdrop`` keep the mirror pair, resp. the scrim."""
     kept: list[dict] = []
     dropped_side: list[ItemId] = []
     panel_backdrops: list[dict] = []
@@ -977,8 +974,7 @@ def _rects_close(a: Rect, b: Rect, tol: float = 0.5) -> bool:
 
 def _asset_natural_size(obj: dict) -> tuple[float, float]:
     """``naturalSize`` (media pixel size) lives directly on an image/movie archive,
-    not under ``super.pathsource`` like ``iwa_geometry._natural_size`` expects for
-    shapes (F1)."""
+    not under ``super.pathsource`` like ``iwa_geometry._natural_size`` expects for shapes."""
     natural = obj.get("naturalSize") or {}
     return (natural.get("width") or 0.0, natural.get("height") or 0.0)
 
@@ -986,7 +982,7 @@ def _asset_natural_size(obj: dict) -> tuple[float, float]:
 def crop_geometry(
     obj: dict, objects: dict[str, dict], window: Rect
 ) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
-    """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
+    """``(content_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
     ``window``, or ``None`` when nothing is visible; raises ``CropFallback`` otherwise."""
     mask_ref = (obj.get("mask") or {}).get("identifier")
     if mask_ref is not None and objects.get(str(mask_ref)) is None:
@@ -995,24 +991,28 @@ def crop_geometry(
     mask_geom = _mask_geom(obj, objects)
     frame_angle = _xywha(geom)[4]
     frame_rotated = abs((frame_angle % 360.0 + 180.0) % 360.0 - 180.0) > 0.01
+    frame_abs = Rect(*_frame_aabb(geom))
     if mask_geom:
         masked_rect, mask_rotated = _masked_rect(geom, mask_geom)
         rotated = frame_rotated or mask_rotated
         mask_abs = Rect(*_mask_aabb(geom, mask_geom)) if rotated else Rect(*masked_rect)
     else:
-        mask_abs = Rect(*_frame_aabb(geom))
+        mask_abs = frame_abs
         rotated = frame_rotated
-    visible = _intersect(mask_abs, window)
+    content_abs = _intersect(mask_abs, frame_abs)
+    if content_abs is None:
+        return None
+    visible = _intersect(content_abs, window)
     if visible is None:
         return None
     if rotated:
-        if _rects_close(visible, mask_abs):
+        if _rects_close(visible, content_abs):
             return None
         raise CropFallback("rotated-masked geometry" if mask_geom else "rotated frame")
     frame = Rect(*_frame_rect(geom))
     natural = _asset_natural_size(obj)
     if frame.w <= 0 or frame.h <= 0 or natural[0] <= 0 or natural[1] <= 0:
-        if _rects_close(visible, mask_abs):
+        if _rects_close(visible, content_abs):
             return None
         raise CropFallback("invalid frame or naturalSize geometry")
     sx, sy = natural[0] / frame.w, natural[1] / frame.h
@@ -1024,7 +1024,7 @@ def crop_geometry(
         min(int(round(natural[0])), int(math.ceil(x1))),
         min(int(round(natural[1])), int(math.ceil(y1))),
     )
-    return mask_abs, visible, px_box
+    return content_abs, visible, px_box
 
 
 def _item_object_ids(slide_archive: dict, objects: dict[str, dict]) -> dict[ItemId, str]:
@@ -1047,9 +1047,9 @@ def plan_crops(
     number: int,
     build_targets: Iterable[ItemId] = (),
     dry_run: bool = False,
-) -> tuple[dict[ItemId, CropSpec], list[str]]:
-    """Offline per-slide crop planning: a kept image whose visible rect is a proper
-    subset of ``window`` is replaced by a cropped file under ``crop_dir``."""
+) -> tuple[dict[ItemId, CropSpec], list[str], tuple[tuple[Path, Path], ...]]:
+    """Offline per-slide crop planning; returns pending ``(temp_path, final_path)``
+    writes under ``crop_dir`` for the caller to commit once every slide validates."""
     from obed_edom.offline_inspect import _data_identifier, data_member_index  # noqa: PLC0415
 
     crops: dict[ItemId, CropSpec] = {}
@@ -1099,8 +1099,8 @@ def plan_crops(
             if result is None:
                 _mark_kept(item)
                 continue
-            mask_abs, visible, px_box = result
-            if _rects_close(visible, mask_abs):
+            content_abs, visible, px_box = result
+            if _rects_close(visible, content_abs):
                 _mark_kept(item)
                 continue
             if (item.get("rotation") or 0) % 360 != 0:
@@ -1186,7 +1186,4 @@ def plan_crops(
                 "kept image left uncropped this slide"
             )
 
-    for temp_path, out_path in pending_writes:
-        os.replace(temp_path, out_path)
-
-    return crops, warnings
+    return crops, warnings, tuple(pending_writes)

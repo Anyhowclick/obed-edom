@@ -6,6 +6,7 @@ exercise real Sermon_PK decks and are skipped when the local operator files or
 the ``keynote_parser`` optional extra are absent (mirrors test_iwa_runs.py).
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import obed_edom.dsk_plan as dsk_plan
 from obed_edom.dsk_plan import (
     Band,
     BandRefusal,
+    CropFallback,
     CropRefusal,
     TextBox,
     classify_deck,
@@ -1275,13 +1277,25 @@ def test_no_crop_when_visible_inside_panel():
     assert dsk_plan._rects_close(visible, mask_abs)
 
 
+def test_crop_geometry_mask_beyond_frame_clips_to_frame():
+    # The mask extends past the frame on every side; content must be frame ∩ mask
+    # first, or the oversized mask makes an already-fully-visible frame look cropped.
+    obj, extra = _image_obj(x=1954, y=27, w=1381, h=921, mask=(-100, -100, 1581, 1121), natural=(1600, 1056))
+    objects = {"img": obj, **extra}
+    result = crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+    assert result is not None
+    content_abs, visible, _px_box = result
+    assert content_abs == Rect(1954.0, 27.0, 1381.0, 921.0)
+    assert dsk_plan._rects_close(visible, content_abs)
+
+
 def test_crop_refused_on_rotated_full_panel_mask_true_aabb_overflows():
     # The snapped mask rect equals the window, but the raw rotated AABB of a full-panel
     # mask at 5 degrees genuinely overflows it -- D6 requires the LWCROP fallback, not
     # silence (round-2 finding 3).
     obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080))
     objects = {"img": obj, **extra}
-    with pytest.raises(CropRefusal):
+    with pytest.raises(CropFallback):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
 
 
@@ -1291,7 +1305,7 @@ def test_crop_geometry_unmasked_rotated_uses_frame_aabb():
     # overflows it must refuse (the unrotated rect would wrongly look fully visible).
     obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=10.0, natural=(3840, 1080))
     objects = {"img": obj, **extra}
-    with pytest.raises(CropRefusal):
+    with pytest.raises(CropFallback):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
 
 
@@ -1300,7 +1314,7 @@ def test_crop_refused_on_rotated_frame_needing_crop():
         x=1920, y=-981.6, w=3840, h=2560, angle=5.0, mask=(0, 808, 3840, 1472), natural=(6000, 4000)
     )
     objects = {"img": obj, **extra}
-    with pytest.raises(CropRefusal):
+    with pytest.raises(CropFallback):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
 
 
@@ -1310,7 +1324,7 @@ def test_crop_refused_on_referenced_but_missing_mask():
     obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
     obj["mask"] = {"identifier": "missing-mask"}
     objects = {"img": obj}
-    with pytest.raises(CropRefusal, match="mask"):
+    with pytest.raises(CropFallback, match="mask"):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
 
 
@@ -1319,7 +1333,7 @@ def test_crop_refused_on_zero_natural_size_when_crop_needed():
     # must fall back with a warning, not silently keep the source (round-2 finding 4).
     obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(0, 0))
     objects = {"img": obj, **extra}
-    with pytest.raises(CropRefusal, match="naturalSize"):
+    with pytest.raises(CropFallback, match="naturalSize"):
         crop_geometry(obj, objects, CENTRE_PANEL_RECT)
 
 
@@ -1350,7 +1364,7 @@ def test_crop_falls_back_on_exif_orientation(tmp_path, monkeypatch):
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}
@@ -1378,7 +1392,7 @@ def test_crop_falls_back_on_exif_before_min_window_refusal(tmp_path, monkeypatch
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}
@@ -1402,7 +1416,7 @@ def test_plan_crops_falls_back_on_rotated_item(tmp_path, monkeypatch):
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 5.0, "fileName": "photo.jpg"}
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}
@@ -1428,7 +1442,7 @@ def test_plan_crops_falls_back_on_rotated_frame(tmp_path, monkeypatch):
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}
@@ -1455,11 +1469,42 @@ def test_plan_crops_warns_on_rotated_full_panel_mask_needing_crop(tmp_path, monk
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 5.0, "fileName": "photo.jpg"}
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}
     assert any("rotated" in w and "LWCROP" in w for w in warnings)
+
+
+def test_plan_crops_warns_on_missing_referenced_mask(tmp_path, monkeypatch):
+    """A ``mask.identifier`` `crop_geometry` can't resolve raises `CropFallback` --
+    `plan_crops` must catch it, warn, and keep the source (LWCROP), not crash."""
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    obj["mask"] = {"identifier": "missing-mask"}
+    objects = {"img": obj}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+    crops, warnings, pending = plan_crops(
+        _empty_key(tmp_path), {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert pending == ()
+    assert any("mask" in w and "LWCROP" in w for w in warnings)
+
+
+def test_plan_crops_warns_on_invalid_geometry(tmp_path, monkeypatch):
+    """Zero `naturalSize` with a genuine crop needed raises `CropFallback` from
+    `crop_geometry` -- `plan_crops` must catch it, warn, and keep the source (LWCROP)."""
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(0, 0))
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
+    crops, warnings, pending = plan_crops(
+        _empty_key(tmp_path), {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert pending == ()
+    assert any("naturalSize" in w and "LWCROP" in w for w in warnings)
 
 
 def test_plan_crops_refuses_duplicate_fileName_on_one_slide(tmp_path, monkeypatch):
@@ -1612,7 +1657,7 @@ def test_plan_crops_dry_run_notes_would_crop_without_writing_files(tmp_path, mon
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
     item = {"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "photo.jpg"}
     crop_dir = tmp_path / "crops"
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         _empty_key(tmp_path), {}, objects, [item], [("image", 0)],
         crop_dir=crop_dir, number=3, dry_run=True,
     )
@@ -1676,7 +1721,7 @@ def test_crop_falls_back_to_note_when_build_targets_image(tmp_path, monkeypatch)
     obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         _empty_key(tmp_path), {}, objects,
         [{"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "a.png"}],
         [("image", 0)], crop_dir=tmp_path, number=3, build_targets=[("image", 0)],
@@ -1689,7 +1734,7 @@ def test_crop_no_op_for_gw48_shaped_visible_inside_panel(tmp_path, monkeypatch):
     obj, extra = _image_obj(x=1954, y=27, w=1381, h=921, mask=(0, 0, 1381, 921), natural=(1600, 1056))
     objects = {"img": obj, **extra}
     monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 2): "img"})
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         _empty_key(tmp_path), {}, objects,
         [{"kind": "image", "kindIndex": 2, "rotation": 0, "fileName": "wheelchair.jpeg"}],
         [("image", 2)], crop_dir=tmp_path, number=48,
@@ -1718,13 +1763,17 @@ def test_plan_crops_writes_file_keeping_source_name(tmp_path, monkeypatch):
     item = {
         "kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "Yang Zheng_250408_YZ_0613.jpg",
     }
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert warnings == []
     assert list(crops.keys()) == [("image", 0)]
     spec = crops[("image", 0)]
     assert spec.path.name == "Yang Zheng_250408_YZ_0613.jpg"
+    assert not spec.path.exists()
+    assert [final for _temp, final in pending] == [spec.path]
+    for temp_path, final_path in pending:
+        os.replace(temp_path, final_path)
     assert spec.path.is_file()
     assert spec.px_box == (0, 1533, 6000, 3222)
     with Image.open(spec.path) as cropped:
@@ -1754,7 +1803,7 @@ def test_plan_crops_unlinks_partial_file_on_save_failure(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(Image.Image, "save", _broken_save)
-    crops, warnings = plan_crops(
+    crops, warnings, pending = plan_crops(
         key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
     )
     assert crops == {}

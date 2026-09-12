@@ -6,6 +6,7 @@ report's transition note on clip slides is expected, not a defect.
 from __future__ import annotations
 
 import copy
+import os
 import re
 import time
 import zipfile
@@ -277,13 +278,19 @@ def slide_affine_scale(
     return None
 
 
-def _unlink_crop_files(paths: Sequence[Path]) -> None:
-    """Best-effort delete of crop files already written for earlier slides on refusal."""
-    for path in paths:
+def _discard_pending_crop_writes(pending: Sequence[tuple[Path, Path]]) -> None:
+    """Best-effort delete of temp crop files planned so far; final paths are untouched."""
+    for temp_path, _final_path in pending:
         try:
-            Path(path).unlink(missing_ok=True)
+            Path(temp_path).unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _commit_pending_crop_writes(pending: Sequence[tuple[Path, Path]]) -> None:
+    """Atomically rename every planned crop's temp file onto its final path."""
+    for temp_path, final_path in pending:
+        os.replace(temp_path, final_path)
 
 
 def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | None:
@@ -338,8 +345,8 @@ def plan_assembly(
     no_drop_panel_backdrop: bool = False,
     split_overrides: Mapping[int, int] | None = None,
 ) -> AssemblyPlan:
-    """Pure planning over `payload`/`classes`, EXCEPT `plan_crops`, which writes
-    cropped image files under `crop_dir` (unless `no_image_crop`) as it plans."""
+    """Pure planning over `payload`/`classes`, EXCEPT the cropped image files under
+    `crop_dir` (unless `no_image_crop`), committed only once every slide validates."""
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     wall = (payload["slideWidth"], payload["slideHeight"])
@@ -372,7 +379,7 @@ def plan_assembly(
     if objects_graph is None and fw_deck is not None:
         objects_graph = _load_deck(fw_deck)[0]
 
-    crop_files_written: list[Path] = []
+    pending_crop_writes: list[tuple[Path, Path]] = []
     consumed_splits: set[int] = set()
 
     for number in kept_numbers:
@@ -415,7 +422,7 @@ def plan_assembly(
                         for b in ((builds or {}).get(number) or {}).get("builds") or []
                     }
                     try:
-                        slide_crops, crop_warnings = plan_crops(
+                        slide_crops, crop_warnings, slide_pending = plan_crops(
                             fw_deck,
                             slide_archive,
                             objects_graph,
@@ -430,7 +437,7 @@ def plan_assembly(
                     except CropRefusal as exc:
                         raise AssemblyRefusal(str(exc)) from exc
                     warnings.extend(f"slide {number}: {w}" for w in crop_warnings)
-                    crop_files_written.extend(spec.path for spec in slide_crops.values() if spec.created)
+                    pending_crop_writes.extend(slide_pending)
             if slide_crops:
                 crops_out[number] = slide_crops
 
@@ -713,16 +720,18 @@ def plan_assembly(
             if stacked_ids:
                 stacked_id_map[number] = frozenset(stacked_ids)
         except Exception:
-            _unlink_crop_files(crop_files_written)
+            _discard_pending_crop_writes(pending_crop_writes)
             raise
 
     unconsumed_splits = sorted((split_overrides or {}).keys() - consumed_splits)
     if unconsumed_splits:
-        _unlink_crop_files(crop_files_written)
+        _discard_pending_crop_writes(pending_crop_writes)
         raise AssemblyRefusal(
             f"slide {unconsumed_splits[0]}: --split does not apply -- slide has no long "
             "text boxes to split"
         )
+
+    _commit_pending_crop_writes(pending_crop_writes)
 
     ordinals = ordinal_map(kept_numbers, parts)
     ordinal_to_number: dict[int, int] = {}
