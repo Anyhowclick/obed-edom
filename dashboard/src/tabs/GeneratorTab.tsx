@@ -13,7 +13,7 @@ import {
 import { useCurrentJob } from "../sessions";
 
 export function GeneratorTab() {
-  const { job, upsert, error: openError } = useCurrentJob("generate");
+  const { job, upsert, rename, error: openError } = useCurrentJob("generate");
   const [lwTemplate, setLwTemplate] = useState<ChosenFile | null>(() => loadStoredFile(LW_TEMPLATE_KEY));
   const [dskTemplate, setDskTemplate] = useState<ChosenFile | null>(() => loadStoredFile(DSK_TEMPLATE_KEY));
   const [busy, setBusy] = useState(false);
@@ -122,7 +122,13 @@ export function GeneratorTab() {
       </div>
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {(busy || running) && <LoadingOverlay title="Generating decks…" logs={logs} />}
-      {job && <GenerateResultView job={job} onOpen={setOpen} />}
+      {job && (
+        <GenerateResultView
+          job={job}
+          onOpen={setOpen}
+          onRename={rename}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

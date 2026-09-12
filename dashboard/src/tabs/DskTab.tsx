@@ -16,7 +16,7 @@ import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useCurrentJob } from "../sessions";
 
 export function DskTab() {
-  const { job, upsert, error: openError } = useCurrentJob("dsk");
+  const { job, upsert, rename, error: openError } = useCurrentJob("dsk");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [dsk, setDsk] = useState<ChosenFile | null>(null);
   const [busy, setBusy] = useState(false);
@@ -119,7 +119,14 @@ export function DskTab() {
       {notice && <p className="note">{notice}</p>}
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Validating Keynote…" logs={logs} />}
-      {job && <InspectResultView job={job} labelPrefix="LW" onOpen={setOpen} />}
+      {job && (
+        <InspectResultView
+          job={job}
+          labelPrefix="LW"
+          onOpen={setOpen}
+          onRename={rename}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

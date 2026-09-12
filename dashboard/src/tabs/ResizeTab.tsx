@@ -58,7 +58,7 @@ type ResizeResult = FramingProposal & {
 };
 
 export function ResizeTab() {
-  const { job, upsert, error: openError } = useCurrentJob("resize");
+  const { job, upsert, rename, error: openError } = useCurrentJob("resize");
   const [lw, setLw] = useState<ChosenFile | null>(null);
   const [template, setTemplate] = useState<ChosenFile | null>(null);
   const [range, setRange] = useState("");
@@ -297,7 +297,13 @@ export function ResizeTab() {
       )}
       <ErrorNotice message={error || openError || rangeError} onDismiss={error ? () => setError(null) : undefined} />
       {busy && <LoadingOverlay title="Remapping map and pins…" logs={logs} />}
-      {job && <InspectResultView job={job} onOpen={setOpen} />}
+      {job && (
+        <InspectResultView
+          job={job}
+          onOpen={setOpen}
+          onRename={rename}
+        />
+      )}
       <Lightbox src={open} onClose={() => setOpen(null)} />
     </div>
   );

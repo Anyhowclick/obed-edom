@@ -2,6 +2,7 @@ import { useState } from "react";
 import { previewUrl, reveal, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
 import { ErrorNotice } from "./ErrorNotice";
+import { JobName } from "./JobName";
 import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
 
 const LW_PREVIEW_COLS = 2;
@@ -24,7 +25,15 @@ function present(job: Job, label: string): boolean {
   return !job.artifacts?.missing?.includes(label);
 }
 
-export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: string) => void }) {
+export function GenerateResultView({
+  job,
+  onOpen,
+  onRename,
+}: {
+  job: Job;
+  onOpen: (src: string) => void;
+  onRename?: (id: string, name: string) => Promise<Job>;
+}) {
   const [deck, setDeck] = useState<"lw" | "dsk">("lw");
   const result = (job.result || null) as GenResult | null;
 
@@ -58,6 +67,7 @@ export function GenerateResultView({ job, onOpen }: { job: Job; onOpen: (src: st
 
   return (
     <>
+      {onRename && <JobName job={job} onRename={onRename} className="path-note" />}
       <p className="note path-note">
         {hasLw ? `${result.lwCount} LW` : "No LW"}
         {" · "}

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { previewUrl, type Flag, type Job } from "../api";
 import { PreviewGrid } from "./PreviewGrid";
 import { ErrorNotice } from "./ErrorNotice";
+import { JobName } from "./JobName";
 import { SHOW_INFO_KEY, useSessionToggle } from "../prefs";
 import { SlideFindings } from "./SlideFindings";
 import { parseSlideTarget, ValidationPanel } from "./ValidationPanel";
@@ -31,10 +32,12 @@ export function InspectResultView({
   job,
   labelPrefix = "Slide",
   onOpen,
+  onRename,
 }: {
   job: Job;
   labelPrefix?: string;
   onOpen: (src: string) => void;
+  onRename?: (id: string, name: string) => Promise<Job>;
 }) {
   const result = (job.result || undefined) as InspectResult | undefined;
   const [showInfo, setShowInfo] = useSessionToggle(SHOW_INFO_KEY, false);
@@ -79,6 +82,7 @@ export function InspectResultView({
 
   return (
     <>
+      {onRename && <JobName job={job} onRename={onRename} className="note" />}
       {result?.slideWidth && (
         <p className="note">
           Source canvas {result.slideWidth}×{result.slideHeight}
