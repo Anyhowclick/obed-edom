@@ -227,11 +227,11 @@ def _is_number(field: str) -> bool:
     return True
 
 
-def _check_zoom_range(zoom: float, line: int, raw: str) -> str | None:
+def _check_zoom_range(zoom: float, line: int, raw: str, label: str = "Line") -> str | None:
     if not math.isfinite(zoom):
-        return f"Line {line}: bad zoom {raw!r}"
+        return f"{label} {line}: bad zoom {raw!r}"
     if not (0 <= zoom <= 22):
-        return f"Line {line}: zoom out of range {raw!r} (must be 0-22)"
+        return f"{label} {line}: zoom out of range {raw!r} (must be 0-22)"
     return None
 
 
@@ -320,11 +320,11 @@ def _parse_headerless_row(fields: list[str], line: int, extracted_url: str | Non
     return Place(line=line, name=name, url=url, lat=lat_c, lon=lon_c, zoom=zoom, kind=kind, query=query, full_query=False)
 
 
-def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
+def _place_from_dict_row(row: dict[str, str], line: int, label: str = "Line") -> Place | str:
     name = (row.get("name") or row.get("title") or "").strip()
     query = (row.get("place") or "").strip() or None
     if not name and not query:
-        return f"Line {line}: no name"
+        return f"{label} {line}: no name"
     lat_raw = (row.get("lat") or row.get("latitude") or "").strip()
     lon_raw = (row.get("lon") or row.get("lng") or row.get("longitude") or "").strip()
     try:
@@ -333,30 +333,44 @@ def _place_from_dict_row(row: dict[str, str], line: int) -> Place | str:
         if (lat_val is not None and not math.isfinite(lat_val)) or (
             lon_val is not None and not math.isfinite(lon_val)
         ):
-            return f"Line {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
+            return f"{label} {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
         lat = clamp_lat(lat_val) if lat_val is not None else None
         lon = clamp_lon(lon_val) if lon_val is not None else None
     except ValueError:
-        return f"Line {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
+        return f"{label} {line}: bad lat/lon {lat_raw!r}, {lon_raw!r}"
     url = (row.get("maps_url") or row.get("url") or "").strip() or None
     zoom_raw = (row.get("zoom") or "").strip()
     try:
         zoom = float(zoom_raw) if zoom_raw else None
     except ValueError:
-        return f"Line {line}: bad zoom {zoom_raw!r}"
+        return f"{label} {line}: bad zoom {zoom_raw!r}"
     if zoom is not None:
-        zoom_error = _check_zoom_range(zoom, line, zoom_raw)
+        zoom_error = _check_zoom_range(zoom, line, zoom_raw, label)
         if zoom_error is not None:
             return zoom_error
     if (lat_raw and not lon_raw) or (lon_raw and not lat_raw):
-        return f"Line {line}: lat without lon" if lat_raw else f"Line {line}: lon without lat"
+        return f"{label} {line}: lat without lon" if lat_raw else f"{label} {line}: lon without lat"
     kind_raw = (row.get("kind") or "").strip()
     kind: str | None = None
     if kind_raw:
         kind = _KIND_CANON.get(kind_raw.lower())
         if kind is None:
-            return f"Line {line}: unknown kind {kind_raw!r}"
+            return f"{label} {line}: unknown kind {kind_raw!r}"
     return Place(line=line, name=name, url=url, lat=lat, lon=lon, zoom=zoom, kind=kind, query=query, full_query=bool(query))
+
+
+def places_from_rows(rows: list[dict[str, object]]) -> tuple[list[Place], list[str]]:
+    """Form rows -> Places, with the CSV header-form semantics and "Row N: …" errors."""
+    places: list[Place] = []
+    errors: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        text = {key: ("" if value is None else str(value).strip()) for key, value in row.items()}
+        result = _place_from_dict_row(text, index, label="Row")
+        if isinstance(result, str):
+            errors.append(result)
+        else:
+            places.append(result)
+    return places, errors
 
 
 def _parse_header_form(raw_lines: list[str], first_idx: int) -> tuple[list[Place], list[str]]:
