@@ -1262,10 +1262,16 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             ]
             slide_no += 1
         else:
+            new_no = slide_no + 1
             body += [
                 f"      make new slide at after slide {slide_no}",
+                "      try",
+                f'        set base slide of slide {new_no} of theDoc to master slide "Blank" of theDoc',
+                "      on error",
+                '        set masterStatus to "default"',
+                "      end try",
             ]
-            slide_no += 1
+            slide_no = new_no
         body += _emit_slide_body(op, slide_no)
     return "\n".join(
         [
@@ -1277,7 +1283,13 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             f'      close (every document whose name is "{name}" or name is "{stem}") saving no',
             "      delay 0.3",
             "    end try",
+            '    set themeStatus to "default"',
+            '    set masterStatus to "blank"',
             "    set theDoc to make new document",
+            "    try",
+            '      set document theme of theDoc to theme "Basic Black"',
+            '      set themeStatus to "basicblack"',
+            "    end try",
             f"    set width of theDoc to {int(width)}",
             f"    set height of theDoc to {int(height)}",
             f'    save theDoc in POSIX file "{dest_s}"',
@@ -1296,10 +1308,16 @@ def build_deck_script(ops: list[dict[str, Any]], dest: Path, *, width: int, heig
             "    set theDoc to document 1",
             f'    if name of theDoc does not start with "{stem}" then error '
             '"maps export bound the wrong document: " & (name of theDoc)',
+            "    try",
+            '      set base slide of slide 1 of theDoc to master slide "Blank" of theDoc',
+            "    on error",
+            '      set masterStatus to "default"',
+            "    end try",
             "    tell theDoc",
             *body,
             "    end tell",
             "    save theDoc",
+            '    log "theme=" & themeStatus & " master=" & masterStatus',
             "    try",
             "      close theDoc saving yes",
             "    end try",
@@ -1550,7 +1568,9 @@ def _apply_poster_frames(
         return {"deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None}
     except OfflineWriteCorrupted as exc:
         _log(job, f"posterFrame {deck_label}: deck truncated during patch ({exc}); regenerating unpatched…")
-        _run_one_deck(ops, dest, width=width, height=height, is_cancelled=is_cancelled)
+        _run_one_deck(
+            ops, dest, width=width, height=height, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         from obed_edom.iwa_write import recovery_tmp_path
 
         recovery_tmp_path(dest).unlink(missing_ok=True)
@@ -1573,6 +1593,7 @@ def _run_one_deck(
     width: int,
     height: int,
     is_cancelled: Callable[[], bool] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> str:
     _raise_if_cancelled(is_cancelled)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1589,6 +1610,11 @@ def _run_one_deck(
             + (proc.stdout or "")
             + f"\nScript saved to {debug}"
         )
+    if log is not None:
+        for line in (proc.stdout or "").splitlines() + (proc.stderr or "").splitlines():
+            line = line.strip()
+            if line.startswith("theme=") or line.startswith("master="):
+                log(line)
     return script
 
 
@@ -1819,7 +1845,9 @@ def export_maps_job(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
             reveals=reveals, reveal_movies=reveal_movies,
         )
-        _run_one_deck(ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled)
+        _run_one_deck(
+            ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         result["destPath"] = str(dest)
         _raise_if_cancelled(is_cancelled)
         record = _apply_poster_frames(
@@ -1840,7 +1868,9 @@ def export_maps_job(
                 reveals=reveals, reveal_movies=reveal_movies,
             )
         )
-        _run_one_deck(ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled)
+        _run_one_deck(
+            ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         result["destPathDsk"] = str(dest_dsk)
         record = _apply_poster_frames(
             dest_dsk, ops_dsk, reveal_poster_times, job, "dsk",
@@ -1883,7 +1913,9 @@ def export_maps_job(
                 slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False,
                 reveals=reveals, reveal_movies=reveal_movies,
             )
-        _run_one_deck(ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled)
+        _run_one_deck(
+            ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
+        )
         result["destPathCg"] = str(dest_cg)
         _raise_if_cancelled(is_cancelled)
         record = _apply_poster_frames(

@@ -1825,3 +1825,126 @@ def test_export_maps_job_removes_stale_poster_frame_when_gate_off(tmp_path: Path
 
     result = export_maps_job(job, export_lw=True, export_cg=False)
     assert "posterFrame" not in result
+
+
+def test_build_deck_script_creates_document_on_basic_black_theme(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert "set theDoc to make new document\n" in script
+    assert 'set document theme of theDoc to theme "Basic Black"' in script
+    assert 'set themeStatus to "basicblack"' in script
+    assert 'set base slide of slide 1 of theDoc to master slide "Blank" of theDoc' in script
+    # exactly one combined status line, emitted once at the end of the script.
+    assert script.count('log "theme=" & themeStatus & " master=" & masterStatus') == 1
+
+
+def test_build_deck_script_new_slides_use_blank_master_with_fallback(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert "make new slide at after slide 1\n" in script
+    assert 'set base slide of slide 2 of theDoc to master slide "Blank" of theDoc' in script
+    # every base-slide assignment (slide 1 included) degrades the single master status.
+    assert script.count('set masterStatus to "default"') == 2
+    assert 'set masterStatus to "blank"' in script
+
+
+def test_build_deck_script_single_slide_deck_still_reports_master(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0))
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    ops = plan_deck([a], [], {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert 'set masterStatus to "blank"' in script
+    assert script.count('log "theme=" & themeStatus & " master=" & masterStatus') == 1
+
+
+def test_run_one_deck_forwards_the_combined_status_line(tmp_path: Path, monkeypatch):
+    import subprocess as _sp
+
+    import obed_edom.maps_keynote as mod
+
+    a = _slide("s1", _camera(3.0, 101.0))
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    ops = plan_deck([a], [], {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+
+    def _fake_run(script, **_k):
+        return _sp.CompletedProcess(
+            args=["osascript"], returncode=0, stdout="theme=basicblack master=blank\n", stderr=""
+        )
+
+    monkeypatch.setattr(mod, "run_osascript", _fake_run)
+    job = _job(tmp_path, [a], [])
+    mod._run_one_deck(
+        ops, tmp_path / "Deck.key", width=7680, height=1080, log=lambda message: mod._log(job, message)
+    )
+    assert job.logs == ["theme=basicblack master=blank"]
+
+
+def test_build_deck_script_theme_and_master_scripts_compile(tmp_path: Path):
+    """A `try` block rescues only runtime errors, never a COMPILE error (627cd66) -- verify
+    the theme-create and blank-master AppleScript this PR emits actually osacompiles."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("osacompile") is None:
+        pytest.skip("osacompile unavailable (non-macOS)")
+
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.0, 102.0))
+    links = [{"from": "s1", "to": "s2", "kind": "cut", "duration": 1.0, "playWithoutClick": False}]
+    _dummy_png(tmp_path / "stills" / "s1.png")
+    _dummy_png(tmp_path / "stills" / "s2.png")
+    ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    # broaden past image-only ops: a movie with an image fallback, a text item, a
+    # duplicated slide and a transition all have to compile too.
+    movie = tmp_path / "clip.m4v"
+    movie.write_bytes(b"x")
+    ops[0]["items"] += [
+        {
+            "kind": "movie",
+            "x": 10,
+            "y": 10,
+            "w": 50,
+            "h": 50,
+            "path": str(movie),
+            "fallback": str(tmp_path / "stills" / "s1.png"),
+        },
+        {"kind": "text", "x": 30, "y": 30, "w": 100, "h": 40, "text": "Hope Church"},
+    ]
+    ops.append(
+        {
+            "duplicate": True,
+            "transition": {"effect": "magic_move", "duration": 1.0, "automatic": True},
+            "items": list(ops[0]["items"][:1]),
+        }
+    )
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    assert "duplicate slide" in script
+    assert "make new text item" in script
+    assert "transition effect:magic move" in script
+
+    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["osacompile", "-o", "/dev/null", str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "-2707" not in proc.stderr
+    assert "-2741" not in proc.stderr
