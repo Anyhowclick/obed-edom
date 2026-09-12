@@ -1,6 +1,6 @@
 ---
 name: Maps + Watercolour branch state
-overview: PR #63, #68, and #79 (feat/maps-ux-round) are merged into main. New branch feat/maps-backlog-races, rebased on main 31f9dbe, PR #81 (open), carries the concurrent-race tests and the backend/dashboard fixes they found. Records what landed on 2026-09-09, 2026-09-11, and the backlog round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
+overview: PR #63, #68, #79, and #81 (feat/maps-backlog-races) are merged into main. PR #81 merged as 1a4ee00. Current branch feat/maps-save-status-snap-guide, off 1a4ee00, PR not yet opened, carries the save-status pill and the Keynote-style snap guide. Records what landed on 2026-09-09, 2026-09-11, the backlog round, and the 2026-09-11 evening round, the limits those choices bake in, the QA the owner still owes, and the backlog that is genuinely still open.
 todos:
   - id: owner-qa
     content: "Done 2026-09-09: isolate sequence, paint-on reveal, objects, pitched framing, ink slider + darken all PASS; reorder revert bug FOUND and fixed in aac2807. Still owed: reveal-as-slide-movie, Keynote re-render of restored pairs, and honest preview 2b QA (toner lines, pitched downtown, movie hops across relief/province/CG-crop gates, morph plate slide, centre-to-FW mixed hop, side-panel toggle on centre-only slide)."
@@ -21,7 +21,7 @@ isProject: false
 
 # Maps + Watercolour branch state
 
-PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `main`. Current branch `feat/maps-backlog-races`, rebased on `main` `31f9dbe`, PR **#81** (open). Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
+PR **#63**, PR **#68**, PR **#79** (`feat/maps-ux-round`), and PR **#81** (`feat/maps-backlog-races`) are merged into `main` (`#81` merged as `1a4ee00`). Current branch `feat/maps-save-status-snap-guide`, off `1a4ee00`, PR not yet opened. Workspace `/Users/anyhowclick/Desktop/work/obed-edom-wt-maps-tab`. Never edit `/Users/anyhowclick/Desktop/work/obed-edom` (unrelated dirty branch).
 
 ## Shipped 2026-09-09
 
@@ -104,6 +104,17 @@ PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `m
 - Declined: Codex's ask for a React harness for MapsTab (no such harness exists; owner decision to skip); opus's "thumbnail permanently stale when a bump doesn't touch the slide" (the existing thumbnail still matches the view; only a change that pops it changes the slide fingerprint).
 - Known limit: the stale-thumbnail retry stops silently when the local doc is behind the server (see F1). The CAS/session-import atomic contract — F4, `post_png` writing into `previewDir` while `load_session` swaps it — is **not** fixed; a plan exists (see Open backlog).
 
+## In progress 2026-09-11 (evening)
+
+- `385a656` save-status pill in the Maps toolbar (Saved / Saving… / Unsaved / Paused / Save failed): `MapsSaveStatus`, a `status` getter + `onStatus` callback on `MapsSaveQueue`.
+- `33f4edf` Keynote-style yellow centre guide (`.maps-snap-guide`, `--snap-guide`) shown while the CG crop snaps to centre.
+- Opus review: REVISE, four fixes being applied — `MapsSaveBlockedError` must not set `lastError`/call `onError` in `drain`'s catch; `markDirty` moved to edit time in `scheduleSave`; the guide gated by `exportCg && !splitCg`; `aria-live` added to the pill. Codex gate not yet run.
+- Note: two implementers stalled because a new saveQueue test looped forever (transport conflicting on every call through `keepMyChanges`) — always run `node --test` in the foreground with `timeout`.
+
+### Owner QA results 2026-09-11 evening
+
+Items 1, 2, 4, 5 (below) PASS. Items 3, 6, 7, 8 could not be observed: there was no save indicator, and the conflict banner only appears when another tab/Studio changed the job — the pill is the fix; re-test with two tabs.
+
 ### Owner decisions 2026-09-10
 - No legacy/back-compat handling: old jobs/sessions without `retiredLinks` fail to save/load and should be recreated; the isolate 0.60→0.65 migration may be stripped later if the owner wants.
 
@@ -126,14 +137,14 @@ PR **#63**, PR **#68**, and PR **#79** (`feat/maps-ux-round`) are merged into `m
 
 Round from 2026-09-09: isolate sequence PASS, paint-on reveal PASS ("looks amazing"), objects PASS, pitched framing PASS, ink slider + darken PASS (darken now +5%, i.e. the 0.65 default), reorder revert bug FOUND and fixed in `aac2807`. Still owed:
 
-1. Reveal-as-slide-movie playback in Keynote.
-2. Keynote re-render of restored (reordered) pairs.
-3. Poster-frame probe: run `scripts/probe_movie_poster.py` (dump hand-set deck vs untouched export; patch; reopen) to learn whether Keynote regenerates the poster from `posterTime` or keeps cached `posterImageData`; only then flip `OBED_MAPS_POSTER_FRAME` on (see todo `poster-frame`).
-4. Preview and export a long hop (e.g. SEA overview → downtown) under Arc, compare feel vs Zoom-out/move/zoom-in; check bearing changes on a pitched hop.
-5. Cancellation latency on a real 24 MP photo (painted mask, and rect-only so GrabCut runs); if GrabCut per-iteration is the long pole, follow-up = GrabCut on a downscaled image (separate decision).
-6. Cancelled-batch UX: finished tiles usable, cancelled tiles muted, no red banner, Download batch returns finished files only.
-7. Add-to-map to a non-active Maps slide → Maps shows placeholder thumbnail, selecting recaptures with the landmark, objects list already lists it.
-8. Race: Studio add while a Maps edit is pending → no conflict dialog, both present.
+1. Reveal-as-slide-movie playback in Keynote. **PASS** (2026-09-11 evening).
+2. Keynote re-render of restored (reordered) pairs. **PASS** (2026-09-11 evening).
+3. Poster-frame probe: run `scripts/probe_movie_poster.py` (dump hand-set deck vs untouched export; patch; reopen) to learn whether Keynote regenerates the poster from `posterTime` or keeps cached `posterImageData`; only then flip `OBED_MAPS_POSTER_FRAME` on (see todo `poster-frame`). Not observed 2026-09-11 evening (no save indicator existed yet to confirm state).
+4. Preview and export a long hop (e.g. SEA overview → downtown) under Arc, compare feel vs Zoom-out/move/zoom-in; check bearing changes on a pitched hop. **PASS** (2026-09-11 evening).
+5. Cancellation latency on a real 24 MP photo (painted mask, and rect-only so GrabCut runs); if GrabCut per-iteration is the long pole, follow-up = GrabCut on a downscaled image (separate decision). **PASS** (2026-09-11 evening).
+6. Cancelled-batch UX: finished tiles usable, cancelled tiles muted, no red banner, Download batch returns finished files only. Not observed 2026-09-11 evening (no save indicator existed to confirm state).
+7. Add-to-map to a non-active Maps slide → Maps shows placeholder thumbnail, selecting recaptures with the landmark, objects list already lists it. Not observed 2026-09-11 evening (no save indicator existed to confirm state).
+8. Race: Studio add while a Maps edit is pending → no conflict dialog, both present. Not observed 2026-09-11 evening — the conflict banner only appears when another tab/Studio changed the job; the save-status pill (`385a656`) is the fix, re-test with two tabs.
 9. Honest preview 2b: toner-lines still at authored 2.5 vs preview.
 10. Honest preview 2b: pitched downtown z16 still vs preview at 25%.
 11. Honest preview 2b: a movie hop crossing a relief/province gate (scrub for popping).
@@ -149,6 +160,8 @@ Round from 2026-09-11 (honest preview 2b owner QA): cut-out PASS, flight PASS, r
 18. Object handles above the CG/LW frame (post-`1fc4039`).
 19. Window resize does not dirty the document.
 20. Save conflict: gestures stay live but nothing edits the document until Reload latest / Keep my changes; thumbnails not posted during a conflict.
+21. Save-status pill shows Unsaved→Saving…→Saved on an edit, Paused on a conflict, never flips on resize/inspector toggle.
+22. Yellow centre guide appears only while dragging the CG frame at snap.
 
 ## Open backlog
 
@@ -158,6 +171,7 @@ Round from 2026-09-11 (honest preview 2b owner QA): cut-out PASS, flight PASS, r
 - **3D terrain** unstarted; owner may want additional flight/animation types later — extend the `flight` enum.
 - **Copy/paste target chooser** for multi-slide LW/CG destinations was never finished.
 - **`selectSlide` unguarded thumbnail await.** `selectSlide` awaits `captureThumb(prev)` unguarded, and every caller does `void selectSlide(...)`, so a non-stale thumbnail POST failure on the first attempt silently prevents the slide switch (unhandled rejection) — asymmetric with the retry path, which surfaces via `setError`. Found in review; pre-existing, not introduced by this branch.
+- **Next: isolate darken inconsistent in hop preview** (owner bug, read-only investigation done, not yet fixed). Export ground truth: the fly renders every frame with the SOURCE slide's isolate (`MapsTab.tsx` ~L1633/1710 → `captureFly`), then Python inserts a plain landing slide + dissolve into the isolated destination (`isolate_landing_slides`, `maps_keynote.py` ~L589-608, wired ~L972). Preview: `previewLink`'s movie branch (~L1151-1201) sets no `previewView` before `animateHop`, so the fly shows the SELECTED slide's look; the destination is applied only as a snap at the end, then `stopPreview(true)` restores. Two minimal fixes: (a) `await applyPreviewView(fromView, run)` before `animateHop` (~L1176); (b) `isolate={renderedView?.isolate || active.isolate}` (~L2215) leaks the selected slide's isolate — use `(renderedView || active).isolate`. Optional: emulate the landing+dissolve via `dissolveFrame`. No test pins preview hop appearance (export side is pinned in `tests/test_maps_keynote.py` ~L1335-1390).
 
 ## Pointers
 

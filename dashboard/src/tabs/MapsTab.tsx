@@ -41,7 +41,7 @@ import { MapView, type MapViewHandle } from "../maps/MapView";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
-import { MapsSaveConflictError, MapsSaveQueue } from "../maps/saveQueue";
+import { MapsSaveConflictError, MapsSaveQueue, type MapsSaveStatus } from "../maps/saveQueue";
 import {
   CG_SHIFT_MAX,
   CG_W,
@@ -241,12 +241,21 @@ function formatEta(seconds: number): string {
   return `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
+const SAVE_STATUS_LABEL: Record<MapsSaveStatus, string> = {
+  saved: "Saved",
+  saving: "Saving…",
+  unsaved: "Unsaved",
+  paused: "Paused",
+  error: "Save failed",
+};
+
 export function MapsTab() {
   const { openRun, clearOpenRun } = useRunNav();
   const { job: opened, error: openError } = useCurrentJob("maps");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveConflict, setSaveConflict] = useState<{ paths: string[] } | null>(null);
+  const [saveStatus, setSaveStatus] = useState<MapsSaveStatus>("saved");
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeAudience, setActiveAudience] = useState<MapsAudience>("lw");
@@ -353,6 +362,7 @@ export function MapsTab() {
         setSaveConflict({ paths: conflict.paths });
       },
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+      onStatus: (status) => setSaveStatus(status),
     });
   }
 
@@ -580,11 +590,11 @@ export function MapsTab() {
     const currentJob = jobRef.current;
     if (!currentJob) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveQueue.current?.markDirty();
     const scheduledId = currentJob.id;
     const run = () => {
       saveTimer.current = null;
       if (jobRef.current?.id !== scheduledId) return;
-      saveQueue.current?.markDirty();
       void saveQueue.current?.flush().catch(() => undefined);
     };
     if (immediate) run();
@@ -1995,6 +2005,7 @@ export function MapsTab() {
         >
           <IconLibrary />
         </button>
+        <span className={`maps-save-status maps-save-status-${saveStatus}`} aria-live="polite">{SAVE_STATUS_LABEL[saveStatus]}</span>
         <span className="note">{job.id}</span>
       </div>
       <div className="maps-stylebar">

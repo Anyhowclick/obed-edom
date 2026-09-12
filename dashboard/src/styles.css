@@ -19,6 +19,7 @@
   --accent-collab-fg: #1A1300;
   --accent-danger: #FF4D4D;
   --accent-danger-fg: #FFFFFF;
+  --snap-guide: #ffcc00;
   --glow-magenta: #E12B7C;
   --glow-violet: #6C38FF;
   --glow-indigo: #2D1B69;
@@ -868,6 +869,17 @@ label.check input[type="checkbox"]:disabled,
   cursor: not-allowed;
 }
 .note { color: var(--muted); font-size: 14px; }
+.maps-save-status {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  background: var(--bg-surface-glass-sub);
+}
+.maps-save-status-paused,
+.maps-save-status-error { color: var(--warn); }
 .err { color: var(--err); }
 .error-notice {
   display: flex;
@@ -2109,6 +2121,16 @@ label.inline-field select { width: auto; padding: 5px 8px; }
 }
 .maps-crop-cg:active { cursor: grabbing; }
 .maps-crop-cg.snapped { border-color: var(--accent-primary); }
+.maps-snap-guide {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--snap-guide);
+  pointer-events: none;
+  z-index: 3;
+}
 .maps-object-layer {
   position: absolute;
   inset: 0;
