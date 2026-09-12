@@ -149,6 +149,48 @@ describe("manual entry forms", () => {
     });
   });
 
+  it("starts a fresh row when the operator switches forms", async () => {
+    await renderMapsTab();
+
+    await openForm("Add slides manually…");
+    await type("Name row 1", "Singapore");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add row" }));
+    });
+    await type("Name row 2", "London");
+    await openForm("Add pins to this view manually…");
+
+    expect(screen.getByRole("group", { name: "Add pins manually" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Name row 1")).toHaveValue("");
+    expect(screen.queryByLabelText("Name row 2")).not.toBeInTheDocument();
+  });
+
+  it("takes focus on open and follows the row it adds", async () => {
+    await renderMapsTab();
+
+    await openForm("Add slides manually…");
+    expect(screen.getByLabelText("Name row 1")).toHaveFocus();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add row" }));
+    });
+    expect(screen.getByLabelText("Name row 2")).toHaveFocus();
+  });
+
+  it("stops adding rows at the batch cap the server enforces", async () => {
+    await renderMapsTab();
+
+    await openForm("Add slides manually…");
+    const addRow = screen.getByRole("button", { name: "Add row" });
+    await act(async () => {
+      for (let i = 0; i < 99; i += 1) fireEvent.click(addRow);
+    });
+
+    expect(screen.getByLabelText("Name row 100")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name row 101")).not.toBeInTheDocument();
+    expect(addRow).toBeDisabled();
+  });
+
   it("hides the manual entries behind the lock", async () => {
     await renderMapsTab({ job: makeJob({ status: "running" }) });
 

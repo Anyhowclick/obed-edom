@@ -176,6 +176,10 @@ All are Codex-gated. **#99, #100 and #101 are now MERGED** into `main` (tip `fc4
 - **D6** Basic Black is the template theme.
 - **Labels** must be editable text over a rounded filled background, like `Gold_Wall_Input.key` slide 8 (a text item plus a red rounded-rect shape). The corner radius is not scriptable, so a **PNG pill under the text item** is the recommended route; the owner is to choose PNG vs a native shape, and the pill colour. Status: **planned, not implemented**.
 
+## Open 2026-09-13 (manual entries)
+
+- **`feat/maps-manual-entries`** (base `main`, PR pending): the owner's ask for a keyed-in alternative to the CSV paste — two forms behind the Maps ＋ menu, one row per new slide and one row per pin/dot on the current view, a "+" to add a row and "Done" to post the batch. Both are thin clients over a new `POST /api/maps/{job_id}/bootstrap-rows`, which takes the CSV form's seven columns as JSON (`places_from_rows` stringifies and delegates to `_place_from_dict_row`) and reuses `_run_bootstrap` / `_run_pin_bootstrap` verbatim, so the zoom ladder, geocoding, Google-URL parsing, id allocation and link restitching are unchanged. Batch cap 100 rows, enforced by the route (`MAX_BOOTSTRAP_ROWS`) and mirrored by a disabled "Add row" on the client. Also fixes a pre-existing defect shared with the CSV pin path: a bootstrapped pin kept the row's own ladder zoom as `sizeZoom`, so a country row dropped on a z13 slide rendered ~26 000 px wide; bootstrapped pins now take the target view's camera zoom, matching a shift-click pin. Inherited gaps, none fixed here: manually added slides are always `style: "positron"` (hardcoded in `maps.py`, the deck's `defaultStyle` is ignored), a row's `zoom` is inert in pins mode (the target view's zoom overwrites it), and the route's `replace` flag has no UI. QA check 35 below.
+
 ## Known limits / assumptions
 
 - **Province tile floor.** `admin_level` 4 geometry starts at map z1; nothing renders provinces below it. Preview runs `previewZoomDelta` below authored, so low-zoom previews stay silent about provinces even though the 7680 export shows them.
@@ -238,6 +242,10 @@ Round from 2026-09-12 late (one live check per PR; items 4 and 6 above were defe
 32. **#105** — export a deck with one dot and one drop pin with the PIN DROP WAVE asset moved aside: the export completes, the pin tip sits on its location, a scale-with-map doubling stays sharp.
 33. **#106** — place a dot and a drop pin at z12, zoom to z9: both shrink 8× on screen and in a 7680 still; toggling scale-with-map off keeps the on-screen size; copy/paste between slides keeps the on-screen size.
 34. **#109** — export a still slide with 2–3 labelled churches: each label sits on a gold-red rounded pill, the text is still editable in Keynote at bold 24 pt, and the pills line up on the DSK deck as well.
+
+Round from 2026-09-13 (add):
+
+35. **Manual entries** — ＋ ▸ "Add slides manually…": key in `Singapore`, `London` and `Udaipur`, one of them with a full desktop Google Maps `@lat,lng` URL, then Done. Three slides land at the end of the deck, each zoomed to fit what it is (country ~z4.3, town ~z13). Then select one slide, ＋ ▸ "Add pins to this view manually…", add a drop pin and a dot: both land on that slide at the slide's own zoom (a country-sized row must not render metres wide) and the deck still exports.
 
 Older owed items 3 (poster probe — the dump is done, the patch + reopen on the `_poster.key` copy is still owed) and 9-22 are unchanged.
 
