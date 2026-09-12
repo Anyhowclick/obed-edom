@@ -60,7 +60,7 @@ from obed_edom.maps_tiles import (
     rels_for_cameras,
     rels_for_countries,
 )
-from obed_edom.paths import output_root
+from obed_edom.paths import output_root, validate_export_dir
 from obed_edom.web.job_names import normalise_job_name
 from obed_edom.web.jobs import rewrite_result_paths
 
@@ -469,6 +469,7 @@ class ExportBody(BaseModel):
     exportLw: bool | None = None
     exportCg: bool | None = None
     exportDsk: bool | None = None
+    exportDir: str | None = None
 
 
 def _job_or_404(job_id: str):
@@ -1225,10 +1226,12 @@ def _read_session_archive(job, source) -> tuple[dict[str, Any], dict[str, int]]:
     return commit.payload, {"tiles": len(tile_entries), "previews": len(imported_previews)}
 
 
-def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False) -> dict[str, Any]:
+def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False, export_dir: Path | None = None) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
-    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk)
+    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir)
+    if export_dir is not None:
+        result["exportDir"] = str(export_dir)
     return _bump_state_revision(job.id, result)
 
 
@@ -1674,7 +1677,17 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
             export_dsk = result.get("exportDsk", False) if payload is None or payload.exportDsk is None else payload.exportDsk
             if not export_lw and not export_cg and not export_dsk:
                 raise HTTPException(400, "At least one export target must be on")
-            updated = _runner().rerun(job_id, lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk: _run_export(j, lw, cg, dsk))
+            raw_export_dir = result.get("exportDir") if payload is None or payload.exportDir is None else payload.exportDir
+            export_dir = None
+            if raw_export_dir:
+                try:
+                    export_dir = validate_export_dir(raw_export_dir)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
+            updated = _runner().rerun(
+                job_id,
+                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir: _run_export(j, lw, cg, dsk, ed),
+            )
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if not updated:

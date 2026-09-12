@@ -71,7 +71,7 @@ from obed_edom.outline_check import (
     slots_from_cues,
 )
 from obed_edom.outline_check import visible as visible_slides
-from obed_edom.paths import find_repo_root, output_root
+from obed_edom.paths import export_destination, find_repo_root, output_root, validate_export_dir
 from obed_edom.resolve_drop import resolve_dropped_keynote
 from obed_edom.pipeline import generate
 from obed_edom.remap_keynote import (
@@ -128,6 +128,7 @@ class SettingsBody(BaseModel):
     reuseThreshold: float | None = None
     reusePairings: bool | None = None
     reusePreviews: bool | None = None
+    defaultExportDir: str | None = None
 
 
 def create_app() -> FastAPI:
@@ -156,7 +157,12 @@ def create_app() -> FastAPI:
             current["reusePairings"] = payload.reusePairings
         if payload.reusePreviews is not None:
             current["reusePreviews"] = payload.reusePreviews
-        return save_settings(current)
+        if payload.defaultExportDir is not None:
+            current["defaultExportDir"] = payload.defaultExportDir
+        try:
+            return save_settings(current)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/choose-file")
     def choose_file(prompt: str = Form("Select a Keynote file")) -> dict:
@@ -360,9 +366,16 @@ def create_app() -> FastAPI:
         files: list[UploadFile] = File(...),
         lw_template: str = Form(""),
         dsk_template: str = Form(""),
+        export_dir: str = Form(""),
     ) -> dict:
         lw_path = Path(lw_template.strip()).expanduser() if lw_template.strip() else None
         dsk_path = Path(dsk_template.strip()).expanduser() if dsk_template.strip() else None
+        seed_result: dict[str, Any] = {}
+        if export_dir.strip():
+            try:
+                seed_result["exportDir"] = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         if lw_path is None and dsk_path is None:
             raise HTTPException(400, "At least one Keynote template is required (LW, DSK, or both).")
         if lw_path is not None and not lw_path.exists():
@@ -385,6 +398,7 @@ def create_app() -> FastAPI:
                 "generate",
                 lambda j, p=path, lw=lw_path, dsk=dsk_path: _run_generate(j, p, lw, dsk),
                 feature="generate",
+                result=dict(seed_result) if seed_result else None,
             )
             jobs.append(job.to_dict())
         return {"jobs": jobs}
@@ -433,14 +447,21 @@ def create_app() -> FastAPI:
         return job.to_dict()
 
     @app.post("/api/outline")
-    def outline_endpoint(path: str = Form(...)) -> dict:
+    def outline_endpoint(path: str = Form(...), export_dir: str = Form("")) -> dict:
         outline = _outline_arg(path)
         if outline is None:
             raise HTTPException(400, "An outline .docx or .pdf is required.")
+        seed_result: dict[str, Any] = {}
+        if export_dir.strip():
+            try:
+                seed_result["exportDir"] = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         job = RUNNER.submit(
             "outline",
             lambda j, p=outline: _run_outline(j, p),
             feature="check",
+            result=seed_result or None,
         )
         return job.to_dict()
 
@@ -564,10 +585,17 @@ def create_app() -> FastAPI:
         include_lists: str = Form("false"),
         # Form field `validate` would shadow BaseModel.validate; alias keeps the wire name.
         run_validation: str = Form("true", alias="validate"),
+        export_dir: str = Form(""),
     ) -> dict:
         key = Path(path).expanduser()
         if not key.exists():
             raise HTTPException(400, f"Not found: {path}")
+        resolved_export_dir = ""
+        if export_dir.strip():
+            try:
+                resolved_export_dir = str(validate_export_dir(export_dir))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         raw_template = (template_path or gold_path).strip()
         if not raw_template:
             raise HTTPException(400, "CG template .key is required.")
@@ -587,8 +615,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(err))
         job = RUNNER.submit(
             "resize",
-            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate: (
-                _run_resize_propose(j, p, t, sl, ex, lists, va)
+            lambda j, p=key, t=template, sl=sel, ex=do_export, lists=do_lists, va=do_validate, ed=resolved_export_dir: (
+                _run_resize_propose(j, p, t, sl, ex, lists, va, export_dir=ed)
             ),
             feature="resize",
         )
@@ -745,6 +773,7 @@ def _run_generate(
         docx,
         lw_template=lw_template,
         dsk_template=dsk_template,
+        output_dir=export_destination(job),
     )
     lw_prev = result.output_dir / "previews" / "lw"
     dsk_prev = result.output_dir / "previews" / "dsk"
@@ -1193,13 +1222,15 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
     )
     job.log("Checking scripture references and house style…")
     dest_dir = default_output_root() / ".outline" / job.name
-    dest = dest_dir / f"{path.stem}_findings.pdf"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = export_destination(job) / f"{path.stem}_findings.pdf"
     written = _write_outline_pdf(job, dest, report)
     return {
         **report,
         "kind": "outline",
         "outputDir": str(dest_dir),
         "outlineReport": str(written) if written else None,
+        "exportDir": (job.result or {}).get("exportDir") if job.result else None,
     }
 
 
@@ -1381,6 +1412,7 @@ def _run_resize_propose(
     export: bool,
     keep_side_panels: bool = False,
     validate: bool = True,
+    export_dir: str = "",
 ) -> dict[str, Any]:
     typed = slide_range
     label = format_slide_range(slide_range)
@@ -1463,6 +1495,7 @@ def _run_resize_propose(
         "includeLists": keep_side_panels,
         "validate": validate,
         "export": export,
+        "exportDir": export_dir or None,
         **proposal,
         "slideRange": sorted(slide_range) if slide_range else None,
         "slideRangeTyped": sorted(expand_slide_range(typed) or []) or None,
@@ -1484,7 +1517,7 @@ def _run_resize(
     validate: bool = True,
 ) -> dict[str, Any]:
     dest_dir = default_output_root() / ".resize" / job.name
-    dest = dest_dir / f"{path.stem}_CG.key"
+    dest = export_destination(job) / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
     scope = f"slide {label}" if label else "every slide"
@@ -1527,6 +1560,7 @@ def _run_resize(
         "path": str(path),
         "outputDir": str(dest_dir),
         "destPath": str(dest),
+        "exportDir": (job.result or {}).get("exportDir") if job.result else None,
         "templatePath": str(template),
         "slideWidth": inspect.get("slideWidth") or info.get("width"),
         "slideHeight": inspect.get("slideHeight") or info.get("height"),
