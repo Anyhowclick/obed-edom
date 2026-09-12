@@ -1,4 +1,4 @@
-import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
+import { GeoJSONSource, type Map as MapLibreMap, type SymbolLayerSpecification } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
@@ -332,7 +332,7 @@ export async function addOverlays(
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
-        "icon-size": iconSizeStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]) as never,
+        "icon-size": iconSizeStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]) as unknown as NonNullable<SymbolLayerSpecification["layout"]>["icon-size"],
         "icon-rotation-alignment": "viewport",
         "icon-pitch-alignment": "viewport",
       },

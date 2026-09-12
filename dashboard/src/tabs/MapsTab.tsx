@@ -2379,7 +2379,13 @@ export function MapsTab() {
                         const kind = event.target.value as MapsPinKind;
                         if (kind === "landmark" && !pin.assetId) return;
                         updateActive({
-                          churches: (activeView?.churches || []).map((c) => (c.id === pin.id ? { ...c, kind } : c)),
+                          churches: (activeView?.churches || []).map((c) =>
+                            c.id === pin.id
+                              ? kind === "landmark"
+                                ? { ...c, kind }
+                                : { ...c, kind, scaleWithMap: undefined, sizeZoom: undefined, reveal: undefined }
+                              : c
+                          ),
                         });
                       }}
                     >

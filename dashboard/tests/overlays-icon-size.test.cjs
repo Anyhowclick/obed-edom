@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { createExpression } = require("@maplibre/maplibre-gl-style-spec");
 
 const root = path.resolve(__dirname, "..");
 const out = fs.mkdtempSync(path.join(os.tmpdir(), "maps-overlays-icon-size-"));
@@ -17,7 +18,7 @@ const { iconSizeStops } = require(path.join(out, "objects.js"));
 
 function stopValues(stops) {
   assert.equal(stops[0], "interpolate");
-  assert.deepEqual(stops[1], ["linear"]);
+  assert.deepEqual(stops[1], ["exponential", 2]);
   assert.deepEqual(stops[2], ["zoom"]);
   return { z0: stops[4], z22: stops[6] };
 }
@@ -28,11 +29,31 @@ test("iconSizeStops folds a non-scaling feature to the same value at both stops"
   assert.deepEqual(z22, ["case", ["boolean", ["get", "scaleWithMap"], false], ["*", ["get", "base"], ["^", 2, ["-", 22, ["get", "sizeZoomRef"]]]], ["get", "base"]]);
 });
 
-test("iconSizeStops values are geometric in ratio 2^22 for a scaling feature", () => {
-  const sizeZoomRef = 5;
+function evaluateIconSize(base, properties) {
+  const expr = iconSizeStops(base);
+  const parsed = createExpression(expr, { type: "number" });
+  assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
+  const feature = { properties };
+  return (zoom) => parsed.value.evaluate({ zoom }, feature);
+}
+
+test("iconSizeStops is exactly geometric (base 2) for a scaleWithMap feature", () => {
   const base = 40;
-  const evalCase = (z) => Math.pow(2, z - sizeZoomRef) * base;
-  assert.equal(evalCase(22) / evalCase(0), Math.pow(2, 22));
+  const sizeZoomRef = 5;
+  const evaluate = evaluateIconSize(base, { sizeZoomRef, scaleWithMap: true });
+  assert.equal(evaluate(3), base * 0.25);
+  assert.equal(evaluate(5), base * 1);
+  assert.equal(evaluate(6), base * 2);
+  assert.ok(Math.abs(evaluate(7.3) - base * Math.pow(2, 2.3)) < 1e-9);
+  assert.equal(evaluate(22), base * 131072);
+});
+
+test("iconSizeStops holds a scaleWithMap:false feature constant at every zoom", () => {
+  const base = 40;
+  const evaluate = evaluateIconSize(base, { scaleWithMap: false });
+  for (const zoom of [3, 5, 6, 7.3, 22]) {
+    assert.equal(evaluate(zoom), base);
+  }
 });
 
 const overlaysOut = fs.mkdtempSync(path.join(os.tmpdir(), "maps-overlays-icon-size-full-"));

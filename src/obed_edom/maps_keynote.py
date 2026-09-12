@@ -1687,6 +1687,12 @@ def _render_reveals(
             country_still = _country_still_path(item_slide, output_dir, audience)
             cap_w, cap_h = slide_capture_size(item_slide)
             origin_x = slide_map_origin_x(item_slide)
+            slide_zoom = float((item_slide.get("camera") or {}).get("zoom") or 0)
+            landmark_churches = [
+                church for church in landmark_churches if _effective_size(church, slide_zoom, None) >= 1
+            ]
+            if not landmark_churches:
+                continue
             geometry_items = _place_churches(
                 landmark_churches,
                 plate=None,

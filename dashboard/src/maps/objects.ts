@@ -1,3 +1,5 @@
+import type { ExpressionSpecification } from "maplibre-gl";
+
 /** Mirrors `_default_landmark_size` in src/obed_edom/web/watercolour.py. */
 export function defaultLandmarkSize(assetWidth: number): number {
   return Math.trunc(Math.max(240, Math.min(1600, Math.min(assetWidth, Math.trunc(1920 / 3) * 2))));
@@ -20,10 +22,10 @@ export function effectiveObjectSize(church: { size?: number; scaleWithMap?: bool
  * (non-scaling) icon-size expression; the stops fold in the geometric zoom growth for
  * features with `scaleWithMap` via `sizeZoomRef` (see overlays.ts `churchesGeo`).
  */
-export function iconSizeStops(base: unknown): unknown[] {
+export function iconSizeStops(base: unknown): ExpressionSpecification {
   const swm = ["boolean", ["get", "scaleWithMap"], false];
   const stopAt = (z: number) => ["case", swm, ["*", base, ["^", 2, ["-", z, ["get", "sizeZoomRef"]]]], base];
-  return ["interpolate", ["linear"], ["zoom"], 0, stopAt(0), 22, stopAt(22)];
+  return ["interpolate", ["exponential", 2], ["zoom"], 0, stopAt(0), 22, stopAt(22)] as unknown as ExpressionSpecification;
 }
 
 export type ObjectCorner = "nw" | "ne" | "sw" | "se";
