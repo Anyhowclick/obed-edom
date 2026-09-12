@@ -712,6 +712,17 @@ def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
     return min(PIN_MAX_PT, DOT_SIZE)
 
 
+EFFECTIVE_SIZE_MAX = 20000
+
+
+def _effective_size(church: dict[str, Any], zoom: float, movie: Path | None) -> float:
+    size = float(church.get("size") or _pin_size(church, movie))
+    size_zoom = church.get("sizeZoom")
+    if church.get("scaleWithMap") and size_zoom is not None:
+        size = size * 2 ** (zoom - float(size_zoom))
+    return min(EFFECTIVE_SIZE_MAX, size)
+
+
 def _place_churches(
     churches: list[dict[str, Any]],
     *,
@@ -750,7 +761,11 @@ def _place_churches(
             theta = math.radians(float(camera.get("bearing") or 0))
             copy_dx = math.cos(theta) * copy_world
             copy_dy = -math.sin(theta) * copy_world
-        size = int(church.get("size") or _pin_size(church, movie))
+        zoom = float((camera or {}).get("zoom") or 0)
+        size = _effective_size(church, zoom, movie)
+        if size < 1:
+            continue
+        size = int(size)
         color = parse_color(str(church.get("color") or "#c44a42"))
         kind = str(church.get("kind") or "dot")
         asset_id = str(church.get("assetId") or "")

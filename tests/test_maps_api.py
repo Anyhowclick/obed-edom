@@ -899,6 +899,73 @@ def test_reveal_duration_out_of_range_rejected():
     assert rejected.status_code == 400
 
 
+def test_scale_with_map_round_trips_on_landmark():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "scaleWithMap": True, "sizeZoom": 6.5,
+        }
+    ]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    church = saved.json()["result"]["slides"][0]["churches"][0]
+    assert church["scaleWithMap"] is True
+    assert church["sizeZoom"] == 6.5
+
+
+def test_scale_with_map_rejected_without_size_zoom():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "scaleWithMap": True,
+        }
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
+def test_scale_with_map_rejected_on_non_landmark():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {"id": "p1", "name": "Dot", "lat": 3, "lon": 101, "kind": "dot", "color": "#c44a42", "scaleWithMap": True, "sizeZoom": 6},
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
+def test_size_zoom_out_of_range_rejected():
+    job = _seed()
+    uploaded = client.post(
+        f"/api/maps/{job['id']}/assets",
+        files={"file": ("church.png", _landmark_png(), "image/png")},
+    ).json()
+    asset = uploaded["asset"]
+    doc = _doc(job)
+    doc["slides"][0]["churches"] = [
+        {
+            "id": "p1", "name": "Church", "lat": 3, "lon": 101, "kind": "landmark", "color": "#c44a42",
+            "assetId": asset["id"], "size": 180, "scaleWithMap": True, "sizeZoom": 23,
+        }
+    ]
+    rejected = _save(job, doc)
+    assert rejected.status_code == 400
+
+
 def test_church_size_allows_up_to_4000_and_rejects_above():
     job = _seed()
     doc = _doc(job)
@@ -1604,6 +1671,8 @@ def test_watercolour_add_to_map_seeds_default_landmark_size_not_180():
     church = slide["churches"][-1]
     assert church["size"] == _default_landmark_size(church["assetWidth"])
     assert church["size"] != 180
+    assert church["scaleWithMap"] is True
+    assert church["sizeZoom"] == slide["camera"]["zoom"]
     import re
     assert re.fullmatch(r"w[0-9a-f]{8}", church["id"])
 
