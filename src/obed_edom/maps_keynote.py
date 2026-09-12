@@ -34,6 +34,7 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
+from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, ensure_label_pill_png, ensure_pin_png
 from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
@@ -53,6 +54,11 @@ DOT_SIZE = 28
 DROP_SIZE = 64
 PHOTO_SIZE = 96
 NAME_HEIGHT = 32
+LABEL_BOLD_FONT = "Amplitude-Bold"
+LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
+LABEL_CHAR_W = 13
+PILL_PAD_X = 6
+PILL_PAD_Y = 2
 MAP_BG_RE = re.compile(r"map\s*bg", re.I)
 PIN_WAVE_RE = re.compile(r"PIN\s*DROP\s*WAVE.*\.mov$", re.I)
 _SKIP_WALK = {
@@ -733,6 +739,7 @@ def _place_churches(
     movie: Path | None,
     origin_x: float = 0,
     capture_w: float = WALL_WIDTH,
+    pin_root: Path,
     asset_root: Path | None = None,
     allow_reveal: bool = True,
     reveals: dict[tuple[str, str, str], str] | None = None,
@@ -740,6 +747,9 @@ def _place_churches(
     sid: str = "",
     skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
+    """`pin_root` is required on purpose: dot and drop-pin rasters are written
+    there, so a caller that forgets it must fail rather than emit a markerless
+    deck. Production callers pass `output_dir / "pins"`."""
     items: list[dict[str, Any]] = []
     for church in churches:
         if skip_landmarks and str(church.get("kind") or "") == "landmark":
@@ -783,7 +793,13 @@ def _place_churches(
             if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
                 continue
             x = cx + origin_x - size / 2.0
-            y = cy - size if kind == "landmark" else cy - size * 1.08 if static_drop else cy - size / 2.0
+            drop_h = whole(size * PIN_ASPECT)
+            if kind == "landmark":
+                y = cy - size
+            elif static_drop:
+                y = whole(cy) - drop_h
+            else:
+                y = cy - size / 2.0
             if wall:
                 x = avoid_straddle(x, size)
             if kind == "landmark":
@@ -820,42 +836,41 @@ def _place_churches(
             elif kind == "dropPin" and movie is not None:
                 items.append(_item("movie", x, y, size, size, path=str(movie), color=color))
             else:
-                if kind == "dropPin":
-                    tail_w = round(size * 0.46)
-                    tail_h = round(size * 0.4)
-                    items.append(
-                        _item(
-                            "shape",
-                            x + (size - tail_w) / 2.0,
-                            y + size * 0.68,
-                            tail_w,
-                            tail_h,
-                            color=color,
-                            shape="triangle",
-                            rotation=180,
-                        )
+                pin_kind = "droppin" if static_drop else "dot"
+                height = drop_h if static_drop else size
+                items.append(
+                    _item(
+                        "image",
+                        x,
+                        y,
+                        size,
+                        height,
+                        path=str(ensure_pin_png(pin_root, pin_kind, color)),
+                        color=color,
                     )
-                items.append(_item("shape", x, y, size, size, color=color, shape="oval"))
-                if kind == "dropPin":
-                    inner = max(6, round(size * 0.36))
-                    items.append(
-                        _item(
-                            "shape",
-                            x + (size - inner) / 2.0,
-                            y + (size - inner) / 2.0,
-                            inner,
-                            inner,
-                            color=(65535, 65535, 65535),
-                            shape="oval",
-                        )
-                    )
+                )
             if name and church.get("showLabel", True):
-                nw = max(48, min(420, 11 * len(name)))
+                nw = max(48, min(420, LABEL_CHAR_W * len(name)))
+                nw += nw % 2
                 nx = x + size + 8
                 ny = y + (size - NAME_HEIGHT) / 2.0
+                pw = nw + 2 * PILL_PAD_X
+                ph = NAME_HEIGHT + 2 * PILL_PAD_Y
                 if wall:
-                    nx = avoid_straddle(nx, nw)
-                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
+                    px = nx - PILL_PAD_X
+                    nx += avoid_straddle(px, pw) - px
+                items.append(
+                    _item(
+                        "image",
+                        nx - PILL_PAD_X,
+                        ny - PILL_PAD_Y,
+                        pw,
+                        ph,
+                        path=str(ensure_label_pill_png(pin_root, LABEL_PILL_RGB, pw, ph)),
+                        labelPill=True,
+                    )
+                )
+                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name, bold=True))
     return items
 
 
@@ -905,6 +920,7 @@ def build_slide_items(
     wall: bool,
     bg_movie: Path | None = None,
     dest_slide: dict[str, Any] | None = None,
+    pin_root: Path,
     asset_root: Path | None = None,
     country_still: Path | None = None,
     allow_reveal: bool = True,
@@ -913,6 +929,7 @@ def build_slide_items(
     sid: str = "",
     skip_landmarks: bool = False,
 ) -> list[dict[str, Any]]:
+    """`pin_root` is required (see `_place_churches`); pass `output_dir / "pins"`."""
     mapped, placement = _map_item(
         slide, plate=plate, plate_path=plate_path, still=still, bg_movie=bg_movie, dest_slide=dest_slide
     )
@@ -933,6 +950,7 @@ def build_slide_items(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                pin_root=pin_root,
                 allow_reveal=allow_reveal,
                 reveals=reveals,
                 reveal_audience=reveal_audience,
@@ -1060,6 +1078,7 @@ def plan_deck(
             bg_movie=bg_movie,
             dest_slide=item_dest,
             asset_root=output_dir / "assets",
+            pin_root=output_dir / "pins",
             country_still=country_still,
             allow_reveal=not duplicate,
             reveals=reveals,
@@ -1165,29 +1184,9 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
             ]
         lines.append("        end try")
         return lines
-    if kind == "shape":
-        color = item.get("color") or (0xC4 * 257, 0x4A * 257, 0x42 * 257)
-        shape = item.get("shape") or "oval"
-        lines = [
-            "        set shp to make new shape with properties "
-            f"{{shape type:{shape}, position:{{{x}, {y}}}, width:{w}, height:{h}}}",
-            "        try",
-            "          set fill type of shp to color fill",
-            "        end try",
-            "        try",
-            f"          set fill color of shp to {{{color[0]}, {color[1]}, {color[2]}}}",
-            "        end try",
-        ]
-        if item.get("rotation") is not None:
-            lines += [
-                "        try",
-                f"          set rotation of shp to {float(item['rotation'])}",
-                "        end try",
-            ]
-        return lines
     text = _as_escape(str(item.get("text") or ""))
     font_size = float(item.get("fontSize") or 24)
-    return [
+    lines = [
         "        set txt to make new text item with properties "
         f'{{object text:"{text}", position:{{{x}, {y}}}, width:{w}, height:{h}}}',
         "        try",
@@ -1197,6 +1196,17 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         "          set color of object text of txt to {65535, 65535, 65535}",
         "        end try",
     ]
+    if item.get("bold"):
+        lines += [
+            "        try",
+            f'          set font of object text of txt to "{LABEL_BOLD_FONT}"',
+            "        on error",
+            "          try",
+            f'            set font of object text of txt to "{LABEL_BOLD_FALLBACK}"',
+            "          end try",
+            "        end try",
+        ]
+    return lines
 
 
 def _emit_transition(slide_no: int, trans: dict[str, Any] | None) -> list[str]:
@@ -1866,6 +1876,7 @@ def _render_reveals(
                 origin_x=origin_x,
                 capture_w=cap_w,
                 asset_root=asset_root,
+                pin_root=output_dir / "pins",
                 allow_reveal=False,
                 sid=sid,
             )

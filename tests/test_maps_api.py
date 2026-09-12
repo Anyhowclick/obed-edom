@@ -464,6 +464,23 @@ def test_bootstrap_csv_preserves_empty_deck_layers(monkeypatch):
     assert new_slide["hiddenLayers"] == []
 
 
+def test_bootstrap_csv_pins_scale_with_map(monkeypatch):
+    job = _seed()
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Nominatim")))
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "name\nSingapore\n", "replace": "false"},
+    )
+    assert started.status_code == 200
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    church = new_slide["churches"][0]
+    assert church["scaleWithMap"] is True
+    assert church["sizeZoom"] == new_slide["camera"]["zoom"]
+    assert church["size"]
+
+
 def test_bootstrap_csv_infers_hop_kind_against_deck_resolved_legacy_slide(monkeypatch):
     """Legacy stored deck: deck hiddenLayers != DEFAULT, slides[0].hiddenLayers is None (as
     JobRunner._load_sessions would restore it verbatim). The new CSV slide is deck-resolved by
@@ -940,14 +957,17 @@ def test_scale_with_map_rejected_without_size_zoom():
     assert rejected.status_code == 400
 
 
-def test_scale_with_map_rejected_on_non_landmark():
+def test_scale_with_map_allowed_on_dot():
     job = _seed()
     doc = _doc(job)
     doc["slides"][0]["churches"] = [
         {"id": "p1", "name": "Dot", "lat": 3, "lon": 101, "kind": "dot", "color": "#c44a42", "scaleWithMap": True, "sizeZoom": 6},
     ]
-    rejected = _save(job, doc)
-    assert rejected.status_code == 400
+    saved = _save(job, doc)
+    assert saved.status_code == 200
+    church = saved.json()["result"]["slides"][0]["churches"][0]
+    assert church["scaleWithMap"] is True
+    assert church["sizeZoom"] == 6
 
 
 def test_size_zoom_out_of_range_rejected():

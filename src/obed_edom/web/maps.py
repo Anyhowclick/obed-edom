@@ -43,7 +43,7 @@ from obed_edom.maps_geo import (
     parse_maps_query,
     sea_overview_camera,
 )
-from obed_edom.maps_keynote import coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
+from obed_edom.maps_keynote import DOT_SIZE, DROP_SIZE, coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
 from obed_edom.maps_tiles import (
     DEFAULT_CAMERA_MAXZOOM,
     DEFAULT_COUNTRY_MAXZOOM,
@@ -721,8 +721,6 @@ def _validate_asset_document(doc: MapsDocument, result: dict[str, Any]) -> MapsD
                     raise HTTPException(400, "Landmark objects require an uploaded Maps asset")
                 if church.reveal and church.kind != "landmark":
                     raise HTTPException(400, "Paint-on reveal is only available for landmark objects")
-                if church.scaleWithMap and church.kind != "landmark":
-                    raise HTTPException(400, "Scale with map is only available for landmark objects")
                 if church.scaleWithMap and church.sizeZoom is None:
                     raise HTTPException(400, "Scale with map requires sizeZoom")
             if view.revealMovie and not any(c.kind == "landmark" and c.reveal for c in view.churches):
@@ -885,13 +883,17 @@ def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = No
         if not name or name == "Untitled":
             name = str(hit.get("label") or name)
     camera["zoom"] = clamp_zoom(resolve_zoom(place, place_type=place_type, zoom_from_url=zoom_from_url))
+    kind = place.kind or "dropPin"
     church = {
         "id": f"{slide_id}-pin",
         "name": name,
         "lat": camera["lat"],
         "lon": camera["lon"],
-        "kind": place.kind or "dropPin",
+        "kind": kind,
         "color": "#c44a42",
+        "size": DOT_SIZE if kind == "dot" else DROP_SIZE,
+        "scaleWithMap": True,
+        "sizeZoom": camera["zoom"],
     }
     return {
         "id": slide_id,

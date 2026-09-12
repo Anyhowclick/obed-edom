@@ -5,9 +5,9 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
+import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, selectedDragScale, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
-import { effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
+import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyAuthoredZoomGates } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
@@ -632,7 +632,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const hit = layers.length ? map.queryRenderedFeatures(event.point, { layers }) : [];
       const id = String(hit[0]?.properties?.id || "");
       const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
-      map.getCanvas().style.cursor = church && church.id === selectedPinId && church.kind === "landmark" ? "move" : "";
+      map.getCanvas().style.cursor = church && church.id === selectedPinId ? "move" : "";
     };
 
     const onObjPointerDown = (event: PointerEvent) => {
@@ -939,18 +939,27 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     }
     const recompute = () => {
       const church = overlay.current.churches.find((c) => c.id === selectedPinId);
-      if (!church || church.kind !== "landmark") {
+      if (!church) {
         setBoxPos(null);
         return;
       }
       const scale = objectLayoutScale(authoredWidthRef.current);
-      const size = church.size || 120;
+      const size = church.size || defaultObjectSize(church.kind);
       const eff = effectiveObjectSize(church, map.getZoom() - deltaRef.current);
       const w = eff * scale;
-      const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
       const anchor = map.project([church.lon, church.lat]);
-      // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
-      setBoxPos({ x: anchor.x - w / 2, y: anchor.y - h, w, h, size });
+      if (church.kind === "dot") {
+        // circle layer is centre-anchored.
+        setBoxPos({ x: anchor.x - w / 2, y: anchor.y - w / 2, w, h: w, size });
+      } else if (church.kind === "dropPin") {
+        // icon-anchor is "bottom", so the anchor sits on the tail tip.
+        const box = dropPinSelectionBox(w);
+        setBoxPos({ x: anchor.x - box.w / 2, y: anchor.y - box.h, w: box.w, h: box.h, size });
+      } else {
+        const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
+        // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
+        setBoxPos({ x: anchor.x - w / 2, y: anchor.y - h, w, h, size });
+      }
     };
     recompute();
     map.on("move", recompute);
@@ -973,7 +982,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       event.stopPropagation();
       if (!boxPos) return;
       const church = overlay.current.churches.find((c) => c.id === selectedPinId);
-      const aspect = (church?.assetHeight || 1) / (church?.assetWidth || 1);
+      const aspect = church?.kind === "landmark" ? (church?.assetHeight || 1) / (church?.assetWidth || 1) : church?.kind === "dropPin" ? DROP_PIN_TOTAL_PX / DROP_PIN_HEAD_PX : 1;
       event.currentTarget.setPointerCapture(event.pointerId);
       handleDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startSize: boxPos.size, corner, aspect };
     };
@@ -985,7 +994,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     if (!drag || !map || !selectedPinId) return;
     const church = overlay.current.churches.find((c) => c.id === selectedPinId);
     const zoomFactor = church?.scaleWithMap && church.sizeZoom != null ? zoomSizeFactor(church.sizeZoom, map.getZoom() - deltaRef.current) : 1;
-    const scale = objectDragScale(map, authoredWidthRef.current) * zoomFactor;
+    const scale = selectedDragScale(church?.kind || "", objectDragScale(map, authoredWidthRef.current) * zoomFactor);
     const size = resizeFromCorner(
       { x: drag.startX, y: drag.startY },
       { x: event.clientX, y: event.clientY },

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -11,8 +12,18 @@ import pytest
 
 from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, world_width
 from obed_edom.maps_keynote import (
+    CG_WIDTH,
+    DOT_SIZE,
+    DSK_SCALE,
+    DSK_WIDTH,
+    LABEL_BOLD_FALLBACK,
+    LABEL_BOLD_FONT,
+    LABEL_CHAR_W,
     MAP_BG_RE,
+    NAME_HEIGHT,
     PANEL_EDGES,
+    PILL_PAD_X,
+    PILL_PAD_Y,
     WALL_HEIGHT,
     WALL_WIDTH,
     _place_churches,
@@ -25,6 +36,7 @@ from obed_edom.maps_keynote import (
     cg_crop_origin,
     coerce_link_kinds,
     dsk_item,
+    dsk_ops,
     export_maps_job,
     hop_capture_size,
     maps_export_plan,
@@ -38,7 +50,9 @@ from obed_edom.maps_keynote import (
     project_into_camera,
     project_into_plate,
     split_cg_export_plan,
+    whole,
 )
+from obed_edom.maps_pins import LABEL_PILL_RGB, PIN_ASPECT, label_pill_png_path
 from obed_edom.maps_reveal import REVEAL_FPS
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
@@ -95,6 +109,18 @@ def _dummy_png(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (16, 16), (20, 30, 40)).save(path, "PNG")
     return path
+
+
+def _pin_items(items: list[dict]) -> list[dict]:
+    """Dots and static drop pins are plain images: not the map, not a landmark,
+    not a label pill."""
+    return [
+        item for item in items
+        if item["kind"] == "image"
+        and not item.get("map")
+        and not item.get("landmark")
+        and not item.get("labelPill")
+    ]
 
 
 def _write_plan_rasters(output_dir: Path, slides: list[dict], links: list[dict]):
@@ -177,7 +203,7 @@ def test_matching_rotation_uses_one_rotated_plate():
     )
 
 
-def test_cg_shift_clamp_used():
+def test_cg_shift_clamp_used(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0), cgShiftX=2000, cgShiftY=10)
     dx, dy = clamp_cg_shift(2000, 0)
     origin = cg_crop_origin(slide)
@@ -191,6 +217,7 @@ def test_cg_shift_clamp_used():
         still=Path("/tmp/missing-still.png"),
         movie=None,
         wall=False,
+        pin_root=tmp_path / "pins",
     )
     mapped = next(item for item in items if item.get("map"))
     assert mapped["x"] == whole_wall_to_cg(CENTRE_ORIGIN_X, origin[0])
@@ -274,8 +301,10 @@ def test_pin_x_not_1920_or_5760(tmp_path: Path):
     slide = _slide("s1", cam, churches=[church])
     still = tmp_path / "s1.png"
     still.write_bytes(b"\x89PNG\r\n\x1a\n")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
-    pins = [item for item in items if item["kind"] == "shape"]
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    pins = _pin_items(items)
     assert pins
     xs = [item["x"] for item in pins]
     assert 1920 not in xs
@@ -301,25 +330,37 @@ def test_hidden_pin_label_stays_in_state_but_is_not_exported(tmp_path: Path):
         _camera(3.0, 101.0, 8),
         churches=[{"id": "c", "name": "Private label", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#c44a42", "showLabel": False}],
     )
-    items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
-    shapes = [item for item in items if item["kind"] == "shape"]
-    assert len(shapes) == 3
-    assert any(item.get("shape") == "triangle" for item in shapes)
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    pins = _pin_items(items)
+    assert len(pins) == 1
+    assert Path(pins[0]["path"]).name.startswith("droppin-")
     assert not [item for item in items if item["kind"] == "text" and item.get("text") == "Private label"]
 
 
 def test_static_drop_pin_tip_is_anchored_to_the_projected_location(tmp_path: Path):
     camera = _camera(3.0, 101.0, 8)
+    # lat 3.1 projects to y = 503.539..., i.e. a NON-integral tip: the height must
+    # still be the canonical raster height, not a projection-fraction artefact.
     slide = _slide(
         "s1",
         camera,
-        churches=[{"id": "c", "name": "Anchor", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#ff8a00"}],
+        churches=[{"id": "c", "name": "Anchor", "lat": 3.1, "lon": 101.0, "kind": "dropPin", "color": "#ff8a00"}],
     )
-    items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
-    triangle = next(item for item in items if item.get("shape") == "triangle")
-    projected_x, projected_y = project_into_camera(3.0, 101.0, camera)
-    assert abs((triangle["x"] + triangle["w"] / 2) - projected_x) <= 1
-    assert abs((triangle["y"] + triangle["h"]) - projected_y) <= 1
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    pins = _pin_items(items)
+    assert len(pins) == 1
+    pin = pins[0]
+    projected_x, projected_y = project_into_camera(3.1, 101.0, camera)
+    assert projected_y != whole(projected_y)
+    assert abs((pin["x"] + pin["w"] / 2) - projected_x) <= 1
+    assert pin["h"] == whole(pin["w"] * PIN_ASPECT)
+    assert pin["y"] + pin["h"] == whole(projected_y)
 
 
 def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
@@ -328,8 +369,18 @@ def test_dot_pin_is_solid_without_white_centre(tmp_path: Path):
         _camera(3.0, 101.0, 8),
         churches=[{"id": "c", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"}],
     )
-    items = build_slide_items(slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True)
-    assert len([item for item in items if item["kind"] == "shape"]) == 1
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    pins = _pin_items(items)
+    assert len(pins) == 1
+    dot = pins[0]
+    assert dot["w"] == dot["h"] == whole(DOT_SIZE)
+    projected_x, projected_y = project_into_camera(3.0, 101.0, _camera(3.0, 101.0, 8))
+    assert abs((dot["x"] + dot["w"] / 2) - projected_x) <= 1
+    assert abs((dot["y"] + dot["h"] / 2) - projected_y) <= 1
+    assert Path(dot["path"]).name.startswith("dot-")
 
 
 def _landmark_church(**extra) -> dict:
@@ -353,7 +404,8 @@ def test_landmark_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 200
 
@@ -364,7 +416,8 @@ def test_landmark_scale_with_map_zoom_out_halves_width(tmp_path: Path):
     camera = _camera(3.0, 101.0, 4)
     slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 50
 
@@ -377,7 +430,8 @@ def test_landmark_scale_with_map_zoom_in_doubles_width_on_morph_plate(tmp_path: 
     geom = morph_plate_geom([cam_a, cam_b])
     plate_path = _dummy_png(tmp_path / "plate.png")
     items = build_slide_items(
-        slide, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True, asset_root=asset_root
+        slide, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
     )
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 200
@@ -389,7 +443,8 @@ def test_landmark_scale_with_map_off_is_unchanged(tmp_path: Path):
     camera = _camera(3.0, 101.0, 6)
     slide = _slide("s1", camera, churches=[_landmark_church(sizeZoom=5)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 100
 
@@ -400,9 +455,88 @@ def test_landmark_scale_with_map_clamps_at_effective_size_max(tmp_path: Path):
     camera = _camera(3.0, 101.0, 40)
     slide = _slide("s1", camera, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5, size=100)])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmark = next(item for item in items if item.get("landmark"))
     assert landmark["w"] == 20000
+
+
+def _dot_church(**extra) -> dict:
+    row = {"id": "dot", "name": "Dot", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42", "size": 100}
+    row.update(extra)
+    return row
+
+
+def _drop_pin_church(**extra) -> dict:
+    row = {"id": "drop", "name": "Drop", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#c44a42", "size": 100}
+    row.update(extra)
+    return row
+
+
+def test_dot_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    oval = _pin_items(items)[0]
+    assert oval["w"] == 200
+
+
+def test_dot_scale_with_map_zoom_out_halves_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 4)
+    slide = _slide("s1", camera, churches=[_dot_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    oval = _pin_items(items)[0]
+    assert oval["w"] == 50
+
+
+def test_dot_scale_with_map_off_is_unchanged(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_dot_church(sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    oval = _pin_items(items)[0]
+    assert oval["w"] == 100
+
+
+def test_drop_pin_scale_with_map_zoom_in_doubles_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    head = _pin_items(items)[0]
+    assert head["w"] == 200
+
+
+def test_drop_pin_scale_with_map_zoom_out_halves_width(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 4)
+    slide = _slide("s1", camera, churches=[_drop_pin_church(scaleWithMap=True, sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    head = _pin_items(items)[0]
+    assert head["w"] == 50
+
+
+def test_drop_pin_scale_with_map_off_is_unchanged(tmp_path: Path):
+    camera = _camera(3.0, 101.0, 6)
+    slide = _slide("s1", camera, churches=[_drop_pin_church(sizeZoom=5)])
+    still = _dummy_png(tmp_path / "s1.png")
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
+    head = _pin_items(items)[0]
+    assert head["w"] == 100
 
 
 def test_landmark_sub_one_px_is_dropped_but_others_remain(tmp_path: Path):
@@ -414,7 +548,8 @@ def test_landmark_sub_one_px_is_dropped_but_others_remain(tmp_path: Path):
     visible = {**_landmark_church(id="visible", assetId="asset2", size=100), "lon": 101.01}
     slide = _slide("s1", camera, churches=[tiny, visible])
     still = _dummy_png(tmp_path / "s1.png")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root)
+    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins")
     landmarks = [item for item in items if item.get("landmark")]
     assert len(landmarks) == 1
 
@@ -430,7 +565,8 @@ def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: 
     without_reveal = _slide("s1", camera, churches=[_landmark_church()])
     still = _dummy_png(tmp_path / "s1.png")
     baseline = build_slide_items(
-        without_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root
+        without_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
     )
     image_item = next(item for item in baseline if item.get("landmark"))
     assert image_item["kind"] == "image"
@@ -438,6 +574,7 @@ def test_landmark_with_reveal_mov_yields_movie_item_at_image_geometry(tmp_path: 
     with_reveal = _slide("s1", camera, churches=[_landmark_church()])
     revealed = build_slide_items(
         with_reveal, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
         reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     movie_item = next(item for item in revealed if item.get("landmark"))
@@ -478,7 +615,8 @@ def test_landmark_reveal_suppressed_on_duplicate_slide(tmp_path: Path):
     slide = _slide("s1", camera, churches=[_landmark_church()])
     still = _dummy_png(tmp_path / "s1.png")
     items = build_slide_items(
-        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root, allow_reveal=False,
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, asset_root=asset_root,
+        pin_root=tmp_path / "pins", allow_reveal=False,
         reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     landmark_item = next(item for item in items if item.get("landmark"))
@@ -644,7 +782,7 @@ def test_reveal_movie_slide_emits_bg_movie_and_no_still(tmp_path: Path):
     }
     assert not any(item.get("kind") == "image" and item.get("map") for item in items)
     assert not any(item.get("landmark") for item in items)
-    assert any(item.get("kind") == "shape" for item in items)
+    assert _pin_items(items)
     assert any(item.get("kind") == "text" for item in items)
 
 
@@ -744,8 +882,11 @@ def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Pa
         _camera(0.0, 179.0, 8),
         churches=[{"id": "c", "name": "Dateline", "lat": 0.0, "lon": 181.0, "kind": "dot", "color": "#c44a42"}],
     )
-    items = build_slide_items(near_dateline, plate=None, plate_path=None, still=_dummy_png(tmp_path / "dateline.png"), movie=None, wall=True)
-    pin = next(item for item in items if item["kind"] == "shape")
+    items = build_slide_items(
+        near_dateline, plate=None, plate_path=None, still=_dummy_png(tmp_path / "dateline.png"), movie=None,
+        wall=True, pin_root=tmp_path / "pins",
+    )
+    pin = _pin_items(items)[0]
     assert abs((pin["x"] + pin["w"] / 2) - WALL_WIDTH / 2) < 1000
 
     overview = _slide(
@@ -754,8 +895,11 @@ def test_static_pin_wraps_across_dateline_and_low_zoom_world_copies(tmp_path: Pa
         includeSidePanels=True,
         churches=[{"id": "c", "name": "World", "lat": 0.0, "lon": 0.0, "kind": "dot", "color": "#c44a42"}],
     )
-    copies = build_slide_items(overview, plate=None, plate_path=None, still=_dummy_png(tmp_path / "world.png"), movie=None, wall=True)
-    assert len([item for item in copies if item["kind"] == "shape"]) >= 14
+    copies = build_slide_items(
+        overview, plate=None, plate_path=None, still=_dummy_png(tmp_path / "world.png"), movie=None,
+        wall=True, pin_root=tmp_path / "pins",
+    )
+    assert len(_pin_items(copies)) >= 14
 
 
 def test_movie_without_video_is_still(monkeypatch, tmp_path: Path):
@@ -778,7 +922,8 @@ def test_movie_without_video_is_still(monkeypatch, tmp_path: Path):
     assert "magic move" not in wall
     assert "duplicate slide" not in wall
     assert "make new movie" not in wall
-    assert "shape type:oval" in wall
+    assert "shape type" not in wall
+    assert "droppin-c44a42" in wall
 
 
 def test_export_importable_and_osascript_is_mockable():
@@ -1402,7 +1547,9 @@ def test_lw_still_sits_on_centre_wall(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0))
     still = tmp_path / "s1.png"
     still.write_bytes(b"\x89PNG\r\n\x1a\n")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
     mapped = next(item for item in items if item.get("map"))
     assert mapped["x"] == CENTRE_ORIGIN_X
     assert mapped["w"] == CENTRE_WIDTH
@@ -1413,7 +1560,9 @@ def test_fw_still_fills_wall(tmp_path: Path):
     slide = _slide("s1", _camera(3.0, 101.0), includeSidePanels=True)
     still = tmp_path / "s1.png"
     still.write_bytes(b"\x89PNG\r\n\x1a\n")
-    items = build_slide_items(slide, plate=None, plate_path=None, still=still, movie=None, wall=True)
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=still, movie=None, wall=True, pin_root=tmp_path / "pins"
+    )
     mapped = next(item for item in items if item.get("map"))
     assert mapped["x"] == 0
     assert mapped["w"] == WALL_WIDTH
@@ -1579,7 +1728,8 @@ def test_place_churches_stamps_reveal_key_only_on_reveal_movie_items(tmp_path: P
 
     with_reveal = _place_churches(
         churches, plate=None, placement=None, camera=camera, wall=True, movie=None,
-        asset_root=asset_root, reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
+        asset_root=asset_root, pin_root=tmp_path / "pins",
+        reveals={("lw", "s1", "lm"): str(reveal_mov)}, reveal_audience="lw", sid="s1",
     )
     revealed_item = next(item for item in with_reveal if item.get("landmark"))
     assert revealed_item["revealKey"] == ("lw", "s1", "lm")
@@ -1587,6 +1737,7 @@ def test_place_churches_stamps_reveal_key_only_on_reveal_movie_items(tmp_path: P
 
     without_reveal = _place_churches(
         churches, plate=None, placement=None, camera=camera, wall=True, movie=None, asset_root=asset_root,
+        pin_root=tmp_path / "pins",
     )
     assert not any("revealKey" in item for item in without_reveal)
 
@@ -2233,3 +2384,321 @@ def test_export_maps_job_cg_autoplay_regeneration_invalidates_cg_poster_record(t
     cg_autoplay = next(r for r in result["movieAutoplay"] if r["deck"] == "cg")
     assert cg_autoplay["refused"] is True
     assert "truncated" in cg_autoplay["reason"]
+
+
+def _kitchen_sink_ops(tmp_path: Path, *, wall: bool = True) -> list[dict]:
+    """One deck plan touching every `_emit_item` branch and every transition shape.
+
+    Map still, country cutout, landmark movie with a still fallback, a dot, a
+    movie-less drop pin and its label, then a duplicate slide (magic move), a
+    movie backdrop (dissolve) and a fresh slide with an automatic no-effect
+    transition.
+    """
+    import obed_edom.maps_keynote as mod
+
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    reveal_mov = tmp_path / "reveal" / "s1-lm.mov"
+    reveal_mov.parent.mkdir(parents=True, exist_ok=True)
+    reveal_mov.write_bytes(b"mov")
+    slide = _slide(
+        "s1",
+        _camera(3.0, 101.0, 8),
+        isolate=True,
+        highlights=["MYS"],
+        churches=[
+            {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"},
+            {"id": "c2", "name": "Pin City", "lat": 3.1, "lon": 101.1, "kind": "dropPin", "color": "#ff8a00"},
+            _landmark_church(id="lm", lat=3.2, lon=101.2),
+        ],
+    )
+    items = build_slide_items(
+        slide,
+        plate=None,
+        plate_path=None,
+        still=_dummy_png(tmp_path / "stills" / "s1.png"),
+        movie=None,
+        wall=wall,
+        asset_root=asset_root,
+        pin_root=tmp_path / "pins",
+        country_still=_dummy_png(tmp_path / "stills" / "s1-country.png"),
+        reveals={("lw", "s1", "lm"): str(reveal_mov)},
+        sid="s1",
+    )
+    deck_width = WALL_WIDTH if wall else CENTRE_WIDTH
+    bg_movie = tmp_path / "movies" / "s3.mov"
+    bg_movie.parent.mkdir(parents=True, exist_ok=True)
+    bg_movie.write_bytes(b"mov")
+    return [
+        {"id": "s1", "duplicate": False, "items": items,
+         "transition": {"effect": "magic_move", "duration": 1.2, "automatic": False}},
+        {"id": "s2", "duplicate": True, "items": items,
+         "transition": {"effect": "dissolve", "duration": 0.8, "automatic": True}},
+        {"id": "s3", "duplicate": False,
+         "items": [mod._item("movie", 0, 0, deck_width, WALL_HEIGHT, path=str(bg_movie), map=True)],
+         "transition": {"effect": None, "duration": 2.0, "automatic": True}},
+        {"id": "s4", "duplicate": False,
+         "items": [mod._item("text", 10, 20, 200, 40, text='Quote "x" & tail')],
+         "transition": None},
+    ]
+
+
+def test_deck_script_never_emits_shape_properties(tmp_path: Path):
+    """All three real export paths: the 7680 wall plan, the 1920 CG plan built
+    from wall=False items, and the 1920 DSK plan built by `dsk_ops`."""
+    wall_ops = _kitchen_sink_ops(tmp_path)
+    cg_ops = _kitchen_sink_ops(tmp_path, wall=False)
+    matrix = (
+        (int(WALL_WIDTH), wall_ops),
+        (CG_WIDTH, cg_ops),
+        (DSK_WIDTH, dsk_ops(wall_ops)),
+    )
+    for width, plan in matrix:
+        script = build_deck_script(plan, tmp_path / "deck.key", width=width, height=int(WALL_HEIGHT))
+        for banned in ("shape type", "fill type", "fill color", "color fill", "make new shape"):
+            assert banned not in script, banned
+
+
+def test_deck_script_and_plate_probe_compile_under_osacompile(tmp_path: Path):
+    """`osascript <file>` compiles the whole file before running a line, so one
+    unsupported term anywhere aborts the entire export (-2741). This is the
+    offline guard: compile a deck plan covering every emitter branch."""
+    if shutil.which("osacompile") is None:
+        pytest.skip("osacompile unavailable (non-macOS)")
+
+    deck = build_deck_script(
+        _kitchen_sink_ops(tmp_path), tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT)
+    )
+    probe = build_shared_plate_probe_script(tmp_path / "probe.key", _dummy_png(tmp_path / "probe.png"))
+    for label, script in (("deck", deck), ("probe", probe)):
+        source = tmp_path / f"{label}.applescript"
+        source.write_text(script, encoding="utf-8")
+        proc = subprocess.run(
+            ["osacompile", "-o", str(tmp_path / f"{label}.scpt"), str(source)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, f"{label}: {proc.stderr}"
+
+
+def test_static_drop_pin_geometry_survives_the_dsk_scale(tmp_path: Path):
+    slide = _slide(
+        "s1",
+        _camera(3.0, 101.0, 8),
+        churches=[{"id": "c", "name": "Anchor", "lat": 3.0, "lon": 101.0, "kind": "dropPin", "color": "#ff8a00"}],
+    )
+    items = build_slide_items(
+        slide, plate=None, plate_path=None, still=_dummy_png(tmp_path / "s1.png"), movie=None, wall=True,
+        pin_root=tmp_path / "pins",
+    )
+    pin = _pin_items(items)[0]
+    scaled = dsk_item(pin)
+    assert scaled["w"] == round(pin["w"] * DSK_SCALE)
+    assert scaled["h"] == round(pin["h"] * DSK_SCALE)
+    assert abs(scaled["h"] / scaled["w"] - pin["h"] / pin["w"]) < 0.02
+
+
+def _label_churches() -> list[dict]:
+    return [
+        {"id": "c1", "name": "Dot City", "lat": 3.0, "lon": 101.0, "kind": "dot", "color": "#c44a42"},
+        {"id": "c2", "name": "Pin City", "lat": 3.05, "lon": 101.05, "kind": "dropPin", "color": "#ff8a00"},
+    ]
+
+
+def _place_labels(tmp_path: Path, churches: list[dict], **kwargs) -> list[dict]:
+    params = {
+        "plate": None,
+        "placement": None,
+        "camera": _camera(3.0, 101.0, 8),
+        "wall": True,
+        "movie": None,
+        "pin_root": tmp_path / "pins",
+    }
+    params.update(kwargs)
+    return _place_churches(churches, **params)
+
+
+def test_label_pill_is_emitted_before_its_text_and_inflated_by_the_pad_constants(tmp_path: Path):
+    items = _place_labels(tmp_path, _label_churches())
+    texts = [index for index, item in enumerate(items) if item.get("kind") == "text"]
+    pills = [index for index, item in enumerate(items) if item.get("labelPill")]
+    assert len(texts) == 2
+    assert len(pills) == 2
+    for pill_index, text_index in zip(pills, texts):
+        # Creation order is stacking order: the pill must precede its text.
+        assert pill_index == text_index - 1
+        pill, text = items[pill_index], items[text_index]
+        assert pill["kind"] == "image"
+        assert pill["x"] == text["x"] - PILL_PAD_X
+        assert pill["y"] == text["y"] - PILL_PAD_Y
+        assert pill["w"] == text["w"] + 2 * PILL_PAD_X
+        assert pill["h"] == text["h"] + 2 * PILL_PAD_Y
+        assert text["h"] == NAME_HEIGHT
+
+
+def test_label_text_is_flagged_bold_and_sized_by_the_bold_char_width(tmp_path: Path):
+    items = _place_labels(tmp_path, _label_churches())
+    texts = [item for item in items if item.get("kind") == "text"]
+    assert len(texts) == 2
+    for text, church in zip(texts, _label_churches()):
+        assert text["bold"] is True
+        assert text["w"] == max(48, min(420, LABEL_CHAR_W * len(church["name"])))
+
+
+def test_emitted_script_sets_the_bold_label_font_with_a_system_fallback(tmp_path: Path):
+    """24 pt bold white (owner decision L3): the Gold reference face, falling back
+    to a guaranteed system bold so a missing Amplitude never aborts the export."""
+    script = build_deck_script(
+        _kitchen_sink_ops(tmp_path), tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT)
+    )
+    assert f'set font of object text of txt to "{LABEL_BOLD_FONT}"' in script
+    assert f'set font of object text of txt to "{LABEL_BOLD_FALLBACK}"' in script
+    assert "set size of object text of txt to 24" in script
+
+
+def test_unflagged_text_items_keep_the_theme_font(tmp_path: Path):
+    import obed_edom.maps_keynote as mod
+
+    plain = "\n".join(mod._emit_item({"kind": "text", "x": 0, "y": 0, "w": 10, "h": 10, "text": "Plain"}))
+    assert "set font of object text" not in plain
+
+
+def test_label_pill_uses_the_fixed_gold_red_regardless_of_marker_colour(tmp_path: Path):
+    items = _place_labels(tmp_path, _label_churches())
+    pills = [item for item in items if item.get("labelPill")]
+    assert len(pills) == 2
+    for pill in pills:
+        path = Path(pill["path"])
+        assert path.is_file()
+        assert path.name.startswith("labelpill-ee220c-")
+        expected = label_pill_png_path(tmp_path / "pins", LABEL_PILL_RGB, pill["w"], pill["h"])
+        assert path == expected
+
+
+def test_show_label_false_emits_neither_pill_nor_text(tmp_path: Path):
+    churches = [dict(church, showLabel=False) for church in _label_churches()]
+    items = _place_labels(tmp_path, churches)
+    assert not any(item.get("kind") == "text" for item in items)
+    assert not any(item.get("labelPill") for item in items)
+
+
+def test_label_geometry_is_invariant_under_scale_with_map(tmp_path: Path):
+    plain = _place_labels(tmp_path, _label_churches())
+    scaled = _place_labels(
+        tmp_path,
+        [dict(church, scaleWithMap=True, sizeZoom=4) for church in _label_churches()],
+    )
+
+    def labels(items):
+        return [
+            (item["w"], item["h"])
+            for item in items
+            if item.get("kind") == "text" or item.get("labelPill")
+        ]
+
+    assert labels(plain) == labels(scaled)
+
+
+def test_dsk_and_cg_keep_the_pill_registered_with_its_text(tmp_path: Path):
+    import obed_edom.maps_keynote as mod
+
+    items = _place_labels(tmp_path, _label_churches())
+    pairs = [
+        (items[index], items[index + 1])
+        for index, item in enumerate(items)
+        if item.get("labelPill")
+    ]
+    assert pairs
+    for pill, text in pairs:
+        for mapped_pill, mapped_text in (
+            (dsk_item(pill), dsk_item(text)),
+            tuple(mod._to_cg([pill, text], (CENTRE_ORIGIN_X, 0.0))),
+        ):
+            assert mapped_pill["x"] == mapped_text["x"] - round(
+                PILL_PAD_X * (DSK_SCALE if "fontSize" in mapped_text else 1)
+            )
+            assert mapped_pill["w"] - mapped_text["w"] == round(
+                2 * PILL_PAD_X * (DSK_SCALE if "fontSize" in mapped_text else 1)
+            )
+            assert mapped_pill["h"] - mapped_text["h"] == round(
+                2 * PILL_PAD_Y * (DSK_SCALE if "fontSize" in mapped_text else 1)
+            )
+
+
+def test_movie_backdrop_slides_emit_no_label_pills(tmp_path: Path):
+    bg_movie = tmp_path / "movies" / "s1.mov"
+    bg_movie.parent.mkdir(parents=True, exist_ok=True)
+    bg_movie.write_bytes(b"mov")
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=_label_churches())
+    items = build_slide_items(
+        slide,
+        plate=None,
+        plate_path=None,
+        still=None,
+        movie=None,
+        wall=True,
+        bg_movie=bg_movie,
+        pin_root=tmp_path / "pins",
+        sid="s1",
+    )
+    assert not any(item.get("labelPill") for item in items)
+    assert not any(item.get("kind") == "text" for item in items)
+
+
+def test_reveal_backdrop_slides_still_label_their_non_landmark_churches(tmp_path: Path):
+    """The reveal backdrop is `render_slide_reveal_movie(still, ...)`, and the dashboard
+    exports stills with no `churches` in its opts (MapsTab.tsx ~1550), so `addOverlays` —
+    and with it the `churches-labels` symbol layer — never runs. The movie bakes only the
+    painted landmark artwork, so pins and labels must still be placed over it."""
+    movie = tmp_path / "reveal.mov"
+    movie.write_bytes(b"mov")
+    churches = [
+        *_label_churches(),
+        {"id": "lm", "name": "Landmark", "lat": 3.1, "lon": 101.1, "kind": "landmark", "reveal": {"duration": 1.2}},
+    ]
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=churches, revealMovie=True)
+    ops = plan_deck(
+        [slide],
+        [],
+        {},
+        output_dir=tmp_path,
+        preview_dir=tmp_path,
+        movie=None,
+        wall=True,
+        reveal_movies={("lw", "s1"): str(movie)},
+    )
+    items = ops[0]["items"]
+    assert any(item.get("map") and item["kind"] == "movie" for item in items)
+    labelled = [church for church in churches if church["kind"] != "landmark"]
+    assert len([item for item in items if item.get("labelPill")]) == len(labelled)
+    assert len([item for item in items if item.get("kind") == "text"]) == len(labelled)
+
+
+def test_odd_length_names_scale_to_dsk_without_distorting_the_pill(tmp_path: Path):
+    church = dict(_label_churches()[0], name="Odd Name")
+    items = _place_labels(tmp_path, [church])
+    pill = next(item for item in items if item.get("labelPill"))
+    text = next(item for item in items if item.get("kind") == "text")
+    for item in (pill, text):
+        assert item["w"] % 2 == 0
+        assert item["h"] % 2 == 0
+        scaled = dsk_item(item)
+        assert scaled["w"] / item["w"] == DSK_SCALE
+        assert scaled["h"] / item["h"] == DSK_SCALE
+
+
+def test_label_pill_outer_bounds_clear_the_wall_seam(tmp_path: Path):
+    church = {"id": "c1", "name": "Seam Church", "lat": 3.0, "lon": 95.673, "kind": "dot", "color": "#c44a42"}
+    unguarded = _place_labels(tmp_path, [church], wall=False)
+    straddler = next(item for item in unguarded if item.get("labelPill"))
+    assert straddler["x"] < 1920 < straddler["x"] + straddler["w"]
+
+    items = _place_labels(tmp_path, [church])
+    pill = next(item for item in items if item.get("labelPill"))
+    text = next(item for item in items if item.get("kind") == "text")
+    for item in (pill, text):
+        assert not (item["x"] < 1920 < item["x"] + item["w"])
+    assert pill["x"] <= text["x"]
+    assert text["x"] + text["w"] <= pill["x"] + pill["w"]
+    assert pill["x"] == text["x"] - PILL_PAD_X
