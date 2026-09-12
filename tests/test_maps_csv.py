@@ -471,3 +471,66 @@ def test_url_peeling_is_fast_for_adversarial_input():
     parse_places(text)
     elapsed = time.perf_counter() - start
     assert elapsed < 1.0
+
+
+def test_stray_unterminated_quote_reports_error_and_resumes_parsing():
+    text = 'Paris\n"London\nRome\nTokyo'
+    places, errors = parse_places(text)
+    assert [p.name for p in places] == ["Paris", "Rome", "Tokyo"]
+    assert len(errors) == 1
+    assert "Line 2" in errors[0]
+    assert "unterminated quote" in errors[0]
+
+
+def test_legitimate_two_line_quoted_name_still_works():
+    text = '"Foo\nBar",1,2\nSingapore\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Foo\nBar", "Singapore"]
+
+
+def test_multiline_record_bound_at_four_lines_reports_unterminated():
+    text = '"A\nB\nC\nD\nE",1,2\nSingapore\n'
+    places, errors = parse_places(text)
+    assert "Line 1" in errors[0]
+    assert "unterminated quote" in errors[0]
+    assert [p.name for p in places] == ["B", "C", "D", 'E"', "Singapore"]
+
+
+def test_blank_line_inside_quoted_multiline_name_is_preserved():
+    text = '"Foo\n\nBar",1,2\nSingapore\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Foo\n\nBar", "Singapore"]
+
+
+def test_url_peel_bound_reports_error_when_peelable_fields_remain():
+    fields = ",".join(["z=1"] * 9)
+    text = f"Landmark,https://maps.google.com/?q=1.35,103.8,{fields}"
+    places, errors = parse_places(text)
+    assert places == []
+    assert len(errors) == 1
+    assert "Line 1" in errors[0]
+    assert "too many fields after URL" in errors[0]
+
+
+def test_url_inside_quoted_name_is_not_mangled():
+    text = '"Visit https://example.com/place, it is nice",1,2\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].name == "Visit https://example.com/place, it is nice"
+    assert places[0].url is None
+
+
+def test_header_form_multiline_record_reports_starting_line():
+    text = 'name,lat,lon\n"Foo\nBar",1,2\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].line == 2
+
+
+def test_nul_byte_in_field_parses_without_error():
+    text = "Paris\x00,1,2\n"
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].name == "Paris\x00"

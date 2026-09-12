@@ -1442,8 +1442,8 @@ async def bootstrap_csv(
     if file is not None:
         try:
             text = (await file.read()).decode("utf-8")
-        except UnicodeDecodeError:
-            raise HTTPException(400, "File is not valid UTF-8")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(400, "File is not valid UTF-8") from exc
     if not text.strip():
         raise HTTPException(400, "CSV is empty")
     places, errors = parse_places(text)
