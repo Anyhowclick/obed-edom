@@ -4531,6 +4531,7 @@ def test_commit_pending_crop_writes_unlinks_remaining_temps_on_mid_loop_failure(
 
     assert pending[0][1].exists()
     assert not pending[0][0].exists()
+    assert not pending[1][0].exists()
     assert not pending[1][1].exists()
     assert not pending[2][0].exists()
     assert not pending[2][1].exists()
@@ -4561,6 +4562,7 @@ def test_commit_pending_crop_writes_removes_empty_slide_directory_on_mid_loop_fa
         dsa._commit_pending_crop_writes(pending)
 
     assert (tmp_path / "0").exists()
+    assert not (tmp_path / "1").exists()
     assert not (tmp_path / "2").exists()
 
 

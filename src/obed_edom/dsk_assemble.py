@@ -299,9 +299,9 @@ def _commit_pending_crop_writes(pending: Sequence[tuple[Path, Path]]) -> None:
         try:
             os.replace(temp_path, final_path)
         except OSError as exc:
-            for remaining_temp, _final_path in pending[i + 1 :]:
+            for remaining_temp, _final_path in pending[i:]:
                 Path(remaining_temp).unlink(missing_ok=True)
-            for remaining_temp, _final_path in pending[i + 1 :]:
+            for remaining_temp, _final_path in pending[i:]:
                 try:
                     Path(remaining_temp).parent.rmdir()
                 except OSError:
