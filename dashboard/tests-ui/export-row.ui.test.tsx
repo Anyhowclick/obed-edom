@@ -34,3 +34,14 @@ describe("ExportDestinationRow default (non-inline) rendering", () => {
     expect(screen.getByText("Export to")).toBeInTheDocument();
   });
 });
+
+describe("ExportDestinationRow inline + disabled", () => {
+  it("renders locked destination copy and no Export to… button", () => {
+    render(
+      <ExportDestinationRow value="/tmp/out" onChange={() => undefined} disabled inline />,
+    );
+    expect(screen.getByText(/\/tmp\/out/)).toBeInTheDocument();
+    expect(screen.getByText(/Locked to this destination until applied\./)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Export to…" })).not.toBeInTheDocument();
+  });
+});

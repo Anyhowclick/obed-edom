@@ -243,6 +243,22 @@ def test_open_path_launches_open(tmp_path, monkeypatch):
     assert calls == [["open", str(target)]]
 
 
+def test_open_path_allows_package_format_key_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.mkdir()
+    calls = []
+    monkeypatch.setattr(
+        app_mod.subprocess, "run", lambda argv, **kw: calls.append(argv)
+    )
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert calls == [["open", str(target)]]
+
+
 def test_open_path_rejects_app_bundle(tmp_path):
     client = TestClient(app)
     target = tmp_path / "Evil.app"

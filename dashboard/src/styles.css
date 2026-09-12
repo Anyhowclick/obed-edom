@@ -297,6 +297,7 @@ h3 {
   box-shadow: 0 0 28px rgba(255, 199, 44, 0.45);
 }
 .actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
+.export-actions { align-items: center; }
 
 .overlay {
   position: fixed;
@@ -439,7 +440,6 @@ h3 {
 .session-del:hover { color: var(--err); border-color: var(--err); }
 .status-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
 .status-badge.status-err { color: var(--err); }
-.status-badge.status-busy { color: var(--ok); }
 .status-icon { width: 12px; height: 12px; }
 .job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }

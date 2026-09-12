@@ -237,7 +237,8 @@ def create_app() -> FastAPI:
         target = Path(path).expanduser()
         if not target.exists():
             raise HTTPException(404, f"Not found: {path}")
-        if not target.is_file() or target.suffix.lower() not in OPENABLE_SUFFIXES:
+        suffix = target.suffix.lower()
+        if suffix not in OPENABLE_SUFFIXES or (target.is_dir() and suffix != ".key"):
             raise HTTPException(400, f"Not an openable artifact: {path}")
         subprocess.run(["open", str(target)], check=False)
         return {"ok": True}

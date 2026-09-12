@@ -3098,7 +3098,7 @@ export function MapsTab() {
                     />
                     DSK lower third (1920×1080)
                   </label>
-                  <div className="actions">
+                  <div className="actions export-actions">
                     <ExportDestinationRow
                       value={exportDir}
                       onChange={setExportDir}
