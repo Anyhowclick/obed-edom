@@ -5819,6 +5819,31 @@ def test_offframe_report_is_empty_after_reflow():
     assert rows == []
 
 
+def test_offframe_rows_uses_refused_size_for_visible_area():
+    # A group whose size was refused (sizeRefused) keeps its source dims (1000x100) on
+    # the wall, not the collapsed target rect (100x100) offframe_rows was using — the
+    # latter made a barely-on-frame group look fully visible.
+    recipe = {"destWidth": 1920.0, "destHeight": 1080.0}
+    item = _item(kindIndex=0, kind="group", x=0.0, y=0.0, w=10.0, h=10.0)
+    slide = {"number": 4, "items": [item]}
+    spec = ItemTransform(
+        slide_number=4,
+        item_index=0,
+        kind="group",
+        kind_index=0,
+        x=1800.0,
+        y=0.0,
+        w=100.0,
+        h=100.0,
+        role="other",
+        src=Rect(0.0, 0.0, 1000.0, 100.0),
+        size_refused="group-children-unavailable",
+    )
+    rows = offframe_rows([spec], slide, recipe, 1920.0, 1080.0)
+    assert len(rows) == 1
+    assert rows[0]["visible"] == pytest.approx(0.12)
+
+
 def test_fit_to_frame_recipe_carries_card_samples():
     # A wall slide whose only template framing is degenerate (forces fit-to-frame,
     # like the existing "1280 wide against a 7680 wall" scenario) must still resize
@@ -5970,6 +5995,159 @@ def test_badge_group_reaches_the_child_write_path():
     d = group_tf.as_dict()
     assert len(d["children"]) == 2
     assert d["children"][0]["w"] / 278.0 == pytest.approx(report[0]["s"])
+
+
+def test_autosize_marked_group_refuses_the_collapsing_write_without_groupchildren():
+    """Reproduces the Gold slide 2 badge collapse: a JXA-read wall never attaches
+    groupChildren (archive-space child offsets are incompatible with a JXA group's
+    live union frame), but groupAutosize is attached unconditionally. Without the
+    fix, plan_slide_transforms leaves child_src=None and ItemTransform.as_dict()
+    writes the bare group w/h, which Keynote's aspect-locked resize then collapses.
+    This must FAIL on pre-fix code (children absent, w/h present) and PASS after."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 1.0, "tx": -2464.3, "ty": 0.6, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert "children" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert report[0]["sizeRefused"] == "group-children-unavailable"
+    assert report[0]["s"] == 1.0
+
+
+def test_autosize_marked_group_with_groupchildren_is_unaffected():
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 0.25, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildren": {0: _badge_child_src()},
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    d = group_tf.as_dict()
+    assert "sizeRefused" not in d
+    assert len(d["children"]) == 2
+    assert "sizeRefused" not in report[0]
+
+
+def test_autosize_marked_pin_group_also_refuses_the_collapsing_write():
+    """A short-caption group (classify_item locks these to role=pin) must get the
+    same group-children-unavailable safety net as a role=other group: the bug was
+    that all group bookkeeping lived under `role == "other"`, so a pin-classified
+    autosize group with no groupChildren still got the bare, collapsing w/h write.
+
+    Pins never had pass-2 font scaling, so this must NOT gain a child_resize_report
+    row (that row is the font-scaling job list, gated on role=="other" exactly as
+    pre-fix) — only the size refusal and the collapse token, both carried on the
+    transform itself, apply regardless of role."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 1.0 / 3.0, "tx": 0.0, "ty": 0.0, "src": {"x": 3000.0, "y": 0.0, "w": 100.0, "h": 100.0}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=3000.0, y=0.0, w=100.0, h=100.0)],
+        "groupChildText": {0: "A"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.role == "pin"
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert d["groupCollapseRefused"] == "groupCollapseRefused(s=2,idx=1)"
+    assert report == []
+
+
+def test_group_collapse_guard_fires_on_an_exact_one_third_shrink():
+    """An autosize-marked group whose planned rect shrinks either axis by
+    exactly 3x relative to its source rect must still tag the transform dict
+    with groupCollapseRefused: the guard is boundary-inclusive (Codex r1),
+    alongside the primary missing-groupChildren refusal that covers the
+    size write itself."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 1.0 / 3.0, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.w * 3.0 == 278.0
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert d["groupCollapseRefused"] == "groupCollapseRefused(s=2,idx=1)"
+    assert report[0]["sizeRefused"] == "group-children-unavailable"
+    assert "groupCollapseRefused" not in report[0]
+    assert report[0]["s"] == 1.0
+
+
+def test_group_collapse_guard_does_not_fire_below_the_shrink_threshold():
+    """A shrink milder than 3x on both axes must not tag the transform dict with
+    groupCollapseRefused, even though the primary missing-groupChildren
+    refusal still applies to the size write itself."""
+    recipe = {
+        "destWidth": 1920.0,
+        "destHeight": 1080.0,
+        "groups": [
+            {"s": 0.5, "tx": 0.0, "ty": 0.0, "src": {"x": 4164.3, "y": 39.4, "w": 278.0, "h": 87.6}},
+        ],
+    }
+    slide = {
+        "number": 2,
+        "items": [_item(kindIndex=0, kind="group", x=4164.3, y=39.4, w=278.0, h=87.6)],
+        "groupChildText": {0: "Ps George"},
+        "groupAutosize": {0: True},
+        "groupChildrenUnavailable": True,
+    }
+    report: list[dict] = []
+    out = plan_slide_transforms(slide, recipe, wall_size=(7680, 1080), child_resize_report=report)
+    group_tf = next(t for t in out if t.kind == "group")
+    assert group_tf.w * 3.0 > 278.0
+    d = group_tf.as_dict()
+    assert "w" not in d and "h" not in d
+    assert d["sizeRefused"] == "group-children-unavailable"
+    assert report[0]["sizeRefused"] == "group-children-unavailable"
+    assert "groupCollapseRefused" not in report[0]
 
 
 def test_card_group_never_takes_the_child_write_path():

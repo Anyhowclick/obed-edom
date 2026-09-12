@@ -1028,3 +1028,84 @@ def test_attach_group_children_wires_records_by_slide_index_and_int_kindindex(mo
     assert {r["kind"] for r in kids[0]} == {"shape", "text"}
     # The plain (no-autosize-child) group's slide never gets a groupChildren key at all.
     assert "groupChildren" not in payload["slides"][1]
+
+
+def test_attach_group_children_skips_a_slide_marked_group_children_unavailable(monkeypatch):
+    """A slide merged in from a scoped JXA-fallback read (remap_keynote._merge_legacy_slides)
+    carries live union group frames, not archive offsets — attach_group_children must not
+    attach them a groupChildren record despite qualifying otherwise."""
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _badge_deck())
+    payload = {
+        "slides": [
+            {"index": 0, "items": [], "groupChildrenUnavailable": True},
+            {"index": 1, "items": []},
+        ]
+    }
+    attach_group_children("ignored.key", payload)
+    assert "groupChildren" not in payload["slides"][0]
+    assert "groupChildren" not in payload["slides"][1]
+
+
+# --------------------------------------------------------------------------
+# attach_group_autosize — archive-fact marker, valid under any reader. Must mark
+# a group even when _group_child_records itself refuses it (nested group, etc):
+# those are exactly the cases that collapse without the fix.
+# --------------------------------------------------------------------------
+def test_attach_group_autosize_marks_the_badge_group_and_leaves_the_plain_one_unmarked(
+    monkeypatch,
+):
+    from obed_edom.iwa_runs import attach_group_autosize
+
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _badge_deck())
+    payload = {"slides": [{"index": 0, "items": []}, {"index": 1, "items": []}]}
+    attach_group_autosize("ignored.key", payload)
+    assert payload["slides"][0]["groupAutosize"] == {0: True}
+    assert "groupAutosize" not in payload["slides"][1]
+
+
+def test_attach_group_autosize_marks_a_group_group_child_records_itself_refuses(
+    monkeypatch,
+):
+    """A nested group with an autosize grandchild is refused by _group_child_records
+    (same aspect-lock problem one level down) but must still collapse-refuse at
+    write time, so attach_group_autosize marks it independently of that refusal."""
+    from obed_edom.iwa_runs import attach_group_autosize
+
+    def storage(text):
+        return {"_pbtype": "TSWP.StorageArchive", "text": [text]}
+
+    objects = {
+        "130": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "230"}},
+        "230": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "910"}]},
+        "910": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 200.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "911"}, {"identifier": "912"}],
+        },
+        "911": {
+            "_pbtype": "TSD.GroupArchive",
+            "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 50.0, "height": 40.0}, "angle": 0.0},
+            "children": [{"identifier": "913"}],
+        },
+        "912": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "super": {"geometry": {"position": {"x": 50.0, "y": 0.0}, "size": {"width": 100.0, "height": 40.0}, "angle": 0.0}},
+        },
+        "913": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "913-st"},
+            "super": {
+                "geometry": {"position": {"x": 0.0, "y": 0.0}, "size": {"width": 40.0, "height": 0.0}, "angle": 0.0},
+                "pathsource": {"bezierPathSource": {"naturalSize": {"width": 40.0, "height": 30.0}}},
+            },
+        },
+        "913-st": storage("Nested"),
+        "show": {"_pbtype": "KN.ShowArchive", "slideTree": {"slides": [{"identifier": "130"}]}},
+    }
+    from obed_edom.iwa_runs import _group_child_records
+
+    assert _group_child_records(objects["910"], objects) is None
+
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: (objects, {}, {}))
+    payload = {"slides": [{"index": 0, "items": []}]}
+    attach_group_autosize("ignored.key", payload)
+    assert payload["slides"][0]["groupAutosize"] == {0: True}

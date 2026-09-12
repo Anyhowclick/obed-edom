@@ -3140,6 +3140,63 @@ def test_plan_out_carries_pass_two_expectations(monkeypatch, tmp_path):
     assert plan_out["statSlides"] == [3]
 
 
+def test_plan_out_collects_group_collapse_refused_from_a_non_other_transform(monkeypatch, tmp_path):
+    """A pin-role group's groupCollapseRefused token lives only on the transform
+    dict (map_remap.py's as_dict), never in a child_resize_report row (that row is
+    gated on role=="other"). plan_out["groupCollapseRefused"] must still pick it up
+    by scanning transform_dicts, not child_resize — otherwise a pin's collapse
+    token never reaches the run record."""
+    import obed_edom.remap_keynote as rk
+    from obed_edom.map_remap import ItemTransform
+
+    monkeypatch.delenv("OBED_OFFLINE_WRITE", raising=False)
+    monkeypatch.delenv("OBED_SUPPRESS_GEOMETRY", raising=False)
+    monkeypatch.delenv("OBED_AS_GEOMETRY", raising=False)
+
+    pin_transform = ItemTransform(
+        slide_number=2, item_index=0, kind="group", x=0, y=0, w=10, h=10,
+        kind_index=0, role="pin",
+    )
+    pin_transform.group_collapse_refused = "groupCollapseRefused(s=2,idx=1)"
+
+    monkeypatch.setattr(rk, "plan_payload_transforms", lambda *a, **k: [pin_transform])
+    monkeypatch.setattr(rk, "plan_slide_reuses", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rk, "recipe_for",
+        lambda wall, template: {
+            "source": "test", "mapSrc": "src", "mapDst": "dst",
+            "destWidth": 1920, "destHeight": 1080, "characterStyles": [],
+        },
+    )
+    monkeypatch.setattr(rk, "score_against_gold", lambda *a, **k: 0.0)
+    monkeypatch.setattr(rk, "summarize_plan", lambda transforms: {"map": 0, "pin": 1, "list": 0, "hide": 0})
+    monkeypatch.setattr(rk, "copy_keynote", lambda source, dest: dest)
+    monkeypatch.setattr(rk, "_run_jxa", lambda plan: {"applied": 1, "missed": 0})
+    monkeypatch.setattr(rk, "restore_card_stroke_widths", lambda *a, **k: None)
+
+    source = tmp_path / "wall.key"
+    template = tmp_path / "tpl.key"
+    dest = tmp_path / "out.key"
+    source.touch()
+    template.touch()
+
+    wall_payload = {"slideWidth": 7680, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+    template_payload = {"slideWidth": 1920, "slideHeight": 1080, "slides": [{"number": 1, "items": []}]}
+
+    plan_out: dict = {}
+    logs: list[str] = []
+    rk.remap_keynote(
+        source, dest, template=template,
+        wall_payload=wall_payload, template_payload=template_payload,
+        plan_out=plan_out, log=logs.append,
+    )
+
+    assert plan_out.get("statJobs") == []
+    assert plan_out["groupCollapseRefused"] == ["groupCollapseRefused(s=2,idx=1)"]
+    warn_lines = [line for line in logs if line.startswith("WARNING remap: groupCollapseRefused")]
+    assert warn_lines == ["WARNING remap: groupCollapseRefused(s=2,idx=1)"]
+
+
 def test_plan_warns_once_per_run_on_aspect_less_items(monkeypatch, tmp_path):
     import obed_edom.remap_keynote as rk
     from obed_edom.map_remap import ItemTransform
