@@ -47,6 +47,7 @@ type ResizeResult = FramingProposal & {
   path?: string;
   templatePath?: string;
   destPath?: string;
+  exportDir?: string;
   applied?: number;
   missed?: number;
   counts?: { map?: number; pin?: number; list?: number; total?: number };
@@ -155,6 +156,9 @@ export function ResizeTab() {
   const counts = result?.counts;
   const score = result?.templateScore || result?.goldScore;
   const awaitingFramings = result?.phase === "framing";
+  // Once a proposal is captured, Apply always uses the destination it was proposed
+  // against — freeze the row so it can't drift out from under the pending apply.
+  const frozenExportDir = awaitingFramings ? result?.exportDir || "" : undefined;
   const fitted = result?.fittedSlides || [];
   const offFrame = result?.offFrame || [];
   const overruled = (result?.framingReport || []).filter((r) => r.confirmed && r.fitted);
@@ -198,10 +202,11 @@ export function ResizeTab() {
           onError={setError}
         />
         <ExportDestinationRow
-          value={exportDir}
+          value={frozenExportDir ?? exportDir}
           onChange={setExportDir}
           defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
           onError={setError}
+          disabled={awaitingFramings}
         />
       </div>
       <label className="field">
