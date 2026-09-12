@@ -14,14 +14,17 @@ import obed_edom.dsk_plan as dsk_plan
 from obed_edom.dsk_plan import (
     Band,
     BandRefusal,
+    CropRefusal,
     TextBox,
     classify_deck,
     classify_slide,
+    crop_geometry,
     fit_item,
     fit_slide,
     fit_text_stack,
     is_panel_backdrop,
     mirror_duplicates,
+    plan_crops,
     read_band,
     resolve_font_path,
     wrapped_height,
@@ -1193,3 +1196,117 @@ def test_fit_text_stack_bare_band_ordering():
     t17, t38, t49 = _t_for(17), _t_for(38), _t_for(49)
     assert t17 > t49  # heavier GW 49 badge needs more shrink than the two-box GW 17
     assert t17 == pytest.approx(0.87, abs=0.02)
+
+
+def _image_obj(*, x, y, w, h, angle=0.0, mask=None, natural=None, mask_id="mask0"):
+    obj = {
+        "super": {"geometry": {"position": {"x": x, "y": y}, "size": {"width": w, "height": h}, "angle": angle}},
+        "naturalSize": {"width": (natural or (w, h))[0], "height": (natural or (w, h))[1]},
+    }
+    if mask is not None:
+        mx, my, mw, mh = mask
+        obj["mask"] = {"identifier": mask_id}
+        return obj, {mask_id: {"geometry": {
+            "position": {"x": mx, "y": my}, "size": {"width": mw, "height": mh}, "angle": 0.0,
+        }}}
+    return obj, {}
+
+
+def test_crop_box_from_frame_mask_and_lw():
+    # GW 3 geometry (F1): frame (1920,-981.6,3840x2560), mask-local (0,808,3840x1472),
+    # naturalSize 6000x4000. Checked by hand: visible clips to the full centre panel
+    # (1920,0,3840,1080); the source-pixel box follows the frame->naturalSize scale (1.5625).
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    objects = {"img": obj, **extra}
+    result = crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+    assert result is not None
+    mask_abs, visible, px_box = result
+    assert visible == Rect(1920.0, 0.0, 3840.0, 1080.0)
+    assert px_box == (0, 1533, 6000, 3222)
+
+
+def test_no_crop_when_visible_inside_panel():
+    # GW 48 shaped: the whole masked visible rect already sits inside the panel window,
+    # so nothing is cropped away (D2) -- crop_geometry still reports it; plan_crops is the
+    # one that skips replacement, which we check via _rects_close directly here.
+    obj, extra = _image_obj(x=1954, y=27, w=1381, h=921, mask=(0, 0, 1381, 921), natural=(1600, 1056))
+    objects = {"img": obj, **extra}
+    result = crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+    assert result is not None
+    mask_abs, visible, _px_box = result
+    assert dsk_plan._rects_close(visible, mask_abs)
+
+
+def test_crop_refused_on_rotation_or_exif():
+    obj, extra = _image_obj(x=1920, y=0, w=3840, h=1080, angle=5.0, mask=(0, 0, 3840, 1080))
+    objects = {"img": obj, **extra}
+    with pytest.raises(CropRefusal):
+        crop_geometry(obj, objects, CENTRE_PANEL_RECT)
+
+
+def _empty_key(tmp_path):
+    import zipfile as _zipfile
+
+    path = tmp_path / "x.key"
+    with _zipfile.ZipFile(path, "w"):
+        pass
+    return path
+
+
+def test_crop_falls_back_to_note_when_build_targets_image(tmp_path, monkeypatch):
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+    crops, warnings = plan_crops(
+        _empty_key(tmp_path), {}, objects,
+        [{"kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "a.png"}],
+        [("image", 0)], crop_dir=tmp_path, number=3, build_targets=[("image", 0)],
+    )
+    assert crops == {}
+    assert any("build targets" in w for w in warnings)
+
+
+def test_crop_no_op_for_gw48_shaped_visible_inside_panel(tmp_path, monkeypatch):
+    obj, extra = _image_obj(x=1954, y=27, w=1381, h=921, mask=(0, 0, 1381, 921), natural=(1600, 1056))
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 2): "img"})
+    crops, warnings = plan_crops(
+        _empty_key(tmp_path), {}, objects,
+        [{"kind": "image", "kindIndex": 2, "rotation": 0, "fileName": "wheelchair.jpeg"}],
+        [("image", 2)], crop_dir=tmp_path, number=48,
+    )
+    assert crops == {}
+    assert warnings == []
+
+
+def test_plan_crops_writes_file_keeping_source_name(tmp_path, monkeypatch):
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/Yang Zheng_250408_YZ_0613-99.jpg")
+
+    obj, extra = _image_obj(x=1920, y=-981.6, w=3840, h=2560, mask=(0, 808, 3840, 1472), natural=(6000, 4000))
+    obj["data"] = {"identifier": "99"}
+    objects = {"img": obj, **extra}
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", lambda slide_archive, objects: {("image", 0): "img"})
+
+    item = {
+        "kind": "image", "kindIndex": 0, "rotation": 0, "fileName": "Yang Zheng_250408_YZ_0613.jpg",
+    }
+    crops, warnings = plan_crops(
+        key_path, {}, objects, [item], [("image", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert warnings == []
+    assert list(crops.keys()) == [("image", 0)]
+    spec = crops[("image", 0)]
+    assert spec.path.name == "Yang Zheng_250408_YZ_0613.jpg"
+    assert spec.path.is_file()
+    assert spec.px_box == (0, 1533, 6000, 3222)
+    with Image.open(spec.path) as cropped:
+        assert cropped.size == (6000, 3222 - 1533)

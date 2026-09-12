@@ -55,6 +55,23 @@ def _build_data_index(zip_names: list[str]) -> dict[str, str]:
     return index
 
 
+def data_member_index(zip_names: list[str]) -> dict[str, str]:
+    """``{data id: raw zip member name}`` -- the reverse of ``_build_data_index``'s
+    reconstructed filename, keeping Keynote's ``-<dataId>`` suffix so the member can be
+    opened directly (F1/D2)."""
+    index: dict[str, str] = {}
+    for raw_name in zip_names:
+        try:
+            name = raw_name.encode("cp437").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            name = raw_name
+        m = _DATA_MEMBER.match(name)
+        if not m:
+            continue
+        index[m.group("id")] = name
+    return index
+
+
 def _data_identifier(obj: dict) -> str | None:
     for key in ("data", "movieData"):
         ref = (obj.get(key) or {}).get("identifier")

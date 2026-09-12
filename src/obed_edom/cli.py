@@ -162,6 +162,34 @@ def main(argv: list[str] | None = None) -> int:
         "its fitted band, leave it for the operator to adjust. shrink: also set that box's "
         "size to its largest source run size, flattening run sizes to fit.",
     )
+    dsk_assemble.add_argument(
+        "--min-text-pt", type=float, default=None,
+        help="Floor glyph size (pt) a text slide's band-stretch fit search will not shrink "
+        "below before splitting into N slides (default 24).",
+    )
+    dsk_assemble.add_argument(
+        "--text-slide-words", type=int, default=None,
+        help="A slide is a text slide when some kept text item has more than this many "
+        "whitespace-separated words (default 10).",
+    )
+    dsk_assemble.add_argument(
+        "--no-split", action="store_true",
+        help="Refuse a text slide that does not fit the band at --min-text-pt instead of "
+        "splitting it into N DSK slides.",
+    )
+    dsk_assemble.add_argument(
+        "--crop-dir", type=Path, default=None,
+        help="Destination folder for cropped image files (default: <keynote's folder>/crops).",
+    )
+    dsk_assemble.add_argument(
+        "--no-image-crop", action="store_true",
+        help="Never replace an image with a cropped file; keep the source drawable everywhere.",
+    )
+    dsk_assemble.add_argument(
+        "--no-auto-anchor", action="store_true",
+        help="Never derive a slide's anchor from its kept content-item count; slides with no "
+        "explicit --anchor stay centred.",
+    )
     remap.add_argument(
         "--source-previews",
         help=(
@@ -274,6 +302,8 @@ _DSK_ASSEMBLE_ANCHORS = frozenset({"centre", "left", "right"})
 def _run_dsk_assemble(args: argparse.Namespace) -> int:
     from obed_edom.dsk_assemble import (
         DEFAULT_LAYOUT_TEMPLATE,
+        DEFAULT_MIN_TEXT_PT,
+        DEFAULT_TEXT_SLIDE_WORDS,
         DEFAULT_TRANSPARENT_LAYOUT_NAMES,
         AssemblyRefusal,
         SlideDecision,
@@ -376,7 +406,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
 
     decisions = {
         n: SlideDecision(
-            n, "both" if n in clips else "in_deck", anchor=anchors.get(n, "centre"), keep_side=n in include_side
+            n, "both" if n in clips else "in_deck", anchor=anchors.get(n, "auto"), keep_side=n in include_side
         )
         for n in slide_numbers
     }
@@ -396,6 +426,14 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             black_layout_names=black_layout_names,
             stroke_min_refs=args.stroke_min_refs,
             text_fit=args.text_fit,
+            min_text_pt=args.min_text_pt if args.min_text_pt is not None else DEFAULT_MIN_TEXT_PT,
+            allow_split=not args.no_split,
+            text_slide_words=(
+                args.text_slide_words if args.text_slide_words is not None else DEFAULT_TEXT_SLIDE_WORDS
+            ),
+            crop_dir=args.crop_dir,
+            no_image_crop=args.no_image_crop,
+            no_auto_anchor=args.no_auto_anchor,
         )
     except AssemblyRefusal as exc:
         print(f"Assembly refused: {exc}", file=sys.stderr)

@@ -1227,11 +1227,13 @@ def _assemble_fixture(tmp_path):
 
 def _patch_common(monkeypatch, payload, classes, stderr_text, returncode=0):
     monkeypatch.setattr(
-        dsa, "load_assembly_inputs", lambda deck, include_side=frozenset(): (payload, classes, {})
+        dsa, "load_assembly_inputs",
+        lambda deck, include_side=frozenset(), text_slide_words=10: (payload, classes, {}),
     )
     monkeypatch.setattr(dsa, "LiveBatch", _make_fake_live_batch(stderr_text, returncode))
     monkeypatch.setattr(dsa, "copy_keynote", _fake_copy_keynote)
     monkeypatch.setattr(dsa, "_load_deck", lambda path: ({}, {}, {}))
+    monkeypatch.setattr(dsa, "deck_builds", lambda path, *, deck=None: {})
     monkeypatch.setattr(iwa_write, "card_styles", lambda objects, id_to_file: [])
     monkeypatch.setattr(
         iwa_write,
@@ -3241,7 +3243,8 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
 
     def fake_assemble_dsk_deck(
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
-        text_fit,
+        text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
+        no_image_crop=False, no_auto_anchor=False,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -3294,7 +3297,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
     decisions = captured["decisions"]
     assert decisions[13].action == "in_deck"
     assert decisions[13].keep_side is True
-    assert decisions[13].anchor == "centre"
+    assert decisions[13].anchor == "auto"
     assert decisions[32].action == "both"
     assert decisions[32].keep_side is False
     assert decisions[32].anchor == "left"
@@ -3318,7 +3321,8 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
 
     def fake_assemble_dsk_deck(
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
-        text_fit,
+        text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
+        no_image_crop=False, no_auto_anchor=False,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(
@@ -4243,3 +4247,146 @@ def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
     warnings: list[str] = []
     with pytest.raises(AssemblyRefusal):
         dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
+
+
+# --------------------------------------------------------------------------
+# placement by count (D3/step 9) -- SlideDecision(anchor="auto") is the CLI's
+# "operator gave no explicit --anchor" sentinel; plan_assembly derives right for
+# exactly one kept content item, centre otherwise, and text never counts.
+# --------------------------------------------------------------------------
+def test_single_content_item_right_aligned():
+    slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {48: SlideDecision(48, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    rect = plan.fits[48][("image", 2)]
+    assert rect.x + rect.w == pytest.approx(BAND.x_max)
+    assert plan.anchors[48] == "right"
+
+
+def test_two_items_centred():
+    slide = _slide(24, [_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {24: SlideDecision(24, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[24] == "centre"
+
+
+def test_explicit_anchor_overrides_auto():
+    slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {48: SlideDecision(48, "in_deck", anchor="left")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[48] == "left"
+    assert plan.fits[48][("image", 2)].x == pytest.approx(BAND.x_min)
+
+
+def test_text_items_do_not_count_towards_placement():
+    slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921), _text_item(0, x=2000, y=900, w=400, h=100)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {48: SlideDecision(48, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[48] == "right"
+
+
+def test_no_auto_anchor_flag_forces_centre():
+    slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {48: SlideDecision(48, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, no_auto_anchor=True)
+    assert plan.anchors[48] == "centre"
+
+
+# --------------------------------------------------------------------------
+# deletes/refusals (step 10)
+# --------------------------------------------------------------------------
+def test_deletes_include_backdrop_duplicate_and_cropped(monkeypatch):
+    from obed_edom.dsk_plan import CropSpec
+
+    scrim = _shape_item = {"kind": "shape", "kindIndex": 0, "x": 951, "y": 0, "w": 3840, "h": 1080, "text": ""}
+    badge = _text_item(0, x=2000, y=900, w=400, h=100)
+    image = _image_item(0, x=1954, y=27, w=1381, h=921)
+    slide = _slide(28, [scrim, badge, image])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {28: SlideDecision(28, "in_deck", anchor="auto")}
+
+    fake_spec = CropSpec(path=Path("/tmp/fake.jpg"), source_file_name="fake.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1))
+    monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+    )
+    assert ("shape", 0) in plan.deletes[28]
+    assert ("image", 0) in plan.deletes[28]
+    assert plan.crops[28][("image", 0)] is fake_spec
+
+
+def test_crop_min_window_refuses(monkeypatch):
+    from obed_edom.dsk_plan import CropRefusal
+
+    def _raise(*a, **k):
+        raise CropRefusal("slide 5 image 0: crop window under 8px")
+
+    monkeypatch.setattr(dsa, "plan_crops", _raise)
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    slide = _slide(5, [_image_item(0, x=1954, y=27, w=1381, h=921)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {5: SlideDecision(5, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={},
+            deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+        )
+
+
+def test_crop_insert_lines_match_clip_idiom(monkeypatch):
+    from obed_edom.dsk_plan import CropSpec
+    from obed_edom.dsk_assemble import build_assembly_script
+
+    fake_spec = CropSpec(
+        path=Path("/tmp/crops/3/photo.jpg"), source_file_name="photo.jpg",
+        px_box=(0, 0, 100, 100), visible=Rect(0, 0, 100, 100),
+    )
+    image = _image_item(0, x=1954, y=27, w=1381, h=921)
+    slide = _slide(3, [image])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {3: SlideDecision(3, "in_deck", anchor="auto")}
+    monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, []))
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", lambda objects, number: {})
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        deck=({}, {}, {}), fw_deck="/tmp/does-not-matter.key",
+    )
+    text = build_assembly_script(plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/out.key"))
+    assert 'make new image with properties {file:(POSIX file "/tmp/crops/3/photo.jpg") as alias}' in text
+    assert "count of images of slide" in text
+    assert "did not import" in text
+
+
+def test_min_text_pt_forces_split():
+    from obed_edom.iwa_builds import build_identity
+
+    text = " ".join(["word"] * 20)
+    long_a = _text_item(0, x=1980, y=200, w=0, h=0)
+    long_a["text"] = text
+    long_a["font"] = "AzoSans-Bold"
+    long_a["size"] = 70.0
+    long_b = _text_item(1, x=5700, y=200, w=0, h=0)
+    long_b["text"] = text + " twin"
+    long_b["font"] = "AzoSans-Bold"
+    long_b["size"] = 70.0
+    slide = _slide(17, [long_a, long_b])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
+    assert plan.parts.get(17, 1) >= 1

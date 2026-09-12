@@ -6,12 +6,15 @@ image/movie band for CG-style placement. Never opens Keynote.
 """
 from __future__ import annotations
 
+import math
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from obed_edom.iwa_builds import _ref_id, _transition_effect_duration, build_identity, deck_builds
+from obed_edom.iwa_geometry import _frame_rect, _geom_dict, _mask_geom, _masked_rect, _natural_size, _xywha
 from obed_edom.iwa_kindindex import derive_kind_index
 from obed_edom.iwa_runs import _load_deck, slide_order
 from obed_edom.map_remap import (
@@ -917,3 +920,186 @@ def _place(rect: Rect, scale: float, band: Band, anchor: str) -> Rect:
     else:
         x = band.x_min + (band.width - w) / 2.0
     return Rect(x, y, w, h)
+
+
+MIN_CROP_PX = 8.0
+
+
+class CropRefusal(ValueError):
+    """A crop precondition failed hard enough to refuse the slide (D2/D6): only a
+    crop window under ``MIN_CROP_PX`` on either axis. Every other precondition
+    failure (rotation, EXIF, an unresolved data member, a build on the image) is a
+    per-item fallback -- warned, source kept -- handled inside ``plan_crops``."""
+
+
+@dataclass(frozen=True)
+class CropSpec:
+    """One image replaced by a cropped file (D2, Q1). ``path``'s basename is
+    ``source_file_name`` verbatim -- Keynote's live insert then reports that same
+    fileName in the output package, so build_identity (file-keyed) and the
+    card-stroke pass's filename match both keep working with no extra bookkeeping."""
+
+    path: Path
+    source_file_name: str
+    px_box: tuple[int, int, int, int]
+    visible: Rect
+
+
+def _rects_close(a: Rect, b: Rect, tol: float = 0.5) -> bool:
+    return (
+        abs(a.x - b.x) <= tol and abs(a.y - b.y) <= tol
+        and abs(a.w - b.w) <= tol and abs(a.h - b.h) <= tol
+    )
+
+
+def _asset_natural_size(obj: dict) -> tuple[float, float]:
+    """``naturalSize`` (media pixel size) lives directly on an image/movie archive,
+    not under ``super.pathsource`` like ``iwa_geometry._natural_size`` expects for
+    shapes (F1)."""
+    natural = obj.get("naturalSize") or {}
+    return (natural.get("width") or 0.0, natural.get("height") or 0.0)
+
+
+def crop_geometry(
+    obj: dict, objects: dict[str, dict], window: Rect
+) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
+    """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
+    ``window`` (D2 crop math). ``None`` when the object carries no mask (nothing to
+    crop against) or nothing of it is visible in ``window``. Raises ``CropRefusal``
+    on a rotated frame or a rotated mask -- this pixel mapping is axis-aligned only."""
+    geom = _geom_dict(obj)
+    mask_geom = _mask_geom(obj, objects)
+    if not mask_geom:
+        return None
+    frame_angle = _xywha(geom)[4]
+    if abs((frame_angle % 360.0 + 180.0) % 360.0 - 180.0) > 0.01:
+        raise CropRefusal("rotated frame")
+    masked_rect, rotated = _masked_rect(geom, mask_geom)
+    if rotated:
+        raise CropRefusal("rotated-masked geometry")
+    mask_abs = Rect(*masked_rect)
+    visible = _intersect(mask_abs, window)
+    if visible is None:
+        return None
+    frame = Rect(*_frame_rect(geom))
+    natural = _asset_natural_size(obj)
+    if frame.w <= 0 or frame.h <= 0 or natural[0] <= 0 or natural[1] <= 0:
+        return None
+    sx, sy = natural[0] / frame.w, natural[1] / frame.h
+    x0, y0 = (visible.x - frame.x) * sx, (visible.y - frame.y) * sy
+    x1, y1 = x0 + visible.w * sx, y0 + visible.h * sy
+    px_box = (
+        max(0, int(math.floor(x0))),
+        max(0, int(math.floor(y0))),
+        min(int(round(natural[0])), int(math.ceil(x1))),
+        min(int(round(natural[1])), int(math.ceil(y1))),
+    )
+    return mask_abs, visible, px_box
+
+
+def _item_object_ids(slide_archive: dict, objects: dict[str, dict]) -> dict[ItemId, str]:
+    """``(kind, kindIndex) -> object id`` for one slide, addressed the same way
+    ``offline_wall_payload`` addresses its items."""
+    from obed_edom.iwa_geometry import compose_geometry  # noqa: PLC0415
+
+    return {(rec["kind"], rec["kindIndex"]): rec["id"] for rec in compose_geometry(slide_archive, objects)}
+
+
+def plan_crops(
+    key_path: str | Path,
+    slide_archive: dict,
+    objects: dict[str, dict],
+    items: Sequence[dict],
+    kept: Iterable[ItemId],
+    *,
+    include_side: bool = False,
+    crop_dir: str | Path,
+    number: int,
+    build_targets: Iterable[ItemId] = (),
+) -> tuple[dict[ItemId, CropSpec], list[str]]:
+    """Offline image-crop planning for one slide (D2, step 8). A kept image whose
+    visible rect (frame ∩ mask) is a PROPER SUBSET of ``window`` (the centre panel,
+    or the whole wall under ``include_side``) is replaced by a cropped file written
+    under ``crop_dir``; a visible rect already inside ``window`` (GW 48, GW 24) is
+    left untouched. Never opens Keynote. Raises ``CropRefusal`` only for a crop
+    window under ``MIN_CROP_PX``; every other precondition failure is a fallback."""
+    from obed_edom.offline_inspect import _data_identifier, data_member_index  # noqa: PLC0415
+
+    crops: dict[ItemId, CropSpec] = {}
+    warnings: list[str] = []
+    window = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
+    items_by_id = {(it["kind"], it["kindIndex"]): it for it in items}
+    build_target_set = set(build_targets)
+    id_by_item = _item_object_ids(slide_archive, objects)
+
+    image_ids = sorted(iid for iid in kept if iid[0] == "image")
+    if not image_ids:
+        return crops, warnings
+
+    with zipfile.ZipFile(key_path) as zf:
+        data_index = data_member_index(zf.namelist())
+        for item_id in image_ids:
+            item = items_by_id.get(item_id)
+            obj_id = id_by_item.get(item_id)
+            if item is None or obj_id is None:
+                continue
+            obj = objects.get(obj_id)
+            if obj is None:
+                continue
+            if item_id in build_target_set:
+                warnings.append(f"image {item_id[1]}: a build targets this image, keeping source (LWCROP)")
+                continue
+            if (item.get("rotation") or 0) % 360 != 0:
+                warnings.append(f"image {item_id[1]}: rotated, keeping source (LWCROP)")
+                continue
+            try:
+                result = crop_geometry(obj, objects, window)
+            except CropRefusal as exc:
+                warnings.append(f"image {item_id[1]}: {exc}, keeping source (LWCROP)")
+                continue
+            if result is None:
+                continue
+            mask_abs, visible, px_box = result
+            if _rects_close(visible, mask_abs):
+                continue
+
+            if (px_box[2] - px_box[0]) < MIN_CROP_PX or (px_box[3] - px_box[1]) < MIN_CROP_PX:
+                raise CropRefusal(f"slide {number} image {item_id[1]}: crop window under {MIN_CROP_PX:.0f}px")
+
+            data_id = _data_identifier(obj)
+            member = data_index.get(str(data_id)) if data_id is not None else None
+            if member is None:
+                warnings.append(f"image {item_id[1]}: unresolved data member, keeping source (LWCROP)")
+                continue
+
+            from PIL import Image  # noqa: PLC0415
+
+            try:
+                with zf.open(member) as fh:
+                    src_img = Image.open(fh)
+                    src_img.load()
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"image {item_id[1]}: could not open {member} ({exc}), keeping source (LWCROP)")
+                continue
+
+            orientation = None
+            try:
+                orientation = (src_img.getexif() or {}).get(274)
+            except Exception:  # noqa: BLE001
+                orientation = None
+            natural = _asset_natural_size(obj)
+            if orientation not in (None, 1) or src_img.size != (round(natural[0]), round(natural[1])):
+                warnings.append(f"image {item_id[1]}: EXIF/pixel-size mismatch, keeping source (LWCROP)")
+                continue
+
+            source_name = item.get("fileName") or Path(member).name
+            out_dir = Path(crop_dir) / str(number)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / source_name
+            ext = Path(source_name).suffix.lower()
+            save_kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
+            src_img.crop(px_box).save(out_path, **save_kwargs)
+
+            crops[item_id] = CropSpec(path=out_path, source_file_name=source_name, px_box=px_box, visible=visible)
+
+    return crops, warnings

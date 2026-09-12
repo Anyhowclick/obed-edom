@@ -30,6 +30,9 @@ from obed_edom.dsk_live import (
 )
 from obed_edom.dsk_plan import (
     Band,
+    CropRefusal,
+    CropSpec,
+    DEFAULT_TEXT_SLIDE_WORDS,
     ItemId,
     SlideClass,
     TextBox,
@@ -38,6 +41,7 @@ from obed_edom.dsk_plan import (
     classify_deck,
     fit_slide,
     fit_text_stack,
+    plan_crops,
     read_band,
     visible_union,
     wrapped_height,
@@ -60,6 +64,7 @@ from obed_edom.iwa_geometry import (
     _xywha,
     compose_geometry,
 )
+from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
 from obed_edom.offline_inspect import _canvas_size, offline_wall_payload
@@ -129,6 +134,8 @@ class AssemblyPlan:
     splits: dict[int, tuple[SplitPart, ...]] = field(default_factory=dict)
     run_sizes: dict[int, dict[ItemId, tuple[tuple[int, int, float], ...]]] = field(default_factory=dict)
     stacked_ids: dict[int, frozenset[ItemId]] = field(default_factory=dict)
+    crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
+    anchors: dict[int, str] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -263,6 +270,22 @@ def slide_affine_scale(
     return None
 
 
+def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | None:
+    """Raw slide archive for a 1-based payload ``number`` (same addressing as
+    ``offline_wall_payload``/``slide_order``)."""
+    order = slide_order(objects)
+    if number < 1 or number > len(order):
+        return None
+    slide_id, _skipped = order[number - 1]
+    return objects.get(slide_id)
+
+
+def _content_item_count(cls: SlideClass) -> int:
+    """Count of kept image/movie/group items -- placement is by COUNT (D3); text
+    (and text-bearing badge shapes) never count towards it."""
+    return sum(1 for iid in cls.kept if iid[0] in ("image", "movie", "group"))
+
+
 def plan_assembly(
     payload: dict,
     classes: Sequence[SlideClass],
@@ -274,6 +297,12 @@ def plan_assembly(
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
     allow_split: bool = True,
     text_fit: Literal["warn", "shrink"] = "warn",
+    deck: Any = None,
+    fw_deck: str | Path | None = None,
+    crop_dir: str | Path | None = None,
+    no_image_crop: bool = False,
+    builds: Mapping[int, dict] | None = None,
+    no_auto_anchor: bool = False,
 ) -> AssemblyPlan:
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
@@ -300,7 +329,10 @@ def plan_assembly(
     splits: dict[int, tuple[SplitPart, ...]] = {}
     run_sizes: dict[int, dict[ItemId, tuple[tuple[int, int, float], ...]]] = {}
     stacked_id_map: dict[int, frozenset[ItemId]] = {}
+    crops_out: dict[int, dict[ItemId, CropSpec]] = {}
+    anchors_out: dict[int, str] = {}
     warnings: list[str] = []
+    objects_graph = deck[0] if isinstance(deck, tuple) else deck
 
     for number in kept_numbers:
         decision = decisions[number]
@@ -311,15 +343,47 @@ def plan_assembly(
         group_child_text = slide.get("groupChildSignature")
         warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
+        if decision.anchor in (None, "auto"):
+            anchor = "centre" if no_auto_anchor else ("right" if _content_item_count(cls) == 1 else "centre")
+        else:
+            anchor = decision.anchor
+        anchors_out[number] = anchor
+
         fit = fit_slide(
             items,
             band,
             include_side=decision.keep_side,
-            anchor=decision.anchor,
+            anchor=anchor,
             wall=wall,
             group_child_text=group_child_text,
         )
         fits[number] = fit
+
+        slide_crops: dict[ItemId, CropSpec] = {}
+        if not no_image_crop and objects_graph is not None and fw_deck is not None:
+            slide_archive = _slide_archive_for_number(objects_graph, number)
+            if slide_archive is not None:
+                build_target_ids = {
+                    (b["kind"], b["kindIndex"])
+                    for b in ((builds or {}).get(number) or {}).get("builds") or []
+                }
+                try:
+                    slide_crops, crop_warnings = plan_crops(
+                        fw_deck,
+                        slide_archive,
+                        objects_graph,
+                        items,
+                        cls.kept,
+                        include_side=decision.keep_side,
+                        crop_dir=crop_dir if crop_dir is not None else Path(fw_deck).parent / "crops",
+                        number=number,
+                        build_targets=build_target_ids,
+                    )
+                except CropRefusal as exc:
+                    raise AssemblyRefusal(str(exc)) from exc
+                warnings.extend(f"slide {number}: {w}" for w in crop_warnings)
+        if slide_crops:
+            crops_out[number] = slide_crops
 
         top_level_movie_ids = tuple(iid for iid in cls.kept if iid[0] == "movie")
         if cls.category in ("movie", "mixed") and cls.movie_count > len(top_level_movie_ids):
@@ -331,7 +395,7 @@ def plan_assembly(
                 items,
                 band,
                 include_side=decision.keep_side,
-                anchor=decision.anchor,
+                anchor=anchor,
                 wall=wall,
                 group_child_text=group_child_text,
             )
@@ -376,7 +440,8 @@ def plan_assembly(
         all_ids = {(item["kind"], item["kindIndex"]) for item in items}
         excluded_ids = all_ids - set(cls.kept) - set(cls.dropped_side)
 
-        base_deletes = _delete_order(list(dropped) + list(movie_ids) + list(excluded_ids))
+        crop_ids = tuple(sorted(slide_crops.keys()))
+        base_deletes = _delete_order(list(dropped) + list(movie_ids) + list(excluded_ids) + list(crop_ids))
         deletes[number] = base_deletes
 
         stacked_ids: set[ItemId] = set()
@@ -610,6 +675,8 @@ def plan_assembly(
         splits=splits,
         run_sizes=run_sizes,
         stacked_ids=stacked_id_map,
+        crops=crops_out,
+        anchors=anchors_out,
     )
 
 
@@ -732,7 +799,10 @@ def _attach_full_group_children(fw_deck: Path, payload: dict, *, deck: Any = Non
 
 
 def load_assembly_inputs(
-    fw_deck: Path, *, include_side: frozenset[int] = frozenset()
+    fw_deck: Path,
+    *,
+    include_side: frozenset[int] = frozenset(),
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
 ) -> tuple[dict, list[SlideClass], dict[int, dict[ItemId, list[float]]]]:
     """The only I/O in the pure planning path: offline payload, classifier output, and
     per-text-item run sizes, all read from `fw_deck` once."""
@@ -743,7 +813,9 @@ def load_assembly_inputs(
     attach_group_child_text(fw_deck, payload, deck=deck)
     attach_group_content_signature(fw_deck, payload, deck=deck)
     attach_group_captions(fw_deck, payload, deck=deck)
-    classes = classify_deck(fw_deck, include_side=include_side, deck=deck, payload=payload)
+    classes = classify_deck(
+        fw_deck, include_side=include_side, deck=deck, payload=payload, text_slide_words=text_slide_words,
+    )
 
     runs: dict[int, dict[ItemId, list[float]]] = {}
     for slide in payload.get("slides") or []:
@@ -1103,8 +1175,11 @@ def _slide_lines(
     group_text_sizes = plan.group_text_sizes.get(number, {})
     group_origin = plan.group_origin.get(number, {})
     scale = plan.group_scale.get(number)
+    slide_crops = plan.crops.get(number, {}) if split_parts is None else {}
 
     for item_id, rect in fit.items():
+        if item_id in slide_crops:
+            continue
         kind, kind_index = item_id
         name = _AS_KIND_NAMES.get(kind)
         if not name:
@@ -1158,6 +1233,24 @@ def _slide_lines(
             "          if locked of theObj then set locked of theObj to false",
             "        end try",
             "        delete theObj",
+        ]
+
+    for item_id, spec in slide_crops.items():
+        rect = fit.get(item_id)
+        if rect is None:
+            continue
+        kind_index = item_id[1]
+        lines += [
+            f"        set imgBefore to (count of images of slide {ordinal})",
+            f"        tell slide {ordinal}",
+            "          set newImg to make new image with properties "
+            f'{{file:(POSIX file "{_as_escape(str(spec.path))}") as alias}}',
+            "        end tell",
+            f"        set position of newImg to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}",
+            f"        set width of newImg to {_as_num(rect.w)}",
+            f"        set height of newImg to {_as_num(rect.h)}",
+            f'        if (count of images of slide {ordinal}) is not (imgBefore + 1) then '
+            f'error "cropped image {kind_index} did not import"',
         ]
 
     if is_clip:
@@ -1946,6 +2039,12 @@ def assemble_dsk_deck(
     layout_template: Path = DEFAULT_LAYOUT_TEMPLATE,
     stroke_min_refs: int = 1,
     text_fit: Literal["warn", "shrink"] = "warn",
+    min_text_pt: float = DEFAULT_MIN_TEXT_PT,
+    allow_split: bool = True,
+    text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
+    crop_dir: Path | None = None,
+    no_image_crop: bool = False,
+    no_auto_anchor: bool = False,
 ) -> AssembleResult:
     """Runs the live AppleScript batch end to end (plan -> LiveBatch -> script),
     then two offline IWA post-passes: card-border stroke restore and build/transition
@@ -1977,9 +2076,16 @@ def assemble_dsk_deck(
         resolved_band = DEFAULT_BAND
 
     include_side = frozenset(d.slide for d in decisions.values() if d.keep_side)
-    payload, classes, runs = load_assembly_inputs(fw_deck, include_side=include_side)
+    deck = _load_deck(fw_deck)
+    payload, classes, runs = load_assembly_inputs(
+        fw_deck, include_side=include_side, text_slide_words=text_slide_words,
+    )
+    builds_by_number = deck_builds(fw_deck, deck=deck)
     plan = plan_assembly(
         payload, classes, decisions=decisions, band=resolved_band, clips=clips, runs=runs, text_fit=text_fit,
+        min_text_pt=min_text_pt, allow_split=allow_split,
+        deck=deck, fw_deck=fw_deck, crop_dir=crop_dir, no_image_crop=no_image_crop,
+        builds=builds_by_number, no_auto_anchor=no_auto_anchor,
     )
 
     warnings: list[str] = list(plan.warnings)
