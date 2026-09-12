@@ -409,14 +409,16 @@ h3 {
   --ctl-font: var(--ctl-font-md); --icon-size: var(--icon-md);
 }
 .playlist-controls, .framing-tabs, .framing-filter,
-.maps-pin-bulk, .maps-landmark-pop, .maps-cache-menu, .maps-deck-actions-menu, .wash-mask-tools {
+.maps-pin-bulk, .maps-landmark-pop, .maps-cache-menu, .maps-deck-actions-menu {
   --ctl-h: var(--ctl-h-sm); --ctl-pad: var(--ctl-pad-sm);
   --ctl-font: var(--ctl-font-sm); --icon-size: var(--icon-sm);
 }
-.row-acts, .hop-phase-toggles, .plan-modes, .maps-gutter, .maps-hl-list {
+.row-acts, .maps-gutter, .maps-hl-list {
   --ctl-h: var(--ctl-h-xs); --ctl-pad: var(--ctl-pad-xs);
   --ctl-font: var(--ctl-font-xs); --icon-size: var(--icon-xs);
 }
+/* The hop row's one control is a bare glyph, so it keeps the sm icon at the xs height. */
+.maps-gutter { --icon-size: var(--icon-sm); }
 
 .overlay {
   position: fixed;
@@ -2933,7 +2935,7 @@ input.maps-thumb-title-input:focus {
 }
 .maps-inspector input[type="color"] {
   width: 48px;
-  height: 28px;
+  height: var(--ctl-h);
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
