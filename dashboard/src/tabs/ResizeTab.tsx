@@ -304,7 +304,7 @@ export function ResizeTab() {
       {result?.destPath && (
         <>
           <p className="note path-note">
-            Wrote CG.key
+            Wrote {result.destPath.split("/").pop()}
             {counts ? ` — ${counts.pin ?? 0} pins, ${counts.map ?? 0} map, ${counts.list ?? 0} list` : ""}
             {typeof result.applied === "number" ? ` (applied ${result.applied}` : ""}
             {typeof result.missed === "number" ? `, missed ${result.missed})` : result.applied != null ? ")" : ""}

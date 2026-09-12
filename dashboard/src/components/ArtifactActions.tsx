@@ -75,7 +75,7 @@ export function ArtifactActions({
       <button
         className="btn secondary"
         type="button"
-        title={present[0].path}
+        title={present[0].path.slice(0, present[0].path.lastIndexOf("/")) || present[0].path}
         onClick={() => void runReveal(present[0].path)}
       >
         <IconFolder />

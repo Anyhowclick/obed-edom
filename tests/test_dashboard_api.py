@@ -243,6 +243,24 @@ def test_open_path_launches_open(tmp_path, monkeypatch):
     assert calls == [["open", str(target)]]
 
 
+def test_open_path_rejects_app_bundle(tmp_path):
+    client = TestClient(app)
+    target = tmp_path / "Evil.app"
+    target.mkdir()
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
+def test_open_path_rejects_non_artifact_suffix(tmp_path):
+    client = TestClient(app)
+    target = tmp_path / "run.sh"
+    target.write_text("echo hi")
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
 def test_resize_requires_template(tmp_path):
     client = TestClient(app)
     wall = tmp_path / "wall.key"

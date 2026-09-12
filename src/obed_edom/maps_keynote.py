@@ -1893,6 +1893,12 @@ def export_maps_job(
         if record is not None:
             poster_frame.append(record)
         flags_cg = _inspect_dest(dest_cg, job, is_cancelled=is_cancelled)
+    if not export_lw:
+        result.pop("destPath", None)
+    if not export_cg:
+        result.pop("destPathCg", None)
+    if not export_dsk:
+        result.pop("destPathDsk", None)
     result["exportLw"] = bool(export_lw)
     result["exportCg"] = bool(export_cg)
     result["exportDsk"] = bool(export_dsk)
