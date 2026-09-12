@@ -962,7 +962,6 @@ class CropSpec:
     source_file_name: str
     px_box: tuple[int, int, int, int]
     visible: Rect
-    created: bool = True
 
 
 def _rects_close(a: Rect, b: Rect, tol: float = 0.5) -> bool:
@@ -1061,7 +1060,7 @@ def plan_crops(
 
     image_ids = sorted(iid for iid in kept if iid[0] == "image")
     if not image_ids:
-        return crops, warnings
+        return crops, warnings, ()
 
     used_names: set[str] = set()
     kept_uncropped_names: set[str] = set()
@@ -1156,7 +1155,6 @@ def plan_crops(
             out_dir = Path(crop_dir) / str(number)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / source_name
-            pre_existing = out_path.exists()
             ext = Path(source_name).suffix.lower()
             save_kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
             temp_fd, temp_name = tempfile.mkstemp(dir=out_dir, prefix=f".{source_name}.", suffix=ext)
@@ -1174,7 +1172,6 @@ def plan_crops(
             pending_writes.append((temp_path, out_path))
             crops[item_id] = CropSpec(
                 path=out_path, source_file_name=source_name, px_box=px_box, visible=visible,
-                created=not pre_existing,
             )
 
     for name in used_names:

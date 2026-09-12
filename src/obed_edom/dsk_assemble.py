@@ -285,12 +285,27 @@ def _discard_pending_crop_writes(pending: Sequence[tuple[Path, Path]]) -> None:
             Path(temp_path).unlink(missing_ok=True)
         except OSError:
             pass
+    for temp_path, _final_path in pending:
+        try:
+            Path(temp_path).parent.rmdir()
+        except OSError:
+            pass
 
 
 def _commit_pending_crop_writes(pending: Sequence[tuple[Path, Path]]) -> None:
     """Atomically rename every planned crop's temp file onto its final path."""
-    for temp_path, final_path in pending:
-        os.replace(temp_path, final_path)
+    committed: list[Path] = []
+    for i, (temp_path, final_path) in enumerate(pending):
+        try:
+            os.replace(temp_path, final_path)
+        except OSError as exc:
+            for remaining_temp, _final_path in pending[i + 1 :]:
+                Path(remaining_temp).unlink(missing_ok=True)
+            raise AssemblyRefusal(
+                f"could not commit crop {final_path}: {exc}; already replaced: "
+                f"{', '.join(str(p) for p in committed) or 'none'}"
+            ) from exc
+        committed.append(final_path)
 
 
 def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | None:

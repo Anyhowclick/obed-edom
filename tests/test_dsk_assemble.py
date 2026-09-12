@@ -1067,6 +1067,30 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     assert stack_top13 - (badge13.y + badge13.h) == pytest.approx(dsa._TEXT_STACK_GAP, abs=0.5)
 
 
+def test_gw_every_kept_non_movie_slide_plans_under_default_flags(tmp_path):
+    """Real deck, real `fw_deck`, default flags, one slide at a time -- the gap
+    that let the `plan_crops` 2-tuple early return crash every image-less slide
+    on the live crop path while the suite stayed green."""
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
+    deck = dsa._load_deck(GW_DECK)
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    checked = 0
+    for number, cls in by_number.items():
+        if cls.movie_count > 0 or number == 49:
+            continue
+        decisions = {number: SlideDecision(number, "in_deck")}
+        plan = plan_assembly(
+            payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs,
+            deck=deck, fw_deck=GW_DECK, crop_dir=tmp_path / "crops",
+        )
+        assert plan is not None
+        checked += 1
+    assert checked == 60
+
+
 def test_gw_text_slides_stay_within_band_top():
     # Band-containment measured through the real placement path (_stacked_text_rects +
     # _short_row_rects via plan_assembly), for every GW text slide -- the defect that
@@ -4483,6 +4507,48 @@ def test_refusal_cleans_up_pending_temp_files(tmp_path, monkeypatch):
     assert not final_path.exists()
 
 
+def test_commit_pending_crop_writes_unlinks_remaining_temps_on_mid_loop_failure(tmp_path, monkeypatch):
+    """The second of three renames fails: the first final is already committed, the
+    third temp must be unlinked rather than left orphaned, and the failure must
+    surface as an `AssemblyRefusal` naming the failed path and what already committed."""
+    pending = []
+    for i in range(3):
+        final_path = tmp_path / f"final{i}.jpg"
+        temp_path = tmp_path / f"temp{i}.jpg"
+        temp_path.write_bytes(b"crop")
+        pending.append((temp_path, final_path))
+
+    real_replace = dsa.os.replace
+
+    def flaky_replace(src, dst):
+        if str(src) == str(pending[1][0]):
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dsa.os, "replace", flaky_replace)
+    with pytest.raises(AssemblyRefusal, match=str(pending[1][1])):
+        dsa._commit_pending_crop_writes(pending)
+
+    assert pending[0][1].exists()
+    assert not pending[0][0].exists()
+    assert not pending[1][1].exists()
+    assert not pending[2][0].exists()
+    assert not pending[2][1].exists()
+
+
+def test_discard_pending_crop_writes_removes_empty_slide_directory(tmp_path):
+    slide_dir = tmp_path / "5"
+    slide_dir.mkdir()
+    temp_path = slide_dir / ".photo.jpg.tmp"
+    temp_path.write_bytes(b"crop")
+    final_path = slide_dir / "photo.jpg"
+
+    dsa._discard_pending_crop_writes([(temp_path, final_path)])
+
+    assert not temp_path.exists()
+    assert not slide_dir.exists()
+
+
 def test_refusal_preserves_preexisting_final_file(tmp_path, monkeypatch):
     """A later slide's refusal must leave an earlier slide's crop *final* path
     untouched -- only the pending temp write is unlinked, never the final file."""
@@ -4495,7 +4561,6 @@ def test_refusal_preserves_preexisting_final_file(tmp_path, monkeypatch):
     temp_path.write_bytes(b"fake-crop")
     fake_spec = CropSpec(
         path=final_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1),
-        created=False,
     )
 
     def fake_plan_crops(*a, **k):
@@ -4595,6 +4660,57 @@ def test_plan_assembly_real_multi_slide_refusal_preserves_earlier_slide_bytes(tm
     assert [p for p in final_path.parent.iterdir()] == [final_path]
 
 
+def test_plan_assembly_real_fw_deck_skips_text_only_slide(tmp_path, monkeypatch):
+    """Real (unmocked) `plan_crops`, driven through `plan_assembly`, over a payload
+    with a text-only slide next to an image slide -- the empty-`image_ids` branch
+    of `plan_crops` must return a plan, not raise (regression for the 2-tuple
+    early return that broke every slide with no kept image)."""
+    from PIL import Image
+    import zipfile as _zipfile
+
+    img = Image.new("RGB", (6000, 4000), "red")
+    buf_path = tmp_path / "photo.jpg"
+    img.save(buf_path, quality=95)
+
+    key_path = tmp_path / "deck.key"
+    with _zipfile.ZipFile(key_path, "w") as zf:
+        zf.write(buf_path, "Data/photo.jpg")
+
+    obj = {
+        "super": {"geometry": {"position": {"x": 1954, "y": 27}, "size": {"width": 1381, "height": 921}, "angle": 0.0}},
+        "naturalSize": {"width": 6000, "height": 4000},
+        "data": {"identifier": "0"},
+    }
+    objects = {"img": obj}
+
+    def fake_slide_archive_for_number(objects, number):
+        return {"which": "image" if number == 3 else "text"}
+
+    def fake_item_object_ids(slide_archive, objects):
+        return {("image", 0): "img"} if slide_archive.get("which") == "image" else {}
+
+    monkeypatch.setattr(dsa, "_slide_archive_for_number", fake_slide_archive_for_number)
+    monkeypatch.setattr(dsk_plan, "_item_object_ids", fake_item_object_ids)
+
+    image = _image_item(0, x=1954, y=27, w=1381, h=921)
+    image["fileName"] = "photo.jpg"
+    slide3 = _slide(3, [image])
+    slide5 = _slide(5, [_text_item(0, x=1920, y=0, w=1000, h=200, runs=[{"text": "hello"}])])
+    payload = _payload([slide3, slide5])
+    classes = [_classify(slide3), _classify(slide5)]
+    decisions = {
+        3: SlideDecision(3, "in_deck", anchor="auto"),
+        5: SlideDecision(5, "in_deck", anchor="auto"),
+    }
+
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={},
+        deck=(objects, {}, {}), fw_deck=key_path, crop_dir=tmp_path / "crops",
+    )
+
+    assert 5 not in plan.crops
+
+
 def test_rotated_image_falls_back_through_plan_assembly(tmp_path, monkeypatch):
     from PIL import Image
     import zipfile as _zipfile
@@ -4666,7 +4782,6 @@ def test_unconsumed_split_refusal_preserves_preexisting_final_file(tmp_path, mon
     temp_path.write_bytes(b"fake-crop")
     fake_spec = CropSpec(
         path=final_path, source_file_name="photo.jpg", px_box=(0, 0, 1, 1), visible=Rect(0, 0, 1, 1),
-        created=False,
     )
 
     monkeypatch.setattr(dsa, "plan_crops", lambda *a, **k: ({("image", 0): fake_spec}, [], ((temp_path, final_path),)))

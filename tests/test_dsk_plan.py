@@ -1809,3 +1809,13 @@ def test_plan_crops_unlinks_partial_file_on_save_failure(tmp_path, monkeypatch):
     assert crops == {}
     assert any("could not save crop" in w for w in warnings)
     assert not (tmp_path / "crops" / "3" / "photo.jpg").exists()
+
+
+def test_plan_crops_returns_empty_for_image_less_slide(tmp_path):
+    item = {"kind": "shape", "kindIndex": 0}
+    crops, warnings, pending = plan_crops(
+        tmp_path / "deck.key", {}, {}, [item], [("shape", 0)], crop_dir=tmp_path / "crops", number=3,
+    )
+    assert crops == {}
+    assert warnings == []
+    assert pending == ()
