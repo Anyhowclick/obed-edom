@@ -21,12 +21,19 @@ let renameCalls: Array<{ id: string; name: string }> = [];
 
 let getJobResolution: Job | null = null;
 
+let saveDeferOnce: Promise<Job> | null = null;
+
 export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveMapsStateArgs[0], document: SaveMapsStateArgs[1], expectedRevision: SaveMapsStateArgs[2]): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
   if (saveConflictOnce) {
     const { conflict } = saveConflictOnce;
     saveConflictOnce = null;
     throw new actual.MapsStateConflictError(conflict);
+  }
+  if (saveDeferOnce) {
+    const deferred = saveDeferOnce;
+    saveDeferOnce = null;
+    return deferred;
   }
   return makeJob({ id, result: { ...document, stateRevision: expectedRevision + 1 } });
 });
@@ -67,6 +74,7 @@ export const getSettings = vi.fn<typeof actual.getSettings>(
 
 export function resetMapsApiScript() {
   saveConflictOnce = null;
+  saveDeferOnce = null;
   saveCalls = [];
   staleOnce = null;
   postMapsPngCalls = [];
@@ -84,6 +92,9 @@ export const mapsApiScript = {
   saveMapsState: {
     conflictOnce(conflict: { document: Record<string, unknown>; stateRevision: number }) {
       saveConflictOnce = { conflict: { document: conflict.document, stateRevision: conflict.stateRevision } };
+    },
+    deferOnce(promise: Promise<Job>) {
+      saveDeferOnce = promise;
     },
     get calls() {
       return saveCalls;
