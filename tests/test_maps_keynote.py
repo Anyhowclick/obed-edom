@@ -350,6 +350,20 @@ def test_landmark_scale_with_map_zoom_out_halves_width(tmp_path: Path):
     assert landmark["w"] == 50
 
 
+def test_landmark_scale_with_map_zoom_in_doubles_width_on_morph_plate(tmp_path: Path):
+    asset_root = tmp_path / "assets"
+    _dummy_png(asset_root / "asset1.png")
+    cam_a, cam_b = _pan_camera(6, 400)
+    slide = _slide("s1", cam_a, churches=[_landmark_church(scaleWithMap=True, sizeZoom=5)])
+    geom = morph_plate_geom([cam_a, cam_b])
+    plate_path = _dummy_png(tmp_path / "plate.png")
+    items = build_slide_items(
+        slide, plate=geom, plate_path=plate_path, still=None, movie=None, wall=True, asset_root=asset_root
+    )
+    landmark = next(item for item in items if item.get("landmark"))
+    assert landmark["w"] == 200
+
+
 def test_landmark_scale_with_map_off_is_unchanged(tmp_path: Path):
     asset_root = tmp_path / "assets"
     _dummy_png(asset_root / "asset1.png")
