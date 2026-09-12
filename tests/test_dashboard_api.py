@@ -653,10 +653,11 @@ def test_patch_name_returns_public_dict_with_new_name(tmp_path):
     started = client.post("/api/outline", data={"path": str(path)})
     job = _wait(client, started.json()["id"])
 
-    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": "Quiet Jordan"})
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
     assert renamed.status_code == 200, renamed.text
     body = renamed.json()
-    assert body["name"] == "quiet-jordan"
+    assert body["name"] == target
     assert body["id"] == job["id"]
     assert "artifacts" in body
 
