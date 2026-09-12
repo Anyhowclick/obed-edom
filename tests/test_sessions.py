@@ -102,7 +102,17 @@ def test_loop_reverts_result_when_save_fails(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(threading, "excepthook", capturing_hook)
 
     runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
-    job = runner.submit("maps", lambda _job: {"new": True}, feature="maps", result={"old": True})
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fn(_job: Job) -> dict:
+        started.set()
+        release.wait(5)
+        return {"new": True}
+
+    job = runner.submit("maps", fn, feature="maps", result={"old": True})
+    assert started.wait(5)
 
     real_save = runner.save
 
@@ -112,11 +122,11 @@ def test_loop_reverts_result_when_save_fails(tmp_path: Path, monkeypatch):
         real_save(saved_job)
 
     monkeypatch.setattr(runner, "save", failing_save)
+    release.set()
 
-    deadline = time.time() + 2.0
-    while time.time() < deadline and job.status == "queued":
+    deadline = time.time() + 5.0
+    while time.time() < deadline and job.status not in ("error", "done"):
         time.sleep(0.02)
-    time.sleep(0.1)
 
     assert job.status == "error"
     assert job.error == "disk full"
