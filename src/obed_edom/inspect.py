@@ -6,20 +6,18 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from obed_edom import keynote_app
 from obed_edom.map_remap import slides_for_plan
+from obed_edom.osascript_runner import KEYNOTE_LOCK as _KEYNOTE_LOCK
+from obed_edom.osascript_runner import parse_json_stdout, run_applescript, run_jxa
 from obed_edom.paths import output_root
 
 INSPECT_JS = Path(__file__).resolve().parent / "inspect_keynote.js"
 BULK_GEOMETRY_JS = Path(__file__).resolve().parent / "bulk_geometry.js"
-
-# In-process only; one dashboard process drives one Keynote instance.
-_KEYNOTE_LOCK = threading.RLock()
 
 
 def bulk_read_enabled() -> bool:
@@ -119,16 +117,10 @@ def _close_document_by_name(key_path: Path) -> None:
             "end using terms from",
         ]
     )
-    with _KEYNOTE_LOCK:
-        with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-            handle.write(script)
-            script_path = Path(handle.name)
-        try:
-            subprocess.run(["osascript", str(script_path)], capture_output=True, text=True, check=False)
-        except Exception:  # noqa: BLE001 — best-effort cleanup must never mask the original failure
-            pass
-        finally:
-            script_path.unlink(missing_ok=True)
+    try:
+        run_applescript(script, timeout=60)
+    except Exception:  # noqa: BLE001 — best-effort cleanup must never mask the original failure
+        pass
 
 
 def _run_applescript_export(
@@ -136,18 +128,7 @@ def _run_applescript_export(
 ) -> str | None:
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
-    try:
-        proc = subprocess.run(
-            ["osascript", str(script_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
+    proc = run_applescript(script)
     err = (proc.stderr or proc.stdout or "").strip() or "Keynote did not write PNG previews."
     if proc.returncode != 0:
         return f"Preview export failed: {err}"
@@ -230,32 +211,6 @@ def _raise_if_cancelled(is_cancelled: Callable[[], bool] | None) -> None:
         raise RuntimeError("Export cancelled.")
 
 
-def _run_jxa_inspect(
-    args: list[str], is_cancelled: Callable[[], bool] | None
-) -> subprocess.CompletedProcess[str]:
-    _raise_if_cancelled(is_cancelled)
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        proc = subprocess.Popen(args, stdout=stdout, stderr=stderr)
-        while proc.poll() is None:
-            if is_cancelled and is_cancelled():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                raise RuntimeError("Export cancelled.")
-            time.sleep(0.05)
-        stdout.seek(0)
-        stderr.seek(0)
-        return subprocess.CompletedProcess(
-            proc.args,
-            proc.returncode,
-            stdout.read().decode("utf-8", "replace"),
-            stderr.read().decode("utf-8", "replace"),
-        )
-
-
 def inspect_keynote(
     key_path: Path | str,
     *,
@@ -324,26 +279,11 @@ def inspect_keynote(
     if wanted:
         plan["slides"] = wanted
         plan["range"] = [wanted[0], wanted[-1]]
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-        json.dump(plan, handle)
-        plan_path = handle.name
     with _KEYNOTE_LOCK:
-        try:
-            t_jxa = time.perf_counter()
-            proc = _run_jxa_inspect(
-                ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path], is_cancelled
-            )
-            timing["jxa"] = time.perf_counter() - t_jxa
-        finally:
-            Path(plan_path).unlink(missing_ok=True)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                "Keynote inspect failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
-            )
-        raw = (proc.stdout or "").strip()
-        if not raw:
-            raise RuntimeError("Keynote inspect returned no JSON.")
-        payload = json.loads(raw)
+        t_jxa = time.perf_counter()
+        proc = run_jxa(INSPECT_JS, plan, is_cancelled=is_cancelled)
+        timing["jxa"] = time.perf_counter() - t_jxa
+        payload = parse_json_stdout(proc, "Keynote inspect")
         try:
             from obed_edom.iwa_runs import attach_runs  # noqa: PLC0415
 
@@ -424,35 +364,13 @@ def bulk_geometry(
             wanted = sorted({int(n) for n in slides})
             plan["slides"] = wanted
             plan["range"] = [wanted[0], wanted[-1]]
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-            json.dump(plan, handle)
-            plan_path = handle.name
+        proc = run_jxa(BULK_GEOMETRY_JS, plan)
         try:
-            proc = subprocess.run(
-                ["osascript", "-l", "JavaScript", str(BULK_GEOMETRY_JS), plan_path],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        finally:
-            Path(plan_path).unlink(missing_ok=True)
-        if proc.returncode != 0:
+            parsed = parse_json_stdout(proc, "Bulk geometry read")
+        except RuntimeError:
             if keep_open:
                 _close_document_by_name(key_path)
-            raise RuntimeError(
-                "Bulk geometry read failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
-            )
-        raw = (proc.stdout or "").strip()
-        if not raw:
-            if keep_open:
-                _close_document_by_name(key_path)
-            raise RuntimeError("Bulk geometry read returned no JSON.")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            if keep_open:
-                _close_document_by_name(key_path)
-            raise RuntimeError(f"Bulk geometry read returned invalid JSON: {exc}") from exc
+            raise
         if parsed.get("error"):
             # An open/slides failure must be loud, never a silent empty-geometry fallback.
             if keep_open:
@@ -512,30 +430,9 @@ def inspect_items(
             str(int(slide)): {str(k): int(v) for k, v in kinds.items()}
             for slide, kinds in counts.items()
         }
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-        json.dump(plan, handle)
-        plan_path = handle.name
     with _KEYNOTE_LOCK:
-        try:
-            proc = subprocess.run(
-                ["osascript", "-l", "JavaScript", str(INSPECT_JS), plan_path],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        finally:
-            Path(plan_path).unlink(missing_ok=True)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "Item-scoped inspect failed:\n" + (proc.stderr or "") + "\n" + (proc.stdout or "")
-        )
-    raw = (proc.stdout or "").strip()
-    if not raw:
-        raise RuntimeError("Item-scoped inspect returned no JSON.")
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Item-scoped inspect returned invalid JSON: {exc}") from exc
+        proc = run_jxa(INSPECT_JS, plan)
+    parsed = parse_json_stdout(proc, "Item-scoped inspect")
     items_by_slide = parsed.get("itemsBySlide") or {}
     out: dict[int, dict[str, Any]] = {}
     for slide_key, result in items_by_slide.items():

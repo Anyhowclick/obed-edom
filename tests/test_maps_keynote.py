@@ -827,8 +827,9 @@ def test_inspect_and_validate_checks_cancellation_between_phases(monkeypatch, tm
         mod.inspect_and_validate(tmp_path / "deck.key", is_cancelled=lambda: next(checks))
 
 
-def test_inspect_keynote_terminates_blocked_jxa_when_cancelled(monkeypatch, tmp_path: Path):
+def test_inspect_keynote_terminates_blocked_jxa_when_cancelled(monkeypatch, tmp_path: Path, live_osascript):
     import obed_edom.inspect as inspect_mod
+    from obed_edom import osascript_runner
 
     class Proc:
         args = ["osascript", "-l", "JavaScript"]
@@ -851,7 +852,7 @@ def test_inspect_keynote_terminates_blocked_jxa_when_cancelled(monkeypatch, tmp_
     proc = Proc()
     started = threading.Event()
     cancelled = threading.Event()
-    monkeypatch.setattr(inspect_mod.subprocess, "Popen", lambda *_a, **_k: started.set() or proc)
+    monkeypatch.setattr(osascript_runner.subprocess, "Popen", lambda *_a, **_k: started.set() or proc)
     result = []
 
     def inspect():

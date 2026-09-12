@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from conftest import _fake_osascript
 from obed_edom import inspect as inspect_mod
 from obed_edom.baseline import CACHE_DIR_ENV, deck_digest, inspect_cache_path
 
@@ -218,18 +218,17 @@ def test_inspect_items_builds_plan_and_parses(tmp_path, monkeypatch):
     key.write_text("stub")
     captured = {}
 
-    def fake_run(args, *a, **kw):
+    def on_argv(args):
         plan_path = args[-1]
         captured["plan"] = json.loads(Path(plan_path).read_text(encoding="utf-8"))
-        out = {"path": str(key), "itemsBySlide": {
-            "0": {"unreadable": False, "items": [
-                {"kind": "image", "kindIndex": 0, "x": 5, "y": 6, "w": 7, "h": 8},
-            ]},
-            "4": {"unreadable": True, "items": []},
-        }}
-        return SimpleNamespace(returncode=0, stdout=json.dumps(out), stderr="")
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
+    out = {"path": str(key), "itemsBySlide": {
+        "0": {"unreadable": False, "items": [
+            {"kind": "image", "kindIndex": 0, "x": 5, "y": 6, "w": 7, "h": 8},
+        ]},
+        "4": {"unreadable": True, "items": []},
+    }}
+    _fake_osascript(monkeypatch, stdout=json.dumps(out), on_argv=on_argv)
     result = inspect_mod.inspect_items(
         key,
         [{"slide": 1, "kind": "image", "kindIndex": 0}],
@@ -251,7 +250,9 @@ def test_inspect_items_empty_returns_empty(tmp_path, monkeypatch):
     def boom(*a, **k):  # pragma: no cover
         raise AssertionError("osascript must not run for an empty item list")
 
-    monkeypatch.setattr(inspect_mod.subprocess, "run", boom)
+    from obed_edom import osascript_runner
+
+    monkeypatch.setattr(osascript_runner.subprocess, "Popen", boom)
     assert inspect_mod.inspect_items(key, []) == {}
 
 

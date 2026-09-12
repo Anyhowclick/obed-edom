@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from conftest import _fake_osascript
 from obed_edom import inspect as inspect_mod
 from obed_edom.baseline import (
     CACHE_DIR_ENV,
@@ -362,12 +363,11 @@ def test_cache_hit_repair_osascript_failure_with_stale_png_reports_error(deck, m
                          lambda *a, **k: (_ for _ in ()).throw(AssertionError("rebuild must not run")))
 
     def fake_run(args, **kwargs):
-        if args[0] == "open":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        return SimpleNamespace(returncode=1, stdout="", stderr="export bound wrong document")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(inspect_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(inspect_mod.time, "sleep", lambda s: None)
+    _fake_osascript(monkeypatch, returncode=1, stderr="export bound wrong document")
 
     out = inspect_mod.inspect_keynote_checker(deck, export_dir=tmp_path / "job", use_cache=True)
 
