@@ -328,8 +328,8 @@ non-finite/negative fall back) bounds it above the existing 0.35s floor;
 `OBED_RAISE_SETTLE_MIN` only lengthens the floor. `-1719` is
 `errAEIllegalIndex`, not an Accessibility denial (`-1743`/`-25211` are) —
 measured 2026-09-10 with Accessibility probed granted. The strict pass-2 bar
-still aborts on any `frontErr`, so `--pass2-bar parity` is mandatory for W1
-gating until a run returns an empty `frontErr`.
+still aborts on any `frontErr`; the 2026-09-12 full gate returned empty
+`frontErr` in both arms, so strict is now the W1 bar.
 
 `obedFront` (shared by every raise phase, including badge) retries once on a
 click *error* (not just a dead landing): it re-polls readiness via
@@ -340,6 +340,15 @@ logs a non-gating `WARN <label>: raiseClickRetried=<n> ...` line in both bar
 modes; `raiseClickRetried` is neither a `PASS2_PARITY_KEYS` nor a
 `PASS2_ZERO_KEYS` member. A twice-failed retry still latches `badgeFrontDead`
 deck-wide as before — that is by design, not a regression.
+
+`obedFrontReady` also records `lastFrontBlind` whenever its readiness poll
+never confirms, cleared by `obedFront` on entry so it always scopes to the
+raise that just happened (the two polls on the retry path OR-fold).
+`obedRaiseItem` re-probes badge landing on a blind poll as well as on a
+click retry, so a conclusive non-landing latches `badgeFrontDead` on the
+first occurrence instead of being credited blind; `badgeProbeBlind(s=,k=)`
+marks a probe that only the blind trigger ran and is observational — it
+gates nothing.
 
 The 2026-09-07 Full bank under
 `output/bank/2026-09-07/write-gate-full/` completed RED but is reusable:

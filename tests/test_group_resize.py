@@ -1107,7 +1107,7 @@ def test_obed_kind_count_zero_is_not_a_dead_raise():
     err_block = handler[guard_at:else_at]
     assert "badgeCountErr(s=" in err_block
     assert "badgeFrontDead" not in err_block
-    assert "if _retriedOnly then set badgeMoved to badgeMoved + 1" in err_block
+    assert "if _probeOnly then set badgeMoved to badgeMoved + 1" in err_block
 
 
 def test_obed_top_real_trims_trailing_placeholders():
@@ -1153,19 +1153,19 @@ def test_badge_liveness_probes_the_top_real_index_not_the_kind_count():
         "my obedBadgeFind(slideNo, theKind, _kindCount, fx, fy, fw, fh, matchW, matchH, false)"
         not in handler
     )
-    top_if_at = handler.index("if (badgeMoved is 0 or _frontResult is not 0) and badgeFrontDead is 0 then")
+    top_if_at = handler.index("if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then")
     top_else_at = handler.index("else if badgeFrontDead is 0 then", top_if_at)
     probe_block = handler[top_if_at:top_else_at]
     moved_at = probe_block.index("if _foundAt is _topReal then")
     # One unconditional `badgeMoved + 1` on the verified-landed branch, plus one
-    # `if _retriedOnly then` guarded copy on each of the three inconclusive branches.
+    # `if _probeOnly then` guarded copy on each of the three inconclusive branches.
     assert probe_block.count("set badgeMoved to badgeMoved + 1") == 4
-    assert probe_block.count("if _retriedOnly then set badgeMoved to badgeMoved + 1") == 3
+    assert probe_block.count("if _probeOnly then set badgeMoved to badgeMoved + 1") == 3
     unconditional_at = [
         i for i in range(len(probe_block))
         if probe_block.startswith("set badgeMoved to badgeMoved + 1", i)
-        and not probe_block[max(0, i - len("if _retriedOnly then ")):i].endswith(
-            "if _retriedOnly then "
+        and not probe_block[max(0, i - len("if _probeOnly then ")):i].endswith(
+            "if _probeOnly then "
         )
     ]
     assert len(unconditional_at) == 1
@@ -1197,14 +1197,14 @@ def test_badge_front_dead_needs_a_testable_probe():
     )
     unknown_block = handler[unknown_cond_at : handler.index("else", unknown_cond_at)]
     assert "badgeProbeUnknown(s=" in unknown_block
-    assert "if _retriedOnly then set badgeMoved to badgeMoved + 1" in unknown_block
+    assert "if _probeOnly then set badgeMoved to badgeMoved + 1" in unknown_block
     assert "badgeFrontDead" not in unknown_block
 
     zero_cond_at = handler.index("else if _foundAt is 0 or _foundAt > _topReal then")
     zero_body_at = zero_cond_at + len("else if _foundAt is 0 or _foundAt > _topReal then")
     zero_block = handler[zero_body_at : handler.index("else", zero_body_at)]
     assert "badgeProbeUnknown(s=" in zero_block
-    assert "if _retriedOnly then set badgeMoved to badgeMoved + 1" in zero_block
+    assert "if _probeOnly then set badgeMoved to badgeMoved + 1" in zero_block
     assert "badgeFrontDead" not in zero_block
 
 
@@ -1226,7 +1226,7 @@ def test_badge_found_above_top_real_is_probe_unknown_not_dead():
     over_top_body_at = over_top_cond_at + len("else if _foundAt is 0 or _foundAt > _topReal then")
     over_top_block = handler[over_top_body_at : handler.index("else", over_top_body_at)]
     assert "badgeProbeUnknown(s=" in over_top_block
-    assert "if _retriedOnly then set badgeMoved to badgeMoved + 1" in over_top_block
+    assert "if _probeOnly then set badgeMoved to badgeMoved + 1" in over_top_block
     assert "badgeFrontDead" not in over_top_block
     assert over_top_cond_at < handler.index("set badgeFrontDead to 1")
 
@@ -1234,9 +1234,9 @@ def test_badge_found_above_top_real_is_probe_unknown_not_dead():
 def test_badge_probe_unknown_does_not_latch_or_count():
     """Every badgeProbeUnknown outcome must leave badgeFrontDead untouched -- it is
     deliberately inconclusive, not a verdict -- and never set badgeMoved on the same
-    statement line (a retried-only entry credits badgeMoved on its own guarded line,
+    statement line (a probe-only entry credits badgeMoved on its own guarded line,
     covered elsewhere); the outer guard must still read `(badgeMoved is 0 or
-    _frontResult is not 0) and badgeFrontDead is 0` so a later raise, or a retried
+    _reprobe) and badgeFrontDead is 0` so a later raise, or a retried/blind
     landed raise, re-probes."""
     script = _build_stat_finalize_script(
         Path("/tmp/x.key"), [], {},
@@ -1245,12 +1245,180 @@ def test_badge_probe_unknown_does_not_latch_or_count():
         ],
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
-    assert "if (badgeMoved is 0 or _frontResult is not 0) and badgeFrontDead is 0 then" in handler
+    assert "if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then" in handler
     unknown_lines = [line for line in handler.splitlines() if "badgeProbeUnknown(s=" in line]
     assert len(unknown_lines) == 2
     for line in unknown_lines:
         assert "badgeMoved" not in line
         assert "badgeFrontDead" not in line
+
+
+def test_obed_front_ready_records_the_blind_flag():
+    """A not-ready poll must set lastFrontBlind inside the same `if not _ready then`
+    arm as raiseBlind, exactly once, never cleared by obedFrontReady itself."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = _front_ready_handler(script)
+    assert handler.count("set lastFrontBlind to 1") == 1
+    not_ready_at = handler.index("if not _ready then")
+    end_if_at = handler.index("end if", not_ready_at)
+    arm = handler[not_ready_at:end_if_at]
+    assert "set lastFrontBlind to 1" in arm
+    assert "set lastFrontBlind to 0" not in handler
+
+
+def test_obed_front_clears_the_blind_flag_before_polling():
+    """obedFront must clear lastFrontBlind exactly once, before its first readiness
+    poll, and its 0/1/2 return contract must be untouched."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    front = _front_handler(script)
+    assert front.count("set lastFrontBlind to 0") == 1
+    clear_at = front.index("set lastFrontBlind to 0")
+    first_ready_at = front.index("my obedFrontReady(phase, slideNo, idx)")
+    assert clear_at < first_ready_at
+    assert front.count("my obedFrontReady(phase, slideNo, idx)") == 2
+    assert "return 0" in front
+    assert "return 1" in front
+    assert "return 2" in front
+
+
+def test_badge_probe_runs_when_the_readiness_poll_was_blind():
+    """obedRaiseItem must OR-fold a blind readiness poll into the same reprobe
+    trigger as a click retry, and the old _frontResult-only guard must be gone."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert "set _reprobe to _frontResult is not 0 or lastFrontBlind is not 0" in handler
+    assert "if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then" in handler
+    assert "if (badgeMoved is 0 or _frontResult is not 0) and badgeFrontDead is 0 then" not in handler
+
+
+def test_blind_probe_emits_an_observational_token_inside_the_probe_branch():
+    """badgeProbeBlind must fire only inside the extra probe path, guarded by
+    `_probeOnly and _frontResult is 0`, and must not be a stat-phase (raise*) token."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    assert handler.count('badgeProbeBlind(s="') == 1
+    top_if_at = handler.index("if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then")
+    kind_count_at = handler.index("my obedKindCount(slideNo, theKind)")
+    token_at = handler.index('badgeProbeBlind(s="')
+    assert top_if_at < token_at < kind_count_at
+    guard_at = handler.rindex("if _probeOnly and _frontResult is 0 then", 0, token_at)
+    assert handler.index("end if", guard_at) > token_at
+
+    from obed_edom.remap_keynote import _RAISE_TOKEN_KINDS
+
+    assert "badgeProbeBlind" not in _RAISE_TOKEN_KINDS
+
+
+def test_blind_but_inconclusive_probe_still_credits_badge_moved():
+    """Every inconclusive probe arm credits badgeMoved via `_probeOnly`; the conclusive
+    non-landing arm sets badgeFrontDead and credits nothing."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
+    for anchor in (
+        'badgeCountErr(s=" & slideNo & ",k=" & theKind & ")"',
+        'badgeProbeUnknown(s=" & slideNo & ",k=" & theKind & ")"',
+    ):
+        for occurrence_at in [i for i in range(len(handler)) if handler.startswith(anchor, i)]:
+            line_end = handler.index("\n", occurrence_at)
+            next_line_end = handler.index("\n", line_end + 1)
+            next_line = handler[line_end + 1 : next_line_end]
+            assert "if _probeOnly then set badgeMoved to badgeMoved + 1" in next_line
+    dead_at = handler.index("set badgeFrontDead to 1")
+    dead_line_end = handler.index("\n", dead_at)
+    assert "badgeMoved" not in handler[dead_at:dead_line_end]
+
+
+def test_last_front_blind_is_initialised_and_not_reported():
+    """lastFrontBlind belongs to the accumulator globals and gets zero-initialised,
+    but never appears in the raw return string -- it is transient per-raise state."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [], {},
+        badge_raises=[
+            {"slide": 1, "kind": "shape", "index": 1, "isTitle": False, "x": 17.0, "y": 37.0, "w": 411.0, "h": 123.0},
+        ],
+    )
+    assert "lastFrontBlind" in _STAT_ACCUMULATORS
+    assert "set lastFrontBlind to 0" in script
+    return_at = script.index('return "done="')
+    assert "lastFrontBlind=" not in script[return_at:]
+
+
+def test_stat_phase_probes_every_raise_without_a_blind_trigger():
+    """obedRaiseSlide's stat-phase raise stays untouched: it re-probes every raise
+    unconditionally and never references lastFrontBlind or badgeMoved."""
+    script = _build_stat_finalize_script(
+        Path("/tmp/x.key"), [{"slide": 4, "groupIndex": 1, "childSig": "111"}], {},
+    )
+    handler = script[script.index("on obedRaiseSlide") : script.index("end obedRaiseSlide")]
+    front_at = handler.index('my obedFront("raise", slideNo, _mn)')
+    verify_at = handler.index(
+        'my obedBadgeFind(slideNo, "group", _top, fx of _f, fy of _f, fw of _f, fh of _f, true, true, false)'
+    )
+    assert front_at < verify_at
+    assert "lastFrontBlind" not in handler
+    assert "badgeMoved" not in handler
+
+
+def test_badge_probe_blind_token_round_trips_through_the_parsers(monkeypatch):
+    """badgeProbeBlind must survive _run_stat_finalize's raw-string parsing into
+    result['tokens'] and appear on the Badge raise detail line via the badge-prefix
+    filter, not via _RAISE_TOKEN_KINDS."""
+    from types import SimpleNamespace
+
+    import obed_edom.keynote as keynote_mod
+    from obed_edom.remap_keynote import _say_stat_finalize_detail
+
+    state = {"raw": ""}
+
+    def fake_run(args, *a, **kw):
+        if args[0] == "osascript":
+            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+
+    jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
+    state["raw"] = (
+        "done=1 skipped=0 sized=1 sizeSkips=0 front=1 dedupDeleted=0 dedupShortfall=0 "
+        "frontErr= exported=false sigFallback=0 unresolved=0 badgeFallback=2 "
+        "badgeUnresolved=3 badgeMoved=4 badgeFrontDead=1 "
+        "detail= badgeProbeBlind(s=42,k=shape) badgeFrontDead(s=42)"
+    )
+    result = keynote_mod._run_stat_finalize(Path("/tmp/x.key"), jobs, {"269": 200.0})
+    assert result["tokens"]["badgeProbeBlind"] == ["s=42,k=shape"]
+
+    lines: list[str] = []
+    _say_stat_finalize_detail(result, [{"slide": 42}], lines.append)
+    badge_lines = [line for line in lines if line.startswith("Badge raise detail: ")]
+    assert len(badge_lines) == 1
+    assert "badgeProbeBlind(s=42,k=shape)" in badge_lines[0]
+    assert "badgeFrontDead(s=42)" in badge_lines[0]
 
 
 def test_stat_finalize_script_compiles_at_scale():
@@ -2134,8 +2302,9 @@ def test_badge_probe_reruns_after_a_retried_click():
     )
     handler = script[script.index("on obedRaiseItem") : script.index("end obedRaiseItem")]
     assert "set _frontResult to my obedFront(\"badge\", slideNo, _hit)" in handler
+    assert "set _reprobe to _frontResult is not 0 or lastFrontBlind is not 0" in handler
     top_if_at = handler.index(
-        "if (badgeMoved is 0 or _frontResult is not 0) and badgeFrontDead is 0 then"
+        "if (badgeMoved is 0 or _reprobe) and badgeFrontDead is 0 then"
     )
     top_else_at = handler.index("else if badgeFrontDead is 0 then", top_if_at)
     blind_block = handler[top_else_at:]
