@@ -168,6 +168,11 @@ def _merge_legacy_slides(
                 key = (it.get("kind"), it.get("kindIndex"))
                 if key in prior:
                     it["aspect"] = prior[key]
+        # This slide's items came from a scoped legacy (JXA) inspect, not the offline
+        # decode — its group rects are live union frames, not archive offsets, so
+        # attach_group_children must not attach children to it despite the payload's
+        # overall reader staying "offline".
+        slide["groupChildrenUnavailable"] = True
 
 
 def acquire_wall_payload(
@@ -186,7 +191,23 @@ def acquire_wall_payload(
     rejected_cache = cached is not None
     usable = complete_cached_wall_payload(cached) and cached.get("reader") in allowed_readers
     carries = mode != "on" or wall_payload_carries_aspect(cached)
-    if usable and carries:
+    # A cached JXA read is coordinate-space-incompatible with `groupChildren` (archive
+    # offsets vs a JXA group's live union frame — see attach_group_children's gate), so in
+    # mode "on" it must not be served merely because a fresh offline decode would succeed;
+    # re-read offline instead. A live JXA fallback stays allowed once offline read is
+    # confirmed genuinely unavailable, below.
+    stale_jxa = mode == "on" and usable and carries and cached.get("reader") == "jxa"
+    # An offline cache written before per-slide `groupChildrenUnavailable` tagging
+    # cannot tell a JXA-fallback slide from a genuinely offline one, so its
+    # `groupChildren` may already mix coordinate spaces; re-read rather than trust it.
+    stale_mixed = (
+        mode == "on"
+        and usable
+        and carries
+        and cached.get("reader") == "offline"
+        and not cached.get("offlineFallbackTagged")
+    )
+    if usable and carries and not stale_jxa and not stale_mixed:
         bulk_errors = cached.get("bulkErrors") or []
         if bulk_errors:
             say(f"WARN: cached {cached['reader']} read for {source.name} carries "
@@ -194,6 +215,14 @@ def acquire_wall_payload(
         say(f"Read {source.name} from cached {cached['reader']} payload — "
             "skipped the Keynote source read.")
         return cached
+
+    if stale_jxa:
+        say(f"Cached jxa read of {source.name} cannot carry group children; "
+            "re-reading offline.")
+
+    if stale_mixed:
+        say(f"Cached offline read of {source.name} is not from a mixed-slide-tagged "
+            "two-tier read; re-reading offline.")
 
     if rejected_cache and mode == "on" and usable and not carries:
         say(f"Cached {cached['reader']} read of {source.name} predates per-item aspect; "
@@ -213,6 +242,21 @@ def acquire_wall_payload(
             source, bulk_geometry_fn=bulk_geometry, log=say
         )
     except Exception as exc:  # noqa: BLE001 — any tier-1 failure drops to legacy
+        if stale_jxa:
+            # The cached jxa payload is complete and carries aspect; it is only
+            # children-incompatible, and groupChildrenUnavailable makes any
+            # collapsing-group refusal fire correctly on it — no Keynote re-read needed.
+            say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
+                f"serving cached jxa payload for {source.name}.")
+            return cached
+        if stale_mixed:
+            # Untagged: we cannot tell a fallback slide from a genuinely offline one, so
+            # refuse every autosize group's size rather than re-read Keynote in full.
+            for slide in cached.get("slides") or []:
+                slide["groupChildrenUnavailable"] = True
+            say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); serving "
+                f"cached offline payload for {source.name} with group sizes refused.")
+            return cached
         say(f"Offline source read unavailable ({type(exc).__name__}: {exc}); "
             f"using Keynote inspect of {source.name}.")
         return inspect_keynote(source, **legacy_cache_arg)
@@ -246,6 +290,7 @@ def acquire_wall_payload(
     say(f"Read {source.name} two-tier (offline IWA + bulk geometry){confirmed}{skipped_note} — "
         f"skipped the full Keynote source inspect.")
     offline["reader"] = "offline"
+    offline["offlineFallbackTagged"] = True
     if _truthy_cache(None, None):
         try:
             store_inspect_payload(source, offline)
@@ -898,12 +943,17 @@ def prepare_wall_payload(
     deck = None
     try:
         from obed_edom.iwa_runs import (  # noqa: PLC0415
-            _load_deck, attach_group_captions, attach_group_child_text, attach_group_children,
+            _load_deck, attach_group_autosize, attach_group_captions, attach_group_child_text,
+            attach_group_children,
         )
 
         deck = _load_deck(source)
         attach_group_child_text(source, wall, deck=deck)
         attach_group_captions(source, wall, deck=deck)
+        # Whether a group holds an autosize text box is an archive fact, valid under any
+        # reader; attach it unconditionally so map_remap can refuse a collapsing group
+        # write even when groupChildren (below) is unavailable.
+        attach_group_autosize(source, wall, deck=deck)
         # Child offsets and offline-composed group frames share an archive coordinate
         # space. Live JXA group frames may instead be child unions, so only attach for
         # actual offline geometry. Reader-less injected payloads retain the old mode
@@ -912,14 +962,17 @@ def prepare_wall_payload(
             "reader" not in wall and offline_read_mode(offline_read) == "on"
         ):
             attach_group_children(source, wall, deck=deck)
+        else:
+            for slide in wall.get("slides") or []:
+                slide["groupChildrenUnavailable"] = True
     except Exception as exc:  # noqa: BLE001 — no group signatures/captions on any failure
         say(
             f"Wall IWA decode unavailable ({type(exc).__name__}: {exc}); reuse group dedup "
             "will report a shortfall instead of deduping, photo cards will not be "
             "recognised as cards at all (no groupChildText signature to match on) — they "
             "keep today's affine-mapped size, same as any other unmatched group; groups "
-            "holding an autosize text box keep today's group-level resize (which collapses "
-            "them)."
+            "holding an autosize text box are unmarked and keep today's group-level "
+            "resize (which collapses them)."
         )
 
     try:
@@ -1347,6 +1400,13 @@ def remap_keynote(
             # uses "childResize" for `_run_stat_finalize`'s return; this is the JOB LIST.
             plan_out["statJobs"] = list(child_resize)
             plan_out["statSlides"] = sorted({int(cr.get("slide", -1)) for cr in child_resize})
+            group_collapse_refused = [
+                t["groupCollapseRefused"]
+                for t in transform_dicts
+                if t.get("groupCollapseRefused")
+            ]
+            if group_collapse_refused:
+                plan_out["groupCollapseRefused"] = group_collapse_refused
         jxa = _run_jxa(plan)
     finally:
         shutil.rmtree(layout_dir, ignore_errors=True)
@@ -1459,6 +1519,18 @@ def remap_keynote(
                 f"WARNING: {len(refusals)} card caption(s) could not be measured "
                 f"({refusals[0].get('captionRefusal')}) — kept at the template swatch size."
             )
+    size_refusals = [t for t in transform_dicts if t.get("sizeRefused")]
+    if size_refusals:
+        detail = ", ".join(f"s={t['slide']}/idx={t['kindIndex'] + 1}" for t in size_refusals)
+        say(
+            f"WARNING remap: {len(size_refusals)} group(s) with an autosize text box kept "
+            f"their source size (reason={size_refusals[0]['sizeRefused']}): {detail}."
+        )
+    group_collapse_tokens = [
+        t["groupCollapseRefused"] for t in transform_dicts if t.get("groupCollapseRefused")
+    ]
+    if group_collapse_tokens:
+        say("WARNING remap: " + " ".join(group_collapse_tokens))
     # JXA cannot size grouped stat numbers or restack them; AppleScript sets template point size and Bring to Front.
     export_path = Path(export_dir).expanduser().resolve() if export_dir else None
     child_resize_result: dict[str, Any] | None = None

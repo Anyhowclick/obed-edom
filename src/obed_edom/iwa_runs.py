@@ -516,6 +516,15 @@ def attach_group_captions(key_path: str | Path, payload: dict, *, deck: Any = No
             slide["groupCaption"] = caps
 
 
+def _is_autosize_text_child(pbtype: str | None, kinds: list[str], ch: float) -> bool:
+    """Shared with `attach_group_autosize` so the two callers cannot drift.
+
+    ch == 0.0 alone also matches a zero-height LINE child (legitimately h == 0, a
+    hairline divider): "text" in kinds is what actually marks an autosize text box.
+    """
+    return pbtype == "TSWP.ShapeInfoArchive" and ch == 0.0 and "text" in kinds
+
+
 def _group_child_records(group_obj: dict, objects: dict[str, dict]) -> list[dict] | None:
     """Per-child AppleScript address + SOURCE-deck geometry for a flat group, else None.
 
@@ -560,15 +569,7 @@ def _group_child_records(group_obj: dict, objects: dict[str, dict]) -> list[dict
             _rect, off_axis = _masked_rect(geom, mask_geom)
             if off_axis:
                 return None
-        # ch == 0.0 alone also matches a zero-height LINE child (legitimately h == 0,
-        # a hairline divider): "text" in assigned is what actually marks an autosize
-        # text box, so it must gate the predicate, not just the later lookup — else a
-        # group with an ordinary line member is refused outright instead of falling
-        # through to the plain leaf-bbox branch below.
-        autosize = (
-            child.get("_pbtype") == "TSWP.ShapeInfoArchive" and ch == 0.0 and "text" in assigned
-        )
-        if autosize:
+        if _is_autosize_text_child(child.get("_pbtype"), kinds, ch):
             nw, nh = _natural_size(child)
             if nw <= 0 or nh <= 0:
                 return None
@@ -595,7 +596,10 @@ def _group_child_records(group_obj: dict, objects: dict[str, dict]) -> list[dict
 
 def attach_group_children(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
     """Attach slide['groupChildren'] = {kindIndex: [child record, ...]} for top-level
-    groups holding an autosize text box. Read-only; mirrors attach_group_captions."""
+    groups holding an autosize text box. Read-only; mirrors attach_group_captions.
+    Skips any slide already marked `groupChildrenUnavailable` (a JXA-fallback slide
+    merged into an otherwise offline payload) — its group rects are live union
+    frames, not archive offsets."""
     from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
 
     objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
@@ -617,6 +621,59 @@ def attach_group_children(key_path: str | Path, payload: dict, *, deck: Any = No
         if kids:
             kids_by_index[idx] = kids
     for slide in payload.get("slides") or []:
+        if slide.get("groupChildrenUnavailable"):
+            continue
         kids = kids_by_index.get(slide.get("index"))
         if kids:
             slide["groupChildren"] = kids
+
+
+def _group_has_autosize_descendant(group_obj: dict, objects: dict[str, dict]) -> bool:
+    from obed_edom.iwa_geometry import _geom_dict, _xywha  # noqa: PLC0415
+    from obed_edom.iwa_kindindex import _memberships  # noqa: PLC0415
+
+    for ref in group_obj.get("children") or []:
+        cid = ref.get("identifier")
+        child = objects.get(str(cid)) if cid is not None else None
+        if child is None:
+            continue
+        if child.get("_pbtype") == "TSD.GroupArchive":
+            if _group_has_autosize_descendant(child, objects):
+                return True
+            continue
+        _cx, _cy, _cw, ch, _ca = _xywha(_geom_dict(child))
+        if _is_autosize_text_child(child.get("_pbtype"), _memberships(child), ch):
+            return True
+    return False
+
+
+def attach_group_autosize(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
+    """Attach slide['groupAutosize'] = {kindIndex: True, ...} for top-level groups holding
+    an autosize text descendant, regardless of nesting or reader. Whether a group holds an
+    autosize text box is a property of the archive, not the coordinate space, so it stays
+    valid whichever reader produced the payload — unlike `groupChildren`, which needs
+    offline geometry. A group `_group_child_records` refuses (nested group, rotation, mask,
+    stale naturalSize) is exactly the case that must still be marked here."""
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
+    marks_by_index: dict[int, dict[int, bool]] = {}
+    for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
+        slide_archive = objects.get(slide_id)
+        if slide_archive is None:
+            continue
+        marks: dict[int, bool] = {}
+        for rec in derive_kind_index(slide_archive, objects):
+            if rec.get("kind") != "group":
+                continue
+            group_obj = objects.get(str(rec["id"]))
+            if not group_obj:
+                continue
+            if _group_has_autosize_descendant(group_obj, objects):
+                marks[int(rec["kindIndex"])] = True
+        if marks:
+            marks_by_index[idx] = marks
+    for slide in payload.get("slides") or []:
+        marks = marks_by_index.get(slide.get("index"))
+        if marks:
+            slide["groupAutosize"] = marks

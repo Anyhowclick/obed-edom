@@ -282,18 +282,19 @@ def planned_rects(
     ):
         dropped = spec.role == "hide" or (spec.opacity is not None and spec.opacity <= 0.0)
         # Round the same 2-decimal values apply serializes (as_dict), not the raw floats,
-        # so parity holds under banker's rounding at .5 boundaries. as_dict only carries
-        # w/h for the sized roles (a "line" is width=length/height=0 there, ignored by
-        # Keynote) -- fall back to the raw transform for every other role's height/width.
+        # so parity holds under banker's rounding at .5 boundaries. as_dict writes a
+        # "line" role's h as 0 (Keynote ignores it, geometry comes from start/end) and
+        # omits w/h entirely for a refused group -- fall back to the raw transform for
+        # both (the refused size falls back to the source size).
         applied = spec.as_dict()
-        has_wh = spec.role in {"map", "list", "pin", "title", "other"}
+        has_wh = spec.role != "line" and "w" in applied
         rect = {
             "role": spec.role,
             "kind": spec.kind,
             "x": round(applied["x"]),
             "y": round(applied["y"]),
-            "w": round(applied["w"]) if has_wh else round(spec.w),
-            "h": round(applied["h"]) if has_wh else round(spec.h),
+            "w": round(applied["w"]) if has_wh else round(spec.src.w if spec.size_refused and spec.src else spec.w),
+            "h": round(applied["h"]) if has_wh else round(spec.src.h if spec.size_refused and spec.src else spec.h),
             "willBeInOutput": not dropped,
         }
         if spec.match_text:

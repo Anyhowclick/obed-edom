@@ -27,7 +27,7 @@ from obed_edom.framing import (
     reuse_framings,
     save_framings,
 )
-from obed_edom.map_remap import ItemTransform, frame_affine
+from obed_edom.map_remap import ItemTransform, Rect, frame_affine
 
 WALL = "/tmp/Wall.key"
 TEMPLATE = "/tmp/Base_CG_Assets.key"
@@ -344,3 +344,25 @@ def test_planned_rects_rounds_the_serialized_apply_coordinate(monkeypatch):
         {"index": 0, "number": 1, "items": []}, {}, wall_size=(1920, 1080)
     )
     assert rects[0]["x"] == round(spec.as_dict()["x"]) == 82
+
+
+def test_planned_rects_does_not_crash_on_a_refused_group(monkeypatch):
+    """Reproduces the Gold slide 2 badge collapse's fallout on framing.planned_rects:
+    a size-refused group's as_dict() omits w/h entirely, so has_wh must be derived
+    from the payload's actual keys, not from spec.role. Must FAIL on pre-fix code
+    with KeyError: 'w'."""
+    spec = ItemTransform(
+        slide_number=2, item_index=0, kind="group",
+        x=1700.0, y=40.0, w=278.0, h=87.6, role="other",
+        src=Rect(1700.0, 40.0, 278.0, 87.6),
+        size_refused="group-children-unavailable",
+    )
+
+    from obed_edom import map_remap as map_remap_mod
+    monkeypatch.setattr(map_remap_mod, "plan_payload_transforms", lambda *a, **k: [spec])
+
+    rects = planned_rects(
+        {"index": 1, "number": 2, "items": []}, {}, wall_size=(7680, 1080)
+    )
+    assert rects[0]["w"] == 278
+    assert rects[0]["h"] == 88

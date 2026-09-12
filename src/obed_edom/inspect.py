@@ -821,6 +821,11 @@ def inspect_keynote_checker(
             payload["keynoteBundleId"] = keynote_app.bundle_id()
             payload["keynoteVersion"] = keynote_app.app_version()
             payload["reader"] = "offline"  # persists past the cache-write underscore strip
+            # Deliberately no `offlineFallbackTagged` here: `_merge_legacy_items` above
+            # splices live JXA per-item geometry into otherwise-offline slides with no
+            # per-item tagging, so this payload can carry the same coordinate-mixture
+            # defect at item granularity. Leaving it untagged makes acquire_wall_payload
+            # reject it as stale_mixed rather than trust it.
             payload.setdefault("exported", False)
 
             if export_target is not None:
