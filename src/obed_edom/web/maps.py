@@ -686,7 +686,12 @@ def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = No
             camera = dict(parsed["camera"])
             if parsed.get("zoomFromUrl"):
                 zoom_from_url = camera["zoom"]
-    query = place.query or name
+    if place.query and place.full_query:
+        query = place.query
+    elif place.query:
+        query = f"{name}, {place.query}" if name else place.query
+    else:
+        query = name
     if camera is None:
         country = find_country(query) if query else None
         if country:

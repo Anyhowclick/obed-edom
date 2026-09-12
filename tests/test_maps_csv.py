@@ -273,3 +273,69 @@ def test_header_form_place_column_without_name_falls_back():
     assert errors == []
     assert places[0].name == ""
     assert places[0].query == "China"
+    assert places[0].full_query is True
+
+
+def test_header_form_bad_zoom_reports_error_not_crash():
+    places, errors = parse_places("name,zoom\nParis,notazoom\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "bad zoom" in errors[0]
+
+
+def test_header_form_unknown_kind_reports_error_not_crash():
+    places, errors = parse_places("name,kind\nParis,spaceport\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "unknown kind" in errors[0]
+
+
+def test_header_form_canonicalizes_kind():
+    places, errors = parse_places("name,kind\nParis,landmark\n")
+    assert errors == []
+    assert places[0].kind == "landmark"
+
+
+def test_headerless_leftover_words_are_marked_as_qualifiers_not_full_query():
+    places, errors = parse_places("Paris,France")
+    assert errors == []
+    assert places[0].query == "France"
+    assert places[0].full_query is False
+
+
+def test_single_column_name_header_requires_more_lines():
+    places, errors = parse_places("name\nParis\nLondon\n")
+    assert errors == []
+    assert [p.name for p in places] == ["Paris", "London"]
+
+
+def test_single_column_name_alone_is_headerless():
+    places, errors = parse_places("name")
+    assert errors == []
+    assert places[0].name == "name"
+
+
+def test_single_word_place_alone_is_headerless():
+    places, errors = parse_places("China")
+    assert errors == []
+    assert places[0].name == "China"
+
+
+def test_unspaced_field_after_url_is_peeled_off_not_swallowed():
+    text = 'City Harvest Church Kikuyo,https://maps.google.com/?q=1.35,103.8,24.58 N,73.68 E'
+    places, errors = parse_places(text)
+    assert errors == []
+    place = places[0]
+    assert place.url == "https://maps.google.com/?q=1.35,103.8"
+    assert place.lat == pytest.approx(24.58, abs=1e-6)
+    assert place.lon == pytest.approx(73.68, abs=1e-6)
+
+
+def test_spaced_field_after_url_already_stays_separate():
+    text = 'City Harvest Church Kikuyo,https://maps.google.com/?q=1.35,103.8, 24.58 N,73.68 E'
+    places, errors = parse_places(text)
+    assert errors == []
+    place = places[0]
+    assert place.url == "https://maps.google.com/?q=1.35,103.8"
+    assert place.lat == pytest.approx(24.58, abs=1e-6)
+    assert place.lon == pytest.approx(73.68, abs=1e-6)
