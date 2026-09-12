@@ -693,6 +693,10 @@ def _row_slide(place: Place, slide_id: str, hidden_layers: list[str] | None = No
             if bbox:
                 camera = camera_from_bbox(bbox)
                 place_type = "country"
+                if not name or name == "Untitled":
+                    country_name = (country.get("properties") or {}).get("NAME")
+                    if country_name:
+                        name = str(country_name)
     if camera is None:
         hit = geocode(query, wait=True)
         camera = dict(hit["camera"])

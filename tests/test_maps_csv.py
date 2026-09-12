@@ -339,3 +339,45 @@ def test_spaced_field_after_url_already_stays_separate():
     assert place.url == "https://maps.google.com/?q=1.35,103.8"
     assert place.lat == pytest.approx(24.58, abs=1e-6)
     assert place.lon == pytest.approx(73.68, abs=1e-6)
+
+
+def test_place_only_header_row_with_extra_comma_is_joined_not_a_crash():
+    places, errors = parse_places("place\nParis, France\n")
+    assert errors == []
+    assert places[0].query == "Paris, France"
+    assert places[0].full_query is True
+
+
+def test_multi_column_header_row_with_extra_columns_is_an_error_not_a_crash():
+    places, errors = parse_places("name,lat,lon\nX,1,2,3\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "too many columns" in errors[0]
+
+
+def test_header_form_zoom_out_of_range_reports_error():
+    places, errors = parse_places("name,zoom\nParis,25\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "zoom out of range" in errors[0]
+
+
+def test_header_form_negative_zoom_out_of_range_reports_error():
+    places, errors = parse_places("name,zoom\nParis,-1\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "zoom out of range" in errors[0]
+
+
+def test_header_form_lat_without_lon_reports_error():
+    places, errors = parse_places("name,lat,lon\nX,1\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "lat without lon" in errors[0]
+
+
+def test_header_form_lon_without_lat_reports_error():
+    places, errors = parse_places("name,lat,lon\nX,,2\n")
+    assert places == []
+    assert "Line 2" in errors[0]
+    assert "lon without lat" in errors[0]
