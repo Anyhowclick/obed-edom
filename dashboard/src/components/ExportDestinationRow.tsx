@@ -16,7 +16,7 @@ export function ExportDestinationRow({ value, onChange, defaultLabel, onError, d
 
   if (disabled) {
     return inline ? (
-      <span className="muted">Locked to this destination until applied.</span>
+      <span className="muted">{destination} · Locked to this destination until applied.</span>
     ) : (
       <div className="col">
         <strong>Export to</strong>

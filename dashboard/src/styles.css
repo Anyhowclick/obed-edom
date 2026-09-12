@@ -280,7 +280,7 @@ h3 {
   animation: none;
   box-shadow: none;
 }
-.btn.collab {
+.btn.collab, .btn.save-pairing {
   background: var(--accent-collab);
   color: var(--accent-collab-fg);
   box-shadow: 0 0 20px rgba(255, 199, 44, 0.28);
@@ -288,11 +288,6 @@ h3 {
 .btn.collab:hover:not(:disabled) {
   background: #ffd45c;
   box-shadow: 0 0 28px rgba(255, 199, 44, 0.4);
-}
-.btn.save-pairing {
-  background: var(--accent-collab);
-  color: var(--accent-collab-fg);
-  box-shadow: 0 0 20px rgba(255, 199, 44, 0.28);
 }
 .btn.save-pairing:hover:not(:disabled) {
   background: #ffd45c;
@@ -459,7 +454,7 @@ h3 {
 }
 .job-name-edit:hover { opacity: 1; }
 .job-name-editing { flex-wrap: wrap; }
-.job-name-input {
+input.job-name-input {
   min-width: 0;
   flex: 1 1 auto;
   background: var(--bg-surface-glass-sub);
@@ -1908,7 +1903,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   background: rgba(255, 199, 44, 0.08);
 }
 .maps-thumb-title:disabled { cursor: default; }
-.maps-thumb-title-input {
+input.maps-thumb-title-input {
   display: block;
   width: 100%;
   margin: 0;
