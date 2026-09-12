@@ -1233,7 +1233,13 @@ export function MapsTab() {
     previewAbort.current = false;
     savedCamera.current = mapRef.current?.getCamera() || from.camera;
     setPreviewing(true);
-    await previewLink(link, from, to);
+    try {
+      await previewLink(link, from, to);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      stopPreview(true);
+      return;
+    }
     if (previewAbort.current) return;
     if (restore) stopPreview(true);
     else setPreviewing(false);
@@ -1263,7 +1269,13 @@ export function MapsTab() {
       const to = current.slides[i + 1];
       const link = linkBetween(current.links, from.id, to.id);
       if (!link) continue;
-      await previewLink(link, from, to);
+      try {
+        await previewLink(link, from, to);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        stopPreview(true);
+        return;
+      }
     }
     if (previewAbort.current) return;
     setPreviewing(false);
