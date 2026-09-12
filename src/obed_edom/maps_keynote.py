@@ -54,6 +54,9 @@ DOT_SIZE = 28
 DROP_SIZE = 64
 PHOTO_SIZE = 96
 NAME_HEIGHT = 32
+LABEL_BOLD_FONT = "Amplitude-Bold"
+LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
+LABEL_CHAR_W = 13
 PILL_PAD_X = 6
 PILL_PAD_Y = 2
 MAP_BG_RE = re.compile(r"map\s*bg", re.I)
@@ -847,7 +850,7 @@ def _place_churches(
                     )
                 )
             if name and church.get("showLabel", True):
-                nw = max(48, min(420, 11 * len(name)))
+                nw = max(48, min(420, LABEL_CHAR_W * len(name)))
                 nx = x + size + 8
                 ny = y + (size - NAME_HEIGHT) / 2.0
                 if wall:
@@ -865,7 +868,7 @@ def _place_churches(
                         labelPill=True,
                     )
                 )
-                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name))
+                items.append(_item("text", nx, ny, nw, NAME_HEIGHT, text=name, bold=True))
     return items
 
 
@@ -1181,7 +1184,7 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         return lines
     text = _as_escape(str(item.get("text") or ""))
     font_size = float(item.get("fontSize") or 24)
-    return [
+    lines = [
         "        set txt to make new text item with properties "
         f'{{object text:"{text}", position:{{{x}, {y}}}, width:{w}, height:{h}}}',
         "        try",
@@ -1191,6 +1194,17 @@ def _emit_item(item: dict[str, Any]) -> list[str]:
         "          set color of object text of txt to {65535, 65535, 65535}",
         "        end try",
     ]
+    if item.get("bold"):
+        lines += [
+            "        try",
+            f'          set font of object text of txt to "{LABEL_BOLD_FONT}"',
+            "        on error",
+            "          try",
+            f'            set font of object text of txt to "{LABEL_BOLD_FALLBACK}"',
+            "          end try",
+            "        end try",
+        ]
+    return lines
 
 
 def _emit_transition(slide_no: int, trans: dict[str, Any] | None) -> list[str]:

@@ -16,6 +16,9 @@ from obed_edom.maps_keynote import (
     DOT_SIZE,
     DSK_SCALE,
     DSK_WIDTH,
+    LABEL_BOLD_FALLBACK,
+    LABEL_BOLD_FONT,
+    LABEL_CHAR_W,
     MAP_BG_RE,
     NAME_HEIGHT,
     PANEL_EDGES,
@@ -2532,6 +2535,33 @@ def test_label_pill_is_emitted_before_its_text_and_inflated_by_the_pad_constants
         assert pill["w"] == text["w"] + 2 * PILL_PAD_X
         assert pill["h"] == text["h"] + 2 * PILL_PAD_Y
         assert text["h"] == NAME_HEIGHT
+
+
+def test_label_text_is_flagged_bold_and_sized_by_the_bold_char_width(tmp_path: Path):
+    items = _place_labels(tmp_path, _label_churches())
+    texts = [item for item in items if item.get("kind") == "text"]
+    assert len(texts) == 2
+    for text, church in zip(texts, _label_churches()):
+        assert text["bold"] is True
+        assert text["w"] == max(48, min(420, LABEL_CHAR_W * len(church["name"])))
+
+
+def test_emitted_script_sets_the_bold_label_font_with_a_system_fallback(tmp_path: Path):
+    """24 pt bold white (owner decision L3): the Gold reference face, falling back
+    to a guaranteed system bold so a missing Amplitude never aborts the export."""
+    script = build_deck_script(
+        _kitchen_sink_ops(tmp_path), tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT)
+    )
+    assert f'set font of object text of txt to "{LABEL_BOLD_FONT}"' in script
+    assert f'set font of object text of txt to "{LABEL_BOLD_FALLBACK}"' in script
+    assert "set size of object text of txt to 24" in script
+
+
+def test_unflagged_text_items_keep_the_theme_font(tmp_path: Path):
+    import obed_edom.maps_keynote as mod
+
+    plain = "\n".join(mod._emit_item({"kind": "text", "x": 0, "y": 0, "w": 10, "h": 10, "text": "Plain"}))
+    assert "set font of object text" not in plain
 
 
 def test_label_pill_uses_the_fixed_gold_red_regardless_of_marker_colour(tmp_path: Path):
