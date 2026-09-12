@@ -15,10 +15,11 @@ function previewNormalise(raw: string): string {
 type Props = {
   job: Job;
   onRename: (id: string, name: string) => Promise<Job>;
+  onSelect?: (id: string) => void;
   className?: string;
 };
 
-export function JobName({ job, onRename, className }: Props) {
+export function JobName({ job, onRename, onSelect, className }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +68,12 @@ export function JobName({ job, onRename, className }: Props) {
   if (!editing) {
     return (
       <span className={`job-name ${className || ""}`}>
-        <span className="job-name-text">{label}</span>
+        <span
+          className="job-name-text"
+          onClick={() => onSelect?.(job.id)}
+        >
+          {label}
+        </span>
         {!locked && (
           <button
             type="button"

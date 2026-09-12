@@ -430,8 +430,8 @@ h3 {
 }
 .session-row.active .session-del,
 .session-del:hover { color: var(--err); border-color: var(--err); }
-.job-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.job-name-text { overflow-wrap: anywhere; }
+.job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
 .job-name-edit {
   flex: 0 0 auto;
   background: transparent;
