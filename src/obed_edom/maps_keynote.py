@@ -34,7 +34,7 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
-from obed_edom.maps_pins import ensure_pin_png
+from obed_edom.maps_pins import PIN_ASPECT, ensure_pin_png
 from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
@@ -788,7 +788,7 @@ def _place_churches(
             if not (-size <= cx <= capture_w + size and -size <= cy <= WALL_HEIGHT + size):
                 continue
             x = cx + origin_x - size / 2.0
-            drop_h = whole(size * 1.08)
+            drop_h = whole(size * PIN_ASPECT)
             if kind == "landmark":
                 y = cy - size
             elif static_drop:

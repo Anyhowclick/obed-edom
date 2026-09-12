@@ -46,6 +46,7 @@ from obed_edom.maps_keynote import (
     split_cg_export_plan,
     whole,
 )
+from obed_edom.maps_pins import PIN_ASPECT
 from obed_edom.maps_reveal import REVEAL_FPS
 from obed_edom.maps_movie import movie_path
 from obed_edom.web.jobs import Job
@@ -348,7 +349,7 @@ def test_static_drop_pin_tip_is_anchored_to_the_projected_location(tmp_path: Pat
     projected_x, projected_y = project_into_camera(3.1, 101.0, camera)
     assert projected_y != whole(projected_y)
     assert abs((pin["x"] + pin["w"] / 2) - projected_x) <= 1
-    assert pin["h"] == whole(pin["w"] * 1.08)
+    assert pin["h"] == whole(pin["w"] * PIN_ASPECT)
     assert pin["y"] + pin["h"] == whole(projected_y)
 
 

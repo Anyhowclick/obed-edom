@@ -6,6 +6,7 @@ from PIL import Image
 
 from obed_edom.maps_keynote import parse_color
 from obed_edom.maps_pins import (
+    PIN_ASPECT,
     RENDER_VERSION,
     ensure_pin_png,
     pin_png_path,
@@ -38,7 +39,7 @@ def test_dot_alpha_bbox_fills_the_canvas():
 def test_drop_pin_has_the_keynote_aspect_and_a_tip_at_the_bottom_centre():
     image = render_drop_pin(ORANGE)
     assert image.mode == "RGBA"
-    assert image.size == (512, round(512 * 1.08))
+    assert image.size == (512, round(512 * PIN_ASPECT))
     alpha = image.getchannel("A")
     left, top, right, bottom = alpha.getbbox()
     assert left <= 1 and top <= 1
@@ -91,4 +92,4 @@ def test_ensure_pin_png_renders_each_kind_at_its_own_aspect(tmp_path: Path):
     with Image.open(ensure_pin_png(tmp_path, "dot", RED)) as dot:
         assert dot.size == (512, 512)
     with Image.open(ensure_pin_png(tmp_path, "droppin", RED)) as pin:
-        assert pin.size == (512, round(512 * 1.08))
+        assert pin.size == (512, round(512 * PIN_ASPECT))
