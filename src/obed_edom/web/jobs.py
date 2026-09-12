@@ -271,10 +271,6 @@ class JobRunner:
                 return True
         return lowered in self._deleted_names or lowered in self._reserved_names
 
-    def is_name_taken(self, name: str, *, exclude_job_id: str | None = None) -> bool:
-        with self._lock:
-            return self._is_name_taken_locked(name, exclude_job_id=exclude_job_id)
-
     def reserve_name(self, name: str, *, exclude_job_id: str | None = None) -> None:
         """Claim a target name for an in-flight rename transaction so a concurrent
         submit or rename can't take it before the transaction commits or aborts."""

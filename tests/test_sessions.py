@@ -830,7 +830,7 @@ def test_rename_refused_while_running(tmp_path: Path):
     job = runner.submit("resize", work, feature="resize")
     assert started.wait(1)
     with pytest.raises(RuntimeError):
-        runner.rename(job.id, "quiet-jordan")
+        runner.rename(job.id, f"quiet-jordan-{job.id}")
     release.set()
     _wait(runner, job.id)
 
@@ -848,8 +848,9 @@ def test_rename_of_generator_job_does_not_move_user_folder(tmp_path: Path):
     )
     _wait(runner, job.id)
 
-    renamed = runner.rename(job.id, "quiet-jordan")
-    assert renamed.name == "quiet-jordan"
+    target = f"quiet-jordan-{job.id}"
+    renamed = runner.rename(job.id, target)
+    assert renamed.name == target
     assert user_folder.is_dir()
     assert renamed.result["outputDir"] == str(user_folder)
 
@@ -895,8 +896,10 @@ def test_rerun_blocks_until_rename_releases_job_lock(tmp_path: Path, monkeypatch
 
     rename_result: dict = {}
 
+    rename_target = f"quiet-jordan-{job.id}"
+
     def do_rename():
-        rename_result["job"] = runner.rename(job.id, "quiet-jordan")
+        rename_result["job"] = runner.rename(job.id, rename_target)
 
     rename_thread = threading.Thread(target=do_rename)
     rename_thread.start()
@@ -915,13 +918,13 @@ def test_rerun_blocks_until_rename_releases_job_lock(tmp_path: Path, monkeypatch
 
     release.set()
     rename_thread.join(2)
-    assert rename_result["job"].name == "quiet-jordan"
+    assert rename_result["job"].name == rename_target
     rerun_thread.join(2)
     assert rerun_done.is_set()
 
     monkeypatch.undo()
     finished = _wait(runner, job.id)
-    assert finished.name == "quiet-jordan"
+    assert finished.name == rename_target
     assert finished.result == {"stem": "again"}
 
 

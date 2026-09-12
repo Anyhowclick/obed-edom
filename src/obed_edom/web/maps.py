@@ -157,6 +157,8 @@ class MapsCommit:
 
 @contextmanager
 def maps_commit(job_id: str, expected_revision: int | None = None, *, bump: bool = True) -> Iterator[MapsCommit]:
+    commit: MapsCommit | None = None
+    saved = None
     with _mutation_lock(job_id):
         job = _job_or_404(job_id)
         _require_idle(job)
@@ -186,7 +188,7 @@ def maps_commit(job_id: str, expected_revision: int | None = None, *, bump: bool
             commit._restore(backups)
             raise HTTPException(404, "Unknown maps job")
         commit._cleanup_backups(backups)
-        commit.payload = _runner().public_dict(saved)
+    commit.payload = _runner().public_dict(saved)
 
 
 def mutate_document(job_id: str, expected_revision: int | None, fn) -> dict[str, Any]:
@@ -485,7 +487,7 @@ def _resolved_maps_root() -> Path:
     return maps_root
 
 
-def _require_direct_child(parent: Path, candidate: Path) -> Path:
+def _require_direct_child(parent: Path, candidate: Path) -> None:
     try:
         resolved = candidate.resolve()
         resolved.relative_to(parent)
@@ -493,7 +495,6 @@ def _require_direct_child(parent: Path, candidate: Path) -> Path:
         raise HTTPException(500, "Maps job folder is outside the maps root")
     if resolved.parent != parent:
         raise HTTPException(500, "Maps job folder is outside the maps root")
-    return resolved
 
 
 def rename_job_folder(job_id: str, raw_name: str):
@@ -516,6 +517,10 @@ def rename_job_folder(job_id: str, raw_name: str):
     name = normalise_job_name(raw_name)
     runner = _runner()
     maps_root = _resolved_maps_root()
+    job = _job_or_404(job_id)
+    _require_idle(job)
+    if name == runner.get(job_id).name.lower():
+        return job
     previous_name: str | None = None
     old_dir: Path | None = None
     new_dir: Path | None = None
@@ -525,8 +530,6 @@ def rename_job_folder(job_id: str, raw_name: str):
         with maps_commit(job_id, None, bump=False) as commit:
             job = commit.job
             previous_name = job.name
-            if name == job.name.lower():
-                return runner.get(job_id)
             runner.reserve_name(name, exclude_job_id=job_id)
             reserved = True
             old_dir = Path(str(commit.result.get("outputDir") or ""))

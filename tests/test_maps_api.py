@@ -3244,12 +3244,17 @@ def test_rename_maps_job_rejects_folder_outside_maps_root():
     outside.mkdir(parents=True)
 
     stored = RUNNER.get(job["id"])
+    original_result = stored.result
     tampered = dict(stored.result)
     tampered["outputDir"] = str(outside)
     stored.result = tampered
 
-    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
-    assert res.status_code == 500
+    try:
+        res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+        assert res.status_code == 500
+    finally:
+        stored.result = original_result
+        shutil.rmtree(outside, ignore_errors=True)
 
 
 def test_rename_maps_job_restores_name_in_memory_when_restore_save_also_fails(monkeypatch):
