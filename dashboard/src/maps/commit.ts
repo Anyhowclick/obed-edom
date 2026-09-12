@@ -1,5 +1,4 @@
 import type { MapsAudience, MapsCamera, MapsDocument, MapsSlide } from "./types";
-import { slideForAudience } from "./types";
 
 export interface ThumbnailGeometry {
   authoredWidth: number;
@@ -38,10 +37,6 @@ export function shouldPublishThumb(gate: { frozen: boolean; tokenStillValid: boo
 
 export function shouldReconcileThumb(gate: { frozen: boolean; sameJob: boolean }): boolean {
   return !gate.frozen && gate.sameJob;
-}
-
-export function hopPreviewViews(from: MapsSlide, to: MapsSlide, audience: MapsAudience): { during: MapsSlide; landing: MapsSlide } {
-  return { during: slideForAudience(from, audience), landing: slideForAudience(to, audience) };
 }
 
 export function commitCamera(

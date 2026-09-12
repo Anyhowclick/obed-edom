@@ -392,8 +392,16 @@ export function softMovieFields(_from: MapsSlide, _to: MapsSlide): Set<MapsAppea
   return new Set<MapsAppearanceField>(["highlights", "isolate"]);
 }
 
+export function isolateDissolveNeeded(_from: MapsSlide, to: MapsSlide): boolean {
+  return !!(to.isolate && to.highlights.length);
+}
+
+export function plainIsolateTarget(slide: MapsSlide): MapsSlide {
+  return { ...slide, highlights: [], isolate: undefined };
+}
+
 export function movieAppearanceMismatch(from: MapsSlide, to: MapsSlide): boolean {
-  const target: MapsSlide = to.isolate && to.highlights.length ? { ...to, highlights: [], isolate: undefined } : to;
+  const target: MapsSlide = isolateDissolveNeeded(from, to) ? plainIsolateTarget(to) : to;
   if (appearanceMismatch(from, target).length > 0) return true;
   if (!from.cg && !target.cg) return false;
   return appearanceMismatch(slideForAudience(from, "cg"), slideForAudience(target, "cg")).length > 0;
