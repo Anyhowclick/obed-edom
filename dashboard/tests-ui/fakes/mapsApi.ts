@@ -21,15 +21,15 @@ let saveDeferOnce: Promise<Job> | null = null;
 
 export const saveMapsState = vi.fn(async (id: string, document: Record<string, unknown>, expectedRevision: number): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
-  if (saveDeferOnce) {
-    const deferred = saveDeferOnce;
-    saveDeferOnce = null;
-    return deferred;
-  }
   if (saveConflictOnce) {
     const { conflict } = saveConflictOnce;
     saveConflictOnce = null;
     throw new actual.MapsStateConflictError(conflict);
+  }
+  if (saveDeferOnce) {
+    const deferred = saveDeferOnce;
+    saveDeferOnce = null;
+    return deferred;
   }
   return makeJob({ id, result: { ...document, stateRevision: expectedRevision + 1 } });
 });
