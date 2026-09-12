@@ -7,6 +7,10 @@ import { mapsApiScript } from "./fakes/mapsApi";
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // jsdom doesn't implement the PointerEvent capture API.
+  HTMLElement.prototype.setPointerCapture = vi.fn();
+  HTMLElement.prototype.hasPointerCapture = vi.fn(() => false);
+  HTMLElement.prototype.releasePointerCapture = vi.fn();
 });
 
 afterEach(() => {
@@ -48,6 +52,7 @@ describe("save-status pill", () => {
     resolveSave(makeJob({ id: job.id, result: { ...doc, stateRevision: 2 } }));
     await tick(0);
     expect(pillState()).toBe("Saved (maps-save-status-saved)");
+    expect(pill()).toHaveAttribute("aria-live", "polite");
   });
 
   it("moves to Paused on a scripted conflict", async () => {
@@ -69,21 +74,27 @@ describe("save-status pill", () => {
     expect(pillState()).toBe("Paused (maps-save-status-paused)");
   });
 
-  it("does not change status on window resize or inspector toggle", async () => {
+  it("does not change status on nav-list resize drag or inspector toggle", async () => {
     const doc = makeDoc();
     const job = makeJob({ result: { ...doc, stateRevision: 1 } });
-    await renderMapsTab({ job });
+    const { mapFake } = await renderMapsTab({ job });
 
     const before = pillState();
 
+    const handle = screen.getByLabelText("Resize slide list");
     await act(async () => {
-      window.dispatchEvent(new Event("resize"));
+      fireEvent.pointerDown(handle, { clientX: 200 });
+      fireEvent.pointerMove(handle, { clientX: 260 });
+      fireEvent.pointerUp(handle, { clientX: 260 });
     });
     expect(pillState()).toBe(before);
+    expect(mapFake.resize).toHaveBeenCalled();
 
+    mapFake.resize.mockClear();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /inspector/i }));
     });
     expect(pillState()).toBe(before);
+    expect(mapFake.resize).toHaveBeenCalled();
   });
 });
