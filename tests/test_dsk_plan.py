@@ -1140,6 +1140,22 @@ def test_wrapped_height_golden_slide_33_argentcf_bold():
     assert predicted_lines - observed_lines <= 1.0 + 1e-6
 
 
+class _FixedWidthFont:
+    def getlength(self, text):
+        return len(text)
+
+
+@pytest.mark.parametrize("sep", ["\n", " ", " "])
+def test_wrap_lines_hard_breaks_on_each_separator(sep):
+    lines = dsk_plan._wrap_lines(f"one{sep}two", _FixedWidthFont(), max_width=1000)
+    assert lines == ["one", "two"]
+
+
+def test_wrap_lines_mixed_separators_all_break():
+    lines = dsk_plan._wrap_lines("a\nb c d", _FixedWidthFont(), max_width=1000)
+    assert lines == ["a", "b", "c", "d"]
+
+
 def test_wrapped_height_missing_font_warns():
     assert resolve_font_path("NotARealFontXYZ") is None
     assert wrapped_height("hello world", "NotARealFontXYZ", 40.0, 1849.0) is None

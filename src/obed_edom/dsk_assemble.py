@@ -174,9 +174,12 @@ def _short_row_rects(short_fit: dict[ItemId, Rect], row_h: float, stack_top: flo
 def _run_size_ranges(
     item: dict, scale: float, *, item_id: ItemId | None = None, slide_number: int | None = None,
     warnings: list[str] | None = None,
-) -> tuple[tuple[int, int, float], ...] | None:
+) -> tuple[tuple[tuple[int, int, float], ...] | None, bool]:
     """Per-run 1-indexed character ranges ``(start, end, size * scale)`` from ``item['runs']``,
-    or ``None`` (caller keeps the flat write) for a uniform size or a gap in coverage."""
+    or ``(None, unresolved)``: ``unresolved`` is ``False`` for a genuinely uniform size (the
+    caller's flat write is safe) and ``True`` for a gap in run-size coverage, where the caller
+    must preserve source sizing rather than flatten -- flattening a gap is only ever done
+    under an explicit ``--text-fit shrink``."""
     runs = item.get("runs") or []
     full_len = len(item.get("text") or "")
     ranges: list[tuple[int, int, float]] = []
@@ -194,18 +197,20 @@ def _run_size_ranges(
             continue
         ranges.append((pos, pos + length - 1, float(size) * scale))
         pos += length
-    if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
-        return None
-    covered = bool(ranges) and not gap and ranges[0][0] == 1 and ranges[-1][1] == full_len
+    if not ranges:
+        return None, False
+    covered = not gap and ranges[0][0] == 1 and ranges[-1][1] == full_len
     if covered:
         covered = all(b[0] == a[1] + 1 for a, b in zip(ranges, ranges[1:]))
     if not covered:
         if warnings is not None and item_id is not None:
             warnings.append(
-                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap, flattening to one size"
+                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap, preserving source sizing"
             )
-        return None
-    return tuple(ranges)
+        return None, True
+    if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
+        return None, False
+    return tuple(ranges), False
 
 
 def _text_boxes(
@@ -373,6 +378,7 @@ def plan_assembly(
 
         stacked_ids: set[ItemId] = set()
         stacked_text_sizes: dict[ItemId, float] = {}
+        stacked_shrink_only_sizes: dict[ItemId, float] = {}
         stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
         if cls.is_text and cls.long_text_ids:
             long_ids = [iid for iid in cls.long_text_ids if iid in fit]
@@ -398,12 +404,14 @@ def plan_assembly(
                         fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
                     stacked_ids = {box.item_id for box in boxes}
                     for box in boxes:
-                        ranges = _run_size_ranges(
+                        ranges, unresolved = _run_size_ranges(
                             items_by_id[box.item_id], t, item_id=box.item_id,
                             slide_number=number, warnings=warnings,
                         )
                         if ranges is not None:
                             stacked_run_sizes[box.item_id] = ranges
+                        elif unresolved:
+                            stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
                         else:
                             stacked_text_sizes[box.item_id] = sizes[box.item_id]
                 elif not allow_split:
@@ -431,7 +439,7 @@ def plan_assembly(
                         part_fit[box.item_id] = rect
                         other_long = [b.item_id for b in boxes if b.item_id != box.item_id]
                         part_deletes = _delete_order(list(base_deletes) + other_long)
-                        part_ranges = _run_size_ranges(
+                        part_ranges, part_unresolved = _run_size_ranges(
                             items_by_id[box.item_id], t1, item_id=box.item_id,
                             slide_number=number, warnings=warnings,
                         )
@@ -441,10 +449,15 @@ def plan_assembly(
                             if part_item.get("w") == 0.0 or part_item.get("h") == 0.0
                             else frozenset()
                         )
+                        part_text_sizes: dict[ItemId, float] = {}
+                        if part_ranges is None and not part_unresolved:
+                            part_text_sizes[box.item_id] = sizes1[box.item_id]
+                        elif part_unresolved:
+                            stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
                         part_list.append(
                             SplitPart(
                                 fits=part_fit, deletes=part_deletes,
-                                text_sizes={box.item_id: sizes1[box.item_id]},
+                                text_sizes=part_text_sizes,
                                 run_sizes={box.item_id: part_ranges} if part_ranges is not None else {},
                                 stacked_ids=frozenset({box.item_id}),
                                 autosize=part_autosize,
@@ -508,6 +521,7 @@ def plan_assembly(
 
         slide_text_sizes.update(stacked_text_sizes)
         slide_shrink_sizes.update(stacked_text_sizes)
+        slide_shrink_sizes.update(stacked_shrink_only_sizes)
         for iid, ranges in stacked_run_sizes.items():
             slide_shrink_sizes[iid] = max(size for _s, _e, size in ranges)
         if slide_text_sizes:
@@ -1656,13 +1670,12 @@ def _restore_stroke(
     return stroke
 
 
-def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> set[tuple[str, int]]:
-    """Staged (post-delete/insert) `(kind, kindIndex)` for the items this slide keeps.
-    A deletion renumbers surviving siblings of the same kind, so each kind's kept source
-    ids -- with any `plan.deletes[number]` id excluded first, deleted or not, so a deleted
-    movie never occupies a staged index -- are ranked by source kindIndex to get the new
-    (staged) index; an inserted clip becomes the last staged movie. A split slide reads
-    that ``part``'s own fits/deletes, not the unsplit slide's."""
+def _staged_kind_ranks(number: int, plan: AssemblyPlan, *, part: int = 0) -> dict[str, list[int]]:
+    """Per-kind source ``kindIndex`` lists, sorted, for this slide/part's kept items --
+    ``plan.deletes``/the split part's own deletes excluded first, deleted or not, so a
+    deleted item never occupies a staged rank. Position in each list is the staged
+    (post-delete/insert) index. A split slide reads that ``part``'s own fits/deletes,
+    not the unsplit slide's."""
     split_parts = plan.splits.get(number)
     if split_parts is not None:
         split_part = split_parts[part]
@@ -1678,13 +1691,30 @@ def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> s
         by_kind.setdefault(kind, []).append(idx)
     for kind, idxs in by_kind.items():
         by_kind[kind] = sorted(idxs)
-    retained: set[tuple[str, int]] = set()
-    for kind, idxs in by_kind.items():
-        for rank in range(len(idxs)):
-            retained.add((kind, rank))
+    return by_kind
+
+
+def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> set[tuple[str, int]]:
+    """Staged (post-delete/insert) `(kind, kindIndex)` for the items this slide keeps;
+    an inserted clip becomes the last staged movie."""
+    by_kind = _staged_kind_ranks(number, plan, part=part)
+    retained = {(kind, rank) for kind, idxs in by_kind.items() for rank in range(len(idxs))}
     if number in plan.clips:
         retained.add(("movie", len(by_kind.get("movie", []))))
     return retained
+
+
+def _staged_id_for(
+    number: int, plan: AssemblyPlan, source_id: tuple[str, int] | None, *, part: int = 0
+) -> tuple[str, int] | None:
+    """Staged id for a source `(kind, kindIndex)`, or ``None`` if deleted or absent."""
+    if source_id is None:
+        return None
+    kind, idx = source_id
+    idxs = _staged_kind_ranks(number, plan, part=part).get(kind, [])
+    if idx not in idxs:
+        return None
+    return (kind, idxs.index(idx))
 
 
 def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: AssemblyPlan, number: int) -> list[dict]:
@@ -1696,7 +1726,8 @@ def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: Assembl
     short_reps: dict[tuple, dict] = {}
     for ordinal, rec in ordinal_recs:
         part = ordinal - plan.ordinals[number]
-        long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
+        source_long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
+        long_id = _staged_id_for(number, plan, source_long_id, part=part)
         counts: Counter = Counter()
         for b in rec["builds"]:
             if (b["kind"], b["kindIndex"]) == long_id:

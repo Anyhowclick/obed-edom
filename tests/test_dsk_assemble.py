@@ -240,6 +240,38 @@ def test_text_uniform_run_size_scaled():
     assert plan.warnings == ()
 
 
+def test_run_size_ranges_full_coverage_multi_size():
+    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 20.0}]}
+    ranges, unresolved = dsa._run_size_ranges(item, 1.0)
+    assert ranges == ((1, 1, 10.0), (2, 2, 20.0))
+    assert unresolved is False
+
+
+def test_run_size_ranges_uniform_size_is_safe_to_flatten():
+    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": 10.0}]}
+    ranges, unresolved = dsa._run_size_ranges(item, 1.0)
+    assert ranges is None
+    assert unresolved is False
+
+
+def test_run_size_ranges_no_runs_is_safe_to_flatten():
+    item = {"text": "ab", "runs": []}
+    ranges, unresolved = dsa._run_size_ranges(item, 1.0)
+    assert ranges is None
+    assert unresolved is False
+
+
+def test_run_size_ranges_known_size_then_unresolved_run_is_unresolved():
+    # A known-size run followed by a size=None run leaves a coverage gap -- must not be
+    # silently flattened to a whole-object write; caller only offers it to opt-in shrink.
+    item = {"text": "ab", "runs": [{"text": "a", "size": 10.0}, {"text": "b", "size": None}]}
+    warnings: list[str] = []
+    ranges, unresolved = dsa._run_size_ranges(item, 1.0, item_id=("text", 0), slide_number=1, warnings=warnings)
+    assert ranges is None
+    assert unresolved is True
+    assert warnings == ["slide 1 text 0: run ranges leave a gap, preserving source sizing"]
+
+
 def test_text_mixed_run_sizes_warns_and_omits():
     item = _text_item(0, x=1920, y=0, w=200, h=80, runs=[{"size": 20.0}, {"size": 30.0}])
     slide = _slide(1, [item])
@@ -3549,6 +3581,36 @@ def test_stacked_mixed_run_box_preserves_run_size_ratios():
     assert 'OVERFLOW" & tab & "text:1"' in script
 
 
+def test_stacked_box_gap_in_run_coverage_preserves_source_sizing():
+    # A run with size=None (no full per-run coverage) must not be silently flattened
+    # to a whole-object write -- only offered under an explicit --text-fit shrink.
+    _require_font("AzoSans-Regular")
+    text = _VERSE_1
+    split_at = 20
+    runs = [
+        {"text": text[:split_at], "size": 70.0},
+        {"text": text[split_at:], "size": None},
+    ]
+    item = _text_item(1, x=2000, y=200, w=1800, h=300, runs=runs)
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    item["size"] = 70.0
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert ("text", 1) not in plan.run_sizes.get(13, {})
+    assert ("text", 1) not in plan.text_sizes.get(13, {})
+    assert ("text", 1) in plan.shrink_text_sizes.get(13, {})
+    assert any("run ranges leave a gap, preserving source sizing" in w for w in plan.warnings)
+
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
+    )
+    assert "set size of object text of theObj" not in script
+
+
 def test_stacked_mixed_run_box_keeps_run_ranges_under_text_fit_shrink():
     # Shrink no longer flattens a stacked mixed-run box -- it writes the same
     # per-run ranges (scaled by the fit factor) as warn mode, since flattening it was
@@ -3760,7 +3822,12 @@ def test_verify_builds_sums_two_long_boxes_sharing_an_identity_key(monkeypatch):
     # Two split boxes with identical text share an (effect, animationType, identity)
     # key -- each part's own long box must still be summed, not merged to the common-key
     # max meant for a short item repeated across parts, or this spuriously refuses a
-    # missing build.
+    # missing build. The two boxes have DISTINCT source ids (text:1, text:3), and each
+    # part deletes the lower-index text:0 -- so the staged (post-delete) rank of each
+    # long box is 0, not its raw source index. A classifier that compared raw source
+    # ids to the output's staged kindIndex would never recognise either box as "long",
+    # would fall through to the short-item max path, and would collapse the two builds
+    # (which share an identity key) down to one instead of summing them.
     from obed_edom import iwa_builds
 
     shared = _dissolve_build(1, ("text", "shared verse"))
@@ -3778,8 +3845,14 @@ def test_verify_builds_sums_two_long_boxes_sharing_an_identity_key(monkeypatch):
         kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
         autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
         splits={17: (
-            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}, stacked_ids=frozenset({("text", 0)})),
-            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}, stacked_ids=frozenset({("text", 0)})),
+            SplitPart(
+                fits={("text", 1): None}, deletes=(("text", 0), ("text", 3)), text_sizes={},
+                stacked_ids=frozenset({("text", 1)}),
+            ),
+            SplitPart(
+                fits={("text", 3): None}, deletes=(("text", 0), ("text", 1)), text_sizes={},
+                stacked_ids=frozenset({("text", 3)}),
+            ),
         )},
     )
     warnings: list[str] = []
