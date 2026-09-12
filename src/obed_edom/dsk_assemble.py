@@ -175,11 +175,8 @@ def _run_size_ranges(
     item: dict, scale: float, *, item_id: ItemId | None = None, slide_number: int | None = None,
     warnings: list[str] | None = None,
 ) -> tuple[tuple[tuple[int, int, float], ...] | None, bool]:
-    """Per-run 1-indexed character ranges ``(start, end, size * scale)`` from ``item['runs']``,
-    or ``(None, unresolved)``: ``unresolved`` is ``False`` for a genuinely uniform size (the
-    caller's flat write is safe) and ``True`` for a gap in run-size coverage, where the caller
-    must preserve source sizing rather than flatten -- flattening a gap is only ever done
-    under an explicit ``--text-fit shrink``."""
+    """Per-run 1-indexed character ranges ``(start, end, size * scale)``, or ``(None, unresolved)``
+    -- ``unresolved`` marks a size gap where the caller must preserve source sizing."""
     runs = item.get("runs") or []
     full_len = len(item.get("text") or "")
     ranges: list[tuple[int, int, float]] = []
@@ -198,7 +195,11 @@ def _run_size_ranges(
         ranges.append((pos, pos + length - 1, float(size) * scale))
         pos += length
     if not ranges:
-        return None, False
+        if gap and warnings is not None and item_id is not None:
+            warnings.append(
+                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap, preserving source sizing"
+            )
+        return None, gap
     covered = not gap and ranges[0][0] == 1 and ranges[-1][1] == full_len
     if covered:
         covered = all(b[0] == a[1] + 1 for a, b in zip(ranges, ranges[1:]))
@@ -411,6 +412,11 @@ def plan_assembly(
                         if ranges is not None:
                             stacked_run_sizes[box.item_id] = ranges
                         elif unresolved:
+                            if t < 1.0:
+                                raise AssemblyRefusal(
+                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                    f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
+                                )
                             stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
                         else:
                             stacked_text_sizes[box.item_id] = sizes[box.item_id]
@@ -453,6 +459,11 @@ def plan_assembly(
                         if part_ranges is None and not part_unresolved:
                             part_text_sizes[box.item_id] = sizes1[box.item_id]
                         elif part_unresolved:
+                            if t1 < 1.0:
+                                raise AssemblyRefusal(
+                                    f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                    f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
+                                )
                             stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
                         part_list.append(
                             SplitPart(
@@ -1671,11 +1682,8 @@ def _restore_stroke(
 
 
 def _staged_kind_ranks(number: int, plan: AssemblyPlan, *, part: int = 0) -> dict[str, list[int]]:
-    """Per-kind source ``kindIndex`` lists, sorted, for this slide/part's kept items --
-    ``plan.deletes``/the split part's own deletes excluded first, deleted or not, so a
-    deleted item never occupies a staged rank. Position in each list is the staged
-    (post-delete/insert) index. A split slide reads that ``part``'s own fits/deletes,
-    not the unsplit slide's."""
+    """Per-kind source ``kindIndex`` lists, sorted by post-delete staged index, for this
+    slide/part's kept items (own fits/deletes for a split part)."""
     split_parts = plan.splits.get(number)
     if split_parts is not None:
         split_part = split_parts[part]

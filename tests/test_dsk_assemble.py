@@ -261,6 +261,15 @@ def test_run_size_ranges_no_runs_is_safe_to_flatten():
     assert unresolved is False
 
 
+def test_run_size_ranges_all_none_sizes_is_unresolved():
+    item = {"text": "ab", "runs": [{"text": "a", "size": None}, {"text": "b", "size": None}]}
+    warnings: list[str] = []
+    ranges, unresolved = dsa._run_size_ranges(item, 1.0, item_id=("text", 0), slide_number=1, warnings=warnings)
+    assert ranges is None
+    assert unresolved is True
+    assert warnings == ["slide 1 text 0: run ranges leave a gap, preserving source sizing"]
+
+
 def test_run_size_ranges_known_size_then_unresolved_run_is_unresolved():
     # A known-size run followed by a size=None run leaves a coverage gap -- must not be
     # silently flattened to a whole-object write; caller only offers it to opt-in shrink.
@@ -309,6 +318,23 @@ def test_script_overflow_readback_omitted_for_uniform_run_text():
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
     )
     assert 'OVERFLOW" & tab & "text:0"' not in script
+
+
+def test_stacked_unresolved_run_gap_below_full_size_refuses(monkeypatch):
+    words = " ".join(["word"] * 12)
+    item = _text_item(0, x=1920, y=0, w=3698, h=494.4, runs=[{"text": "a", "size": 10.0}, {"text": "b", "size": None}])
+    item["text"] = words
+    item["font"] = "Arial"
+    item["size"] = 40.0
+    slide = _slide(1, [item])
+    payload = _payload([slide])
+    cls = _classify(slide)
+    decisions = {1: SlideDecision(1, "in_deck")}
+    monkeypatch.setattr(
+        dsa, "fit_text_stack", lambda boxes, band, min_text_pt: (0.5, {("text", 0): 20.0}, {("text", 0): 100.0})
+    )
+    with pytest.raises(AssemblyRefusal, match="run ranges leave a gap"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
 
 def test_text_autosize_zero_dimension_flagged():
@@ -1057,7 +1083,12 @@ def test_gw_text_slides_stay_within_band_top():
         if not cls.is_text:
             continue
         decisions = {number: SlideDecision(number, "in_deck")}
-        plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs)
+        try:
+            plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs)
+        except AssemblyRefusal:
+            # GW 49 has a real run-size coverage gap with t < 1.0 -- refused rather
+            # than assembled overflowing (finding 2); not a band-containment case.
+            continue
         fit = dict(plan.fits.get(number, {}))
         for part in plan.splits.get(number, ()):
             fit.update(part.fits)

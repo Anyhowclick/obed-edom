@@ -367,6 +367,11 @@ the band even alone") — never split a box mid-text.
   *missing*, exactly as a deletion does today.
 - `_restore_stroke`'s `_rekey_slides` (`dsk_assemble.py:1037`) takes the same extended inverse map.
 
+**Accepted residual risk:** the 15 pt safety headroom is measured against a worst estimator
+divergence of −20 pt (GW 38) and a −10..−15 pt cluster elsewhere; `OVERFLOW` read-back remains the
+authority over the estimate. The forced-split acceptance run now provokes the split at GW 17/28
+with the floor at 66 (GW 13 still fits at t=0.91 and only refuses at 66).
+
 ### D5. Deletes
 
 `deletes[number]` (`dsk_assemble.py:228`) additionally carries `cls.dropped_backdrop`,

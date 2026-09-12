@@ -831,12 +831,12 @@ def resolve_font_path(font_name: str) -> Path | None:
 _WRAP_BREAK_CHARS = (" ", " ")  # ASCII space and thin space (F9/D4)
 
 
-_PARA_BREAK_CHARS = ("\n", " ", " ")
+_PARA_BREAK_CHARS = ("\n", "\r", " ", " ")
 
 
 def _wrap_lines(text: str, font: Any, max_width: float) -> list[str]:
-    """Greedy word wrap honouring ``\\n``/``\\u2028``/``\\u2029`` as hard breaks; ``\\xa0`` is
-    non-breaking (F9/D4)."""
+    """Greedy word wrap honouring ``\\n``/``\\r``/``\\u2028``/``\\u2029`` as hard breaks; ``\\xa0``
+    is non-breaking (F9/D4)."""
     import re as _re  # noqa: PLC0415
 
     pattern = "[" + "".join(_WRAP_BREAK_CHARS) + "]"

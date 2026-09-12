@@ -1145,7 +1145,7 @@ class _FixedWidthFont:
         return len(text)
 
 
-@pytest.mark.parametrize("sep", ["\n", " ", " "])
+@pytest.mark.parametrize("sep", ["\n", "\r", " ", " "])
 def test_wrap_lines_hard_breaks_on_each_separator(sep):
     lines = dsk_plan._wrap_lines(f"one{sep}two", _FixedWidthFont(), max_width=1000)
     assert lines == ["one", "two"]
