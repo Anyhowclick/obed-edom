@@ -1070,7 +1070,7 @@ def _looks_highlight(color: list | None) -> bool:
     return rn > 0.7 and gn > 0.45 and bn < 0.45
 
 
-def diff_work_dir(job_id: str) -> Path:
-    root = output_root() / ".diff" / job_id
+def diff_work_dir(folder_name: str) -> Path:
+    root = output_root() / ".diff" / folder_name
     root.mkdir(parents=True, exist_ok=True)
     return root

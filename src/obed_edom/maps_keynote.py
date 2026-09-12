@@ -1757,7 +1757,12 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
     is_cancelled = getattr(job, "cancelled", lambda: False)
     _raise_if_cancelled(is_cancelled)
     result = inherit_hidden_layers(dict(getattr(job, "result", None) or {}))
-    output_dir = Path(str(result.get("outputDir") or find_repo_root() / "output" / ".maps" / str(getattr(job, "id", "maps"))))
+    output_dir = Path(
+        str(
+            result.get("outputDir")
+            or find_repo_root() / "output" / ".maps" / str(getattr(job, "name", None) or getattr(job, "id", "maps"))
+        )
+    )
     preview_dir = Path(str(result.get("previewDir") or (output_dir / "previews")))
     output_dir.mkdir(parents=True, exist_ok=True)
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -1791,7 +1796,7 @@ def export_maps_job(job: Any, *, export_lw: bool = True, export_cg: bool = True,
     links = plan["links"]
     result["links"] = links
     movie = find_pin_drop_wave()
-    stem = str(result.get("stem") or f"maps-{getattr(job, 'id', 'maps')}")
+    stem = str(result.get("stem") or getattr(job, "name", "") or f"maps-{getattr(job, 'id', 'maps')}")
     flags: list[Any] = []
     flags_cg: list[Any] = []
     poster_frame: list[dict[str, Any]] = []

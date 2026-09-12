@@ -6,6 +6,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -60,6 +61,8 @@ from obed_edom.maps_tiles import (
     rels_for_countries,
 )
 from obed_edom.paths import output_root
+from obed_edom.web.job_names import normalise_job_name
+from obed_edom.web.jobs import rewrite_result_paths
 
 router = APIRouter(prefix="/api/maps", tags=["maps"])
 
@@ -472,6 +475,53 @@ def _require_idle(job) -> None:
         raise HTTPException(409, "Maps job is not ready")
 
 
+def rename_job_folder(job_id: str, raw_name: str):
+    """Rename a maps job: validate, move its `.maps` folder and set `Job.name`,
+    both under `maps_commit`'s lock and restore ladder (`bump=False` — folder
+    paths are not part of the document, `DIR_KEYS`, so a rename must not 409 an
+    open editor on the pre-rename revision).
+
+    The move uses a plain `os.replace` rather than `MapsCommit.stage_path`:
+    `stage_path` moves its source into a temp file immediately and its abort/restore
+    path only ever deletes the promoted destination, which would lose the folder
+    outright on failure instead of putting it back at the old path.
+    """
+    job = _job_or_404(job_id)
+    name = normalise_job_name(raw_name)
+    runner = _runner()
+    if name == job.name.lower():
+        return job
+    if runner.is_name_taken(name, exclude_job_id=job_id):
+        raise FileExistsError(f"A job named '{name}' already exists")
+    previous_name = job.name
+    old_dir: Path | None = None
+    new_dir: Path | None = None
+    try:
+        with maps_commit(job_id, None, bump=False) as commit:
+            old_dir = Path(str(commit.result.get("outputDir") or ""))
+            if old_dir.name != job.name:
+                raise HTTPException(500, "Maps job folder does not match its current name")
+            new_dir = old_dir.parent / name
+            if new_dir.exists():
+                raise FileExistsError(f"A folder named '{name}' already exists")
+            os.replace(old_dir, new_dir)
+            commit.result = rewrite_result_paths(commit.result, old_dir, new_dir)
+            if commit.result.get("stem") == job.name:
+                commit.result["stem"] = name
+            runner.set_name(job_id, name)
+    except BaseException:
+        if old_dir is not None and new_dir is not None and new_dir.exists() and not old_dir.exists():
+            os.replace(new_dir, old_dir)
+        current = runner.get(job_id)
+        if current is not None and current.name == name:
+            try:
+                runner.set_name(job_id, previous_name)
+            except Exception:
+                pass
+        raise
+    return runner.get(job_id)
+
+
 def _safe_name(raw: str) -> str:
     name = Path(raw).name
     if not name or "/" in name or "\\" in name or name.startswith("."):
@@ -673,13 +723,13 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         raise HTTPException(400, message) from exc
 
 
-def _seed_result(job_id: str) -> dict[str, Any]:
-    root = output_root() / ".maps" / job_id
+def _seed_result(name: str) -> dict[str, Any]:
+    root = output_root() / ".maps" / name
     preview = root / "previews"
     preview.mkdir(parents=True, exist_ok=True)
     camera = sea_overview_camera()
     return {
-        "stem": f"maps-{job_id}",
+        "stem": name,
         "outputDir": str(root),
         "workDir": str(root),
         "previewDir": str(preview),
@@ -715,7 +765,7 @@ def _seed_result(job_id: str) -> dict[str, Any]:
 
 
 def _run_maps(job) -> dict[str, Any]:
-    return _seed_result(job.id)
+    return _seed_result(job.name)
 
 
 def _next_slide_id(slides: list[dict[str, Any]]) -> str:
@@ -854,7 +904,7 @@ def _run_pin_bootstrap(job, places: list[Place], slide_id: str, audience: str) -
 def _session_path(job_id: str, result: dict[str, Any]) -> Path:
     output_dir = Path(str(result.get("outputDir") or ""))
     output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / f"{str(result.get('stem') or f'maps-{job_id}')}.obedmaps"
+    return output_dir / f"{str(result.get('stem') or job_id)}.obedmaps"
 
 
 def _clear_derived_maps_output(result: dict[str, Any], *, clear_preview: bool = True) -> Path:

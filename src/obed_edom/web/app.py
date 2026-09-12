@@ -99,6 +99,10 @@ class JobPatch(BaseModel):
     result: dict[str, Any]
 
 
+class RenameBody(BaseModel):
+    name: str
+
+
 class RelocateBody(BaseModel):
     folder: str | None = None
     path: str | None = None
@@ -239,6 +243,26 @@ def create_app() -> FastAPI:
         job = RUNNER.update_result(job_id, payload.result)
         if not job:
             raise HTTPException(404, "Unknown job")
+        return RUNNER.public_dict(job)
+
+    @app.patch("/api/jobs/{job_id}/name")
+    def rename_job(job_id: str, payload: RenameBody) -> dict:
+        existing = RUNNER.get(job_id)
+        if not existing:
+            raise HTTPException(404, "Unknown job")
+        try:
+            if existing.feature == "maps":
+                from obed_edom.web.maps import rename_job_folder  # noqa: PLC0415
+
+                job = rename_job_folder(job_id, payload.name)
+            else:
+                job = RUNNER.rename(job_id, payload.name)
+        except KeyError:
+            raise HTTPException(404, "Unknown job") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except (RuntimeError, FileExistsError) as exc:
+            raise HTTPException(409, str(exc)) from exc
         return RUNNER.public_dict(job)
 
     @app.post("/api/jobs/{job_id}/relocate")
@@ -823,7 +847,7 @@ def _run_diff(
     lw_final: bool = True,
 ) -> dict[str, Any]:
     settings = load_settings()
-    work = diff_work_dir(job.id)
+    work = diff_work_dir(job.name)
     heat_dir = work / "heat"
     heat_dir.mkdir(parents=True, exist_ok=True)
     if fresh:
@@ -957,6 +981,7 @@ def _run_diff(
         "heatDir": str(heat_dir),
         "evidenceDir": str(work / "evidence"),
         "workDir": str(work),
+        "outputDir": str(work),
         "leftInspect": str(inspect_left),
         "rightInspect": str(inspect_right),
         "leftPngs": [p.name for p in preview_pngs(left_dir)],
@@ -1167,9 +1192,15 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
         f"{len(report['rows'])} advance(s)."
     )
     job.log("Checking scripture references and house style…")
-    dest = default_output_root() / ".outline" / job.id / f"{path.stem}_findings.pdf"
+    dest_dir = default_output_root() / ".outline" / job.name
+    dest = dest_dir / f"{path.stem}_findings.pdf"
     written = _write_outline_pdf(job, dest, report)
-    return {**report, "kind": "outline", "outlineReport": str(written) if written else None}
+    return {
+        **report,
+        "kind": "outline",
+        "outputDir": str(dest_dir),
+        "outlineReport": str(written) if written else None,
+    }
 
 
 def _write_outline_pdf(job: Job, dest: Path, report: dict[str, Any]) -> Path | None:
@@ -1192,7 +1223,7 @@ def _run_inspect(
     outline: Path | None = None,
     lw_final: bool = True,
 ) -> dict[str, Any]:
-    job_dir = default_output_root() / ".inspect" / job.id if export else None
+    job_dir = default_output_root() / ".inspect" / job.name if export else None
     job.log(f"Inspecting {path.name} (read-only, no save)…")
     payload = inspect_keynote(path, export_dir=job_dir, slide_range=slide_range)
     _log_inspect(job, path.name, payload)
@@ -1219,6 +1250,7 @@ def _run_inspect(
         "outlinePath": str(outline) if outline else None,
         "lwFinal": bool(lw_final),
         "deck": deck,
+        "outputDir": str(job_dir) if job_dir else None,
         "evidenceDir": str(evidence_dir) if evidence_dir else None,
         "slideWidth": payload.get("slideWidth"),
         "slideHeight": payload.get("slideHeight"),
@@ -1451,7 +1483,7 @@ def _run_resize(
     side_content_slides: set[int] | None = None,
     validate: bool = True,
 ) -> dict[str, Any]:
-    dest_dir = default_output_root() / ".resize" / job.id
+    dest_dir = default_output_root() / ".resize" / job.name
     dest = dest_dir / f"{path.stem}_CG.key"
     export_dir = dest_dir / "previews" if export else None
     label = format_slide_range(slide_range)
@@ -1493,6 +1525,7 @@ def _run_resize(
     return {
         "phase": "resized",
         "path": str(path),
+        "outputDir": str(dest_dir),
         "destPath": str(dest),
         "templatePath": str(template),
         "slideWidth": inspect.get("slideWidth") or info.get("width"),
