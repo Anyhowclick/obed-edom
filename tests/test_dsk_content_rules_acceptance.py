@@ -4,8 +4,8 @@ real `Sermon_PK (GW).key`, one row per the plan's Acceptance table
 
 Every number here was read back from the deck with these same three functions, not typed
 from the plan's prose -- where the plan's table and the measurement disagreed, the plan was
-corrected to match this file (GW 5's anchor/crop box, GW 13's t, and GW 17's t after the
-badge-fold-in-stack change moved it from the F9-era 0.91 to 0.74). Tolerances are 0.5 pt.
+corrected to match this file (GW 5's anchor/crop box, and GW 13/17's t after pass 1 started
+using the run-aware wrap estimator instead of the single-font one). Tolerances are 0.5 pt.
 
 All tests are `@pytest.mark.deck` and skip when the GW deck or the `keynote_parser` (iwa)
 extra is absent, via the same `_require_gw_deck` skip helper `tests/test_dsk_plan.py`/
@@ -74,7 +74,7 @@ def test_gw13_single_text_verse_box_no_split(gw_inputs):
     assert 13 not in plan.splits
 
     run_sizes = sorted({size for _, _, size in plan.run_sizes[13][("text", 1)]})
-    assert run_sizes == pytest.approx([63.7, 77.35], abs=0.01)
+    assert run_sizes == pytest.approx([56.0, 68.0], abs=0.01)
 
 
 @pytest.mark.deck
@@ -94,9 +94,9 @@ def test_gw17_dedupe_and_stretch_no_overlap(gw_inputs):
 
     ranges17 = plan.run_sizes[17][("text", 1)]
     assert [(start, end) for start, end, _ in ranges17] == [(1, 3), (4, 20), (21, 30), (31, 79)]
-    assert [size for _, _, size in ranges17] == pytest.approx([51.8, 51.8, 62.9, 51.8], abs=0.01)
+    assert [size for _, _, size in ranges17] == pytest.approx([44.8, 44.8, 54.4, 44.8], abs=0.01)
     t17 = ranges17[0][2] / 70.0
-    assert t17 == pytest.approx(0.74, abs=0.01)
+    assert t17 == pytest.approx(0.64, abs=0.01)
 
 
 @pytest.mark.deck

@@ -457,9 +457,9 @@ class LiveBatch:
     ) -> subprocess.CompletedProcess:
         """Runs `script_path` under the RSS watchdog, retrying once on a -1712 timeout
         (quit-and-wait for a clean exit, then a pristine re-copy of the scratch).
-        `retry_on_1712=False` (a refit pass against an already-written scratch, D2 step 5)
-        disables the retry -- re-copying would discard the earlier pass's writes -- so a
-        -1712 there aborts the batch instead."""
+        `retry_on_1712=False` (a refit pass against an already-written scratch) disables
+        the retry -- re-copying would discard the earlier pass's writes -- so a -1712
+        there aborts the batch instead."""
         assert self.scratch is not None and self.work is not None
         stem_name = self.scratch.stem
         doc_name = self.scratch.name

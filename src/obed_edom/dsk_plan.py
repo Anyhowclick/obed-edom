@@ -39,20 +39,24 @@ def _delete_order(ids: Sequence[ItemId], id_by_item: Mapping[ItemId, str] | None
     """Deletion order: reverse ``kindIndex`` within each ``kind`` (deleting high-to-low so
     a not-yet-deleted index never shifts). ``id_by_item`` dedupes duals -- the same
     underlying object addressed under two kinds, e.g. a text box also enumerated as its
-    owning shape -- to a single address, keeping the first survivor in that order (F2)."""
+    owning shape -- to a single address: the kind that sorts last among the kinds present,
+    since deleting one kind's address also removes the object from every other kind's
+    collection and would shift the indices of that other kind's still-pending addresses."""
     ordered = sorted(ids, key=lambda iid: (iid[0], -iid[1]))
     if not id_by_item:
         return tuple(ordered)
-    seen: set[str] = set()
-    deduped: list[ItemId] = []
+    by_obj: dict[str, list[ItemId]] = {}
     for iid in ordered:
         obj_id = id_by_item.get(iid)
         if obj_id is not None:
-            if obj_id in seen:
-                continue
-            seen.add(obj_id)
-        deduped.append(iid)
-    return tuple(deduped)
+            by_obj.setdefault(obj_id, []).append(iid)
+    drop: set[ItemId] = set()
+    for dupes in by_obj.values():
+        if len(dupes) < 2:
+            continue
+        survivor = max(dupes, key=lambda iid: iid[0])
+        drop.update(iid for iid in dupes if iid != survivor)
+    return tuple(iid for iid in ordered if iid not in drop)
 
 
 def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bool = False) -> bool:
@@ -919,7 +923,7 @@ class Run:
 
 
 def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
-    """Run-aware sibling of ``wrapped_height`` (F2): wraps across each run's own
+    """Run-aware sibling of ``wrapped_height``: wraps across each run's own
     resolved font at its own size, charging every wrapped line's height by the
     tallest run on that line. ``None`` when a run's font cannot be resolved."""
     import re as _re  # noqa: PLC0415
@@ -1005,7 +1009,7 @@ def fit_text_stack(
     """Largest ``t`` in ``(0, 1]`` fitting ``boxes`` stacked with ``gap`` into ``band``, or
     ``None``. Uses ``wrapped_height_runs`` when a box carries ``runs``, else the single-font
     ``wrapped_height``; either way ``height_correction`` (a per-box multiplier from a live
-    ``MEASURE`` round, D2 step 4) scales the estimate before the fit check. A fixed safety
+    ``MEASURE`` round) scales the estimate before the fit check. A fixed safety
     term against the estimator's own measured under-prediction is charged for every box
     count; the live ``OVERFLOW`` read-back is the final authority on wrap."""
     if not boxes:

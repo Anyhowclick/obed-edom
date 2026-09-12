@@ -1042,8 +1042,9 @@ def test_delete_or_hide_placeholder_lines_branches_on_title_and_body():
     item (errNum -10003, ``default title item``/``default body item`` are read-only per
     Keynote.sdef) -- hide it via the read-write ``title showing``/``body showing``
     properties instead, matching plain delete for every other shape. Identity is an
-    ``id of`` comparison inside a ``try`` (F3), and each hide branch logs a ``HIDDEN``
-    marker naming the object and slot (F1)."""
+    ``is`` comparison inside a ``try`` (``iWork item``/``shape``/``text item`` have no
+    ``id`` property per Keynote.sdef), and each hide branch logs a ``HIDDEN`` marker
+    naming the object and slot."""
     from obed_edom.remap_keynote import _delete_or_hide_placeholder_lines
 
     lines = _delete_or_hide_placeholder_lines(17, 17, "shape 2 of slide 17")
@@ -1051,17 +1052,16 @@ def test_delete_or_hide_placeholder_lines_branches_on_title_and_body():
     assert "delete theObj" in script
     assert "set title showing of slide 17 to false" in script
     assert "set body showing of slide 17 to false" in script
-    assert "id of default title item of slide 17" in script
-    assert "id of default body item of slide 17" in script
+    assert "theObj is (default title item of slide 17)" in script
+    assert "theObj is (default body item of slide 17)" in script
     assert 'HIDDEN" & tab & "17" & tab & "shape 2 of slide 17" & tab & "title"' in script
     assert 'HIDDEN" & tab & "17" & tab & "shape 2 of slide 17" & tab & "body"' in script
-    assert script.count("try") >= 2  # each id-of probe is wrapped, not the bare `is`
+    assert script.count("try") >= 2  # each `is` probe is wrapped
 
 
 def test_delete_or_hide_placeholder_lines_missing_title_item_falls_through_to_delete():
     """No title item on the slide: ``default title item`` raises inside the wrapping
-    ``try``, ``isTitle``/``isBody`` stay false, and the object is plainly deleted --
-    the F3 ``missing value`` fall-through, unchanged by the F1/F3 fixes."""
+    ``try``, ``isTitle``/``isBody`` stay false, and the object is plainly deleted."""
     from obed_edom.remap_keynote import _delete_or_hide_placeholder_lines
 
     lines = _delete_or_hide_placeholder_lines(9, 9, "shape 3 of slide 9")
@@ -1077,8 +1077,8 @@ def test_script_shape_text_dual_dedupes_to_one_delete_address():
     object (dual: one id under two kinds), so the planned delete set for this slide
     carries a single address per underlying object; ``build_assembly_script`` must
     still route every one of those addresses through the title/body placeholder guard,
-    in the given order, not a bare unconditional ``delete theObj`` (F2/F8: the dedupe
-    itself lives in ``dsk_plan._delete_order`` and is covered directly there)."""
+    in the given order, not a bare unconditional ``delete theObj`` (the dedupe itself
+    lives in ``dsk_plan._delete_order`` and is covered directly there)."""
     import dataclasses  # noqa: PLC0415
 
     kept_text = _text_item(0, x=2385, y=20, w=626, h=92, runs=[{"size": 40.0}])
@@ -1159,10 +1159,10 @@ def test_gw13_gw17_stack_budget_and_fit_t_under_default_band():
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, runs=runs)
 
     t13 = next(iter(plan.run_sizes[13][("text", 1)]))[2] / 70.0
-    assert t13 == pytest.approx(0.91, abs=0.01)
+    assert t13 == pytest.approx(0.80, abs=0.01)
 
     t17 = next(iter(plan.run_sizes[17][("text", 1)]))[2] / 70.0
-    assert t17 == pytest.approx(0.74, abs=0.01)
+    assert t17 == pytest.approx(0.64, abs=0.01)
 
     badge13 = plan.fits[13][("shape", 0)]
     stack13 = [r for iid, r in plan.fits[13].items() if iid in plan.stacked_ids[13]]
@@ -1246,23 +1246,21 @@ def test_short_row_rects_regression_moves_badge_out_of_band():
     assert tight[("shape", 0)].y == pytest.approx(band_top - 1.0, abs=1e-6)
 
 
-def test_gw17_28_forced_split_at_floor_66_leaves_gw28_unsplit():
-    # Acceptance table: forcing --min-text-pt 66 across GW 17/28 must split only
-    # GW 17 (its two-box stack can't clear the floor at any single t), assembling to
-    # 3 slides total, not refuse GW 28 (its single box clears the floor unsplit).
+def test_gw17_28_forced_split_at_floor_66_refuses_gw28_single_box():
+    # Acceptance table: forcing --min-text-pt 66 across GW 17/28 must split GW 17 (its
+    # two-box stack can't clear the floor at any single t). GW 28's single box, once
+    # pass 1 charges the run-aware estimate rather than the single-font underestimate,
+    # also can't clear the floor and a lone box can't split -- refuses.
     _require_gw_deck()
     _require_font("AzoSans-Regular")
     payload, classes, runs = load_assembly_inputs(GW_DECK)
     by_number = {c.number: c for c in classes}
     decisions = {n: SlideDecision(n, "in_deck") for n in (17, 28)}
-    plan = plan_assembly(
-        payload, [by_number[17], by_number[28]], decisions=decisions,
-        band=BAND, clips={}, runs=runs, min_text_pt=66.0,
-    )
-    assert plan.kept == (17, 28)
-    assert 28 not in plan.splits
-    assert plan.parts.get(17) == 2
-    assert sum(plan.parts.get(n, 1) for n in plan.kept) == 3
+    with pytest.raises(AssemblyRefusal, match="does not fit the band even alone"):
+        plan_assembly(
+            payload, [by_number[17], by_number[28]], decisions=decisions,
+            band=BAND, clips={}, runs=runs, min_text_pt=66.0,
+        )
 
 
 def test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box():
@@ -1573,7 +1571,10 @@ def test_refit_loop_shrinks(tmp_path, monkeypatch):
         "OBED\t13\tdone",
     ])
     still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
-    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, still_over_stderr, still_over_stderr])
+    shrunk_fits_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t20.0", "OBED\t13\tdone"])
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, still_over_stderr, still_over_stderr, shrunk_fits_stderr]
+    )
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
@@ -4062,7 +4063,7 @@ def test_unresolved_gap_below_t1_flattens_lead_size_under_shrink_text_fit():
     assert ("text", 1) not in plan.run_sizes.get(13, {})
     assert ("text", 1) not in plan.text_sizes.get(13, {})
     assert ("text", 1) in plan.shrink_text_sizes[13]
-    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(150.0 * 0.83, abs=0.01)
+    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(122.99, abs=0.01)
     assert any(
         "flattening run sizes to the lead size under --text-fit shrink" in w and "box 1" in w
         for w in plan.warnings

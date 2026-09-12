@@ -1228,29 +1228,37 @@ def test_fit_text_stack_bare_band_ordering():
 
 
 def test_wrapped_height_runs_charges_emphasis_run_font():
-    # GW 17 text:2's mixed-run shape (F2): a 51.8pt lead run followed by a 62.9pt
-    # ArgentCF-Bold emphasis run at the same wrap width. The single-font estimator only
-    # ever sees the lead style, so it under-predicts the emphasis run's own wrap.
+    # GW 17 text:2's actual runs (lead + an ArgentCF-Bold emphasis run + trailing
+    # punctuation), scaled to their real written size (70/85 * 0.74). Pinned to the
+    # deck's real values, stable across band widths 1849 and 1892 (out-r9b: 166.6).
     _require_font("AzoSans-Regular")
     _require_font("ArgentCF-Bold")
-    lead_text = "Steadfast love of the LORD never ceases,"
-    emphasis_text = "his mercies never come to an end;"
-    single = wrapped_height(f"{lead_text} {emphasis_text}", "AzoSans-Regular", 51.8, 1849.0)
-    runs = (Run(lead_text, "AzoSans-Regular", 51.8), Run(emphasis_text, "ArgentCF-Bold", 62.9))
-    predicted = wrapped_height_runs(runs, 1849.0)
-    assert single is not None and predicted is not None
-    lines = (predicted - 21.0) / (1.157 * 62.9)
-    assert lines >= 1.9
-    assert predicted >= 1.9 * single
+    lead_text = "May they also be in Us "
+    emphasis_text = "so that the world may believe that You have sent Me"
+    tail_text = "."
+    single = wrapped_height(f"{lead_text}{emphasis_text}{tail_text}", "AzoSans-Regular", 51.8, 1849.0)
+    runs = (
+        Run(lead_text, "AzoSans-Regular", 51.8),
+        Run(emphasis_text, "ArgentCF-Bold", 62.9),
+        Run(tail_text, "AzoSans-Regular", 51.8),
+    )
+    for width in (1849.0, 1892.0):
+        predicted = wrapped_height_runs(runs, width)
+        assert predicted is not None
+        assert predicted == pytest.approx(166.6, abs=0.5)
+    assert single is not None
+    assert predicted > single
 
 
 def test_delete_order_dedupes_dual_shape_text_address():
     # GW 17's shape:1 (`shape 2`) and text:3 (`text item 4`) are the same underlying
     # object addressed under two kinds; id_by_item marks the dual so _delete_order keeps
-    # only the first survivor in delete order (F2).
+    # the address of the kind that sorts last among the kinds present ("text"), since
+    # deleting a shape also removes it from the slide's text collection and would shift
+    # the indices of every other still-pending text address.
     ids = [("shape", 1), ("text", 5), ("text", 4), ("text", 3)]
     id_by_item = {("shape", 1): "obj-shared", ("text", 3): "obj-shared", ("text", 4): "obj-x", ("text", 5): "obj-y"}
-    assert dsk_plan._delete_order(ids, id_by_item) == (("shape", 1), ("text", 5), ("text", 4))
+    assert dsk_plan._delete_order(ids, id_by_item) == (("text", 5), ("text", 4), ("text", 3))
 
 
 def test_delete_order_without_id_map_keeps_every_address():
