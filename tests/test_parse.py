@@ -694,6 +694,22 @@ def test_review_pdf_and_slide_kinds():
     assert not list(result.output_dir.glob("*.json"))
 
 
+def test_generate_honours_output_dir(tmp_path):
+    from obed_edom.pipeline import generate
+
+    export_dir = tmp_path / "exports"
+    with patch("obed_edom.bible.fetch_passage", return_value=(None, "mocked")):
+        result = generate(
+            OUTLINES / "Sermon BC.docx",
+            make_keynote=False,
+            check_visuals=False,
+            output_dir=export_dir,
+        )
+    assert result.output_dir.parent == export_dir
+    assert result.output_dir.is_relative_to(export_dir)
+    assert result.review_path.exists()
+
+
 def test_passage_header():
     from obed_edom.slide_map import _passage_header
 

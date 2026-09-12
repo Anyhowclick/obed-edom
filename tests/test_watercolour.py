@@ -1,5 +1,6 @@
 import json
 from io import BytesIO
+from pathlib import Path
 from PIL import Image
 import numpy as np
 from obed_edom import watercolour
@@ -62,6 +63,72 @@ def test_delete_purges_watercolour_output_dir():
     assert client.delete(f'/api/jobs/{job_id}').status_code == 200
     assert not Path(output_dir).exists()
     assert client.get(f'/api/jobs/{job_id}').status_code == 404
+
+def _run_batch_wait(client, job_id):
+    import time
+    for _ in range(80):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done', 'error'}:
+            return job
+        time.sleep(.03)
+    return job
+
+def test_batch_copies_done_results_to_export_dir(tmp_path):
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    export_dir = tmp_path / "exports"
+    response = client.post(
+        '/api/watercolour',
+        data={'export_dir': str(export_dir)},
+        files=[
+            ('files', ('good.png', png((90, 140, 210, 255)), 'image/png')),
+            ('files', ('bad.png', b'not-image', 'image/png')),
+        ],
+    )
+    assert response.status_code == 200, response.text
+    job = _run_batch_wait(client, response.json()['id'])
+    assert job['status'] == 'done', job.get('error')
+    items = job['result']['items']
+    exported = job['result']['exportedResults']
+    assert len(exported) == 1
+    assert items[0]['status'] == 'done' and items[1]['status'] == 'error'
+    exported_path = Path(exported[0])
+    assert exported_path.parent == export_dir.resolve()
+    assert exported_path.is_file()
+
+def test_batch_export_dir_collision_suffixes_the_name(tmp_path):
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    (export_dir / "00-good-watercolour.png").write_bytes(b"existing")
+    response = client.post(
+        '/api/watercolour',
+        data={'export_dir': str(export_dir)},
+        files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))],
+    )
+    assert response.status_code == 200, response.text
+    job = _run_batch_wait(client, response.json()['id'])
+    assert job['status'] == 'done', job.get('error')
+    exported = job['result']['exportedResults']
+    assert len(exported) == 1
+    exported_path = Path(exported[0])
+    assert exported_path.name == "00-good-watercolour-2.png"
+    assert (export_dir / "00-good-watercolour.png").read_bytes() == b"existing"
+
+def test_batch_rejects_private_root_export_dir():
+    from obed_edom.paths import output_root
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    response = client.post(
+        '/api/watercolour',
+        data={'export_dir': str(output_root() / ".watercolour")},
+        files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))],
+    )
+    assert response.status_code == 400
 
 def test_white_input_is_reserved_as_bare_paper():
     # Watercolour is subtractive: a white photo has no pigment, so the output must be the cream paper itself.

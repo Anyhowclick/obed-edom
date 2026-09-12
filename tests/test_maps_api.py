@@ -2746,7 +2746,7 @@ def test_export_bumps_state_revision(monkeypatch):
     job = _seed()
     before_revision = int(job["result"].get("stateRevision") or 0)
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
     monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
@@ -2755,6 +2755,40 @@ def test_export_bumps_state_revision(monkeypatch):
     done = _wait(job["id"])
     assert done["status"] == "done", done.get("error")
     assert int(done["result"]["stateRevision"] or 0) == before_revision + 1
+
+
+def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
+    job = _seed()
+    captured = {}
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        captured["export_dir"] = export_dir
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    export_dir = tmp_path / "exports"
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": str(export_dir)})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert captured["export_dir"] == export_dir.resolve()
+    assert done["result"]["exportDir"] == str(export_dir.resolve())
+
+
+def test_export_rejects_private_root_export_dir():
+    from obed_edom.paths import output_root
+
+    job = _seed()
+    response = client.post(
+        f"/api/maps/{job['id']}/export", json={"exportDir": str(output_root() / ".maps")}
+    )
+    assert response.status_code == 400
+
+
+def test_export_body_rejects_unknown_field_other_than_export_dir():
+    job = _seed()
+    response = client.post(f"/api/maps/{job['id']}/export", json={"bogus": True})
+    assert response.status_code == 422
 
 
 def test_bootstrap_csv_bumps_state_revision(monkeypatch):
@@ -3086,6 +3120,27 @@ def test_rename_maps_job_moves_folder_without_bumping_revision():
 
     save_res = _save(body, _doc(body))
     assert save_res.status_code == 200, save_res.text
+
+
+def test_rename_maps_job_leaves_external_dest_path_untouched(tmp_path):
+    job = _seed()
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    external_dest = export_dir / "wall.key"
+    external_dest.write_text("fake wall deck")
+    latest = client.get(f"/api/jobs/{job['id']}")
+    result = dict(latest.json()["result"])
+    result["destPath"] = str(external_dest)
+    from obed_edom.web.app import RUNNER
+
+    RUNNER.update_result(job["id"], result)
+
+    target = f"quiet-galilee-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["result"]["destPath"] == str(external_dest)
+    assert external_dest.is_file()
 
 
 def test_rename_maps_job_keeps_assets_and_previews_servable():

@@ -770,6 +770,27 @@ def test_rename_moves_folder_and_rewrites_result_paths(tmp_path: Path, monkeypat
     assert old_name != renamed.name
 
 
+def test_rename_leaves_external_dest_path_untouched(tmp_path: Path):
+    output = tmp_path / "output"
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir(parents=True)
+    external_dest = export_dir / "wall_CG.key"
+    external_dest.write_text("fake wall deck")
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root), "destPath": str(external_dest)}
+
+    job = runner.submit("resize", work, feature="resize")
+    done = _wait(runner, job.id)
+
+    renamed = runner.rename(job.id, "Quiet Jordan")
+    assert renamed.result["destPath"] == str(external_dest)
+    assert external_dest.is_file()
+
+
 def test_rename_reverts_folder_move_when_save_fails(tmp_path: Path, monkeypatch):
     output = tmp_path / "output"
     runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
