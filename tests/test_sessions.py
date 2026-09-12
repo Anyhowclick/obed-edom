@@ -125,7 +125,7 @@ def test_loop_reverts_result_when_save_fails(tmp_path: Path, monkeypatch):
     release.set()
 
     deadline = time.time() + 5.0
-    while time.time() < deadline and job.status not in ("error", "done"):
+    while time.time() < deadline and job.status != "error":
         time.sleep(0.02)
 
     assert job.status == "error"
