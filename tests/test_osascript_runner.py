@@ -234,8 +234,59 @@ def test_parse_json_stdout_error_messages():
 def test_timeout_env_override(monkeypatch):
     monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "0")
     assert runner.keynote_timeout() == 0
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "-1")
+    assert runner.keynote_timeout() == -1
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "nan")
+    import math
+    assert math.isnan(runner.keynote_timeout())
+    monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "inf")
+    assert runner.keynote_timeout() == float("inf")
     monkeypatch.setenv("OBED_OSASCRIPT_TIMEOUT", "garbage")
     assert runner.keynote_timeout() == runner.DEFAULT_TIMEOUT
     monkeypatch.delenv("OBED_OSASCRIPT_TIMEOUT", raising=False)
     assert runner.keynote_timeout() == runner.DEFAULT_TIMEOUT
     assert runner.DEFAULT_TIMEOUT > 3600
+
+
+def test_run_applescript_unlinks_on_write_failure(monkeypatch):
+    seen = {}
+    real_named_temp = runner.tempfile.NamedTemporaryFile
+
+    def fake_named_temp(*args, **kwargs):
+        handle = real_named_temp(*args, **kwargs)
+        seen["path"] = Path(handle.name)
+
+        def boom(_text):
+            raise OSError("disk full")
+
+        handle.write = boom
+        return handle
+
+    monkeypatch.setattr(runner.tempfile, "NamedTemporaryFile", fake_named_temp)
+    monkeypatch.setattr(
+        runner, "_execute",
+        lambda argv, **kw: pytest.fail("must not execute when the write fails"),
+    )
+    with pytest.raises(OSError):
+        runner.run_applescript("script text")
+    assert not seen["path"].exists()
+
+
+def test_run_jxa_unlinks_on_serialisation_failure(monkeypatch):
+    seen = {}
+    real_named_temp = runner.tempfile.NamedTemporaryFile
+
+    def fake_named_temp(*args, **kwargs):
+        handle = real_named_temp(*args, **kwargs)
+        seen["path"] = Path(handle.name)
+        return handle
+
+    monkeypatch.setattr(runner.tempfile, "NamedTemporaryFile", fake_named_temp)
+    monkeypatch.setattr(
+        runner, "_execute",
+        lambda argv, **kw: pytest.fail("must not execute when the plan cannot serialise"),
+    )
+    plan = {"bad": {1, 2, 3}}
+    with pytest.raises(TypeError):
+        runner.run_jxa(Path("/tmp/some_script.js"), plan)
+    assert not seen["path"].exists()

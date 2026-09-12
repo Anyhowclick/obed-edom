@@ -58,7 +58,8 @@ class OsaResult:
 
 def keynote_timeout(override: float | None = None) -> float:
     """``override`` -> ``OBED_OSASCRIPT_TIMEOUT`` -> ``DEFAULT_TIMEOUT``; 0/negative/
-    non-finite disables the limit."""
+    non-finite disables the limit (a non-numeric env value falls back to
+    ``DEFAULT_TIMEOUT``)."""
     if override is not None:
         return override
     raw = os.environ.get(_TIMEOUT_ENV, "").strip()
@@ -67,8 +68,6 @@ def keynote_timeout(override: float | None = None) -> float:
     try:
         value = float(raw)
     except ValueError:
-        return DEFAULT_TIMEOUT
-    if not math.isfinite(value):
         return DEFAULT_TIMEOUT
     return value
 
@@ -96,7 +95,7 @@ def _execute(
     if is_cancelled is not None and is_cancelled():
         raise OsascriptCancelled("Export cancelled.")
     limit = keynote_timeout(timeout)
-    deadline = None if limit <= 0 else time.monotonic() + limit
+    deadline = None if limit <= 0 or not math.isfinite(limit) else time.monotonic() + limit
     start = time.monotonic()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         proc = subprocess.Popen(argv, stdout=out, stderr=err)
@@ -127,10 +126,11 @@ def run_applescript(
     dump_on_failure: Path | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> OsaResult:
-    with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as handle:
-        handle.write(script)
-        script_path = Path(handle.name)
+    handle = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
+    script_path = Path(handle.name)
     try:
+        with handle:
+            handle.write(script)
         with KEYNOTE_LOCK:
             if launch:
                 _launch_keynote()
@@ -158,10 +158,11 @@ def run_jxa(
     timeout: float | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> OsaResult:
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-        json.dump(plan, handle)
-        plan_path = Path(handle.name)
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    plan_path = Path(handle.name)
     try:
+        with handle:
+            json.dump(plan, handle)
         with KEYNOTE_LOCK:
             if launch:
                 _launch_keynote()
