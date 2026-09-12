@@ -195,6 +195,36 @@ def test_usa_is_not_lusaka(monkeypatch):
     assert place is None or "lusaka" not in str(place.get("label") or "").lower()
 
 
+def test_geocode_singapore_carries_place_type(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    hit = geocode("Singapore")
+    assert hit["source"] == "places"
+    assert hit["placeType"] == "city"
+
+
+def test_parse_maps_query_zoom_from_url():
+    at = parse_maps_query("@1.3,103.8,6.8z")
+    assert at["zoomFromUrl"] is True
+    comma_zoom = parse_maps_query("https://www.google.com/maps/@1.3,103.8/data=!3d1!4d1,6.8z")
+    assert comma_zoom["zoomFromUrl"] is True
+    no_zoom = parse_maps_query("https://www.google.com/maps/@1.3,103.8")
+    assert no_zoom["zoomFromUrl"] is False
+    bare_pair = parse_maps_query("1.3,103.8")
+    assert bare_pair["zoomFromUrl"] is False
+
+
+def test_country_via_admin0_has_place_type(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+    hit = geocode("USA")
+    assert hit["placeType"] == "country"
+
+
 def test_geometry_bbox_antimeridian_not_lon_zero():
     geom = {
         "type": "MultiPoint",
