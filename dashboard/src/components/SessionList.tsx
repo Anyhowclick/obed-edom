@@ -22,8 +22,13 @@ export function SessionList({ jobs, activeId, onSelect, onDelete, onRename }: Pr
           {items.map((job) => (
             <div key={job.id} className={`session-row ${job.id === activeId ? "active" : ""}`}>
               <div className="session-pick-info">
-                {onRename && <JobName job={job} onRename={onRename} />}
-                <button type="button" className="session-pick" onClick={() => onSelect(job.id)}>
+                {onRename && <JobName job={job} onRename={onRename} onSelect={onSelect} />}
+                <button
+                  type="button"
+                  className="session-pick"
+                  aria-label={`Open ${jobLabel(job)}`}
+                  onClick={() => onSelect(job.id)}
+                >
                   {!onRename && jobLabel(job)}
                   <div className="cap">
                     {job.status}

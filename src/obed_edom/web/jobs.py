@@ -270,9 +270,11 @@ class JobRunner:
                     return True
             return lowered in self._deleted_names
 
-    def set_name(self, job_id: str, name: str) -> Job:
-        """Assign an already-validated name and save. Used directly by feature-specific
-        rename flows (e.g. maps, which moves its folder inside `maps_commit`)."""
+    def set_name(self, job_id: str, name: str, *, save: bool = True) -> Job:
+        """Assign an already-validated name, optionally saving immediately. Used directly
+        by feature-specific rename flows (e.g. maps, which moves its folder inside
+        `maps_commit`). Pass `save=False` to assign the name in memory only, leaving a
+        later `update_result` (in the same commit) to persist name and result together."""
         with self._job_lock(job_id):
             job = self._jobs.get(job_id)
             if not job:
@@ -280,11 +282,12 @@ class JobRunner:
             previous_name, previous_updated_at = job.name, job.updated_at
             job.name = name
             job.updated_at = time.time()
-            try:
-                self.save(job)
-            except Exception:
-                job.name, job.updated_at = previous_name, previous_updated_at
-                raise
+            if save:
+                try:
+                    self.save(job)
+                except Exception:
+                    job.name, job.updated_at = previous_name, previous_updated_at
+                    raise
         return job
 
     def rename(self, job_id: str, raw_name: str) -> Job:

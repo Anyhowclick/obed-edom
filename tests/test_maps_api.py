@@ -2854,6 +2854,22 @@ def test_rename_maps_job_keeps_assets_and_previews_servable():
     assert Path(body["result"]["previewDir"]).parent.name == target
 
 
+def test_rename_maps_job_renames_orphaned_session_archive():
+    job = _seed()
+    archive = client.get(f"/api/maps/{job['id']}/session")
+    assert archive.status_code == 200, archive.text
+    old_archive_path = Path(job["result"]["outputDir"]) / f"{job['name']}.obedmaps"
+    assert old_archive_path.is_file()
+
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    new_output_dir = Path(body["result"]["outputDir"])
+    assert not old_archive_path.exists()
+    assert (new_output_dir / f"{target}.obedmaps").is_file()
+
+
 def test_rename_maps_job_rolls_back_on_commit_failure(monkeypatch):
     job = _seed()
     old_output_dir = Path(job["result"]["outputDir"])
@@ -2887,7 +2903,7 @@ def test_rename_maps_job_rolls_back_on_set_name_failure(monkeypatch):
     job = _seed()
     old_output_dir = Path(job["result"]["outputDir"])
 
-    def boom(_job_id, _name):
+    def boom(_job_id, _name, **_kwargs):
         raise RuntimeError("session write failed")
 
     monkeypatch.setattr(RUNNER, "set_name", boom)
@@ -2898,6 +2914,30 @@ def test_rename_maps_job_rolls_back_on_set_name_failure(monkeypatch):
     stored = RUNNER.get(job["id"])
     assert stored.name == job["name"]
     assert stored.result["outputDir"] == job["result"]["outputDir"]
+
+
+def test_rename_maps_job_writes_name_and_result_in_a_single_save(monkeypatch):
+    job = _seed()
+    calls = {"n": 0}
+    real_save = RUNNER.save
+
+    def counting_save(job_obj):
+        calls["n"] += 1
+        return real_save(job_obj)
+
+    monkeypatch.setattr(RUNNER, "save", counting_save)
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    monkeypatch.undo()
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert calls["n"] == 1
+    assert body["name"] == target
+    assert Path(body["result"]["outputDir"]).name == target
+
+    stored_raw = json.loads(RUNNER._session_file(job["id"]).read_text(encoding="utf-8"))
+    assert stored_raw["name"] == target
+    assert Path(stored_raw["result"]["outputDir"]).name == target
 
 
 def test_rename_maps_job_refused_while_running():

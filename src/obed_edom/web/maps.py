@@ -481,6 +481,11 @@ def rename_job_folder(job_id: str, raw_name: str):
     `stage_path` moves its source into a temp file immediately and its abort/restore
     path only ever deletes the promoted destination, which would lose the folder
     outright on failure instead of putting it back at the old path.
+
+    `Job.name` is assigned in memory only (`set_name(..., save=False)`); the commit's
+    own `update_result` on exit persists name and result in a single session-file
+    write, avoiding a crash window where the file would carry the new name against
+    stale paths.
     """
     job = _job_or_404(job_id)
     name = normalise_job_name(raw_name)
@@ -492,6 +497,7 @@ def rename_job_folder(job_id: str, raw_name: str):
     previous_name = job.name
     old_dir: Path | None = None
     new_dir: Path | None = None
+    archive_renamed = False
     try:
         with maps_commit(job_id, None, bump=False) as commit:
             old_dir = Path(str(commit.result.get("outputDir") or ""))
@@ -501,12 +507,22 @@ def rename_job_folder(job_id: str, raw_name: str):
             if new_dir.exists():
                 raise FileExistsError(f"A folder named '{name}' already exists")
             os.replace(old_dir, new_dir)
-            commit.result = rewrite_result_paths(commit.result, old_dir, new_dir)
             if commit.result.get("stem") == job.name:
+                old_archive = new_dir / f"{job.name}.obedmaps"
+                new_archive = new_dir / f"{name}.obedmaps"
+                if old_archive.exists():
+                    os.replace(old_archive, new_archive)
+                    archive_renamed = True
                 commit.result["stem"] = name
-            runner.set_name(job_id, name)
+            commit.result = rewrite_result_paths(commit.result, old_dir, new_dir)
+            runner.set_name(job_id, name, save=False)
     except BaseException:
         if old_dir is not None and new_dir is not None and new_dir.exists() and not old_dir.exists():
+            if archive_renamed:
+                new_archive = new_dir / f"{name}.obedmaps"
+                old_archive = new_dir / f"{previous_name}.obedmaps"
+                if new_archive.exists():
+                    os.replace(new_archive, old_archive)
             os.replace(new_dir, old_dir)
         current = runner.get(job_id)
         if current is not None and current.name == name:
