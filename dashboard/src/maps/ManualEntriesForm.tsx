@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconPlus } from "./icons";
+import { IconClose, IconPlus } from "../components/icons";
 import {
   blankRow,
   rowIsEmpty,
@@ -158,7 +158,7 @@ export function ManualEntriesForm({ mode, busy, onDone, onCancel }: Props) {
               title="Remove row"
               onClick={() => remove(row.key)}
             >
-              ×
+              <IconClose />
             </button>
           </div>
         );

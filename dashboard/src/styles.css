@@ -1886,7 +1886,7 @@ label.inline-field select { width: auto; padding: 0 8px; min-height: var(--ctl-h
 .maps-manual-pins .maps-manual-head,
 .maps-manual-pins .maps-manual-row { grid-template-columns: 1.2fr 1.2fr 1.6fr 0.7fr 0.7fr 0.8fr auto; }
 .maps-manual-head { font-size: 12px; color: var(--muted); }
-.maps-manual-row input, .maps-manual-row select { padding: 7px 9px; min-width: 0; }
+.maps-manual-row input, .maps-manual-row select { padding: 0 9px; min-width: 0; }
 .maps-manual-row input[aria-invalid="true"] { border-color: var(--warn); }
 .maps-manual-actions { display: flex; gap: 8px; align-items: center; }
 .maps-manual-actions .spacer { flex: 1; }
