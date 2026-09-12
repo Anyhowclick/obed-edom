@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from obed_edom.paths import (
+    ensure_export_dir,
     export_destination,
     find_repo_root,
     output_root,
@@ -118,6 +119,30 @@ def test_validate_export_dir_accepts_sibling_of_output_root(tmp_path: Path, monk
     assert resolved == target.resolve()
 
 
+def test_validate_export_dir_rejects_case_variant_private_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    with pytest.raises(ValueError, match="cannot be inside"):
+        validate_export_dir(tmp_path / "OUTPUT" / ".MAPS" / "sub")
+
+
+def test_ensure_export_dir_accepts_valid_dir(tmp_path: Path):
+    target = tmp_path / "exports"
+    target.mkdir()
+    assert ensure_export_dir(target) == target.resolve()
+
+
+def test_ensure_export_dir_rejects_symlink_swapped_into_private_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    private = tmp_path / "output" / ".maps" / "job1"
+    private.mkdir(parents=True)
+    target = tmp_path / "exports"
+    target.symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="cannot be inside"):
+        ensure_export_dir(target)
+
+
 def test_export_destination_job_override_wins(tmp_path: Path):
     override = tmp_path / "override"
     override.mkdir()
@@ -126,28 +151,27 @@ def test_export_destination_job_override_wins(tmp_path: Path):
         result = {"exportDir": str(override)}
 
     assert export_destination(FakeJob()) == override
-    assert "exportDirFallback" not in FakeJob.result
 
 
-def test_export_destination_job_override_removed_falls_back(tmp_path: Path):
+def test_export_destination_job_override_removed_raises(tmp_path: Path):
     override = tmp_path / "override"  # never created — removed between submit and run
 
     class FakeJob:
         result = {"exportDir": str(override)}
 
-    assert export_destination(FakeJob()) == output_root()
-    assert FakeJob.result["exportDirFallback"] is True
+    with pytest.raises(ValueError, match="no longer exists"):
+        export_destination(FakeJob())
 
 
-def test_export_destination_job_override_now_a_file_falls_back(tmp_path: Path):
+def test_export_destination_job_override_now_a_file_raises(tmp_path: Path):
     override = tmp_path / "override"
     override.write_text("now a file")
 
     class FakeJob:
         result = {"exportDir": str(override)}
 
-    assert export_destination(FakeJob()) == output_root()
-    assert FakeJob.result["exportDirFallback"] is True
+    with pytest.raises(ValueError, match="no longer exists"):
+        export_destination(FakeJob())
 
 
 def test_export_destination_setting_wins_over_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -164,9 +188,7 @@ def test_export_destination_setting_wins_over_default(monkeypatch: pytest.Monkey
     assert export_destination(FakeJob()) == default_dir
 
 
-def test_export_destination_stale_setting_falls_back_to_output_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_export_destination_stale_setting_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     class FakeJob:
         result = {}
 
@@ -177,7 +199,8 @@ def test_export_destination_stale_setting_falls_back_to_output_root(
         settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(stale_dir)}
     )
     assert not stale_dir.exists()
-    assert export_destination(FakeJob()) == output_root()
+    with pytest.raises(ValueError, match="no longer exists"):
+        export_destination(FakeJob())
 
 
 def test_export_destination_falls_back_to_output_root(monkeypatch: pytest.MonkeyPatch):

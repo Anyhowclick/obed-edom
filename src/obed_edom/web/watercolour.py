@@ -5,6 +5,7 @@ import binascii
 import io
 import json
 import math
+import os
 import shutil
 import uuid
 import zipfile
@@ -17,7 +18,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
-from obed_edom.paths import export_destination, output_root, validate_export_dir
+from obed_edom.paths import ensure_export_dir, export_destination, output_root, validate_export_dir
 from obed_edom.watercolour import MAX_ENCODED_BYTES, Cancel, WatercolourCancelled, WatercolourError, WatercolourOptions, _has_paint, convert, decode_image, grabcut_mask, render
 
 router = APIRouter(prefix="/api/watercolour", tags=["watercolour"])
@@ -227,8 +228,7 @@ def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions,
 
 
 def _export_done_results(job, results: Path, rows: list[dict[str, Any]]) -> list[str]:
-    dest_dir = export_destination(job)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = ensure_export_dir(export_destination(job))
     exported: list[str] = []
     for row in rows:
         if row.get("status") != "done" or not row.get("result"):
@@ -236,14 +236,51 @@ def _export_done_results(job, results: Path, rows: list[dict[str, Any]]) -> list
         src = results / row["result"]
         if not src.is_file():
             continue
-        dest = dest_dir / src.name
-        counter = 2
-        while dest.exists():
-            dest = dest_dir / f"{src.stem}-{counter}{src.suffix}"
-            counter += 1
-        shutil.copy2(src, dest)
-        exported.append(str(dest))
+        dest = _copy_into_export_dir(src, dest_dir)
+        if dest is not None:
+            exported.append(str(dest))
     return exported
+
+
+def _copy_into_export_dir(src: Path, dest_dir: Path) -> Path | None:
+    """Copy `src` into `dest_dir`, claiming a collision-free name atomically.
+
+    Copies to a destination-local temp file first, then claims the final name by
+    hard-linking the temp file into place (atomic: `os.link` fails with
+    `FileExistsError` rather than overwriting), so two concurrent batches racing on the
+    same name never clobber each other. The temp file is always removed; a failed copy
+    leaves no partial file behind and the row is simply not reported as exported.
+    """
+    tmp = dest_dir / f".{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copy2(src, tmp)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return None
+    try:
+        stem, suffix = src.stem, src.suffix
+        counter = 1
+        while True:
+            name = f"{stem}{suffix}" if counter == 1 else f"{stem}-{counter}{suffix}"
+            candidate = dest_dir / name
+            try:
+                os.link(tmp, candidate)
+            except FileExistsError:
+                counter += 1
+                continue
+            except OSError:
+                try:
+                    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    counter += 1
+                    continue
+                os.close(fd)
+                shutil.copy2(tmp, candidate)
+            return candidate
+    except OSError:
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @router.post("")

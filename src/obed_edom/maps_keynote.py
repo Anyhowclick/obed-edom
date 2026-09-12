@@ -34,7 +34,7 @@ from obed_edom.maps_geo import (
     world_width,
 )
 from obed_edom.maps_movie import movie_path
-from obed_edom.paths import find_repo_root
+from obed_edom.paths import ensure_export_dir, find_repo_root
 
 # P2: HEVC fly/route movies, is_backdrop Map BG, score_resize — deferred.
 
@@ -1809,6 +1809,8 @@ def export_maps_job(
     flags: list[Any] = []
     flags_cg: list[Any] = []
     poster_frame: list[dict[str, Any]] = []
+    if export_dir is not None:
+        export_dir = ensure_export_dir(export_dir)
     if export_lw:
         dest = (export_dir or output_dir) / f"{stem}.key"
         _log(job, f"Exporting wall deck {dest.name} (7680×1080)…")

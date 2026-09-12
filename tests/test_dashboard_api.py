@@ -381,8 +381,7 @@ def test_outline_endpoint_writes_findings_pdf_to_export_dir(tmp_path):
     assert outline_report.is_file()
 
 
-def test_outline_export_dir_removed_between_submit_and_run_falls_back(tmp_path):
-    from obed_edom.paths import output_root
+def test_outline_export_dir_removed_between_submit_and_run_fails_the_job(tmp_path):
     from obed_edom.web.app import _run_outline
     from obed_edom.web.jobs import Job
 
@@ -390,12 +389,8 @@ def test_outline_export_dir_removed_between_submit_and_run_falls_back(tmp_path):
     export_dir = tmp_path / "exports"  # never created — simulates removal before the job runs
     job = Job(id="job-1", kind="outline", result={"exportDir": str(export_dir)})
 
-    result = _run_outline(job, path)
-
-    assert result["exportDirFallback"] is True
-    assert "exportDir" not in result
-    assert Path(result["outlineReport"]).parent == output_root()
-    assert Path(result["outlineReport"]).is_file()
+    with pytest.raises(ValueError, match="no longer exists"):
+        _run_outline(job, path)
 
 
 def test_outline_endpoint_rejects_private_root_export_dir(tmp_path):
