@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   bootstrapMapsCsv,
   bootstrapMapsPinsCsv,
+  bootstrapMapsRows,
   downloadMapsSession,
   exportMaps,
   cancelMapsExport,
@@ -46,6 +47,9 @@ import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFl
 import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
+import { IconPlus } from "../maps/icons";
+import { ManualEntriesForm } from "../maps/ManualEntriesForm";
+import type { ManualMode, MapsBootstrapRow } from "../maps/manualRows";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
@@ -175,14 +179,6 @@ function IconLabelOff() {
     <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
       <path d="M4 20 20 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconPlus() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -324,6 +320,7 @@ export function MapsTab() {
   const layersRef = useRef<HTMLDivElement | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement | null>(null);
+  const [manualMode, setManualMode] = useState<ManualMode | null>(null);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
@@ -1327,6 +1324,41 @@ export function MapsTab() {
     await selectSlide(last.id, { flush: false, audience: activeAudienceRef.current });
   }
 
+  async function onManualRows(rows: MapsBootstrapRow[], mode: ManualMode) {
+    if (!job || !rows.length) return;
+    const target = mode === "pins" ? active : null;
+    if (mode === "pins" && !target) {
+      setError("Select a slide first.");
+      return;
+    }
+    const targetJobId = job.id;
+    setError(null);
+    const beforeIds = new Set((docRef.current?.slides || []).map((slide) => slide.id));
+    try {
+      await persistCurrentState();
+      if (jobRef.current?.id !== targetJobId) return;
+      const started = await bootstrapMapsRows(
+        targetJobId,
+        target ? { rows, targetSlideId: target.id, audience: activeAudience } : { rows }
+      );
+      setJob(started);
+      const done = await pollJob(started.id, (tick) => {
+        setLogs(tick.logs);
+        setJob(tick);
+      });
+      if (jobRef.current?.id !== targetJobId) return;
+      if (done.status === "error") return;
+      reconcileServerJob(done);
+      setManualMode(null);
+      if (mode === "slides") {
+        const created = (docRef.current?.slides || []).find((slide) => !beforeIds.has(slide.id));
+        if (created) void selectSlide(created.id, { flush: false });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function onCsv(file: File, mode: "append" | "replace" | "pins") {
     if (!job) return;
     setError(null);
@@ -1953,6 +1985,27 @@ export function MapsTab() {
               </button>
               <button
                 type="button"
+                title="Key in one entry per slide: a name, optionally a place, a Google Maps link with @lat,lng, or coordinates. Each slide is zoomed to fit what it is."
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setManualMode("slides");
+                }}
+              >
+                Add slides manually…
+              </button>
+              <button
+                type="button"
+                disabled={!active}
+                title="Key in one entry per pin on the current view: a name, optionally a place or coordinates. Pins keep this slide's zoom."
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setManualMode("pins");
+                }}
+              >
+                Add pins to this view manually…
+              </button>
+              <button
+                type="button"
                 title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
@@ -2155,6 +2208,15 @@ export function MapsTab() {
             void saveQueue.current?.keepMyChanges();
           }}>Keep my changes</button>
         </div>
+      )}
+
+      {manualMode && (
+        <ManualEntriesForm
+          mode={manualMode}
+          busy={locked}
+          onCancel={() => setManualMode(null)}
+          onDone={(payload) => void onManualRows(payload, manualMode)}
+        />
       )}
 
       <div

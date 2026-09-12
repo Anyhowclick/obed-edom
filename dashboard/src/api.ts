@@ -1,3 +1,5 @@
+import type { MapsBootstrapRow } from "./maps/manualRows";
+
 export type Flag = {
   severity: "info" | "warning" | "error" | "success";
   category: string;
@@ -608,6 +610,19 @@ export async function bootstrapMapsPinsCsv(id: string, file: File, slideId: stri
   body.set("targetSlideId", slideId);
   body.set("audience", audience);
   const res = await fetch(`/api/maps/${id}/bootstrap-csv`, { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function bootstrapMapsRows(
+  id: string,
+  body: { rows: MapsBootstrapRow[]; replace?: boolean; targetSlideId?: string; audience?: "lw" | "cg" }
+): Promise<Job> {
+  const res = await fetch(`/api/maps/${id}/bootstrap-rows`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
