@@ -272,6 +272,7 @@ def plan_assembly(
     runs: Mapping[int, Mapping[ItemId, Sequence[float]]] | None = None,
     min_text_pt: float = DEFAULT_MIN_TEXT_PT,
     allow_split: bool = True,
+    text_fit: Literal["warn", "shrink"] = "warn",
 ) -> AssemblyPlan:
     classes_by_number = {c.number: c for c in classes}
     slides_by_number = {s["number"]: s for s in payload["slides"]}
@@ -413,9 +414,15 @@ def plan_assembly(
                             stacked_run_sizes[box.item_id] = ranges
                         elif unresolved:
                             if t < 1.0:
-                                raise AssemblyRefusal(
+                                if text_fit == "warn":
+                                    raise AssemblyRefusal(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                        f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
+                                    )
+                                warnings.append(
                                     f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
-                                    f"fit t={t:.2f} < 1.0, would overflow with un-shrunken text"
+                                    f"fit t={t:.2f} < 1.0, flattening run sizes to the lead size under "
+                                    "--text-fit shrink"
                                 )
                             stacked_shrink_only_sizes[box.item_id] = sizes[box.item_id]
                         else:
@@ -460,9 +467,15 @@ def plan_assembly(
                             part_text_sizes[box.item_id] = sizes1[box.item_id]
                         elif part_unresolved:
                             if t1 < 1.0:
-                                raise AssemblyRefusal(
+                                if text_fit == "warn":
+                                    raise AssemblyRefusal(
+                                        f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
+                                        f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
+                                    )
+                                warnings.append(
                                     f"slide {number} box {box.item_id[1]}: run ranges leave a gap and "
-                                    f"fit t={t1:.2f} < 1.0, would overflow with un-shrunken text"
+                                    f"fit t={t1:.2f} < 1.0, flattening run sizes to the lead size under "
+                                    "--text-fit shrink"
                                 )
                             stacked_shrink_only_sizes[box.item_id] = sizes1[box.item_id]
                         part_list.append(
@@ -1726,16 +1739,25 @@ def _staged_id_for(
 
 
 def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: AssemblyPlan, number: int) -> list[dict]:
-    """Each part's own long-box builds are always summed; a short item's build, repeated
-    on every part, is counted by max across parts common to it and summed otherwise."""
+    """Each part's own long-box builds are always summed. A short item's build is
+    recognised as "repeated" only when its source id (recovered from the part's staged
+    kindIndex) sits in every part's own ``fits`` -- i.e. it is genuinely the same shared
+    item cloned onto every part, not a per-part-unique item that happens to share an
+    (effect, animationType, identity) key. A repeated key is counted only when every
+    part's counter for it agrees; a disagreement (e.g. one part dropped it) contributes
+    nothing here, so the shortfall surfaces as a missing build for `_verify_builds` to
+    refuse or tolerate. A key that isn't recognised as repeated is summed, as before."""
     split_parts = plan.splits.get(number, ())
+    part_fits = [p.fits for p in split_parts]
     long_builds: list[dict] = []
     short_counts: list[Counter] = []
     short_reps: dict[tuple, dict] = {}
+    repeated_keys: set[tuple] = set()
     for ordinal, rec in ordinal_recs:
         part = ordinal - plan.ordinals[number]
         source_long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
         long_id = _staged_id_for(number, plan, source_long_id, part=part)
+        staged_idxs = _staged_kind_ranks(number, plan, part=part)
         counts: Counter = Counter()
         for b in rec["builds"]:
             if (b["kind"], b["kindIndex"]) == long_id:
@@ -1744,15 +1766,21 @@ def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: Assembl
             key = (b["effect"], b["animationType"], b["identity"])
             counts[key] += 1
             short_reps.setdefault(key, b)
+            idxs = staged_idxs.get(b["kind"], [])
+            if b["kindIndex"] < len(idxs):
+                src_id = (b["kind"], idxs[b["kindIndex"]])
+                if part_fits and all(src_id in fits for fits in part_fits):
+                    repeated_keys.add(key)
         short_counts.append(counts)
-    common_keys = set.intersection(*(set(c) for c in short_counts)) if short_counts else set()
+    all_keys = set().union(*(set(c) for c in short_counts)) if short_counts else set()
     merged_counts: Counter = Counter()
-    for key in common_keys:
-        merged_counts[key] = max(c[key] for c in short_counts)
-    for c in short_counts:
-        for key, n in c.items():
-            if key not in common_keys:
-                merged_counts[key] += n
+    for key in all_keys:
+        counts = [c.get(key, 0) for c in short_counts]
+        if key in repeated_keys:
+            if len(set(counts)) == 1:
+                merged_counts[key] = counts[0]
+        else:
+            merged_counts[key] = sum(counts)
     return long_builds + [short_reps[key] for key, n in merged_counts.items() for _ in range(n)]
 
 
@@ -1931,7 +1959,9 @@ def assemble_dsk_deck(
 
     include_side = frozenset(d.slide for d in decisions.values() if d.keep_side)
     payload, classes, runs = load_assembly_inputs(fw_deck, include_side=include_side)
-    plan = plan_assembly(payload, classes, decisions=decisions, band=resolved_band, clips=clips, runs=runs)
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=resolved_band, clips=clips, runs=runs, text_fit=text_fit,
+    )
 
     warnings: list[str] = list(plan.warnings)
     movie_props: dict[int, dict[str, str]] = {}

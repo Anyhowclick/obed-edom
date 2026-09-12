@@ -3642,6 +3642,108 @@ def test_stacked_box_gap_in_run_coverage_preserves_source_sizing():
     assert "set size of object text of theObj" not in script
 
 
+def _gw49_shaped_item(kind_index, *, x=2000, y=200, w=1800, h=300, split_at=20, size=150.0):
+    # GW 49-shaped: a run-size coverage gap (mostly size=None) whose only remaining fit
+    # needs t < 1.0 -- the exact case finding 1 threads text_fit through for.
+    text = _VERSE_1
+    runs = [
+        {"text": text[:split_at], "size": size},
+        {"text": text[split_at:], "size": None},
+    ]
+    item = _text_item(kind_index, x=x, y=y, w=w, h=h, runs=runs)
+    item["text"] = text
+    item["font"] = "AzoSans-Regular"
+    item["size"] = size
+    return item
+
+
+def test_unresolved_gap_below_t1_refuses_under_warn_text_fit():
+    _require_font("AzoSans-Regular")
+    item = _gw49_shaped_item(1)
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match=r"fit t=0\.\d\d < 1\.0"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, text_fit="warn")
+
+
+def test_unresolved_gap_below_t1_flattens_lead_size_under_shrink_text_fit():
+    _require_font("AzoSans-Regular")
+    item = _gw49_shaped_item(1)
+    slide = _slide(13, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, text_fit="shrink")
+    assert ("text", 1) not in plan.run_sizes.get(13, {})
+    assert ("text", 1) not in plan.text_sizes.get(13, {})
+    assert ("text", 1) in plan.shrink_text_sizes[13]
+    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(150.0 * 0.83, abs=0.01)
+    assert any(
+        "flattening run sizes to the lead size under --text-fit shrink" in w and "box 1" in w
+        for w in plan.warnings
+    )
+
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        text_fit="shrink",
+    )
+    assert "set size of object text of theObj to" in script
+
+
+def test_split_part_unresolved_gap_below_t1_refuses_under_warn_text_fit():
+    _require_font("AzoSans-Regular")
+    box1 = _gw49_shaped_item(1)
+    box2 = _long_text_item(2, _VERSE_2, y=500, size=200.0)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match=r"fit t=0\.\d\d < 1\.0"):
+        plan_assembly(
+            payload, classes, decisions=decisions, band=BAND, clips={}, text_fit="warn", min_text_pt=60.0,
+        )
+
+
+def test_split_part_unresolved_gap_below_t1_flattens_under_shrink_text_fit():
+    _require_font("AzoSans-Regular")
+    box1 = _gw49_shaped_item(1)
+    box2 = _long_text_item(2, _VERSE_2, y=500, size=200.0)
+    slide = _slide(17, [box1, box2])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(
+        payload, classes, decisions=decisions, band=BAND, clips={}, text_fit="shrink", min_text_pt=60.0,
+    )
+    assert plan.parts.get(17) == 2
+    assert ("text", 1) in plan.shrink_text_sizes[17]
+    assert any(
+        "flattening run sizes to the lead size under --text-fit shrink" in w and "box 1" in w
+        for w in plan.warnings
+    )
+
+
+def test_gw49_plans_under_shrink_and_refuses_under_warn():
+    # Read-only probe: GW 49's real run-size coverage gap with t < 1.0.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    if 49 not in by_number:
+        pytest.skip("GW deck has no slide 49")
+    decisions = {49: SlideDecision(49, "in_deck")}
+    with pytest.raises(AssemblyRefusal):
+        plan_assembly(
+            payload, [by_number[49]], decisions=decisions, band=BAND, clips={}, runs=runs, text_fit="warn",
+        )
+    plan = plan_assembly(
+        payload, [by_number[49]], decisions=decisions, band=BAND, clips={}, runs=runs, text_fit="shrink",
+    )
+    assert plan.shrink_text_sizes.get(49) or plan.splits.get(49)
+
+
 def test_stacked_mixed_run_box_keeps_run_ranges_under_text_fit_shrink():
     # Shrink no longer flattens a stacked mixed-run box -- it writes the same
     # per-run ranges (scaled by the fit factor) as warn mode, since flattening it was
@@ -3970,12 +4072,15 @@ def test_verify_builds_tolerates_badge_build_repeated_on_every_part(monkeypatch)
         iwa_builds, "deck_builds",
         lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
     )
+    # Badge (text:5) is a genuine short item -- present in every part's own fits, so
+    # its build key is recognised as "repeated" rather than summed as a per-part
+    # one-off (finding 2).
     plan = AssemblyPlan(
         kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
         autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
         splits={17: (
-            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}),
-            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}),
+            SplitPart(fits={("text", 5): None}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={("text", 5): None}, deletes=(("text", 1),), text_sizes={}),
         )},
     )
     warnings: list[str] = []
@@ -4000,12 +4105,14 @@ def test_verify_builds_tolerates_badge_build_repeated_twice_on_every_part(monkey
         iwa_builds, "deck_builds",
         lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
     )
+    # Badge (text:5) is a genuine short item -- present in every part's own fits, so
+    # its build key is recognised as "repeated" rather than summed (finding 2).
     plan = AssemblyPlan(
         kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
         autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
         splits={17: (
-            SplitPart(fits={}, deletes=(("text", 2),), text_sizes={}),
-            SplitPart(fits={}, deletes=(("text", 1),), text_sizes={}),
+            SplitPart(fits={("text", 5): None}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={("text", 5): None}, deletes=(("text", 1),), text_sizes={}),
         )},
     )
     warnings: list[str] = []
@@ -4013,3 +4120,35 @@ def test_verify_builds_tolerates_badge_build_repeated_twice_on_every_part(monkey
     assert len(builds["out_rekeyed"][17]["builds"]) == 2
     assert builds["report"]["surplus"] == []
     assert builds["report"]["missing"] == []
+
+
+def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
+    # A one-build badge repeated on every part but only actually carried by one of
+    # them (counters [1, 0]) must not be summed to one and matched against the single
+    # source build -- that would conceal the dropped build on the other part.
+    from obed_edom import iwa_builds
+
+    badge = _dissolve_build(0, ("text", "badge"))
+    src_builds = {17: {"slideId": "s", "builds": [badge], "transition": None}}
+    out_builds = {
+        2: {"slideId": "o1", "builds": [badge], "transition": None},
+        3: {"slideId": "o2", "builds": [], "transition": None},
+    }
+    monkeypatch.setattr(
+        iwa_builds, "deck_builds",
+        lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
+    )
+    # Badge (text:5) is present in every part's own fits -- a genuine short item, so
+    # its build key is recognised as "repeated"; the [1, 0] split-count disagreement
+    # must not be summed away.
+    plan = AssemblyPlan(
+        kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
+        autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
+        splits={17: (
+            SplitPart(fits={("text", 5): None}, deletes=(("text", 2),), text_sizes={}),
+            SplitPart(fits={("text", 5): None}, deletes=(("text", 1),), text_sizes={}),
+        )},
+    )
+    warnings: list[str] = []
+    with pytest.raises(AssemblyRefusal):
+        dsa._verify_builds(Path("/tmp/fw.key"), Path("/tmp/out.key"), plan, warnings)
