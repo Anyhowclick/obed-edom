@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { diffImageUrl, type Flag, type Job } from "../api";
+import { diagnosticsUrl, diffImageUrl, revealDiagnostics, type Flag, type Job } from "../api";
 import { placeItem, rebuildPairs, slotsFromPairs, combineNext, splitRights, canCombineNext, rightsOf, shiftColumn, slotsEqual, type Slot } from "../playlist";
 import { useLayout } from "../nav";
 import type { OutlineRow } from "../outline";
@@ -55,6 +55,7 @@ export type DiffResult = {
   flags: Flag[];
   outlineFlags?: Flag[];
   rows?: OutlineRow[];
+  diagnosticsPath?: string | null;
   reuse?: { used?: boolean; carried: number; changed: number; added: number; removed: number; source?: string };
 };
 
@@ -437,6 +438,25 @@ export function DiffResultView({
             >
               {showInfo ? "Hide info findings" : "Show info findings"}
             </button>
+            {result.diagnosticsPath && (
+              <>
+                <a
+                  className="btn secondary"
+                  href={diagnosticsUrl(job.id)}
+                  download
+                  title="Includes all slide text from both decks"
+                >
+                  Export diagnostics
+                </a>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  onClick={() => void revealDiagnostics(job.id)}
+                >
+                  Show in Finder
+                </button>
+              </>
+            )}
             <button
               className="btn secondary icon-btn"
               type="button"

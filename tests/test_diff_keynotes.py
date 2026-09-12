@@ -1353,3 +1353,51 @@ def test_ocr_inside_a_pasted_graphic_is_left_to_the_photo_rules(tmp_path):
     outside = OcrLine(text="Praise and Worship", confidence=0.9, x0=0.01, y0=0.02, x1=0.40, y1=0.09)
     kept = _outside_photos([inside, outside], slide, size)
     assert kept == ["Praise and Worship"]
+
+
+def test_select_text_sources_attempt_order():
+    from obed_edom.diff_keynotes import select_text_sources
+
+    # both typed, typed covers both slides -> typed attempt first, then the
+    # clean-or-full fallback (still offered, since compare_inspects stops at
+    # the first non-None finding rather than at the first attempt).
+    attempts, typed_skip = select_text_sources(
+        a_text="Your Faith", a_typed="Your Faith", a_clean="Your Faith",
+        b_text="Faith", b_typed="Faith", b_clean="Faith",
+    )
+    assert [a[0] for a in attempts] == ["typed", "clean"]
+    assert attempts[0] == ("typed", "Your Faith", "Faith", "typed-covers-both")
+    assert typed_skip is None
+
+    # typed below TYPED_COVERAGE on one side -> no typed attempt.
+    attempts, typed_skip = select_text_sources(
+        a_text="Your Faith and also a much longer caption here",
+        a_typed="Faith", a_clean="Your Faith and also a much longer caption here",
+        b_text="Faith", b_typed="Faith", b_clean="Faith",
+    )
+    assert [a[0] for a in attempts] == ["clean"]
+    assert typed_skip == "typed-below-coverage"
+
+    # typed empty on one side -> no typed attempt.
+    attempts, typed_skip = select_text_sources(
+        a_text="Your Faith", a_typed="", a_clean="Your Faith",
+        b_text="Faith", b_typed="Faith", b_clean="Faith",
+    )
+    assert [a[0] for a in attempts] == ["clean"]
+    assert typed_skip == "typed-empty"
+
+    # filter symmetric (both sides drop a similar share to "clean") -> clean source.
+    attempts, _typed_skip = select_text_sources(
+        a_text="Your Faith [PHOTO]", a_typed="", a_clean="Your Faith",
+        b_text="Faith [PHOTO]", b_typed="", b_clean="Faith",
+    )
+    assert attempts[-1][0] == "clean"
+
+    # filter asymmetric (one side drops far more than the other) -> full source.
+    a_full = "Your Faith and a long caption on this slide only"
+    b_full = "Faith [PHOTO]"
+    attempts, _typed_skip = select_text_sources(
+        a_text=a_full, a_typed="", a_clean=a_full,
+        b_text=b_full, b_typed="", b_clean="Faith",
+    )
+    assert attempts[-1] == ("full", a_full, b_full, "filter-asymmetric")

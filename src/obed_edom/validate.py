@@ -41,8 +41,8 @@ def load_rules() -> dict:
     return _RULES_CACHE
 
 
-def rule_severity(rule: str, default: str = "warning") -> str | None:
-    configured = (load_rules().get("rules") or {}).get(rule, default)
+def rule_severity(rule: str, default: str = "warning", *, rules: dict | None = None) -> str | None:
+    configured = (rules if rules is not None else (load_rules().get("rules") or {})).get(rule, default)
     text = str(configured).strip().lower()
     if text in {"off", "none", "false", "silent"}:
         return None

@@ -302,6 +302,15 @@ export function evidenceUrl(jobId: string, filename: string): string {
   return `/api/jobs/${jobId}/evidence/${encodeURIComponent(filename)}`;
 }
 
+export function diagnosticsUrl(jobId: string): string {
+  return `/api/jobs/${jobId}/diagnostics`;
+}
+
+export async function revealDiagnostics(jobId: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${jobId}/diagnostics/reveal`, { method: "POST" });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
 export async function pollJob(
   id: string,
   onTick: (job: Job) => void,
