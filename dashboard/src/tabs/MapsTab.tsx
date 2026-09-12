@@ -1173,6 +1173,8 @@ export function MapsTab() {
       return;
     }
     if (link.kind === "movie") {
+      await applyPreviewView(fromView, run);
+      if (previewAbort.current || previewRun.current !== run) return;
       try {
         await mapRef.current?.animateHop({
           from: fromView.camera,
@@ -2212,7 +2214,7 @@ export function MapsTab() {
                 camera={renderedView?.camera || active.camera}
                 styleId={renderedView?.style || active.style}
                 highlights={renderedView?.highlights || active.highlights}
-                isolate={renderedView?.isolate || active.isolate}
+                isolate={renderedView ? renderedView.isolate : active.isolate}
                 churches={renderedView?.churches || active.churches}
                 numberPins={outgoing?.kind === "movie"}
                 crop={doc?.crop || "center+cg"}
