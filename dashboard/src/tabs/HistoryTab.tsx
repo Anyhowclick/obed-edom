@@ -40,34 +40,6 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
         upsert(await relocateJob(active.id, { path: file.path }));
         return;
       }
-      if (feature === "maps") {
-        const wall = await chooseKeynote("LED wall Map Keynote");
-        const result = (active.result || {}) as {
-          exportCg?: boolean;
-          exportDsk?: boolean;
-          destPathCg?: string;
-          destPathDsk?: string;
-        };
-        const needCg = result.exportCg !== false || Boolean(result.destPathCg);
-        const needDsk = result.exportDsk === true || Boolean(result.destPathDsk);
-        const body: { destPath: string; destPathCg?: string; destPathDsk?: string } = { destPath: wall.path };
-        if (needCg) {
-          try {
-            const cg = await chooseKeynote("CG Map Keynote");
-            body.destPathCg = cg.path;
-          } catch {}
-        }
-        if (needDsk) {
-          try {
-            const dsk = await chooseKeynote("DSK Map Keynote");
-            body.destPathDsk = dsk.path;
-          } catch {
-            /* wall relocate still proceeds */
-          }
-        }
-        upsert(await relocateJob(active.id, body));
-        return;
-      }
       const left = await chooseKeynote("Left / LW Keynote");
       const right = await chooseKeynote("Right Keynote");
       upsert(await relocateJob(active.id, { leftPath: left.path, rightPath: right.path }));
@@ -123,7 +95,7 @@ export function HistoryTab({ active: visible }: { active: boolean }) {
                       Use this folder
                     </button>
                   )}
-                  {feature && feature !== "watercolour" && (
+                  {feature && feature !== "watercolour" && feature !== "maps" && (
                     <button className="btn secondary" type="button" onClick={relocate}>
                       Relocate…
                     </button>
