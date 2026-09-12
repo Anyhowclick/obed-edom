@@ -11,9 +11,11 @@ import {
 } from "../api";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { FramingReview, type FramingProposal } from "../components/FramingReview";
 import { InspectResultView } from "../components/InspectResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
+import { useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 function parseSlideSpec(raw: string): number[] | null {
@@ -67,6 +69,7 @@ export function ResizeTab() {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.resize.exportDir");
   const result = (job?.result || undefined) as ResizeResult | undefined;
 
   useEffect(() => {
@@ -101,6 +104,7 @@ export function ResizeTab() {
         templatePath: template.path,
         slides: parsedSlides ?? undefined,
         validate,
+        exportDir: exportDir || undefined,
       });
       upsert(created);
       await track(created);
@@ -192,6 +196,7 @@ export function ResizeTab() {
           onPath={(path) => setTemplate({ path, name: path.split("/").pop() || path })}
           onError={setError}
         />
+        <ExportDestinationRow value={exportDir} onChange={setExportDir} onError={setError} />
       </div>
       <label className="field">
         Slides — leave blank for the whole deck

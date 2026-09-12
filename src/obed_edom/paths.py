@@ -50,8 +50,8 @@ def validate_export_dir(raw: str | Path) -> Path:
             raise ValueError(f"Export directory cannot be inside {private_root}")
 
     try:
-        resolved.relative_to(cache_root().resolve())
-    except ValueError:
+        resolved.resolve().relative_to(cache_root().resolve())
+    except (ValueError, FileNotFoundError):
         pass
     else:
         raise ValueError(f"Export directory cannot be inside {cache_root()}")

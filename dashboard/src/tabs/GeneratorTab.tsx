@@ -2,6 +2,7 @@ import { useState } from "react";
 import { chooseKeynote, generateDocx, pollJob, type ChosenFile } from "../api";
 import { FileWell } from "../components/FileWell";
 import { ErrorNotice } from "../components/ErrorNotice";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { GenerateResultView } from "../components/GenerateResultView";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import {
@@ -9,6 +10,7 @@ import {
   LW_TEMPLATE_KEY,
   loadStoredFile,
   saveStoredFile,
+  useSessionPath,
 } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
@@ -16,6 +18,7 @@ export function GeneratorTab() {
   const { job, upsert, rename, error: openError } = useCurrentJob("generate");
   const [lwTemplate, setLwTemplate] = useState<ChosenFile | null>(() => loadStoredFile(LW_TEMPLATE_KEY));
   const [dskTemplate, setDskTemplate] = useState<ChosenFile | null>(() => loadStoredFile(DSK_TEMPLATE_KEY));
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.generate.exportDir");
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -55,10 +58,14 @@ export function GeneratorTab() {
     setError(null);
     setBusy(true);
     try {
-      const created = await generateDocx(docx, {
-        lwTemplate: lwTemplate?.path,
-        dskTemplate: dskTemplate?.path,
-      });
+      const created = await generateDocx(
+        docx,
+        {
+          lwTemplate: lwTemplate?.path,
+          dskTemplate: dskTemplate?.path,
+        },
+        exportDir
+      );
       for (const createdJob of created) {
         upsert(createdJob);
         const done = await pollJob(createdJob.id, (tick) => {
@@ -119,6 +126,7 @@ export function GeneratorTab() {
           }}
           onError={setError}
         />
+        <ExportDestinationRow value={exportDir} onChange={setExportDir} onError={setError} />
       </div>
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {(busy || running) && <LoadingOverlay title="Generating decks…" logs={logs} />}

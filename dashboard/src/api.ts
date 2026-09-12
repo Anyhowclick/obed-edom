@@ -75,12 +75,14 @@ export async function reveal(path: string): Promise<void> {
 
 export async function generateDocx(
   files: File[],
-  templates: { lwTemplate?: string; dskTemplate?: string }
+  templates: { lwTemplate?: string; dskTemplate?: string },
+  exportDir?: string
 ): Promise<Job[]> {
   const body = new FormData();
   for (const file of files) body.append("files", file);
   if (templates.lwTemplate) body.set("lw_template", templates.lwTemplate);
   if (templates.dskTemplate) body.set("dsk_template", templates.dskTemplate);
+  if (exportDir) body.set("export_dir", exportDir);
   const res = await fetch("/api/generate", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   const data = await res.json();
@@ -163,6 +165,7 @@ export type Settings = {
   reuseThreshold: number;
   reusePairings: boolean;
   reusePreviews: boolean;
+  defaultExportDir: string;
 };
 
 export async function getSettings(): Promise<Settings> {
@@ -203,9 +206,10 @@ export async function startDiff(
   return res.json();
 }
 
-export async function startOutline(path: string): Promise<Job> {
+export async function startOutline(path: string, exportDir?: string): Promise<Job> {
   const body = new FormData();
   body.set("path", path);
+  if (exportDir) body.set("export_dir", exportDir);
   const res = await fetch("/api/outline", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -257,6 +261,7 @@ export async function startResize(
     export?: boolean;
     includeLists?: boolean;
     validate?: boolean;
+    exportDir?: string;
   }
 ): Promise<Job> {
   const body = new FormData();
@@ -268,6 +273,7 @@ export async function startResize(
   body.set("export", opts.export === false ? "false" : "true");
   body.set("include_lists", opts.includeLists ? "true" : "false");
   body.set("validate", opts.validate === false ? "false" : "true");
+  if (opts.exportDir) body.set("export_dir", opts.exportDir);
   const res = await fetch("/api/resize", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -593,7 +599,7 @@ export async function addMapsLandmark(id: string, slideId: string, audience: "lw
   return { job: job as Job, churchId };
 }
 
-export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean }): Promise<Job> {
+export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean; exportDir?: string }): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -611,13 +617,14 @@ export async function cancelMapsExport(id: string): Promise<Job> {
 
 export async function startWatercolour(
   files: File[],
-  opts: { washSoftness: number; inkAmount: number; masks: Record<string, unknown> }
+  opts: { washSoftness: number; inkAmount: number; masks: Record<string, unknown>; exportDir?: string }
 ): Promise<Job> {
   const body = new FormData();
   for (const file of files) body.append("files", file);
   body.set("wash_softness", String(opts.washSoftness));
   body.set("ink_amount", String(opts.inkAmount));
   body.set("masks", JSON.stringify(opts.masks));
+  if (opts.exportDir) body.set("export_dir", opts.exportDir);
   const res = await fetch("/api/watercolour", { method: "POST", body });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();

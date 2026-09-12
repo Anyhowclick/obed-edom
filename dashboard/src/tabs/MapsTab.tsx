@@ -29,7 +29,8 @@ import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { type Item as WcItem } from "../components/WatercolourResultView";
 import { useRunNav } from "../nav";
-import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionToggle } from "../prefs";
+import { MAPS_INSPECTOR_KEY, MAPS_SIDE_PANELS_KEY, useSessionPath, useSessionToggle } from "../prefs";
+import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { jobLabel, renameAndApply, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
@@ -294,6 +295,7 @@ export function MapsTab() {
     return Number.isFinite(raw) && raw >= 160 ? Math.min(420, raw) : 220;
   });
   const navDrag = useRef<{ x: number; w: number } | null>(null);
+  const [exportDir, setExportDir] = useSessionPath("obed-edom.maps.exportDir");
   const [sidePanels, setSidePanels] = useSessionToggle(MAPS_SIDE_PANELS_KEY, true);
   const [inspectorOpen, setInspectorOpen] = useSessionToggle(MAPS_INSPECTOR_KEY, true);
   const [layersOpen, setLayersOpen] = useState(false);
@@ -1736,6 +1738,7 @@ export function MapsTab() {
         exportLw: latest?.exportLw,
         exportCg: latest?.exportCg,
         exportDsk: latest?.exportDsk,
+        exportDir: exportDir || undefined,
       });
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
@@ -2995,6 +2998,7 @@ export function MapsTab() {
                     />
                     DSK lower third (1920×1080)
                   </label>
+                  <ExportDestinationRow value={exportDir} onChange={setExportDir} onError={setError} />
                   <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
                     Export
                   </button>
