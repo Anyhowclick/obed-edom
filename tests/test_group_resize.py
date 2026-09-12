@@ -563,19 +563,17 @@ def test_stat_accumulators_include_raise_liveness_counters():
 def test_run_stat_finalize_result_dict_exposes_raise_liveness_counters(monkeypatch, tmp_path):
     """End-to-end through _run_stat_finalize's own raw-string parsing, with
     subprocess.run stubbed so no Keynote/osascript actually runs."""
-    from types import SimpleNamespace
-
     import obed_edom.keynote as keynote_mod
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
 
@@ -815,19 +813,17 @@ def test_finalize_return_string_carries_badge_counters():
 def test_run_stat_finalize_result_dict_exposes_badge_counters(monkeypatch, tmp_path):
     """End-to-end through _run_stat_finalize's own raw-string parsing, with
     subprocess.run stubbed so no Keynote/osascript actually runs."""
-    from types import SimpleNamespace
-
     import obed_edom.keynote as keynote_mod
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
 
@@ -1395,13 +1391,13 @@ def test_badge_probe_blind_token_round_trips_through_the_parsers(monkeypatch):
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     state["raw"] = (
@@ -1870,19 +1866,17 @@ def test_parse_detail_tokens_boundaries():
 def test_run_stat_finalize_exposes_front_err_and_tokens(monkeypatch, tmp_path):
     """End-to-end through _run_stat_finalize's own raw-string parsing, with
     subprocess.run stubbed so no Keynote/osascript actually runs."""
-    from types import SimpleNamespace
-
     import obed_edom.keynote as keynote_mod
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
 
@@ -1905,19 +1899,17 @@ def test_run_stat_finalize_exposes_front_err_and_tokens(monkeypatch, tmp_path):
 def test_run_stat_finalize_front_err_empty_when_absent(monkeypatch, tmp_path):
     """End-to-end through _run_stat_finalize's own raw-string parsing, with
     subprocess.run stubbed so no Keynote/osascript actually runs."""
-    from types import SimpleNamespace
-
     import obed_edom.keynote as keynote_mod
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
 
@@ -2416,19 +2408,17 @@ def test_finalize_return_string_carries_raise_blind_counters():
 
 
 def test_run_stat_finalize_result_dict_exposes_raise_blind_counters(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
     import obed_edom.keynote as keynote_mod
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
 
@@ -2446,19 +2436,17 @@ def test_run_stat_finalize_result_dict_exposes_raise_blind_counters(monkeypatch,
 
 
 def test_run_stat_finalize_result_dict_exposes_raise_click_retried(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
     import obed_edom.keynote as keynote_mod
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     state["raw"] = (
@@ -2483,13 +2471,13 @@ def test_front_err_retry_tag_round_trips_through_both_parsers(monkeypatch, tmp_p
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     state["raw"] = (
@@ -2514,13 +2502,13 @@ def test_front_err_entry_round_trips_through_both_parsers(monkeypatch, tmp_path)
 
     state = {"raw": ""}
 
-    def fake_run(args, *a, **kw):
-        if args[0] == "osascript":
-            return SimpleNamespace(returncode=0, stdout=state["raw"], stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    from obed_edom import osascript_runner
 
-    monkeypatch.setattr(keynote_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(keynote_mod.time, "sleep", lambda *_: None)
+    def fake_execute(argv, *, timeout=None, is_cancelled=None):
+        return osascript_runner.OsaResult(argv=argv, returncode=0, stdout=state["raw"], stderr="", elapsed=0.0)
+
+    monkeypatch.setattr(osascript_runner, "_execute", fake_execute)
+    monkeypatch.setattr(osascript_runner, "_launch_keynote", lambda: None)
 
     jobs = [{"slide": 4, "groupIndex": 1, "childSig": "269"}]
     state["raw"] = (
