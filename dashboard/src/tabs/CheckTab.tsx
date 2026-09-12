@@ -16,7 +16,7 @@ import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { useLayout } from "../nav";
 import type { Slot } from "../playlist";
-import { useSessionPath } from "../prefs";
+import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 
 type Mode = "none" | "outline" | "deck" | "deck+outline" | "pair" | "pair+outline";
@@ -61,6 +61,7 @@ export function CheckTab() {
   const [open, setOpen] = useState<string | null>(null);
   const [lwFinal, setLwFinal] = useState(true);
   const [exportDir, setExportDir] = useSessionPath("obed-edom.check.exportDir");
+  const defaultExportDir = useDefaultExportDir();
 
   const result = (job?.result || undefined) as
     | { path?: string; leftPath?: string; rightPath?: string; outlinePath?: string; kind?: string }
@@ -211,7 +212,12 @@ export function CheckTab() {
             onError={setError}
           />
           {mode === "outline" && (
-            <ExportDestinationRow value={exportDir} onChange={setExportDir} onError={setError} />
+            <ExportDestinationRow
+              value={exportDir}
+              onChange={setExportDir}
+              defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+              onError={setError}
+            />
           )}
         </div>
         {wallPresent && outline && (

@@ -131,10 +131,28 @@ def test_export_destination_setting_wins_over_default(monkeypatch: pytest.Monkey
 
     from obed_edom import settings as settings_mod
 
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
     monkeypatch.setattr(
-        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(tmp_path / "default")}
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(default_dir)}
     )
-    assert export_destination(FakeJob()) == Path(tmp_path / "default")
+    assert export_destination(FakeJob()) == default_dir
+
+
+def test_export_destination_stale_setting_falls_back_to_output_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    class FakeJob:
+        result = {}
+
+    from obed_edom import settings as settings_mod
+
+    stale_dir = tmp_path / "gone"
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(stale_dir)}
+    )
+    assert not stale_dir.exists()
+    assert export_destination(FakeJob()) == output_root()
 
 
 def test_export_destination_falls_back_to_output_root(monkeypatch: pytest.MonkeyPatch):

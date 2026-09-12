@@ -461,7 +461,7 @@ def create_app() -> FastAPI:
             "outline",
             lambda j, p=outline: _run_outline(j, p),
             feature="check",
-            result=seed_result or None,
+            result=dict(seed_result) if seed_result else None,
         )
         return job.to_dict()
 
@@ -801,6 +801,7 @@ def _run_generate(
         "dskCount": len(result.dsk_slides) if result.dsk_key else 0,
         "lwTemplate": str(lw_template) if lw_template else None,
         "dskTemplate": str(dsk_template) if dsk_template else None,
+        "exportDir": (job.result or {}).get("exportDir"),
     }
 
 
@@ -1230,7 +1231,7 @@ def _run_outline(job: Job, path: Path) -> dict[str, Any]:
         "kind": "outline",
         "outputDir": str(dest_dir),
         "outlineReport": str(written) if written else None,
-        "exportDir": (job.result or {}).get("exportDir") if job.result else None,
+        "exportDir": (job.result or {}).get("exportDir"),
     }
 
 
@@ -1560,7 +1561,7 @@ def _run_resize(
         "path": str(path),
         "outputDir": str(dest_dir),
         "destPath": str(dest),
-        "exportDir": (job.result or {}).get("exportDir") if job.result else None,
+        "exportDir": (job.result or {}).get("exportDir"),
         "templatePath": str(template),
         "slideWidth": inspect.get("slideWidth") or info.get("width"),
         "slideHeight": inspect.get("slideHeight") or info.get("height"),

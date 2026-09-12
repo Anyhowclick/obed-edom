@@ -10,6 +10,7 @@ import {
   LW_TEMPLATE_KEY,
   loadStoredFile,
   saveStoredFile,
+  useDefaultExportDir,
   useSessionPath,
 } from "../prefs";
 import { useCurrentJob } from "../sessions";
@@ -19,6 +20,7 @@ export function GeneratorTab() {
   const [lwTemplate, setLwTemplate] = useState<ChosenFile | null>(() => loadStoredFile(LW_TEMPLATE_KEY));
   const [dskTemplate, setDskTemplate] = useState<ChosenFile | null>(() => loadStoredFile(DSK_TEMPLATE_KEY));
   const [exportDir, setExportDir] = useSessionPath("obed-edom.generate.exportDir");
+  const defaultExportDir = useDefaultExportDir();
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -126,7 +128,12 @@ export function GeneratorTab() {
           }}
           onError={setError}
         />
-        <ExportDestinationRow value={exportDir} onChange={setExportDir} onError={setError} />
+        <ExportDestinationRow
+          value={exportDir}
+          onChange={setExportDir}
+          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+          onError={setError}
+        />
       </div>
       <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
       {(busy || running) && <LoadingOverlay title="Generating decks…" logs={logs} />}

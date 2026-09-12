@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { getSettings } from "./api";
 
 /** A boolean the operator sets once and keeps for the rest of the session. */
 export function useSessionToggle(key: string, fallback: boolean): [boolean, (next: boolean) => void] {
@@ -53,6 +54,30 @@ export function useSessionPath(key: string, fallback = ""): [string, (next: stri
   );
 
   return [value, update];
+}
+
+let defaultExportDirRequest: Promise<string> | null = null;
+
+/** The operator's persisted default export folder (`""` when unset), fetched once and shared. */
+export function useDefaultExportDir(): string {
+  const [value, setValue] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!defaultExportDirRequest) {
+      defaultExportDirRequest = getSettings()
+        .then((settings) => settings.defaultExportDir || "")
+        .catch(() => "");
+    }
+    defaultExportDirRequest.then((dir) => {
+      if (!cancelled) setValue(dir);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return value;
 }
 
 export const SHOW_INFO_KEY = "obed-edom.findings.showInfo";

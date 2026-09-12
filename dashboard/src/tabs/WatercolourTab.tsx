@@ -5,7 +5,7 @@ import { ExportDestinationRow } from "../components/ExportDestinationRow";
 import { FileWell } from "../components/FileWell";
 import { Lightbox, LoadingOverlay } from "../components/PreviewGrid";
 import { WatercolourResultView } from "../components/WatercolourResultView";
-import { useSessionPath } from "../prefs";
+import { useDefaultExportDir, useSessionPath } from "../prefs";
 import { useCurrentJob } from "../sessions";
 import { floodFill } from "../watercolour/floodFill";
 import { sobelMagnitude, snapToEdge } from "../watercolour/edges";
@@ -1029,6 +1029,7 @@ export function WatercolourTab() {
   const cancelRef = useRef(false);
   const landmarkMaskRef = useRef<LandmarkMaskHandle | null>(null);
   const [exportDir, setExportDir] = useSessionPath("obed-edom.watercolour.exportDir");
+  const defaultExportDir = useDefaultExportDir();
 
   async function selectFiles(next: File[]) {
     const resolved = await Promise.all(next.map(toSupported));
@@ -1103,7 +1104,12 @@ export function WatercolourTab() {
           onFiles={selectFiles}
           browseLabel="Choose on this Mac"
         />
-        <ExportDestinationRow value={exportDir} onChange={setExportDir} onError={setError} />
+        <ExportDestinationRow
+          value={exportDir}
+          onChange={setExportDir}
+          defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+          onError={setError}
+        />
       </div>
       {files.length > 0 && <p className="note">{files.map((file) => file.name).join(", ")}</p>}
 

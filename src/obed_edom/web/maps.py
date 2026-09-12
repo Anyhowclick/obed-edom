@@ -1232,6 +1232,8 @@ def _run_export(job, export_lw: bool, export_cg: bool, export_dsk: bool = False,
     result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir)
     if export_dir is not None:
         result["exportDir"] = str(export_dir)
+    else:
+        result.pop("exportDir", None)
     return _bump_state_revision(job.id, result)
 
 

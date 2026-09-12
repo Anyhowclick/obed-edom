@@ -32,10 +32,7 @@ def _clamp(data: dict) -> dict:
     if "reusePreviews" in data:
         out["reusePreviews"] = bool(data["reusePreviews"])
     if "defaultExportDir" in data:
-        from obed_edom.paths import validate_export_dir  # noqa: PLC0415
-
-        raw = str(data["defaultExportDir"] or "").strip()
-        out["defaultExportDir"] = str(validate_export_dir(raw)) if raw else ""
+        out["defaultExportDir"] = str(data["defaultExportDir"] or "").strip()
     return out
 
 
@@ -54,6 +51,10 @@ def load_settings(root: Path | None = None) -> dict:
 
 def save_settings(data: dict, root: Path | None = None) -> dict:
     out = _clamp(data)
+    if out["defaultExportDir"]:
+        from obed_edom.paths import validate_export_dir  # noqa: PLC0415
+
+        out["defaultExportDir"] = str(validate_export_dir(out["defaultExportDir"]))
     path = settings_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")

@@ -2775,6 +2775,26 @@ def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
     assert done["result"]["exportDir"] == str(export_dir.resolve())
 
 
+def test_export_clears_export_dir_with_empty_string(monkeypatch, tmp_path):
+    job = _seed()
+
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+        return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
+    export_dir = tmp_path / "exports"
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": str(export_dir)})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["result"]["exportDir"] == str(export_dir.resolve())
+
+    response = client.post(f"/api/maps/{job['id']}/export", json={"exportDir": ""})
+    assert response.status_code == 200, response.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert "exportDir" not in done["result"]
+
+
 def test_export_rejects_private_root_export_dir():
     from obed_edom.paths import output_root
 
