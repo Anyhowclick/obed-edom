@@ -1659,7 +1659,8 @@ def test_plan_crops_leaves_pre_existing_file_on_refusal(tmp_path, monkeypatch):
             key_path, {}, objects, items, [("image", 0), ("image", 1)],
             crop_dir=crop_dir, number=3,
         )
-    assert out_path.exists()
+    assert out_path.read_bytes() == b"pre-existing"
+    assert [p for p in out_path.parent.iterdir()] == [out_path]
 
 
 def _empty_key(tmp_path):

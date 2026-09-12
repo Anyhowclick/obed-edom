@@ -292,11 +292,12 @@ its style, builds and z-order.
   - a build targets the image → **do not replace**; keep the source drawable, fit it as today and
     emit an `OBED … LWCROP` operator note. A delete-and-reinsert changes the file name and
     `build_identity` is file-keyed (F6), so the build would be silently lost.
-  - `px != naturalSize`, EXIF orientation ≠ 1, an unresolvable data member, or a rotated frame/mask
-    that a crop actually needs → same fallback + a warning; a rotated image needing no crop is
-    silent (checked before the rotation test, see above).
+  - `px != naturalSize`, EXIF orientation ≠ 1, an unresolvable data member, a referenced-but-missing
+    mask, an invalid frame/`naturalSize`, or a rotated frame/mask that a crop actually needs → same
+    fallback + a warning; a rotated image needing no crop is silent (checked before the rotation
+    test, see above).
   - the crop window is < 8 px on either axis, or the `fileName` collides with another kept image
-    already cropped this slide → refuse the slide.
+    (whether already cropped this slide or left uncropped, order-independent) → refuse the slide.
 - **Style continuity**: a fresh insert has no card stroke. `_restore_stroke` (`dsk_assemble.py:997`)
   keys media by file name via `card_styles(out_objects, out_id_to_file)`, so register the cropped
   file under its **source** file name — pass `plan.crops`' `source_file_name` into the
@@ -411,7 +412,8 @@ New `dsk-assemble` CLI (`cli.py:113`):
 `--text-slide-words N` (10), `--min-text-pt N` (default **24**; the golden's verse text is 45 pt and
 its badges 40 pt, so 24 is a floor, not a target), `--no-dedupe`, `--no-auto-anchor`,
 `--no-drop-panel-backdrop`, `--no-split`, `--split N=k` (operator override of the offline decision),
-`--crop-dir PATH`, `--no-image-crop` (fall back to the LWCROP note everywhere).
+`--crop-dir PATH`, `--no-image-crop` (fall back to the LWCROP note everywhere; the deck still loads
+and crop analysis still runs, only the write-to-disk step is skipped).
 
 `classes` must already have been built (via `classify_deck`/`classify_slide`) with the SAME
 `--no-dedupe`/`--no-drop-panel-backdrop` flags passed to `plan_assembly`, since `cls.kept` and

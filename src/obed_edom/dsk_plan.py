@@ -7,6 +7,8 @@ image/movie band for CG-style placement. Never opens Keynote.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
@@ -947,8 +949,11 @@ MIN_CROP_PX = 8.0
 
 
 class CropRefusal(ValueError):
-    """Hard refusal (min window, duplicate name) or a per-item fallback signal
-    caught by ``plan_crops`` and turned into an LWCROP warning."""
+    """Hard refusal (min window, duplicate name) that aborts the whole slide."""
+
+
+class CropFallback(CropRefusal):
+    """Per-item fallback signal, caught by ``plan_crops`` and turned into an LWCROP warning."""
 
 
 @dataclass(frozen=True)
@@ -982,11 +987,10 @@ def crop_geometry(
     obj: dict, objects: dict[str, dict], window: Rect
 ) -> tuple[Rect, Rect, tuple[int, int, int, int]] | None:
     """``(mask_abs, visible, px_box)`` for an image/movie ``obj`` clipped to
-    ``window``, or ``None`` when nothing is visible; raises ``CropRefusal`` as a
-    per-item fallback (rotated geometry, unresolved mask, invalid size)."""
+    ``window``, or ``None`` when nothing is visible; raises ``CropFallback`` otherwise."""
     mask_ref = (obj.get("mask") or {}).get("identifier")
     if mask_ref is not None and objects.get(str(mask_ref)) is None:
-        raise CropRefusal("referenced mask not found")
+        raise CropFallback("referenced mask not found")
     geom = _geom_dict(obj)
     mask_geom = _mask_geom(obj, objects)
     frame_angle = _xywha(geom)[4]
@@ -1004,13 +1008,13 @@ def crop_geometry(
     if rotated:
         if _rects_close(visible, mask_abs):
             return None
-        raise CropRefusal("rotated-masked geometry" if mask_geom else "rotated frame")
+        raise CropFallback("rotated-masked geometry" if mask_geom else "rotated frame")
     frame = Rect(*_frame_rect(geom))
     natural = _asset_natural_size(obj)
     if frame.w <= 0 or frame.h <= 0 or natural[0] <= 0 or natural[1] <= 0:
         if _rects_close(visible, mask_abs):
             return None
-        raise CropRefusal("invalid frame or naturalSize geometry")
+        raise CropFallback("invalid frame or naturalSize geometry")
     sx, sy = natural[0] / frame.w, natural[1] / frame.h
     x0, y0 = (visible.x - frame.x) * sx, (visible.y - frame.y) * sy
     x1, y1 = x0 + visible.w * sx, y0 + visible.h * sy
@@ -1061,7 +1065,7 @@ def plan_crops(
 
     used_names: set[str] = set()
     kept_uncropped_names: set[str] = set()
-    created_paths: set[Path] = set()
+    pending_writes: list[tuple[Path, Path]] = []
 
     def _mark_kept(it: dict) -> None:
         name = it.get("fileName")
@@ -1069,12 +1073,8 @@ def plan_crops(
             kept_uncropped_names.add(name)
 
     def _cleanup() -> None:
-        for spec in crops.values():
-            path = Path(spec.path)
-            if path in created_paths:
-                path.unlink(missing_ok=True)
-            else:
-                warnings.append(f"left pre-existing file {path} untouched on refusal")
+        for temp_path, _out_path in pending_writes:
+            temp_path.unlink(missing_ok=True)
 
     with zipfile.ZipFile(key_path) as zf:
         data_index = data_member_index(zf.namelist())
@@ -1092,7 +1092,7 @@ def plan_crops(
                 continue
             try:
                 result = crop_geometry(obj, objects, window)
-            except CropRefusal as exc:
+            except CropFallback as exc:
                 warnings.append(f"image {item_id[1]}: {exc}, keeping source (LWCROP)")
                 _mark_kept(item)
                 continue
@@ -1159,18 +1159,19 @@ def plan_crops(
             pre_existing = out_path.exists()
             ext = Path(source_name).suffix.lower()
             save_kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
+            temp_fd, temp_name = tempfile.mkstemp(dir=out_dir, prefix=f".{source_name}.", suffix=ext)
+            os.close(temp_fd)
+            temp_path = Path(temp_name)
             try:
-                src_img.crop(px_box).save(out_path, **save_kwargs)
+                src_img.crop(px_box).save(temp_path, **save_kwargs)
             except Exception as exc:  # noqa: BLE001
-                if not pre_existing:
-                    out_path.unlink(missing_ok=True)
+                temp_path.unlink(missing_ok=True)
                 warnings.append(f"image {item_id[1]}: could not save crop as {source_name!r} ({exc}), keeping source (LWCROP)")
                 _mark_kept(item)
                 continue
 
             used_names.add(source_name)
-            if not pre_existing:
-                created_paths.add(out_path)
+            pending_writes.append((temp_path, out_path))
             crops[item_id] = CropSpec(
                 path=out_path, source_file_name=source_name, px_box=px_box, visible=visible,
                 created=not pre_existing,
@@ -1184,5 +1185,8 @@ def plan_crops(
                 f"slide {number} image {conflicting[1]}: fileName {name!r} collides with another "
                 "kept image left uncropped this slide"
             )
+
+    for temp_path, out_path in pending_writes:
+        os.replace(temp_path, out_path)
 
     return crops, warnings
