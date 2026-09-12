@@ -562,3 +562,39 @@ def test_nul_byte_in_field_parses_without_error():
     places, errors = parse_places(text)
     assert errors == []
     assert places[0].name == "Paris\x00"
+
+
+def test_headerless_stray_quote_mid_name_is_literal():
+    text = 'Paris,1,2\nO"Brien,1,2'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Paris", 'O"Brien']
+
+
+def test_header_form_stray_quote_mid_name_is_literal():
+    text = 'name,lat,lon\nParis,1,2\nO"Brien,1,2'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert [p.name for p in places] == ["Paris", 'O"Brien']
+    assert [p.line for p in places] == [2, 3]
+
+
+def test_header_form_five_line_quoted_record_is_bounded_and_resumes():
+    # The quoted field spans 5 physical lines (A..E), past the 4-line
+    # bound, so it is reported as unterminated at its starting line and
+    # parsing resumes per remaining physical line.
+    text = 'name,lat,lon\n"A\nB\nC\nD\nE",1,2\nSingapore,3,4\n'
+    places, errors = parse_places(text)
+    assert len(errors) == 1
+    assert "Line 2" in errors[0]
+    assert "unterminated quote" in errors[0]
+    assert [p.name for p in places] == ["B", "C", "D", 'E"', "Singapore"]
+    assert [p.line for p in places] == [3, 4, 5, 6, 7]
+
+
+def test_header_form_four_line_quoted_record_is_accepted():
+    text = 'name,lat,lon\n"A\nB\nC\nD",1,2\n'
+    places, errors = parse_places(text)
+    assert errors == []
+    assert places[0].name == "A\nB\nC\nD"
+    assert places[0].line == 2
