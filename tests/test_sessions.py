@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -651,3 +652,149 @@ def test_submit_does_not_reuse_deleted_job_id(tmp_path: Path, monkeypatch):
     assert done.status == "done"
     assert (sessions / f"{job.id}.json").is_file()
     assert not (sessions / f"{old.id}.json").exists()
+
+
+def test_submit_mints_name_and_seeds_folder_from_it(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+
+    def work(job: Job):
+        root = tmp_path / "output" / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job = runner.submit("resize", work, feature="resize")
+    assert re.match(r"^[a-z]+-[a-z]+(-\d+)?$", job.name)
+    done = _wait(runner, job.id)
+    assert Path(done.result["outputDir"]).name == job.name
+
+
+def test_rename_moves_folder_and_rewrites_result_paths(tmp_path: Path, monkeypatch):
+    from obed_edom.web import app as app_module
+
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+    monkeypatch.setattr(app_module, "default_output_root", lambda: output)
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        if export_dir is not None:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_module, "remap_and_inspect", fake_remap_and_inspect)
+
+    def work(job: Job):
+        return app_module._run_resize(
+            job,
+            tmp_path / "source.key",
+            tmp_path / "template.key",
+            None,
+            True,
+        )
+
+    job = runner.submit("resize", work, feature="resize")
+    done = _wait(runner, job.id)
+    old_name = done.name
+    old_output_dir = Path(done.result["outputDir"])
+    assert old_output_dir.name == old_name
+    assert Path(done.result["destPath"]).is_file()
+
+    renamed = runner.rename(job.id, "Quiet Jordan")
+    assert renamed.name == "quiet-jordan"
+    new_output_dir = Path(renamed.result["outputDir"])
+    assert new_output_dir.name == "quiet-jordan"
+    assert not old_output_dir.exists()
+    assert renamed.result["destPath"] == str(new_output_dir / "source_CG.key")
+    assert Path(renamed.result["destPath"]).is_file()
+    assert old_name != renamed.name
+
+
+def test_rename_reverts_folder_move_when_save_fails(tmp_path: Path, monkeypatch):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job = runner.submit("resize", work, feature="resize")
+    done = _wait(runner, job.id)
+    old_output_dir = Path(done.result["outputDir"])
+    old_name = done.name
+
+    def failing_save(self, _job):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(JobRunner, "save", failing_save)
+    with pytest.raises(RuntimeError):
+        runner.rename(job.id, "silent-tabor")
+    monkeypatch.undo()
+
+    assert old_output_dir.is_dir()
+    reloaded = runner.get(job.id)
+    assert reloaded.name == old_name
+    assert reloaded.result["outputDir"] == str(old_output_dir)
+
+
+def test_rename_conflict_when_target_folder_exists(tmp_path: Path):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+
+    def work(job: Job):
+        root = output / ".resize" / job.name
+        root.mkdir(parents=True)
+        return {"outputDir": str(root)}
+
+    job = runner.submit("resize", work, feature="resize")
+    done = _wait(runner, job.id)
+    old_output_dir = Path(done.result["outputDir"])
+    (output / ".resize" / "taken-slot").mkdir(parents=True)
+
+    with pytest.raises(FileExistsError):
+        runner.rename(job.id, "taken-slot")
+    assert old_output_dir.is_dir()
+
+
+def test_rename_refused_while_running(tmp_path: Path):
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=tmp_path / "output")
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(job: Job):
+        started.set()
+        release.wait(2)
+        return {}
+
+    job = runner.submit("resize", work, feature="resize")
+    assert started.wait(1)
+    with pytest.raises(RuntimeError):
+        runner.rename(job.id, "quiet-jordan")
+    release.set()
+    _wait(runner, job.id)
+
+
+def test_rename_of_generator_job_does_not_move_user_folder(tmp_path: Path):
+    output = tmp_path / "output"
+    runner = JobRunner(session_dir=tmp_path / "sessions", output_root=output)
+    user_folder = tmp_path / "Documents" / "Sermon_BC"
+    user_folder.mkdir(parents=True)
+
+    job = runner.submit(
+        "generate",
+        lambda _j: {"stem": "Sermon_BC", "outputDir": str(user_folder)},
+        feature="generate",
+    )
+    _wait(runner, job.id)
+
+    renamed = runner.rename(job.id, "quiet-jordan")
+    assert renamed.name == "quiet-jordan"
+    assert user_folder.is_dir()
+    assert renamed.result["outputDir"] == str(user_folder)

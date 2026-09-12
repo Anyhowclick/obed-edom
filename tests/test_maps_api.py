@@ -2814,3 +2814,135 @@ def test_session_export_snapshot_is_consistent(monkeypatch):
             if name.startswith("assets/") and name.endswith(".png")
         }
     assert manifest_asset_ids == archive_asset_ids
+
+
+def test_rename_maps_job_moves_folder_without_bumping_revision():
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    latest = client.get(f"/api/jobs/{job['id']}")
+    revision = int(latest.json()["result"].get("stateRevision") or 0)
+
+    target = f"quiet-jordan-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"Quiet Jordan {job['id']}"})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["name"] == target
+    new_output_dir = Path(body["result"]["outputDir"])
+    assert new_output_dir.name == target
+    assert not old_output_dir.exists()
+    assert new_output_dir.is_dir()
+    assert body["result"]["stem"] == target
+    assert int(body["result"].get("stateRevision") or 0) == revision
+
+    save_res = _save(body, _doc(body))
+    assert save_res.status_code == 200, save_res.text
+
+
+def test_rename_maps_job_keeps_assets_and_previews_servable():
+    job = _seed()
+    preview_dir = Path(job["result"]["previewDir"])
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    (preview_dir / "s1.png").write_bytes(b"fake-png")
+
+    target = f"silent-tabor-{job['id']}"
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+
+    preview = client.get(f"/api/jobs/{job['id']}/previews/maps/s1.png")
+    assert preview.status_code == 200
+    assert Path(body["result"]["previewDir"]).parent.name == target
+
+
+def test_rename_maps_job_rolls_back_on_commit_failure(monkeypatch):
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+
+    def boom(_job_id, result):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(RUNNER, "update_result", boom)
+    with pytest.raises(OSError):
+        client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    monkeypatch.undo()
+    assert old_output_dir.is_dir()
+    stored = RUNNER.get(job["id"])
+    assert stored.name == job["name"]
+
+
+def test_rename_refuses_duplicate_maps_name():
+    first = _seed()
+    second = _seed()
+    dup = client.patch(f"/api/jobs/{first['id']}/name", json={"name": second["name"]})
+    assert dup.status_code == 409
+
+
+def test_rename_maps_job_rejects_invalid_name():
+    job = _seed()
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": "../evil"})
+    assert res.status_code == 400
+
+
+def test_rename_maps_job_rolls_back_on_set_name_failure(monkeypatch):
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+
+    def boom(_job_id, _name):
+        raise RuntimeError("session write failed")
+
+    monkeypatch.setattr(RUNNER, "set_name", boom)
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"broad-shiloh-{job['id']}"})
+    assert res.status_code == 409
+    monkeypatch.undo()
+    assert old_output_dir.is_dir()
+    stored = RUNNER.get(job["id"])
+    assert stored.name == job["name"]
+    assert stored.result["outputDir"] == job["result"]["outputDir"]
+
+
+def test_rename_maps_job_refused_while_running():
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.status = "running"
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"quiet-jordan-{job['id']}"})
+    assert res.status_code == 409
+    stored.status = "done"
+
+
+def test_rename_maps_job_refused_while_queued():
+    job = _seed()
+    stored = RUNNER.get(job["id"])
+    assert stored is not None
+    stored.status = "queued"
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": f"quiet-jordan-{job['id']}"})
+    assert res.status_code == 409
+    stored.status = "done"
+
+
+def test_rename_non_maps_job_refused_while_running_returns_409():
+    started = threading.Event()
+    release = threading.Event()
+
+    def work(_job):
+        started.set()
+        release.wait(2)
+        return {}
+
+    job = RUNNER.submit("resize", work, feature="resize")
+    assert started.wait(1)
+    res = client.patch(f"/api/jobs/{job.id}/name", json={"name": "quiet-jordan"})
+    assert res.status_code == 409
+    assert res.json()["detail"] == "Job is still running"
+    release.set()
+    _wait(job.id)
+
+
+def test_name_folder_exists_checks_all_id_derived_roots():
+    runner = RUNNER
+    for root_name in (".maps", ".watercolour", ".resize", ".diff", ".outline", ".inspect"):
+        folder = runner._output_root / root_name / "already-taken"
+        folder.mkdir(parents=True, exist_ok=True)
+        assert runner._name_folder_exists("already-taken") is True
+        folder.rmdir()
+    assert runner._name_folder_exists("definitely-not-taken") is False

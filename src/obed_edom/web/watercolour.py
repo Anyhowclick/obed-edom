@@ -175,7 +175,7 @@ def _scale_spec(spec: dict[str, Any] | None, factor: float, size: tuple[int, int
 
 
 def _run_batch(job, staged: list[tuple[str, Path]], options: WatercolourOptions, masks: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    root = Path(str((job.result or {}).get("outputDir") or output_root() / ".watercolour" / job.id))
+    root = Path(str((job.result or {}).get("outputDir") or output_root() / ".watercolour" / job.name))
     originals, results = root / "originals", root / "results"
     originals.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
@@ -373,6 +373,10 @@ def add_to_map(job_id: str, item_id: str, maps_job_id: str, slide_id: str) -> di
 
 
 def _job_root(job_id: str) -> Path:
+    job = _runner().get(job_id)
+    output_dir = (job.result or {}).get("outputDir") if job else None
+    if output_dir:
+        return Path(str(output_dir)).resolve()
     return (output_root() / ".watercolour" / job_id).resolve()
 
 

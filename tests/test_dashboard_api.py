@@ -645,3 +645,33 @@ def test_relocate_maps_job_is_rejected():
     response = client.post(f"/api/jobs/{job['id']}/relocate", json={"folder": "/tmp"})
     assert response.status_code == 409, response.text
     assert "state" in response.json()["detail"]
+
+
+def test_patch_name_returns_public_dict_with_new_name(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path)})
+    job = _wait(client, started.json()["id"])
+
+    renamed = client.patch(f"/api/jobs/{job['id']}/name", json={"name": "Quiet Jordan"})
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["name"] == "quiet-jordan"
+    assert body["id"] == job["id"]
+    assert "artifacts" in body
+
+
+def test_patch_name_rejects_invalid_name(tmp_path):
+    path = _write_cued_pdf(tmp_path / "cued.pdf")
+    client = TestClient(app)
+    started = client.post("/api/outline", data={"path": str(path)})
+    job = _wait(client, started.json()["id"])
+
+    res = client.patch(f"/api/jobs/{job['id']}/name", json={"name": "../evil"})
+    assert res.status_code == 400
+
+
+def test_patch_name_404_on_unknown_job():
+    client = TestClient(app)
+    res = client.patch("/api/jobs/not-a-real-job/name", json={"name": "quiet-jordan"})
+    assert res.status_code == 404

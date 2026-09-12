@@ -1119,3 +1119,30 @@ def test_cancel_immediately_after_result_replace_discards_the_committed_file():
         assert items[0]['status'] == 'cancelled'
         result_dir=Path(job['result']['resultDir'])
         assert not list(result_dir.glob('00-*'))
+
+def test_renamed_watercolour_job_still_serves_result_file_and_download():
+    from pathlib import Path
+    from obed_edom.web.app import app
+    from fastapi.testclient import TestClient
+    import time
+    client = TestClient(app)
+    response = client.post('/api/watercolour', files=[('files', ('good.png', png((90, 140, 210, 255)), 'image/png'))])
+    assert response.status_code == 200, response.text
+    job_id = response.json()['id']
+    for _ in range(80):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in {'done', 'error'}:
+            break
+        time.sleep(.03)
+    old_output_dir = Path(job['result']['outputDir'])
+    item_id = job['result']['items'][0]['id']
+
+    target = f'quiet-jordan-{job_id}'
+    renamed = client.patch(f'/api/jobs/{job_id}/name', json={'name': target})
+    assert renamed.status_code == 200, renamed.text
+    new_output_dir = Path(renamed.json()['result']['outputDir'])
+    assert new_output_dir.name == target
+    assert not old_output_dir.exists()
+
+    assert client.get(f'/api/watercolour/{job_id}/items/{item_id}/result').status_code == 200
+    assert client.get(f'/api/watercolour/{job_id}/download').status_code == 200
