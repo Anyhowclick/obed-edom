@@ -220,6 +220,103 @@ def test_health_and_stubs():
     assert missing_file.status_code == 400
 
 
+def test_open_path_missing_is_404():
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": "/no/such/deck.key"})
+    assert res.status_code == 404
+    assert "Not found" in res.json()["detail"]
+
+
+def test_open_path_launches_open(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    calls = []
+    monkeypatch.setattr(
+        app_mod.subprocess, "run", lambda argv, **kw: calls.append(argv)
+    )
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert calls == [["open", str(target)]]
+
+
+def test_open_path_allows_package_format_key_dir(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.mkdir()
+    calls = []
+    monkeypatch.setattr(
+        app_mod.subprocess, "run", lambda argv, **kw: calls.append(argv)
+    )
+    client = TestClient(app)
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert calls == [["open", str(target)]]
+
+
+def test_open_path_rejects_app_bundle(tmp_path):
+    client = TestClient(app)
+    target = tmp_path / "Evil.app"
+    target.mkdir()
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
+def test_open_path_rejects_non_artifact_suffix(tmp_path):
+    client = TestClient(app)
+    target = tmp_path / "run.sh"
+    target.write_text("echo hi")
+    res = client.post("/api/open", data={"path": str(target)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
+def test_open_and_reveal_reject_foreign_origin(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    monkeypatch.setattr(app_mod.subprocess, "run", lambda argv, **kw: None)
+    client = TestClient(app)
+    headers = {"Origin": "https://evil.example.com"}
+    res_open = client.post("/api/open", data={"path": str(target)}, headers=headers)
+    assert res_open.status_code == 403
+    res_reveal = client.post("/api/reveal", data={"path": str(target)}, headers=headers)
+    assert res_reveal.status_code == 403
+
+
+@pytest.mark.parametrize("origin", [None, "http://localhost:5173", "http://127.0.0.1:5173"])
+def test_open_and_reveal_allow_local_or_missing_origin(tmp_path, monkeypatch, origin):
+    import obed_edom.web.app as app_mod
+
+    target = tmp_path / "deck.key"
+    target.write_text("placeholder")
+    monkeypatch.setattr(app_mod.subprocess, "run", lambda argv, **kw: None)
+    client = TestClient(app)
+    headers = {"Origin": origin} if origin else {}
+    res_open = client.post("/api/open", data={"path": str(target)}, headers=headers)
+    assert res_open.status_code == 200
+    res_reveal = client.post("/api/reveal", data={"path": str(target)}, headers=headers)
+    assert res_reveal.status_code == 200
+
+
+def test_open_path_rejects_key_symlink_to_app_bundle(tmp_path):
+    client = TestClient(app)
+    app_bundle = tmp_path / "Applications" / "Foo.app"
+    app_bundle.mkdir(parents=True)
+    evil = tmp_path / "evil.key"
+    evil.symlink_to(app_bundle)
+    res = client.post("/api/open", data={"path": str(evil)})
+    assert res.status_code == 400
+    assert "Not an openable artifact" in res.json()["detail"]
+
+
 def test_resize_requires_template(tmp_path):
     client = TestClient(app)
     wall = tmp_path / "wall.key"

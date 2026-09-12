@@ -280,10 +280,14 @@ h3 {
   animation: none;
   box-shadow: none;
 }
-.btn.save-pairing {
+.btn.collab, .btn.save-pairing {
   background: var(--accent-collab);
   color: var(--accent-collab-fg);
   box-shadow: 0 0 20px rgba(255, 199, 44, 0.28);
+}
+.btn.collab:hover:not(:disabled) {
+  background: #ffd45c;
+  box-shadow: 0 0 28px rgba(255, 199, 44, 0.4);
 }
 .btn.save-pairing:hover:not(:disabled) {
   background: #ffd45c;
@@ -293,6 +297,7 @@ h3 {
   box-shadow: 0 0 28px rgba(255, 199, 44, 0.45);
 }
 .actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap; }
+.export-actions { align-items: center; }
 
 .overlay {
   position: fixed;
@@ -418,18 +423,24 @@ h3 {
 .session-pick .cap { margin: 4px 0 0; }
 .session-del {
   flex: 0 0 auto;
-  width: auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   color: var(--ink-tertiary);
   border: var(--border-glass);
   border-radius: var(--radius-pill);
-  padding: 8px 10px;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
 }
 .session-row.active .session-del,
 .session-del:hover { color: var(--err); border-color: var(--err); }
+.status-badge { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
+.status-badge.status-err { color: var(--err); }
+.status-icon { width: 12px; height: 12px; }
 .job-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .job-name-text { overflow-wrap: anywhere; flex: 1 1 auto; cursor: pointer; }
 .job-name-edit {
@@ -444,16 +455,6 @@ h3 {
 }
 .job-name-edit:hover { opacity: 1; }
 .job-name-editing { flex-wrap: wrap; }
-.job-name-input {
-  min-width: 0;
-  flex: 1 1 auto;
-  background: var(--bg-surface-solid);
-  color: var(--ink-primary);
-  border: var(--border-glass);
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
-  font: inherit;
-}
 .job-name-preview { font-size: 11px; color: var(--ink-tertiary); }
 .job-name-error { font-size: 11px; color: var(--err); flex-basis: 100%; }
 .library-detail { min-width: 0; }
@@ -823,7 +824,7 @@ body.dragging-split { cursor: col-resize; user-select: none; }
   box-shadow: var(--shadow-card);
 }
 .slide-card.flagged { border-color: rgba(255, 199, 44, 0.45); }
-input[type="text"], input[type="number"], select {
+input[type="text"], input[type="number"], input:not([type]), select {
   background: var(--bg-surface-glass-sub);
   border: var(--border-glass);
   color: var(--ink-primary);
@@ -833,10 +834,25 @@ input[type="text"], input[type="number"], select {
   font-size: 16px;
   width: 100%;
 }
-input[type="text"]:focus, input[type="number"]:focus, select:focus {
+input[type="text"]:focus, input[type="number"]:focus, input:not([type]):focus, select:focus {
   outline: none;
   border-color: rgba(255, 255, 255, 0.3);
   box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.18);
+}
+input.job-name-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  background: var(--bg-surface-glass-sub);
+  color: var(--ink-primary);
+  border: var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  font: inherit;
+}
+input.job-name-input:focus {
+  outline: none;
+  border: var(--border-glass);
+  box-shadow: none;
 }
 /* The OS renders the option list, so it needs the polarity told to it or the
    text comes out dark on dark. */
@@ -913,6 +929,17 @@ label.check input[type="checkbox"]:disabled,
 }
 .maps-save-status-paused,
 .maps-save-status-error { color: var(--warn); }
+.maps-save-status-saved { color: var(--accent-primary-fg); background: var(--ok); }
+.maps-save-status-saving {
+  animation: save-pulse 1.1s ease-in-out infinite;
+}
+@keyframes save-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 transparent; }
+  50% { opacity: 0.6; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .maps-save-status-saving { animation: none; }
+}
 .err { color: var(--err); }
 .error-notice {
   display: flex;
@@ -1893,7 +1920,7 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   background: rgba(255, 199, 44, 0.08);
 }
 .maps-thumb-title:disabled { cursor: default; }
-.maps-thumb-title-input {
+input.maps-thumb-title-input {
   display: block;
   width: 100%;
   margin: 0;
@@ -1906,6 +1933,11 @@ label.inline-field select { width: auto; padding: 5px 8px; }
   color: var(--ink-primary);
   font: inherit;
   font-size: 12px;
+}
+input.maps-thumb-title-input:focus {
+  outline: 2px solid var(--accent-collab);
+  outline-offset: -2px;
+  box-shadow: none;
 }
 .maps-gutter {
   display: flex;

@@ -77,7 +77,15 @@ export async function resolveDrop(name: string, size?: number): Promise<ChosenFi
 export async function reveal(path: string): Promise<void> {
   const body = new FormData();
   body.set("path", path);
-  await fetch("/api/reveal", { method: "POST", body });
+  const res = await fetch("/api/reveal", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function openPath(path: string): Promise<void> {
+  const body = new FormData();
+  body.set("path", path);
+  const res = await fetch("/api/open", { method: "POST", body });
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 export async function generateDocx(

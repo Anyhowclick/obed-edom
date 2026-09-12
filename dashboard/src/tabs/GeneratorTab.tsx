@@ -142,6 +142,7 @@ export function GeneratorTab() {
           job={job}
           onOpen={setOpen}
           onRename={rename}
+          onError={setError}
         />
       )}
       <Lightbox src={open} onClose={() => setOpen(null)} />

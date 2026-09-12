@@ -1,14 +1,17 @@
-import { previewUrl, reveal, type Job } from "../api";
+import { previewUrl, type Job } from "../api";
+import { ArtifactActions } from "./ArtifactActions";
 import { JobName } from "./JobName";
 
 export function MapsResultView({
   job,
   onOpen,
   onRename,
+  onError,
 }: {
   job: Job;
   onOpen: (src: string) => void;
   onRename?: (id: string, name: string) => Promise<Job>;
+  onError?: (message: string) => void;
 }) {
   const result = (job.result || {}) as {
     destPath?: string;
@@ -18,33 +21,15 @@ export function MapsResultView({
     slides?: { id: string; title: string; stillPng?: string }[];
   };
   const names = result.previewFiles?.maps || [];
+  const artifacts = [
+    result.destPath ? { label: "LED wall", path: result.destPath } : null,
+    result.destPathCg ? { label: "CG", path: result.destPathCg } : null,
+    result.destPathDsk ? { label: "DSK", path: result.destPathDsk } : null,
+  ].filter((artifact): artifact is { label: string; path: string } => artifact != null);
   return (
     <div>
       {onRename && <JobName job={job} onRename={onRename} className="note" />}
-      {result.destPath && (
-        <p className="note path-note">
-          LED wall: {result.destPath}{" "}
-          <button className="btn secondary" type="button" onClick={() => void reveal(result.destPath!)}>
-            Reveal
-          </button>
-        </p>
-      )}
-      {result.destPathCg && (
-        <p className="note path-note">
-          CG: {result.destPathCg}{" "}
-          <button className="btn secondary" type="button" onClick={() => void reveal(result.destPathCg!)}>
-            Reveal
-          </button>
-        </p>
-      )}
-      {result.destPathDsk && (
-        <p className="note path-note">
-          DSK: {result.destPathDsk}{" "}
-          <button className="btn secondary" type="button" onClick={() => void reveal(result.destPathDsk!)}>
-            Reveal
-          </button>
-        </p>
-      )}
+      <ArtifactActions artifacts={artifacts} onError={onError} />
       <div className="thumbs">
         {names.map((name) => {
           const src = previewUrl(job.id, "maps", name);

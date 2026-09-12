@@ -239,6 +239,24 @@ def test_both_dest_keys_when_both_flags_on(monkeypatch, tmp_path: Path):
     assert "set width of image 1 to" in wall
 
 
+def test_stale_dest_path_dropped_when_target_not_reexported(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a)
+    b = _slide("s2", cam_b)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": True}]
+    job = _job(tmp_path, [a, b], links)
+    _write_plan_rasters(Path(job.result["outputDir"]), [a, b], links)
+    first = export_maps_job(job, export_lw=True, export_cg=True)
+    assert first.get("destPathCg")
+
+    job.result = first
+    second = export_maps_job(job, export_lw=True, export_cg=False)
+    assert second.get("destPath")
+    assert "destPathCg" not in second
+
+
 def test_pin_x_not_1920_or_5760(tmp_path: Path):
     zoom = 8.0
     cam = _camera(3.0, 101.0, zoom)

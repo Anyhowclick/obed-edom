@@ -25,6 +25,7 @@ import {
   renameJob,
   type Job,
 } from "../api";
+import { ArtifactActions } from "../components/ArtifactActions";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
@@ -531,6 +532,13 @@ export function MapsTab() {
   }, [addMenuOpen, sessionMenuOpen]);
 
   const locked = job?.status === "queued" || job?.status === "running" || previewing || exporting || sessionBusy || !!saveConflict;
+
+  const exportResult = (job?.result || {}) as { destPath?: string; destPathCg?: string; destPathDsk?: string };
+  const exportArtifacts = [
+    exportResult.destPath ? { label: "LED wall", path: exportResult.destPath } : null,
+    exportResult.destPathCg ? { label: "CG", path: exportResult.destPathCg } : null,
+    exportResult.destPathDsk ? { label: "DSK", path: exportResult.destPathDsk } : null,
+  ].filter((artifact): artifact is { label: string; path: string } => artifact != null);
 
   function onNavResizeStart(event: React.PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -3090,20 +3098,26 @@ export function MapsTab() {
                     />
                     DSK lower third (1920×1080)
                   </label>
-                  <ExportDestinationRow
-                    value={exportDir}
-                    onChange={setExportDir}
-                    defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
-                    onError={setError}
-                  />
-                  <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
-                    Export
-                  </button>
-                  {exporting ? (
-                    <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
-                      Cancel
+                  <div className="actions export-actions">
+                    <ExportDestinationRow
+                      value={exportDir}
+                      onChange={setExportDir}
+                      defaultLabel={defaultExportDir ? `${defaultExportDir}/ (default)` : undefined}
+                      onError={setError}
+                      inline
+                    />
+                    <button className="btn" type="button" disabled={locked} onClick={() => void onExport()}>
+                      Export
                     </button>
-                  ) : null}
+                    {exporting ? (
+                      <button className="btn secondary" type="button" onClick={() => { exportAbort.current = true; }}>
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                  {job?.status === "done" && exportArtifacts.length > 0 && (
+                    <ArtifactActions artifacts={exportArtifacts} onError={setError} />
+                  )}
                 </div>
               )}
             </div>
