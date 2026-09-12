@@ -4,9 +4,11 @@ import pytest
 
 from obed_edom.paths import (
     ensure_export_dir,
+    ensure_export_subdir,
     export_destination,
     find_repo_root,
     output_root,
+    resolve_export_destination,
     resolve_keynote_template,
     validate_export_dir,
 )
@@ -211,3 +213,56 @@ def test_export_destination_falls_back_to_output_root(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": ""})
     assert export_destination(FakeJob()) == output_root()
+
+
+def test_resolve_export_destination_matches_export_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": ""})
+    assert resolve_export_destination(None) == output_root()
+
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(default_dir)}
+    )
+    assert resolve_export_destination(None) == default_dir
+
+    override = tmp_path / "override"
+    override.mkdir()
+    assert resolve_export_destination(str(override)) == override
+
+
+def test_ensure_export_subdir_creates_child(tmp_path: Path):
+    parent = tmp_path / "root"
+    parent.mkdir()
+    child = ensure_export_subdir(parent, "My_Sermon")
+    assert child == parent / "My_Sermon"
+    assert child.is_dir()
+    # Idempotent: calling again on an already-created plain directory is fine.
+    assert ensure_export_subdir(parent, "My_Sermon") == child
+
+
+def test_ensure_export_subdir_refuses_preexisting_symlink(tmp_path: Path):
+    parent = tmp_path / "root"
+    parent.mkdir()
+    private_target = tmp_path / "private"
+    private_target.mkdir()
+    (parent / "My_Sermon").symlink_to(private_target, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        ensure_export_subdir(parent, "My_Sermon")
+    # Refused before any write landed in the symlink target.
+    assert list(private_target.iterdir()) == []
+
+
+def test_ensure_export_subdir_rejects_private_root_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    private = tmp_path / "output" / ".maps"
+    private.mkdir(parents=True)
+    parent = tmp_path / "root"
+    parent.mkdir()
+    (parent / "child").symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        ensure_export_subdir(parent, "child")

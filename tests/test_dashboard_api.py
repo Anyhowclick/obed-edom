@@ -1054,3 +1054,107 @@ def test_patch_name_404_on_unknown_job():
     client = TestClient(app)
     res = client.patch("/api/jobs/not-a-real-job/name", json={"name": "quiet-jordan"})
     assert res.status_code == 404
+
+
+def _propose_stubs(monkeypatch, tmp_path):
+    import obed_edom.web.app as app_mod
+
+    wall = tmp_path / "Wall.key"
+    template = tmp_path / "Base_CG_Assets.key"
+    wall.write_text("wall")
+    template.write_text("template")
+    monkeypatch.setattr(
+        app_mod, "acquire_wall_payload", lambda source, *, slide_range, mode, say: _cached_wall()
+    )
+    monkeypatch.setattr(
+        app_mod, "inspect_keynote",
+        lambda path, *, export_dir=None, slide_range=None, use_cache=None, is_cancelled=None: {
+            "slideWidth": 1920, "slideHeight": 1080, "slides": []
+        },
+    )
+    monkeypatch.setattr(
+        app_mod, "propose_framings",
+        lambda *_args, **_kwargs: {"wallDigests": [], "templateDigest": "", "pages": []},
+    )
+    monkeypatch.setattr(app_mod, "load_settings", lambda: {"reusePairings": False})
+    return app_mod, wall, template
+
+
+def test_resize_propose_stores_resolved_export_dir_with_no_override(tmp_path, monkeypatch):
+    from obed_edom.paths import output_root
+
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+    logs: list[str] = []
+    result = app_mod._run_resize_propose(
+        type("Job", (), {"log": logs.append})(), wall, template, None, False
+    )
+    assert "exportDir" not in result
+    assert result["resolvedExportDir"] == str(output_root())
+
+
+def test_resize_propose_stores_resolved_export_dir_with_override(tmp_path, monkeypatch):
+    app_mod, wall, template = _propose_stubs(monkeypatch, tmp_path)
+    override = tmp_path / "chosen"
+    override.mkdir()
+    logs: list[str] = []
+    result = app_mod._run_resize_propose(
+        type("Job", (), {"log": logs.append})(),
+        wall, template, None, False, export_dir=str(override),
+    )
+    assert result["exportDir"] == str(override)
+    assert result["resolvedExportDir"] == str(override)
+
+
+def test_resize_apply_uses_the_resolved_export_dir_frozen_at_propose_time(
+    tmp_path, monkeypatch
+):
+    """A Settings default change between propose and apply must not silently redirect
+    the write — apply uses the effective destination captured on the proposal, not a
+    fresh `export_destination(job)` lookup."""
+    import obed_edom.web.app as app_mod
+
+    frozen_dest = tmp_path / "frozen"
+    frozen_dest.mkdir()
+    later_default = tmp_path / "later-default"
+    later_default.mkdir()
+
+    def fake_remap_and_inspect(path, dest, *, export_dir=None, **_kwargs):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x")
+        return {
+            "inspect": {"slideWidth": 1920, "slideHeight": 1080, "slideCount": 0, "exported": False},
+            "payload": {"path": str(dest), "slideWidth": 1920, "slideHeight": 1080, "slides": []},
+            "counts": {},
+            "applied": 0,
+            "missed": 0,
+        }
+
+    monkeypatch.setattr(app_mod, "remap_and_inspect", fake_remap_and_inspect)
+    # If apply re-resolved the destination instead of using the frozen value, it would
+    # land here instead.
+    from obed_edom import settings as settings_mod
+
+    monkeypatch.setattr(
+        settings_mod, "load_settings", lambda *a, **k: {"defaultExportDir": str(later_default)}
+    )
+
+    job = type(
+        "Job",
+        (),
+        {"log": lambda self, msg: None, "name": "job", "result": {"resolvedExportDir": str(frozen_dest)}},
+    )()
+    result = app_mod._run_resize(
+        job, tmp_path / "source.key", tmp_path / "template.key", None, False
+    )
+    assert Path(result["destPath"]).parent == frozen_dest
+
+
+def test_write_outline_pdf_propagates_a_vanished_destination_as_job_error(tmp_path, monkeypatch):
+    import obed_edom.web.app as app_mod
+
+    vanished = tmp_path / "gone"  # never created
+    logs: list[str] = []
+    job = type("Job", (), {"log": logs.append})()
+    with pytest.raises(ValueError, match="no longer a directory"):
+        app_mod._write_outline_pdf(job, vanished / "findings.pdf", {"rows": [], "outlineFlags": []})
+    assert not logs
