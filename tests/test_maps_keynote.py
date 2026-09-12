@@ -2013,6 +2013,41 @@ def test_export_maps_job_movie_autoplay_happy_path(tmp_path: Path, monkeypatch):
     assert result["movieAutoplay"][0]["refused"] is False
 
 
+def test_export_maps_job_movie_autoplay_verify_mismatch_refuses(tmp_path: Path, monkeypatch):
+    """Verify mode must not report success when the read-back still shows the
+    pre-patch values."""
+    monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "verify")
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    monkeypatch.setattr(
+        "obed_edom.maps_reveal.render_reveal",
+        lambda asset, dest, **_kw: dest.parent.mkdir(parents=True, exist_ok=True) or dest.write_bytes(b"mov") or dest,
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.plan_movie_autoplay",
+        lambda deck, targets: {"refused": False, "reason": None, "ids": ["300"]},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.patch_movie_autoplay",
+        lambda deck, ids: {"refused": False, "reason": None, "touched": ["300"], "applied": 1},
+    )
+    monkeypatch.setattr(
+        "obed_edom.iwa_movies.movie_autoplay_state",
+        lambda deck, ids: {"300": {"playsAcrossSlides": True, "automatic": None}},
+    )
+    church = _landmark_church(reveal={"kind": "brush", "duration": 1.2})
+    slide = _slide("s1", _camera(3.0, 101.0, 8), churches=[church])
+    job = _job(tmp_path, [slide], [])
+    _dummy_png(Path(job.result["outputDir"]) / "assets" / "asset1.png")
+    _write_plan_rasters(Path(job.result["outputDir"]), [slide], [])
+
+    result = export_maps_job(job, export_lw=True, export_cg=False)
+    record = result["movieAutoplay"][0]
+    assert record["refused"] is True
+    assert record["applied"] == 0
+    assert "verify read-back mismatch" in record["reason"]
+
+
 def test_export_maps_job_movie_autoplay_off_records_nothing(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OBED_MAPS_MOVIE_AUTOPLAY", "off")
     monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", _ok_osascript)

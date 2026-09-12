@@ -19,6 +19,7 @@ from keynote_parser.codec import IWAFile, import_version  # noqa: E402
 
 from obed_edom.iwa_movies import (  # noqa: E402
     movie_archives,
+    movie_autoplay_state,
     patch_movie_autoplay,
     patch_movie_posters,
     plan_movie_autoplay,
@@ -126,7 +127,14 @@ _LANDMARK_FRAME = (400.0, 300.0, 60.0, 80.0)
 _BG_FRAME = (0.0, 0.0, 7680.0, 1080.0)
 
 
-def _build_movies_deck(path, *, extra_movie_same_frame=False, extra_build_for_landmark=False):
+def _build_movies_deck(
+    path,
+    *,
+    extra_movie_same_frame=False,
+    extra_build_for_landmark=False,
+    orphan_chunk_for_landmark=False,
+    chunk_in_other_member=False,
+):
     x, y, w, h = _LANDMARK_FRAME
     landmark = _arch(
         300, "TSD.MovieArchive",
@@ -156,7 +164,21 @@ def _build_movies_deck(path, *, extra_movie_same_frame=False, extra_build_for_la
          "buildChunkIdentifier": {"buildId": {"lower": "1", "upper": "1"}, "buildChunkId": 1},
          "buildId": {"lower": "1", "upper": "1"}},
     )
-    archives.extend([build900, chunk910])
+    archives.extend([build900])
+    chunk_archives = [chunk910]
+    build_refs = [{"identifier": 900}]
+    chunk_refs = [{"identifier": 910}]
+    if orphan_chunk_for_landmark:
+        # Same apple:movie-start build, but absent from the slide's buildChunks: an
+        # inactive archive this repo deliberately leaves in place, never the patch target.
+        chunk_archives.append(
+            _arch(
+                912, "KN.BuildChunkArchive",
+                {"build": {"identifier": 900}, "delay": 0.0, "duration": 0.5, "automatic": False, "referent": True,
+                 "buildChunkIdentifier": {"buildId": {"lower": "1", "upper": "1"}, "buildChunkId": 2},
+                 "buildId": {"lower": "1", "upper": "1"}},
+            )
+        )
     if extra_build_for_landmark:
         build901 = _arch(
             901, "KN.BuildArchive",
@@ -169,7 +191,10 @@ def _build_movies_deck(path, *, extra_movie_same_frame=False, extra_build_for_la
              "buildChunkIdentifier": {"buildId": {"lower": "2", "upper": "1"}, "buildChunkId": 1},
              "buildId": {"lower": "2", "upper": "1"}},
         )
-        archives.extend([build901, chunk911])
+        archives.append(build901)
+        chunk_archives.append(chunk911)
+        build_refs.append({"identifier": 901})
+        chunk_refs.append({"identifier": 911})
     if extra_movie_same_frame:
         dup = _arch(
             301, "TSD.MovieArchive",
@@ -178,13 +203,20 @@ def _build_movies_deck(path, *, extra_movie_same_frame=False, extra_build_for_la
         )
         archives.append(dup)
         zorder.append({"identifier": 301})
-    slide = _arch(100, "KN.SlideArchive", {"drawablesZOrder": zorder})
+    slide = _arch(
+        100, "KN.SlideArchive",
+        {"drawablesZOrder": zorder, "builds": build_refs, "buildChunks": chunk_refs},
+    )
     show = _arch(2, "KN.ShowArchive", {"slideTree": {"slides": [{"identifier": 10}]}})
     node = _arch(10, "KN.SlideNodeArchive", {"slide": {"identifier": 100}, "isSkipped": False})
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("Index/Document.iwa", _member([show, node]))
-        z.writestr("Index/Slide-100.iwa", _member([slide, *archives]))
+        if chunk_in_other_member:
+            z.writestr("Index/Slide-100.iwa", _member([slide, *archives]))
+            z.writestr("Index/Slide-101.iwa", _member(chunk_archives))
+        else:
+            z.writestr("Index/Slide-100.iwa", _member([slide, *archives, *chunk_archives]))
     path.write_bytes(buf.getvalue())
     return path
 
@@ -348,7 +380,7 @@ def test_patch_autoplay_refuses_a_movie_with_no_build_chunk(deck):
     before = deck.read_bytes()
     result = patch_movie_autoplay(deck, ["310"])
     assert result["refused"] is True
-    assert "0 apple:movie-start build" in result["reason"]
+    assert "0 listed apple:movie-start build chunk" in result["reason"]
     assert deck.read_bytes() == before
 
 
@@ -357,7 +389,7 @@ def test_patch_autoplay_refuses_a_movie_with_ambiguous_build_chunks(tmp_path):
     before = deck.read_bytes()
     result = patch_movie_autoplay(deck, ["300"])
     assert result["refused"] is True
-    assert "2 apple:movie-start build" in result["reason"]
+    assert "2 listed apple:movie-start build chunk" in result["reason"]
     assert deck.read_bytes() == before
 
 
@@ -371,3 +403,27 @@ def test_patch_autoplay_refuses_a_target_id_pointing_at_a_non_movie_archive(deck
 def test_patch_autoplay_empty_ids_is_a_noop(deck):
     result = patch_movie_autoplay(deck, [])
     assert result == {"refused": False, "reason": None, "touched": [], "applied": 0}
+
+
+def test_patch_autoplay_ignores_an_orphan_chunk_on_the_same_build(tmp_path):
+    deck = _build_movies_deck(tmp_path / "movies.key", orphan_chunk_for_landmark=True)
+    result = patch_movie_autoplay(deck, ["300"])
+    assert result["refused"] is False
+    objects, _, _ = _load_deck(deck)
+    assert objects["910"]["automatic"] is True
+    assert objects["912"]["automatic"] is False
+
+
+def test_patch_autoplay_refuses_a_chunk_in_another_member(tmp_path):
+    deck = _build_movies_deck(tmp_path / "movies.key", chunk_in_other_member=True)
+    before = deck.read_bytes()
+    result = patch_movie_autoplay(deck, ["300"])
+    assert result["refused"] is True
+    assert "another member" in result["reason"]
+    assert deck.read_bytes() == before
+
+
+def test_movie_autoplay_state_reads_the_listed_chunk(deck):
+    patch_movie_autoplay(deck, ["300"])
+    state = movie_autoplay_state(deck, ["300"])
+    assert state["300"] == {"playsAcrossSlides": False, "automatic": True}

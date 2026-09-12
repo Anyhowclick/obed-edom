@@ -1594,13 +1594,25 @@ def _apply_movie_autoplay(
         _log(job, f"movieAutoplay {deck_label}: patched {patched['applied']} reveal movie(s)")
         if mode == "verify":
             state = movie_autoplay_state(dest, patched["touched"])
+            bad: list[str] = []
             for oid in patched["touched"]:
-                s = state.get(oid, {})
+                read = state.get(oid, {})
                 _log(
                     job,
-                    f"movieAutoplay {deck_label}: {oid} playsAcrossSlides={s.get('playsAcrossSlides')} "
-                    f"automatic={s.get('automatic')}",
+                    f"movieAutoplay {deck_label}: {oid} playsAcrossSlides={read.get('playsAcrossSlides')} "
+                    f"automatic={read.get('automatic')}",
                 )
+                if read.get("playsAcrossSlides") is not False or read.get("automatic") is not True:
+                    bad.append(
+                        f"{oid} playsAcrossSlides={read.get('playsAcrossSlides')} automatic={read.get('automatic')}"
+                    )
+            if bad:
+                reason = "verify read-back mismatch: " + "; ".join(bad)
+                _log(job, f"movieAutoplay {deck_label}: refused ({reason})")
+                return {
+                    "deck": deck_label, "mode": mode, "applied": 0, "refused": True, "reason": reason,
+                    "regenerated": False,
+                }
         return {
             "deck": deck_label, "mode": mode, "applied": patched["applied"], "refused": False, "reason": None,
             "regenerated": False,

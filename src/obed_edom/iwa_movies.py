@@ -209,40 +209,72 @@ def patch_movie_posters(deck: Path, posters: dict[str, float]) -> dict:
     return _patch_archive_fields(deck, patches)
 
 
-def _movie_build_chunk(objects: dict, movie_id: str) -> tuple[str | None, str | None]:
+def _movie_slide(objects: dict, movie_id: str) -> str | None:
+    """The one ``KN.SlideArchive`` whose ``drawablesZOrder`` holds ``movie_id``
+    (``None`` on zero or several -- reveal movies are always top-level drawables,
+    the same assumption ``iwa_builds.deck_builds`` makes of a build's target)."""
+    owners = [
+        slide_id
+        for slide_id, _skipped in slide_order(objects)
+        if any(
+            str((ref or {}).get("identifier")) == movie_id
+            for ref in (objects.get(slide_id) or {}).get("drawablesZOrder") or []
+        )
+    ]
+    return owners[0] if len(owners) == 1 else None
+
+
+def _movie_build_chunk(objects: dict, id_to_file: dict, movie_id: str) -> tuple[str | None, str | None]:
     """Resolve the single ``KN.BuildChunkArchive`` for ``movie_id``'s
-    ``apple:movie-start`` build. Returns ``(chunk_id, error)``; refuses (``chunk_id``
-    ``None``) rather than guess when the movie has zero or multiple builds/chunks.
+    ``apple:movie-start`` build, THROUGH the owning slide's own ``builds``/
+    ``buildChunks`` timeline -- this repo deliberately leaves orphaned build/chunk
+    archives in place (``iwa_write.patch_slide_builds``), so a global search could
+    patch an archive Keynote never plays. Returns ``(chunk_id, error)``; refuses
+    (``chunk_id`` ``None``) rather than guess.
     """
-    builds = [
-        oid
-        for oid, obj in objects.items()
-        if obj.get("_pbtype") == "KN.BuildArchive"
-        and str((obj.get("drawable") or {}).get("identifier")) == movie_id
-        and ((obj.get("attributes") or {}).get("animationAttributes") or {}).get("effect") == "apple:movie-start"
-    ]
-    if len(builds) != 1:
-        return None, f"movie {movie_id} has {len(builds)} apple:movie-start build(s)"
-    build_id = builds[0]
-    chunks = [
-        oid
-        for oid, obj in objects.items()
-        if obj.get("_pbtype") == "KN.BuildChunkArchive" and str((obj.get("build") or {}).get("identifier")) == build_id
-    ]
+    slide_id = _movie_slide(objects, movie_id)
+    if slide_id is None:
+        return None, f"movie {movie_id} does not resolve to exactly one owning slide"
+    slide = objects.get(slide_id) or {}
+    listed_builds = {str((ref or {}).get("identifier")) for ref in slide.get("builds") or []}
+
+    chunks: list[str] = []
+    for ref in slide.get("buildChunks") or []:
+        chunk_id = str((ref or {}).get("identifier"))
+        chunk = objects.get(chunk_id)
+        if not chunk or chunk.get("_pbtype") != "KN.BuildChunkArchive":
+            continue
+        build_id = str((chunk.get("build") or {}).get("identifier"))
+        if build_id not in listed_builds:
+            continue
+        build = objects.get(build_id) or {}
+        if build.get("_pbtype") != "KN.BuildArchive":
+            continue
+        if str((build.get("drawable") or {}).get("identifier")) != movie_id:
+            continue
+        if ((build.get("attributes") or {}).get("animationAttributes") or {}).get("effect") != "apple:movie-start":
+            continue
+        if id_to_file.get(build_id) != id_to_file.get(movie_id):
+            return None, f"movie {movie_id} build {build_id} lives in another member"
+        chunks.append(chunk_id)
+
     if len(chunks) != 1:
-        return None, f"movie {movie_id} build {build_id} has {len(chunks)} chunk(s)"
-    return chunks[0], None
+        return None, f"movie {movie_id} has {len(chunks)} listed apple:movie-start build chunk(s) on slide {slide_id}"
+    chunk_id = chunks[0]
+    if id_to_file.get(chunk_id) != id_to_file.get(movie_id):
+        return None, f"movie {movie_id} chunk {chunk_id} lives in another member"
+    return chunk_id, None
 
 
 def movie_autoplay_state(deck: Path, ids: list[str]) -> dict[str, dict[str, Any]]:
     """Read back each movie's ``playsAcrossSlides`` and its ``apple:movie-start`` build
     chunk's ``automatic``, for verify-mode logging after `patch_movie_autoplay`."""
     deck = Path(deck)
-    objects, _id_to_file, _file_ids = _load_deck(deck)
+    objects, id_to_file, _file_ids = _load_deck(deck)
     out: dict[str, dict[str, Any]] = {}
     for oid in ids:
         obj = objects.get(oid) or {}
-        chunk_id, _error = _movie_build_chunk(objects, oid)
+        chunk_id, _error = _movie_build_chunk(objects, id_to_file, oid)
         chunk = objects.get(chunk_id) if chunk_id else None
         out[oid] = {
             "playsAcrossSlides": bool(obj.get("playsAcrossSlides") or False),
@@ -264,7 +296,7 @@ def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
     if not ids:
         return {"refused": False, "reason": None, "touched": [], "applied": 0}
 
-    objects, _id_to_file, _file_ids = _load_deck(deck)
+    objects, id_to_file, _file_ids = _load_deck(deck)
     for oid in ids:
         obj = objects.get(oid)
         if obj is None or obj.get("_pbtype") != "TSD.MovieArchive":
@@ -272,7 +304,7 @@ def patch_movie_autoplay(deck: Path, ids: list[str]) -> dict:
 
     patches: list[tuple[str, str, dict[str, Any]]] = []
     for movie_id in ids:
-        chunk_id, error = _movie_build_chunk(objects, movie_id)
+        chunk_id, error = _movie_build_chunk(objects, id_to_file, movie_id)
         if error:
             return {"refused": True, "reason": error, "touched": [], "applied": 0}
         patches.append((chunk_id, "KN.BuildChunkArchive", {"automatic": True}))
