@@ -11,4 +11,9 @@ The style is adapted at runtime to use OpenFreeMap vector and glyph endpoints,
 local procedural replacements for the four required fill patterns, and no
 external sprite endpoint. Captured and interactive maps retain the required
 OpenStreetMap and MapTiler attribution. The three boundary layers are
-re-gated and re-weighted at load time for low-zoom wall exports.
+re-gated and re-weighted at load time for low-zoom wall exports. The solid
+`building_fill` layer is dropped at load time so the `building_pattern`
+hatch is the only building paint at every zoom. Unlike the boundary layers,
+the building layers' minzoom gates (including `building_pattern`'s minzoom
+14) stay at their vendored map-zoom values and are not shifted by the
+low-zoom wall export's `zoomOffset`.

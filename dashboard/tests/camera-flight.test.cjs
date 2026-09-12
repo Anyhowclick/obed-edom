@@ -201,8 +201,8 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
     const styles = require(path.join(out, "styles.js"));
     assert.deepEqual(styles.remapTonerFonts({ nested: ["Nunito Regular", "Nunito SemiBold", "Noto Sans Bold Italic"] }), { nested: ["Noto Sans Regular", "Noto Sans Bold", "Noto Sans Italic"] });
     const [full, background, lines] = await Promise.all([styles.resolveOpenFreeMapStyle("toner"), styles.resolveOpenFreeMapStyle("toner-background"), styles.resolveOpenFreeMapStyle("toner-lines")]);
-    assert.equal(full.layers.length, 39);
-    assert.equal(background.layers.length, 13);
+    assert.equal(full.layers.length, 38);
+    assert.equal(background.layers.length, 12);
     assert.equal(lines.layers.length, 15);
     for (const style of [full, background, lines]) {
       assert.equal(style.sprite, undefined);
@@ -210,6 +210,13 @@ test("pinned Toner variants keep local patterns, OpenFreeMap endpoints, and attr
       assert.match(style.sources.openmaptiles.tiles[0], /openfreemap/);
       assert.match(style.glyphs, /openfreemap/);
     }
+    const idsOf = (style) => new Set(style.layers.map((layer) => layer.id));
+    for (const style of [background, full]) {
+      const ids = idsOf(style);
+      assert.ok(ids.has("building_pattern"), "expected the hatched building_pattern layer");
+      assert.ok(!ids.has("building_fill"), "expected the solid building_fill layer to be dropped");
+    }
+
     const boundaryIds = ["boundary_state", "boundary_state_z1-4", "boundary_country_z0-4", "boundary_country_z5-"];
     const lineIds = new Set(lines.layers.map((layer) => layer.id));
     const backgroundIds = new Set(background.layers.map((layer) => layer.id));

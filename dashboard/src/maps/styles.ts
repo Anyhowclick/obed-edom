@@ -2,7 +2,9 @@ import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
 import { TERRAIN_ATTRIBUTION } from "./stampOsm";
+import { withBrighterDarkLines } from "./darkContrast";
 import { shift, withLowZoomBoundaries } from "./tonerBoundaries";
+import { withoutSolidBuildings } from "./tonerBuildings";
 import { thinLineWidths } from "./tonerLines";
 import { buildWatercolourStyle } from "./watercolourStyle";
 import tonerStyleUrl from "./vendor/maptiler-toner-8688fbd.json?url";
@@ -73,7 +75,7 @@ async function resolveTonerStyle(styleId: Extract<MapsStyleId, "toner" | "toner-
   next.sources = { openmaptiles: { ...structuredClone(vector), attribution: "© OpenStreetMap contributors · © MapTiler" } };
   next.glyphs = base.glyphs;
   delete next.sprite;
-  let layers = withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset);
+  let layers = withoutSolidBuildings(withLowZoomBoundaries(remapTonerFonts(next.layers) as LayerSpecification[], zoomOffset));
   const nonBoundary = layers.filter((layer) => !layer.id.startsWith("boundary"));
   const boundary = layers.filter((layer) => layer.id.startsWith("boundary"));
   layers = [...thinLineWidths(nonBoundary, TONER_LINES_WIDTH_FACTOR), ...boundary];
@@ -187,6 +189,7 @@ export function resolveOpenFreeMapStyle(styleId: MapsStyleId, zoomOffset = 0): P
   return pending.then((s) => {
     let next = structuredClone(s);
     if (styleId === "watercolour") next = buildWatercolourStyle(next).style as StyleSpecification;
+    if (styleId === "dark") next = withBrighterDarkLines(next);
     return withHillshade(next, styleId, zoomOffset);
   });
 }
