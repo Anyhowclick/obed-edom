@@ -266,3 +266,31 @@ def test_ensure_export_subdir_rejects_private_root_target(tmp_path: Path, monkey
     (parent / "child").symlink_to(private, target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
         ensure_export_subdir(parent, "child")
+
+
+def test_generate_default_path_rejects_symlink_into_private_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """generate()'s default output-path selection must go through the same
+    symlink guard as ensure_export_subdir, even when no operator outline
+    fixtures are available. Parsing/mapping/validation are stubbed so this
+    stays unconditionally collected (unlike test_parse.py, which skips
+    without the gitignored Sermon Outlines fixtures)."""
+    from obed_edom import pipeline
+
+    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
+    monkeypatch.setattr(pipeline, "parse_outline", lambda docx: object())
+    monkeypatch.setattr(pipeline, "map_slides", lambda outline: ([], [], []))
+    monkeypatch.setattr(pipeline, "validate_outline", lambda outline: [])
+    monkeypatch.setattr(pipeline, "validate_slide_specs", lambda lw, dsk: [])
+
+    docx = tmp_path / "Sermon BC.docx"
+    stem = pipeline.stem_for(docx)
+    private = tmp_path / "output" / ".maps" / "x"
+    private.mkdir(parents=True)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    (tmp_path / "output" / stem).symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        pipeline.generate(docx, make_keynote=False, check_visuals=False)
+
+    assert list(private.iterdir()) == []

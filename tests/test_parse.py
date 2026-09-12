@@ -710,23 +710,6 @@ def test_generate_honours_output_dir(tmp_path):
     assert result.review_path.exists()
 
 
-def test_generate_default_path_rejects_symlink_into_private_root(tmp_path, monkeypatch):
-    from obed_edom.pipeline import generate
-
-    monkeypatch.setenv("OBED_EDOM_OUTPUT_ROOT", str(tmp_path / "output"))
-    stem = "Sermon BC"
-    private = tmp_path / "output" / ".maps" / "x"
-    private.mkdir(parents=True)
-    (tmp_path / "output").mkdir(exist_ok=True)
-    (tmp_path / "output" / stem).symlink_to(private, target_is_directory=True)
-
-    with patch("obed_edom.bible.fetch_passage", return_value=(None, "mocked")):
-        with pytest.raises(ValueError, match="symlink"):
-            generate(OUTLINES / "Sermon BC.docx", make_keynote=False, check_visuals=False)
-
-    assert not list(private.iterdir())
-
-
 def test_passage_header():
     from obed_edom.slide_map import _passage_header
 

@@ -22,6 +22,7 @@ import {
   MapsStateConflictError,
   addWatercolourToMap,
   watercolourImageUrl,
+  renameJob,
   type Job,
 } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
@@ -37,7 +38,7 @@ import {
   useSessionToggle,
 } from "../prefs";
 import { ExportDestinationRow } from "../components/ExportDestinationRow";
-import { jobLabel, renameAndApply, useCurrentJob } from "../sessions";
+import { jobLabel, useCurrentJob } from "../sessions";
 import { AeScrub } from "../maps/AeScrub";
 import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
@@ -580,6 +581,13 @@ export function MapsTab() {
       id: currentJob.id,
       result: { ...(updated.result || {}), ...local },
     });
+  }
+
+  async function renameCurrentJob(id: string, name: string): Promise<Job> {
+    await persistCurrentState();
+    const updated = await renameJob(id, name);
+    mergeServerMeta(updated);
+    return updated;
   }
 
   function reconcileServerJob(updated: Job) {
@@ -2057,7 +2065,7 @@ export function MapsTab() {
           <IconLibrary />
         </button>
         <span className={`maps-save-status maps-save-status-${saveStatus}`} aria-live="polite">{SAVE_STATUS_LABEL[saveStatus]}</span>
-        <JobName job={job} onRename={(id, name) => renameAndApply(id, name, setJob)} className="note" />
+        <JobName job={job} onRename={renameCurrentJob} className="note" />
       </div>
       <div className="maps-stylebar">
         <StylePicker
