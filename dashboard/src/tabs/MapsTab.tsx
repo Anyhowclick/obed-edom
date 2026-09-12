@@ -1917,6 +1917,7 @@ export function MapsTab() {
               </button>
               <button
                 type="button"
+                title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
                   csvMode.current = "append";
@@ -1928,6 +1929,7 @@ export function MapsTab() {
               <button
                 type="button"
                 disabled={!active}
+                title="One place per line: Name, then optionally a Google Maps link, coordinates (24.58° N, 73.68° E) and a zoom (z=6.8). A name alone is geocoded. A header row (name,lat,lon,url,zoom,kind) also works."
                 onClick={() => {
                   setAddMenuOpen(false);
                   csvMode.current = "pins";
@@ -1988,7 +1990,7 @@ export function MapsTab() {
         <input
           ref={csvInput}
           type="file"
-          accept=".csv,text/csv"
+          accept=".csv,.txt,text/csv,text/plain"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
