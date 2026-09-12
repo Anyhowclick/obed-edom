@@ -28,6 +28,33 @@ export function useSessionToggle(key: string, fallback: boolean): [boolean, (nex
   return [value, update];
 }
 
+/** A string the operator sets once and keeps for the rest of the session. */
+export function useSessionPath(key: string, fallback = ""): [string, (next: string) => void] {
+  const [value, setValue] = useState<string>(() => {
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw !== null) return raw;
+    } catch {
+      /* ignore */
+    }
+    return fallback;
+  });
+
+  const update = useCallback(
+    (next: string) => {
+      setValue(next);
+      try {
+        sessionStorage.setItem(key, next);
+      } catch {
+        /* ignore */
+      }
+    },
+    [key]
+  );
+
+  return [value, update];
+}
+
 export const SHOW_INFO_KEY = "obed-edom.findings.showInfo";
 export const SIDE_PANELS_KEY = "obed-edom.diff.sidePanels";
 export const MAPS_SIDE_PANELS_KEY = "obed-edom.maps.sidePanels";

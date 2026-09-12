@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getSettings, putSettings, type Settings } from "../api";
+import { chooseFolder, getSettings, putSettings, type Settings } from "../api";
 import { ErrorNotice } from "../components/ErrorNotice";
 
 export function SettingsTab() {
@@ -68,6 +68,30 @@ export function SettingsTab() {
               value={threshold}
               onChange={(event) => update({ reuseThreshold: Number(event.target.value) / 100 })}
             />
+          </label>
+          <label className="settings-block">
+            <span>Default export destination for finished decks, PDFs, and photos</span>
+            <div className="settings-row">
+              <span className="muted">{settings.defaultExportDir || "output/ (default)"}</span>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const chosen = await chooseFolder("Choose a default export folder");
+                    await update({ defaultExportDir: chosen.path });
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+              >
+                Choose…
+              </button>
+              {settings.defaultExportDir && (
+                <button type="button" onClick={() => update({ defaultExportDir: "" })}>
+                  Use output/
+                </button>
+              )}
+            </div>
           </label>
           {saved && <p className="ok">Saved.</p>}
         </div>
