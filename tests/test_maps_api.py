@@ -2593,6 +2593,154 @@ def test_promote_removes_unpromoted_tmp_files_when_a_later_staged_path_fails(tmp
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_promote_restores_original_when_tmp_to_dest_replace_fails(tmp_path, monkeypatch):
+    import os
+
+    from obed_edom.web import maps
+
+    commit = maps.MapsCommit(job_id="job", job=None, result={})
+    dest = tmp_path / "dest.png"
+    dest.write_bytes(b"original")
+    commit.stage_bytes(dest, b"new")
+
+    tmp_path_marker = commit._promotions[0][1]
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        if str(src) == str(tmp_path_marker) and str(dst) == str(dest):
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    with pytest.raises(OSError):
+        commit._promote()
+
+    assert dest.exists()
+    assert dest.read_bytes() == b"original"
+    assert not list(tmp_path.glob("*.obedbak-*"))
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_bootstrap_csv_enqueue_waits_for_admitted_commit(monkeypatch):
+    from obed_edom.web import maps
+
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    landmark_started = threading.Event()
+    release_landmark = threading.Event()
+    fired = threading.Event()
+
+    def hook(job_id):
+        if job_id == map_job["id"] and not fired.is_set():
+            fired.set()
+            landmark_started.set()
+            release_landmark.wait(5)
+
+    monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
+
+    landmark_outcome = {}
+
+    def do_landmark():
+        landmark_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    landmark_thread = threading.Thread(target=do_landmark)
+    landmark_thread.start()
+    assert landmark_started.wait(5)
+
+    before_revision = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+
+    bootstrap_outcome = {}
+
+    def do_bootstrap():
+        bootstrap_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/bootstrap-csv",
+            data={"csv_text": "name,lat,lon\nSt Marks,51.5,-0.1\n", "replace": "true"},
+        )
+
+    bootstrap_thread = threading.Thread(target=do_bootstrap)
+    bootstrap_thread.start()
+    time.sleep(0.1)
+    assert bootstrap_thread.is_alive()
+
+    revision_while_blocked = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+    assert revision_while_blocked == before_revision
+
+    release_landmark.set()
+    landmark_thread.join(5)
+    bootstrap_thread.join(5)
+    monkeypatch.undo()
+
+    assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
+    assert bootstrap_outcome["response"].status_code == 200, bootstrap_outcome["response"].text
+
+    for _ in range(50):
+        if RUNNER.get(map_job["id"]).status != "queued" and RUNNER.get(map_job["id"]).status != "running":
+            break
+        time.sleep(0.1)
+
+    final = RUNNER.get(map_job["id"])
+    assert final.status == "done"
+    final_revision = int(final.result.get("stateRevision") or 0)
+    assert final_revision > before_revision
+
+
+def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
+    from obed_edom.web import maps
+
+    map_job = _seed()
+    slide_id = map_job["result"]["slides"][0]["id"]
+    landmark_started = threading.Event()
+    release_landmark = threading.Event()
+    fired = threading.Event()
+
+    def hook(job_id):
+        if job_id == map_job["id"] and not fired.is_set():
+            fired.set()
+            landmark_started.set()
+            release_landmark.wait(5)
+
+    monkeypatch.setattr(maps, "_COMMIT_HOOK", hook)
+
+    landmark_outcome = {}
+
+    def do_landmark():
+        landmark_outcome["response"] = client.post(
+            f"/api/maps/{map_job['id']}/slides/{slide_id}/landmark",
+            files={"file": ("st-marks.png", _landmark_png(), "image/png")},
+        )
+
+    landmark_thread = threading.Thread(target=do_landmark)
+    landmark_thread.start()
+    assert landmark_started.wait(5)
+
+    before_revision = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+
+    export_outcome = {}
+
+    def do_export():
+        export_outcome["response"] = client.post(f"/api/maps/{map_job['id']}/export")
+
+    export_thread = threading.Thread(target=do_export)
+    export_thread.start()
+    time.sleep(0.1)
+    assert export_thread.is_alive()
+
+    revision_while_blocked = int(RUNNER.get(map_job["id"]).result.get("stateRevision") or 0)
+    assert revision_while_blocked == before_revision
+
+    release_landmark.set()
+    landmark_thread.join(5)
+    export_thread.join(5)
+    monkeypatch.undo()
+
+    assert landmark_outcome["response"].status_code == 200, landmark_outcome["response"].text
+    assert export_outcome["response"].status_code == 200, export_outcome["response"].text
+    RUNNER.cancel(map_job["id"])
+
+
 def test_session_export_snapshot_is_consistent(monkeypatch):
     from obed_edom.web import maps
 
