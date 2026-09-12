@@ -45,5 +45,6 @@ describe("rename persists the unsaved edit first", () => {
     expect(mapsApiScript.renameJob.calls[0]).toEqual({ id: job.id, name: "renamed-deck" });
 
     expect(mapFake.getLatestProps().camera).toEqual(editedCamera);
+    expect(screen.getByText("renamed-deck")).toBeInTheDocument();
   });
 });

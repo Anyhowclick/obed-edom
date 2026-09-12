@@ -32,6 +32,14 @@ vi.mock("../src/maps/overlays", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/prefs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/prefs")>();
+  return {
+    ...actual,
+    useDefaultExportDir: () => "",
+  };
+});
+
 let currentMapFake: MapViewFake | null = null;
 
 vi.mock("../src/maps/MapView", () => ({

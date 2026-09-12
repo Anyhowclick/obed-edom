@@ -4,20 +4,24 @@ import { makeJob } from "./doc";
 
 const actual = await vi.importActual<typeof import("../../src/api")>("../../src/api");
 
-type PngCall = { kind?: string; slideId?: string; audience?: string; revision?: number };
+type SaveMapsStateArgs = Parameters<typeof actual.saveMapsState>;
+type PostMapsPngArgs = Parameters<typeof actual.postMapsPng>;
+type PostMapsPngOpts = PostMapsPngArgs[2];
+type RenameJobArgs = Parameters<typeof actual.renameJob>;
+type GetJobArgs = Parameters<typeof actual.getJob>;
 
 let saveConflictOnce: { conflict: MapsStateConflict } | null = null;
 let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRevision: number }> = [];
 
 let staleOnce: { stateRevision: number } | null = null;
-let postMapsPngCalls: PngCall[] = [];
+let postMapsPngCalls: PostMapsPngOpts[] = [];
 
 let renameFailOnce: Error | null = null;
 let renameCalls: Array<{ id: string; name: string }> = [];
 
 let getJobResolution: Job | null = null;
 
-export const saveMapsState = vi.fn(async (id: string, document: Record<string, unknown>, expectedRevision: number): Promise<Job> => {
+export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveMapsStateArgs[0], document: SaveMapsStateArgs[1], expectedRevision: SaveMapsStateArgs[2]): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
   if (saveConflictOnce) {
     const { conflict } = saveConflictOnce;
@@ -27,7 +31,7 @@ export const saveMapsState = vi.fn(async (id: string, document: Record<string, u
   return makeJob({ id, result: { ...document, stateRevision: expectedRevision + 1 } });
 });
 
-export const postMapsPng = vi.fn(async (id: string, _blob: Blob, opts: PngCall = {}): Promise<Job> => {
+export const postMapsPng = vi.fn<typeof actual.postMapsPng>(async (id: PostMapsPngArgs[0], _blob: PostMapsPngArgs[1], opts: PostMapsPngOpts = {}): Promise<Job> => {
   postMapsPngCalls.push(opts);
   if (staleOnce) {
     const { stateRevision } = staleOnce;
@@ -37,7 +41,7 @@ export const postMapsPng = vi.fn(async (id: string, _blob: Blob, opts: PngCall =
   return makeJob({ id });
 });
 
-export const renameJob = vi.fn(async (id: string, name: string): Promise<Job> => {
+export const renameJob = vi.fn<typeof actual.renameJob>(async (id: RenameJobArgs[0], name: RenameJobArgs[1]): Promise<Job> => {
   renameCalls.push({ id, name });
   if (renameFailOnce) {
     const err = renameFailOnce;
@@ -47,12 +51,12 @@ export const renameJob = vi.fn(async (id: string, name: string): Promise<Job> =>
   return makeJob({ id, name });
 });
 
-export const getJob = vi.fn(async (id: string): Promise<Job> => {
+export const getJob = vi.fn<typeof actual.getJob>(async (id: GetJobArgs[0]): Promise<Job> => {
   if (getJobResolution) return getJobResolution;
   return makeJob({ id });
 });
 
-export const getSettings = vi.fn(
+export const getSettings = vi.fn<typeof actual.getSettings>(
   async (): Promise<Settings> => ({
     reuseThreshold: 0,
     reusePairings: false,

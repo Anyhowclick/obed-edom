@@ -87,7 +87,7 @@ Everything MapsTab needs is already injectable-by-mock:
 - save queue: `useRef(new MapsSaveQueue(...))`, per instance — no cross-test leak;
 - MapView, stampOsm, api: module imports — `vi.mock`.
 
-Two module-level caches *do* leak between tests and should be reset in setup rather than refactored: `loadAdmin0()` in `dashboard/src/maps/overlays.ts` (stub it to resolve immediately) and `defaultExportDirRequest`/`defaultExportDirVersion` in `dashboard/src/prefs.ts` (reset via `vi.resetModules()` between files, or mock `useDefaultExportDir`). If a third such singleton turns up, prefer `vi.resetModules()` over touching product code.
+Two module-level caches *do* leak between tests and are handled via `vi.mock` in `renderMapsTab.tsx` rather than refactored: `loadAdmin0()` in `dashboard/src/maps/overlays.ts` (stubbed to resolve immediately) and `defaultExportDirRequest`/`defaultExportDirVersion` in `dashboard/src/prefs.ts` (the module is partially mocked with `importOriginal`, replacing only `useDefaultExportDir` with a stable stub so the singleton is never touched). If a third such singleton turns up, prefer the same partial-mock approach, or `vi.resetModules()`, over touching product code.
 
 The only product change I'd consider later, and only if tests get ugly: add `data-testid` to the save-status pill and the conflict banner. Prefer querying by the existing `aria-live` text and button labels ("Reload latest", "Keep my changes") first — free, and it tests what the operator sees.
 
@@ -95,7 +95,7 @@ The only product change I'd consider later, and only if tests get ugly: add `dat
 
 **PR 1 — harness + 3 seed tests** (the three with the widest blast radius and the simplest fakes):
 
-1. `conflict-freeze.test.tsx` — *conflict freeze does not edit the doc*. Script `saveMapsState` to conflict; assert the banner appears, then `mapFake.emit.cameraCommit(newCam)` and an object move leave `docRef`'s rendered camera unchanged (assert via the `camera` prop the MapView fake received), that `postMapsPng` is never called while frozen, and that "Reload latest" / "Keep my changes" each clear the banner and restore editing. Covers `applyLocalDoc`'s early return and the `captureThumb` guard.
+1. `conflict-freeze.test.tsx` — *conflict freeze does not edit the doc*. Script `saveMapsState` to conflict; assert the banner appears, then `mapFake.emit.cameraCommit(newCam)` and an object move leave `docRef`'s rendered camera unchanged (assert via the `camera` prop the MapView fake received), that `postMapsPng` is never called while frozen, and that "Reload latest" / "Keep my changes" each clear the banner and restore editing. Covers `applyLocalDoc`'s early return; the zero-POST assertion is not pinned to `captureThumb`'s own `frozen` guard in `shouldPublishThumb` — reverting `frozen: !!saveConflictRef.current` to `frozen: false` there still leaves the test green, because the token bump and the frozen `applyLocalDoc`/doc-unchanged path independently stop the capture. Pinning that specific guard is PR 2 work (see below).
 2. `thumb-token.test.tsx` — *token bump on conflict*. Hold `waitUntilIdle`, fire a conflict mid-capture, release; assert no `postMapsPng`. Second case: token invalidation — `selectSlide` awaits the in-flight `captureThumb(prev)` before moving `activeRef`, so both captures target the same slide; hold idle, select the same slide again, release, assert only the newer capture's token publishes. PR 2 adds a `sameView` case: flip audience via `selectSlide(id, { audience: "cg" })` mid-capture and assert no POST for the stale view.
 3. `rename-unsaved.test.tsx` — *rename persists first and preserves the doc*. Make an edit, click the JobName pencil, submit; assert `saveMapsState` is called **before** `renameJob`, and that after `mergeServerMeta` the local slides survive (the server echo must not clobber them).
 
@@ -106,6 +106,7 @@ Each of these three must be verified red when its corresponding guard is reverte
 4. `thumb-stale-retry.test.tsx` — `postMapsPng` throws `MapsStaleThumbnailError`; assert exactly one retry, only after a successful `flush()`, and only when `saveQueue.revision >= err.stateRevision`; a second case where the flush rejects asserts zero retries; a third where the queue is behind asserts zero retries.
 5. `thumb-reconcile.test.tsx` — after a successful thumb POST, `reconcileServerJob` runs; assert navigating slides mid-flight does not reconcile into the wrong slide (`shouldReconcileThumb` `sameJob` gate).
 6. `save-status-pill.test.tsx` — assert the label sequence `Saved → Unsaved → Saving… → Saved` across a debounced edit, and `→ Paused` on conflict, read through the `aria-live` node.
+7. Add a case (or extend `conflict-freeze.test.tsx`) that pins `captureThumb`'s own `frozen: !!saveConflictRef.current` input to `shouldPublishThumb` — a conflict that starts *after* a capture is already past its own freeze checks but before `gate()` runs, isolated from the token bump and from `applyLocalDoc`'s doc-unchanged effect.
 
 **PR 3 — components + preview**
 
