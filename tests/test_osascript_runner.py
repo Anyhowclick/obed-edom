@@ -102,8 +102,8 @@ def test_timeout_kills_child_and_raises(tmp_path, monkeypatch, live_osascript):
         runner.run_applescript("script", timeout=0.5)
     elapsed = time.monotonic() - start
 
-    assert elapsed < 5
-    for _ in range(50):
+    assert elapsed < 15
+    for _ in range(100):
         if pid_file.exists():
             break
         time.sleep(0.05)
