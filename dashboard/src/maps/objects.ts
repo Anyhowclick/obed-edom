@@ -73,3 +73,16 @@ export function resizeFromCorner(
   const d = Math.abs(px) >= Math.abs(py) ? px : py;
   return Math.round(Math.max(24, Math.min(4000, startSize + d)));
 }
+
+/**
+ * Clipboard rebase: materialise the object's on-screen size at `sourceZoom` into `size`
+ * and re-anchor `sizeZoom` to the target camera, so a paste keeps the same on-screen size.
+ */
+export function rebaseForPaste<T extends { size?: number; scaleWithMap?: boolean; sizeZoom?: number; kind?: string }>(
+  church: T,
+  sourceZoom: number,
+  targetZoom: number
+): T {
+  if (!church.scaleWithMap) return church;
+  return { ...church, size: Math.round(effectiveObjectSize(church, sourceZoom)), sizeZoom: targetZoom };
+}

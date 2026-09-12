@@ -117,12 +117,12 @@ test("churches-dots circle-radius is exactly geometric (base 2) for a scaleWithM
 });
 
 test("churches-drops icon-size scales geometrically off the drop-pin head px and validates with the style spec", () => {
-  const DROP_PIN_HEAD_PX = 17;
+  const DROP_PIN_HEAD_PX = 50;
   const expr = zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]);
   const parsed = createExpression(expr, { type: "number" });
   assert.equal(parsed.result, "success", JSON.stringify(parsed.value));
   const evaluate = (zoom, properties) => parsed.value.evaluate({ zoom }, { properties });
-  const size = 64;
+  const size = 100;
   const sizeZoomRef = 8;
   const base = size / DROP_PIN_HEAD_PX;
   assert.equal(evaluate(8, { size, objectScale: 1, sel: false, scaleWithMap: true, sizeZoomRef }), base);

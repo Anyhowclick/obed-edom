@@ -13,7 +13,7 @@ const compile = spawnSync(runtime, [
   "--outDir", out, path.join(root, "src/maps/objects.ts"),
 ], { cwd: root, encoding: "utf8" });
 assert.equal(compile.status, 0, compile.stderr || compile.stdout);
-const { defaultLandmarkSize, defaultObjectSize, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
+const { defaultLandmarkSize, defaultObjectSize, rebaseForPaste, resizeFromCorner, zoomSizeFactor, effectiveObjectSize } = require(path.join(out, "objects.js"));
 
 test("defaultObjectSize matches DOT_SIZE/DROP_SIZE (maps_keynote.py) and the landmark default", () => {
   assert.equal(defaultObjectSize("dot"), 28);
@@ -97,4 +97,40 @@ test("zoomSizeFactor matches effectiveObjectSize's ratio", () => {
 test("resizeFromCorner with a zoom-inflated scale edits ground size", () => {
   const zoomFactor = zoomSizeFactor(5, 6);
   assert.equal(resizeFromCorner({ x: 0, y: 0 }, { x: 50, y: 0 }, 120, 1 * zoomFactor, "se"), 170);
+});
+
+test("rebaseForPaste leaves a non-scaling object untouched", () => {
+  const church = { kind: "dropPin", size: 100, scaleWithMap: false, sizeZoom: 5 };
+  assert.deepEqual(rebaseForPaste(church, 7, 10), church);
+});
+
+test("rebaseForPaste keeps the on-screen size when the source camera differs from sizeZoom", () => {
+  // size 100 authored at sizeZoom 5, viewed on a source camera at zoom 7 -> 400 px on screen.
+  const church = { kind: "dropPin", size: 100, scaleWithMap: true, sizeZoom: 5 };
+  assert.equal(effectiveObjectSize(church, 7), 400);
+  const pasted = rebaseForPaste(church, 7, 10);
+  assert.equal(pasted.size, 400);
+  assert.equal(pasted.sizeZoom, 10);
+  assert.equal(effectiveObjectSize(pasted, 10), 400);
+});
+
+test("rebaseForPaste is a no-op on size when the source camera equals sizeZoom", () => {
+  const church = { kind: "dropPin", size: 100, scaleWithMap: true, sizeZoom: 7 };
+  const pasted = rebaseForPaste(church, 7, 3);
+  assert.equal(pasted.size, 100);
+  assert.equal(pasted.sizeZoom, 3);
+  assert.equal(effectiveObjectSize(pasted, 3), 100);
+});
+
+test("copy-then-paste to many slides holds the source on-screen size at every target camera", () => {
+  const sourceZoom = 7;
+  const church = { kind: "dropPin", size: 100, scaleWithMap: true, sizeZoom: 5 };
+  const onScreen = effectiveObjectSize(church, sourceZoom);
+  // copySelectedPins materialises against the source camera; pasteObjects rebases per target.
+  const clipboard = rebaseForPaste({ ...church }, sourceZoom, sourceZoom);
+  for (const targetZoom of [3, 7, 10, 12.5]) {
+    const pasted = rebaseForPaste(clipboard, clipboard.sizeZoom, targetZoom);
+    assert.equal(pasted.sizeZoom, targetZoom);
+    assert.equal(effectiveObjectSize(pasted, targetZoom), onScreen);
+  }
 });

@@ -5,7 +5,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
+import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
 import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
@@ -632,7 +632,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       const hit = layers.length ? map.queryRenderedFeatures(event.point, { layers }) : [];
       const id = String(hit[0]?.properties?.id || "");
       const church = id ? overlay.current.churches.find((c) => c.id === id) : undefined;
-      map.getCanvas().style.cursor = church && church.id === selectedPinId && church.kind === "landmark" ? "move" : "";
+      map.getCanvas().style.cursor = church && church.id === selectedPinId ? "move" : "";
     };
 
     const onObjPointerDown = (event: PointerEvent) => {
@@ -952,11 +952,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
         // circle layer is centre-anchored.
         setBoxPos({ x: anchor.x - w / 2, y: anchor.y - w / 2, w, h: w, size });
       } else if (church.kind === "dropPin") {
-        const k = (w * 1.08) / DROP_PIN_HEAD_PX;
-        const boxW = DROP_PIN_HEAD_PX * k;
-        const boxH = 27.5 * k;
-        // icon-anchor is "bottom": the anchor sits at the pin's tip, 28.5k above the bulb's top.
-        setBoxPos({ x: anchor.x - boxW / 2, y: anchor.y - 28.5 * k, w: boxW, h: boxH, size });
+        // icon-anchor is "bottom", so the anchor sits on the tail tip.
+        const box = dropPinSelectionBox(w);
+        setBoxPos({ x: anchor.x - box.w / 2, y: anchor.y - box.h, w: box.w, h: box.h, size });
       } else {
         const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
         // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
@@ -984,7 +982,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       event.stopPropagation();
       if (!boxPos) return;
       const church = overlay.current.churches.find((c) => c.id === selectedPinId);
-      const aspect = church?.kind === "landmark" ? (church?.assetHeight || 1) / (church?.assetWidth || 1) : church?.kind === "dropPin" ? 27.5 / 17 : 1;
+      const aspect = church?.kind === "landmark" ? (church?.assetHeight || 1) / (church?.assetWidth || 1) : church?.kind === "dropPin" ? DROP_PIN_TOTAL_PX / DROP_PIN_HEAD_PX : 1;
       event.currentTarget.setPointerCapture(event.pointerId);
       handleDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, startSize: boxPos.size, corner, aspect };
     };

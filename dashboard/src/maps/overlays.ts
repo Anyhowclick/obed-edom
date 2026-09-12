@@ -239,29 +239,55 @@ function dropPinImageId(color: string): string {
   return `church-drop-${hash >>> 0}`;
 }
 
-/** Head diameter (px) of the 48x60 @2x `dropPinImage`: the bulb's bezier extent (x 7->41 device, /2). */
-export const DROP_PIN_HEAD_PX = 17;
+/**
+ * Preview drop pin, drawn to Keynote's `_place_churches` geometry: a head circle of
+ * diameter = size, a tail triangle 0.46 wide x 0.4 tall starting at 0.68, and a white
+ * hole of diameter 0.36 at the head centre. Total height is 1.08 x size, tip on the anchor.
+ */
+const DROP_PIN_DEVICE_HEAD = 100;
+const DROP_PIN_PIXEL_RATIO = 2;
+
+/** Head diameter in CSS px of the raster `dropPinImage` returns. */
+export const DROP_PIN_HEAD_PX = DROP_PIN_DEVICE_HEAD / DROP_PIN_PIXEL_RATIO;
+/** Head-to-tip height in CSS px of that raster. */
+export const DROP_PIN_TOTAL_PX = DROP_PIN_HEAD_PX * 1.08;
+/** Emphasis applied to a selected drop pin's `icon-size`. */
+export const DROP_PIN_SELECTED_SCALE = 1.08;
+
+/** Selection-box size for a drop pin whose unselected head measures `headPx` on screen. */
+export function dropPinSelectionBox(headPx: number): { w: number; h: number } {
+  const w = headPx * DROP_PIN_SELECTED_SCALE;
+  return { w, h: (w * DROP_PIN_TOTAL_PX) / DROP_PIN_HEAD_PX };
+}
 
 function dropPinImage(color: string): ImageData {
+  const size = DROP_PIN_DEVICE_HEAD;
+  const height = Math.round(size * 1.08);
   const canvas = document.createElement("canvas");
-  canvas.width = 48;
-  canvas.height = 60;
+  canvas.width = size;
+  canvas.height = height;
   const ctx = canvas.getContext("2d");
-  if (!ctx) return new ImageData(48, 60);
+  if (!ctx) return new ImageData(size, height);
+  const half = size / 2;
+  const tailW = size * 0.46;
+  const tailTop = size * 0.68;
   ctx.beginPath();
-  ctx.moveTo(24, 58);
-  ctx.bezierCurveTo(20, 49, 7, 37, 7, 23);
-  ctx.bezierCurveTo(7, 11, 14, 3, 24, 3);
-  ctx.bezierCurveTo(34, 3, 41, 11, 41, 23);
-  ctx.bezierCurveTo(41, 37, 28, 49, 24, 58);
+  ctx.moveTo(half - tailW / 2, tailTop);
+  ctx.lineTo(half + tailW / 2, tailTop);
+  ctx.lineTo(half, tailTop + size * 0.4);
   ctx.closePath();
+  ctx.moveTo(size, half);
+  ctx.arc(half, half, half, 0, Math.PI * 2);
+  // Stroke under the fill: the outer silhouette keeps a thin white rim while the fill hides
+  // the head/tail seam. The rim's overshoot is clipped by the canvas, so the head stays `size` wide.
+  ctx.lineWidth = size * 0.03;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineJoin = "round";
+  ctx.stroke();
   ctx.fillStyle = color;
   ctx.fill();
-  ctx.lineWidth = 2.5;
-  ctx.strokeStyle = "#ffffff";
-  ctx.stroke();
   ctx.beginPath();
-  ctx.arc(24, 22, 7, 0, Math.PI * 2);
+  ctx.arc(half, half, size * 0.18, 0, Math.PI * 2);
   ctx.fillStyle = "#ffffff";
   ctx.fill();
   return ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -271,7 +297,7 @@ export function ensureDropPinImages(map: MapLibreMap, churches: MapsChurch[]) {
   for (const church of churches) {
     if (church.kind !== "dropPin") continue;
     const id = dropPinImageId(church.color);
-    if (!map.hasImage(id)) map.addImage(id, dropPinImage(church.color), { pixelRatio: 2 });
+    if (!map.hasImage(id)) map.addImage(id, dropPinImage(church.color), { pixelRatio: DROP_PIN_PIXEL_RATIO });
   }
 }
 
@@ -338,9 +364,8 @@ export function churchesLayers(): LayerSpecification[] {
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
-        // DROP_PIN_HEAD_PX (17) is the drop image's head diameter at pixelRatio 2 (see dropPinImage), so
-        // size/DROP_PIN_HEAD_PX brings icon-size to church.size px measured head-to-head, like Keynote's drop pin.
-        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], 1.08, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]),
+        // Dividing by the raster's head diameter renders church.size px head-to-head, like Keynote's drop pin.
+        "icon-size": zoomScaledStops(["*", ["case", ["boolean", ["get", "sel"], false], DROP_PIN_SELECTED_SCALE, 1], ["get", "size"], ["get", "objectScale"], 1 / DROP_PIN_HEAD_PX]),
       },
       paint: { "icon-opacity": ["coalesce", ["get", "opacity"], 1] },
     },

@@ -48,7 +48,7 @@ import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
-import { defaultObjectSize, zoomSizeFactor } from "../maps/objects";
+import { defaultObjectSize, rebaseForPaste, zoomSizeFactor } from "../maps/objects";
 import { admin0Name, loadAdmin0 } from "../maps/overlays";
 import { stampOsm } from "../maps/stampOsm";
 import { StylePicker } from "../maps/StylePicker";
@@ -1064,7 +1064,10 @@ export function MapsTab() {
   function copySelectedPins() {
     if (!activeView || !selectedPins.length) return;
     const selected = new Set(selectedPins);
-    setObjectClipboard(activeView.churches.filter((church) => selected.has(church.id)).map((church) => ({ ...church })));
+    const sourceZoom = activeView.camera.zoom;
+    setObjectClipboard(
+      activeView.churches.filter((church) => selected.has(church.id)).map((church) => rebaseForPaste({ ...church }, sourceZoom, sourceZoom))
+    );
   }
 
   function pasteObjects(toAllSlides = false) {
@@ -1076,7 +1079,7 @@ export function MapsTab() {
       const targetZoom = targetView.camera.zoom;
       const copies: MapsChurch[] = [];
       for (const church of objectClipboard) {
-        const rebased = church.scaleWithMap ? { ...church, sizeZoom: targetZoom } : church;
+        const rebased = rebaseForPaste(church, church.sizeZoom ?? targetZoom, targetZoom);
         copies.push({ ...rebased, id: nextPinId([...slide.churches, ...copies]) });
       }
       if (activeAudience === "cg" && slide.cg) return { ...slide, cg: { ...slide.cg, churches: [...slide.cg.churches, ...copies] } };
