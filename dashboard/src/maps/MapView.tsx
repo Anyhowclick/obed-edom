@@ -7,7 +7,7 @@ import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
 import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
-import { resizeFromCorner, type ObjectCorner } from "./objects";
+import { effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
 import { applyAuthoredZoomGates } from "./tonerBoundaries";
 import { installPatternById, installPatterns, paperGrainCss, paperGrainUrl, stylePatterns } from "./watercolourStyle";
@@ -943,7 +943,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       }
       const scale = objectLayoutScale(authoredWidthRef.current);
       const size = church.size || 120;
-      const w = size * scale;
+      const eff = effectiveObjectSize(church, map.getZoom() - deltaRef.current);
+      const w = eff * scale;
       const h = w * ((church.assetHeight || 1) / (church.assetWidth || 1));
       const anchor = map.project([church.lon, church.lat]);
       // icon-anchor is "bottom", so the anchor point is the bottom-center of the rendered image.
@@ -980,7 +981,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     const drag = handleDrag.current;
     const map = mapRef.current;
     if (!drag || !map || !selectedPinId) return;
-    const scale = objectDragScale(map, authoredWidthRef.current);
+    const church = overlay.current.churches.find((c) => c.id === selectedPinId);
+    const zoomFactor = church?.scaleWithMap && church.sizeZoom != null ? zoomSizeFactor(church.sizeZoom, map.getZoom() - deltaRef.current) : 1;
+    const scale = objectDragScale(map, authoredWidthRef.current) * zoomFactor;
     const size = resizeFromCorner(
       { x: drag.startX, y: drag.startY },
       { x: event.clientX, y: event.clientY },

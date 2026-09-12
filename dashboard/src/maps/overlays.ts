@@ -2,6 +2,7 @@ import { GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
+import { iconSizeStops } from "./objects";
 
 export type Admin0 = {
   type: "FeatureCollection";
@@ -196,6 +197,8 @@ export function churchesGeo(
         opacity: church.opacity ?? 1,
         sel: church.id === selectedPinId,
         objectScale,
+        scaleWithMap: church.scaleWithMap === true,
+        sizeZoomRef: (church.sizeZoom ?? 0) + Math.log2(objectScale),
       },
       geometry: { type: "Point", coordinates: [church.lon, church.lat] },
     })),
@@ -329,7 +332,7 @@ export async function addOverlays(
         "icon-anchor": "bottom",
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
-        "icon-size": ["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]],
+        "icon-size": iconSizeStops(["/", ["*", ["coalesce", ["get", "size"], 120], ["get", "objectScale"]], ["max", 1, ["get", "assetRenderWidth"]]]) as never,
         "icon-rotation-alignment": "viewport",
         "icon-pitch-alignment": "viewport",
       },
