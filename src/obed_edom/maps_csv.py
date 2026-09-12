@@ -145,6 +145,9 @@ def _peelable_field(token: str, after: str) -> bool:
     return False
 
 
+_MAX_URL_PEEL = 8
+
+
 def _extract_unquoted_url(raw_line: str) -> tuple[str, str | None]:
     match = _URL_RE.search(raw_line)
     if not match:
@@ -155,23 +158,22 @@ def _extract_unquoted_url(raw_line: str) -> tuple[str, str | None]:
     end = match.end()
     while end > start and raw_line[end - 1] == ",":
         end -= 1
-    while True:
-        segment = raw_line[start:end]
-        if not _URL_RE.fullmatch(segment):
+    tokens = raw_line[start:end].split(",")
+    after = raw_line[end:]
+    for _ in range(_MAX_URL_PEEL):
+        if len(tokens) <= 1:
             break
-        comma_idx = segment.rfind(",")
-        if comma_idx == -1:
-            break
-        candidate_url = segment[:comma_idx]
-        if not _URL_RE.fullmatch(candidate_url):
-            break
-        trailing_token = segment[comma_idx + 1 :]
-        after = raw_line[end:]
+        trailing_token = tokens[-1]
         if not _peelable_field(trailing_token, after):
             break
-        end = start + comma_idx
-    remainder = raw_line[:start] + raw_line[end:]
-    return remainder, raw_line[start:end] or None
+        after = "," + trailing_token + after
+        tokens.pop()
+    url = ",".join(tokens)
+    if not _URL_RE.fullmatch(url):
+        return raw_line, None
+    new_end = start + len(url)
+    remainder = raw_line[:start] + raw_line[new_end:]
+    return remainder, url
 
 
 def _order_halves(a: tuple[float, str | None], b: tuple[float, str | None]) -> tuple[float, float]:
@@ -361,7 +363,10 @@ _RESTKEY = "__extra__"
 
 def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list[str]]:
     reader = csv.DictReader(io.StringIO(sample), restkey=_RESTKEY)
-    fieldnames = [str(f or "").strip().lower() for f in (reader.fieldnames or [])]
+    try:
+        fieldnames = [str(f or "").strip().lower() for f in (reader.fieldnames or [])]
+    except csv.Error as exc:
+        return [], [f"Line {line_offset + 1}: unreadable row ({exc})"]
     seen: set[str] = set()
     for field in fieldnames:
         if field in seen:
@@ -370,7 +375,15 @@ def _parse_header_form(sample: str, line_offset: int) -> tuple[list[Place], list
     single_joinable_header = len(fieldnames) == 1 and fieldnames[0] in _SINGLE_FIELD_HEADERS
     places: list[Place] = []
     errors: list[str] = []
-    for raw in reader:
+    row_iter = iter(reader)
+    while True:
+        try:
+            raw = next(row_iter)
+        except StopIteration:
+            break
+        except csv.Error as exc:
+            errors.append(f"Line {line_offset + reader.line_num}: unreadable row ({exc})")
+            continue
         line_no = line_offset + reader.line_num
         extra = raw.pop(_RESTKEY, None)
         row = {str(key or "").strip().lower(): (value or "").strip() for key, value in raw.items()}
@@ -398,16 +411,44 @@ def parse_places(text: str) -> tuple[list[Place], list[str]]:
     numbered = [(i + 1, line) for i, line in enumerate(raw_lines) if line.strip()]
     if not numbered:
         return [], []
-    first_fields = next(csv.reader([numbered[0][1]]))
+    try:
+        first_fields = next(csv.reader([numbered[0][1]]))
+    except csv.Error as exc:
+        return [], [f"Line {numbered[0][0]}: unreadable row ({exc})"]
     if looks_like_header(first_fields, has_more_lines=len(numbered) > 1):
         header_offset = numbered[0][0] - 1
         header_sample = "\n".join(raw_lines[header_offset:])
         return _parse_header_form(header_sample, header_offset)
+
     places: list[Place] = []
     errors: list[str] = []
-    for line_no, raw_line in numbered:
-        remainder, extracted_url = _extract_unquoted_url(raw_line)
-        fields = next(csv.reader([remainder]))
+    non_blank_lines = [line for _, line in numbered]
+    reader = csv.reader(io.StringIO("\n".join(non_blank_lines)))
+    total = len(non_blank_lines)
+    idx = 0
+    while idx < total:
+        prev_line_num = reader.line_num
+        try:
+            next(reader)
+        except StopIteration:
+            break
+        except csv.Error as exc:
+            line_no = numbered[idx][0]
+            errors.append(f"Line {line_no}: unreadable row ({exc})")
+            idx += 1
+            continue
+        consumed = max(reader.line_num - prev_line_num, 1)
+        line_no = numbered[idx][0]
+        raw_record = "\n".join(non_blank_lines[idx : idx + consumed])
+        idx += consumed
+        remainder, extracted_url = _extract_unquoted_url(raw_record)
+        try:
+            fields = next(csv.reader(io.StringIO(remainder)))
+        except StopIteration:
+            fields = []
+        except csv.Error as exc:
+            errors.append(f"Line {line_no}: unreadable row ({exc})")
+            continue
         result = _parse_headerless_row(fields, line_no, extracted_url)
         if isinstance(result, str):
             errors.append(result)
