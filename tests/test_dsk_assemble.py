@@ -267,7 +267,7 @@ def test_run_size_ranges_all_none_sizes_is_unresolved():
     ranges, unresolved = dsa._run_size_ranges(item, 1.0, item_id=("text", 0), slide_number=1, warnings=warnings)
     assert ranges is None
     assert unresolved is True
-    assert warnings == ["slide 1 text 0: run ranges leave a gap, preserving source sizing"]
+    assert warnings == ["slide 1 text 0: run ranges leave a gap"]
 
 
 def test_run_size_ranges_known_size_then_unresolved_run_is_unresolved():
@@ -278,7 +278,7 @@ def test_run_size_ranges_known_size_then_unresolved_run_is_unresolved():
     ranges, unresolved = dsa._run_size_ranges(item, 1.0, item_id=("text", 0), slide_number=1, warnings=warnings)
     assert ranges is None
     assert unresolved is True
-    assert warnings == ["slide 1 text 0: run ranges leave a gap, preserving source sizing"]
+    assert warnings == ["slide 1 text 0: run ranges leave a gap"]
 
 
 def test_text_mixed_run_sizes_warns_and_omits():
@@ -1087,7 +1087,7 @@ def test_gw_text_slides_stay_within_band_top():
             plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={}, runs=runs)
         except AssemblyRefusal:
             # GW 49 has a real run-size coverage gap with t < 1.0 -- refused rather
-            # than assembled overflowing (finding 2); not a band-containment case.
+            # than assembled overflowing; not a band-containment case.
             continue
         fit = dict(plan.fits.get(number, {}))
         for part in plan.splits.get(number, ()):
@@ -1139,7 +1139,7 @@ def test_gw17_28_forced_split_at_floor_66_leaves_gw28_unsplit():
 
 def test_gw13_forced_floor_66_refuses_its_badge_gapped_single_box():
     # GW 13's own natural fit dropped from t=0.95 to t=0.91 once the stack budget
-    # correctly charges the badge gap once, not zero times (finding 1) -- 0.91 * 70
+    # correctly charges the badge gap once, not zero times -- 0.91 * 70
     # is below the 66pt floor, and a single box can't split, so this now refuses
     # rather than assembling unsplit.
     _require_gw_deck()
@@ -3634,7 +3634,7 @@ def test_stacked_box_gap_in_run_coverage_preserves_source_sizing():
     assert ("text", 1) not in plan.run_sizes.get(13, {})
     assert ("text", 1) not in plan.text_sizes.get(13, {})
     assert ("text", 1) in plan.shrink_text_sizes.get(13, {})
-    assert any("run ranges leave a gap, preserving source sizing" in w for w in plan.warnings)
+    assert any("run ranges leave a gap" in w for w in plan.warnings)
 
     script = build_assembly_script(
         plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key")
@@ -3644,7 +3644,7 @@ def test_stacked_box_gap_in_run_coverage_preserves_source_sizing():
 
 def _gw49_shaped_item(kind_index, *, x=2000, y=200, w=1800, h=300, split_at=20, size=150.0):
     # GW 49-shaped: a run-size coverage gap (mostly size=None) whose only remaining fit
-    # needs t < 1.0 -- the exact case finding 1 threads text_fit through for.
+    # needs t < 1.0 -- exercises text_fit threaded through to this path.
     text = _VERSE_1
     runs = [
         {"text": text[:split_at], "size": size},
@@ -3841,6 +3841,29 @@ def test_split_parts_one_long_box_each_keeps_badge():
     assert ("text", 0) in part1.fits and ("text", 0) in part2.fits
     assert ("text", 2) in part1.deletes
     assert ("text", 1) in part2.deletes
+
+
+def test_split_parts_both_carry_the_badges_size_write():
+    _require_font("AzoSans-Regular")
+    box1 = _long_text_item(1, _VERSE_1, y=100)
+    box2 = _long_text_item(2, _VERSE_2, y=500)
+    badge = _badge_item(0)
+    badge["runs"] = [{"text": badge["text"], "size": badge["size"]}]
+    slide = _slide(17, [box1, box2, badge])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {17: SlideDecision(17, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
+    from obed_edom.remap_keynote import _as_num
+
+    badge_size = plan.text_sizes[17][("text", 0)]
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        layout_policy="preserve",
+    )
+    write_line = f"set size of object text of theObj to {_as_num(badge_size)}"
+    assert script.count(write_line) == 2
+    assert "OVERFLOW\\ttext:0" not in script
 
 
 def test_split_script_duplicates_in_descending_order():
@@ -4074,7 +4097,7 @@ def test_verify_builds_tolerates_badge_build_repeated_on_every_part(monkeypatch)
     )
     # Badge (text:5) is a genuine short item -- present in every part's own fits, so
     # its build key is recognised as "repeated" rather than summed as a per-part
-    # one-off (finding 2).
+    # one-off.
     plan = AssemblyPlan(
         kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
         autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},
@@ -4106,7 +4129,7 @@ def test_verify_builds_tolerates_badge_build_repeated_twice_on_every_part(monkey
         lambda path, *, deck=None: src_builds if "fw" in str(path) else out_builds,
     )
     # Badge (text:5) is a genuine short item -- present in every part's own fits, so
-    # its build key is recognised as "repeated" rather than summed (finding 2).
+    # its build key is recognised as "repeated" rather than summed.
     plan = AssemblyPlan(
         kept=(17,), ordinals={17: 2}, fits={17: {}}, deletes={17: ()}, clips={}, text_sizes={},
         autosize={}, warnings=(), parts={17: 2}, ordinal_to_number={2: 17, 3: 17},

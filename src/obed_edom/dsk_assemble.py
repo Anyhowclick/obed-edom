@@ -197,7 +197,7 @@ def _run_size_ranges(
     if not ranges:
         if gap and warnings is not None and item_id is not None:
             warnings.append(
-                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap, preserving source sizing"
+                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap"
             )
         return None, gap
     covered = not gap and ranges[0][0] == 1 and ranges[-1][1] == full_len
@@ -206,7 +206,7 @@ def _run_size_ranges(
     if not covered:
         if warnings is not None and item_id is not None:
             warnings.append(
-                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap, preserving source sizing"
+                f"slide {slide_number} text {item_id[1]}: run ranges leave a gap"
             )
         return None, True
     if len({round(sz, 6) for _s, _e, sz in ranges}) <= 1:
@@ -487,6 +487,7 @@ def plan_assembly(
                                 autosize=part_autosize,
                             )
                         )
+                    assert number not in clips_out, f"slide {number}: split text slide cannot also be a clip"
                     parts[number] = len(part_list)
                     splits[number] = tuple(part_list)
                     for iid in long_ids:
@@ -1061,7 +1062,7 @@ def _slide_lines(
         split_part = split_parts[part]
         fit = split_part.fits
         deletes_here: tuple[ItemId, ...] = split_part.deletes
-        text_sizes = split_part.text_sizes
+        text_sizes = {**plan.text_sizes.get(number, {}), **split_part.text_sizes}
         run_sizes_here = split_part.run_sizes
         stacked_ids_here = split_part.stacked_ids
         autosize_ids = plan.autosize.get(number, frozenset()) | split_part.autosize
@@ -1739,14 +1740,8 @@ def _staged_id_for(
 
 
 def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: AssemblyPlan, number: int) -> list[dict]:
-    """Each part's own long-box builds are always summed. A short item's build is
-    recognised as "repeated" only when its source id (recovered from the part's staged
-    kindIndex) sits in every part's own ``fits`` -- i.e. it is genuinely the same shared
-    item cloned onto every part, not a per-part-unique item that happens to share an
-    (effect, animationType, identity) key. A repeated key is counted only when every
-    part's counter for it agrees; a disagreement (e.g. one part dropped it) contributes
-    nothing here, so the shortfall surfaces as a missing build for `_verify_builds` to
-    refuse or tolerate. A key that isn't recognised as repeated is summed, as before."""
+    """Sums each part's own long-box builds; merges short-item builds, treating a key as
+    "repeated" only when genuinely shared across every part (see plan D5)."""
     split_parts = plan.splits.get(number, ())
     part_fits = [p.fits for p in split_parts]
     long_builds: list[dict] = []

@@ -369,13 +369,25 @@ the band even alone") — never split a box mid-text.
 
 **Accepted residual risk:** the 15 pt safety headroom is measured against a worst estimator
 divergence of −20 pt (GW 38) and a −10..−15 pt cluster elsewhere; `OVERFLOW` read-back remains the
-authority over the estimate. The forced-split acceptance run now provokes the split at GW 17/28
-with the floor at 66 (GW 13 still fits at t=0.91 and only refuses at 66).
+authority over the estimate. The forced-split acceptance run now provokes the split at GW 17
+with the floor at 66 (GW 13 still fits at t=0.91 and only refuses at 66; GW 28 still fits alone
+at 66 and does not split).
 
 ### D5. Deletes
 
 `deletes[number]` (`dsk_assemble.py:228`) additionally carries `cls.dropped_backdrop`,
 `cls.dropped_duplicate` and every crop-replaced image id, in `_delete_order`.
+
+`_merge_split_part_builds` (`dsk_assemble.py:1742`): each part's own long-box builds are always
+summed. A short item's build is recognised as "repeated" only when its source id (recovered from
+the part's staged kindIndex) sits in every part's own `fits` -- i.e. it is genuinely the same
+shared item cloned onto every part, not a per-part-unique item that happens to share an
+(effect, animationType, identity) key. A repeated key is counted only when every part's counter
+for it agrees; a disagreement (e.g. one part dropped it) contributes nothing here, so the
+shortfall surfaces as a missing build for `_verify_builds` to refuse or tolerate. A key that isn't
+recognised as repeated is summed, as before. This can mis-classify a key shared between a genuine
+repeated item and a per-part-unique one, or under-count a losing repeated item across both parts;
+both err toward refusal rather than silent loss, which is the deliberate tradeoff.
 
 ### D6. Flags and refusals
 
