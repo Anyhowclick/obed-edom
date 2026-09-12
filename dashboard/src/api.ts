@@ -35,7 +35,8 @@ export type ChosenFile = { path: string; name: string };
 async function readError(res: Response, parsed?: unknown): Promise<string> {
   try {
     const data = parsed !== undefined ? parsed : await res.json();
-    return (data as { detail?: string })?.detail || JSON.stringify(data);
+    const detail = (data as { detail?: string | string[] })?.detail;
+    return (Array.isArray(detail) ? detail.join("\n") : detail) || JSON.stringify(data);
   } catch {
     return res.statusText;
   }
