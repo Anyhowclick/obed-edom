@@ -3410,3 +3410,125 @@ def test_rename_maps_job_serializes_with_concurrent_delete(monkeypatch):
     assert RUNNER.get(job["id"]) is None
     assert not new_output_dir.exists()
     assert not old_output_dir.exists()
+
+
+def test_rename_maps_job_delete_blocks_until_rollback_completes(monkeypatch):
+    from obed_edom.web import maps
+
+    job = _seed()
+    old_output_dir = Path(job["result"]["outputDir"])
+    new_output_dir = old_output_dir.parent / f"quiet-jordan-{job['id']}"
+    target = new_output_dir.name
+
+    commit_failing = threading.Event()
+    release_rollback = threading.Event()
+    rollback_started = threading.Event()
+    finish_rollback = threading.Event()
+    real_update_result = RUNNER.update_result
+    real_replace = os.replace
+
+    def failing_update_result(job_id, result):
+        if job_id == job["id"]:
+            commit_failing.set()
+            release_rollback.wait(5)
+            raise OSError("disk full")
+        return real_update_result(job_id, result)
+
+    def hooked_replace(src, dst):
+        if str(src) == str(new_output_dir) and str(dst) == str(old_output_dir):
+            rollback_started.set()
+            finish_rollback.wait(5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+    monkeypatch.setattr(maps.os, "replace", hooked_replace)
+
+    rename_outcome = {}
+
+    def do_rename():
+        try:
+            rename_outcome["response"] = client.patch(f"/api/jobs/{job['id']}/name", json={"name": target})
+        except OSError as exc:
+            rename_outcome["error"] = exc
+
+    thread = threading.Thread(target=do_rename)
+    thread.start()
+    assert commit_failing.wait(2)
+    assert new_output_dir.is_dir()
+    assert not old_output_dir.exists()
+
+    delete_outcome = {}
+
+    def do_delete():
+        delete_outcome["response"] = client.delete(f"/api/jobs/{job['id']}")
+
+    delete_thread = threading.Thread(target=do_delete)
+    delete_thread.start()
+    time.sleep(0.2)
+    assert delete_thread.is_alive(), "delete must block behind the held job lock before the rollback even starts"
+
+    release_rollback.set()
+    assert rollback_started.wait(2)
+    time.sleep(0.2)
+    assert delete_thread.is_alive(), "delete must stay blocked while the rollback os.replace is in flight"
+
+    finish_rollback.set()
+    thread.join(5)
+    delete_thread.join(5)
+    monkeypatch.undo()
+
+    assert "error" in rename_outcome and isinstance(rename_outcome["error"], OSError)
+    assert delete_outcome["response"].status_code == 200, delete_outcome["response"].text
+    assert RUNNER.get(job["id"]) is None
+    assert not new_output_dir.exists()
+    assert not old_output_dir.exists()
+
+
+def test_rename_maps_job_reserves_source_name_during_failing_commit(monkeypatch):
+    job_a = _seed()
+    job_b = _seed()
+    old_name_a = job_a["name"]
+    old_output_dir_a = Path(job_a["result"]["outputDir"])
+    target = f"quiet-jordan-{job_a['id']}"
+
+    inside_failing_save = threading.Event()
+    release = threading.Event()
+    real_update_result = RUNNER.update_result
+
+    def failing_update_result(job_id, result):
+        if job_id == job_a["id"]:
+            inside_failing_save.set()
+            release.wait(5)
+            raise OSError("disk full")
+        return real_update_result(job_id, result)
+
+    monkeypatch.setattr(RUNNER, "update_result", failing_update_result)
+
+    outcome = {}
+
+    def do_rename():
+        try:
+            outcome["response"] = client.patch(f"/api/jobs/{job_a['id']}/name", json={"name": target})
+        except OSError as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=do_rename)
+    thread.start()
+    assert inside_failing_save.wait(2)
+
+    refused = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
+    assert refused.status_code == 409
+
+    release.set()
+    thread.join(5)
+    monkeypatch.undo()
+
+    assert "error" in outcome and isinstance(outcome["error"], OSError)
+    assert old_output_dir_a.is_dir()
+    stored_a = RUNNER.get(job_a["id"])
+    assert stored_a.name == old_name_a
+    assert stored_a.result["outputDir"] == job_a["result"]["outputDir"]
+
+    still_refused = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
+    assert still_refused.status_code == 409
+    assert RUNNER.get(job_b["id"]).name != old_name_a
