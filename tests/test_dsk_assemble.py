@@ -4,6 +4,7 @@ subprocess.run/Popen is reached without an explicit monkeypatch.
 """
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 
@@ -5138,11 +5139,12 @@ def test_keep_side_content_anchor_clips_to_centre_panel():
 
 
 def test_rotated_image_anchor_uses_transformed_aabb():
-    # A 400x1000 image rotated 90 degrees is visually 1000x400 (aspect 2.5, LW-dimension)
-    # -- the unrotated frame (aspect 0.4) would wrongly read squarish and right-align it.
-    # Positioned so its rotated AABB sits fully inside the centre panel (codex placement
-    # review 3, finding 1).
-    item = _image_item(0, x=2800, y=40, w=400, h=1000)
+    # Production payload semantics (codex placement review 4): x/y is already the rotated
+    # frame's AABB top-left, w/h is its UNROTATED size. A raw 400x1000 frame at (2220,0)
+    # rotated 90 degrees has exact AABB (1920,300,1000,400) -- payload carries that AABB
+    # top-left with the original 400x1000 size. Aspect 1000/400=2.5 is LW-dimension; the
+    # old (unrotated-origin) reading would re-rotate the AABB point and miss the panel.
+    item = _image_item(0, x=1920, y=300, w=400, h=1000)
     item["rotation"] = 90
     slide = _slide(50, [item])
     payload = _payload([slide])
@@ -5153,9 +5155,10 @@ def test_rotated_image_anchor_uses_transformed_aabb():
 
 
 def test_rotated_group_anchor_uses_transformed_aabb():
-    # Same rotation, but the content item is a top-level media group -- the group's own
-    # payload frame is rotation-naive too, so the fix must cover groups as well as images.
-    group = _group_item(0, x=2800, y=40, w=400, h=1000)
+    # Same production semantics, off-centre within the panel -- the content item is a
+    # top-level media group, so the fix must cover groups as well as images. AABB top-left
+    # (2200,300) with unrotated 400x1000 stays put; only the 1000x400 extent is derived.
+    group = _group_item(0, x=2200, y=300, w=400, h=1000)
     group["rotation"] = 90
     slide = _slide(51, [group])
     slide["groupChildSignature"] = {0: "image:photo.jpg"}
@@ -5164,6 +5167,47 @@ def test_rotated_group_anchor_uses_transformed_aabb():
     decisions = {51: SlideDecision(51, "in_deck", anchor="auto")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
     assert plan.anchors[51] == "centre"
+    visibles = dsa._content_visibles_by_kept(slide["items"], [("group", 0)])
+    rect = visibles[("group", 0)]
+    assert rect.x == pytest.approx(2200.0)
+    assert rect.y == pytest.approx(300.0)
+    assert rect.w == pytest.approx(1000.0)
+    assert rect.h == pytest.approx(400.0)
+
+
+def test_rotated_item_panel_edge_uses_exact_offline_payload_aabb():
+    # codex placement review 4, finding 1's own worked example: a raw 400x1000 frame at
+    # (2220,0) rotated 90 degrees. offline_inspect/_compose_record write that through
+    # _frame_rect as AABB top-left (1920,300) with unrotated size (400,1000) -- exactly
+    # on the centre panel's left edge (panel starts at x=1920). _content_item_aabb must
+    # reproduce the exact AABB (1920,300,1000,400), not clip or shift it.
+    item = _image_item(0, x=1920, y=300, w=400, h=1000)
+    item["rotation"] = 90
+    aabb = dsa._content_item_aabb(item)
+    assert aabb.x == pytest.approx(1920.0)
+    assert aabb.y == pytest.approx(300.0)
+    assert aabb.w == pytest.approx(1000.0)
+    assert aabb.h == pytest.approx(400.0)
+
+
+def test_fractionally_rotated_masked_item_uses_extent_formula():
+    # A masked image's payload w/h is already its D2 masked rect (iwa_geometry docstring:
+    # "masked=mask rect"), still reported as an unrotated size at the AABB top-left --
+    # same contract as an unmasked frame. A residual (non-90-snapped) rotation must still
+    # derive its extents from w/h/rotation, not re-rotate x/y: exercise a threshold-typical
+    # fractional angle (0.5 degrees) below the geometry layer's own snap gate.
+    item = _image_item(0, x=1920, y=300, w=400, h=1000)
+    item["rotation"] = 0.5
+    aabb = dsa._content_item_aabb(item)
+    theta = math.radians(0.5)
+    expected_w = abs(400 * math.cos(theta)) + abs(1000 * math.sin(theta))
+    expected_h = abs(400 * math.sin(theta)) + abs(1000 * math.cos(theta))
+    assert aabb.x == pytest.approx(1920.0)
+    assert aabb.y == pytest.approx(300.0)
+    assert aabb.w == pytest.approx(expected_w)
+    assert aabb.h == pytest.approx(expected_h)
+    assert aabb.w != pytest.approx(400.0)
+    assert aabb.h != pytest.approx(1000.0)
 
 
 def test_group_has_media_missing_none_empty_signature():

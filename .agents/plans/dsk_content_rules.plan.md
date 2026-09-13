@@ -346,10 +346,30 @@ recorded in the plan and printed in the run log.
 A rotated top-level image/movie or rotated group is NOT refused before reaching `_content_anchor`
 (codex placement review 3, finding 1) — its content rect must therefore be the item's exact
 transformed AABB, not its unrotated frame, or a rotated wide item can wrongly read squarish (or
-vice versa). `_content_item_aabb`/`_content_visibles_by_kept` (`dsk_assemble.py`) compute that AABB
-via the shared `iwa_geometry` frame-transform helpers before clipping to the centre panel; masked
-media still contributes its masked rect (D2), unaffected since it carries no separate rotation
-case here.
+vice versa).
+
+**Measured payload semantics (codex placement review 4).** `iwa_geometry`'s own contract
+("rotated=AABB position + unrotated size") holds uniformly: `_frame_rect` (plain frames, used for
+groups/shapes/text/unmasked images) and `_masked_rect` (masked images/movies, whose `w`/`h` is
+already the D2 masked rect) both return the rotated frame's **AABB top-left** as `x`/`y` and the
+frame's own **unrotated** `w`/`h` — never the AABB's own width/height. `offline_inspect._item_from_record`
+copies those `x`/`y`/`w`/`h` straight into the JXA-shaped payload item, so a rotated payload item's
+`x`/`y` is already the point `_content_item_aabb` must anchor on; only `w`/`h` needs rotating.
+Confirmed against a real GW-deck record (`tests/test_dsk_content_rules_acceptance.py`'s payload
+builder) and against Codex's worked example: a raw `400×1000` frame at `(2220,0)` rotated 90°
+composes to payload `x=1920, y=300, w=400, h=1000, rotation=90` — its exact AABB is
+`(1920,300,1000,400)` (aspect 2.5). The review 3 fix instead re-ran the full frame-transform on
+`x`/`y` as if they were the unrotated origin, silently re-rotating an already-rotated point and
+returning `(1620,600,1000,400)` — off by `(300,-300)`.
+
+`_content_item_aabb` (`dsk_assemble.py`) now keeps payload `x`/`y` untouched for a rotated item and
+derives only the rotated **extents** `w' = |w·cosθ| + |h·sinθ|`, `h' = |w·sinθ| + |h·cosθ|` from
+`w`/`h`/`rotation` — the closed-form AABB size of a `w×h` rect rotated by `θ`, independent of
+position, which matches `_frame_rect`/`_masked_rect`'s AABB-top-left/unrotated-size contract without
+re-deriving corners from the object graph. `_content_visibles_by_kept` clips that rect to the centre
+panel as before. Masked media needs no separate case: its `rotation` is the frame+mask net angle
+(`offline_inspect`, whole-degree rounded) and its trusted (non-`rotated-masked`-flagged) `w`/`h` is
+already snapped to a multiple of 90°, at which the extent formula reduces to an exact swap/no-op.
 
 **Union vs. per-item, and the deck-wide flip list (opus review 1 finding 1, union reading, owner
 confirmation pending).** A per-*item* aspect test (the first cut of this rule) measures each kept

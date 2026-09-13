@@ -6,6 +6,7 @@ report's transition note on clip slides is expected, not a defect.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 import time
@@ -54,9 +55,7 @@ from obed_edom.dsk_plan import (
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
-    _corners_aabb,
     _frame_rect,
-    _frame_transform,
     _geom_dict,
     _leaf_bbox,
     _mask_geom,
@@ -390,16 +389,22 @@ def _content_ids(
 
 
 def _content_item_aabb(item: dict) -> Rect:
-    """Exact transformed AABB of a content item's own frame -- the raw ``x``/``y``/``w``/``h``
-    for an unrotated item, or the true rotated bounding box (via the shared
-    ``iwa_geometry`` frame-transform helpers) when the item carries a non-zero ``rotation``.
-    Masked media already carries its masked rect in ``w``/``h`` (D2), so this needs no
-    separate mask case."""
+    """Exact AABB of a content item's own frame. Payload ``x``/``y``/``w``/``h`` already
+    follow the offline-payload contract (``iwa_geometry``: "rotated=AABB position +
+    unrotated size") -- ``x``/``y`` is the rotated frame's AABB top-left and ``w``/``h``
+    is its unrotated size, for both plain frames (``_frame_rect``) and masked media
+    (``_masked_rect``, whose ``w``/``h`` is already the mask's own D2 rect). So a rotated
+    item needs only its rotated EXTENTS derived from ``w``/``h``/``rotation``; ``x``/``y``
+    stay as given -- they must never be re-rotated about the frame centre."""
     angle = item.get("rotation") or 0.0
+    x, y, w, h = item.get("x", 0.0), item.get("y", 0.0), item.get("w", 0.0), item.get("h", 0.0)
     if angle % 360.0:
-        x, y, w, h = item.get("x", 0.0), item.get("y", 0.0), item.get("w", 0.0), item.get("h", 0.0)
-        x0, y0, x1, y1 = _corners_aabb(_frame_transform(x, y, w, h, angle), w, h)
-        return Rect(x0, y0, x1 - x0, y1 - y0)
+        theta = math.radians(angle)
+        w, h = (
+            abs(w * math.cos(theta)) + abs(h * math.sin(theta)),
+            abs(w * math.sin(theta)) + abs(h * math.cos(theta)),
+        )
+        return Rect(x, y, w, h)
     return item_rect(item)
 
 
