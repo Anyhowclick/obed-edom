@@ -4910,8 +4910,8 @@ def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
 # --------------------------------------------------------------------------
 # placement by shape (D3/step 9, owner correction 2026-09-12) -- SlideDecision
 # (anchor="auto") is the CLI's "operator gave no explicit --anchor" sentinel;
-# plan_assembly derives the anchor from the union of the kept content items'
-# masked-and-clipped rects (the same union `fit_slide` lays out), not their
+# plan_assembly derives the anchor from the union of the kept content rects --
+# the same clip `fit_slide` uses, restricted to content -- not their
 # count: a union w/h >= 2.5 (LW-dimension) centres the slide; otherwise 1-2
 # squarish items go right, 3+ centre. Text and side panels never count.
 # --------------------------------------------------------------------------

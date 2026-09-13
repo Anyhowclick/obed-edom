@@ -314,11 +314,10 @@ its style, builds and z-order.
   tuple (or raw `objects`) to reuse it, or leave it `None` to have `plan_assembly` load `fw_deck`
   itself, gated on `not no_image_crop` (no need to load the IWA graph when cropping is off).
 
-### D3. Placement by SHAPE (owner correction 2026-09-12, supersedes "placement by count";
-UNION reading applied per opus review 1 finding 1, orchestrator decision pending owner
-confirmation — 2026-09-12)
+### D3. Placement by SHAPE (owner correction 2026-09-12, supersedes "placement by count")
 
-In `plan_assembly` (`dsk_assemble.py`), let the kept **content** items be those from D1
+The UNION reading below was applied per opus review 1 finding 1; orchestrator decision pending
+owner confirmation — 2026-09-12. In `plan_assembly` (`dsk_assemble.py`), let the kept **content** items be those from D1
 (images/movies/groups; text and text-bearing badge shapes excluded). A group counts only when it
 has an `image:`/`movie:` leaf (`_group_has_media`); its measured rect is the group bbox, caption
 included — a photo with a wide caption strip can read LW-dimension on the strength of the caption,
@@ -328,8 +327,9 @@ unconditionally).
 
 When the operator gave no explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`)
 decides from the SHAPE of the **union** of those items' rects — the masked rect clipped to the
-panel (the same clip `_visibles_by_kept`/`fit_slide` already compute, and the same union
-`fit_slide` actually lays out; `_union_rect`), not from their count and not per item:
+panel (the same clip `_visibles_by_kept`/`fit_slide` already compute) — the union of the kept
+content rects, the same clip `fit_slide` uses, restricted to content (`_union_rect`), not from
+their count and not per item:
 
 - the union is "LW-dimension" (`w/h >= 2.5`) → `anchor = "centre"`. Measured examples: the GW 21
   crowd photo crops to 4494x1265 = 3.55, the GW 5 photo crops to 5120x1441 = 3.55, the GW 32/33
@@ -357,13 +357,15 @@ count rule (`_content_anchor`, `include_side=False`, full `Sermon_PK (GW).key`):
 |---|---|---|---|---|
 | 5, 15, 21, 32, 33, 42 | right | **centre** | 1 | 3.56 |
 | 24 | centre | **right** | 2 | union 1.14 |
-| **16** | centre | **right** | 2 | halves 1.77/1.78, union 3.56 → **centre** |
-| **22** | centre | **right** | 2 | halves 1.77/1.78, union 3.56 → **centre** |
+| **16** | centre | **centre** | 2 | halves 1.77/1.78 → per-item right; union 3.56 → centre |
+| **22** | centre | **centre** | 2 | halves 1.77/1.78 → per-item right; union 3.56 → centre |
 | 48 | right | right | 1 | 1.50 |
 | 2 | centre | centre | 3 | union 3.56 (3+ already centres) |
 
-Ten slides change anchor under the new SHAPE rule; GW 16/22 are the two the union reading (vs. a
-per-item reading, which would leave them at `right`) additionally corrects to `centre`.
+Seven GW slides change anchor vs. the retired count rule (5/15/21/32/33/42 right→centre, 24
+centre→right); 16/22 and 2 stay centre, 48 stays right. 16/22 are unchanged only because the
+union reading was chosen — a per-item reading would have flipped them to right, which is the
+decision awaiting owner confirmation.
 
 **Text + picture slides.** A slide that is both text (`cls.is_text`/`long_text_ids`) and keeps a
 non-full-wall picture (a media *group* survives the text-slide media drop that a bare image/movie
@@ -574,12 +576,13 @@ anchor GW 7/37 from `right` to `centre` -- each keeps a single text-only badge g
 rule. All seven slides are a layout change the owner should eyeball on the next gold run.
 
 Opus review 1 (union reading, owner confirmation pending — 2026-09-12): switching `_content_anchor`
-from a per-item aspect test to the union of kept content rects (D3) additionally flips GW 16 and 22
-from `right` to `centre` — see the flip-list table in D3. Ten GW slides change anchor under the new
-SHAPE rule in total (5/15/21/32/33/42 right→centre, 24 centre→right, 16/22 centre→right→centre via
-the union fix, 2 unchanged at centre, 48 unchanged at right); the owner should eyeball all ten on
-the next gold run, GW 16/22 especially since the union reading is the one implemented here without
-a separate owner ruling on the per-item alternative.
+from a per-item aspect test to the union of kept content rects (D3) keeps GW 16 and 22 at `centre`
+— see the flip-list table in D3. Seven GW slides change anchor vs. the retired count rule under the
+new SHAPE rule (5/15/21/32/33/42 right→centre, 24 centre→right); 16/22 and 2 stay centre, 48 stays
+right. 16/22 are unchanged only because the union reading was chosen — a per-item reading would
+have flipped them to right, which is the decision awaiting owner confirmation. The owner should
+eyeball all seven on the next gold run, GW 16/22 especially since the union reading is the one
+implemented here without a separate owner ruling on the per-item alternative.
 
 `dsk_plan.py`'s outward px-rounding of the crop box against the un-rounded `visible`
 rect (round 1 finding 13, knowingly deferred) is a non-uniform sub-pixel stretch of the

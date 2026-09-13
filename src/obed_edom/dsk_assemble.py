@@ -365,6 +365,7 @@ _LW_ASPECT_MIN = 2.5
 def _content_ids(
     cls: SlideClass,
     items_by_id: Mapping[ItemId, dict],
+    *,
     wall: tuple[float, float],
     group_signature: Mapping[int, str | None] | None = None,
 ) -> list[ItemId]:
@@ -395,11 +396,12 @@ def _content_anchor(
     group_signature: Mapping[int, str | None] | None = None,
 ) -> str:
     """Auto anchor ("centre" or "right") for a content slide with no explicit anchor:
-    the union of the kept content rects (the same union `fit_slide` lays out) being
-    LW-dimension (w/h >= 2.5) forces centre; otherwise squarish items go right at 1-2
-    and centre at 3+. Side panels never count as content for anchoring."""
+    the union of the kept content rects — the same clip `fit_slide` uses, restricted
+    to content — being LW-dimension (w/h >= 2.5) forces centre; otherwise squarish
+    items go right at 1-2 and centre at 3+. Side panels never count as content for
+    anchoring."""
     items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
-    content_ids = _content_ids(cls, items_by_id, wall, group_signature)
+    content_ids = _content_ids(cls, items_by_id, wall=wall, group_signature=group_signature)
     if not content_ids:
         return "centre"
     visibles = _visibles_by_kept(items, content_ids, include_side=include_side)
