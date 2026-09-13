@@ -1,4 +1,9 @@
-import { GeoJSONSource, type LayerSpecification, type Map as MapLibreMap } from "maplibre-gl";
+import {
+  GeoJSONSource,
+  type DataDrivenPropertyValueSpecification,
+  type LayerSpecification,
+  type Map as MapLibreMap,
+} from "maplibre-gl";
 import { isolateMaskGeometry } from "./isolate";
 import { shift } from "./tonerBoundaries";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, type MapsChurch, type MapsIsolate, type MapsStyleId } from "./types";
@@ -17,6 +22,16 @@ export function admin0Name(code: string): string {
   const feat = admin0Cache?.features.find((item) => String(item.properties?.ADM0_A3 || "").toUpperCase() === wanted);
   return feat?.properties?.NAME || code;
 }
+
+export type Admin1Feature = {
+  properties?: { adm0_a3?: string; adm1_code?: string; iso_3166_2?: string; name?: string; type_en?: string } | null;
+  geometry?: { type: string; coordinates: unknown } | null;
+};
+
+export type Admin1 = { type: "FeatureCollection"; features: Admin1Feature[] };
+
+const admin1Cache = new Map<string, Admin1>();
+const admin1Pending = new Map<string, Promise<Admin1 | null>>();
 
 let admin0Cache: Admin0 | null = null;
 let admin0Pending: Promise<Admin0 | null> | null = null;
@@ -37,6 +52,103 @@ export async function loadAdmin0(): Promise<Admin0 | null> {
       });
   }
   return admin0Pending;
+}
+
+export async function loadAdmin1(code: string): Promise<Admin1 | null> {
+  const wanted = code.toUpperCase();
+  const cached = admin1Cache.get(wanted);
+  if (cached) return cached;
+  let pending = admin1Pending.get(wanted);
+  if (!pending) {
+    pending = fetch(`/api/maps/ne/admin1/${wanted}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          console.warn("admin1 fetch failed", wanted, res.status);
+          return null;
+        }
+        const data = (await res.json()) as Admin1;
+        admin1Cache.set(wanted, data);
+        return data;
+      })
+      .catch((err) => {
+        console.warn("admin1 fetch failed", wanted, err);
+        return null;
+      })
+      .finally(() => {
+        admin1Pending.delete(wanted);
+      });
+    admin1Pending.set(wanted, pending);
+  }
+  return pending;
+}
+
+export function isAdmin1Loaded(code: string): boolean {
+  return admin1Cache.has(code.toUpperCase());
+}
+
+/** Every admin-1 feature loaded so far, flattened — the clip path and the isolate mask read this. */
+export function admin1Features(): Admin1Feature[] {
+  const out: Admin1Feature[] = [];
+  for (const data of admin1Cache.values()) out.push(...data.features);
+  return out;
+}
+
+/** Resolves an `A1:` id's country: prefers the loaded feature's `adm0_a3`, falling back to the
+ * code's own prefix (`adm1_code` always carries its country as the first three characters,
+ * e.g. `MYS-1186`, `GAZ+00?`). The one resolver both `admin1Countries` and `admin1FeaturesInPlay`
+ * use, so a code whose prefix differs from its `adm0_a3` resolves the same way everywhere. */
+function admin1CodeCountry(id: string): string {
+  const feat = admin1Features().find((item) => item.properties?.adm1_code === id);
+  return String(feat?.properties?.adm0_a3 || id.slice(0, 3)).toUpperCase();
+}
+
+/** Every country a highlight names — bare or `A1:` — the set the isolate mask, the export clip,
+ * and the admin-1 preload all key off, so they never disagree on which countries are in play. */
+export function highlightedCountries(highlights: string[]): string[] {
+  const countries = new Set<string>();
+  for (const highlight of highlights) {
+    const country = highlight.startsWith("A1:") ? admin1CodeCountry(highlight.slice(3)) : highlight;
+    if (country) countries.add(country.toUpperCase());
+  }
+  return [...countries];
+}
+
+/** Admin-1 features for the countries a highlight actually names — bare or `A1:` — never every
+ * cached country, so the isolate mask's shape depends only on what is highlighted, not on which
+ * countries happen to be loaded (e.g. from the Regions-mode camera preload). */
+export function admin1FeaturesInPlay(highlights: string[]): Admin1Feature[] {
+  const out: Admin1Feature[] = [];
+  for (const country of highlightedCountries(highlights)) {
+    const data = admin1Cache.get(country);
+    if (data) out.push(...data.features);
+  }
+  return out;
+}
+
+/** Countries named by an `A1:` highlight only — used to resolve the merged admin-1 source. */
+export function admin1Countries(highlights: string[]): string[] {
+  const codes = new Set<string>();
+  for (const highlight of highlights) {
+    if (!highlight.startsWith("A1:")) continue;
+    const country = admin1CodeCountry(highlight.slice(3));
+    if (country.length === 3) codes.add(country);
+  }
+  return [...codes];
+}
+
+export function admin1Name(id: string): string {
+  const code = id.startsWith("A1:") ? id.slice(3) : id;
+  for (const data of admin1Cache.values()) {
+    const feat = data.features.find((item) => item.properties?.adm1_code === code);
+    if (!feat) continue;
+    const name = feat.properties?.name || code;
+    const type = feat.properties?.type_en || "";
+    const twin = data.features.some(
+      (item) => item.properties?.name === name && item.properties?.adm1_code !== code
+    );
+    return twin && type ? `${name} (${type})` : name;
+  }
+  return code;
 }
 
 /** Positron/Bright/Dark/Fiord ship the NE raster source but no layer; Liberty shows land at SEA zoom because it does. */
@@ -83,12 +195,46 @@ export function applyHillshade(map: MapLibreMap, on: boolean): void {
 
 export function applyHighlights(map: MapLibreMap, highlights: string[]) {
   if (!map.getSource("admin0") || !admin0Cache) return;
-  const wanted = new Set(highlights.map((h) => h.toUpperCase()));
+  const wanted = new Set(highlights.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
   for (const feat of admin0Cache.features) {
     const id = String(feat.properties?.ADM0_A3 || "");
     if (!id) continue;
     map.setFeatureState({ source: "admin0", id }, { hl: wanted.has(id.toUpperCase()) });
   }
+}
+
+export const ADMIN0_FILL_OPACITY = 0.4;
+export const ADMIN0_LINE_OPACITY = 0.9;
+export const ADMIN1_FILL_OPACITY = 0.4;
+export const ADMIN1_LINE_OPACITY = 0.9;
+
+/** Highlighted-country fill/line opacity, keyed off `feature-state.hl` set by `applyHighlights`. */
+export function admin0PaintExpression(on: number): DataDrivenPropertyValueSpecification<number> {
+  return ["case", ["boolean", ["feature-state", "hl"], false], on, 0] as DataDrivenPropertyValueSpecification<number>;
+}
+
+/** Highlighted-region ids drive an `["in", …]` expression rather than feature state: one
+ * `setPaintProperty` repaints every region, and no `promoteId` is needed on the source. */
+export function admin1PaintExpression(
+  highlights: string[],
+  on: number
+): DataDrivenPropertyValueSpecification<number> {
+  const bare = new Set(highlights.filter((h) => !h.startsWith("A1:")).map((h) => h.toUpperCase()));
+  const ids = [
+    ...new Set(
+      highlights
+        .filter((h) => h.startsWith("A1:"))
+        .map((h) => h.slice(3))
+        .filter((id) => !bare.has(id.slice(0, 3).toUpperCase()))
+    ),
+  ];
+  return ["case", ["in", ["get", "adm1_code"], ["literal", ids]], on, 0] as DataDrivenPropertyValueSpecification<number>;
+}
+
+export function applyAdmin1Highlights(map: MapLibreMap, highlights: string[]): void {
+  if (!map.getLayer("admin1-fill")) return;
+  map.setPaintProperty("admin1-fill", "fill-opacity", admin1PaintExpression(highlights, ADMIN1_FILL_OPACITY));
+  map.setPaintProperty("admin1-line", "line-opacity", admin1PaintExpression(highlights, ADMIN1_LINE_OPACITY));
 }
 
 function firstSymbolId(map: MapLibreMap): string | undefined {
@@ -98,7 +244,7 @@ function firstSymbolId(map: MapLibreMap): string | undefined {
 
 export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: MapsIsolate | undefined): void {
   if (!map.getStyle()) return;
-  const mask = isolate ? isolateMaskGeometry((admin0Cache?.features || []) as never, highlights) : null;
+  const mask = isolate ? isolateMaskGeometry((admin0Cache?.features || []) as never, highlights, admin1FeaturesInPlay(highlights)) : null;
   if (!isolate || !mask) {
     if (map.getLayer("isolate-fill")) map.removeLayer("isolate-fill");
     if (map.getSource("isolate")) map.removeSource("isolate");
@@ -126,16 +272,32 @@ export function applyIsolate(map: MapLibreMap, highlights: string[], isolate: Ma
   }
 }
 
+/** True while `map`'s style/generation is still the one the caller started this async work for.
+ * Every mutation after an `await` in `ensureAdmin0Highlights` and `syncAdmin1Source` must be
+ * gated on this, not only the caller's own follow-up (e.g. `triggerRepaint`) — otherwise an
+ * older, slower request can overwrite a newer selection when admin-1 loads resolve out of order. */
+export type IsCurrent = () => boolean;
+
+const ALWAYS_CURRENT: IsCurrent = () => true;
+
 export async function ensureAdmin0Highlights(
   map: MapLibreMap,
   highlights: string[],
   styleId?: string,
   isolate?: MapsIsolate,
-  zoomOffset = 0
+  zoomOffset = 0,
+  extraAdmin1: string[] = [],
+  isCurrent: IsCurrent = ALWAYS_CURRENT
 ): Promise<void> {
   ensureLowZoomRaster(map, styleId, zoomOffset);
   const data = await loadAdmin0();
-  if (!data) return;
+  if (!data || !isCurrent()) return;
+  // A border cut (spec 10.3) needs every named country's admin-1 loaded, not only the A1:-tagged
+  // ones, so the cut rings never fall back to admin-0 for a bare-highlighted country.
+  const hasAdmin1Highlight = highlights.some((h) => h.startsWith("A1:"));
+  const admin1Codes = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(highlights) : []), ...extraAdmin1])];
+  if (admin1Codes.length) await Promise.all(admin1Codes.map(loadAdmin1));
+  if (!isCurrent()) return;
   if (!map.getSource("admin0")) {
     map.addSource("admin0", { type: "geojson", data: data as GeoJSON.GeoJSON, promoteId: "ADM0_A3" });
   }
@@ -148,7 +310,7 @@ export async function ensureAdmin0Highlights(
         source: "admin0",
         paint: {
           "fill-color": "#e8772a",
-          "fill-opacity": ["case", ["boolean", ["feature-state", "hl"], false], 0.4, 0],
+          "fill-opacity": admin0PaintExpression(ADMIN0_FILL_OPACITY),
         },
       },
       before
@@ -161,14 +323,70 @@ export async function ensureAdmin0Highlights(
         paint: {
           "line-color": "#e8772a",
           "line-width": 1.2,
-          "line-opacity": ["case", ["boolean", ["feature-state", "hl"], false], 0.9, 0],
+          "line-opacity": admin0PaintExpression(ADMIN0_LINE_OPACITY),
         },
       },
       before
     );
   }
+  ensureAdmin1Layers(map, admin1Codes);
   applyHighlights(map, highlights);
+  applyAdmin1Highlights(map, highlights);
   applyIsolate(map, highlights, isolate);
+}
+
+/** Loads `codes` and re-feeds the merged `admin1` source from the cache — the explicit
+ * operation for keeping that source in step with the camera country in Regions mode, since
+ * the fast highlight-effect path only touches paint expressions. Generation-guarded: `isCurrent`
+ * is checked after the load before the source is touched, so a superseded call is a no-op. */
+export async function syncAdmin1Source(
+  map: MapLibreMap,
+  codes: string[],
+  isCurrent: IsCurrent = ALWAYS_CURRENT
+): Promise<void> {
+  if (codes.length) await Promise.all(codes.map(loadAdmin1));
+  if (!isCurrent()) return;
+  ensureAdmin1Layers(map, codes);
+}
+
+/** Adds (or re-feeds) the merged admin-1 source for `codes`. No-op while nothing is highlighted. */
+function ensureAdmin1Layers(map: MapLibreMap, codes: string[]): void {
+  if (!codes.length) {
+    if (map.getLayer("admin1-line")) map.removeLayer("admin1-line");
+    if (map.getLayer("admin1-fill")) map.removeLayer("admin1-fill");
+    if (map.getSource("admin1")) map.removeSource("admin1");
+    return;
+  }
+  const features: Admin1Feature[] = [];
+  for (const code of codes) features.push(...(admin1Cache.get(code)?.features || []));
+  const data = { type: "FeatureCollection", features } as GeoJSON.GeoJSON;
+  const source = map.getSource("admin1") as GeoJSONSource | undefined;
+  if (source) {
+    source.setData(data);
+    return;
+  }
+  map.addSource("admin1", { type: "geojson", data });
+  // Pin admin1-fill below isolate-fill regardless of which layer is (re)created first, so the
+  // isolate mask always stays on top of the region fill, matching today's look.
+  const before = map.getLayer("isolate-fill") ? "isolate-fill" : firstSymbolId(map);
+  map.addLayer(
+    {
+      id: "admin1-fill",
+      type: "fill",
+      source: "admin1",
+      paint: { "fill-color": "#e8772a", "fill-opacity": 0 },
+    },
+    before
+  );
+  map.addLayer(
+    {
+      id: "admin1-line",
+      type: "line",
+      source: "admin1",
+      paint: { "line-color": "#e8772a", "line-width": 1.2, "line-opacity": 0 },
+    },
+    before
+  );
 }
 
 export function churchesGeo(
@@ -400,11 +618,15 @@ export async function addOverlays(
   numberPins: boolean,
   assetBaseUrl?: string,
   objectScale = 1,
-  isolate?: MapsIsolate
+  isolate?: MapsIsolate,
+  extraAdmin1: string[] = [],
+  isCurrent: IsCurrent = ALWAYS_CURRENT
 ) {
-  await ensureAdmin0Highlights(map, highlights, styleId, isolate);
+  await ensureAdmin0Highlights(map, highlights, styleId, isolate, 0, extraAdmin1, isCurrent);
+  if (!isCurrent()) return;
   ensureDropPinImages(map, churches);
   await ensureLandmarkImages(map, churches, assetBaseUrl);
+  if (!isCurrent()) return;
   const pins = churchesGeo(churches, selectedPinId, numberPins, objectScale);
   if (!map.getSource("churches")) {
     map.addSource("churches", { type: "geojson", data: pins, promoteId: "id" });
@@ -413,5 +635,6 @@ export async function addOverlays(
     (map.getSource("churches") as GeoJSONSource).setData(pins);
   }
   applyHighlights(map, highlights);
+  applyAdmin1Highlights(map, highlights);
   applyIsolate(map, highlights, isolate);
 }

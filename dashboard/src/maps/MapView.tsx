@@ -5,7 +5,8 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cameraAtHop } from "./captureFly";
 import { applyLayerFilters } from "./layers";
-import { addOverlays, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, loadAdmin0, movieObjectsAt, selectedDragScale, withoutRevealed } from "./overlays";
+import { AdminSyncGate } from "./adminSync";
+import { addOverlays, applyAdmin1Highlights, applyHighlights, applyHillshade, applyIsolate, churchesGeo, DROP_PIN_HEAD_PX, dropPinSelectionBox, DROP_PIN_TOTAL_PX, ensureAdmin0Highlights, ensureDropPinImages, ensureLandmarkImages, ensureLowZoomRaster, highlightedCountries, isAdmin1Loaded, loadAdmin0, movieObjectsAt, selectedDragScale, syncAdmin1Source, withoutRevealed } from "./overlays";
 import { exportGpuCap } from "./captureExport";
 import { defaultObjectSize, effectiveObjectSize, resizeFromCorner, zoomSizeFactor, type ObjectCorner } from "./objects";
 import { OPENFREEMAP_STYLES, resolveOpenFreeMapStyle } from "./styles";
@@ -211,6 +212,7 @@ export type MapViewHandle = {
   capturePreviewBlob: () => Promise<Blob | null>;
   waitUntilIdle: (styleId?: MapsStyleId, timeoutMs?: number) => Promise<void>;
   resize: () => void;
+  getRegionCountries: () => string[];
 };
 
 type Props = {
@@ -231,6 +233,8 @@ type Props = {
   selectedPinId: string | null;
   onCameraCommit: (camera: MapsCamera) => void;
   onToggleCountry: (adm0: string) => void;
+  onToggleRegion: (adm1: string) => void;
+  pickRegions: boolean;
   onAddPin: (lat: number, lon: number) => void;
   onSelectPin: (id: string | null) => void;
   onEditPin: (id: string) => void;
@@ -268,6 +272,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     selectedPinId,
     onCameraCommit,
     onToggleCountry,
+    onToggleRegion,
+    pickRegions,
     onAddPin,
     onSelectPin,
     onEditPin,
@@ -295,9 +301,11 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const styleUrl = useRef(OPENFREEMAP_STYLES[styleId]);
   const styleIdentity = useRef(styleId);
   const styleReady = useRef(false);
-  const overlayGeneration = useRef(0);
+  const adminSync = useRef(new AdminSyncGate());
+  const styleToken = useRef<number | null>(null);
+  const [adminReplay, setAdminReplay] = useState(0);
   const previewingRef = useRef(previewing);
-  const callbacks = useRef({ onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
+  const callbacks = useRef({ onCameraCommit, onToggleCountry, onToggleRegion, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort });
   const overlay = useRef({ highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins });
   const cgDrag = useRef<{ x: number; shift: number; width: number; surfaceWidth: number } | null>(null);
   const objDrag = useRef<{ id: string; grabDx: number; grabDy: number; pointerId: number } | null>(null);
@@ -322,8 +330,19 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   const hopWidthRef = useRef<number | null>(null);
   const [hopWidth, setHopWidth] = useState<number | null>(null);
   const sidePanelsRef = useRef(sidePanels);
+  const pickRegionsRef = useRef(pickRegions);
   const [texWarn, setTexWarn] = useState<string | null>(null);
   const [gpuWarn, setGpuWarn] = useState<string | null>(null);
+
+  /** In region-pick mode the country under the camera must have its admin-1 loaded even before
+   * anything in it is highlighted, or there is no `admin1-fill` layer to click. */
+  function regionCountries(map: MapLibreMap): string[] {
+    if (!pickRegionsRef.current || !map.getLayer("admin0-fill")) return [];
+    const centre = map.project(map.getCenter());
+    const hit = map.queryRenderedFeatures([centre.x, centre.y], { layers: ["admin0-fill"] })[0];
+    const code = String(hit?.properties?.ADM0_A3 || "");
+    return code ? [code] : [];
+  }
 
   function finishHop() {
     if (hopRaf.current) {
@@ -346,7 +365,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
   propWidthRef.current = authoredWidth;
   authoredWidthRef.current = hopWidthRef.current ?? authoredWidth;
   sidePanelsRef.current = sidePanels;
-  callbacks.current = { onCameraCommit, onToggleCountry, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
+  pickRegionsRef.current = pickRegions;
+  callbacks.current = { onCameraCommit, onToggleCountry, onToggleRegion, onAddPin, onSelectPin, onEditPin, onMoveObject, onResizeObject, onObjectCommit, onCgShift, onPreviewAbort };
   overlay.current = { highlights, churches, selectedPinId, styleId, hiddenLayers, hillshade, isolate, numberPins };
 
   /** Sizes/positions `.maps-map-inner` to fill the whole frame (not just the band) at the
@@ -587,9 +607,18 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           map.off("idle", check);
           reject(new Error(message));
         };
+        let settling = false;
+        const ready = () => styleReady.current && map.loaded() && map.areTilesLoaded();
         const check = () => {
           if (mapRef.current !== map || styleIdentity.current !== expected) return fail("Map style changed before capture was ready");
-          if (styleReady.current && map.loaded() && map.areTilesLoaded()) finish();
+          if (!ready() || settling) return;
+          settling = true;
+          void adminSync.current.settled().then(() => {
+            settling = false;
+            if (finished) return;
+            if (mapRef.current !== map || styleIdentity.current !== expected) return fail("Map style changed before capture was ready");
+            if (ready()) finish();
+          });
         };
         map.on("idle", check);
         poll = window.setInterval(check, 50);
@@ -606,6 +635,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           churchesGeo(overlay.current.churches, overlay.current.selectedPinId, overlay.current.numberPins, objectLayoutScale(authoredWidthRef.current))
         );
       }
+    },
+    getRegionCountries() {
+      const map = mapRef.current;
+      return map ? regionCountries(map) : [];
     },
   }));
 
@@ -717,6 +750,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           transformConstrain: (center, zoom) => ({ center, zoom: clampMapZoom(zoom) }),
         });
         mapRef.current = map;
+        styleReady.current = false;
+        styleToken.current = adminSync.current.beginStyleLoad();
         styleUrl.current = OPENFREEMAP_STYLES[wantedStyle];
         styleIdentity.current = wantedStyle;
         innerEl.style.transform = `translateY(${-L.bandTop * L.k}px) scale(${L.k})`;
@@ -734,11 +769,21 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
           }
         }
 
-        function paintOverlays() {
+        function takeStyleToken(): number {
+          const token = styleToken.current;
+          styleToken.current = null;
+          if (token !== null) return token;
+          styleReady.current = false;
+          return adminSync.current.beginStyleLoad();
+        }
+
+        /** `generation` is the style-load token acquired by whoever started this load, before
+         * `setStyle` so a sync arriving mid-load defers to the replay instead of touching the
+         * half-built style. */
+        function paintOverlays(generation: number) {
           if (!map) return;
           const currentMap = map;
-          const generation = ++overlayGeneration.current;
-          styleReady.current = false;
+          const isCurrent = () => mapRef.current === currentMap && adminSync.current.isCurrent(generation) && !!currentMap.getStyle();
           ensureLowZoomRaster(currentMap, overlay.current.styleId, deltaRef.current);
           installPatterns(currentMap, stylePatterns(overlay.current.styleId));
           applyLayerFilters(currentMap, overlay.current.hiddenLayers);
@@ -752,18 +797,46 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             overlay.current.numberPins,
             assetBaseUrl,
             objectLayoutScale(authoredWidthRef.current),
-            overlay.current.isolate
+            overlay.current.isolate,
+            regionCountries(currentMap),
+            isCurrent
           ).then(() => {
-            if (mapRef.current === currentMap && overlayGeneration.current === generation) {
+            if (isCurrent()) {
               styleReady.current = true;
               currentMap.triggerRepaint();
             }
+          }).catch((err) => console.warn("overlay paint", err)).finally(() => {
+            if (adminSync.current.endStyleLoad(generation)) setAdminReplay((n) => n + 1);
           });
         }
 
         function commitCamera() {
           if (!map || suppress.current || previewingRef.current) return;
           callbacks.current.onCameraCommit(readCamera(map, deltaRef.current, minZoomRef.current, cameraRef.current.zoom));
+        }
+
+        /** Regions mode's admin1-fill layer must stay pickable for whatever country is now under
+         * the camera, so a pan/zoom that changes it re-syncs the merged `admin1` source — the
+         * highlight effect only re-runs on highlight/isolate/pickRegions changes, never on camera
+         * moves alone. Shares one generation with overlay painting and the highlight effect, so
+         * whichever request starts last wins and a sync during a style load is deferred to it. */
+        function syncRegionCamera() {
+          if (!map || !pickRegionsRef.current) return;
+          const currentMap = map;
+          if (!currentMap.getSource("admin0")) return;
+          const codes = regionCountries(currentMap);
+          if (!codes.length) return;
+          const generation = adminSync.current.beginSync();
+          if (generation === null) return;
+          const isCurrent = () => mapRef.current === currentMap && adminSync.current.isCurrent(generation) && !!currentMap.getStyle();
+          const hasAdmin1Highlight = overlay.current.highlights.some((h) => h.startsWith("A1:"));
+          const needed = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(overlay.current.highlights) : []), ...codes])];
+          void adminSync.current.track(syncAdmin1Source(currentMap, needed, isCurrent).then(() => {
+            if (!isCurrent()) return;
+            applyHighlights(currentMap, overlay.current.highlights);
+            applyAdmin1Highlights(currentMap, overlay.current.highlights);
+            applyIsolate(currentMap, overlay.current.highlights, overlay.current.isolate);
+          }));
         }
 
         map.on("error", (event) => {
@@ -791,8 +864,10 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             suppress.current = false;
             console.warn("maplibre load", err);
           }
+          const generation = takeStyleToken();
           void loadAdmin0().then(() => {
-            if (mapRef.current === map) paintOverlays();
+            if (mapRef.current === map) paintOverlays(generation);
+            else if (adminSync.current.endStyleLoad(generation)) adminSync.current.clearReplay();
           });
         });
         map.on("style.load", () => {
@@ -803,11 +878,14 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             applyLayerFilters(map, overlay.current.hiddenLayers);
             applyHillshade(map, overlay.current.hillshade);
           }
+          const generation = takeStyleToken();
           void loadAdmin0().then(() => {
-            if (mapRef.current === map) paintOverlays();
+            if (mapRef.current === map) paintOverlays(generation);
+            else if (adminSync.current.endStyleLoad(generation)) adminSync.current.clearReplay();
           });
         });
         map.on("moveend", commitCamera);
+        map.on("moveend", syncRegionCamera);
         map.on("mousemove", onCanvasMouseMove);
         map.on("mouseout", () => {
           if (map) map.getCanvas().style.cursor = "";
@@ -828,6 +906,13 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
             return;
           }
           callbacks.current.onSelectPin(null);
+          if (pickRegionsRef.current) {
+            if (!map.getLayer("admin1-fill")) return;
+            const regionHits = map.queryRenderedFeatures(event.point, { layers: ["admin1-fill"] });
+            const region = String(regionHits[0]?.properties?.adm1_code || "");
+            if (region) callbacks.current.onToggleRegion(region);
+            return;
+          }
           if (authoredZoomOf(map, deltaRef.current, minZoomRef.current) >= COUNTRY_PICK_MAX_ZOOM) return;
           if (!map.getLayer("admin0-fill")) return;
           const hits = map.queryRenderedFeatures(event.point, { layers: ["admin0-fill"] });
@@ -880,6 +965,8 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     styleReady.current = false;
     void resolveOpenFreeMapStyle(styleId, deltaRef.current).then((style) => {
       if (mapRef.current !== map || styleIdentity.current !== styleId) return;
+      styleReady.current = false;
+      styleToken.current = adminSync.current.beginStyleLoad();
       map.setStyle(style, { diff: false });
       map.once("style.load", () => {
         silently(suppress, () => {
@@ -905,10 +992,29 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map?.getSource("admin0")) return;
-    applyHighlights(map, highlights);
-    applyIsolate(map, highlights, isolate);
-  }, [highlights, isolate?.mode, isolate?.strength]);
+    if (!map?.getSource("admin0")) {
+      adminSync.current.clearReplay();
+      return;
+    }
+    const generation = adminSync.current.beginSync();
+    if (generation === null) return;
+    const isCurrent = () => mapRef.current === map && adminSync.current.isCurrent(generation) && !!map.getStyle();
+    const hasAdmin1Highlight = highlights.some((h) => h.startsWith("A1:"));
+    const needed = [...new Set([...(hasAdmin1Highlight ? highlightedCountries(highlights) : []), ...regionCountries(map)])];
+    if (needed.every(isAdmin1Loaded)) {
+      void adminSync.current.track(syncAdmin1Source(map, needed, isCurrent).then(() => {
+        if (!isCurrent()) return;
+        applyHighlights(map, highlights);
+        applyAdmin1Highlights(map, highlights);
+        applyIsolate(map, highlights, isolate);
+      }));
+      return;
+    }
+    void adminSync.current.track(ensureAdmin0Highlights(map, highlights, styleId, isolate, deltaRef.current, regionCountries(map), isCurrent).then(() => {
+      if (isCurrent()) map.triggerRepaint();
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlights, isolate?.mode, isolate?.strength, pickRegions, adminReplay]);
 
   useEffect(() => {
     const map = mapRef.current;

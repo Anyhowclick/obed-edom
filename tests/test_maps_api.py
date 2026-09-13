@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 import pytest
 
+from obed_edom import maps_admin1
 from obed_edom.maps_geo import CG_MIN_ZOOM, WORLD_MIN_ZOOM, camera_dict
 from obed_edom.maps_keynote import export_maps_job, maps_export_plan
 from obed_edom.web.app import RUNNER, app
@@ -4030,3 +4031,98 @@ def test_export_normalises_crlf_in_credits(monkeypatch):
     assert started.status_code == 200, started.text
     _wait(job["id"])
     assert captured.get("credits") == ["Line one with CRLF", "Line two with LF"]
+
+
+@pytest.fixture
+def admin1_root(tmp_path, monkeypatch):
+    """Point the admin-1 store at a throwaway root already holding a two-country split."""
+    monkeypatch.setattr(maps_admin1, "output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    maps_admin1._admin1.clear()
+    raw = {
+        "features": [
+            {
+                "properties": {
+                    "adm0_a3": "MYS",
+                    "adm1_code": "MYS-1186",
+                    "iso_3166_2": "MY-12",
+                    "name": "Sabah",
+                    "type_en": "State",
+                },
+                "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            },
+            {
+                "properties": {
+                    "adm0_a3": "MYS",
+                    "adm1_code": "MYS-1187",
+                    "iso_3166_2": "MY-13",
+                    "name": "Sarawak",
+                    "type_en": "State",
+                },
+                "geometry": {"type": "Polygon", "coordinates": [[[2, 2], [3, 2], [3, 3], [2, 2]]]},
+            },
+        ]
+    }
+    maps_admin1.split_admin1(raw, maps_admin1.admin1_dir())
+    yield tmp_path
+    maps_admin1._admin1.clear()
+
+
+def test_ne_admin1_returns_country(admin1_root):
+    response = client.get("/api/maps/ne/admin1/MYS")
+    assert response.status_code == 200
+    names = [f["properties"]["name"] for f in response.json()["features"]]
+    assert names == ["Sabah", "Sarawak"]
+    assert response.headers["cache-control"] == "public, max-age=86400"
+
+
+def test_ne_admin1_rejects_bad_code(admin1_root):
+    assert client.get("/api/maps/ne/admin1/xx").status_code == 400
+    assert client.get("/api/maps/ne/admin1/ZZZ").status_code == 404
+
+
+def test_maps_slide_rejects_bad_highlight():
+    """`/state` funnels every document validation failure through 400 (see `_parse_document`)."""
+    job = _seed()
+    for bad in ("a1:foo", "USAA", "A1:has space", "A1:"):
+        doc = _doc(job)
+        doc["slides"][0]["highlights"] = [bad]
+        assert _save(job, doc).status_code == 400, bad
+
+
+def test_maps_slide_accepts_admin1_highlight():
+    job = _seed()
+    doc = _doc(job)
+    doc["slides"][0]["highlights"] = ["mys", "A1:MYS-1186"]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["slides"][0]["highlights"] == ["MYS", "A1:MYS-1186"]
+
+
+def test_post_png_plate_country_variant():
+    job = _seed()
+    body = _landmark_png()
+    response = client.post(
+        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=country", content=body
+    )
+    assert response.status_code == 200
+    out = Path(job["result"]["outputDir"])
+    assert (out / "plates" / "map BG_p-s1-s2-country.png").read_bytes() == body
+    bad = client.post(
+        f"/api/maps/{job['id']}/png?plateId=p-s1-s2&kind=plate&variant=nope", content=body
+    )
+    assert bad.status_code == 400
+
+
+def test_session_zip_excludes_admin1(admin1_root):
+    from obed_edom import maps_tiles
+
+    (maps_tiles.cache_root() / "planet.json").write_text("{}", encoding="utf-8")
+    job = _seed()
+    assert _save(job, _doc(job)).status_code == 200
+    session = client.get(f"/api/maps/{job['id']}/session")
+    assert session.status_code == 200
+    with zipfile.ZipFile(BytesIO(session.content)) as archive:
+        names = archive.namelist()
+    assert "tile-cache/planet.json" in names, names
+    assert not any("admin1" in name for name in names), names

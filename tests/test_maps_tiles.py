@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from obed_edom.maps_admin1 import admin1_dir
 from obed_edom.maps_tiles import (
     FETCH_WORKERS,
     PINNED_CACHE_COUNTRIES,
@@ -18,6 +19,7 @@ from obed_edom.maps_tiles import (
     cache_path,
     cache_stats,
     camera_tile_plan,
+    clear_tile_cache,
     fetch_and_cache,
     fetch_upstream,
     media_type_for,
@@ -410,3 +412,25 @@ def test_prefetch_rels_uses_larger_pool_for_terrain(tmp_path, monkeypatch):
     assert TERRAIN_FETCH_WORKERS > FETCH_WORKERS
     assert ofm_max > 1
     assert ofm_max <= FETCH_WORKERS
+
+
+def test_cache_stats_includes_admin1_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_admin1.output_root", lambda: tmp_path)
+    admin1_dir().mkdir(parents=True, exist_ok=True)
+    (admin1_dir() / "MYS.geojson").write_bytes(b"x" * 64)
+
+    stats = cache_stats()
+    assert stats["files"] >= 1
+    assert stats["bytes"] >= 64
+
+
+def test_clear_tile_cache_removes_admin1(tmp_path, monkeypatch):
+    monkeypatch.setattr("obed_edom.maps_tiles.output_root", lambda: tmp_path)
+    monkeypatch.setattr("obed_edom.maps_admin1.output_root", lambda: tmp_path)
+    admin1_dir().mkdir(parents=True, exist_ok=True)
+    (admin1_dir() / "MYS.geojson").write_bytes(b"x" * 64)
+
+    stats = clear_tile_cache()
+    assert not (admin1_dir() / "MYS.geojson").exists()
+    assert stats == {"bytes": 0, "files": 0}

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
+from obed_edom.maps_admin1 import Admin1FetchError, ensure_admin1, load_admin1
 from obed_edom.maps_csv import COORD_DEFAULT_ZOOM, Place, parse_places, places_from_rows, resolve_zoom
 from obed_edom.maps_geo import (
     DEFAULT_HIDDEN_LAYERS,
@@ -285,6 +287,23 @@ class MapsAsset(BaseModel):
     height: int = Field(ge=1, le=10000)
 
 
+_HIGHLIGHT_RE = re.compile(r"^(?:[A-Z]{3}|A1:[A-Z0-9+?_-]{1,16})$")
+
+
+def _validate_highlights(value: object) -> object:
+    """Bare ADM0_A3 codes are upper-cased; `A1:<adm1_code>` payloads are kept verbatim."""
+    if not isinstance(value, list):
+        return value
+    out: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        candidate = text if ":" in text else text.upper()
+        if not _HIGHLIGHT_RE.match(candidate):
+            raise ValueError(f"Invalid highlight: {item!r}")
+        out.append(candidate)
+    return out
+
+
 class MapsCgOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
     camera: MapsCamera
@@ -298,6 +317,8 @@ class MapsCgOverride(BaseModel):
     movieMov: str | None = None
     movieDuration: float | None = None
     revealMovie: bool = False
+
+    _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
 
 
 class MapsSlide(BaseModel):
@@ -319,6 +340,8 @@ class MapsSlide(BaseModel):
     cgShiftY: float = 0
     includeSidePanels: bool = False
     cg: MapsCgOverride | None = None
+
+    _check_highlights = field_validator("highlights", mode="before")(_validate_highlights)
 
     @field_validator("includeSidePanels", mode="before")
     @classmethod
@@ -1567,10 +1590,15 @@ async def post_png(
     if kind == "plate":
         if not plateId:
             raise HTTPException(400, "plateId is required for kind=plate")
+        if variant is not None and variant != "country":
+            raise HTTPException(400, "variant must be country")
         safe_plate = _safe_name(plateId)
         folder = output_dir / "plates"
         plate_name = safe_plate if audience != "cg" or safe_plate.endswith("-cg") else f"{safe_plate}-cg"
-        path = folder / plate_filename(plate_name)
+        name = plate_filename(plate_name)
+        if variant == "country":
+            name = f"{Path(name).stem}-country{Path(name).suffix}"
+        path = folder / name
         with maps_commit(job_id, None, bump=False) as commit:
             commit.stage_bytes(path, body)
         return commit.payload
@@ -1764,6 +1792,24 @@ def ne_admin0() -> JSONResponse:
 @router.get("/ne/places")
 def ne_places() -> JSONResponse:
     return JSONResponse(load_places(), headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _admin1_country(adm0_a3: str) -> dict:
+    if not re.fullmatch(r"[A-Z]{3}", adm0_a3):
+        raise HTTPException(400, "Invalid country code")
+    try:
+        ensure_admin1()
+    except Admin1FetchError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    data = load_admin1(adm0_a3)
+    if data is None:
+        raise HTTPException(404, f"No admin-1 data for {adm0_a3}")
+    return data
+
+
+@router.get("/ne/admin1/{adm0_a3}")
+def ne_admin1(adm0_a3: str) -> JSONResponse:
+    return JSONResponse(_admin1_country(adm0_a3), headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.post("/{job_id}/export")

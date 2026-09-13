@@ -447,17 +447,24 @@ def prefetch_rels(rels: Iterable[str], *, fetch=None) -> dict[str, int]:
 
 
 def cache_stats() -> dict[str, int]:
-    root = cache_root()
+    from obed_edom.maps_admin1 import admin1_dir  # noqa: PLC0415
+
     nbytes = 0
     nfiles = 0
-    for path in root.rglob("*"):
-        if path.is_file():
-            nfiles += 1
-            nbytes += path.stat().st_size
+    for root in (cache_root(), admin1_dir()):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                nfiles += 1
+                nbytes += path.stat().st_size
     return {"bytes": nbytes, "files": nfiles}
 
 
 def clear_tile_cache() -> dict[str, int]:
+    from obed_edom.maps_admin1 import clear_admin1  # noqa: PLC0415
+
+    clear_admin1()
     root = cache_root()
     shutil.rmtree(root, ignore_errors=True)
     cache_root()

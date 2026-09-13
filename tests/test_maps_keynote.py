@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import threading
@@ -1702,30 +1703,61 @@ def test_plan_deck_emits_country_cutout_image_above_base(tmp_path: Path):
     ops = plan_deck([a, b], links, {}, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     items = ops[0]["items"]
     map_items = [item for item in items if item.get("map")]
-    assert len(map_items) == 2
+    country_items = [item for item in items if item.get("country")]
+    assert len(map_items) == 1
+    assert len(country_items) == 1
     assert Path(map_items[0]["path"]).name == "s1.png"
-    assert Path(map_items[1]["path"]).name == "s1-country.png"
+    assert Path(country_items[0]["path"]).name == "s1-country.png"
     assert (map_items[0]["x"], map_items[0]["y"], map_items[0]["w"], map_items[0]["h"]) == (
-        map_items[1]["x"],
-        map_items[1]["y"],
-        map_items[1]["w"],
-        map_items[1]["h"],
+        country_items[0]["x"],
+        country_items[0]["y"],
+        country_items[0]["w"],
+        country_items[0]["h"],
     )
     assert len([item for item in ops[1]["items"] if item.get("map")]) == 1
 
 
-def test_plan_deck_magic_move_duplicate_skips_country_cutout(tmp_path: Path):
+def test_plan_deck_magic_move_duplicate_keeps_country_cutout(tmp_path: Path):
     cam_a, cam_b = _pan_camera(8, 400)
     a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
     links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
     plates, links = assign_morph_plates([a, b], links)
-    _write_plan_rasters(tmp_path, [a, b], links)
-    _dummy_png(tmp_path / "stills" / "s1-country.png")
-    _dummy_png(tmp_path / "stills" / "s2-country.png")
+    plan = _write_plan_rasters(tmp_path, [a, b], links)
+    for plate in plan["plates"]:
+        stem = Path(plate_filename(plate["plateId"])).stem
+        _dummy_png(tmp_path / "plates" / f"{stem}-country.png")
     ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
     assert ops[1]["duplicate"] is True
-    assert len(ops[1]["items"]) == 1
+    country_items = [item for item in ops[1]["items"] if item.get("country")]
+    assert len(country_items) == 1
+    assert Path(country_items[0]["path"]).name.endswith("-country.png")
+
+    script = build_deck_script(ops, tmp_path / "Deck.key", width=7680, height=1080)
+    tell_start = script.index("tell slide 2")
+    tell_end = script.index("end tell", tell_start)
+    body = script[tell_start:tell_end]
+    assert "-country.png" not in body
+    assert "make new image" not in body
+    assert "set width of image 2 to" in body
+    assert "set height of image 2 to" in body
+    assert re.search(r"repeat with i from \(count of images\) to 3 by -1", body) is not None
+
+
+def test_plan_deck_morph_member_with_no_own_highlights_still_gets_plate_cutout(tmp_path: Path):
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a, isolate={"mode": "darken", "strength": 0.6}, highlights=["USA"])
+    b = _slide("s2", cam_b, isolate={"mode": "darken", "strength": 0.6}, highlights=[])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.0, "playWithoutClick": False}]
+    plates, links = assign_morph_plates([a, b], links)
+    for plate_id in plates:
+        stem = Path(plate_filename(plate_id)).stem
+        _dummy_png(tmp_path / "plates" / plate_filename(plate_id))
+        _dummy_png(tmp_path / "plates" / f"{stem}-country.png")
+    ops = plan_deck([a, b], links, plates, output_dir=tmp_path, preview_dir=tmp_path, movie=None, wall=True)
+    country_items = [item for item in ops[1]["items"] if item.get("country")]
+    assert len(country_items) == 1
+    assert Path(country_items[0]["path"]).name.endswith("-country.png")
 
 
 def test_export_plan_inserts_landing_row_for_isolated_movie_destination():
@@ -1769,7 +1801,8 @@ def test_plan_deck_inserts_landing_slide_between_movie_and_isolated_destination(
     assert [op["id"] for op in ops] == ["s1", "s2__landing", "s2"]
     assert ops[0]["transition"] == {"effect": "dissolve", "duration": 1.0, "automatic": True, "delay": 2.0}
     assert ops[1]["transition"] == {"effect": "dissolve", "duration": 1.5, "automatic": False}
-    assert len([item for item in ops[2]["items"] if item.get("map")]) == 2
+    assert len([item for item in ops[2]["items"] if item.get("map")]) == 1
+    assert len([item for item in ops[2]["items"] if item.get("country")]) == 1
 
 
 def test_plan_deck_no_isolate_deck_ops_unchanged(tmp_path: Path):
@@ -2831,3 +2864,103 @@ def test_label_pill_outer_bounds_clear_the_wall_seam(tmp_path: Path):
     assert pill["x"] <= text["x"]
     assert text["x"] + text["w"] <= pill["x"] + pill["w"]
     assert pill["x"] == text["x"] - PILL_PAD_X
+
+
+def test_still_plans_a_cutout_without_isolate():
+    """A highlighted slide gets its cutout raster whether or not it is isolated."""
+    plain = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    isolated = _slide("s2", _camera(3.0, 101.0), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    bare = _slide("s3", _camera(3.0, 101.0))
+
+    plan = maps_export_plan([plain, isolated, bare], [])
+    rows = {row["slideId"]: row for row in plan["stills"]}
+
+    assert rows["s1"]["stillPngCountry"] == "s1-country.png"
+    assert rows["s2"]["stillPngCountry"] == "s2-country.png"
+    assert "stillPngCountry" not in rows["s3"]
+
+
+def test_landing_slide_plans_no_cutout():
+    """`isolate_landing_slides` forces `highlights: []`, so the gate can never fire for one."""
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    b = _slide("s2", _camera(20.0, 130.0, 4), highlights=["MYS"], isolate={"mode": "darken", "strength": 0.6})
+    links = [{"from": "s1", "to": "s2", "kind": "movie", "duration": 2.0, "playWithoutClick": True}]
+
+    plan = maps_export_plan([a, b], links)
+    landing = [row for row in plan["stills"] if row["slideId"].endswith("__landing")]
+
+    assert landing, "expected a synthetic landing still"
+    assert all("stillPngCountry" not in row for row in landing)
+
+
+def test_plate_plans_a_cutout_when_highlighted():
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+
+    plan = maps_export_plan([a, b], links)
+    plates = plan["plates"]
+
+    assert plates, "expected a morph plate"
+    assert plates[0]["platePngCountry"] == f"{plates[0]['plateId']}-country.png"
+
+
+def test_plate_plans_no_cutout_without_highlights():
+    a = _slide("s1", _camera(3.0, 101.0))
+    b = _slide("s2", _camera(3.05, 101.05))
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": False}]
+
+    plan = maps_export_plan([a, b], links)
+
+    assert plan["plates"]
+    assert "platePngCountry" not in plan["plates"][0]
+
+
+def test_build_slide_items_stacks_the_cutout_without_isolate(tmp_path: Path):
+    slide = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"], isolate=None)
+    country = _dummy_png(tmp_path / "stills" / "s1-country.png")
+
+    items = build_slide_items(
+        slide,
+        plate=None,
+        plate_path=None,
+        still=_dummy_png(tmp_path / "stills" / "s1.png"),
+        movie=None,
+        wall=True,
+        pin_root=tmp_path / "pins",
+        country_still=country,
+    )
+    map_items = [item for item in items if item.get("map")]
+    country_items = [item for item in items if item.get("country")]
+
+    assert len(map_items) == 1
+    assert len(country_items) == 1
+    assert country_items[0]["path"] == str(country)
+    assert (country_items[0]["x"], country_items[0]["y"]) == (map_items[0]["x"], map_items[0]["y"])
+    assert (country_items[0]["w"], country_items[0]["h"]) == (map_items[0]["w"], map_items[0]["h"])
+
+
+def test_build_slide_items_gives_a_plate_cutout_the_plate_geometry(tmp_path: Path):
+    a = _slide("s1", _camera(3.0, 101.0), highlights=["MYS"])
+    b = _slide("s2", _camera(3.05, 101.05), highlights=["MYS"])
+    geom = morph_plate_geom([a, b])
+    plate_path = _dummy_png(tmp_path / "plates" / plate_filename("p-s1-s2"))
+    country = _dummy_png(tmp_path / "plates" / "map BG_p-s1-s2-country.png")
+
+    items = build_slide_items(
+        a,
+        plate=geom,
+        plate_path=plate_path,
+        still=None,
+        movie=None,
+        wall=True,
+        pin_root=tmp_path / "pins",
+        country_still=country,
+    )
+    map_items = [item for item in items if item.get("map")]
+    country_items = [item for item in items if item.get("country")]
+
+    assert len(map_items) == 1
+    assert len(country_items) == 1
+    assert country_items[0]["path"] == str(country)
+    assert [country_items[0][key] for key in ("x", "y", "w", "h")] == [map_items[0][key] for key in ("x", "y", "w", "h")]

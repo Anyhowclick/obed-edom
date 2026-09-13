@@ -162,6 +162,11 @@ export function resetMapsApiScript() {
 }
 
 export const mapsApiScript = {
+  exportPlan: {
+    set(plan: Record<string, unknown>) {
+      exportPlanResolution = plan as unknown as MapsExportPlan;
+    },
+  },
   saveMapsState: {
     conflictOnce(conflict: { document: Record<string, unknown>; stateRevision: number }) {
       saveConflictOnce = { conflict: { document: conflict.document, stateRevision: conflict.stateRevision } };
