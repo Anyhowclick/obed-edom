@@ -5137,6 +5137,35 @@ def test_keep_side_content_anchor_clips_to_centre_panel():
     assert plan.anchors[49] == "right"
 
 
+def test_rotated_image_anchor_uses_transformed_aabb():
+    # A 400x1000 image rotated 90 degrees is visually 1000x400 (aspect 2.5, LW-dimension)
+    # -- the unrotated frame (aspect 0.4) would wrongly read squarish and right-align it.
+    # Positioned so its rotated AABB sits fully inside the centre panel (codex placement
+    # review 3, finding 1).
+    item = _image_item(0, x=2800, y=40, w=400, h=1000)
+    item["rotation"] = 90
+    slide = _slide(50, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[50] == "centre"
+
+
+def test_rotated_group_anchor_uses_transformed_aabb():
+    # Same rotation, but the content item is a top-level media group -- the group's own
+    # payload frame is rotation-naive too, so the fix must cover groups as well as images.
+    group = _group_item(0, x=2800, y=40, w=400, h=1000)
+    group["rotation"] = 90
+    slide = _slide(51, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {51: SlideDecision(51, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[51] == "centre"
+
+
 def test_group_has_media_missing_none_empty_signature():
     # codex review 1, finding 2: missing mapping entry, None, and "" are not content.
     assert dsa._group_has_media(None) is False

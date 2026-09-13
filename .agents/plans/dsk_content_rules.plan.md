@@ -343,6 +343,14 @@ No span threshold anywhere — this supersedes both the previous revision's 0.98
 the "count only" revision that followed it. `--anchor N=…` always wins; the derived anchor is
 recorded in the plan and printed in the run log.
 
+A rotated top-level image/movie or rotated group is NOT refused before reaching `_content_anchor`
+(codex placement review 3, finding 1) — its content rect must therefore be the item's exact
+transformed AABB, not its unrotated frame, or a rotated wide item can wrongly read squarish (or
+vice versa). `_content_item_aabb`/`_content_visibles_by_kept` (`dsk_assemble.py`) compute that AABB
+via the shared `iwa_geometry` frame-transform helpers before clipping to the centre panel; masked
+media still contributes its masked rect (D2), unaffected since it carries no separate rotation
+case here.
+
 **Union vs. per-item, and the deck-wide flip list (opus review 1 finding 1, union reading, owner
 confirmation pending).** A per-*item* aspect test (the first cut of this rule) measures each kept
 item's own clipped rect against 2.5; the union test instead measures the one rect `fit_slide`

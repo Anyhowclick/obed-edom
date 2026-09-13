@@ -41,9 +41,9 @@ from obed_edom.dsk_plan import (
     TextBox,
     _box_min_t,
     _delete_order,
+    _intersect,
     _item_object_ids,
     _TEXT_GAP_PT,
-    _visibles_by_kept,
     classify_deck,
     fit_slide,
     fit_text_stack,
@@ -54,7 +54,9 @@ from obed_edom.dsk_plan import (
 )
 from obed_edom.iwa_builds import deck_builds
 from obed_edom.iwa_geometry import (
+    _corners_aabb,
     _frame_rect,
+    _frame_transform,
     _geom_dict,
     _leaf_bbox,
     _mask_geom,
@@ -387,6 +389,36 @@ def _content_ids(
     return ids
 
 
+def _content_item_aabb(item: dict) -> Rect:
+    """Exact transformed AABB of a content item's own frame -- the raw ``x``/``y``/``w``/``h``
+    for an unrotated item, or the true rotated bounding box (via the shared
+    ``iwa_geometry`` frame-transform helpers) when the item carries a non-zero ``rotation``.
+    Masked media already carries its masked rect in ``w``/``h`` (D2), so this needs no
+    separate mask case."""
+    angle = item.get("rotation") or 0.0
+    if angle % 360.0:
+        x, y, w, h = item.get("x", 0.0), item.get("y", 0.0), item.get("w", 0.0), item.get("h", 0.0)
+        x0, y0, x1, y1 = _corners_aabb(_frame_transform(x, y, w, h, angle), w, h)
+        return Rect(x0, y0, x1 - x0, y1 - y0)
+    return item_rect(item)
+
+
+def _content_visibles_by_kept(items: Sequence[dict], kept: Iterable[ItemId]) -> dict[ItemId, Rect]:
+    """Like ``dsk_plan._visibles_by_kept(..., include_side=False)`` but measuring each kept
+    item's exact transformed AABB (``_content_item_aabb``) rather than its unrotated frame,
+    so a rotated item's clip to the centre panel reflects its true visual extent."""
+    kept_set = set(kept)
+    visibles: dict[ItemId, Rect] = {}
+    for item in items:
+        item_id: ItemId = (item["kind"], item["kindIndex"])
+        if item_id not in kept_set:
+            continue
+        visible = _intersect(_content_item_aabb(item), CENTRE_PANEL_RECT)
+        if visible is not None:
+            visibles[item_id] = visible
+    return visibles
+
+
 def _content_anchor(
     cls: SlideClass,
     items: Sequence[dict],
@@ -404,7 +436,7 @@ def _content_anchor(
     content_ids = _content_ids(cls, items_by_id, wall=wall, group_signature=group_signature)
     if not content_ids:
         return "centre"
-    visibles = _visibles_by_kept(items, content_ids, include_side=False)
+    visibles = _content_visibles_by_kept(items, content_ids)
     rects = [r for r in visibles.values() if r.w > 0 and r.h > 0]
     if not rects:
         return "centre"
