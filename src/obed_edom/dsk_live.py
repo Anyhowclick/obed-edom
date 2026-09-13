@@ -501,6 +501,7 @@ class LiveBatch:
                 self._watchdog.stop()
             except Exception:
                 pass
+            self.log(f"Keynote peak RSS: {self._watchdog.peak_rss_bytes} bytes (limit {self.rss_limit_bytes} bytes)")
         try:
             if _keynote_running():
                 _run_quit_script(stem_name, doc_name, self.out_dir)

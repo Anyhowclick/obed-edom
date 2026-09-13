@@ -6,6 +6,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+from obed_edom.dsk_live import DEFAULT_RSS_LIMIT_BYTES
 from obed_edom.map_remap import parse_slide_spec, resolve_slides
 from obed_edom.paths import find_repo_root, output_root
 from obed_edom.pipeline import generate
@@ -199,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Never drop a textless full-frame shape (the verse-slide scrim) as a panel backdrop.",
     )
     dsk_assemble.add_argument(
+        "--rss-limit-gb", type=float, default=DEFAULT_RSS_LIMIT_BYTES / 1e9,
+        help="Keynote RSS watchdog limit in GB; the run aborts above it.",
+    )
+    dsk_assemble.add_argument(
         "--split", action="append", default=[], metavar="N=k",
         help="Force slide N's text stack to split into exactly k parts, one per long text "
         "box, overriding the offline fit decision; refuses if N does not have exactly k "
@@ -374,6 +379,9 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
     if args.layout == "import" and not DEFAULT_LAYOUT_TEMPLATE.is_file():
         print(f"Layout template not found: {DEFAULT_LAYOUT_TEMPLATE}", file=sys.stderr)
         return 1
+    if args.rss_limit_gb <= 0:
+        print(f"Bad --rss-limit-gb {args.rss_limit_gb!r}; must be > 0.", file=sys.stderr)
+        return 1
 
     slide_set = set(slide_numbers)
     anchors: dict[int, str] = {}
@@ -473,6 +481,7 @@ def _run_dsk_assemble(args: argparse.Namespace) -> int:
             no_dedupe=args.no_dedupe,
             no_drop_panel_backdrop=args.no_drop_panel_backdrop,
             split_overrides=split_overrides,
+            rss_limit_bytes=int(args.rss_limit_gb * 1e9),
         )
     except AssemblyRefusal as exc:
         print(f"Assembly refused: {exc}", file=sys.stderr)

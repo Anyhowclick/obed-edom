@@ -238,6 +238,26 @@ def test_live_batch_1712_retry_recopies_scratch(monkeypatch, tmp_path):
     assert "quit_and_wait" in calls
 
 
+def test_live_batch_logs_peak_rss_on_exit(monkeypatch, tmp_path):
+    calls, state = _stub_batch(monkeypatch)
+    monkeypatch.setattr(dl._RssWatchdog, "start", lambda self: None)
+    monkeypatch.setattr(dl._RssWatchdog, "stop", lambda self: None)
+    monkeypatch.setattr(dl, "_sample_rss_bytes", lambda pid: 123_456)
+    out_dir = tmp_path / "clips"
+    out_dir.mkdir()
+    fw = tmp_path / "Sermon.key"
+    fw.write_bytes(b"source")
+    logged: list[str] = []
+
+    with dl.LiveBatch(fw, out_dir, rss_limit_bytes=999_999, log=logged.append) as batch:
+        script_path = batch.work / "script.applescript"
+        script_path.write_text("script")
+        batch.run(script_path)
+        batch._watchdog.peak_rss_bytes = dl._sample_rss_bytes(1)
+
+    assert "Keynote peak RSS: 123456 bytes (limit 999999 bytes)" in logged
+
+
 def test_live_batch_run_no_retry_flag(monkeypatch, tmp_path):
     calls, state = _stub_batch(monkeypatch)
     out_dir = tmp_path / "clips"
