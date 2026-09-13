@@ -610,7 +610,7 @@ def test_group_verse_slide_stacks_children_not_affine():
     assert f"set theObj to {verse_addr}" in script
     assert f"set theObj to {badge_addr}" in script
     assert "set size of object text of theObj to" in script  # one uniform run -> lead size
-    assert f"set height of theObj to" not in script.split(verse_addr)[1].split("on error")[0]
+    assert "set height of theObj to" not in script.split(verse_addr)[1].split("on error")[0]
     assert f"iWork items of group 1 of slide {ordinal}" not in script
     assert "(width of theObj)" not in script
 
@@ -736,7 +736,7 @@ def test_groupchild_overflow_stays_a_warning_under_text_fit_shrink():
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
     slides_by_number = {s["number"]: s for s in payload["slides"]}
     overflows = [{"slide": 5, "item": "groupchild:0:1", "height": 400.0}]
-    warnings = [f"slide 5: text groupchild:0:1 overflow, height 400.0"]
+    warnings = ["slide 5: text groupchild:0:1 overflow, height 400.0"]
     dsa._run_refit_and_finalize(
         plan, batch=None, slides_by_number=slides_by_number,
         band=BAND, min_text_pt=24.0, allow_split=False, text_fit="shrink",
@@ -768,6 +768,89 @@ def test_group_child_of_unmapped_kind_skipped_not_placed():
     plan = plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
     assert ("groupchild", 0, 0) not in plan.fits[5]
     assert ("groupchild", 0, 0) not in plan.group_child_kind.get(5, {})
+
+
+def test_content_ids_excludes_text_triggering_group():
+    # New finding 3: a group already used as a text carrier (its child text triggered
+    # the text-slide classification) must never also count towards anchoring content,
+    # even when it separately has a media child -- matching `_content_ids`' own
+    # docstring rule ("text-only content never counts").
+    from obed_edom.dsk_plan import SlideClass
+
+    cls = SlideClass(
+        number=5, category="mixed", build_count=0, movie_count=0,
+        kept=(("image", 0), ("group", 1)), dropped_side=(), dropped_backdrop=(),
+        transition=None, is_text=True, long_text_ids=(("groupchild", 1, 0),),
+    )
+    group_signature = {1: "image:photo\ntext:verse"}
+    without_exclusion = dsa._content_ids(cls, group_signature=group_signature)
+    assert ("group", 1) in without_exclusion
+
+    with_exclusion = dsa._content_ids(
+        cls, group_signature=group_signature, exclude_group_kis={1},
+    )
+    assert ("group", 1) not in with_exclusion
+    assert ("image", 0) in with_exclusion
+
+
+def test_image_child_in_text_triggering_group_refuses():
+    # New finding 3 (owner decision): an image child inside a text-triggering group is
+    # neither dropped nor scaled by the short-row path, unlike a top-level image on a
+    # text slide (`dropped_media_text`) -- refuse, consistent with the movie-nested-in-
+    # group refusal.
+    group = _group_item(0, x=4702, y=15, w=645, h=92)
+    slide = _slide(5, [group])
+    slide["groupChildText"] = {0: _GW5_VERSE}
+    slide["groupChildSignature"] = {0: f"image:photo\ntext:{_GW5_VERSE}"}
+    slide["groupChildren"] = {0: [
+        {"kind": "image", "kindIndex": 0, "autosize": False, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0},
+        {"kind": "text", "kindIndex": 1, "autosize": True, "x": 4303.0, "cy": 89.0, "y": -88.0, "w": 1442.0, "h": 355.0},
+    ]}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": _GW5_VERSE, "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": _GW5_VERSE, "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="image nested in text-triggering group"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
+
+
+def test_group_nested_child_refuses_even_with_top_level_long_text():
+    # New finding 2: a text-triggering group's nested (non-flat) text child must refuse
+    # unconditionally, even when the slide also has a top-level long text item that
+    # would otherwise leave `long_ids` non-empty and let the slide fall through to
+    # placing the nested child position-only in the short row with a bogus AppleScript
+    # address (re-opening F9 for the nested case).
+    top_text = _text_item(0, x=2000, y=0, w=800, h=200)
+    top_text["text"] = _GW5_VERSE
+    top_text["font"] = "AzoSans-Regular"
+    top_text["size"] = 40.0
+    top_text["runs"] = [{"text": _GW5_VERSE, "fontName": "AzoSans-Regular", "size": 40.0}]
+    group = _group_item(0, x=3000, y=0, w=645, h=92)
+    slide = _slide(5, [top_text, group])
+    slide["groupChildText"] = {0: _GW5_VERSE}
+    slide["groupChildSignature"] = {0: f"text:{_GW5_VERSE}"}
+    slide["groupChildren"] = {0: [
+        {
+            "kind": "text", "kindIndex": 1, "autosize": True, "x": 3050.0, "cy": 89.0,
+            "y": -88.0, "w": 1442.0, "h": 355.0, "group_path": (0,),
+        },
+    ]}
+    slide["groupChildRuns"] = {0: {1: {
+        "text": _GW5_VERSE, "font": "AzoSans-Regular", "size": 70.0,
+        "runs": [{"text": _GW5_VERSE, "fontName": "AzoSans-Regular", "size": 70.0}],
+    }}}
+    payload = _payload([slide])
+    cls = _classify(slide, group_child_words=slide["groupChildText"], group_children=slide["groupChildren"])
+    assert cls.is_text
+    assert ("text", 0) in cls.long_text_ids
+    assert ("groupchild", 0, 1) in cls.long_text_ids
+
+    decisions = {5: SlideDecision(5, "in_deck")}
+    with pytest.raises(AssemblyRefusal, match="nested"):
+        plan_assembly(payload, [cls], decisions=decisions, band=BAND, clips={})
 
 
 def test_group_verse_slide_refuses_without_group_children():
@@ -1465,6 +1548,44 @@ def test_gw51_badge_x_clears_title_right_edge():
     badge_rect = plan.fits[51][("groupchild", 0, 0)]
     assert badge_rect.x >= title_rect.x + title_rect.w
     assert badge_rect.x == pytest.approx(1069.99, abs=0.5)
+
+
+def test_gw_group_text_slides_short_row_stays_within_band_x():
+    # New finding 1: every group-text slide's short-row groupchild rect must clamp
+    # into [band.x_min, band.x_max] -- GW 53's badge overhung the canvas before the
+    # clamp. GW 44/50 still refuse (out of this brief's scope, see the smoke test).
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    checked = 0
+    for number in (5, 44, 50, 51, 53, 54):
+        decisions = {number: SlideDecision(number, "in_deck")}
+        try:
+            plan = plan_assembly(payload, [by_number[number]], decisions=decisions, band=BAND, clips={}, runs=runs)
+        except AssemblyRefusal:
+            continue
+        for iid, rect in plan.fits.get(number, {}).items():
+            if iid[0] != "groupchild":
+                continue
+            assert rect.x >= BAND.x_min - 1e-6, (number, iid)
+            assert rect.x + rect.w <= BAND.x_max + 1e-6, (number, iid)
+            checked += 1
+    assert checked >= 4
+
+
+def test_gw53_badge_x_clamped_to_band_right_edge():
+    # New finding 1: reproduces the real-deck defect -- GW 53's badge, placed at the
+    # group's fitted x plus its source offset, used to overhang the canvas by 213 pt.
+    _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    payload, classes, runs = load_assembly_inputs(GW_DECK)
+    by_number = {c.number: c for c in classes}
+    decisions = {53: SlideDecision(53, "in_deck")}
+    plan = plan_assembly(payload, [by_number[53]], decisions=decisions, band=BAND, clips={}, runs=runs)
+    badge = next(rect for iid, rect in plan.fits[53].items() if iid[0] == "groupchild")
+    assert badge.x + badge.w <= BAND.x_max + 1e-6
+    assert badge.x >= BAND.x_min - 1e-6
 
 
 def test_short_row_rects_regression_moves_badge_out_of_band():

@@ -215,6 +215,37 @@ reports heights and applies writes.
   short text label in a group whose overall child text is long (so the group still classifies as text)
   stays in the short row at source size, position-only, exactly like a badge shape.
 
+## D1 fix round 3 (opus review 2)
+
+- **GW 53's badge x is now clamped into the band** (`min(max(x, band.x_min), band.x_max - w)`,
+  refusing if `w > band.width`), applied before `_refuse_on_short_row_overlap` so a clamp that
+  creates a collision still refuses. The group-fitted-x placement (review 1 F1) was correct on
+  GW 51 but overhung the canvas by 213pt on GW 53, since the group's fitted rect can be narrower
+  than the badge's source width.
+- **"Unresolvable group child" is now distinguished from "short label".** The `long_ids` loop
+  refuses (`... text/font could not be resolved -- refusing to write blind`) when a
+  text-triggering group's child has no resolvable `text`/`font`/`size` in
+  `group_child_runs_map`, rather than silently scoring it as a 0-word short label and placing it
+  position-only at source size with a wrong address.
+- **Owner decision: any child of a text-triggering group whose `group_path` is non-empty (i.e.
+  nested in an inner group) refuses unconditionally**, checked once right after `text_group_kis`
+  is computed, regardless of whether the slide also has a top-level long text keeping `long_ids`
+  non-empty. `_all_group_child_records`'s per-recursion-level `counters` collision (two children
+  at different nesting depths sharing a `kindIndex`) is therefore never reached in practice; not
+  fixed separately since nested children are refused before it matters. Not reachable on the GW
+  deck today (latent).
+- **`text_group_kis` is hoisted above the anchor decision** and passed to `_content_ids`/
+  `_content_anchor` as `exclude_group_kis`, so a group already used as a text carrier never also
+  anchors content, matching `_content_ids`' own docstring. No GW output changes (no text-triggering
+  group there has a media child).
+- **Owner decision: an image child inside a text-triggering group refuses** (`image nested in
+  text-triggering group N unsupported`), consistent with the pre-existing movie-nested-in-group
+  refusal — a text slide otherwise drops every top-level image (`dropped_media_text`), so an image
+  child silently surviving at source size in the short row would contradict that rule.
+- Nits: `boxes[0].item_id[1]` -> `_item_label`; `_refuse_on_short_row_overlap`'s docstring now
+  notes it is an x-interval proxy; the two placeholder-less f-strings in
+  `tests/test_dsk_assemble.py` fixed.
+
 ## Open questions (design-changing)
 
 1. **Stale read-back (F3).** Is the two-consecutive-reads poll enough, or does Keynote only settle the height

@@ -220,7 +220,9 @@ def _refuse_on_short_row_overlap(number: int, short_fit: dict[ItemId, Rect]) -> 
     short-row item (F1) -- a pre-existing pair of ordinary short-row items may
     legitimately share one rect (e.g. a shape stacked behind its caption), so only pairs
     touching a ``GroupChildId`` -- the newly-placed entries this rule protects -- are
-    checked."""
+    checked. Compares x-intervals only, as a conservative proxy: `_short_row_rects`
+    bottom-aligns every short-row rect into one row, so an x overlap there is a real
+    overlap; it can also flag a pair vertically separated inside a tall row."""
     items = list(short_fit.items())
     for i, (iid_a, rect_a) in enumerate(items):
         for iid_b, rect_b in items[i + 1:]:
@@ -444,16 +446,22 @@ def _content_ids(
     cls: SlideClass,
     *,
     group_signature: Mapping[int, str | None] | None = None,
+    exclude_group_kis: Iterable[int] | None = None,
 ) -> list[ItemId]:
     """Kept image/movie/group item ids; text-only content never counts towards them.
+    `exclude_group_kis` drops a group already used as a text carrier (its child text
+    triggered the text-slide classification), matching this docstring's own rule.
     Side-only status is NOT decided here: a rotated item's true (transformed-AABB) extent
     can cross into the centre panel even though its unrotated frame does not, so that
     filter lives in `_content_visibles_by_kept`'s centre-panel intersection instead --
     only positive-area intersections count as anchoring content."""
     group_signature = group_signature or {}
+    exclude = set(exclude_group_kis or ())
     ids: list[ItemId] = []
     for kind, kind_index in cls.kept:
         if kind not in ("image", "movie", "group"):
+            continue
+        if kind == "group" and kind_index in exclude:
             continue
         if kind == "group" and not _group_has_media(group_signature.get(kind_index)):
             continue
@@ -484,6 +492,7 @@ def _content_anchor(
     wall: tuple[float, float],
     group_signature: Mapping[int, str | None] | None = None,
     include_side: bool = False,
+    exclude_group_kis: Iterable[int] | None = None,
 ) -> str:
     """Auto anchor ("centre" or "right") for a content slide with no explicit anchor:
     the union of the kept content rects — always clipped to the centre panel,
@@ -491,8 +500,9 @@ def _content_anchor(
     centre; otherwise squarish items go right at 1-2 and centre at 3+. Side panels
     never count as content for anchoring (decided by `_content_visibles_by_kept`'s
     positive-area centre-panel intersection, not by their unrotated frame). `wall` and
-    `include_side` are accepted but unused."""
-    content_ids = _content_ids(cls, group_signature=group_signature)
+    `include_side` are accepted but unused. `exclude_group_kis` is forwarded to
+    `_content_ids` so a group used as a text carrier never anchors content."""
+    content_ids = _content_ids(cls, group_signature=group_signature, exclude_group_kis=exclude_group_kis)
     if not content_ids:
         return "centre"
     visibles = _content_visibles_by_kept(items, content_ids)
@@ -582,10 +592,20 @@ def plan_assembly(
             group_child_runs_map = slide.get("groupChildRuns") or {}
             warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
+            text_group_kis = {iid[1] for iid in cls.long_text_ids if iid[0] == "groupchild"}
+            for group_ki in text_group_kis:
+                for child in group_children_geo.get(group_ki, ()):
+                    if child.get("group_path"):
+                        raise AssemblyRefusal(
+                            f"slide {number}: group {group_ki} child {child['kindIndex']} is nested "
+                            "inside a text-triggering group -- unsupported"
+                        )
+
             if decision.anchor in (None, "auto"):
                 anchor = "centre" if no_auto_anchor else _content_anchor(
                     cls, items, wall=wall,
                     group_signature=slide.get("groupChildSignature"),
+                    exclude_group_kis=text_group_kis,
                 )
             else:
                 anchor = decision.anchor
@@ -645,7 +665,6 @@ def plan_assembly(
                 raise AssemblyRefusal(f"slide {number}: movie nested in group unsupported")
 
             group_ids = [iid for iid in cls.kept if iid[0] == "group"]
-            text_group_kis = {iid[1] for iid in cls.long_text_ids if iid[0] == "groupchild"}
             if group_ids:
                 scale = slide_affine_scale(
                     items,
@@ -721,7 +740,12 @@ def plan_assembly(
                     if iid[0] == "groupchild":
                         _tag, g_ki, c_ki = iid
                         c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
-                        if _word_count(c_info.get("text")) > text_slide_words:
+                        if not (c_info.get("text") and c_info.get("font") and c_info.get("size")):
+                            raise AssemblyRefusal(
+                                f"slide {number}: group {g_ki} child {c_ki} text/font could not be "
+                                "resolved -- refusing to write blind"
+                            )
+                        if _word_count(c_info["text"]) > text_slide_words:
                             long_ids.append(iid)
                     elif iid in fit:
                         long_ids.append(iid)
@@ -759,6 +783,11 @@ def plan_assembly(
                             child_id: ItemId = ("groupchild", group_ki, child["kindIndex"])
                             if child_id in long_id_set:
                                 continue
+                            if child["kind"] == "image":
+                                raise AssemblyRefusal(
+                                    f"slide {number}: image nested in text-triggering group "
+                                    f"{group_ki} unsupported"
+                                )
                             if not _AS_KIND_NAMES.get(child["kind"]):
                                 continue
                             short_children.append((group_ki, child, group_rect, origin_x))
@@ -767,10 +796,16 @@ def plan_assembly(
                         badge_id = ("groupchild", group_ki, child["kindIndex"])
                         badge_w = float(child.get("w", 0.0))
                         badge_h = float(child.get("h", 0.0))
+                        if badge_w > band.width:
+                            raise AssemblyRefusal(
+                                f"slide {number}: group {group_ki} child {child['kindIndex']} is "
+                                "wider than the band -- refusing to place"
+                            )
                         if sole_occupant or group_rect is None:
                             badge_x = band.x_min + (band.width - badge_w) / 2.0
                         else:
                             badge_x = group_rect.x + (float(child.get("x", 0.0)) - origin_x)
+                        badge_x = min(max(badge_x, band.x_min), band.x_max - badge_w)
                         short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
                         slide_group_child_kind[badge_id] = child["kind"]
                     _refuse_on_short_row_overlap(number, short_fit)
@@ -852,7 +887,7 @@ def plan_assembly(
                         )
                     elif len(boxes) < 2:
                         raise AssemblyRefusal(
-                            f"slide {number} box {boxes[0].item_id[1]} does not fit the band even alone at --min-text-pt {min_text_pt}"
+                            f"slide {number} box {_item_label(boxes[0].item_id)} does not fit the band even alone at --min-text-pt {min_text_pt}"
                         )
                     else:
                         if slide_crops:
