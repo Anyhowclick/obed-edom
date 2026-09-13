@@ -324,8 +324,11 @@ included — a photo with a wide caption strip can read LW-dimension on the stre
 not just the media leaf. Side-panel items never count as content for anchoring, whether or not
 `--include-side`/`--keep-side-panels` keeps them for rendering — decided by `_content_visibles_by_kept`'s
 positive-area intersection with the centre panel (a rotated item's true extent can cross the
-boundary its unrotated frame does not; `_content_ids` no longer pre-drops by the unrotated frame,
-codex placement review 5 finding 2).
+boundary its unrotated frame does not; `dsk_plan._filter_kept_items`'s side-panel classifier,
+`_is_side_panel_item`, decides side-only status from the same transformed AABB
+(`_content_item_aabb`, shared with `_content_anchor`) rather than the unrotated frame, so it no
+longer pre-drops such an item before it reaches anchoring — codex placement review 6 finding 1,
+completing review 5 finding 2).
 
 When the operator gave no explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`)
 decides from the SHAPE of the **union** of those items' rects — the masked rect clipped to the

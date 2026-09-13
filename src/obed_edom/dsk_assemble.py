@@ -41,6 +41,7 @@ from obed_edom.dsk_plan import (
     SlideClass,
     TextBox,
     _box_min_t,
+    _content_item_aabb,
     _delete_order,
     _intersect,
     _item_object_ids,
@@ -383,33 +384,6 @@ def _content_ids(
             continue
         ids.append((kind, kind_index))
     return ids
-
-
-def _content_item_aabb(item: dict) -> Rect:
-    """Exact AABB of a content item's own frame. Payload ``x``/``y``/``w``/``h`` already
-    follow the offline-payload contract (``iwa_geometry``: "rotated=AABB position +
-    unrotated size") -- ``x``/``y`` is the rotated frame's AABB top-left and ``w``/``h``
-    is its unrotated size, for both plain frames (``_frame_rect``) and masked media
-    (``_masked_rect``, whose ``w``/``h`` is already the mask's own D2 rect). So a rotated
-    item needs only its rotated EXTENTS derived from ``w``/``h``/``rotation``; ``x``/``y``
-    stay as given -- they must never be re-rotated about the frame centre. An exact
-    multiple of 90 degrees swaps/no-ops the extents rather than going through sin/cos,
-    which leaves float residue (e.g. 400x1000 rotated 90 -> 1000x400.00000000000006)."""
-    angle = item.get("rotation") or 0.0
-    x, y, w, h = item.get("x", 0.0), item.get("y", 0.0), item.get("w", 0.0), item.get("h", 0.0)
-    norm = angle % 360.0
-    if norm == 0.0:
-        return item_rect(item)
-    if norm % 90.0 == 0.0:
-        if norm % 180.0 != 0.0:
-            w, h = h, w
-        return Rect(x, y, w, h)
-    theta = math.radians(norm)
-    w, h = (
-        abs(w * math.cos(theta)) + abs(h * math.sin(theta)),
-        abs(w * math.sin(theta)) + abs(h * math.cos(theta)),
-    )
-    return Rect(x, y, w, h)
 
 
 def _content_visibles_by_kept(items: Sequence[dict], kept: Iterable[ItemId]) -> dict[ItemId, Rect]:

@@ -5233,18 +5233,21 @@ def test_exact_90_rotation_swaps_extents_without_float_residue():
 
 
 def test_rotated_item_crossing_side_panel_counts_by_transformed_aabb():
-    # Codex placement review 5, finding 2: a 400x1000 frame at x=1500 (left of the centre
-    # panel's x=1920 edge) rotated 90 degrees has transformed AABB (1500,y,1000,400),
-    # crossing into the centre panel by 580pt. `_content_ids` must not pre-drop it via
-    # `is_side_panel_item`'s unrotated frame; only the transformed-AABB intersection with
-    # the centre panel decides side-only status. Clipped to 580x400 (aspect 1.45), a lone
-    # item anchors "right"; this must hold whether or not side panels are kept.
+    # Codex placement review 6, finding 1 (fixing review 5 finding 2's incomplete repair):
+    # a 400x1000 frame at x=1500 (left of the centre panel's x=1920 edge) rotated 90
+    # degrees has transformed AABB (1500,y,1000,400), crossing into the centre panel by
+    # 580pt. `dsk_plan._filter_kept_items`'s side-panel classifier (`_is_side_panel_item`)
+    # must not pre-drop it via the unrotated frame -- it now measures the same
+    # transformed AABB (`_content_item_aabb`) that `_content_visibles_by_kept` uses, so
+    # the item is kept and anchors "right" whether or not side panels are kept
+    # (`include_side` mirrors `keep_side`, matching the production `classify_deck` call).
     item = _image_item(0, x=1500, y=300, w=400, h=1000)
     item["rotation"] = 90
     for keep_side in (False, True):
         slide = _slide(53, [dict(item)])
         payload = _payload([slide])
-        classes = [_classify(slide, include_side=True)]
+        classes = [_classify(slide, include_side=keep_side)]
+        assert ("image", 0) in classes[0].kept
         decisions = {53: SlideDecision(53, "in_deck", anchor="auto", keep_side=keep_side)}
         plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
         assert plan.anchors[53] == "right"
