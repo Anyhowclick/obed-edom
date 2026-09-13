@@ -1197,6 +1197,12 @@ def decode_deck(deck: Path | str) -> tuple[dict[str, dict], dict[int, dict[str, 
 # ==========================================================================
 # main — the Keynote-touching orchestration.
 # ==========================================================================
+def slide_selection(raw: str | None) -> frozenset[int] | None:
+    from obed_edom.map_remap import parse_slide_spec  # noqa: PLC0415
+
+    return parse_slide_spec(raw)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Imported here so the pure comparators above import without Keynote/iwa deps present.
     from obed_edom import offline_write  # noqa: PLC0415
@@ -1214,7 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out", type=Path, required=True,
         help="scratch dir for the A/B decks (Keynote-writable, not /tmp)",
     )
-    ap.add_argument("--slides", help="slide range A-B to remap (default: whole deck)")
+    ap.add_argument("--slides", help="slides to remap, e.g. 47 or 47,82,110-113 (default: whole deck)")
     ap.add_argument(
         "--mode", choices=("verify", "on"), default="verify",
         help="run B's OBED_OFFLINE_WRITE (default verify: patch + live verify)",
@@ -1261,10 +1267,10 @@ def main(argv: list[str] | None = None) -> int:
 
     tols = Tolerances(args.tol_hard, args.tol_soft, args.tol_mask, args.tol_text, args.tol_child)
 
-    slide_range = None
-    if args.slides:
-        lo, _, hi = args.slides.partition("-")
-        slide_range = (int(lo), int(hi or lo))
+    try:
+        slide_range = slide_selection(args.slides)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
