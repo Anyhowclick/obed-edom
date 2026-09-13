@@ -1742,6 +1742,52 @@ def test_shrink_fallback_never_writes_above_pass1_size(tmp_path, monkeypatch):
     assert written <= pass1_size + 0.05, "shrink fallback must never write larger than pass 1's own size"
 
 
+def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck = tmp_path / "source.key"
+    fw_deck.mkdir()
+    (fw_deck / "stub").write_bytes(b"x" * 32)
+    out_path = tmp_path / "out" / "assembled.key"
+    text = " ".join(["word"] * 240)
+    split_at = len(text) // 2
+    runs = [
+        {"text": text[:split_at], "size": 40.0},
+        {"text": text[split_at:], "size": 30.0},
+    ]
+    text_item = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": text, "font": "Helvetica", "size": 40.0, "runs": runs,
+    }
+    slide = _slide(13, [text_item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    t_prev = plan.stack_t[13]
+    assert t_prev < 1.0, "fixture must exercise pass 1 shrinking for this test to mean anything"
+    pass1_lo, pass1_hi = 30.0 * t_prev, 40.0 * t_prev
+
+    pass1_stderr = "\n".join([
+        "OBED\t13\tOVERFLOW\ttext:0\t900.0",
+        "OBED\t13\tdone",
+    ])
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    result = assemble_dsk_deck(
+        fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+        min_text_pt=24.0,
+    )
+    assert len(calls) == 2
+    shrink_warnings = [w for w in result.warnings if "shrunk to" in w or "already at the floor" in w]
+    assert shrink_warnings
+    size_desc = shrink_warnings[0].split("to ")[1].split(" ")[0].split("pt")[0]
+    lo_s, _sep, hi_s = size_desc.partition("-")
+    lo = float(lo_s)
+    hi = float(hi_s) if hi_s else lo
+    assert lo <= pass1_lo + 0.05, "shrink fallback must never write a run larger than pass 1's own size"
+    assert hi <= pass1_hi + 0.05, "shrink fallback must never write a run larger than pass 1's own size"
+
+
 def test_refit_round_dropped_measure_warns_and_keeps_prior_size(tmp_path, monkeypatch):
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
@@ -3771,7 +3817,7 @@ def test_cli_dsk_assemble_builds_decisions(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None,
+        split_overrides=None, rss_limit_bytes=None,
     ):
         captured["decisions"] = decisions
         captured["clips"] = clips
@@ -3851,7 +3897,7 @@ def test_cli_dsk_assemble_layout_name_override(tmp_path, monkeypatch):
         src, out, *, decisions, reference_deck, clips, log, layout_policy, black_layout_names, stroke_min_refs,
         text_fit, min_text_pt=24.0, allow_split=True, text_slide_words=10, crop_dir=None,
         no_image_crop=False, no_auto_anchor=False, no_dedupe=False, no_drop_panel_backdrop=False,
-        split_overrides=None,
+        split_overrides=None, rss_limit_bytes=None,
     ):
         captured["black_layout_names"] = black_layout_names
         return AssembleResult(

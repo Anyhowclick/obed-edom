@@ -2614,12 +2614,13 @@ def _run_refit_and_finalize(
             run_sizes_src = [float(r["size"]) for r in (item.get("runs") or []) if r.get("size") is not None]
             min_source_size = min(run_sizes_src) if run_sizes_src else float(item.get("size") or min_text_pt)
             lead_source_size = float(item.get("size") or min_source_size)
-            t_floor = min(1.0, min_text_pt / min_source_size) if min_source_size > 0 else 1.0
+            t_floor = min(1.0, min_text_pt / lead_source_size) if lead_source_size > 0 else 1.0
             t_prev = last_t.get(slide_no, 1.0)
             measured_h = measured.get((slide_no, item_key))
             t_fit = t_prev * (rect.h / measured_h) if measured_h and measured_h > 0 else t_prev
-            t = max(min(t_fit, t_prev), t_floor)
+            t = min(max(min(t_fit, t_prev), t_floor), t_prev)
             clamped = t == t_floor and t_floor > t_fit
+            at_floor = t_floor > t_prev
             ranges, unresolved = _run_size_ranges(
                 item, t, item_id=item_id, slide_number=slide_no, warnings=None,
             )
@@ -2639,10 +2640,16 @@ def _run_refit_and_finalize(
             else:
                 size_desc = f"{round(t * lead_source_size, 1)}pt"
             shrink_refits.setdefault(slide_no, {})[item_id] = TextRefit(rect, run_sizes)
-            floor_note = f" (floor {min_text_pt}pt)" if clamped else ""
-            warnings.append(
-                f"slide {slide_no}: text {item_key} shrunk to {size_desc} after refit{floor_note}"
-            )
+            if at_floor:
+                warnings.append(
+                    f"slide {slide_no}: text {item_key} already at the floor, "
+                    f"left at {size_desc}"
+                )
+            else:
+                floor_note = f" (floor {min_text_pt}pt)" if clamped else ""
+                warnings.append(
+                    f"slide {slide_no}: text {item_key} shrunk to {size_desc} after refit{floor_note}"
+                )
         script = build_refit_script(
             plan, shrink_refits, ordinals=plan.ordinals, scratch_path=reopen_path,
             staging_path=staging_path, hidden=hidden,
@@ -2757,7 +2764,6 @@ def assemble_dsk_deck(
         last_error: tuple[int, int, str] | None = None
         hidden: list[dict] = []
         hidden_ids: dict[int, set[ItemId]] = {}
-        measure2: dict[tuple[int, str], float] = {}
         for line in (proc.stderr or "").splitlines():
             error_m = _ERROR_RE.match(line)
             if error_m:
@@ -2786,7 +2792,6 @@ def assemble_dsk_deck(
                 elif key == "MEASURE2":
                     item_key, _sep, height_s = prop_m.group(3).partition("\t")
                     height2 = float(height_s)
-                    measure2[(slide_no, item_key)] = height2
                     measured_h = measured.get((slide_no, item_key))
                     if measured_h is not None and abs(height2 - measured_h) > 2.0:
                         msg = (
