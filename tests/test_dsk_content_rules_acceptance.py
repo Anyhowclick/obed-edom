@@ -168,6 +168,28 @@ def test_gw24_dedupe_four_to_two_right(gw_inputs):
 
 
 @pytest.mark.deck
+def test_gw16_diptych_union_centred(gw_inputs):
+    # Two clipped LW-panel halves (aspect 1.77 each) whose union is 3840x1080
+    # (aspect 3.56) -- the union-of-kept-rects fix (opus review 1, finding 1)
+    # centres this panel-wide two-up instead of right-flushing it.
+    _require_gw_deck()
+    payload, by_number, runs = gw_inputs
+    cls = by_number[16]
+    plan = _plan_one(payload, cls, runs)
+    assert plan.anchors[16] == "centre"
+
+
+@pytest.mark.deck
+def test_gw22_diptych_union_centred(gw_inputs):
+    # Same shape as GW 16: two clipped LW-panel halves whose union is LW-dimension.
+    _require_gw_deck()
+    payload, by_number, runs = gw_inputs
+    cls = by_number[22]
+    plan = _plan_one(payload, cls, runs)
+    assert plan.anchors[22] == "centre"
+
+
+@pytest.mark.deck
 def test_gw21_image_crop_centred(gw_inputs, tmp_path):
     # 4494x1265 post-crop (aspect 3.55) is LW-dimension, so the shape rule centres it.
     _require_gw_deck()
@@ -222,7 +244,8 @@ def test_gw33_movie_kept_as_sole_content_classify_only(gw_inputs):
     assert cls.movie_count == 1
     assert cls.category == "mixed"
     slide33 = next(s for s in payload["slides"] if s["number"] == 33)
-    assert dsa._content_anchor(cls, slide33["items"], include_side=False) == "centre"
+    wall = (payload["slideWidth"], payload["slideHeight"])
+    assert dsa._content_anchor(cls, slide33["items"], include_side=False, wall=wall) == "centre"
 
 
 @pytest.mark.deck
@@ -233,7 +256,8 @@ def test_gw32_movie_classify_side_panels_dropped(gw_inputs):
     assert cls.kept == (("movie", 0),)
     assert set(cls.dropped_side) == {("image", 0), ("image", 1)}
     slide32 = next(s for s in payload["slides"] if s["number"] == 32)
-    assert dsa._content_anchor(cls, slide32["items"], include_side=False) == "centre"
+    wall = (payload["slideWidth"], payload["slideHeight"])
+    assert dsa._content_anchor(cls, slide32["items"], include_side=False, wall=wall) == "centre"
 
 
 @pytest.mark.deck

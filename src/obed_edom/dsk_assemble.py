@@ -73,7 +73,7 @@ from obed_edom.iwa_runs import (
     slide_order,
 )
 from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
-from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
+from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, is_side_panel_item, item_rect
 from obed_edom.offline_inspect import (
     _build_data_index,
     _canvas_size,
@@ -362,16 +362,27 @@ def _group_has_media(signature: str | None) -> bool:
 _LW_ASPECT_MIN = 2.5
 
 
-def _content_ids(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> list[ItemId]:
-    """Kept image/movie/group item ids; text-only content never counts towards them."""
+def _content_ids(
+    cls: SlideClass,
+    items_by_id: Mapping[ItemId, dict],
+    wall: tuple[float, float],
+    group_signature: Mapping[int, str | None] | None = None,
+) -> list[ItemId]:
+    """Kept image/movie/group item ids; text-only content and side-panel items never
+    count towards them (side panels are never anchoring content, kept or not)."""
     group_signature = group_signature or {}
+    wall_w, wall_h = wall
     ids: list[ItemId] = []
     for kind, kind_index in cls.kept:
         if kind not in ("image", "movie", "group"):
             continue
         if kind == "group" and not _group_has_media(group_signature.get(kind_index)):
             continue
-        ids.append((kind, kind_index))
+        item_id = (kind, kind_index)
+        item = items_by_id.get(item_id)
+        if item is not None and is_side_panel_item(item, wall_w, wall_h):
+            continue
+        ids.append(item_id)
     return ids
 
 
@@ -380,17 +391,23 @@ def _content_anchor(
     items: Sequence[dict],
     *,
     include_side: bool,
+    wall: tuple[float, float],
     group_signature: Mapping[int, str | None] | None = None,
 ) -> str:
-    """"centre"|"right" for a content slide with no explicit anchor: any kept item
-    whose LW-clipped rect is LW-dimension (w/h >= 2.5) forces centre; otherwise
-    squarish items go right at 1-2 and centre at 3+."""
-    content_ids = _content_ids(cls, group_signature)
+    """Auto anchor ("centre" or "right") for a content slide with no explicit anchor:
+    the union of the kept content rects (the same union `fit_slide` lays out) being
+    LW-dimension (w/h >= 2.5) forces centre; otherwise squarish items go right at 1-2
+    and centre at 3+. Side panels never count as content for anchoring."""
+    items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
+    content_ids = _content_ids(cls, items_by_id, wall, group_signature)
     if not content_ids:
         return "centre"
     visibles = _visibles_by_kept(items, content_ids, include_side=include_side)
-    if any(r.w > 0 and r.h > 0 and r.w / r.h >= _LW_ASPECT_MIN for r in visibles.values()):
-        return "centre"
+    rects = [r for r in visibles.values() if r.w > 0 and r.h > 0]
+    if rects:
+        union = _union_rect(rects)
+        if union.w / union.h >= _LW_ASPECT_MIN:
+            return "centre"
     return "right" if len(content_ids) <= 2 else "centre"
 
 
@@ -469,7 +486,8 @@ def plan_assembly(
 
             if decision.anchor in (None, "auto"):
                 anchor = "centre" if no_auto_anchor else _content_anchor(
-                    cls, items, include_side=decision.keep_side, group_signature=slide.get("groupChildSignature"),
+                    cls, items, include_side=decision.keep_side, wall=wall,
+                    group_signature=slide.get("groupChildSignature"),
                 )
             else:
                 anchor = decision.anchor

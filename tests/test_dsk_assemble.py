@@ -4910,9 +4910,10 @@ def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
 # --------------------------------------------------------------------------
 # placement by shape (D3/step 9, owner correction 2026-09-12) -- SlideDecision
 # (anchor="auto") is the CLI's "operator gave no explicit --anchor" sentinel;
-# plan_assembly derives the anchor from the kept content items' post-LW-crop
-# shape, not their count: any LW-dimension item (w/h >= 2.5) centres the slide;
-# otherwise 1-2 squarish items go right, 3+ centre. Text never counts.
+# plan_assembly derives the anchor from the union of the kept content items'
+# masked-and-clipped rects (the same union `fit_slide` lays out), not their
+# count: a union w/h >= 2.5 (LW-dimension) centres the slide; otherwise 1-2
+# squarish items go right, 3+ centre. Text and side panels never count.
 # --------------------------------------------------------------------------
 def test_single_content_item_right_aligned():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
@@ -4968,6 +4969,80 @@ def test_lw_item_among_squarish_centres():
     decisions = {4: SlideDecision(4, "in_deck", anchor="auto")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={4: Path("/tmp/clip.mov")})
     assert plan.anchors[4] == "centre"
+
+
+def test_lw_aspect_boundary_2_5_centres():
+    slide = _slide(40, [_image_item(0, x=2960, y=0, w=2000, h=800)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {40: SlideDecision(40, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[40] == "centre"
+
+
+def test_lw_aspect_boundary_2_49_does_not_centre():
+    slide = _slide(41, [_image_item(0, x=2960, y=0, w=1990, h=800)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {41: SlideDecision(41, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[41] == "right"
+
+
+def test_three_items_with_one_lw_still_centred():
+    slide = _slide(42, [
+        _image_item(0, x=1500, y=0, w=500, h=500),
+        _image_item(1, x=2000, y=0, w=500, h=500),
+        _movie_item(2, x=1920, y=0, w=3840, h=1080),
+    ])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {42: SlideDecision(42, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={42: Path("/tmp/clip.mov")})
+    assert plan.anchors[42] == "centre"
+
+
+def test_mixed_group_bbox_with_caption_centres():
+    # A squarish photo (aspect 1.0) whose group bbox is widened by a caption strip to
+    # an LW-dimension rect (w/h >= 2.5) centres on the strength of the group bbox, not
+    # the media leaf alone (D3: "its measured rect is the group bbox, caption included").
+    group = _group_item(0, x=1920, y=0, w=2600, h=1000)
+    slide = _slide(43, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:a wide caption strip"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {43: SlideDecision(43, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[43] == "centre"
+
+
+def test_side_panel_item_excluded_from_placement_with_include_side():
+    # GW 8 shaped: one centre item plus two kept side-panel images -- with
+    # --include-side, the side pair must not push the anchor to centre or otherwise
+    # change it purely because they were kept rather than dropped.
+    centre = _image_item(0, x=1954, y=27, w=1381, h=921)
+    side_l = _image_item(1, x=0, y=0, w=1920, h=1080)
+    side_r = _image_item(2, x=5760, y=0, w=1920, h=1080)
+    slide = _slide(44, [centre, side_l, side_r])
+    payload = _payload([slide])
+    classes = [_classify(slide, include_side=True)]
+    decisions = {44: SlideDecision(44, "in_deck", anchor="auto", keep_side=True)}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[44] == "right"
+
+
+def test_union_of_two_halves_diptych_centres():
+    # GW 16 shape: two 1912x1080 halves side by side, each clipped aspect ~1.77 (below
+    # 2.5), but their union is 3824x1080 (aspect ~3.55, LW-dimension) -- the union fix
+    # (opus review 1, finding 1) centres this instead of right-flushing a two-up.
+    left = _image_item(0, x=1920, y=0, w=1912, h=1080)
+    right = _image_item(1, x=3832, y=0, w=1912, h=1080)
+    slide = _slide(45, [left, right])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {45: SlideDecision(45, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[45] == "centre"
 
 
 def test_text_and_picture_slide_stacks_full_band_width():

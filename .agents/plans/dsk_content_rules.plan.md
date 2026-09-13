@@ -6,7 +6,8 @@ Worktree `.claude/worktrees/dsk-gen` @ 90bead0. All measurements offline from th
 
 Owner answers 2026-09-11: Q1 crop the image FILE and replace the media (no mask write);
 Q2 a text slide that will not fit the band SPLITS into N DSK slides, one box per slide;
-Q3 placement by COUNT (one item → right, more → centred); Q4 the wheelchair slide is GW 48;
+Q3 placement by COUNT (one item → right, more → centred) — superseded 2026-09-12, see D3:
+placement is by SHAPE (union of kept content rects), not count; Q4 the wheelchair slide is GW 48;
 Q5 dedupe survivor = lowest `kindIndex`.
 
 ---
@@ -106,7 +107,8 @@ items, 352..1567), slide 12 `(529,704,861x350)` cx 959.5, slide 18 `(43,704,1832
 whole file scaled to a frame and then masked to a window exactly 350 tall (579.4x350, 861x350,
 1831.7x350, 375.5x350); golden 31 masks `Speaking in Tongues.png` at frame-local x 954.7/2488.8 =
 0.384 of the width, which is not the LW window (0.25..0.75). Only the **right edge = 1892** and the
-**count→placement** pattern are rule evidence.
+**count→placement** pattern are rule evidence — superseded 2026-09-12 (D3): placement is now by
+SHAPE (the union of kept content rects), the right edge is unchanged.
 
 ### F5. Layout-owned media (R4)
 
@@ -312,18 +314,26 @@ its style, builds and z-order.
   tuple (or raw `objects`) to reuse it, or leave it `None` to have `plan_assembly` load `fw_deck`
   itself, gated on `not no_image_crop` (no need to load the IWA graph when cropping is off).
 
-### D3. Placement by SHAPE (owner correction 2026-09-12, supersedes "placement by count")
+### D3. Placement by SHAPE (owner correction 2026-09-12, supersedes "placement by count";
+UNION reading applied per opus review 1 finding 1, orchestrator decision pending owner
+confirmation — 2026-09-12)
 
 In `plan_assembly` (`dsk_assemble.py`), let the kept **content** items be those from D1
-(images/movies/groups; text and text-bearing badge shapes excluded). When the operator gave no
-explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`) decides from the SHAPE
-of those items' rects after the LW crop (or, when the crop isn't known yet at anchor time, the
-source rect clipped to the LW frame — the same clip `_visibles_by_kept`/`fit_slide` already
-compute), not from their count:
+(images/movies/groups; text and text-bearing badge shapes excluded). A group counts only when it
+has an `image:`/`movie:` leaf (`_group_has_media`); its measured rect is the group bbox, caption
+included — a photo with a wide caption strip can read LW-dimension on the strength of the caption,
+not just the media leaf. Side-panel items never count as content for anchoring, whether or not
+`--include-side`/`--keep-side-panels` keeps them for rendering (`_content_ids` drops them
+unconditionally).
 
-- any kept item is "LW-dimension" (its clipped rect's `w/h >= 2.5`) → `anchor = "centre"`. Measured
-  examples: the GW 21 crowd photo crops to 4494x1265 = 3.55, the GW 5 photo crops to 5120x1441 =
-  3.55, the GW 32/33 movies are 3840x1080 = 3.56.
+When the operator gave no explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`)
+decides from the SHAPE of the **union** of those items' rects — the masked rect clipped to the
+panel (the same clip `_visibles_by_kept`/`fit_slide` already compute, and the same union
+`fit_slide` actually lays out; `_union_rect`), not from their count and not per item:
+
+- the union is "LW-dimension" (`w/h >= 2.5`) → `anchor = "centre"`. Measured examples: the GW 21
+  crowd photo crops to 4494x1265 = 3.55, the GW 5 photo crops to 5120x1441 = 3.55, the GW 32/33
+  movies are 3840x1080 = 3.56.
 - else (all squarish/small, e.g. the GW 48 wheelchair photo at 1381x921 = 1.5, the GW 24 phone
   screenshots at 504x1080 = 0.47): 1 or 2 items → `anchor = "right"` (flush to `band.x_max`;
   `_place`, `dsk_plan.py`, already implements it); 3 or more → `anchor = "centre"` (the three
@@ -332,6 +342,28 @@ compute), not from their count:
 No span threshold anywhere — this supersedes both the previous revision's 0.98-of-panel test and
 the "count only" revision that followed it. `--anchor N=…` always wins; the derived anchor is
 recorded in the plan and printed in the run log.
+
+**Union vs. per-item, and the deck-wide flip list (opus review 1 finding 1, union reading, owner
+confirmation pending).** A per-*item* aspect test (the first cut of this rule) measures each kept
+item's own clipped rect against 2.5; the union test instead measures the one rect `fit_slide`
+actually lays out (`_union_rect` over the visible rects). The two readings agree everywhere except
+GW 16 and 22: two-up diptychs whose halves are each 1.77 (below 2.5) but whose union tiles the
+whole centre panel at 3.56 (at/above 2.5). Right-flushing a panel-wide two-up is not what the
+owner's SHAPE rule is for, so the union reading is the one implemented; it is a strict superset of
+every owner-verified example (5/15/21/32/33/42, 24, 48, 2). Deck-wide flip list vs. the OLD
+count rule (`_content_anchor`, `include_side=False`, full `Sermon_PK (GW).key`):
+
+| GW | old (count) | new (union shape) | items | clipped/union aspect |
+|---|---|---|---|---|
+| 5, 15, 21, 32, 33, 42 | right | **centre** | 1 | 3.56 |
+| 24 | centre | **right** | 2 | union 1.14 |
+| **16** | centre | **right** | 2 | halves 1.77/1.78, union 3.56 → **centre** |
+| **22** | centre | **right** | 2 | halves 1.77/1.78, union 3.56 → **centre** |
+| 48 | right | right | 1 | 1.50 |
+| 2 | centre | centre | 3 | union 3.56 (3+ already centres) |
+
+Ten slides change anchor under the new SHAPE rule; GW 16/22 are the two the union reading (vs. a
+per-item reading, which would leave them at `right`) additionally corrects to `centre`.
 
 **Text + picture slides.** A slide that is both text (`cls.is_text`/`long_text_ids`) and keeps a
 non-full-wall picture (a media *group* survives the text-slide media drop that a bare image/movie
@@ -526,10 +558,10 @@ when present and refuse outright if it is not a reordering of the exact same id 
 | 17 | R1 dedupe + stretch | text3/4/5 in `dropped_duplicate`; two kept boxes, no overlap, t = 0.74 |
 | 17 (`--min-text-pt 66`) | Q2 split | 2 parts, one long box each, badge on both, ordinals contiguous |
 | 28 | R1 panel-backdrop drop | `shape0 (951,0,3840x1080)` in `dropped_backdrop`; fit scale > 0.8 |
-| **48** | R1 image dedupe + Q3 right (wheelchair) | one image kept (`kindIndex` 2), fitted right edge **1892.0**, no crop file emitted |
-| 24 | R1 dedupe + Q3 centred | 4 → 2 images; centred |
-| 21 | R2 image crop | crop window = (1920,0,3840x1080) of the frame → pixel box in 4608x3072; replaced file emitted; single item → right-aligned |
-| 5 | R2 image crop, vertical | crop box (0,1365,5120,2806) of the 5120x3414 file (naturalSize); single item → right-aligned, right edge **1892.0** |
+| **48** | R1 image dedupe + shape right (wheelchair) | one image kept (`kindIndex` 2), fitted right edge **1892.0**, no crop file emitted; right because 1.50 < 2.5 and 1 item |
+| 24 | R1 dedupe + shape right | 4 → 2 images; union aspect 1.14 < 2.5, 2 items → right (superseded 2026-09-12: was "Q3 centred" under the retired count rule) |
+| 21 | R2 image crop | crop window = (1920,0,3840x1080) of the frame → pixel box in 4608x3072; replaced file emitted; union aspect 3.55 → centred (superseded 2026-09-12: was "single item → right-aligned" under the retired count rule) |
+| 5 | R2 image crop, vertical | crop box (0,1365,5120,2806) of the 5120x3414 file (naturalSize); union aspect 3.55 → centred (superseded 2026-09-12: was "single item → right-aligned, right edge 1892.0" under the retired count rule) |
 | 33 | R2 movie + backdrop exemption | movie kept as sole content; crop `3840:1080:1920:0` |
 | 32 | coal fix | crop `3840:1080:1920:0`, no document resize, side panels deleted in the scratch script |
 | 8 | regression | unchanged vs r7 with `--include-side 8` |
@@ -540,6 +572,14 @@ anchor GW 7/37 from `right` to `centre` -- each keeps a single text-only badge g
 (shape + text, no media) and nothing else, so zero content items is correct. GW
 44/50/51/53/54 flipped one commit earlier, under the pre-existing `_group_is_text_only`
 rule. All seven slides are a layout change the owner should eyeball on the next gold run.
+
+Opus review 1 (union reading, owner confirmation pending — 2026-09-12): switching `_content_anchor`
+from a per-item aspect test to the union of kept content rects (D3) additionally flips GW 16 and 22
+from `right` to `centre` — see the flip-list table in D3. Ten GW slides change anchor under the new
+SHAPE rule in total (5/15/21/32/33/42 right→centre, 24 centre→right, 16/22 centre→right→centre via
+the union fix, 2 unchanged at centre, 48 unchanged at right); the owner should eyeball all ten on
+the next gold run, GW 16/22 especially since the union reading is the one implemented here without
+a separate owner ruling on the per-item alternative.
 
 `dsk_plan.py`'s outward px-rounding of the crop box against the un-rounded `visible`
 rect (round 1 finding 13, knowingly deferred) is a non-uniform sub-pixel stretch of the
@@ -568,7 +608,9 @@ duplicated movie slide or a movie behind a panel backdrop.
    part 2 only; `_verify_builds` reports zero surplus.
 
 That set covers every rule: R1 text/dedupe/backdrop-drop (13,17,28,48,24), Q2 split (17 forced),
-R2 image crop (21,5) and movie (32,33), Q3 right-by-count (21,48) and centred (24), R4 (every
+R2 image crop (21,5) and movie (32,33), Q3/D3 shape rule: right (48,24) and centred (21,5)
+— superseded 2026-09-12, see D3 (was "right-by-count (21,48) and centred (24)" under the retired
+count rule), R4 (every
 slide — layouts never appear), plus the coal fix (32).
 
 ---
