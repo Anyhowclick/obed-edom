@@ -26,7 +26,6 @@ from obed_edom.map_remap import (
     Rect,
     is_backdrop,
     is_lw_wall,
-    is_side_panel_item,
     is_visible,
     item_rect,
 )
@@ -57,6 +56,62 @@ def _delete_order(ids: Sequence[ItemId], id_by_item: Mapping[ItemId, str] | None
         survivor = max(dupes, key=lambda iid: iid[0])
         drop.update(iid for iid in dupes if iid != survivor)
     return tuple(iid for iid in ordered if iid not in drop)
+
+
+def _content_item_aabb(item: dict) -> Rect:
+    """Exact AABB of a content item's own frame. Payload ``x``/``y``/``w``/``h`` already
+    follow the offline-payload contract (``iwa_geometry``: "rotated=AABB position +
+    unrotated size") -- ``x``/``y`` is the rotated frame's AABB top-left and ``w``/``h``
+    is its unrotated size, for both plain frames (``_frame_rect``) and masked media
+    (``_masked_rect``, whose ``w``/``h`` is already the mask's own D2 rect). So a rotated
+    item needs only its rotated EXTENTS derived from ``w``/``h``/``rotation``; ``x``/``y``
+    stay as given -- they must never be re-rotated about the frame centre. An exact
+    multiple of 90 degrees swaps/no-ops the extents rather than going through sin/cos,
+    which leaves float residue (e.g. 400x1000 rotated 90 -> 1000x400.00000000000006)."""
+    angle = item.get("rotation") or 0.0
+    x, y, w, h = item.get("x", 0.0), item.get("y", 0.0), item.get("w", 0.0), item.get("h", 0.0)
+    norm = angle % 360.0
+    if norm == 0.0:
+        return item_rect(item)
+    if norm % 90.0 == 0.0:
+        if norm % 180.0 != 0.0:
+            w, h = h, w
+        return Rect(x, y, w, h)
+    theta = math.radians(norm)
+    w, h = (
+        abs(w * math.cos(theta)) + abs(h * math.sin(theta)),
+        abs(w * math.sin(theta)) + abs(h * math.cos(theta)),
+    )
+    return Rect(x, y, w, h)
+
+
+def _is_content_visible(item: dict, wall_w: float, wall_h: float) -> bool:
+    """Like ``map_remap.is_visible`` but for image/movie items measures the transformed
+    AABB (``_content_item_aabb``) rather than the unrotated frame, so a rotated frame
+    that is wholly off-canvas but whose true extent crosses onto the wall is not dropped
+    before the AABB-aware side-panel classification ever sees it."""
+    if item.get("kind") not in ("image", "movie"):
+        return is_visible(item, wall_w, wall_h)
+    if wall_w <= 0 or wall_h <= 0:
+        return True
+    rect = _content_item_aabb(item)
+    if rect.w <= 0 and rect.h <= 0:
+        return False
+    w = rect.w if rect.w > 0 else 1.0
+    h = rect.h if rect.h > 0 else 1.0
+    return rect.x < wall_w and rect.y < wall_h and rect.x + w > 0 and rect.y + h > 0
+
+
+def _is_side_panel_item(item: dict, wall_w: float, wall_h: float) -> bool:
+    """Like ``map_remap.is_side_panel_item`` but measured against the item's transformed
+    AABB (``_content_item_aabb``) rather than its unrotated frame, so a rotated item that
+    visually crosses into the centre panel is not dropped as side-only."""
+    if not is_lw_wall(wall_w, wall_h) or not _is_content_visible(item, wall_w, wall_h):
+        return False
+    r = _content_item_aabb(item)
+    c = CENTRE_PANEL_RECT
+    overlaps_centre = r.x < c.x + c.w and r.x + r.w > c.x and r.y < c.y + c.h and r.y + r.h > c.y
+    return not overlaps_centre
 
 
 def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bool = False) -> bool:
@@ -142,9 +197,9 @@ def _filter_kept_items(
         item_id: ItemId = (item["kind"], item["kindIndex"])
         if is_backdrop(item, wall_w, wall_h):
             continue
-        if not is_visible(item, wall_w, wall_h):
+        if not _is_content_visible(item, wall_w, wall_h):
             continue
-        if not include_side and is_side_panel_item(item, wall_w, wall_h):
+        if not include_side and _is_side_panel_item(item, wall_w, wall_h):
             dropped_side.append(item_id)
             continue
         if not no_drop_panel_backdrop and is_panel_backdrop(item, (wall_w, wall_h), include_side=include_side):

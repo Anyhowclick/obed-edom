@@ -152,7 +152,7 @@ def test_gw48_wheelchair_dedupe_and_right_no_crop(gw_inputs):
 
 
 @pytest.mark.deck
-def test_gw24_dedupe_four_to_two_centred(gw_inputs):
+def test_gw24_dedupe_four_to_two_right(gw_inputs):
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[24]
@@ -162,11 +162,36 @@ def test_gw24_dedupe_four_to_two_centred(gw_inputs):
     assert len(dropped_images) == 2
 
     plan = _plan_one(payload, cls, runs)
-    assert plan.anchors[24] == "centre"
+    assert plan.anchors[24] == "right"
+    fitted = [plan.fits[24][iid] for iid in kept_images]
+    assert max(r.x + r.w for r in fitted) == pytest.approx(1892.0, abs=0.5)
 
 
 @pytest.mark.deck
-def test_gw21_image_crop_right_aligned(gw_inputs, tmp_path):
+def test_gw16_diptych_union_centred(gw_inputs):
+    # Two clipped LW-panel halves (aspect 1.77 each) whose union is 3840x1080
+    # (aspect 3.56) -- the union-of-kept-rects fix (opus review 1, finding 1)
+    # centres this panel-wide two-up instead of right-flushing it.
+    _require_gw_deck()
+    payload, by_number, runs = gw_inputs
+    cls = by_number[16]
+    plan = _plan_one(payload, cls, runs)
+    assert plan.anchors[16] == "centre"
+
+
+@pytest.mark.deck
+def test_gw22_diptych_union_centred(gw_inputs):
+    # Same shape as GW 16: two clipped LW-panel halves whose union is LW-dimension.
+    _require_gw_deck()
+    payload, by_number, runs = gw_inputs
+    cls = by_number[22]
+    plan = _plan_one(payload, cls, runs)
+    assert plan.anchors[22] == "centre"
+
+
+@pytest.mark.deck
+def test_gw21_image_crop_centred(gw_inputs, tmp_path):
+    # 4494x1265 post-crop (aspect 3.55) is LW-dimension, so the shape rule centres it.
     _require_gw_deck()
     payload, by_number, runs = gw_inputs
     cls = by_number[21]
@@ -180,8 +205,8 @@ def test_gw21_image_crop_right_aligned(gw_inputs, tmp_path):
     assert crop.path.is_file()
 
     fitted = plan.fits[21][("image", 0)]
-    assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
-    assert plan.anchors[21] == "right"
+    assert fitted.x + fitted.w / 2.0 == pytest.approx(967.5, abs=0.5)
+    assert plan.anchors[21] == "centre"
 
 
 @pytest.mark.deck
@@ -240,22 +265,29 @@ def test_gw33_movie_kept_as_sole_content_classify_only(gw_inputs):
     # GW 33's clip is not part of this worktree's banked clips, so plan_assembly's
     # clip-path requirement is exercised only via classification -- the classifier alone
     # already proves R2's backdrop-exemption rule (a panel-sized movie survives as a
-    # slide's only content).
+    # slide's only content). The movie is 3840x1080 (aspect 3.56), LW-dimension, so the
+    # shape rule would centre it despite being the slide's sole content item.
     _require_gw_deck()
-    _payload, by_number, _runs = gw_inputs
+    payload, by_number, _runs = gw_inputs
     cls = by_number[33]
     assert cls.kept == (("movie", 0),)
     assert cls.movie_count == 1
     assert cls.category == "mixed"
+    slide33 = next(s for s in payload["slides"] if s["number"] == 33)
+    wall = (payload["slideWidth"], payload["slideHeight"])
+    assert dsa._content_anchor(cls, slide33["items"], include_side=False, wall=wall) == "centre"
 
 
 @pytest.mark.deck
 def test_gw32_movie_classify_side_panels_dropped(gw_inputs):
     _require_gw_deck()
-    _payload, by_number, _runs = gw_inputs
+    payload, by_number, _runs = gw_inputs
     cls = by_number[32]
     assert cls.kept == (("movie", 0),)
     assert set(cls.dropped_side) == {("image", 0), ("image", 1)}
+    slide32 = next(s for s in payload["slides"] if s["number"] == 32)
+    wall = (payload["slideWidth"], payload["slideHeight"])
+    assert dsa._content_anchor(cls, slide32["items"], include_side=False, wall=wall) == "centre"
 
 
 @pytest.mark.deck

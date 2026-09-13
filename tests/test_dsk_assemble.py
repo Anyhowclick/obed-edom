@@ -4,6 +4,7 @@ subprocess.run/Popen is reached without an explicit monkeypatch.
 """
 from __future__ import annotations
 
+import math
 import subprocess
 from pathlib import Path
 
@@ -5369,9 +5370,12 @@ def test_verify_builds_refuses_badge_build_surviving_only_one_part(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# placement by count (D3/step 9) -- SlideDecision(anchor="auto") is the CLI's
-# "operator gave no explicit --anchor" sentinel; plan_assembly derives right for
-# exactly one kept content item, centre otherwise, and text never counts.
+# placement by shape (D3/step 9, owner correction 2026-09-12) -- SlideDecision
+# (anchor="auto") is the CLI's "operator gave no explicit --anchor" sentinel;
+# plan_assembly derives the anchor from the union of the kept content rects --
+# the same clip `fit_slide` uses, restricted to content -- not their
+# count: a union w/h >= 2.5 (LW-dimension) centres the slide; otherwise 1-2
+# squarish items go right, 3+ centre. Text and side panels never count.
 # --------------------------------------------------------------------------
 def test_single_content_item_right_aligned():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
@@ -5384,13 +5388,150 @@ def test_single_content_item_right_aligned():
     assert plan.anchors[48] == "right"
 
 
-def test_two_items_centred():
+def test_two_squarish_items_right_aligned():
     slide = _slide(24, [_image_item(0, x=1943, y=-14, w=504, h=1080), _image_item(1, x=3200, y=-14, w=504, h=1080)])
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {24: SlideDecision(24, "in_deck", anchor="auto")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
-    assert plan.anchors[24] == "centre"
+    assert plan.anchors[24] == "right"
+
+
+def test_lw_dimension_item_centred():
+    slide = _slide(32, [_movie_item(0, x=1920, y=0, w=3840, h=1080)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {32: SlideDecision(32, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={32: Path("/tmp/clip.mov")})
+    assert plan.anchors[32] == "centre"
+    rect = plan.fits[32][("movie", 0)]
+    assert rect.x + rect.w / 2.0 == pytest.approx((BAND.x_min + BAND.x_max) / 2.0)
+
+
+def test_three_squarish_items_centred():
+    slide = _slide(3, [
+        _image_item(0, x=1500, y=0, w=500, h=500),
+        _image_item(1, x=2000, y=0, w=500, h=500),
+        _image_item(2, x=2500, y=0, w=500, h=500),
+    ])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {3: SlideDecision(3, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[3] == "centre"
+
+
+def test_lw_item_among_squarish_centres():
+    slide = _slide(4, [
+        _image_item(0, x=1500, y=0, w=500, h=500),
+        _movie_item(1, x=1920, y=0, w=3840, h=1080),
+    ])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {4: SlideDecision(4, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={4: Path("/tmp/clip.mov")})
+    assert plan.anchors[4] == "centre"
+
+
+def test_lw_aspect_boundary_2_5_centres():
+    slide = _slide(40, [_image_item(0, x=2960, y=0, w=2000, h=800)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {40: SlideDecision(40, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[40] == "centre"
+
+
+def test_lw_aspect_boundary_2_49_does_not_centre():
+    slide = _slide(41, [_image_item(0, x=2960, y=0, w=1990, h=800)])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {41: SlideDecision(41, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[41] == "right"
+
+
+def test_three_items_with_one_lw_still_centred():
+    slide = _slide(42, [
+        _image_item(0, x=1500, y=0, w=500, h=500),
+        _image_item(1, x=2000, y=0, w=500, h=500),
+        _movie_item(2, x=1920, y=0, w=3840, h=1080),
+    ])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {42: SlideDecision(42, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={42: Path("/tmp/clip.mov")})
+    assert plan.anchors[42] == "centre"
+
+
+def test_mixed_group_bbox_with_caption_centres():
+    # A squarish photo (aspect 1.0) whose group bbox is widened by a caption strip to
+    # an LW-dimension rect (w/h >= 2.5) centres on the strength of the group bbox, not
+    # the media leaf alone (D3: "its measured rect is the group bbox, caption included").
+    group = _group_item(0, x=1920, y=0, w=2600, h=1000)
+    slide = _slide(43, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:a wide caption strip"}
+    slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 1920.0, "y": 0.0, "w": 1000.0, "h": 1000.0}]
+    }
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {43: SlideDecision(43, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[43] == "centre"
+
+
+def test_side_panel_item_excluded_from_placement_with_include_side():
+    # GW 8 shaped: one centre item plus two kept side-panel images -- with
+    # --include-side, the side pair must not push the anchor to centre or otherwise
+    # change it purely because they were kept rather than dropped.
+    centre = _image_item(0, x=1954, y=27, w=1381, h=921)
+    side_l = _image_item(1, x=0, y=0, w=1920, h=1080)
+    side_r = _image_item(2, x=5760, y=0, w=1920, h=1080)
+    slide = _slide(44, [centre, side_l, side_r])
+    payload = _payload([slide])
+    classes = [_classify(slide, include_side=True)]
+    decisions = {44: SlideDecision(44, "in_deck", anchor="auto", keep_side=True)}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[44] == "right"
+
+
+def test_union_of_two_halves_diptych_centres():
+    # GW 16 shape: two 1912x1080 halves side by side, each clipped aspect ~1.77 (below
+    # 2.5), but their union is 3824x1080 (aspect ~3.55, LW-dimension) -- the union fix
+    # (opus review 1, finding 1) centres this instead of right-flushing a two-up.
+    left = _image_item(0, x=1920, y=0, w=1912, h=1080)
+    right = _image_item(1, x=3832, y=0, w=1912, h=1080)
+    slide = _slide(45, [left, right])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {45: SlideDecision(45, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[45] == "centre"
+
+
+def test_text_and_picture_slide_stacks_full_band_width():
+    """A text slide that also keeps a non-full-wall picture (a media group survives the
+    text-slide media drop, unlike a bare image/movie) still stacks its long text boxes
+    across the full band width, not narrowed to make room for the picture."""
+    _require_helvetica()
+    text_item = {
+        "kind": "text", "kindIndex": 0, "x": 1920, "y": 0, "w": 3698.0, "h": 300.0,
+        "text": " ".join(["word"] * 16), "font": "Helvetica", "size": 40.0,
+    }
+    picture = _group_item(0, x=5000, y=100, w=800, h=200)
+    slide = _slide(13, [text_item, picture])
+    slide["groupChildSignature"] = {0: "image:photo.jpg"}
+    slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 5000.0, "y": 100.0, "w": 800.0, "h": 200.0}]
+    }
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {13: SlideDecision(13, "in_deck")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    long_rect = plan.fits[13][("text", 0)]
+    assert long_rect.x == pytest.approx(BAND.x_min)
+    assert long_rect.w == pytest.approx(BAND.width)
 
 
 def test_explicit_anchor_overrides_auto():
@@ -5430,6 +5571,9 @@ def test_group_with_media_child_counts_towards_placement():
     group = _group_item(0, x=4702, y=15, w=645, h=92)
     slide = _slide(6, [image, group])
     slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:caption"}
+    slide["groupChildren"] = {
+        0: [{"kind": "image", "kindIndex": 0, "x": 4702.0, "y": 15.0, "w": 645.0, "h": 92.0}]
+    }
     payload = _payload([slide])
     classes = [_classify(slide)]
     decisions = {6: SlideDecision(6, "in_deck", anchor="auto")}
@@ -5450,6 +5594,242 @@ def test_group_shape_plus_text_badge_does_not_count_towards_placement():
     assert plan.anchors[7] == "centre"
 
 
+def test_keep_side_content_anchor_clips_to_centre_panel():
+    # A 3000x1000 item at x=1000 straddles the LW centre-panel boundary (panel is
+    # [1920, 5760]). Even with keep_side=True, the anchor must clip against the
+    # centre panel (2080x1000, aspect < 2.5), not the full wall (aspect 3.0) --
+    # codex review 1, finding 1.
+    item = _image_item(0, x=1000, y=0, w=3000, h=1000)
+    slide = _slide(49, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide, include_side=True)]
+    decisions = {49: SlideDecision(49, "in_deck", anchor="auto", keep_side=True)}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[49] == "right"
+
+
+def test_rotated_image_anchor_uses_transformed_aabb():
+    # Production payload semantics (codex placement review 4): x/y is already the rotated
+    # frame's AABB top-left, w/h is its UNROTATED size. A raw 400x1000 frame at (2220,0)
+    # rotated 90 degrees has exact AABB (1920,300,1000,400) -- payload carries that AABB
+    # top-left with the original 400x1000 size. Aspect 1000/400=2.5 is LW-dimension; the
+    # old (unrotated-origin) reading would re-rotate the AABB point and miss the panel.
+    item = _image_item(0, x=1920, y=300, w=400, h=1000)
+    item["rotation"] = 90
+    slide = _slide(50, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[50] == "centre"
+
+
+def test_content_item_aabb_rotated_group_extent_is_still_correct():
+    # Codex placement review 7, finding 1: a rotated top-level media group with
+    # unresolved children never reaches `_content_anchor` in production (see
+    # `test_rotated_media_only_group_refused_before_placement`) -- but
+    # `_content_item_aabb`/`_content_visibles_by_kept` themselves must still compute the
+    # right transformed extent for the cases that DO legitimately reach them (rotated
+    # top-level images/movies). AABB top-left (2200,300) with unrotated 400x1000 stays
+    # put; only the 1000x400 extent is derived.
+    group = _group_item(0, x=2200, y=300, w=400, h=1000)
+    group["rotation"] = 90
+    visibles = dsa._content_visibles_by_kept([group], [("group", 0)])
+    rect = visibles[("group", 0)]
+    assert rect.x == pytest.approx(2200.0)
+    assert rect.y == pytest.approx(300.0)
+    assert rect.w == pytest.approx(1000.0)
+    assert rect.h == pytest.approx(400.0)
+
+
+def test_rotated_item_panel_edge_uses_exact_offline_payload_aabb():
+    # codex placement review 4, finding 1's own worked example: a raw 400x1000 frame at
+    # (2220,0) rotated 90 degrees. offline_inspect/_compose_record write that through
+    # _frame_rect as AABB top-left (1920,300) with unrotated size (400,1000) -- exactly
+    # on the centre panel's left edge (panel starts at x=1920). _content_item_aabb must
+    # reproduce the exact AABB (1920,300,1000,400), not clip or shift it.
+    item = _image_item(0, x=1920, y=300, w=400, h=1000)
+    item["rotation"] = 90
+    aabb = dsa._content_item_aabb(item)
+    assert aabb.x == pytest.approx(1920.0)
+    assert aabb.y == pytest.approx(300.0)
+    assert aabb.w == pytest.approx(1000.0)
+    assert aabb.h == pytest.approx(400.0)
+
+
+def test_fractionally_rotated_masked_item_uses_extent_formula():
+    # A masked image's payload w/h is already its D2 masked rect (iwa_geometry docstring:
+    # "masked=mask rect"), still reported as an unrotated size at the AABB top-left --
+    # same contract as an unmasked frame. A residual (non-90-snapped) rotation must still
+    # derive its extents from w/h/rotation, not re-rotate x/y: exercise a threshold-typical
+    # fractional angle (0.5 degrees) below the geometry layer's own snap gate.
+    item = _image_item(0, x=1920, y=300, w=400, h=1000)
+    item["rotation"] = 0.5
+    aabb = dsa._content_item_aabb(item)
+    theta = math.radians(0.5)
+    expected_w = abs(400 * math.cos(theta)) + abs(1000 * math.sin(theta))
+    expected_h = abs(400 * math.sin(theta)) + abs(1000 * math.cos(theta))
+    assert aabb.x == pytest.approx(1920.0)
+    assert aabb.y == pytest.approx(300.0)
+    assert aabb.w == pytest.approx(expected_w)
+    assert aabb.h == pytest.approx(expected_h)
+    assert aabb.w != pytest.approx(400.0)
+    assert aabb.h != pytest.approx(1000.0)
+
+
+def test_exact_90_rotation_swaps_extents_without_float_residue():
+    # Codex placement review 5, finding 1: sin/cos at exactly 90 degrees leaves float
+    # residue (400x1000 rotated 90 -> 1000x400.00000000000006), whose aspect
+    # 2.4999999999999996 falls just under the 2.5 LW threshold. An AABB at y=0 (unlike
+    # the y=300 case elsewhere in this file, where intersection subtraction happens to
+    # erase the residue) exposes it directly: assert the exact swap and that the anchor
+    # still reads "centre".
+    item = _image_item(0, x=1920, y=0, w=400, h=1000)
+    item["rotation"] = 90
+    aabb = dsa._content_item_aabb(item)
+    assert aabb.x == 1920.0
+    assert aabb.y == 0.0
+    assert aabb.w == 1000.0
+    assert aabb.h == 400.0
+    slide = _slide(52, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {52: SlideDecision(52, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[52] == "centre"
+
+
+def test_rotated_item_crossing_side_panel_counts_by_transformed_aabb():
+    # Codex placement review 6, finding 1 (fixing review 5 finding 2's incomplete repair):
+    # a 400x1000 frame at x=1500 (left of the centre panel's x=1920 edge) rotated 90
+    # degrees has transformed AABB (1500,y,1000,400), crossing into the centre panel by
+    # 580pt. `dsk_plan._filter_kept_items`'s side-panel classifier (`_is_side_panel_item`)
+    # must not pre-drop it via the unrotated frame -- it now measures the same
+    # transformed AABB (`_content_item_aabb`) that `_content_visibles_by_kept` uses, so
+    # the item is kept and anchors "right" whether or not side panels are kept
+    # (`include_side` mirrors `keep_side`, matching the production `classify_deck` call).
+    item = _image_item(0, x=1500, y=300, w=400, h=1000)
+    item["rotation"] = 90
+    for keep_side in (False, True):
+        slide = _slide(53, [dict(item)])
+        payload = _payload([slide])
+        classes = [_classify(slide, include_side=keep_side)]
+        assert ("image", 0) in classes[0].kept
+        decisions = {53: SlideDecision(53, "in_deck", anchor="auto", keep_side=keep_side)}
+        plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+        assert plan.anchors[53] == "right"
+        visibles = dsa._content_visibles_by_kept(slide["items"], [("image", 0)])
+        rect = visibles[("image", 0)]
+        assert rect.x == pytest.approx(1920.0)
+        assert rect.w == pytest.approx(580.0)
+        assert rect.h == pytest.approx(400.0)
+
+
+def test_rotated_top_level_group_refused_before_placement():
+    # Codex placement review 5, finding 3: does a rotated top-level group ever reach
+    # `_content_anchor` at all, or does `plan_assembly`'s own "nested/rotated/masked
+    # group" refusal (children metadata missing) always catch it first? Measure through
+    # the real production path -- `iwa_geometry.compose_geometry` for the group's
+    # composed x/y/w/h, `iwa_runs._slide_group_child_text`/`_group_child_records` for the
+    # same groupChildText/groupChildren the offline loader attaches -- rather than
+    # hand-supplying an already-correct AABB the way `test_rotated_group_anchor_uses_-
+    # transformed_aabb` above does.
+    #
+    # A rotated top-level group with a media child and a caption TEXT child composes
+    # through `_compose_record`'s group-union branch (translation-only child union,
+    # flagged "rotated-group") -- NOT the "AABB position + unrotated size" contract
+    # `_content_item_aabb` assumes for frames. But `_group_child_records` refuses (returns
+    # None) for ANY rotated group regardless of content, while `_slide_group_child_text`
+    # still finds the caption leaf regardless of rotation -- so `has_text and children is
+    # None` always fires first. See D3 in dsk_content_rules.plan.md for the fixed
+    # invariant: rotated groups never reach anchoring at all, so `_content_anchor`/
+    # `_content_item_aabb` need not (and cannot correctly) special-case them.
+    from obed_edom.iwa_geometry import compose_geometry
+    from obed_edom.iwa_runs import _group_child_records, _slide_group_child_text
+
+    objects = {
+        "500": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"geometry": {
+                "position": {"x": 2200.0, "y": 300.0},
+                "size": {"width": 400.0, "height": 1000.0}, "angle": 90.0,
+            }},
+            "children": [{"identifier": "501"}, {"identifier": "502"}],
+        },
+        "501": {"_pbtype": "TSD.ImageArchive", "super": {"geometry": {
+            "position": {"x": 0.0, "y": 0.0},
+            "size": {"width": 400.0, "height": 700.0}, "angle": 0.0,
+        }}},
+        "502": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "ownedStorage": {"identifier": "600"},
+            "super": {"geometry": {
+                "position": {"x": 0.0, "y": 700.0},
+                "size": {"width": 400.0, "height": 300.0}, "angle": 0.0,
+            }},
+        },
+        "600": {"_pbtype": "TSWP.StorageArchive", "text": ["Caption"]},
+    }
+    slide_archive = {"drawablesZOrder": [{"identifier": "500"}]}
+    records = compose_geometry(slide_archive, objects)
+    assert records == [{
+        "id": "500", "kind": "group", "kindIndex": 0,
+        "x": 2200.0, "y": 300.0, "w": 400.0, "h": 1000.0, "text": "",
+        "geom_source": "group-union", "needs_keynote": "rotated-group",
+    }]
+    group_child_text = _slide_group_child_text(slide_archive, objects, {})
+    assert group_child_text == {0: "Caption"}
+    assert _group_child_records(objects["500"], objects) is None
+
+    group = _group_item(0, x=2200.0, y=300.0, w=400.0, h=1000.0)
+    group["rotation"] = 90
+    slide = _slide(54, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:Caption"}
+    slide["groupChildText"] = group_child_text
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {54: SlideDecision(54, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="nested/rotated/masked group"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+
+def test_rotated_media_only_group_refused_before_placement():
+    # Codex placement review 7, finding 1: the "nested/rotated/masked group" refusal
+    # only fired on `has_text`, so a rotated group with an image/movie leaf and no text
+    # child sailed past it into `_content_anchor`, which then used the group's blind
+    # group-union geometry (not the AABB-position/unrotated-size contract
+    # `_content_item_aabb` assumes) as if it were a valid content rect. Same rotated
+    # group shape as `test_rotated_top_level_group_refused_before_placement` above but
+    # with only an image child -- must refuse the same way.
+    group = _group_item(0, x=2200.0, y=300.0, w=400.0, h=1000.0)
+    group["rotation"] = 90
+    slide = _slide(55, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg"}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {55: SlideDecision(55, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="nested/rotated/masked group"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+
+def test_group_has_media_missing_none_empty_signature():
+    # codex review 1, finding 2: missing mapping entry, None, and "" are not content.
+    assert dsa._group_has_media(None) is False
+    assert dsa._group_has_media("") is False
+
+
+def test_lone_unresolved_group_defaults_to_centre():
+    # A single group with no signature entry at all (mapping miss) has zero proven
+    # content, so the zero-content default of "centre" applies, not "right".
+    group = _group_item(0, x=4702, y=15, w=645, h=92)
+    slide = _slide(50, [group])
+    slide["groupChildSignature"] = {}
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {50: SlideDecision(50, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[50] == "centre"
+
+
 def test_no_auto_anchor_flag_forces_centre():
     slide = _slide(48, [_image_item(2, x=1954, y=27, w=1381, h=921)])
     payload = _payload([slide])
@@ -5457,6 +5837,32 @@ def test_no_auto_anchor_flag_forces_centre():
     decisions = {48: SlideDecision(48, "in_deck", anchor="auto")}
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, no_auto_anchor=True)
     assert plan.anchors[48] == "centre"
+
+
+def test_lone_zero_area_item_defaults_to_centre():
+    # codex review 2, finding 1: a single zero-width item is proven content_ids-wise
+    # but has no positive-area rect, so the zero-content default of "centre" applies.
+    item = _image_item(0, x=1954, y=27, w=0, h=921)
+    slide = _slide(51, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {51: SlideDecision(51, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[51] == "centre"
+
+
+def test_valid_item_plus_degenerate_media_counts_by_positive_area_only():
+    # codex review 2, finding 1: two zero-area media items must not push the count
+    # to 3+; only the one squarish positive-area rect counts, so anchor is "right".
+    valid = _image_item(0, x=1954, y=27, w=1381, h=921)
+    degenerate_a = _image_item(1, x=4702, y=15, w=0, h=92)
+    degenerate_b = _image_item(2, x=4702, y=200, w=645, h=0)
+    slide = _slide(52, [valid, degenerate_a, degenerate_b])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {52: SlideDecision(52, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[52] == "right"
 
 
 # --------------------------------------------------------------------------

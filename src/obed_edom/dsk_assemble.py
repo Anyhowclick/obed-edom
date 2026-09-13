@@ -6,6 +6,7 @@ report's transition note on clip slides is expected, not a defect.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 import time
@@ -40,7 +41,9 @@ from obed_edom.dsk_plan import (
     SlideClass,
     TextBox,
     _box_min_t,
+    _content_item_aabb,
     _delete_order,
+    _intersect,
     _item_object_ids,
     _TEXT_GAP_PT,
     _word_count,
@@ -427,23 +430,79 @@ def _slide_archive_for_number(objects: dict[str, dict], number: int) -> dict | N
 
 
 def _group_has_media(signature: str | None) -> bool:
-    """True when `signature` has an ``image:``/``movie:`` leaf; unresolved/empty counts as content."""
+    """True when `signature` has an ``image:``/``movie:`` leaf; missing/empty is not content."""
     if not signature:
-        return True
+        return False
     return any(part.startswith(("image:", "movie:")) for part in signature.split("\n") if part)
 
 
-def _content_item_count(cls: SlideClass, group_signature: Mapping[int, str | None] | None = None) -> int:
-    """Count of kept image/movie/group items; text-only content never counts towards it."""
+_LW_ASPECT_MIN = 2.5
+_LW_ASPECT_TOL = 1e-9
+
+
+def _content_ids(
+    cls: SlideClass,
+    *,
+    group_signature: Mapping[int, str | None] | None = None,
+) -> list[ItemId]:
+    """Kept image/movie/group item ids; text-only content never counts towards them.
+    Side-only status is NOT decided here: a rotated item's true (transformed-AABB) extent
+    can cross into the centre panel even though its unrotated frame does not, so that
+    filter lives in `_content_visibles_by_kept`'s centre-panel intersection instead --
+    only positive-area intersections count as anchoring content."""
     group_signature = group_signature or {}
-    count = 0
+    ids: list[ItemId] = []
     for kind, kind_index in cls.kept:
         if kind not in ("image", "movie", "group"):
             continue
         if kind == "group" and not _group_has_media(group_signature.get(kind_index)):
             continue
-        count += 1
-    return count
+        ids.append((kind, kind_index))
+    return ids
+
+
+def _content_visibles_by_kept(items: Sequence[dict], kept: Iterable[ItemId]) -> dict[ItemId, Rect]:
+    """Like ``dsk_plan._visibles_by_kept(..., include_side=False)`` but measuring each kept
+    item's exact transformed AABB (``_content_item_aabb``) rather than its unrotated frame,
+    so a rotated item's clip to the centre panel reflects its true visual extent."""
+    kept_set = set(kept)
+    visibles: dict[ItemId, Rect] = {}
+    for item in items:
+        item_id: ItemId = (item["kind"], item["kindIndex"])
+        if item_id not in kept_set:
+            continue
+        visible = _intersect(_content_item_aabb(item), CENTRE_PANEL_RECT)
+        if visible is not None:
+            visibles[item_id] = visible
+    return visibles
+
+
+def _content_anchor(
+    cls: SlideClass,
+    items: Sequence[dict],
+    *,
+    wall: tuple[float, float],
+    group_signature: Mapping[int, str | None] | None = None,
+    include_side: bool = False,
+) -> str:
+    """Auto anchor ("centre" or "right") for a content slide with no explicit anchor:
+    the union of the kept content rects — always clipped to the centre panel,
+    regardless of `keep_side`/`include_side` — being LW-dimension (w/h >= 2.5) forces
+    centre; otherwise squarish items go right at 1-2 and centre at 3+. Side panels
+    never count as content for anchoring (decided by `_content_visibles_by_kept`'s
+    positive-area centre-panel intersection, not by their unrotated frame). `wall` and
+    `include_side` are accepted but unused."""
+    content_ids = _content_ids(cls, group_signature=group_signature)
+    if not content_ids:
+        return "centre"
+    visibles = _content_visibles_by_kept(items, content_ids)
+    rects = [r for r in visibles.values() if r.w > 0 and r.h > 0]
+    if not rects:
+        return "centre"
+    union = _union_rect(rects)
+    if union.w / union.h >= _LW_ASPECT_MIN - _LW_ASPECT_TOL:
+        return "centre"
+    return "right" if len(rects) <= 2 else "centre"
 
 
 def plan_assembly(
@@ -524,8 +583,9 @@ def plan_assembly(
             warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
             if decision.anchor in (None, "auto"):
-                anchor = "centre" if no_auto_anchor else (
-                    "right" if _content_item_count(cls, slide.get("groupChildSignature")) == 1 else "centre"
+                anchor = "centre" if no_auto_anchor else _content_anchor(
+                    cls, items, wall=wall,
+                    group_signature=slide.get("groupChildSignature"),
                 )
             else:
                 anchor = decision.anchor
@@ -611,12 +671,13 @@ def plan_assembly(
                 for iid in group_ids:
                     kind_index = iid[1]
                     has_text = bool((child_text_payload.get(kind_index) or "").strip())
+                    has_media = _group_has_media(group_child_text.get(kind_index) if group_child_text else None)
                     children = children_payload.get(kind_index)
-                    if has_text and children is None:
+                    if (has_text or has_media) and children is None:
                         raise AssemblyRefusal(
-                            f"slide {number}: group {kind_index} has text but no offline child "
-                            "metadata (nested/rotated/masked group, or an autosize child whose "
-                            "naturalSize disagrees with its frame) -- refusing to write blind"
+                            f"slide {number}: group {kind_index} has text or media but no offline "
+                            "child metadata (nested/rotated/masked group, or an autosize child "
+                            "whose naturalSize disagrees with its frame) -- refusing to write blind"
                         )
                     # A group whose child text triggered the text-slide classification
                     # takes no affine path (Design A step 4) -- its children are stacked
