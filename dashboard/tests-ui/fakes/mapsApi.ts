@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { Job, MapsStateConflict, Settings } from "../../src/api";
+import type { Job, MapsExportPlan, MapsStateConflict, Settings } from "../../src/api";
 import { makeJob } from "./doc";
 
 const actual = await vi.importActual<typeof import("../../src/api")>("../../src/api");
@@ -11,6 +11,7 @@ type RenameJobArgs = Parameters<typeof actual.renameJob>;
 type GetJobArgs = Parameters<typeof actual.getJob>;
 type BootstrapRowsArgs = Parameters<typeof actual.bootstrapMapsRows>;
 type PollJobArgs = Parameters<typeof actual.pollJob>;
+type ExportMapsArgs = Parameters<typeof actual.exportMaps>;
 
 let saveConflictOnce: { conflict: MapsStateConflict } | null = null;
 let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRevision: number }> = [];
@@ -30,6 +31,13 @@ let bootstrapRowsDeferOnce: Promise<Job> | null = null;
 let bootstrapRowsCalls: Array<{ id: string; body: BootstrapRowsArgs[1] }> = [];
 
 let pollJobResolution: Job | null = null;
+
+let exportPlanResolution: MapsExportPlan | null = null;
+let exportMapsCalls: Array<{ id: string; body: ExportMapsArgs[1] }> = [];
+let exportMapsResolution: Job | null = null;
+let cancelMapsExportCalls: string[] = [];
+let planMapsTilesResolution = { ok: true, rels: [] as string[], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
+let prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
 
 export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveMapsStateArgs[0], document: SaveMapsStateArgs[1], expectedRevision: SaveMapsStateArgs[2]): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
@@ -92,6 +100,25 @@ export const pollJob = vi.fn<typeof actual.pollJob>(async (id: PollJobArgs[0], o
   return job;
 });
 
+export const fetchMapsExportPlan = vi.fn<typeof actual.fetchMapsExportPlan>(async (_id: string): Promise<MapsExportPlan> => {
+  if (!exportPlanResolution) throw new Error("fetchMapsExportPlan not configured in test");
+  return exportPlanResolution;
+});
+
+export const exportMaps = vi.fn<typeof actual.exportMaps>(async (id: ExportMapsArgs[0], body?: ExportMapsArgs[1]): Promise<Job> => {
+  exportMapsCalls.push({ id, body });
+  return exportMapsResolution ?? makeJob({ id });
+});
+
+export const cancelMapsExport = vi.fn<typeof actual.cancelMapsExport>(async (id: string): Promise<Job> => {
+  cancelMapsExportCalls.push(id);
+  return makeJob({ id });
+});
+
+export const planMapsTiles = vi.fn<typeof actual.planMapsTiles>(async () => planMapsTilesResolution);
+
+export const prefetchMapsTiles = vi.fn<typeof actual.prefetchMapsTiles>(async () => prefetchMapsTilesResolution);
+
 export const getSettings = vi.fn<typeof actual.getSettings>(
   async (): Promise<Settings> => ({
     reuseThreshold: 0,
@@ -114,12 +141,23 @@ export function resetMapsApiScript() {
   bootstrapRowsDeferOnce = null;
   bootstrapRowsCalls = [];
   pollJobResolution = null;
+  exportPlanResolution = null;
+  exportMapsCalls = [];
+  exportMapsResolution = null;
+  cancelMapsExportCalls = [];
+  planMapsTilesResolution = { ok: true, rels: [], tiles: 0, cached: 0, capped: false, cameras: 0, camerasUsed: 0 };
+  prefetchMapsTilesResolution = { ok: true, tiles: 0, cached: 0, fetched: 0, failed: 0 };
   saveMapsState.mockClear();
   postMapsPng.mockClear();
   renameJob.mockClear();
   getJob.mockClear();
   bootstrapMapsRows.mockClear();
   pollJob.mockClear();
+  fetchMapsExportPlan.mockClear();
+  exportMaps.mockClear();
+  cancelMapsExport.mockClear();
+  planMapsTiles.mockClear();
+  prefetchMapsTiles.mockClear();
   getSettings.mockClear();
 }
 
@@ -170,6 +208,24 @@ export const mapsApiScript = {
   pollJob: {
     resolve(job: Job) {
       pollJobResolution = job;
+    },
+  },
+  fetchMapsExportPlan: {
+    resolve(plan: MapsExportPlan) {
+      exportPlanResolution = plan;
+    },
+  },
+  exportMaps: {
+    resolve(job: Job) {
+      exportMapsResolution = job;
+    },
+    get calls() {
+      return exportMapsCalls;
+    },
+  },
+  cancelMapsExport: {
+    get calls() {
+      return cancelMapsExportCalls;
     },
   },
 };

@@ -12,8 +12,11 @@ import pytest
 
 from obed_edom.maps_geo import CENTRE_ORIGIN_X, CENTRE_WIDTH, clamp_cg_shift, world_width
 from obed_edom.maps_keynote import (
+    CG_HEIGHT,
     CG_WIDTH,
+    CREDITS_FONT,
     DOT_SIZE,
+    DSK_HEIGHT,
     DSK_SCALE,
     DSK_WIDTH,
     LABEL_BOLD_FALLBACK,
@@ -35,6 +38,7 @@ from obed_edom.maps_keynote import (
     build_slide_items,
     cg_crop_origin,
     coerce_link_kinds,
+    credits_op,
     dsk_item,
     dsk_ops,
     export_maps_job,
@@ -226,6 +230,94 @@ def test_cg_shift_clamp_used(tmp_path: Path):
 
 def whole_wall_to_cg(wall_x: float, origin_x: float) -> int:
     return int(round(wall_x - origin_x))
+
+
+def test_credits_op_emits_one_text_item_per_line():
+    op = credits_op(["a", "b"], width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    assert len(op["items"]) == 3
+    assert all(item["kind"] == "text" for item in op["items"])
+    assert all("\n" not in item["text"] for item in op["items"])
+    assert "alignment" not in op["items"][0]
+    centre_x = WALL_WIDTH / 2.0
+    for item in op["items"]:
+        assert abs((item["x"] + item["w"] / 2.0) - centre_x) <= 1
+
+
+def test_credits_op_script_has_no_alignment_verb(tmp_path: Path):
+    op = credits_op(["short", "a"], width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    script = build_deck_script([op], tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    assert "set alignment" not in script
+
+
+@pytest.mark.parametrize(
+    "width,height",
+    [(int(WALL_WIDTH), int(WALL_HEIGHT)), (int(DSK_WIDTH), int(DSK_HEIGHT)), (int(CG_WIDTH), int(CG_HEIGHT))],
+)
+def test_credits_op_layout_stays_in_bounds_and_centred(width: int, height: int):
+    short_line = "© OSM"
+    long_line = "© MapTiler, terrain data from a very long attribution string that needs to wrap across multiple lines"
+    op = credits_op([short_line, long_line], width=width, height=height)
+    centre_x = width / 2.0
+    items = op["items"]
+    for item in items:
+        assert item["x"] >= 0
+        assert item["x"] + item["w"] <= width
+        assert item["y"] >= 0
+        assert item["y"] + item["h"] <= height
+        assert abs((item["x"] + item["w"] / 2.0) - centre_x) <= 1
+    short_item, long_item = items[1], items[2]
+    assert short_item["w"] < long_item["w"]
+    top = items[0]["y"]
+    bottom = items[-1]["y"] + items[-1]["h"]
+    block_h = bottom - top
+    assert abs((height - block_h) / 2.0 - top) <= 2
+
+
+def _export_scripts(monkeypatch, tmp_path: Path, *, attribution: str | None, credits: list[str] | None) -> list[str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    scripts: list[str] = []
+
+    def capture(script: str, **_k):
+        scripts.append(script)
+        return _ok_osascript(script)
+
+    monkeypatch.setattr("obed_edom.maps_keynote.run_osascript", capture)
+    monkeypatch.setattr("obed_edom.maps_keynote.inspect_and_validate", lambda _p: [])
+    cam_a, cam_b = _pan_camera(8, 400)
+    a = _slide("s1", cam_a)
+    b = _slide("s2", cam_b)
+    links = [{"from": "s1", "to": "s2", "kind": "morph", "duration": 1.2, "playWithoutClick": True}]
+    job = _job(tmp_path, [a, b], links)
+    if attribution is not None:
+        job.result["attribution"] = attribution
+    _write_plan_rasters(Path(job.result["outputDir"]), [a, b], links)
+    result = export_maps_job(job, export_lw=True, export_cg=True, export_dsk=True, credits=credits)
+    assert result.get("destPath") and result.get("destPathCg") and result.get("destPathDsk")
+    return scripts
+
+
+def test_export_maps_job_appends_credits_slide_when_attribution_credits(monkeypatch, tmp_path: Path):
+    credits = ["© OpenStreetMap contributors", "© MapTiler"]
+    with_credits = _export_scripts(monkeypatch, tmp_path / "with", attribution="credits", credits=credits)
+    without_credits = _export_scripts(monkeypatch, tmp_path / "without", attribution="stamp", credits=credits)
+    for script in with_credits:
+        assert "© MapTiler" in script
+    for script_with, script_without in zip(with_credits, without_credits):
+        assert script_with.count("make new slide") - script_without.count("make new slide") == 1
+
+
+def test_export_maps_job_omits_credits_slide_when_attribution_stamp(monkeypatch, tmp_path: Path):
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution=None, credits=["© OpenStreetMap contributors"])
+    for script in scripts:
+        assert "© OpenStreetMap" not in script
+
+
+def test_credits_slide_not_rescaled_in_dsk_script(monkeypatch, tmp_path: Path):
+    scripts = _export_scripts(monkeypatch, tmp_path, attribution="credits", credits=["© OpenStreetMap contributors"])
+    lw_script, dsk_script, _cg_script = scripts
+    assert f"to {float(CREDITS_FONT)}" in dsk_script
+    assert f"to {float(CREDITS_FONT)}" in lw_script
+    assert f"to {float(CREDITS_FONT) * DSK_SCALE}" not in dsk_script
 
 
 def test_both_dest_keys_when_both_flags_on(monkeypatch, tmp_path: Path):
@@ -2440,6 +2532,15 @@ def _kitchen_sink_ops(tmp_path: Path, *, wall: bool = True) -> list[dict]:
         {"id": "s4", "duplicate": False,
          "items": [mod._item("text", 10, 20, 200, 40, text='Quote "x" & tail')],
          "transition": None},
+        mod.credits_op(
+            [
+                "© OpenStreetMap contributors",
+                "Elevation: Mapzen Terrain Tiles · SRTM & GMTED2010 data courtesy of the U.S. Geological Survey",
+                'Data by "Acme\\Maps" Ltd.',
+            ],
+            width=deck_width,
+            height=WALL_HEIGHT,
+        ),
     ]
 
 
@@ -2480,6 +2581,34 @@ def test_deck_script_and_plate_probe_compile_under_osacompile(tmp_path: Path):
             check=False,
         )
         assert proc.returncode == 0, f"{label}: {proc.stderr}"
+
+
+def test_credits_op_normalises_control_characters():
+    op = credits_op(
+        ["Line one\r\nwith CRLF", "Line two\nwith LF", "Tabbed\tvalue", "   ", ""],
+        width=int(WALL_WIDTH), height=int(WALL_HEIGHT),
+    )
+    texts = [item["text"] for item in op["items"]]
+    assert texts[1:] == ["Line one with CRLF", "Line two with LF", "Tabbed value"]
+    for text in texts:
+        assert "\r" not in text and "\n" not in text and "\t" not in text
+
+
+def test_credits_op_with_crlf_compiles_under_osacompile(tmp_path: Path):
+    if shutil.which("osacompile") is None:
+        pytest.skip("osacompile unavailable (non-macOS)")
+    op = credits_op(
+        ["© OpenStreetMap contributors\r\nMulti-line credit", 'Quoted "value"\\with\\backslash'],
+        width=int(WALL_WIDTH), height=int(WALL_HEIGHT),
+    )
+    script = build_deck_script([op], tmp_path / "deck.key", width=int(WALL_WIDTH), height=int(WALL_HEIGHT))
+    source = tmp_path / "credits.applescript"
+    source.write_text(script, encoding="utf-8")
+    proc = subprocess.run(
+        ["osacompile", "-o", str(tmp_path / "credits.scpt"), str(source)],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_static_drop_pin_geometry_survives_the_dsk_scale(tmp_path: Path):

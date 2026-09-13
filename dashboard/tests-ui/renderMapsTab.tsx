@@ -19,6 +19,11 @@ vi.mock("../src/api", async (importOriginal) => {
     bootstrapMapsRows: apiFake.bootstrapMapsRows,
     pollJob: apiFake.pollJob,
     getSettings: apiFake.getSettings,
+    fetchMapsExportPlan: apiFake.fetchMapsExportPlan,
+    exportMaps: apiFake.exportMaps,
+    cancelMapsExport: apiFake.cancelMapsExport,
+    planMapsTiles: apiFake.planMapsTiles,
+    prefetchMapsTiles: apiFake.prefetchMapsTiles,
   };
 });
 

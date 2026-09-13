@@ -2394,6 +2394,7 @@ def test_delete_and_edit_conflict_leaves_exactly_one_winner():
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "attribution",
         "assets",
         "slides",
         "links",
@@ -2766,7 +2767,7 @@ def test_export_bumps_state_revision(monkeypatch):
     job = _seed()
     before_revision = int(job["result"].get("stateRevision") or 0)
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
     monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
@@ -2781,7 +2782,7 @@ def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
     job = _seed()
     captured = {}
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         captured["export_dir"] = export_dir
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
@@ -2798,7 +2799,7 @@ def test_export_resolves_export_dir_inside_mutation_lock(monkeypatch, tmp_path):
 def test_export_clears_export_dir_with_empty_string(monkeypatch, tmp_path):
     job = _seed()
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
     monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", fake_export)
@@ -2821,7 +2822,7 @@ def test_export_uses_configured_default_export_dir_with_no_override(monkeypatch,
     job = _seed()
     captured = {}
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         captured["export_dir"] = export_dir
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
@@ -2848,7 +2849,7 @@ def test_export_uses_output_root_default_flat_not_private_maps_dir(monkeypatch, 
     job = _seed()
     captured = {}
 
-    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None):
+    def fake_export(job_obj, *, export_lw, export_cg, export_dsk=False, export_dir=None, credits=None):
         captured["export_dir"] = export_dir
         return {**(job_obj.result or {}), "destPath": "/tmp/fake-wall.key"}
 
@@ -3093,7 +3094,7 @@ def test_export_enqueue_waits_for_admitted_commit(monkeypatch):
 
     captured = {}
 
-    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True):
+    def fake_run_export(job, export_lw, export_cg, export_dsk=False, export_dir=None, persist_export_dir=True, credits=None):
         captured["export_lw"] = export_lw
         captured["export_cg"] = export_cg
         captured["export_dsk"] = export_dsk
@@ -3959,3 +3960,73 @@ def test_bootstrap_rows_bumps_state_revision(monkeypatch):
     done_pin = _wait(job["id"])
     assert done_pin["status"] == "done", done_pin.get("error")
     assert int(done_pin["result"]["stateRevision"] or 0) == before + 2
+
+
+def test_document_attribution_defaults_to_stamp():
+    job = _seed()
+    doc = _doc(job)
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "stamp"
+    latest = client.get(f"/api/jobs/{job['id']}")
+    assert latest.json()["result"]["attribution"] == "stamp"
+
+
+def test_document_attribution_round_trips_credits():
+    job = _seed()
+    doc = _doc(job)
+    doc["attribution"] = "credits"
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "credits"
+    latest = client.get(f"/api/jobs/{job['id']}")
+    assert latest.json()["result"]["attribution"] == "credits"
+
+
+def test_document_attribution_rejects_unknown_value_as_stamp():
+    job = _seed()
+    doc = _doc(job)
+    doc["attribution"] = "banner"
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["result"]["attribution"] == "stamp"
+
+
+def test_export_forwards_credits_to_job(monkeypatch):
+    job = _seed()
+    captured = {}
+
+    def spy(j, **kwargs):
+        captured.update(kwargs)
+        result = dict(getattr(j, "result", None) or {})
+        result["destPath"] = str(Path(result.get("outputDir", ".")) / "spy.key")
+        return result
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", spy)
+    started = client.post(
+        f"/api/maps/{job['id']}/export",
+        json={"credits": ["© OpenStreetMap contributors"]},
+    )
+    assert started.status_code == 200, started.text
+    _wait(job["id"])
+    assert captured.get("credits") == ["© OpenStreetMap contributors"]
+
+
+def test_export_normalises_crlf_in_credits(monkeypatch):
+    job = _seed()
+    captured = {}
+
+    def spy(j, **kwargs):
+        captured.update(kwargs)
+        result = dict(getattr(j, "result", None) or {})
+        result["destPath"] = str(Path(result.get("outputDir", ".")) / "spy.key")
+        return result
+
+    monkeypatch.setattr("obed_edom.maps_keynote.export_maps_job", spy)
+    started = client.post(
+        f"/api/maps/{job['id']}/export",
+        json={"credits": ["Line one\r\nwith CRLF", "Line two\nwith LF", "  ", ""]},
+    )
+    assert started.status_code == 200, started.text
+    _wait(job["id"])
+    assert captured.get("credits") == ["Line one with CRLF", "Line two with LF"]

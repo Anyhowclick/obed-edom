@@ -144,11 +144,14 @@ export type MapsDocument = {
   exportDsk: boolean;
   hiddenLayers: MapsLayerFilterId[];
   cachedCountries: string[];
+  attribution: MapsAttribution;
   assets: MapsAsset[];
   slides: MapsSlide[];
   links: MapsLink[];
   retiredLinks?: MapsLink[];
 };
+
+export type MapsAttribution = "stamp" | "credits";
 
 export const MAX_RETIRED_LINKS = 200;
 
@@ -783,6 +786,7 @@ export function documentFromResult(result: Record<string, unknown> | null | unde
     cachedCountries: Array.isArray(result.cachedCountries)
       ? (result.cachedCountries as unknown[]).filter((item): item is string => typeof item === "string")
       : [],
+    attribution: result.attribution === "credits" ? "credits" : "stamp",
     assets: Array.isArray(result.assets)
       ? (result.assets as MapsAsset[]).filter((asset) => asset && typeof asset.id === "string" && typeof asset.version === "string")
       : [],

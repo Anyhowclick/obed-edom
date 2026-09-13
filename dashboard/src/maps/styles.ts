@@ -1,7 +1,7 @@
 import type { LayerSpecification, StyleSpecification } from "maplibre-gl";
 import { HILLSHADE_LAYER_ID, HILLSHADE_NE2_LAYER_ID, HILLSHADE_SOURCE_ID, type MapsStyleId } from "./types";
 import { proxyOpenFreeMapUrl } from "./tileProxy";
-import { TERRAIN_ATTRIBUTION } from "./stampOsm";
+import { TERRAIN_ATTRIBUTION } from "./credits";
 import { withBrighterDarkLines } from "./darkContrast";
 import { shift, withLowZoomBoundaries } from "./tonerBoundaries";
 import { withoutSolidBuildings } from "./tonerBuildings";

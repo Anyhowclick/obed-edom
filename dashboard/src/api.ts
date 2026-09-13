@@ -638,7 +638,7 @@ export async function addMapsLandmark(id: string, slideId: string, audience: "lw
   return { job: job as Job, churchId };
 }
 
-export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean; exportDir?: string }): Promise<Job> {
+export async function exportMaps(id: string, body?: { exportLw?: boolean; exportCg?: boolean; exportDsk?: boolean; exportDir?: string; credits?: string[] }): Promise<Job> {
   const res = await fetch(`/api/maps/${id}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

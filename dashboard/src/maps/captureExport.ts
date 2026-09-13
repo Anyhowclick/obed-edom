@@ -145,6 +145,7 @@ export type ExportMapOpts = {
   numberPins?: boolean;
   assetBaseUrl?: string;
   isCancelled?: () => boolean;
+  stamp?: boolean;
 };
 
 export async function createExportMap(
@@ -233,7 +234,8 @@ export async function captureExportRaster(opts: ExportMapOpts): Promise<Blob> {
       "image/png",
       1,
       opts.hillshade === true,
-      opts.styleId
+      opts.styleId,
+      opts.stamp !== false
     );
   } finally {
     map.remove();
@@ -259,7 +261,8 @@ export async function captureIsolatePair(opts: ExportMapOpts): Promise<{ base: B
       "image/png",
       1,
       opts.hillshade === true,
-      opts.styleId
+      opts.styleId,
+      opts.stamp !== false
     );
 
     map.setLayoutProperty("isolate-fill", "visibility", "none");

@@ -65,6 +65,7 @@ import { captureExportRaster, captureIsolatePair } from "../maps/captureExport";
 import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFly";
 import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
+import { creditLines } from "../maps/credits";
 import { HopTimeline } from "../maps/HopTimeline";
 import { ManualEntriesForm } from "../maps/ManualEntriesForm";
 import type { ManualMode, MapsBootstrapRow } from "../maps/manualRows";
@@ -1432,6 +1433,7 @@ export function MapsTab() {
       throwIfCancelled();
 
       const slidesById = new Map((docRef.current?.slides || []).map((slide) => [slide.id, slide]));
+      const stamp = docRef.current?.attribution !== "credits";
       const linkHasSlides = (link: MapsLink) => slidesById.has(link.from) && slidesById.has(link.to);
       const lwMovieLinks = (docRef.current?.links || []).filter(
         (link) => link.kind === "movie" && linkHasSlides(link)
@@ -1541,6 +1543,7 @@ export function MapsTab() {
           hillshade: (still.hillshade as boolean | undefined) === true,
           isolate: still.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
+          stamp,
         };
         if (still.isolate && still.highlights.length) {
           const pair = await captureIsolatePair(exportOpts);
@@ -1571,6 +1574,7 @@ export function MapsTab() {
           hillshade: (plate.hillshade as boolean | undefined) === true,
           isolate: plate.isolate as MapsIsolate | undefined,
           isCancelled: () => exportAbort.current,
+          stamp,
         });
         throwIfCancelled();
         reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId }));
@@ -1591,6 +1595,7 @@ export function MapsTab() {
             hillshade: (still.hillshade as boolean | undefined) === true,
             isolate: still.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
+            stamp,
           };
           if (still.isolate && still.highlights.length) {
             const pair = await captureIsolatePair(exportOpts);
@@ -1621,6 +1626,7 @@ export function MapsTab() {
             hillshade: (plate.hillshade as boolean | undefined) === true,
             isolate: plate.isolate as MapsIsolate | undefined,
             isCancelled: () => exportAbort.current,
+            stamp,
           });
           throwIfCancelled();
           reconcileServerJob(await postMapsPng(id, blob, { kind: "plate", plateId: plate.plateId, audience: "cg" }));
@@ -1695,6 +1701,7 @@ export function MapsTab() {
           easeOut: link.easeOut,
           flight: link.flight,
           isCancelled: () => exportAbort.current,
+          stamp,
           onFrame: async (blob, i, n) => {
             if (exportAbort.current) throw new Error("Export cancelled.");
             await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps: 30 });
@@ -1778,6 +1785,7 @@ export function MapsTab() {
               toX: cropToX,
             },
             isCancelled: () => exportAbort.current,
+            stamp,
             onFrame: async (blob, i, n) => {
               if (exportAbort.current) throw new Error("Export cancelled.");
               await postMapsFrame(id, blob, { slideId: from.id, index: i, count: n, fps, audience: "cg" });
@@ -1789,11 +1797,18 @@ export function MapsTab() {
       throwIfCancelled();
       setProgress(null);
       const latest = docRef.current;
+      const audiences: Array<"lw" | "cg"> = [];
+      if (latest?.exportLw || latest?.exportDsk) audiences.push("lw");
+      if (latest?.exportCg) audiences.push("cg");
+      const credits = stamp
+        ? undefined
+        : creditLines((latest?.slides || []).flatMap((s) => audiences.map((a) => slideForAudience(s, a))));
       const started = await exportMaps(id, {
         exportLw: latest?.exportLw,
         exportCg: latest?.exportCg,
         exportDsk: latest?.exportDsk,
         exportDir,
+        credits,
       });
       setJob(started);
       const done = await pollJob(started.id, (tick) => {
@@ -3131,6 +3146,18 @@ export function MapsTab() {
                       }}
                     />
                     DSK lower third (1920×1080)
+                  </label>
+                  <label className="maps-check" title="Removes the on-image attribution bar and appends one end slide with the map credits to every exported deck.">
+                    <input
+                      type="checkbox"
+                      checked={doc?.attribution === "credits"}
+                      disabled={locked}
+                      onChange={(event) => {
+                        if (!doc) return;
+                        patchDoc({ ...doc, attribution: event.target.checked ? "credits" : "stamp" });
+                      }}
+                    />
+                    Credits slide instead of stamped attribution
                   </label>
                   <div className="actions export-actions">
                     <ExportDestinationRow

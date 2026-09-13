@@ -386,6 +386,7 @@ export async function captureFlyFrames(opts: {
     toY?: number;
   };
   isCancelled?: () => boolean;
+  stamp?: boolean;
   onFrame: (blob: Blob, index: number, count: number) => Promise<void>;
 }): Promise<number> {
   const {
@@ -415,6 +416,7 @@ export async function captureFlyFrames(opts: {
     flight,
     outputCrop,
     isCancelled,
+    stamp = true,
     onFrame,
   } = opts;
   const cancelled = () => Boolean(isCancelled?.());
@@ -465,7 +467,8 @@ export async function captureFlyFrames(opts: {
         "image/jpeg",
         0.95,
         hillshade === true,
-        styleId
+        styleId,
+        stamp
       );
       if (cancelled()) throw new Error("Export cancelled.");
       await onFrame(blob, i, count);

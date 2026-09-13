@@ -59,6 +59,9 @@ LABEL_BOLD_FALLBACK = "HelveticaNeue-Bold"
 LABEL_CHAR_W = 13
 PILL_PAD_X = 6
 PILL_PAD_Y = 2
+CREDITS_TITLE = "Map data"
+CREDITS_FONT = 28
+CREDITS_TITLE_FONT = 40
 MAP_BG_RE = re.compile(r"map\s*bg", re.I)
 PIN_WAVE_RE = re.compile(r"PIN\s*DROP\s*WAVE.*\.mov$", re.I)
 _SKIP_WALK = {
@@ -707,6 +710,60 @@ def dsk_item(item: dict[str, Any]) -> dict[str, Any]:
 
 def dsk_ops(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{**op, "items": [dsk_item(item) for item in op["items"]]} for op in ops]
+
+
+def normalise_credit_line(line: str) -> str:
+    return re.sub(r"[\r\n\t]+", " ", str(line)).strip()
+
+
+CREDITS_WIDTH_FRAC = 0.6
+CREDITS_CHAR_WIDTH_FRAC = 0.55
+CREDITS_LINE_HEIGHT_FRAC = 1.6
+
+
+def _wrapped_row_count(text: str, box_w: float, font_size: float) -> int:
+    char_w = font_size * CREDITS_CHAR_WIDTH_FRAC
+    chars_per_line = max(1, int(box_w / char_w))
+    return max(1, math.ceil(len(text) / chars_per_line))
+
+
+def _centred_box(text: str, max_w: float, font_size: float, centre_x: float) -> tuple[float, float]:
+    line_w = min(max_w, len(text) * font_size * CREDITS_CHAR_WIDTH_FRAC)
+    return centre_x - line_w / 2.0, line_w
+
+
+def credits_op(lines: list[str], *, width: int, height: int) -> dict[str, Any]:
+    """One text item per line (no `\\n`): `_as_escape` doesn't handle literal newlines,
+    which would otherwise break `osacompile`. Keynote's `rich text`/`text item` classes
+    have no `alignment` property, so each line's own box is centred by its estimated
+    width instead of relying on AppleScript alignment. Box width is deck-relative so it
+    fits LW, DSK, and CG canvases alike; each item's height is estimated from wrapped
+    row count so the block centres correctly even when a line wraps."""
+    clean_lines = [normalise_credit_line(line) for line in lines]
+    clean_lines = [line for line in clean_lines if line]
+    max_w = width * CREDITS_WIDTH_FRAC
+    centre_x = width / 2.0
+    line_height = CREDITS_FONT * CREDITS_LINE_HEIGHT_FRAC
+    title_line_height = CREDITS_TITLE_FONT * CREDITS_LINE_HEIGHT_FRAC
+    title_h = _wrapped_row_count(CREDITS_TITLE, max_w, CREDITS_TITLE_FONT) * title_line_height
+    row_heights = [title_h]
+    for line in clean_lines:
+        row_heights.append(_wrapped_row_count(line, max_w, CREDITS_FONT) * line_height)
+    block_h = sum(row_heights)
+    y0 = (height - block_h) / 2.0
+    title_x, title_w = _centred_box(CREDITS_TITLE, max_w, CREDITS_TITLE_FONT, centre_x)
+    items = [
+        _item(
+            "text", title_x, y0, title_w, row_heights[0],
+            text=CREDITS_TITLE, fontSize=CREDITS_TITLE_FONT, bold=True,
+        )
+    ]
+    y = y0 + row_heights[0]
+    for line, h in zip(clean_lines, row_heights[1:]):
+        line_x, line_w = _centred_box(line, max_w, CREDITS_FONT, centre_x)
+        items.append(_item("text", line_x, y, line_w, h, text=line, fontSize=CREDITS_FONT))
+        y += h
+    return {"id": "_credits", "duplicate": False, "transition": None, "items": items}
 
 
 def _pin_size(church: dict[str, Any], movie: Path | None) -> int:
@@ -1932,6 +1989,7 @@ def export_maps_job(
     export_cg: bool = True,
     export_dsk: bool = False,
     export_dir: Path | None = None,
+    credits: list[str] | None = None,
 ) -> dict[str, Any]:
     if not export_lw and not export_cg and not export_dsk:
         raise ValueError("At least one export target must be on")
@@ -1976,6 +2034,11 @@ def export_maps_job(
     plates = plan["plateGeoms"]
     links = plan["links"]
     result["links"] = links
+    credit_lines = (
+        [cleaned for x in (credits or []) if (cleaned := normalise_credit_line(x))]
+        if str(result.get("attribution") or "stamp") == "credits"
+        else []
+    )
     movie = find_pin_drop_wave()
     stem = str(result.get("stem") or getattr(job, "name", "") or f"maps-{getattr(job, 'id', 'maps')}")
     flags: list[Any] = []
@@ -1994,6 +2057,8 @@ def export_maps_job(
             slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=True,
             reveals=reveals, reveal_movies=reveal_movies,
         )
+        if credit_lines:
+            ops.append(credits_op(credit_lines, width=WALL_WIDTH, height=WALL_HEIGHT))
         _run_one_deck(
             ops, dest, width=WALL_WIDTH, height=WALL_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )
@@ -2023,6 +2088,8 @@ def export_maps_job(
                 reveals=reveals, reveal_movies=reveal_movies,
             )
         )
+        if credit_lines:
+            ops_dsk.append(credits_op(credit_lines, width=DSK_WIDTH, height=DSK_HEIGHT))
         _run_one_deck(
             ops_dsk, dest_dsk, width=DSK_WIDTH, height=DSK_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )
@@ -2074,6 +2141,8 @@ def export_maps_job(
                 slides, links, plates, output_dir=output_dir, preview_dir=preview_dir, movie=movie, wall=False,
                 reveals=reveals, reveal_movies=reveal_movies,
             )
+        if credit_lines:
+            ops_cg.append(credits_op(credit_lines, width=CG_WIDTH, height=CG_HEIGHT))
         _run_one_deck(
             ops_cg, dest_cg, width=CG_WIDTH, height=CG_HEIGHT, is_cancelled=is_cancelled, log=lambda m: _log(job, m)
         )

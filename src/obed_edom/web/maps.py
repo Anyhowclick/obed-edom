@@ -43,7 +43,15 @@ from obed_edom.maps_geo import (
     parse_maps_query,
     sea_overview_camera,
 )
-from obed_edom.maps_keynote import DOT_SIZE, DROP_SIZE, coerce_link_kinds, maps_export_plan, plate_filename, split_cg_export_plan
+from obed_edom.maps_keynote import (
+    DOT_SIZE,
+    DROP_SIZE,
+    coerce_link_kinds,
+    maps_export_plan,
+    normalise_credit_line,
+    plate_filename,
+    split_cg_export_plan,
+)
 from obed_edom.maps_tiles import (
     DEFAULT_CAMERA_MAXZOOM,
     DEFAULT_COUNTRY_MAXZOOM,
@@ -216,6 +224,7 @@ MapsHopKind = Literal["morph", "movie", "dissolve", "cut"]
 MapsPinKind = Literal["dot", "dropPin", "landmark"]
 MapsIconId = Literal["none", "building", "cross"]
 MapsEasing = Literal["ease-in-out", "linear", "ease-in", "ease-out"]
+MapsAttribution = Literal["stamp", "credits"]
 
 
 def _runner():
@@ -379,6 +388,7 @@ class MapsDocument(BaseModel):
     hiddenLayers: list[MapsLayerFilterId] = Field(default_factory=lambda: list(DEFAULT_HIDDEN_LAYERS))
     cachedCountries: list[str] = Field(default_factory=list)
     assets: list[MapsAsset] = Field(default_factory=list)
+    attribution: MapsAttribution = "stamp"
 
     @model_validator(mode="before")
     @classmethod
@@ -408,6 +418,14 @@ class MapsDocument(BaseModel):
             seen.add(code)
             out.append(code)
         return out
+
+    @field_validator("attribution", mode="before")
+    @classmethod
+    def _attribution(cls, value: object) -> object:
+        if value not in ("stamp", "credits"):
+            return "stamp"
+        return value
+
     slides: list[MapsSlide]
     links: list[MapsLink]
     retiredLinks: list[MapsLink] = Field(default_factory=list)
@@ -472,6 +490,23 @@ class ExportBody(BaseModel):
     exportCg: bool | None = None
     exportDsk: bool | None = None
     exportDir: str | None = None
+    credits: list[str] | None = None
+
+    @field_validator("credits", mode="before")
+    @classmethod
+    def _credits(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            return None
+        out = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            cleaned = normalise_credit_line(item)
+            if cleaned:
+                out.append(cleaned)
+        return out[:8]
 
 
 class BootstrapRow(BaseModel):
@@ -775,6 +810,7 @@ def _dump_document(doc: MapsDocument) -> dict[str, Any]:
         "exportDsk": doc.exportDsk,
         "hiddenLayers": list(doc.hiddenLayers),
         "cachedCountries": list(doc.cachedCountries),
+        "attribution": doc.attribution,
         "assets": [asset.model_dump() for asset in doc.assets],
         "slides": [slide.model_dump() for slide in doc.slides],
         "links": [link.dumped() for link in doc.links],
@@ -792,6 +828,7 @@ def _parse_document(payload: dict[str, Any]) -> MapsDocument:
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "attribution",
         "assets",
         "slides",
         "links",
@@ -834,6 +871,7 @@ def _seed_result(name: str) -> dict[str, Any]:
         "crop": "center+cg",
         "hiddenLayers": list(DEFAULT_HIDDEN_LAYERS),
         "cachedCountries": [],
+        "attribution": "stamp",
         "assets": [],
         "slides": [
             {
@@ -1264,10 +1302,11 @@ def _run_export(
     export_dsk: bool = False,
     export_dir: Path | None = None,
     persist_export_dir: bool = True,
+    credits: list[str] | None = None,
 ) -> dict[str, Any]:
     from obed_edom.maps_keynote import export_maps_job
 
-    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir)
+    result = export_maps_job(job, export_lw=export_lw, export_cg=export_cg, export_dsk=export_dsk, export_dir=export_dir, credits=credits)
     if persist_export_dir and export_dir is not None:
         result["exportDir"] = str(export_dir)
     else:
@@ -1483,6 +1522,7 @@ def save_state(job_id: str, payload: dict[str, Any]) -> dict:
         "exportDsk",
         "hiddenLayers",
         "cachedCountries",
+        "attribution",
         "assets",
         "slides",
         "links",
@@ -1762,10 +1802,11 @@ def export_maps(job_id: str, payload: ExportBody | None = None) -> dict:
                     export_dir = export_destination(default_source)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
+            credits = None if payload is None else payload.credits
             updated = _runner().rerun(
                 job_id,
-                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, persist=is_override: _run_export(
-                    j, lw, cg, dsk, ed, persist_export_dir=persist
+                lambda j, lw=export_lw, cg=export_cg, dsk=export_dsk, ed=export_dir, persist=is_override, cr=credits: _run_export(
+                    j, lw, cg, dsk, ed, persist_export_dir=persist, credits=cr
                 ),
             )
     except RuntimeError as exc:

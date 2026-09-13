@@ -1,8 +1,5 @@
 import { compositePaperGrain } from "./watercolourStyle";
-
-const OSM = "© OpenStreetMap contributors";
-export const TERRAIN_ATTRIBUTION =
-  "Elevation: Mapzen Terrain Tiles · SRTM & GMTED2010 data courtesy of the U.S. Geological Survey · ETOPO1 DOC/NOAA/NESDIS/NCEI";
+import { creditLine } from "./credits";
 
 let scratch: HTMLCanvasElement | null = null;
 
@@ -20,8 +17,7 @@ function paintOsmBar(ctx: CanvasRenderingContext2D, width: number, height: numbe
   ctx.fillRect(0, height - 18, width, 18);
   ctx.fillStyle = "#fff";
   ctx.font = "11px sans-serif";
-  const credits = `${OSM}${styleId?.startsWith("toner") ? " · © MapTiler" : ""}`;
-  ctx.fillText(terrain ? `${credits} · ${TERRAIN_ATTRIBUTION}` : credits, 8, height - 5);
+  ctx.fillText(creditLine(styleId, terrain), 8, height - 5);
 }
 
 export function stampOsmCropOnCanvas(
@@ -33,7 +29,8 @@ export function stampOsmCropOnCanvas(
   mime: string,
   quality: number,
   terrain = false,
-  styleId?: string
+  styleId?: string,
+  stamp = true
 ): Promise<Blob> {
   const canvas = scratchCanvas(width, height);
   const ctx = canvas.getContext("2d");
@@ -41,7 +38,7 @@ export function stampOsmCropOnCanvas(
   ctx.clearRect(0, 0, width, height);
   ctx.drawImage(source, x, y, width, height, 0, 0, width, height);
   if (styleId === "watercolour") compositePaperGrain(ctx, width, height);
-  paintOsmBar(ctx, width, height, terrain, styleId);
+  if (stamp) paintOsmBar(ctx, width, height, terrain, styleId);
   return new Promise((resolve, reject) => {
     try {
       canvas.toBlob((next) => (next ? resolve(next) : reject(new Error("toBlob failed"))), mime, quality);
