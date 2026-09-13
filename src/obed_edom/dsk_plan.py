@@ -925,7 +925,9 @@ class Run:
 def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
     """Run-aware sibling of ``wrapped_height``: wraps across each run's own
     resolved font at its own size, charging every wrapped line's height by the
-    tallest run on that line. ``None`` when a run's font cannot be resolved."""
+    tallest run on that line. Preserves each run's actual separator characters --
+    a run boundary with no break char between it and its neighbour is one word,
+    never a synthetic space. ``None`` when a run's font cannot be resolved."""
     import re as _re  # noqa: PLC0415
     from PIL import ImageFont  # noqa: PLC0415
 
@@ -944,8 +946,11 @@ def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
 
     break_pattern = "[" + "".join(_WRAP_BREAK_CHARS) + "]"
     para_pattern = "\r\n|[" + "".join(_PARA_BREAK_CHARS) + "]"
+    tok_re = _re.compile(f"({break_pattern})")
 
-    paragraphs: list[list[tuple[str, Any, float]]] = [[]]
+    # Each paragraph is a list of ("word", [(text, font, size), ...]) or ("sep", text, font, size)
+    # tokens, in source order; a "word" token spans run boundaries when no separator falls between.
+    paragraphs: list[list[tuple]] = [[]]
     last_size = 0.0
     for run in runs:
         font = _font_for(run.font_name, run.size)
@@ -958,33 +963,51 @@ def wrapped_height_runs(runs: Sequence[Run], width: float) -> float | None:
                 paragraphs.append([])
             if piece == "":
                 continue
-            for word in _re.split(break_pattern, piece):
-                paragraphs[-1].append((word, font, run.size))
+            para = paragraphs[-1]
+            for part in tok_re.split(piece):
+                if part == "":
+                    continue
+                if tok_re.fullmatch(part):
+                    para.append(("sep", part, font, run.size))
+                elif para and para[-1][0] == "word":
+                    para[-1][1].append((part, font, run.size))
+                else:
+                    para.append(("word", [(part, font, run.size)]))
 
     scaled_width = width * _WRAP_OVERSAMPLE
-    lines: list[list[tuple[str, Any, float]]] = []
+    lines: list[list[list[tuple[str, Any, float]]]] = []
     for paragraph in paragraphs:
         if not paragraph:
             lines.append([])
             continue
-        current: list[tuple[str, Any, float]] = []
+        current: list[list[tuple[str, Any, float]]] = []
         current_width = 0.0
-        for word, font, size in paragraph:
-            word_width = font.getlength(word)
-            space_width = font.getlength(" ") if current else 0.0
+        pending_sep: tuple[str, Any, float] | None = None
+        for tok in paragraph:
+            if tok[0] == "sep":
+                pending_sep = (tok[1], tok[2], tok[3])
+                continue
+            subparts = tok[1]
+            word_width = sum(f.getlength(t) for t, f, _s in subparts)
+            space_width = 0.0
+            if current and pending_sep is not None:
+                sep_text, sep_font, _sep_size = pending_sep
+                space_width = sep_font.getlength(sep_text)
             trial_width = current_width + space_width + word_width
             if not current or trial_width <= scaled_width:
-                current.append((word, font, size))
+                current.append(subparts)
                 current_width = trial_width
             else:
                 lines.append(current)
-                current = [(word, font, size)]
+                current = [subparts]
                 current_width = word_width
+            pending_sep = None
         lines.append(current)
 
     total = 0.0
     for line in lines:
-        max_size = max((size for _w, _f, size in line), default=last_size)
+        sizes_in_line = [s for subparts in line for _t, _f, s in subparts]
+        max_size = max(sizes_in_line, default=last_size)
         total += _LINE_HEIGHT_FACTOR * max_size
     return total + _BOX_PADDING_PT
 
@@ -996,6 +1019,15 @@ class TextBox:
     font_name: str
     size: float
     runs: tuple[Run, ...] | None = None
+
+
+def _box_min_t(box: TextBox, min_text_pt: float) -> float:
+    """Minimum ``t`` keeping every run at or above ``min_text_pt``; a run already below
+    the floor at its source size imposes no constraint (never enlarged, floored at
+    source) rather than blocking the whole box from shrinking further."""
+    run_sizes = [r.size for r in box.runs] if box.runs else [box.size]
+    candidates = [min_text_pt / s for s in run_sizes if s >= min_text_pt > 0]
+    return max(candidates) if candidates else 0.0
 
 
 def fit_text_stack(
@@ -1015,11 +1047,12 @@ def fit_text_stack(
     if not boxes:
         return None
     height_correction = height_correction or {}
+    floor_t = {box.item_id: _box_min_t(box, min_text_pt) for box in boxes}
     t = 1.00
     while t > 0.0:
-        sizes = {box.item_id: box.size * t for box in boxes}
-        if any(sizes[box.item_id] < min(min_text_pt, box.size) for box in boxes):
+        if any(t < floor_t[box.item_id] for box in boxes):
             return None
+        sizes = {box.item_id: box.size * t for box in boxes}
         heights: dict[ItemId, float] = {}
         for box in boxes:
             if box.runs:

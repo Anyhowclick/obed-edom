@@ -341,6 +341,29 @@ def offline_wall_payload(
     }
 
 
+def offline_text_rects(
+    key_path: str | Path, *, deck: Any = None
+) -> tuple[dict[int, dict[tuple[str, int], tuple[float, float, float, float]]], set[tuple[int, str, int]]]:
+    """Saved-deck ``{ordinal: {(kind, kindIndex): (x, y, w, h)}}`` for text/shape items,
+    plus the ``(ordinal, kind, kindIndex)`` set flagged ``soft_geometry`` (informational)."""
+    payload = offline_wall_payload(key_path, deck=deck)
+    rects: dict[int, dict[tuple[str, int], tuple[float, float, float, float]]] = {}
+    for slide in payload["slides"]:
+        number = int(slide["number"])
+        bucket: dict[tuple[str, int], tuple[float, float, float, float]] = {}
+        for item in slide["items"]:
+            if item["kind"] in ("text", "shape"):
+                bucket[(item["kind"], int(item["kindIndex"]))] = (
+                    float(item["x"]), float(item["y"]), float(item["w"]), float(item["h"]),
+                )
+        rects[number] = bucket
+    soft = {
+        (int(entry["slide"]), entry["kind"], int(entry["kindIndex"]))
+        for entry in payload["_offline"]["soft_geometry"]
+    }
+    return rects, soft
+
+
 def _guard_tripped(guard: list[dict[str, Any]], slide_range: Any) -> bool:
     if not guard:
         return False

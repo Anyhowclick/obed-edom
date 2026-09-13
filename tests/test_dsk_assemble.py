@@ -1379,17 +1379,19 @@ def test_refit_script_addresses_staged_index_after_a_delete_below_the_stack():
 
 def test_refit_shrink_path_writes_measured_fit_size_above_floor(tmp_path, monkeypatch):
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t500.0",
-        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
-        "OBED\t13\tdone",
-    ])
-    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
-    shrunk_fits_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t20.0", "OBED\t13\tdone"])
+    pass1_stderr = "OBED\t13\tdone"
+    still_over_stderr = "OBED\t13\tdone"
+    shrunk_fits_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch(
         [pass1_stderr, still_over_stderr, still_over_stderr, shrunk_fits_stderr]
     )
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq(
+            [_text_rects(500.0), _text_rects(500.0), _text_rects(500.0), _text_rects(20.0)]
+        ),
+    )
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
@@ -1401,17 +1403,19 @@ def test_refit_shrink_path_writes_measured_fit_size_above_floor(tmp_path, monkey
 
 def test_refit_shrink_path_clamps_to_floor_when_measured_fit_is_below_it(tmp_path, monkeypatch):
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t500.0",
-        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
-        "OBED\t13\tdone",
-    ])
-    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t5000.0", "OBED\t13\tdone"])
-    huge_measured_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t50000.0", "OBED\t13\tdone"])
+    pass1_stderr = "OBED\t13\tdone"
+    still_over_stderr = "OBED\t13\tdone"
+    huge_measured_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch(
         [pass1_stderr, still_over_stderr, still_over_stderr, huge_measured_stderr]
     )
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq(
+            [_text_rects(500.0), _text_rects(5000.0), _text_rects(5000.0), _text_rects(20.0)]
+        ),
+    )
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
@@ -1654,17 +1658,67 @@ def _require_helvetica():
         pytest.skip("font not present on this machine: Helvetica")
 
 
+def _offline_reader_seq(entries):
+    """Fakes ``dsa.offline_text_rects``: returns ``entries[i]`` for the i-th call (last
+    entry repeats). Each entry is a ``(rects_by_ordinal, soft)`` pair."""
+    state = {"i": 0}
+
+    def fake(key_path, *, deck=None):
+        i = min(state["i"], len(entries) - 1)
+        state["i"] += 1
+        return entries[i]
+
+    return fake
+
+
+def _text_rects(height, *, ordinal=1, kind_index=0, y=704.0, x=43.0, w=1849.0):
+    """One offline-reader entry: a single text item's rect on ``ordinal``, top-anchored
+    in ``BAND`` by default so a small-enough ``height`` also clears the band check."""
+    return ({ordinal: {("text", kind_index): (x, y, w, height)}}, set())
+
+
+_MISSING_RECTS = ({}, set())
+
+
+def test_refit_loop_triggers_without_any_live_overflow_line(tmp_path, monkeypatch):
+    """The trigger is plan-derived (every stacked box), not the live OVERFLOW line --
+    it must fire even when pass 1's live read never reports one (D2b gate finding)."""
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "OBED\t13\tdone"
+    refit_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, refit_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(269.0), _text_rects(270.0)]))
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 2
+    assert result.overflows == ()
+
+
 def test_refit_loop_converges_in_two_rounds(tmp_path, monkeypatch):
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t269.0",
-        "OBED\t13\tOVERFLOW\ttext:0\t269.0",
-        "OBED\t13\tdone",
-    ])
-    refit_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t270.0", "OBED\t13\tdone"])
+    pass1_stderr = "OBED\t13\tdone"
+    refit_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, refit_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(269.0), _text_rects(270.0)]))
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 2
+    assert result.overflows == ()
+
+
+def test_refit_loop_treats_band_breach_as_over_budget(tmp_path, monkeypatch):
+    """A box whose measured height fits its own rect but whose offline ``y``/``bottom``
+    falls outside the slide's stack band must still be treated as over budget."""
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "OBED\t13\tdone"
+    refit_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, refit_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    breach = _text_rects(100.0, y=1000.0)  # bottom 1100 > BAND.bottom (1054) + 1
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([breach, _text_rects(20.0)]))
     result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
     assert len(calls) == 2
     assert result.overflows == ()
@@ -1673,14 +1727,14 @@ def test_refit_loop_converges_in_two_rounds(tmp_path, monkeypatch):
 def test_refit_loop_refuses_when_still_overflowing(tmp_path, monkeypatch):
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t500.0",
-        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
-        "OBED\t13\tdone",
-    ])
-    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
+    pass1_stderr = "OBED\t13\tdone"
+    still_over_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, still_over_stderr, still_over_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq([_text_rects(500.0), _text_rects(500.0), _text_rects(500.0)]),
+    )
     with pytest.raises(AssemblyRefusal, match="still overflows after refit"):
         assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
     assert len(calls) == 1 + dsa._MAX_REFITS
@@ -1689,23 +1743,43 @@ def test_refit_loop_refuses_when_still_overflowing(tmp_path, monkeypatch):
 def test_refit_loop_shrinks(tmp_path, monkeypatch):
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t500.0",
-        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
-        "OBED\t13\tdone",
-    ])
-    still_over_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t500.0", "OBED\t13\tdone"])
-    shrunk_fits_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t20.0", "OBED\t13\tdone"])
+    pass1_stderr = "OBED\t13\tdone"
+    still_over_stderr = "OBED\t13\tdone"
+    shrunk_fits_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch(
         [pass1_stderr, still_over_stderr, still_over_stderr, shrunk_fits_stderr]
     )
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq(
+            [_text_rects(500.0), _text_rects(500.0), _text_rects(500.0), _text_rects(20.0)]
+        ),
+    )
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
     assert result.overflows == ()
     assert any("shrunk to" in w and "pt after refit" in w for w in result.warnings)
     assert len(calls) == 1 + dsa._MAX_REFITS + 1
+
+
+def test_offline_measure_soft_geometry_item_is_not_a_reason_to_skip(tmp_path, monkeypatch):
+    """Gate outcome overrides the original plan step 2: soft_geometry membership is
+    expected for every autosize-stacked box and must not gate or skip the read."""
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "OBED\t13\tdone"
+    refit_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, refit_stderr])
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    soft_flagged = ({1: {("text", 0): (43.0, 704.0, 1849.0, 269.0)}}, {(1, "text", 0)})
+    monkeypatch.setattr(
+        dsa, "offline_text_rects", _offline_reader_seq([soft_flagged, _text_rects(270.0)]),
+    )
+    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+    assert len(calls) == 2
+    assert result.overflows == ()
 
 
 def test_shrink_fallback_never_writes_above_pass1_size(tmp_path, monkeypatch):
@@ -1726,12 +1800,11 @@ def test_shrink_fallback_never_writes_above_pass1_size(tmp_path, monkeypatch):
     pass1_size = plan.stack_t[13] * 40.0
     assert plan.stack_t[13] < 1.0, "fixture must exercise pass 1 shrinking for this test to mean anything"
 
-    pass1_stderr = "\n".join([
-        "OBED\t13\tOVERFLOW\ttext:0\t900.0",
-        "OBED\t13\tdone",
-    ])
-    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    pass1_stderr = "OBED\t13\tdone"
+    shrink_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, shrink_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_MISSING_RECTS, _text_rects(20.0)]))
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
@@ -1748,7 +1821,7 @@ def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monke
     fw_deck.mkdir()
     (fw_deck / "stub").write_bytes(b"x" * 32)
     out_path = tmp_path / "out" / "assembled.key"
-    text = " ".join(["word"] * 240)
+    text = " ".join(["word"] * 170)
     split_at = len(text) // 2
     runs = [
         {"text": text[:split_at], "size": 40.0},
@@ -1767,12 +1840,11 @@ def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monke
     assert t_prev < 1.0, "fixture must exercise pass 1 shrinking for this test to mean anything"
     pass1_lo, pass1_hi = 30.0 * t_prev, 40.0 * t_prev
 
-    pass1_stderr = "\n".join([
-        "OBED\t13\tOVERFLOW\ttext:0\t900.0",
-        "OBED\t13\tdone",
-    ])
-    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
+    pass1_stderr = "OBED\t13\tdone"
+    shrink_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr, shrink_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_MISSING_RECTS, _text_rects(20.0)]))
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
         min_text_pt=24.0,
@@ -1791,17 +1863,17 @@ def test_shrink_fallback_never_writes_above_pass1_size_mixed_run(tmp_path, monke
 def test_refit_round_dropped_measure_warns_and_keeps_prior_size(tmp_path, monkeypatch):
     _require_helvetica()
     fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t500.0",
-        "OBED\t13\tOVERFLOW\ttext:0\t500.0",
-        "OBED\t13\tdone",
-    ])
+    pass1_stderr = "OBED\t13\tdone"
     dropped_measure_stderr = "OBED\t13\tdone"
-    shrunk_fits_stderr = "\n".join(["OBED\t13\tMEASURE\ttext:0\t20.0", "OBED\t13\tdone"])
+    shrunk_fits_stderr = "OBED\t13\tdone"
     live_batch_cls, calls = _make_seq_live_batch(
         [pass1_stderr, dropped_measure_stderr, shrunk_fits_stderr]
     )
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq([_text_rects(500.0), _MISSING_RECTS, _text_rects(20.0)]),
+    )
     result = assemble_dsk_deck(
         fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
     )
@@ -1810,21 +1882,16 @@ def test_refit_round_dropped_measure_warns_and_keeps_prior_size(tmp_path, monkey
     assert len(calls) == 3
 
 
-def test_measure2_mismatch_warns_end_to_end(tmp_path, monkeypatch):
-    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
-    pass1_stderr = "\n".join([
-        "OBED\t13\tMEASURE\ttext:0\t250.0",
-        "OBED\t13\tMEASURE2\ttext:0\t260.0",
-        "OBED\t13\tdone",
-    ])
-    live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
-    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
-    result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
-    assert len(calls) == 1
-    assert any(
-        "text:0 measure settled at 250.0 but re-read 260.0 at end of slide" in w
-        for w in result.warnings
+def test_assembly_script_emits_no_measure2_lines():
+    """MEASURE2 (the end-of-slide-loop re-read) and its poll are gone (D2b step 4) --
+    the offline naturalSize read of the saved deck is the sole refit authority now."""
+    plan, _slides_by_number = _badge_and_stack_plan()
+    script = build_assembly_script(
+        plan, scratch_path=Path("/tmp/scratch.key"), staging_path=Path("/tmp/staged.key"),
+        layout_policy="preserve",
     )
+    assert "MEASURE2" not in script
+    assert "repeat with i from 1 to" not in script
 
 
 def test_refit_script_staged_index_retains_hidden_item_below_stack():
@@ -1854,6 +1921,7 @@ def test_hidden_marker_appears_in_warnings(tmp_path, monkeypatch):
     ])
     live_batch_cls, calls = _make_seq_live_batch([pass1_stderr])
     _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(110.0)]))
     result = assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
     assert len(calls) == 1
     assert any("shape 2 of slide 13" in w and "title" in w and "hidden" in w for w in result.warnings)
@@ -4338,7 +4406,7 @@ def test_unresolved_gap_below_t1_flattens_lead_size_under_shrink_text_fit():
     assert ("text", 1) not in plan.run_sizes.get(13, {})
     assert ("text", 1) not in plan.text_sizes.get(13, {})
     assert ("text", 1) in plan.shrink_text_sizes[13]
-    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(122.99, abs=0.01)
+    assert plan.shrink_text_sizes[13][("text", 1)] == pytest.approx(124.5, abs=0.01)
     assert any(
         "flattening run sizes to the lead size under --text-fit shrink" in w and "box 1" in w
         for w in plan.warnings
@@ -5652,3 +5720,134 @@ def test_min_text_pt_forces_split():
     plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={}, min_text_pt=66.0)
     assert plan.parts[17] == 2
     assert len(plan.splits[17]) == 2
+
+
+# --------------------------------------------------------------------------
+# _offline_measure (D2b step 2) -- staged-index inversion, offline reader faked.
+# --------------------------------------------------------------------------
+def test_offline_measure_maps_staged_index_back_to_source_index(monkeypatch):
+    plan, _slides_by_number = _badge_and_stack_plan()
+    plan.fits[13][("text", 2)] = plan.fits[13][("text", 0)]
+    plan.deletes[13] = (("text", 0),)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        lambda key_path, *, deck=None: (
+            {1: {("text", 0): (43.0, 800.0, 1849.0, 300.0), ("text", 1): (100.0, 50.0, 200.0, 60.0)}},
+            set(),
+        ),
+    )
+    measured, bands = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+    assert measured[(13, "text:1")] == 300.0
+    assert measured[(13, "text:2")] == 60.0
+    assert bands[(13, "text:1")] == (800.0, 1100.0)
+    assert not warnings
+
+
+def test_offline_measure_warns_and_skips_on_staged_count_mismatch(monkeypatch):
+    plan, _slides_by_number = _badge_and_stack_plan()
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        lambda key_path, *, deck=None: ({1: {("text", 0): (0.0, 0.0, 0.0, 0.0)}}, set()),
+    )
+    measured, _bands = dsa._offline_measure(Path("/tmp/staged.key"), plan, {}, warnings)
+    assert measured == {}
+    assert any("staged text count" in w and "offline text count" in w for w in warnings)
+
+
+# --------------------------------------------------------------------------
+# C1 (Codex review 1) -- a failed refit/shrink pass must never be accepted.
+# --------------------------------------------------------------------------
+def test_refit_round_refuses_on_nonzero_batch_returncode(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+
+    class _FailingRefitBatch:
+        def __init__(self, deck, out_dir, *, rss_limit_bytes=0, log=print):
+            self.deck = Path(deck)
+            self.out_dir = Path(out_dir)
+            self.work = self.out_dir / "fake-work"
+            self.scratch = self.work / self.deck.name
+            self._n = 0
+
+        def __enter__(self):
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch.mkdir(parents=True, exist_ok=True)
+            (self.scratch / "marker").write_bytes(b"scratch")
+            return self
+
+        def __exit__(self, exc_type, exc, _tb):
+            return False
+
+        def run(self, script_path, *, on_progress=None, retry_on_1712=True):
+            self._n += 1
+            if self._n == 1:
+                return subprocess.CompletedProcess([], 0, "", "OBED\t13\tdone")
+            return subprocess.CompletedProcess([], 1, "", "some Keynote error")
+
+    _patch_common_with_batch(monkeypatch, payload, classes, _FailingRefitBatch)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(500.0)]))
+    with pytest.raises(AssemblyRefusal, match="refit round 1 failed"):
+        assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+
+
+def test_refit_round_refuses_on_miss_line(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+
+    class _MissRefitBatch:
+        def __init__(self, deck, out_dir, *, rss_limit_bytes=0, log=print):
+            self.deck = Path(deck)
+            self.out_dir = Path(out_dir)
+            self.work = self.out_dir / "fake-work"
+            self.scratch = self.work / self.deck.name
+            self._n = 0
+
+        def __enter__(self):
+            self.work.mkdir(parents=True, exist_ok=True)
+            self.scratch.mkdir(parents=True, exist_ok=True)
+            (self.scratch / "marker").write_bytes(b"scratch")
+            return self
+
+        def __exit__(self, exc_type, exc, _tb):
+            return False
+
+        def run(self, script_path, *, on_progress=None, retry_on_1712=True):
+            self._n += 1
+            if self._n == 1:
+                return subprocess.CompletedProcess([], 0, "", "OBED\t13\tdone")
+            return subprocess.CompletedProcess(
+                [], 0, "", "MISS\t13\ttext item 1 of slide 1\tsome AppleScript error"
+            )
+
+    _patch_common_with_batch(monkeypatch, payload, classes, _MissRefitBatch)
+    monkeypatch.setattr(dsa, "offline_text_rects", _offline_reader_seq([_text_rects(500.0)]))
+    with pytest.raises(AssemblyRefusal, match="write failed for slide 13"):
+        assemble_dsk_deck(fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve")
+
+
+# --------------------------------------------------------------------------
+# C4 (Codex review 1) -- a still-overflowing box after shrink must refuse, never
+# publish with a nonempty AssembleResult.overflows.
+# --------------------------------------------------------------------------
+def test_shrink_fallback_refuses_when_still_over_budget_after_shrink(tmp_path, monkeypatch):
+    _require_helvetica()
+    fw_deck, out_path, payload, classes, decisions = _stacked_assemble_fixture(tmp_path)
+    pass1_stderr = "OBED\t13\tdone"
+    still_over_stderr = "OBED\t13\tdone"
+    shrunk_still_over_stderr = "OBED\t13\tdone"
+    live_batch_cls, calls = _make_seq_live_batch(
+        [pass1_stderr, still_over_stderr, still_over_stderr, shrunk_still_over_stderr]
+    )
+    _patch_common_with_batch(monkeypatch, payload, classes, live_batch_cls)
+    monkeypatch.setattr(
+        dsa, "offline_text_rects",
+        _offline_reader_seq(
+            [_text_rects(500.0), _text_rects(500.0), _text_rects(500.0), _text_rects(5000.0)]
+        ),
+    )
+    with pytest.raises(AssemblyRefusal, match="still overflows after refit and shrink"):
+        assemble_dsk_deck(
+            fw_deck, out_path, decisions=decisions, clips={}, layout_policy="preserve", text_fit="shrink",
+        )

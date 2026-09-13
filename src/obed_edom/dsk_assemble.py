@@ -39,6 +39,7 @@ from obed_edom.dsk_plan import (
     Run,
     SlideClass,
     TextBox,
+    _box_min_t,
     _delete_order,
     _item_object_ids,
     _TEXT_GAP_PT,
@@ -72,7 +73,13 @@ from obed_edom.iwa_runs import (
 )
 from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
 from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
-from obed_edom.offline_inspect import _build_data_index, _canvas_size, _data_identifier, offline_wall_payload
+from obed_edom.offline_inspect import (
+    _build_data_index,
+    _canvas_size,
+    _data_identifier,
+    offline_text_rects,
+    offline_wall_payload,
+)
 from obed_edom.remap_keynote import _AS_KIND_NAMES, _as_num, _delete_or_hide_placeholder_lines, copy_keynote
 
 DEFAULT_BAND = Band(1054.0, 350.0, 43.0, 1892.0, 4)
@@ -1269,47 +1276,24 @@ def _group_blind_child_lines(number: int, ordinal: int, kind_index: int, rect: R
     ]
 
 
-_MEASURE_POLL_DELAY = 0.2
-_MEASURE_MAX_POLLS = 5
-
-
 def _text_measure_lines(
     number: int, kind_index: int, addr: str, target_h: float, *, ordinal: int | None = None
 ) -> list[str]:
-    """Poll a text item's live height until two consecutive reads agree (`delay 0.2`, at
-    most 5 polls), log `OBED\\t<n>\\tMEASURE\\ttext:<idx>\\t<h>`, then `OBED\\t<n>\\tOVERFLOW\\t...`
-    when it still exceeds `target_h` by more than 2pt."""
+    """One-shot diagnostic read of a text item's live height (single ``height of``, no
+    poll -- the live read is known stale after ``set width/position/size`` and the offline
+    naturalSize read of the saved deck is the refit authority, see D2b), logging
+    `OBED\\t<n>\\tMEASURE\\ttext:<idx>\\t<h>`, then `OBED\\t<n>\\tOVERFLOW\\t...` when it still
+    exceeds `target_h` by more than 2pt."""
     item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
     return [
         "        try",
-        "          set prevH to -1",
-        f"          repeat with i from 1 to {_MEASURE_MAX_POLLS}",
-        f"            set curH to (height of {addr})",
-        "            if curH = prevH then",
-        "              exit repeat",
-        "            end if",
-        "            set prevH to curH",
-        f"            delay {_MEASURE_POLL_DELAY}",
-        "          end repeat",
+        f"          set curH to (height of {addr})",
         f'          log ("OBED" & tab & "{number}" & tab & "MEASURE" & tab & '
         f'"{item_key}" & tab & (curH as string))',
         f"          if curH > {_as_num(target_h)} + 2.0 then",
         f'            log ("OBED" & tab & "{number}" & tab & "OVERFLOW" & tab & '
         f'"{item_key}" & tab & (curH as string))',
         "          end if",
-        "        end try",
-    ]
-
-
-def _second_measure_lines(number: int, kind_index: int, addr: str, *, ordinal: int | None = None) -> list[str]:
-    """End-of-slide-loop re-read of a stacked box's height, logged under a distinct
-    ``MEASURE2`` key so a run can prove the first ``MEASURE`` had already settled rather
-    than agreeing twice on a stale value."""
-    item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
-    return [
-        "        try",
-        f'          log ("OBED" & tab & "{number}" & tab & "MEASURE2" & tab & '
-        f'"{item_key}" & tab & ((height of {addr}) as string))',
         "        end try",
     ]
 
@@ -1407,15 +1391,6 @@ def _slide_lines(
         if kind == "text" and (item_id not in text_sizes or item_id in stacked_ids_here):
             overflow_ordinal = ordinal if split_parts is not None else None
             lines += _text_measure_lines(number, kind_index, addr, rect.h, ordinal=overflow_ordinal)
-
-    for item_id in stacked_ids_here:
-        kind, kind_index = item_id
-        name = _AS_KIND_NAMES.get(kind)
-        if not name:
-            continue
-        addr = f"{name} {kind_index + 1} of slide {ordinal}"
-        overflow_ordinal = ordinal if split_parts is not None else None
-        lines += _second_measure_lines(number, kind_index, addr, ordinal=overflow_ordinal)
 
     for item_id in deletes_here:
         kind, kind_index = item_id
@@ -2215,10 +2190,13 @@ def _staged_kind_ranks(
     return by_kind
 
 
-def _staged_retained_ids(number: int, plan: AssemblyPlan, *, part: int = 0) -> set[tuple[str, int]]:
+def _staged_retained_ids(
+    number: int, plan: AssemblyPlan, *, part: int = 0, hidden: frozenset[ItemId] = frozenset()
+) -> set[tuple[str, int]]:
     """Staged (post-delete/insert) `(kind, kindIndex)` for the items this slide keeps;
-    an inserted clip becomes the last staged movie."""
-    by_kind = _staged_kind_ranks(number, plan, part=part)
+    an inserted clip becomes the last staged movie. ``hidden`` (keyed by source slide
+    number, same map as the refit loop's) keeps a delete-refused placeholder retained."""
+    by_kind = _staged_kind_ranks(number, plan, part=part, hidden=hidden)
     retained = {(kind, rank) for kind, idxs in by_kind.items() for rank in range(len(idxs))}
     if number in plan.clips:
         retained.add(("movie", len(by_kind.get("movie", []))))
@@ -2246,9 +2224,18 @@ def _staged_id_for(
     return (kind, idxs.index(idx))
 
 
-def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: AssemblyPlan, number: int) -> list[dict]:
+def _merge_split_part_builds(
+    ordinal_recs: list[tuple[int, dict]],
+    plan: AssemblyPlan,
+    number: int,
+    *,
+    hidden: frozenset[ItemId] = frozenset(),
+) -> list[dict]:
     """Sums each part's own long-box builds; merges short-item builds, treating a key as
-    "repeated" only when genuinely shared across every part (see plan D5)."""
+    "repeated" only when genuinely shared across every part (see plan D5). ``hidden`` is
+    the source slide's placeholder-hide set (keyed by slide number, not by ordinal/part --
+    a delete-refused placeholder is the same source item regardless of which split part
+    produced the ``HIDDEN`` marker, so one set per source slide is sufficient here)."""
     split_parts = plan.splits.get(number, ())
     part_fits = [p.fits for p in split_parts]
     long_builds: list[dict] = []
@@ -2258,8 +2245,8 @@ def _merge_split_part_builds(ordinal_recs: list[tuple[int, dict]], plan: Assembl
     for ordinal, rec in ordinal_recs:
         part = ordinal - plan.ordinals[number]
         source_long_id = next(iter(split_parts[part].stacked_ids), None) if part < len(split_parts) else None
-        long_id = _staged_id_for(number, plan, source_long_id, part=part)
-        staged_idxs = _staged_kind_ranks(number, plan, part=part)
+        long_id = _staged_id_for(number, plan, source_long_id, part=part, hidden=hidden)
+        staged_idxs = _staged_kind_ranks(number, plan, part=part, hidden=hidden)
         counts: Counter = Counter()
         for b in rec["builds"]:
             if (b["kind"], b["kindIndex"]) == long_id:
@@ -2417,6 +2404,17 @@ def _verify_builds(fw_deck: Path, out_path: Path, plan: AssemblyPlan, warnings: 
 _MAX_REFITS = 2
 
 
+def _check_refit_batch_result(proc: Any, label: str) -> None:
+    """Refuses on a nonzero refit/shrink pass or any ``MISS`` line -- a failed write
+    must never let its (unwritten) measurement be accepted as the new state."""
+    if proc.returncode != 0:
+        raise AssemblyRefusal(f"{label} failed (exit {proc.returncode}):\n{(proc.stderr or '')[-2000:]}")
+    for line in (proc.stderr or "").splitlines():
+        m = _MISS_RE.match(line)
+        if m:
+            raise AssemblyRefusal(f"{label}: write failed for slide {m.group(1)} {m.group(2)}: {m.group(3)}")
+
+
 def _box_with_runs(box: TextBox, item: Mapping) -> TextBox:
     """Attaches ``item['runs']`` (per-run font+size from ``attach_runs``) to a stacking
     ``TextBox`` so a refit round can use the run-aware estimator."""
@@ -2437,8 +2435,15 @@ def _eligible_refit_items(plan: AssemblyPlan, slide_no: int) -> frozenset[ItemId
 
 
 def _refit_still_over_budget(
-    plan: AssemblyPlan, measured: Mapping[tuple[int, str], float], keys: Iterable[tuple[int, str]]
+    plan: AssemblyPlan,
+    measured: Mapping[tuple[int, str], float],
+    keys: Iterable[tuple[int, str]],
+    bands: Mapping[tuple[int, str], tuple[float, float]] | None = None,
 ) -> set[tuple[int, str]]:
+    """A key is over budget when its measured height exceeds its rect (+2pt), or --
+    when ``bands`` carries its offline ``(y, bottom)`` -- it was placed outside its
+    slide's stack band by more than 1pt even though its own rect fits."""
+    bands = bands or {}
     over: set[tuple[int, str]] = set()
     for slide_no, item_key in keys:
         item_id: ItemId = ("text", int(item_key.split(":")[1]))
@@ -2446,6 +2451,14 @@ def _refit_still_over_budget(
         measured_h = measured.get((slide_no, item_key))
         if rect is None or measured_h is None or measured_h > rect.h + 2.0:
             over.add((slide_no, item_key))
+            continue
+        y_bottom = bands.get((slide_no, item_key))
+        stack_band = plan.stack_bands.get(slide_no)
+        if y_bottom is not None and stack_band is not None:
+            y, bottom = y_bottom
+            top = stack_band.bottom - stack_band.height
+            if y < top - 1.0 or bottom > stack_band.bottom + 1.0:
+                over.add((slide_no, item_key))
     return over
 
 
@@ -2538,6 +2551,45 @@ def _build_refit_round(
     return refits
 
 
+def _offline_measure(
+    staging_path: Path,
+    plan: AssemblyPlan,
+    hidden: Mapping[int, frozenset[ItemId]],
+    warnings: list[str],
+) -> tuple[dict[tuple[int, str], float], dict[tuple[int, str], tuple[float, float]]]:
+    """``{(source slide number, 'text:<srcIdx>'): measured h}`` plus ``{key: (y, bottom)}``,
+    read from the SAVED staging deck -- the archive's stored naturalSize, the Gate-outcome
+    authority (soft_geometry membership is expected and is not a reason to skip). Heights
+    are whole-point rounded by the offline reader (+/-0.5pt against the +2.0pt tolerance).
+    Split slides are skipped -- ``_eligible_refit_items`` already excludes them."""
+    measured: dict[tuple[int, str], float] = {}
+    bands: dict[tuple[int, str], tuple[float, float]] = {}
+    try:
+        rects_by_ordinal, _soft = offline_text_rects(staging_path)
+    except Exception as exc:  # noqa: BLE001 -- any offline-read failure just skips this round's measure
+        warnings.append(f"offline measure failed: {exc}")
+        return measured, bands
+    for number, ordinal in plan.ordinals.items():
+        if number in plan.splits:
+            continue
+        rects = rects_by_ordinal.get(ordinal, {})
+        offline_text_count = sum(1 for kind, _idx in rects if kind == "text")
+        ranks = _staged_kind_ranks(number, plan, hidden=hidden.get(number, frozenset())).get("text", [])
+        if offline_text_count != len(ranks):
+            warnings.append(
+                f"slide {number}: staged text count {len(ranks)} != offline text count "
+                f"{offline_text_count} on ordinal {ordinal}, refit measurement skipped"
+            )
+            continue
+        for (kind, staged_idx), (_x, y, _w, h) in rects.items():
+            if kind != "text" or staged_idx >= len(ranks):
+                continue
+            key = (number, f"text:{ranks[staged_idx]}")
+            measured[key] = h
+            bands[key] = (y, y + h)
+    return measured, bands
+
+
 def _run_refit_and_finalize(
     plan: AssemblyPlan,
     batch: LiveBatch,
@@ -2559,17 +2611,26 @@ def _run_refit_and_finalize(
     (`keynote.py`'s ``_build_superscript_fix_script`` precedent: a second osascript
     against a document a prior pass already saved), correcting every stacked box still
     over budget and re-saving in place (``retry_on_1712=False``); stops early once every
-    box on a touched slide fits its rect within +2pt."""
+    box on a touched slide fits its rect within +2pt. The offline naturalSize read of
+    ``staging_path`` (:func:`_offline_measure`) is the authority for every trigger and
+    stop decision -- the live ``MEASURE``/``OVERFLOW`` lines are diagnostics only (logged
+    when they diverge from the offline read by more than 2pt). Split is not re-run after
+    a refit (C5, deferred): a still-overflowing split slide is left to the ``text_fit``
+    fallback below, same as any other unresolved box."""
     eligible_keys = {
-        (o["slide"], o["item"])
-        for o in overflows
-        if o["item"].startswith("text:")
-        and o["item"][5:].isdigit()
-        and ("text", int(o["item"][5:])) in _eligible_refit_items(plan, o["slide"])
+        (n, f"text:{iid[1]}")
+        for n in plan.ordinals
+        for iid in _eligible_refit_items(plan, n)
     }
     if not eligible_keys:
         return
-    todo = _refit_still_over_budget(plan, measured, eligible_keys)
+    live_measured = dict(measured)
+    measured, bands = _offline_measure(staging_path, plan, hidden, warnings)
+    for key, live_h in live_measured.items():
+        offline_h = measured.get(key)
+        if offline_h is not None and abs(live_h - offline_h) > 2.0:
+            log(f"slide {key[0]}: {key[1]} live={live_h} offline={offline_h} diverge")
+    todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands)
     reopen_path = staging_path
     correction: dict[tuple[int, ItemId], float] = {}
     warned_gaps: set[tuple[int, ItemId]] = set()
@@ -2590,11 +2651,10 @@ def _run_refit_and_finalize(
             staging_path=staging_path, hidden=hidden,
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
-        for key in todo:
-            measured.pop(key, None)
-        measured.update(_parse_measure_lines(proc.stderr or ""))
+        _check_refit_batch_result(proc, f"refit round {round_no}")
+        measured, bands = _offline_measure(staging_path, plan, hidden, warnings)
         reopen_path = staging_path
-        todo = _refit_still_over_budget(plan, measured, eligible_keys)
+        todo = _refit_still_over_budget(plan, measured, eligible_keys, bands=bands)
 
     if todo:
         if allow_split:
@@ -2614,7 +2674,8 @@ def _run_refit_and_finalize(
             run_sizes_src = [float(r["size"]) for r in (item.get("runs") or []) if r.get("size") is not None]
             min_source_size = min(run_sizes_src) if run_sizes_src else float(item.get("size") or min_text_pt)
             lead_source_size = float(item.get("size") or min_source_size)
-            t_floor = min(1.0, min_text_pt / lead_source_size) if lead_source_size > 0 else 1.0
+            shrink_box = _box_with_runs(TextBox(item_id, "", "", lead_source_size), item)
+            t_floor = min(1.0, _box_min_t(shrink_box, min_text_pt))
             t_prev = last_t.get(slide_no, 1.0)
             measured_h = measured.get((slide_no, item_key))
             t_fit = t_prev * (rect.h / measured_h) if measured_h and measured_h > 0 else t_prev
@@ -2655,14 +2716,21 @@ def _run_refit_and_finalize(
             staging_path=staging_path, hidden=hidden,
         )
         proc = batch.run(_osascript_path(script, batch.work), retry_on_1712=False)
-        measured.update(_parse_measure_lines(proc.stderr or ""))
-        todo = _refit_still_over_budget(plan, measured, todo)
+        _check_refit_batch_result(proc, "shrink fallback")
+        measured, bands = _offline_measure(staging_path, plan, hidden, warnings)
+        todo = _refit_still_over_budget(plan, measured, todo, bands=bands)
+
+    if todo:
+        slide_no, item_key = sorted(todo)[0]
+        raise AssemblyRefusal(
+            f"slide {slide_no}: text {item_key} still overflows after refit and shrink"
+        )
 
     resolved_keys = eligible_keys - todo
     if resolved_keys:
         stale_prefixes = tuple(f"slide {s}: text {i} overflow, height " for s, i in resolved_keys)
         warnings[:] = [w for w in warnings if not w.startswith(stale_prefixes)]
-    overflows[:] = [o for o in overflows if (o["slide"], o["item"]) not in eligible_keys or (o["slide"], o["item"]) in todo]
+    overflows[:] = [o for o in overflows if (o["slide"], o["item"]) not in eligible_keys]
 
 
 def assemble_dsk_deck(
@@ -2789,17 +2857,6 @@ def assemble_dsk_deck(
                 elif key == "MEASURE":
                     item_key, _sep, height_s = prop_m.group(3).partition("\t")
                     measured[(slide_no, item_key)] = float(height_s)
-                elif key == "MEASURE2":
-                    item_key, _sep, height_s = prop_m.group(3).partition("\t")
-                    height2 = float(height_s)
-                    measured_h = measured.get((slide_no, item_key))
-                    if measured_h is not None and abs(height2 - measured_h) > 2.0:
-                        msg = (
-                            f"slide {slide_no}: text {item_key} measure settled at "
-                            f"{measured_h} but re-read {height2} at end of slide"
-                        )
-                        warnings.append(msg)
-                        log(msg)
                 else:
                     movie_props.setdefault(slide_no, {})[key] = prop_m.group(3)
                 continue
