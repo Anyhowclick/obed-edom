@@ -82,6 +82,7 @@ export function DskTab() {
         <FileWell
           label="Finalised LW.key"
           hint="Required"
+          tone="lw"
           file={lw}
           onChoose={async () => {
             try {
@@ -96,6 +97,7 @@ export function DskTab() {
         <FileWell
           label="Optional DSK.key to modify"
           hint="Drop an existing DSK, or a DSK template .key"
+          tone="dsk"
           file={dsk}
           onChoose={async () => {
             try {

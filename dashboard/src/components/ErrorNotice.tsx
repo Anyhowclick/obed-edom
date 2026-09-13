@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { IconClose } from "./icons";
 
 export function ErrorNotice({ message, onDismiss }: { message: string | null | undefined; onDismiss?: () => void }) {
   const [dismissed, setDismissed] = useState<string | null>(null);
@@ -22,7 +23,7 @@ export function ErrorNotice({ message, onDismiss }: { message: string | null | u
           onDismiss?.();
         }}
       >
-        ×
+        <IconClose />
       </button>
     </div>
   );

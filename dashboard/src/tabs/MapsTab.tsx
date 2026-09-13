@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   bootstrapMapsCsv,
   bootstrapMapsPinsCsv,
+  bootstrapMapsRows,
   downloadMapsSession,
   exportMaps,
   cancelMapsExport,
@@ -27,6 +28,25 @@ import {
 } from "../api";
 import { ArtifactActions } from "../components/ArtifactActions";
 import { ErrorNotice } from "../components/ErrorNotice";
+import {
+  IconArrowLeft,
+  IconCaret,
+  IconClose,
+  IconCopy,
+  IconDot,
+  IconDropPin,
+  IconLabel,
+  IconLabelOff,
+  IconLandmark,
+  IconLayers,
+  IconPanelRight,
+  IconPaste,
+  IconPasteSlides,
+  IconPlay,
+  IconPlus,
+  IconRelief,
+  IconTrash,
+} from "../components/icons";
 import { JobName } from "../components/JobName";
 import { LoadingOverlay, type OverlayProgress } from "../components/PreviewGrid";
 import { type Item as WcItem } from "../components/WatercolourResultView";
@@ -46,6 +66,8 @@ import { autoCruiseZoom, cameraAtHop, captureFlyFrames } from "../maps/captureFl
 import { commitCamera, shouldPublishThumb, shouldReconcileThumb, thumbnailFingerprint, withSlideCamera, type ThumbnailGeometry } from "../maps/commit";
 import { CountryCachePicker } from "../maps/CountryCache";
 import { HopTimeline } from "../maps/HopTimeline";
+import { ManualEntriesForm } from "../maps/ManualEntriesForm";
+import type { ManualMode, MapsBootstrapRow } from "../maps/manualRows";
 import { MorphGates, MovieAppearanceGate } from "../maps/MorphGates";
 import { MapView, type MapViewHandle } from "../maps/MapView";
 import { OBJECT_SIZE_MAX, defaultObjectSize, pasteRebase, zoomSizeFactor } from "../maps/objects";
@@ -120,107 +142,14 @@ const INSPECTOR_TABS: { id: InspectorTab; label: string }[] = [
   { id: "export", label: "Export" },
 ];
 
-function IconPlay() {
-  return (
-    <svg className="maps-icon filled" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 5v14l11-7z" />
-    </svg>
-  );
+function pinKindClass(kind: MapsPinKind): string {
+  return kind === "dropPin" ? "droppin" : kind;
 }
 
-function IconTrash() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M7 7h10M9.5 7V6a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 6v1M8 7l.7 12.5h6.6L16 7"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function IconLibrary() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="4.5" width="17" height="15" rx="2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M16.5 4.5v15" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconLayers() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 4.2 21 8.5 12 12.8 3 8.5 12 4.2z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M5.2 12.2 12 15.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M5.2 16.2 12 19.5l6.8-3.3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconRelief() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M3 17 8.5 8l4 6.5L15 10l6 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconLabelOff() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M4 20 20 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconPlus() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function IconLabel() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 8h11l4 4-4 4H4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function IconCopy() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconPaste() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="5.5" y="5.5" width="13" height="15" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="9" y="3.5" width="6" height="3.5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    </svg>
-  );
-}
-
-function IconPasteSlides() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="5.5" width="11" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <rect x="7" y="3.5" width="4" height="3" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M15.5 12h5M17.5 9.5 20.5 12l-3 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+function PinKindIcon({ kind }: { kind: MapsPinKind }) {
+  if (kind === "dropPin") return <IconDropPin />;
+  if (kind === "landmark") return <IconLandmark />;
+  return <IconDot />;
 }
 
 function cloneSlide(slide: MapsSlide, id: string): MapsSlide {
@@ -324,6 +253,9 @@ export function MapsTab() {
   const layersRef = useRef<HTMLDivElement | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [manualMode, setManualMode] = useState<ManualMode | null>(null);
+  const [manualBusy, setManualBusy] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sessionMenuRef = useRef<HTMLDivElement | null>(null);
   const [namesTick, setNamesTick] = useState(0);
@@ -1327,6 +1259,49 @@ export function MapsTab() {
     await selectSlide(last.id, { flush: false, audience: activeAudienceRef.current });
   }
 
+  function closeManual() {
+    setManualMode(null);
+    addButtonRef.current?.focus();
+  }
+
+  async function onManualRows(rows: MapsBootstrapRow[], mode: ManualMode) {
+    if (!job || !rows.length || manualBusy) return;
+    const target = mode === "pins" ? active : null;
+    if (mode === "pins" && !target) {
+      setError("Select a slide first.");
+      return;
+    }
+    const targetJobId = job.id;
+    setError(null);
+    setManualBusy(true);
+    const beforeIds = new Set((docRef.current?.slides || []).map((slide) => slide.id));
+    try {
+      await persistCurrentState();
+      if (jobRef.current?.id !== targetJobId) return;
+      const started = await bootstrapMapsRows(
+        targetJobId,
+        target ? { rows, targetSlideId: target.id, audience: activeAudience } : { rows }
+      );
+      setJob(started);
+      const done = await pollJob(started.id, (tick) => {
+        setLogs(tick.logs);
+        setJob(tick);
+      });
+      if (jobRef.current?.id !== targetJobId) return;
+      if (done.status === "error") return;
+      reconcileServerJob(done);
+      closeManual();
+      if (mode === "slides") {
+        const created = (docRef.current?.slides || []).find((slide) => !beforeIds.has(slide.id));
+        if (created) void selectSlide(created.id, { flush: false });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   async function onCsv(file: File, mode: "append" | "replace" | "pins") {
     if (!job) return;
     setError(null);
@@ -1897,17 +1872,19 @@ export function MapsTab() {
         <h1>Maps</h1>
         <p className="lede">Author LED-wall cameras, then export Keynote stills. Nothing is created until you start a deck.</p>
         <ErrorNotice message={error || openError} onDismiss={error ? () => setError(null) : undefined} />
-        <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
-          New map deck
-        </button>
-        <button
-          className="btn secondary"
-          type="button"
-          disabled={sessionBusy}
-          onClick={() => sessionInput.current?.click()}
-        >
-          Load map session + cache…
-        </button>
+        <div className="actions">
+          <button className="btn" type="button" disabled={sessionBusy} onClick={() => void createDeck()}>
+            New map deck
+          </button>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={sessionBusy}
+            onClick={() => sessionInput.current?.click()}
+          >
+            Load map session + cache…
+          </button>
+        </div>
         <input
           ref={sessionInput}
           type="file"
@@ -1930,6 +1907,7 @@ export function MapsTab() {
         <div className="maps-deck-actions" ref={addMenuRef}>
           <button
             className="btn secondary"
+            ref={addButtonRef}
             type="button"
             disabled={locked}
             aria-expanded={addMenuOpen}
@@ -1938,7 +1916,8 @@ export function MapsTab() {
             title="Add"
             onClick={() => setAddMenuOpen((open) => !open)}
           >
-            ＋
+            <IconPlus />
+            <IconCaret />
           </button>
           {addMenuOpen && (
             <div className="maps-deck-actions-menu" role="group" aria-label="Add">
@@ -1950,6 +1929,27 @@ export function MapsTab() {
                 }}
               >
                 New map deck
+              </button>
+              <button
+                type="button"
+                title="Key in one entry per slide: a name, optionally a place, a Google Maps link with @lat,lng, or coordinates. Each slide is zoomed to fit what it is."
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setManualMode("slides");
+                }}
+              >
+                Add slides manually…
+              </button>
+              <button
+                type="button"
+                disabled={!active}
+                title="Key in one entry per pin on the current view: a name, optionally a place or coordinates. Pins keep this slide's zoom."
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setManualMode("pins");
+                }}
+              >
+                Add pins to this view manually…
               </button>
               <button
                 type="button"
@@ -1997,7 +1997,8 @@ export function MapsTab() {
             aria-haspopup="true"
             onClick={() => setSessionMenuOpen((open) => !open)}
           >
-            Session ▾
+            Session
+            <IconCaret />
           </button>
           {sessionMenuOpen && (
             <div className="maps-deck-actions-menu" role="group" aria-label="Session">
@@ -2079,7 +2080,7 @@ export function MapsTab() {
           aria-pressed={inspectorOpen}
           onClick={() => setInspectorOpen(!inspectorOpen)}
         >
-          <IconLibrary />
+          <IconPanelRight />
         </button>
         <span className={`maps-save-status maps-save-status-${saveStatus}`} aria-live="polite">{SAVE_STATUS_LABEL[saveStatus]}</span>
         <JobName job={job} onRename={renameCurrentJob} className="note" />
@@ -2102,6 +2103,7 @@ export function MapsTab() {
           >
             <IconLayers />
             {activeHiddenLayers.length ? <span className="maps-layers-count">{activeHiddenLayers.length}</span> : null}
+            <IconCaret />
           </button>
           {layersOpen && (
             <div className="maps-layers-menu" role="group" aria-label="Hide map layers">
@@ -2146,15 +2148,27 @@ export function MapsTab() {
         <div className="notice warning" role="alert">
           <p>This map was changed elsewhere. Your draft is paused until you choose which version to keep.</p>
           <p className="muted">{saveConflict.paths.join(", ")}</p>
-          <button className="btn secondary" type="button" onClick={() => {
-            saveQueue.current?.reloadLatest();
-            setSaveConflict(null);
-          }}>Reload latest</button>
-          <button className="btn" type="button" onClick={() => {
-            setSaveConflict(null);
-            void saveQueue.current?.keepMyChanges();
-          }}>Keep my changes</button>
+          <div className="actions">
+            <button className="btn secondary" type="button" onClick={() => {
+              saveQueue.current?.reloadLatest();
+              setSaveConflict(null);
+            }}>Reload latest</button>
+            <button className="btn" type="button" onClick={() => {
+              setSaveConflict(null);
+              void saveQueue.current?.keepMyChanges();
+            }}>Keep my changes</button>
+          </div>
         </div>
+      )}
+
+      {manualMode && (
+        <ManualEntriesForm
+          key={manualMode}
+          mode={manualMode}
+          busy={locked || manualBusy}
+          onCancel={closeManual}
+          onDone={(payload) => void onManualRows(payload, manualMode)}
+        />
       )}
 
       <div
@@ -2189,7 +2203,7 @@ export function MapsTab() {
                         onClick={() => void selectSlide(slide.id, { audience: "lw" })}
                       >
                         {src ? <img src={`${src}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>}
-                        <span className="maps-thumb-view-label">{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>
+                        <span className={`maps-thumb-view-label ${sidePanels || slide.includeSidePanels ? "fw" : "lw"}`}>{sidePanels || slide.includeSidePanels ? "FW" : "LW"}</span>
                       </button>
                       <button
                         type="button"
@@ -2199,7 +2213,7 @@ export function MapsTab() {
                         onClick={() => void selectSlide(slide.id, { audience: "cg" })}
                       >
                         {cgSrc ? <img src={`${cgSrc}?t=${job.updatedAt || ""}`} alt="" /> : <span className="note">CG</span>}
-                        <span className="maps-thumb-view-label">CG</span>
+                        <span className="maps-thumb-view-label cg">CG</span>
                       </button>
                     </div>
                     {slideTitleControl(slide)}
@@ -2263,8 +2277,8 @@ export function MapsTab() {
             );
           })}
           <div className="maps-nav-actions">
-            <button className="btn secondary" type="button" onClick={addSlide} disabled={locked}>
-              +
+            <button className="btn secondary icon-btn" type="button" onClick={addSlide} disabled={locked} title="Add slide" aria-label="Add slide">
+              <IconPlus />
             </button>
             <button className="btn maps-delete" type="button" onClick={removeSlide} disabled={locked || slides.length < 2} title="Delete slide" aria-label="Delete slide">
               <IconTrash />
@@ -2404,7 +2418,7 @@ export function MapsTab() {
               {inspTab === "properties" && pin && (
                 <>
                   <button className="maps-insp-back" type="button" onClick={() => setSelectedPin(null)}>
-                    ← Camera
+                    <IconArrowLeft /> Camera
                   </button>
                   <div className="cap">Object</div>
                   <label>
@@ -2418,6 +2432,9 @@ export function MapsTab() {
                     />
                   </label>
                   <label>
+                    <span className={`maps-pin-kind kind-${pinKindClass(pin.kind)}`} aria-hidden="true">
+                      <PinKindIcon kind={pin.kind} />
+                    </span>
                     Kind:
                     <select
                       value={pin.kind}
@@ -2562,7 +2579,7 @@ export function MapsTab() {
                     <div className="seg">
                       <button
                         type="button"
-                        className={activeAudience === "lw" ? "on" : ""}
+                        className={`aud-lw${activeAudience === "lw" ? " on" : ""}`}
                         disabled={locked}
                         onClick={() => void selectSlide(active.id, { audience: "lw" })}
                       >
@@ -2570,7 +2587,7 @@ export function MapsTab() {
                       </button>
                       <button
                         type="button"
-                        className={activeAudience === "cg" ? "on" : ""}
+                        className={`aud-cg${activeAudience === "cg" ? " on" : ""}`}
                         disabled={locked}
                         onClick={() => void selectSlide(active.id, { audience: "cg" })}
                       >
@@ -2711,7 +2728,7 @@ export function MapsTab() {
                             }
                           >
                             {admin0Name(code)}
-                            <span aria-hidden="true">×</span>
+                            <IconClose />
                           </button>
                         ))}
                       </div>
@@ -2790,6 +2807,7 @@ export function MapsTab() {
                       }}
                     >
                       <IconPlus />
+                      <IconCaret />
                     </button>
                     {landmarkPicker && (
                       <div className="style-picker-pop maps-landmark-pop">
@@ -2854,14 +2872,14 @@ export function MapsTab() {
                         <button className="btn secondary icon-btn" type="button" disabled={locked || objectClipboard.churches.length === 0} onClick={() => pasteObjects(true)} title="Paste to slides" aria-label="Paste to slides">
                           <IconPasteSlides />
                         </button>
-                        <button className="btn maps-delete maps-pin-bulk-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
+                        <button className="btn maps-delete icon-btn" type="button" disabled={locked || selectedPins.length === 0} onClick={deleteSelectedPins} title="Delete selected objects" aria-label="Delete selected objects">
                           <IconTrash />
                         </button>
                       </div>
                       {objectClipboard.churches.length > 0 && <div className="maps-pin-bulk" role="group" aria-label="Paste destinations">{slides.map((slide) => <label key={slide.id}><input type="checkbox" checked={pasteTargets.includes(slide.id)} onChange={(event) => setPasteTargets((targets) => event.target.checked ? [...new Set([...targets, slide.id])] : targets.filter((id) => id !== slide.id))} /> {slide.title}</label>)}<button className="btn secondary" type="button" disabled={locked || !pasteTargets.length} onClick={() => pasteObjects(true)}>Paste selected slides</button></div>}
                       <div className="maps-pin-list">
                         {(activeView?.churches || []).map((church) => (
-                          <div key={church.id} className={`maps-pin-row${selectedPin === church.id ? " active" : ""}`}>
+                          <div key={church.id} className={`maps-pin-row kind-${pinKindClass(church.kind)}${selectedPin === church.id ? " active" : ""}`}>
                             <label className="maps-pin-select" aria-label={`Select ${church.name}`}>
                               <input
                                 type="checkbox"
@@ -2871,6 +2889,9 @@ export function MapsTab() {
                               />
                             </label>
                             <button type="button" className="maps-pin-open" disabled={locked} onClick={() => openPin(church.id)}>
+                              <span className={`maps-pin-kind kind-${pinKindClass(church.kind)}`} aria-hidden="true">
+                                <PinKindIcon kind={church.kind} />
+                              </span>
                               <span className="maps-pin-swatch" style={{ background: church.color }} />
                               <span className="maps-pin-name">{church.name}</span>
                               {church.reveal && <span className="maps-pin-hidden">Paint-on {church.reveal.duration}s</span>}
@@ -3069,7 +3090,7 @@ export function MapsTab() {
               {inspTab === "export" && (
                 <div>
                   <div className="cap">Export to Keynote</div>
-                  <label className="maps-check">
+                  <label className="maps-check aud-lw">
                     <input
                       type="checkbox"
                       checked={doc?.exportLw !== false}
@@ -3083,7 +3104,7 @@ export function MapsTab() {
                     />
                     LED wall (7680×1080)
                   </label>
-                  <label className="maps-check">
+                  <label className="maps-check aud-cg">
                     <input
                       type="checkbox"
                       checked={doc?.exportCg !== false}
@@ -3097,7 +3118,7 @@ export function MapsTab() {
                     />
                     CG (1920×1080)
                   </label>
-                  <label className="maps-check">
+                  <label className="maps-check aud-dsk">
                     <input
                       type="checkbox"
                       checked={doc?.exportDsk === true}

@@ -25,7 +25,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
-from obed_edom.maps_csv import COORD_DEFAULT_ZOOM, Place, parse_places, resolve_zoom
+from obed_edom.maps_csv import COORD_DEFAULT_ZOOM, Place, parse_places, places_from_rows, resolve_zoom
 from obed_edom.maps_geo import (
     DEFAULT_HIDDEN_LAYERS,
     GeocodeError,
@@ -73,6 +73,7 @@ SESSION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 DEFAULT_ISOLATE_STRENGTH = 0.65
 MAX_RETIRED_LINKS = 200
+MAX_BOOTSTRAP_ROWS = 100
 
 DIR_KEYS = {"outputDir", "workDir", "previewDir", "stem", "previews", "previewFiles"}
 _MUTATION_LOCKS: dict[str, threading.RLock] = {}
@@ -471,6 +472,25 @@ class ExportBody(BaseModel):
     exportCg: bool | None = None
     exportDsk: bool | None = None
     exportDir: str | None = None
+
+
+class BootstrapRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = ""
+    place: str = ""
+    url: str = ""
+    lat: float | str | None = None
+    lon: float | str | None = None
+    zoom: float | str | None = None
+    kind: str = ""
+
+
+class BootstrapRowsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rows: list[BootstrapRow] = Field(default_factory=list, max_length=MAX_BOOTSTRAP_ROWS)
+    replace: bool = False
+    targetSlideId: str | None = None
+    audience: Literal["lw", "cg"] = "lw"
 
 
 def _job_or_404(job_id: str):
@@ -964,9 +984,17 @@ def _run_pin_bootstrap(job, places: list[Place], slide_id: str, audience: str) -
         raise ValueError("Target slide is not in this deck")
     view = dict(target.get("cg") or {}) if audience == "cg" and isinstance(target.get("cg"), dict) else target
     churches = [dict(church) for church in (view.get("churches") or [])]
+    view_zoom = (view.get("camera") or {}).get("zoom")
+    try:
+        size_zoom: float | None = clamp_zoom(float(view_zoom))
+    except (TypeError, ValueError):
+        size_zoom = None
     for place in places:
         generated = _row_slide(place, "csv")["churches"][0]
-        churches.append({**generated, "id": _next_pin_id(churches)})
+        pin = {**generated, "id": _next_pin_id(churches)}
+        if size_zoom is not None:
+            pin["sizeZoom"] = size_zoom
+        churches.append(pin)
     if view is target:
         target["churches"] = churches
     else:
@@ -1611,6 +1639,32 @@ def export_plan(job_id: str) -> dict:
     return payload
 
 
+def _start_bootstrap(
+    job_id: str,
+    places: list[Place],
+    *,
+    replace: bool,
+    target_slide_id: str | None,
+    audience: str,
+) -> dict:
+    try:
+        with _mutation_lock(job_id):
+            job = _job_or_404(job_id)
+            _require_idle(job)
+            if target_slide_id:
+                updated = _runner().rerun(
+                    job_id,
+                    lambda j, rows=places, sid=target_slide_id, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
+                )
+            else:
+                updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not updated:
+        raise HTTPException(404, "Unknown maps job")
+    return _runner().public_dict(updated)
+
+
 @router.post("/{job_id}/bootstrap-csv")
 async def bootstrap_csv(
     job_id: str,
@@ -1636,22 +1690,22 @@ async def bootstrap_csv(
         raise HTTPException(400, errors)
     if not places:
         raise HTTPException(400, ["No places found"])
-    try:
-        with _mutation_lock(job_id):
-            job = _job_or_404(job_id)
-            _require_idle(job)
-            if targetSlideId:
-                updated = _runner().rerun(
-                    job_id,
-                    lambda j, rows=places, sid=targetSlideId, aud=audience: _run_pin_bootstrap(j, rows, sid, aud),
-                )
-            else:
-                updated = _runner().rerun(job_id, lambda j, rows=places, rep=replace: _run_bootstrap(j, rows, rep))
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    if not updated:
-        raise HTTPException(404, "Unknown maps job")
-    return _runner().public_dict(updated)
+    return _start_bootstrap(job_id, places, replace=replace, target_slide_id=targetSlideId, audience=audience)
+
+
+@router.post("/{job_id}/bootstrap-rows")
+def bootstrap_rows(job_id: str, body: BootstrapRowsBody) -> dict:
+    job = _job_or_404(job_id)
+    if job.status == "running":
+        raise HTTPException(409, "Maps job is already running")
+    places, errors = places_from_rows([row.model_dump() for row in body.rows])
+    if errors:
+        raise HTTPException(400, errors)
+    if not places:
+        raise HTTPException(400, ["No places found"])
+    return _start_bootstrap(
+        job_id, places, replace=body.replace, target_slide_id=body.targetSlideId, audience=body.audience
+    )
 
 
 @router.get("/geocode")

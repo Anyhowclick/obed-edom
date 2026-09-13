@@ -19,6 +19,7 @@ import {
   type History,
 } from "../watercolour/history";
 import { loupeCorner } from "../watercolour/loupe";
+import { TOOL_ICONS } from "../components/icons";
 
 type MaskSpec = {
   transparent: boolean;
@@ -656,78 +657,6 @@ function WatercolourPreview({ wash, ink, file }: { wash: number; ink: number; fi
     </figure>
   );
 }
-
-const TOOL_ICONS: Record<string, JSX.Element> = {
-  rect: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <rect x="2.5" y="3.5" width="11" height="9" rx="1" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2.4 2" />
-    </svg>
-  ),
-  pen: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M3 12 3 6 7 3 12 5 13 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="3" cy="12" r="1.1" fill="currentColor" stroke="none" />
-    </svg>
-  ),
-  magnetic: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M2.5 4 3 9.5 8 12.5 13 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M11 10.5v2a1.7 1.7 0 0 0 3.4 0v-2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M11 10.5h1.1M13.3 10.5h1.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  ),
-  wand: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M3.5 13 10 6.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M11 3v2.2M13.8 5.8H11.6M12.6 2.4l-1.6 1.6M9.9 5.1l-1.6 1.6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  ),
-  magnifier: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="6.8" cy="6.8" r="4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M9.7 9.7 13 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M6.8 5.1v3.4M5.1 6.8h3.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  ),
-  compare: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <rect x="2.5" y="2.5" width="11" height="11" rx="1" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M8 2.5v11" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M6 8 4.7 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-      <path d="M5.3 6.9 4 8l1.3 1.1M10 8h1.3M10.7 6.9 12 8l-1.3 1.1" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  reset: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M5.6 2.5h4.8L13.5 5.6v4.8L10.4 13.5H5.6L2.5 10.4V5.6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-      <path d="M6.4 6.4 9.6 9.6M9.6 6.4 6.4 9.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
-  ),
-  undo: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M3.5 8A4.5 4.5 0 1 0 5.2 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M5.6 2.6 5.1 4.9 7.4 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  redo: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M12.5 8A4.5 4.5 0 1 1 10.8 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M10.4 2.6 10.9 4.9 8.6 5.3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  keep: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M8 5.5v5M5.5 8h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  ),
-  remove: (
-    <svg className="maps-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M5.5 8h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  ),
-};
 
 type LandmarkMaskHandle = { flushPending: () => MaskSpec | undefined };
 

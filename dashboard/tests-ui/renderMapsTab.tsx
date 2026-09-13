@@ -16,6 +16,8 @@ vi.mock("../src/api", async (importOriginal) => {
     postMapsPng: apiFake.postMapsPng,
     renameJob: apiFake.renameJob,
     getJob: apiFake.getJob,
+    bootstrapMapsRows: apiFake.bootstrapMapsRows,
+    pollJob: apiFake.pollJob,
     getSettings: apiFake.getSettings,
   };
 });

@@ -3691,3 +3691,271 @@ def test_rename_maps_job_reserves_source_name_during_failing_commit(monkeypatch)
     still_refused = client.patch(f"/api/jobs/{job_b['id']}/name", json={"name": old_name_a})
     assert still_refused.status_code == 409
     assert RUNNER.get(job_b["id"]).name != old_name_a
+
+
+# --- Manual-entry rows (bootstrap-rows) --------------------------------------
+
+
+def _forbid_nominatim(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("Nominatim should not run")
+
+    monkeypatch.setattr("obed_edom.maps_geo.requests.get", boom)
+
+
+def _pin_target(job, zoom):
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    slide["camera"] = camera_dict(1.3521, 103.8198, zoom)
+    doc["slides"] = [slide]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    return saved.json()["result"]["slides"][0]
+
+
+def test_bootstrap_rows_creates_one_slide_per_row_with_ladder_zoom(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "China"}, {"name": "Udaipur", "lat": 24.58, "lon": 73.68}]},
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["status"] == "queued"
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slides = [s for s in done["result"]["slides"] if s["id"] != "s1"]
+    assert [s["title"] for s in new_slides] == ["China", "Udaipur"]
+    assert new_slides[0]["camera"]["zoom"] == pytest.approx(4.3)
+    assert new_slides[1]["camera"]["zoom"] == pytest.approx(13.0)
+    for slide in new_slides:
+        church = slide["churches"][0]
+        assert church["scaleWithMap"] is True
+        assert church["sizeZoom"] == slide["camera"]["zoom"]
+
+
+def test_bootstrap_rows_place_field_overrides_the_geocode_query(monkeypatch):
+    seen_queries: list[str] = []
+
+    def fake_geocode(query, *, wait=False):
+        seen_queries.append(query)
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": query}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "Home", "place": "Bedok, Singapore"}]},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert seen_queries == ["Bedok, Singapore"]
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert new_slide["title"] == "Home"
+
+
+def test_bootstrap_rows_nameless_place_row_takes_the_geocoded_label(monkeypatch):
+    def fake_geocode(query, *, wait=False):
+        return {"camera": camera_dict(1.0, 2.0, 10.5), "placeType": "city", "label": "Bedok, Singapore"}
+
+    monkeypatch.setattr("obed_edom.web.maps.geocode", fake_geocode)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"place": "Bedok, Singapore", "kind": "dropPin"}]},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert new_slide["title"] == "Bedok, Singapore"
+    assert new_slide["churches"][0]["name"] == "Bedok, Singapore"
+
+
+def test_bootstrap_rows_url_supplies_the_camera(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "London", "url": "https://www.google.com/maps/place/London/@51.5,-0.12,11z/"}]},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert new_slide["camera"]["lat"] == pytest.approx(51.5)
+    assert new_slide["camera"]["lon"] == pytest.approx(-0.12)
+    assert new_slide["camera"]["zoom"] == pytest.approx(11.0)
+
+
+def test_bootstrap_rows_explicit_zoom_wins_over_the_ladder(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": [{"name": "China", "zoom": 6.8}]})
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    new_slide = next(s for s in done["result"]["slides"] if s["id"] != "s1")
+    assert new_slide["camera"]["zoom"] == pytest.approx(6.8)
+
+
+def test_bootstrap_rows_row_error_returns_400_with_row_detail():
+    job = _seed()
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": [{"name": "A"}, {"lat": 1, "lon": 2}]})
+    assert started.status_code == 400
+    detail = started.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail == ["Row 2: no name"]
+
+
+def test_bootstrap_rows_reports_every_bad_row():
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "A", "kind": "star"}, {"name": "B"}, {"name": "C", "lat": 1}]},
+    )
+    assert started.status_code == 400
+    assert started.json()["detail"] == ["Row 1: unknown kind 'star'", "Row 3: lat without lon"]
+
+
+def test_bootstrap_rows_empty_rows_returns_400():
+    job = _seed()
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": []})
+    assert started.status_code == 400
+    assert started.json()["detail"] == ["No places found"]
+
+
+def test_bootstrap_rows_rejects_unknown_body_field():
+    job = _seed()
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": [], "bogus": True})
+    assert started.status_code == 422
+
+
+def test_bootstrap_rows_rejects_more_rows_than_the_cap():
+    from obed_edom.web.maps import MAX_BOOTSTRAP_ROWS
+
+    job = _seed()
+    rows = [{"name": f"Row {index}"} for index in range(MAX_BOOTSTRAP_ROWS + 1)]
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": rows})
+    assert started.status_code == 422
+
+
+def test_bootstrap_rows_unknown_job_returns_404():
+    started = client.post("/api/maps/not-a-job/bootstrap-rows", json={"rows": [{"name": "China"}]})
+    assert started.status_code == 404
+
+
+def test_bootstrap_rows_replace_clears_the_deck(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "China"}], "replace": True},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert [s["title"] for s in done["result"]["slides"]] == ["China"]
+
+
+def test_bootstrap_rows_adds_pins_to_one_slide(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={
+            "rows": [{"name": "Kuala Lumpur", "lat": 3.139, "lon": 101.687}, {"name": "Bedok", "lat": 1.3236, "lon": 103.9273, "kind": "dot"}],
+            "targetSlideId": "s1",
+        },
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert len(done["result"]["slides"]) == 1
+    pins = done["result"]["slides"][0]["churches"]
+    assert [pin["id"] for pin in pins] == ["p1", "p2"]
+    assert [pin["name"] for pin in pins] == ["Kuala Lumpur", "Bedok"]
+    assert [pin["kind"] for pin in pins] == ["dropPin", "dot"]
+
+
+def test_bootstrap_rows_pins_take_the_target_slide_zoom_as_size_zoom(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    target = _pin_target(job, 13)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "China"}], "targetSlideId": target["id"]},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    pin = done["result"]["slides"][0]["churches"][0]
+    assert pin["sizeZoom"] == pytest.approx(13.0)
+    assert pin["size"] == 64
+    assert pin["scaleWithMap"] is True
+    assert pin["lat"] != pytest.approx(target["camera"]["lat"])
+    assert 15 < pin["lat"] < 55 and 70 < pin["lon"] < 140
+
+
+def test_bootstrap_csv_pins_take_the_target_slide_zoom_as_size_zoom(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    target = _pin_target(job, 13)
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-csv",
+        data={"csv_text": "China\n", "targetSlideId": target["id"]},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    pin = done["result"]["slides"][0]["churches"][0]
+    assert pin["sizeZoom"] == pytest.approx(13.0)
+
+
+def test_bootstrap_rows_pins_into_the_cg_view(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    doc = _doc(job)
+    slide = dict(doc["slides"][0])
+    slide["camera"] = camera_dict(1.3521, 103.8198, 13)
+    slide["cg"] = {
+        "camera": camera_dict(1.3521, 103.8198, 9),
+        "style": slide["style"],
+        "highlights": [],
+        "churches": [],
+    }
+    doc["slides"] = [slide]
+    saved = _save(job, doc)
+    assert saved.status_code == 200, saved.text
+    started = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "China"}], "targetSlideId": slide["id"], "audience": "cg"},
+    )
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    updated = done["result"]["slides"][0]
+    assert updated["churches"] == []
+    cg_pin = updated["cg"]["churches"][0]
+    assert cg_pin["sizeZoom"] == pytest.approx(9.0)
+
+
+def test_bootstrap_rows_bumps_state_revision(monkeypatch):
+    _forbid_nominatim(monkeypatch)
+    job = _seed()
+    before = int(job["result"].get("stateRevision") or 0)
+    started = client.post(f"/api/maps/{job['id']}/bootstrap-rows", json={"rows": [{"name": "China"}]})
+    assert started.status_code == 200, started.text
+    done = _wait(job["id"])
+    assert done["status"] == "done", done.get("error")
+    assert int(done["result"]["stateRevision"] or 0) == before + 1
+
+    pinned = client.post(
+        f"/api/maps/{job['id']}/bootstrap-rows",
+        json={"rows": [{"name": "Bedok", "lat": 1.3236, "lon": 103.9273}], "targetSlideId": "s1"},
+    )
+    assert pinned.status_code == 200, pinned.text
+    done_pin = _wait(job["id"])
+    assert done_pin["status"] == "done", done_pin.get("error")
+    assert int(done_pin["result"]["stateRevision"] or 0) == before + 2

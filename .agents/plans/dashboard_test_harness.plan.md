@@ -1,6 +1,6 @@
 ---
 name: Dashboard React/DOM test harness
-overview: "Owner approved 2026-09-12. Decisions: Vitest + jsdom + Testing Library; tests live in `dashboard/tests-ui/`; tests-only PRs do not rebuild `dist`; no MapsTab refactor in PR 1. Three PRs: PR 1 builds the harness plus three seed regression tests (conflict-freeze, thumb-token, rename-unsaved), each of which must be shown red when its guard is reverted; PR 2 adds thumbnail + save-status coverage; PR 3 adds component + preview-sequence coverage."
+overview: "Owner approved 2026-09-12. Decisions: Vitest + jsdom + Testing Library; tests live in `dashboard/tests-ui/`; tests-only PRs do not rebuild `dist`; no MapsTab refactor in PR 1. Three PRs: PR 1 builds the harness plus three seed regression tests (conflict-freeze, thumb-token, rename-unsaved), each of which must be shown red when its guard is reverted; PR 2 adds thumbnail + save-status coverage; PR 3 adds component + preview-sequence coverage. PR #112 (2026-09-13 overnight round, open) adds the first coverage from outside this plan: 14 manual-entry form tests, taking test:ui to 9 files / 32 tests; the PR 2 / PR 3 lists are unchanged."
 todos:
   - id: pr1-harness
     content: "Done: shipped as PR #99 (merged, Codex APPROVE). Harness + 3 seed tests: conflict-freeze, thumb-token, rename-unsaved; each proven red with its guard reverted. Deferred to PR 2: the captureThumb `frozen` input is not yet mutation-pinned, and the `sameView` case."
@@ -146,3 +146,11 @@ Two items in §5's PR 1 description turned out not to hold and moved to PR 2: th
   - **JobName double-submit** (item 7);
   - **export-destination freeze** (item 8);
   - **isolate hop preview `viewLog` ordering** (item 9).
+
+## Status 2026-09-13 (overnight round)
+
+**PR #112** (`feat/dashboard-2026-09-13-round`, base `main`, open) adds the first `tests-ui` coverage written outside this plan: `dashboard/tests-ui/manual-entries.ui.test.tsx` (14 tests) driving the Maps manual-entry forms end to end through the harness — the ＋ menu, per-row validation and error clearing, "+" / remove with focus handling, the batch cap, the in-flight "Done" lock, and the posted payload — plus `dashboard/tests-ui/fakes/mapsApi.ts` for `bootstrapMapsRows`. Queries are role/label based throughout (each input is named `… row N`), so none of it is pinned to markup. `npm run test:ui` is now **9 files / 32 tests** (was 8 / 18).
+
+The round also adds `dashboard/tests/ui-consistency.test.cjs` on the `node --test` side — a pure-text parse of `styles.css` and three `.tsx` files, so it belongs with the `.cjs` suite, not here. It guards the control-tier contract and one-caret-per-`aria-haspopup`; 2 of its 3 cases are proven red on `main`.
+
+None of the PR 2 / PR 3 items above are discharged by this round; the remaining list is unchanged.

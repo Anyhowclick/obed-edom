@@ -1,34 +1,5 @@
 import { openPath, reveal } from "../api";
-
-function IconOpen() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M14 4h6v6M20 4 10 14M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function IconFolder() {
-  return (
-    <svg className="maps-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l1.6 2H19.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+import { IconFolder, IconOpen } from "./icons";
 
 export type Artifact = { label: string; path: string };
 

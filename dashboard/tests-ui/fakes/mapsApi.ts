@@ -9,6 +9,8 @@ type PostMapsPngArgs = Parameters<typeof actual.postMapsPng>;
 type PostMapsPngOpts = PostMapsPngArgs[2];
 type RenameJobArgs = Parameters<typeof actual.renameJob>;
 type GetJobArgs = Parameters<typeof actual.getJob>;
+type BootstrapRowsArgs = Parameters<typeof actual.bootstrapMapsRows>;
+type PollJobArgs = Parameters<typeof actual.pollJob>;
 
 let saveConflictOnce: { conflict: MapsStateConflict } | null = null;
 let saveCalls: Array<{ id: string; document: Record<string, unknown>; expectedRevision: number }> = [];
@@ -22,6 +24,12 @@ let renameCalls: Array<{ id: string; name: string }> = [];
 let getJobResolution: Job | null = null;
 
 let saveDeferOnce: Promise<Job> | null = null;
+
+let bootstrapRowsFailOnce: Error | null = null;
+let bootstrapRowsDeferOnce: Promise<Job> | null = null;
+let bootstrapRowsCalls: Array<{ id: string; body: BootstrapRowsArgs[1] }> = [];
+
+let pollJobResolution: Job | null = null;
 
 export const saveMapsState = vi.fn<typeof actual.saveMapsState>(async (id: SaveMapsStateArgs[0], document: SaveMapsStateArgs[1], expectedRevision: SaveMapsStateArgs[2]): Promise<Job> => {
   saveCalls.push({ id, document, expectedRevision });
@@ -63,6 +71,27 @@ export const getJob = vi.fn<typeof actual.getJob>(async (id: GetJobArgs[0]): Pro
   return makeJob({ id });
 });
 
+export const bootstrapMapsRows = vi.fn<typeof actual.bootstrapMapsRows>(async (id: BootstrapRowsArgs[0], body: BootstrapRowsArgs[1]): Promise<Job> => {
+  bootstrapRowsCalls.push({ id, body });
+  if (bootstrapRowsFailOnce) {
+    const err = bootstrapRowsFailOnce;
+    bootstrapRowsFailOnce = null;
+    throw err;
+  }
+  if (bootstrapRowsDeferOnce) {
+    const deferred = bootstrapRowsDeferOnce;
+    bootstrapRowsDeferOnce = null;
+    return deferred;
+  }
+  return makeJob({ id, status: "queued" });
+});
+
+export const pollJob = vi.fn<typeof actual.pollJob>(async (id: PollJobArgs[0], onTick: PollJobArgs[1]): Promise<Job> => {
+  const job = pollJobResolution ?? makeJob({ id });
+  onTick(job);
+  return job;
+});
+
 export const getSettings = vi.fn<typeof actual.getSettings>(
   async (): Promise<Settings> => ({
     reuseThreshold: 0,
@@ -81,10 +110,16 @@ export function resetMapsApiScript() {
   renameFailOnce = null;
   renameCalls = [];
   getJobResolution = null;
+  bootstrapRowsFailOnce = null;
+  bootstrapRowsDeferOnce = null;
+  bootstrapRowsCalls = [];
+  pollJobResolution = null;
   saveMapsState.mockClear();
   postMapsPng.mockClear();
   renameJob.mockClear();
   getJob.mockClear();
+  bootstrapMapsRows.mockClear();
+  pollJob.mockClear();
   getSettings.mockClear();
 }
 
@@ -119,6 +154,22 @@ export const mapsApiScript = {
   getJob: {
     resolve(job: Job) {
       getJobResolution = job;
+    },
+  },
+  bootstrapMapsRows: {
+    failOnce(err: Error) {
+      bootstrapRowsFailOnce = err;
+    },
+    deferOnce(promise: Promise<Job>) {
+      bootstrapRowsDeferOnce = promise;
+    },
+    get calls() {
+      return bootstrapRowsCalls;
+    },
+  },
+  pollJob: {
+    resolve(job: Job) {
+      pollJobResolution = job;
     },
   },
 };

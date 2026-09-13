@@ -8,6 +8,7 @@ from obed_edom.maps_csv import (
     Place,
     looks_like_header,
     parse_places,
+    places_from_rows,
     resolve_zoom,
     zoom_for_place_type,
 )
@@ -598,3 +599,101 @@ def test_header_form_four_line_quoted_record_is_accepted():
     assert errors == []
     assert places[0].name == "A\nB\nC\nD"
     assert places[0].line == 2
+
+
+def test_places_from_rows_maps_a_name_only_row():
+    places, errors = places_from_rows([{"name": "Singapore"}])
+    assert errors == []
+    assert places == [Place(line=1, name="Singapore")]
+
+
+def test_places_from_rows_place_column_is_a_full_query():
+    places, errors = places_from_rows([{"name": "Home", "place": "Bedok, Singapore"}])
+    assert errors == []
+    assert places[0].name == "Home"
+    assert places[0].query == "Bedok, Singapore"
+    assert places[0].full_query is True
+
+
+def test_places_from_rows_accepts_numeric_lat_lon():
+    places, errors = places_from_rows([{"name": "Udaipur", "lat": 24.58, "lon": 73.68}])
+    assert errors == []
+    assert places[0].lat == pytest.approx(24.58)
+    assert places[0].lon == pytest.approx(73.68)
+
+
+def test_places_from_rows_clamps_latitude_and_wraps_longitude():
+    places, errors = places_from_rows([{"name": "North", "lat": 89.9, "lon": 200}])
+    assert errors == []
+    assert places[0].lat == pytest.approx(85.051129, abs=1e-6)
+    assert places[0].lon == pytest.approx(-160.0)
+
+
+def test_places_from_rows_keeps_zero_coordinates():
+    places, errors = places_from_rows([{"name": "Null Island", "lat": 0, "lon": 0, "zoom": 0}])
+    assert errors == []
+    assert places[0].lat == 0.0
+    assert places[0].lon == 0.0
+    assert places[0].zoom == 0.0
+
+
+def test_places_from_rows_treats_empty_strings_as_missing():
+    filled, errors = places_from_rows([{"name": "X", "place": "", "url": "", "lat": "", "lon": "", "kind": ""}])
+    bare, bare_errors = places_from_rows([{"name": "X"}])
+    assert errors == [] and bare_errors == []
+    assert filled == bare
+
+
+def test_places_from_rows_treats_none_as_missing():
+    places, errors = places_from_rows([{"name": "X", "place": None, "lat": None, "lon": None}])
+    assert errors == []
+    assert places == [Place(line=1, name="X")]
+
+
+def test_places_from_rows_numbers_errors_by_row():
+    places, errors = places_from_rows([{"lat": 1, "lon": 2}, {"name": "Good"}, {"name": "Bad", "kind": "star"}])
+    assert errors == ["Row 1: no name", "Row 3: unknown kind 'star'"]
+    assert [p.name for p in places] == ["Good"]
+
+
+def test_places_from_rows_requires_a_name_or_place():
+    _, errors = places_from_rows([{"url": "https://maps.google.com/?q=1,2"}])
+    assert errors == ["Row 1: no name"]
+
+
+def test_places_from_rows_rejects_lat_without_lon():
+    _, errors = places_from_rows([{"name": "X", "lat": 1.3}])
+    assert errors == ["Row 1: lat without lon"]
+
+
+def test_places_from_rows_rejects_lon_without_lat():
+    _, errors = places_from_rows([{"name": "X", "lon": 103.8}])
+    assert errors == ["Row 1: lon without lat"]
+
+
+def test_places_from_rows_rejects_bad_lat_lon():
+    _, errors = places_from_rows([{"name": "X", "lat": "abc", "lon": "103.8"}])
+    assert errors == ["Row 1: bad lat/lon 'abc', '103.8'"]
+
+
+def test_places_from_rows_rejects_bad_zoom():
+    _, errors = places_from_rows([{"name": "X", "zoom": "abc"}])
+    assert errors == ["Row 1: bad zoom 'abc'"]
+
+
+def test_places_from_rows_rejects_zoom_out_of_range():
+    _, errors = places_from_rows([{"name": "X", "zoom": 30}])
+    assert errors == ["Row 1: zoom out of range '30' (must be 0-22)"]
+
+
+def test_places_from_rows_canonicalises_kind():
+    places, errors = places_from_rows(
+        [{"name": "A", "kind": "droppin"}, {"name": "B", "kind": "DropPin"}, {"name": "C", "kind": "dot"}]
+    )
+    assert errors == []
+    assert [p.kind for p in places] == ["dropPin", "dropPin", "dot"]
+
+
+def test_parse_places_still_reports_line_errors():
+    _, errors = parse_places("name,lat,lon\nX,abc,1\n")
+    assert errors == ["Line 2: bad lat/lon 'abc', '1'"]

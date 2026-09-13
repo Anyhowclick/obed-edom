@@ -13,7 +13,7 @@ type Props = {
   onClear?: () => void;
   multiple?: boolean;
   folder?: boolean;
-  tone?: "keynote" | "document";
+  tone?: "lw" | "cg" | "dsk" | "document";
   browseLabel?: string;
 };
 
@@ -79,7 +79,7 @@ export function FileWell({
             type="file"
             accept={accept}
             multiple={multiple}
-            style={{ display: "none" }}
+            hidden
             id={inputId}
             onChange={(e) => {
               const files = e.target.files ? [...e.target.files] : [];

@@ -15,6 +15,7 @@ import {
   type FeatureId,
   type TabId,
 } from "./nav";
+import { IconChevronLeft } from "./components/icons";
 
 const MapsTab = lazy(() => import("./tabs/MapsTab").then((m) => ({ default: m.MapsTab })));
 
@@ -87,7 +88,7 @@ export function App() {
               aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
             >
-              {sidebarCollapsed ? "»" : "«"}
+              {sidebarCollapsed ? <IconChevronLeft className="flip" /> : <IconChevronLeft />}
             </button>
           </div>
           {TABS.map((item) => (
@@ -95,6 +96,7 @@ export function App() {
               key={item.id}
               type="button"
               className={`nav-btn ${tab === item.id ? "active" : ""}`}
+              data-tab={item.id}
               title={item.label}
               onClick={() => {
                 if (item.id !== tab) setOpenRun(null);

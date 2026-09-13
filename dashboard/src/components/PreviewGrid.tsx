@@ -26,7 +26,7 @@ export function LoadingOverlay({
     <div className="overlay">
       <div className="overlay-card">
         <div className="spinner" />
-        <h2 style={{ marginTop: 0 }}>{title}</h2>
+        <h2>{title}</h2>
         {progress ? (
           <div className="progress">
             <div className="progress-head">
@@ -80,7 +80,7 @@ export function PreviewGrid({
         <button
           key={u.src}
           type="button"
-          style={{ background: "none", border: 0, padding: 0, color: "inherit" }}
+          className="thumb-btn"
           onClick={() => onOpen(u.src)}
         >
           {isPreviewVideo(u.src) ? (
