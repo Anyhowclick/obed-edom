@@ -322,8 +322,10 @@ owner confirmation — 2026-09-12. In `plan_assembly` (`dsk_assemble.py`), let t
 has an `image:`/`movie:` leaf (`_group_has_media`); its measured rect is the group bbox, caption
 included — a photo with a wide caption strip can read LW-dimension on the strength of the caption,
 not just the media leaf. Side-panel items never count as content for anchoring, whether or not
-`--include-side`/`--keep-side-panels` keeps them for rendering (`_content_ids` drops them
-unconditionally).
+`--include-side`/`--keep-side-panels` keeps them for rendering — decided by `_content_visibles_by_kept`'s
+positive-area intersection with the centre panel (a rotated item's true extent can cross the
+boundary its unrotated frame does not; `_content_ids` no longer pre-drops by the unrotated frame,
+codex placement review 5 finding 2).
 
 When the operator gave no explicit `--anchor` for the slide, `_content_anchor` (`dsk_assemble.py`)
 decides from the SHAPE of the **union** of those items' rects — the masked rect clipped to the
@@ -370,6 +372,20 @@ re-deriving corners from the object graph. `_content_visibles_by_kept` clips tha
 panel as before. Masked media needs no separate case: its `rotation` is the frame+mask net angle
 (`offline_inspect`, whole-degree rounded) and its trusted (non-`rotated-masked`-flagged) `w`/`h` is
 already snapped to a multiple of 90°, at which the extent formula reduces to an exact swap/no-op.
+
+**Exact 90° swap and the group-refusal invariant (codex placement review 5).** `_content_item_aabb`
+now swaps/no-ops `w`/`h` outright at an exact multiple of 90° instead of going through `sin`/`cos`,
+whose float residue (`400×1000` rotated 90° → `1000×400.00000000000006`) can read a hair below the
+2.5 aspect gate; `_content_anchor`'s own aspect comparison also carries a documented `1e-9`
+tolerance. Rotated groups never reach this code at all: `plan_assembly` composes a rotated
+top-level group's `x`/`y`/`w`/`h` from `iwa_geometry`'s group-union branch (a translation-only
+child union, flagged `needs_keynote="rotated-group"`) — not the AABB-position/unrotated-size
+contract `_content_item_aabb` assumes for frames — but any such group with a text descendant
+(`groupChildText`, computed independent of rotation) always fails `plan_assembly`'s own
+"nested/rotated/masked group" refusal first, because `_group_child_records` refuses (returns
+`None`) for every rotated group regardless of content. So the group branch of `_content_anchor`/
+`_content_item_aabb` is only ever exercised by axis-aligned groups; no code change was needed or
+made there.
 
 **Union vs. per-item, and the deck-wide flip list (opus review 1 finding 1, union reading, owner
 confirmation pending).** A per-*item* aspect test (the first cut of this rule) measures each kept

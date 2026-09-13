@@ -5210,6 +5210,118 @@ def test_fractionally_rotated_masked_item_uses_extent_formula():
     assert aabb.h != pytest.approx(1000.0)
 
 
+def test_exact_90_rotation_swaps_extents_without_float_residue():
+    # Codex placement review 5, finding 1: sin/cos at exactly 90 degrees leaves float
+    # residue (400x1000 rotated 90 -> 1000x400.00000000000006), whose aspect
+    # 2.4999999999999996 falls just under the 2.5 LW threshold. An AABB at y=0 (unlike
+    # the y=300 case elsewhere in this file, where intersection subtraction happens to
+    # erase the residue) exposes it directly: assert the exact swap and that the anchor
+    # still reads "centre".
+    item = _image_item(0, x=1920, y=0, w=400, h=1000)
+    item["rotation"] = 90
+    aabb = dsa._content_item_aabb(item)
+    assert aabb.x == 1920.0
+    assert aabb.y == 0.0
+    assert aabb.w == 1000.0
+    assert aabb.h == 400.0
+    slide = _slide(52, [item])
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {52: SlideDecision(52, "in_deck", anchor="auto")}
+    plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+    assert plan.anchors[52] == "centre"
+
+
+def test_rotated_item_crossing_side_panel_counts_by_transformed_aabb():
+    # Codex placement review 5, finding 2: a 400x1000 frame at x=1500 (left of the centre
+    # panel's x=1920 edge) rotated 90 degrees has transformed AABB (1500,y,1000,400),
+    # crossing into the centre panel by 580pt. `_content_ids` must not pre-drop it via
+    # `is_side_panel_item`'s unrotated frame; only the transformed-AABB intersection with
+    # the centre panel decides side-only status. Clipped to 580x400 (aspect 1.45), a lone
+    # item anchors "right"; this must hold whether or not side panels are kept.
+    item = _image_item(0, x=1500, y=300, w=400, h=1000)
+    item["rotation"] = 90
+    for keep_side in (False, True):
+        slide = _slide(53, [dict(item)])
+        payload = _payload([slide])
+        classes = [_classify(slide, include_side=True)]
+        decisions = {53: SlideDecision(53, "in_deck", anchor="auto", keep_side=keep_side)}
+        plan = plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+        assert plan.anchors[53] == "right"
+        visibles = dsa._content_visibles_by_kept(slide["items"], [("image", 0)])
+        rect = visibles[("image", 0)]
+        assert rect.x == pytest.approx(1920.0)
+        assert rect.w == pytest.approx(580.0)
+        assert rect.h == pytest.approx(400.0)
+
+
+def test_rotated_top_level_group_refused_before_placement():
+    # Codex placement review 5, finding 3: does a rotated top-level group ever reach
+    # `_content_anchor` at all, or does `plan_assembly`'s own "nested/rotated/masked
+    # group" refusal (children metadata missing) always catch it first? Measure through
+    # the real production path -- `iwa_geometry.compose_geometry` for the group's
+    # composed x/y/w/h, `iwa_runs._slide_group_child_text`/`_group_child_records` for the
+    # same groupChildText/groupChildren the offline loader attaches -- rather than
+    # hand-supplying an already-correct AABB the way `test_rotated_group_anchor_uses_-
+    # transformed_aabb` above does.
+    #
+    # A rotated top-level group with a media child and a caption TEXT child composes
+    # through `_compose_record`'s group-union branch (translation-only child union,
+    # flagged "rotated-group") -- NOT the "AABB position + unrotated size" contract
+    # `_content_item_aabb` assumes for frames. But `_group_child_records` refuses (returns
+    # None) for ANY rotated group regardless of content, while `_slide_group_child_text`
+    # still finds the caption leaf regardless of rotation -- so `has_text and children is
+    # None` always fires first. See D3 in dsk_content_rules.plan.md for the fixed
+    # invariant: rotated groups never reach anchoring at all, so `_content_anchor`/
+    # `_content_item_aabb` need not (and cannot correctly) special-case them.
+    from obed_edom.iwa_geometry import compose_geometry
+    from obed_edom.iwa_runs import _group_child_records, _slide_group_child_text
+
+    objects = {
+        "500": {
+            "_pbtype": "TSD.GroupArchive",
+            "super": {"geometry": {
+                "position": {"x": 2200.0, "y": 300.0},
+                "size": {"width": 400.0, "height": 1000.0}, "angle": 90.0,
+            }},
+            "children": [{"identifier": "501"}, {"identifier": "502"}],
+        },
+        "501": {"_pbtype": "TSD.ImageArchive", "super": {"geometry": {
+            "position": {"x": 0.0, "y": 0.0},
+            "size": {"width": 400.0, "height": 700.0}, "angle": 0.0,
+        }}},
+        "502": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "ownedStorage": {"identifier": "600"},
+            "super": {"geometry": {
+                "position": {"x": 0.0, "y": 700.0},
+                "size": {"width": 400.0, "height": 300.0}, "angle": 0.0,
+            }},
+        },
+        "600": {"_pbtype": "TSWP.StorageArchive", "text": ["Caption"]},
+    }
+    slide_archive = {"drawablesZOrder": [{"identifier": "500"}]}
+    records = compose_geometry(slide_archive, objects)
+    assert records == [{
+        "id": "500", "kind": "group", "kindIndex": 0,
+        "x": 2200.0, "y": 300.0, "w": 400.0, "h": 1000.0, "text": "",
+        "geom_source": "group-union", "needs_keynote": "rotated-group",
+    }]
+    group_child_text = _slide_group_child_text(slide_archive, objects, {})
+    assert group_child_text == {0: "Caption"}
+    assert _group_child_records(objects["500"], objects) is None
+
+    group = _group_item(0, x=2200.0, y=300.0, w=400.0, h=1000.0)
+    group["rotation"] = 90
+    slide = _slide(54, [group])
+    slide["groupChildSignature"] = {0: "image:photo.jpg\ntext:Caption"}
+    slide["groupChildText"] = group_child_text
+    payload = _payload([slide])
+    classes = [_classify(slide)]
+    decisions = {54: SlideDecision(54, "in_deck", anchor="auto")}
+    with pytest.raises(AssemblyRefusal, match="nested/rotated/masked group"):
+        plan_assembly(payload, classes, decisions=decisions, band=BAND, clips={})
+
+
 def test_group_has_media_missing_none_empty_signature():
     # codex review 1, finding 2: missing mapping entry, None, and "" are not content.
     assert dsa._group_has_media(None) is False

@@ -74,7 +74,7 @@ from obed_edom.iwa_runs import (
     slide_order,
 )
 from obed_edom.iwa_write import OfflineWriteCorrupted, reorder_drawables
-from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, is_side_panel_item, item_rect
+from obed_edom.map_remap import CENTRE_PANEL_RECT, LW_WALL_SIZE, Rect, item_rect
 from obed_edom.offline_inspect import (
     _build_data_index,
     _canvas_size,
@@ -361,30 +361,27 @@ def _group_has_media(signature: str | None) -> bool:
 
 
 _LW_ASPECT_MIN = 2.5
+_LW_ASPECT_TOL = 1e-9
 
 
 def _content_ids(
     cls: SlideClass,
-    items_by_id: Mapping[ItemId, dict],
     *,
-    wall: tuple[float, float],
     group_signature: Mapping[int, str | None] | None = None,
 ) -> list[ItemId]:
-    """Kept image/movie/group item ids; text-only content and side-panel items never
-    count towards them (side panels are never anchoring content, kept or not)."""
+    """Kept image/movie/group item ids; text-only content never counts towards them.
+    Side-only status is NOT decided here: a rotated item's true (transformed-AABB) extent
+    can cross into the centre panel even though its unrotated frame does not, so that
+    filter lives in `_content_visibles_by_kept`'s centre-panel intersection instead --
+    only positive-area intersections count as anchoring content."""
     group_signature = group_signature or {}
-    wall_w, wall_h = wall
     ids: list[ItemId] = []
     for kind, kind_index in cls.kept:
         if kind not in ("image", "movie", "group"):
             continue
         if kind == "group" and not _group_has_media(group_signature.get(kind_index)):
             continue
-        item_id = (kind, kind_index)
-        item = items_by_id.get(item_id)
-        if item is not None and is_side_panel_item(item, wall_w, wall_h):
-            continue
-        ids.append(item_id)
+        ids.append((kind, kind_index))
     return ids
 
 
@@ -395,17 +392,24 @@ def _content_item_aabb(item: dict) -> Rect:
     is its unrotated size, for both plain frames (``_frame_rect``) and masked media
     (``_masked_rect``, whose ``w``/``h`` is already the mask's own D2 rect). So a rotated
     item needs only its rotated EXTENTS derived from ``w``/``h``/``rotation``; ``x``/``y``
-    stay as given -- they must never be re-rotated about the frame centre."""
+    stay as given -- they must never be re-rotated about the frame centre. An exact
+    multiple of 90 degrees swaps/no-ops the extents rather than going through sin/cos,
+    which leaves float residue (e.g. 400x1000 rotated 90 -> 1000x400.00000000000006)."""
     angle = item.get("rotation") or 0.0
     x, y, w, h = item.get("x", 0.0), item.get("y", 0.0), item.get("w", 0.0), item.get("h", 0.0)
-    if angle % 360.0:
-        theta = math.radians(angle)
-        w, h = (
-            abs(w * math.cos(theta)) + abs(h * math.sin(theta)),
-            abs(w * math.sin(theta)) + abs(h * math.cos(theta)),
-        )
+    norm = angle % 360.0
+    if norm == 0.0:
+        return item_rect(item)
+    if norm % 90.0 == 0.0:
+        if norm % 180.0 != 0.0:
+            w, h = h, w
         return Rect(x, y, w, h)
-    return item_rect(item)
+    theta = math.radians(norm)
+    w, h = (
+        abs(w * math.cos(theta)) + abs(h * math.sin(theta)),
+        abs(w * math.sin(theta)) + abs(h * math.cos(theta)),
+    )
+    return Rect(x, y, w, h)
 
 
 def _content_visibles_by_kept(items: Sequence[dict], kept: Iterable[ItemId]) -> dict[ItemId, Rect]:
@@ -436,9 +440,10 @@ def _content_anchor(
     the union of the kept content rects — always clipped to the centre panel,
     regardless of `keep_side`/`include_side` — being LW-dimension (w/h >= 2.5) forces
     centre; otherwise squarish items go right at 1-2 and centre at 3+. Side panels
-    never count as content for anchoring. `include_side` is accepted but unused."""
-    items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
-    content_ids = _content_ids(cls, items_by_id, wall=wall, group_signature=group_signature)
+    never count as content for anchoring (decided by `_content_visibles_by_kept`'s
+    positive-area centre-panel intersection, not by their unrotated frame). `wall` and
+    `include_side` are accepted but unused."""
+    content_ids = _content_ids(cls, group_signature=group_signature)
     if not content_ids:
         return "centre"
     visibles = _content_visibles_by_kept(items, content_ids)
@@ -446,7 +451,7 @@ def _content_anchor(
     if not rects:
         return "centre"
     union = _union_rect(rects)
-    if union.w / union.h >= _LW_ASPECT_MIN:
+    if union.w / union.h >= _LW_ASPECT_MIN - _LW_ASPECT_TOL:
         return "centre"
     return "right" if len(rects) <= 2 else "centre"
 
