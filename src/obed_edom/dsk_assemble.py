@@ -66,6 +66,7 @@ from obed_edom.iwa_kindindex import _memberships, derive_kind_index
 from obed_edom.iwa_runs import (
     _load_deck,
     attach_group_captions,
+    attach_group_child_runs,
     attach_group_child_text,
     attach_group_content_signature,
     attach_runs,
@@ -166,6 +167,7 @@ class AssemblyPlan:
     short_row_h: dict[int, float] = field(default_factory=dict)
     crops: dict[int, dict[ItemId, CropSpec]] = field(default_factory=dict)
     anchors: dict[int, str] = field(default_factory=dict)
+    group_child_kind: dict[int, dict[ItemId, str]] = field(default_factory=dict)
 
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
@@ -252,15 +254,56 @@ def _run_size_ranges(
     return tuple(ranges), False
 
 
+def _group_child_geometry(
+    group_children: Mapping[int, Sequence[dict]], group_ki: int, child_ki: int
+) -> dict | None:
+    for child in group_children.get(group_ki, ()):
+        if child.get("kindIndex") == child_ki and child.get("kind") == "text":
+            return child
+    return None
+
+
 def _text_boxes(
-    long_ids: Sequence[ItemId], items_by_id: Mapping[ItemId, dict]
+    long_ids: Sequence[ItemId],
+    items_by_id: Mapping[ItemId, dict],
+    *,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
+    group_child_runs: Mapping[int, Mapping[int, dict]] | None = None,
 ) -> tuple[list[TextBox], list[str]]:
     """``([TextBox, ...], [warning, ...])`` for ``long_ids`` in source order (y then x);
-    a box whose font/size can't be resolved is omitted and warned about (D4 fallback)."""
-    ordered = sorted(long_ids, key=lambda iid: (items_by_id[iid].get("y", 0.0), items_by_id[iid].get("x", 0.0)))
+    a box whose font/size can't be resolved is omitted and warned about (D4 fallback). A
+    ``GroupChildId`` reads geometry from ``group_children`` and text/font/size/runs from
+    ``group_child_runs`` -- never matched back by text equality (Design A step 3)."""
+    group_children = group_children or {}
+    group_child_runs = group_child_runs or {}
+
+    def sort_key(iid: ItemId) -> tuple[float, float]:
+        if iid[0] == "groupchild":
+            _tag, group_ki, child_ki = iid
+            child = _group_child_geometry(group_children, group_ki, child_ki)
+            if child is None:
+                return (0.0, 0.0)
+            return (child.get("y", child.get("cy", 0.0)), child.get("x", 0.0))
+        item = items_by_id[iid]
+        return (item.get("y", 0.0), item.get("x", 0.0))
+
+    ordered = sorted(long_ids, key=sort_key)
     boxes: list[TextBox] = []
     warnings: list[str] = []
     for iid in ordered:
+        if iid[0] == "groupchild":
+            _tag, group_ki, child_ki = iid
+            info = (group_child_runs.get(group_ki) or {}).get(child_ki)
+            font_name = (info or {}).get("font") or None
+            size = (info or {}).get("size") or None
+            if not info or not font_name or not size:
+                warnings.append(
+                    f"group {group_ki} text {child_ki}: font/size unresolved, skipping band-stretch fit"
+                )
+                continue
+            box = TextBox(iid, info.get("text") or "", font_name, float(size))
+            boxes.append(_box_with_runs(box, info))
+            continue
         item = items_by_id[iid]
         font_name = item.get("font") or None
         size = item.get("size") or None
@@ -280,6 +323,8 @@ def slide_affine_scale(
     anchor: str,
     wall: tuple[float, float],
     group_child_text: Mapping[int, str | None] | None = None,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
@@ -288,12 +333,14 @@ def slide_affine_scale(
     the slide has no visible/fit content."""
     union = visible_union(
         items, include_side=include_side, wall=wall, group_child_text=group_child_text,
+        group_child_words=group_child_words, group_children=group_children,
         text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if union is None:
         return None
     fit = fit_slide(
         items, band, include_side=include_side, anchor=anchor, wall=wall, group_child_text=group_child_text,
+        group_child_words=group_child_words, group_children=group_children,
         text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if not fit:
@@ -426,6 +473,7 @@ def plan_assembly(
     short_row_h_map: dict[int, float] = {}
     crops_out: dict[int, dict[ItemId, CropSpec]] = {}
     anchors_out: dict[int, str] = {}
+    group_child_kind_map: dict[int, dict[ItemId, str]] = {}
     warnings: list[str] = []
     objects_graph = deck[0] if isinstance(deck, tuple) else deck
     if objects_graph is None and fw_deck is not None:
@@ -442,6 +490,9 @@ def plan_assembly(
             items = slide.get("items") or []
             items_by_id = {(item["kind"], item["kindIndex"]): item for item in items}
             group_child_text = slide.get("groupChildSignature")
+            group_child_words = slide.get("groupChildText")
+            group_children_geo = slide.get("groupChildren") or {}
+            group_child_runs_map = slide.get("groupChildRuns") or {}
             warnings.extend(f"slide {number}: {w}" for w in cls.mirror_warnings)
 
             if decision.anchor in (None, "auto"):
@@ -459,6 +510,8 @@ def plan_assembly(
                 anchor=anchor,
                 wall=wall,
                 group_child_text=group_child_text,
+                group_child_words=group_child_words,
+                group_children=group_children_geo,
                 text_slide_words=text_slide_words,
                 no_dedupe=no_dedupe,
                 no_drop_panel_backdrop=no_drop_panel_backdrop,
@@ -504,6 +557,7 @@ def plan_assembly(
                 raise AssemblyRefusal(f"slide {number}: movie nested in group unsupported")
 
             group_ids = [iid for iid in cls.kept if iid[0] == "group"]
+            text_group_kis = {iid[1] for iid in cls.long_text_ids if iid[0] == "groupchild"}
             if group_ids:
                 scale = slide_affine_scale(
                     items,
@@ -512,6 +566,8 @@ def plan_assembly(
                     anchor=anchor,
                     wall=wall,
                     group_child_text=group_child_text,
+                    group_child_words=group_child_words,
+                    group_children=group_children_geo,
                     text_slide_words=text_slide_words,
                     no_dedupe=no_dedupe,
                     no_drop_panel_backdrop=no_drop_panel_backdrop,
@@ -534,7 +590,10 @@ def plan_assembly(
                             "metadata (nested/rotated/masked group, or an autosize child whose "
                             "naturalSize disagrees with its frame) -- refusing to write blind"
                         )
-                    if children is not None:
+                    # A group whose child text triggered the text-slide classification
+                    # takes no affine path (Design A step 4) -- its children are stacked
+                    # into the band below instead, so it is excluded here entirely.
+                    if children is not None and kind_index not in text_group_kis:
                         slide_group_children[kind_index] = children
                         group_item = items_by_id.get(iid)
                         if group_item is not None:
@@ -568,12 +627,39 @@ def plan_assembly(
             stacked_shrink_only_sizes: dict[ItemId, float] = {}
             stacked_run_sizes: dict[ItemId, tuple[tuple[int, int, float], ...]] = {}
             if cls.is_text and cls.long_text_ids:
-                long_ids = [iid for iid in cls.long_text_ids if iid in fit]
-                boxes, box_warnings = _text_boxes(long_ids, items_by_id)
+                long_ids = [iid for iid in cls.long_text_ids if iid[0] == "groupchild" or iid in fit]
+                boxes, box_warnings = _text_boxes(
+                    long_ids, items_by_id,
+                    group_children=group_children_geo, group_child_runs=group_child_runs_map,
+                )
                 warnings.extend(f"slide {number}: {w}" for w in box_warnings)
                 if boxes and len(boxes) == len(long_ids):
                     long_id_set = set(long_ids)
-                    short_fit = {iid: rect for iid, rect in fit.items() if iid not in long_id_set}
+                    group_top_ids = {("group", ki) for ki in text_group_kis}
+                    short_fit = {
+                        iid: rect for iid, rect in fit.items()
+                        if iid not in long_id_set and iid not in group_top_ids
+                    }
+                    # The group itself takes no affine path on a text slide (Design A
+                    # step 4): drop its own top-level fit entry so `_slide_lines` never
+                    # falls into `_group_blind_child_lines` for it.
+                    for group_top_id in group_top_ids:
+                        fit.pop(group_top_id, None)
+                    slide_group_child_kind: dict[ItemId, str] = {
+                        box.item_id: "text" for box in boxes if box.item_id[0] == "groupchild"
+                    }
+                    for group_ki in text_group_kis:
+                        for child in group_children_geo.get(group_ki, ()):
+                            if child.get("kind") == "text":
+                                continue
+                            badge_id: ItemId = ("groupchild", group_ki, child["kindIndex"])
+                            badge_w = float(child.get("w", 0.0))
+                            badge_h = float(child.get("h", 0.0))
+                            badge_x = band.x_min + (band.width - badge_w) / 2.0
+                            short_fit[badge_id] = Rect(badge_x, 0.0, badge_w, badge_h)
+                            slide_group_child_kind[badge_id] = child["kind"]
+                    if slide_group_child_kind:
+                        group_child_kind_map[number] = slide_group_child_kind
                     stack_band = band
                     short_row_h = 0.0
                     if short_fit:
@@ -600,8 +686,14 @@ def plan_assembly(
                             fit.update(_short_row_rects(short_fit, short_row_h, stack_top))
                         stacked_ids = {box.item_id for box in boxes}
                         for box in boxes:
+                            if box.item_id[0] == "groupchild":
+                                _tag, g_ki, c_ki = box.item_id
+                                c_info = (group_child_runs_map.get(g_ki) or {}).get(c_ki) or {}
+                                run_item = {"runs": c_info.get("runs") or [], "text": c_info.get("text") or ""}
+                            else:
+                                run_item = items_by_id[box.item_id]
                             ranges, unresolved = _run_size_ranges(
-                                items_by_id[box.item_id], t, item_id=box.item_id,
+                                run_item, t, item_id=box.item_id,
                                 slide_number=number, warnings=warnings,
                             )
                             if isinstance(ranges, tuple):
@@ -636,6 +728,11 @@ def plan_assembly(
                     elif not allow_split:
                         raise AssemblyRefusal(
                             f"slide {number}: text does not fit the band at --min-text-pt {min_text_pt}"
+                        )
+                    elif any(box.item_id[0] == "groupchild" for box in boxes):
+                        raise AssemblyRefusal(
+                            f"slide {number}: grouped verse text does not fit the band at "
+                            f"--min-text-pt {min_text_pt} -- refusing to split text inside a group"
                         )
                     elif len(boxes) < 2:
                         raise AssemblyRefusal(
@@ -829,6 +926,7 @@ def plan_assembly(
         short_row_h=short_row_h_map,
         crops=crops_out,
         anchors=anchors_out,
+        group_child_kind=group_child_kind_map,
     )
 
 
@@ -965,6 +1063,7 @@ def load_assembly_inputs(
     attach_runs(fw_deck, payload, deck=deck)
     _attach_full_group_children(fw_deck, payload, deck=deck)
     attach_group_child_text(fw_deck, payload, deck=deck)
+    attach_group_child_runs(fw_deck, payload, deck=deck)
     attach_group_content_signature(fw_deck, payload, deck=deck)
     attach_group_captions(fw_deck, payload, deck=deck)
     classes = classify_deck(
@@ -1276,15 +1375,56 @@ def _group_blind_child_lines(number: int, ordinal: int, kind_index: int, rect: R
     ]
 
 
+def _group_stacked_child_lines(
+    number: int,
+    ordinal: int,
+    group_ki: int,
+    entries: Sequence[tuple[dict, Rect, float | None, tuple[tuple[int, int, float], ...] | None]],
+) -> list[str]:
+    """Per-child writes for a text-triggering group's stacked children (Design A step 4):
+    each child is unlocked/written/relocked individually, the whole set wrapped in one
+    guaranteed lock/relock on the group itself (mirrors `_group_known_child_lines`). A
+    ``text`` child (the verse) gets width+position and its run/lead size, NEVER height
+    (always autosize); a ``shape`` child (the badge) gets position only -- left at
+    source size, per the owner decision. The group itself takes no affine path here."""
+    child_lines: list[str] = []
+    for child, rect, text_size, run_ranges in entries:
+        name = "text item" if child["kind"] == "text" else _AS_KIND_NAMES.get(child["kind"], child["kind"])
+        addr = f"{name} {child['kindIndex'] + 1} of group {group_ki + 1} of slide {ordinal}"
+        body: list[str] = []
+        if child["kind"] == "text":
+            body.append(f"            set width of theObj to {_as_num(rect.w)}")
+            body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
+            if run_ranges:
+                for start, end, size in run_ranges:
+                    body.append(
+                        f"            set size of characters {start} thru {end} "
+                        f"of object text of theObj to {_as_num(size)}"
+                    )
+            elif text_size is not None:
+                body.append(f"            set size of object text of theObj to {_as_num(text_size)}")
+        else:
+            body.append(f"            set position of theObj to {{{_as_num(rect.x)}, {_as_num(rect.y)}}}")
+        child_lines += _locked_write_block(number, addr, body)
+    group_addr = f"group {group_ki + 1} of slide {ordinal}"
+    return _locked_write_block(
+        number, group_addr, child_lines, obj_var="theGroupObj", locked_var="wasGroupLocked"
+    )
+
+
 def _text_measure_lines(
-    number: int, kind_index: int, addr: str, target_h: float, *, ordinal: int | None = None
+    number: int, kind_index: int, addr: str, target_h: float, *, ordinal: int | None = None,
+    item_key: str | None = None,
 ) -> list[str]:
     """One-shot diagnostic read of a text item's live height (single ``height of``, no
     poll -- the live read is known stale after ``set width/position/size`` and the offline
     naturalSize read of the saved deck is the refit authority, see D2b), logging
     `OBED\\t<n>\\tMEASURE\\ttext:<idx>\\t<h>`, then `OBED\\t<n>\\tOVERFLOW\\t...` when it still
-    exceeds `target_h` by more than 2pt."""
-    item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
+    exceeds `target_h` by more than 2pt. ``item_key`` overrides the default ``text:<idx>``
+    key -- a group child (D1 step 6) uses ``groupchild:<g>:<k>`` so it never collides with
+    a top-level text item sharing the same ``kindIndex``."""
+    if item_key is None:
+        item_key = f"text:{kind_index}" if ordinal is None else f"text:{kind_index}:{ordinal}"
     return [
         "        try",
         f"          set curH to (height of {addr})",
@@ -1347,8 +1487,32 @@ def _slide_lines(
     group_origin = plan.group_origin.get(number, {})
     scale = plan.group_scale.get(number)
     slide_crops = plan.crops.get(number, {}) if split_parts is None else {}
+    group_child_kind = plan.group_child_kind.get(number, {}) if split_parts is None else {}
+
+    groupchild_by_group: dict[int, list[tuple[dict, Rect, float | None, tuple | None]]] = {}
+    for item_id, rect in fit.items():
+        if item_id[0] != "groupchild":
+            continue
+        _tag, group_ki, child_ki = item_id
+        child_kind = group_child_kind.get(item_id, "text")
+        child_rec = {"kind": child_kind, "kindIndex": child_ki}
+        groupchild_by_group.setdefault(group_ki, []).append(
+            (child_rec, rect, text_sizes.get(item_id), run_sizes_here.get(item_id))
+        )
+    for group_ki, entries in groupchild_by_group.items():
+        lines += _group_stacked_child_lines(number, ordinal, group_ki, entries)
+        for child_rec, child_rect, _text_size, _run_ranges in entries:
+            if child_rec["kind"] != "text":
+                continue
+            child_ki = child_rec["kindIndex"]
+            addr = f"text item {child_ki + 1} of group {group_ki + 1} of slide {ordinal}"
+            lines += _text_measure_lines(
+                number, child_ki, addr, child_rect.h, item_key=f"groupchild:{group_ki}:{child_ki}"
+            )
 
     for item_id, rect in fit.items():
+        if item_id[0] == "groupchild":
+            continue
         if item_id in slide_crops:
             continue
         kind, kind_index = item_id
@@ -2195,7 +2359,10 @@ def _staged_kind_ranks(
         deleted = set(plan.deletes.get(number, ()))
     retained_ids = (set(fits_here) - deleted) | (deleted & hidden)
     by_kind: dict[str, list[int]] = {}
-    for kind, idx in retained_ids:
+    for iid in retained_ids:
+        if iid[0] == "groupchild":
+            continue  # not a top-level `<kind> items of slide N` AS collection member
+        kind, idx = iid
         by_kind.setdefault(kind, []).append(idx)
     for kind, idxs in by_kind.items():
         by_kind[kind] = sorted(idxs)
@@ -2449,10 +2616,15 @@ def _box_with_runs(box: TextBox, item: Mapping) -> TextBox:
 
 def _eligible_refit_items(plan: AssemblyPlan, slide_no: int) -> frozenset[ItemId]:
     """Text items a refit round may re-fit: the slide's stacked ids, excluding a split
-    slide (its per-part rects live in ``plan.splits``, not ``plan.fits``; out of scope)."""
+    slide (its per-part rects live in ``plan.splits``, not ``plan.fits``; out of scope)
+    and any ``GroupChildId`` -- the live refit's offline measure only maps top-level
+    ``text`` items (D2b); a group's text is fit once, offline, with the run-aware
+    estimator and its safety margin, never refit live (D1 step 6)."""
     if slide_no in plan.splits:
         return frozenset()
-    return plan.stacked_ids.get(slide_no, frozenset())
+    return frozenset(
+        iid for iid in plan.stacked_ids.get(slide_no, frozenset()) if iid[0] != "groupchild"
+    )
 
 
 def _refit_still_over_budget(

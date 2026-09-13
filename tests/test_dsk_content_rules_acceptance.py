@@ -185,25 +185,54 @@ def test_gw21_image_crop_right_aligned(gw_inputs, tmp_path):
 
 
 @pytest.mark.deck
-def test_gw5_image_crop_right_aligned(gw_inputs, tmp_path):
-    # The plan's Acceptance table originally guessed a "5120x2160-ish" crop box and said
-    # nothing about placement; the deck disagrees on both counts -- the measured crop box
-    # is (0,1365,5120,2806) of the 5120x3414 source file, and slide 5's only *content*
-    # item (the caption group has no image/movie leaf, so it doesn't count) puts it right,
-    # not centred. The plan's table has been corrected to match this measurement.
+def test_gw5_group_verse_text_slide_no_image(gw_inputs, tmp_path):
+    # D1 (Design A): GW 5's group holds a 32-word verse child -> the slide is TEXT, the
+    # full-wall photo (and side panels/scrim) is dropped like any other text-slide media,
+    # and the group's two children (badge + verse) are stacked into the band directly --
+    # no crop, no affine group write. Supersedes the pre-D1 "image crop, right-aligned"
+    # expectation the plan's Acceptance table originally carried for this slide.
     _require_gw_deck()
+    _require_font("AzoSans-Regular")
+    _require_font("ArgentCF-Bold")
     payload, by_number, runs = gw_inputs
     cls = by_number[5]
     deck = dsa._load_deck(GW_DECK)
+    assert cls.is_text
+    assert cls.long_text_ids == (("groupchild", 0, 1),)
+    assert ("image", 0) in cls.dropped_media_text
+
     plan = _plan_one(payload, cls, runs, crop_dir=tmp_path / "crops5", deck=deck)
 
-    crop = plan.crops[5][("image", 0)]
-    assert crop.px_box == (0, 1365, 5120, 2806)
-    assert crop.source_file_name == "WhatsApp Image 2026-03-28 at 23.40.20.jpeg"
+    assert not plan.crops.get(5)
+    assert ("image", 0) not in plan.fits[5]
+    assert ("group", 0) not in plan.fits[5]
+    for iid in (("image", 0), ("image", 1), ("image", 2), ("shape", 0)):
+        assert iid in plan.deletes[5]
 
-    assert plan.anchors[5] == "right"
-    fitted = plan.fits[5][("image", 0)]
-    assert fitted.x + fitted.w == pytest.approx(1892.0, abs=0.5)
+    verse = plan.fits[5][("groupchild", 0, 1)]
+    badge = plan.fits[5][("groupchild", 0, 0)]
+    band_top = DEFAULT_BAND.bottom - DEFAULT_BAND.height
+    for rect in (verse, badge):
+        assert rect.y >= band_top - 0.5
+        assert rect.y + rect.h <= DEFAULT_BAND.bottom + 0.5
+    assert badge.y + badge.h <= verse.y + 0.5  # badge above verse
+    assert plan.group_child_kind[5] == {("groupchild", 0, 1): "text", ("groupchild", 0, 0): "shape"}
+
+
+@pytest.mark.deck
+def test_gw50_51_mirror_pair_dedupe_ahead_of_group_classifier(gw_inputs):
+    # GW 50/51: two coincident groups, each holding the same long verse child (D1's
+    # mirror_duplicates must stay in front of the group-text classifier). Dedupe drops
+    # one whole group (('group', 1)); its own groupchild long id must not survive that
+    # drop even though it was derived from the group AFTER dedupe's own item-level check.
+    _require_gw_deck()
+    _payload, by_number, _runs = gw_inputs
+    for number in (50, 51):
+        cls = by_number[number]
+        assert cls.dropped_duplicate == (("group", 1),)
+        assert cls.is_text
+        assert cls.long_text_ids == (("groupchild", 0, 1),)
+        assert ("group", 1) not in cls.kept
 
 
 @pytest.mark.deck

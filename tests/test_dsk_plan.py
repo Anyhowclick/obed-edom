@@ -261,6 +261,53 @@ def test_is_panel_backdrop_tests_wall_frame_under_include_side():
 
 
 # --------------------------------------------------------------------------
+# Group-child text classification (Design A step 1/2, D1) -- a kept group whose child
+# text has more than text_slide_words words makes the slide text and contributes its
+# TEXT children as GroupChildId long ids; media is then dropped like any text slide.
+# --------------------------------------------------------------------------
+def _gw5_shaped_slide():
+    """GW 5's shape: a photo, two side panels, a scrim, and a group with a badge
+    (shape, kindIndex 0) plus a 32-word verse (text, kindIndex 1) -- F1's numbers."""
+    photo = {"kind": "image", "kindIndex": 0, "x": 1920, "y": -1024, "w": 3840, "h": 2561}
+    left = {"kind": "image", "kindIndex": 1, "x": 0, "y": 0, "w": 1920, "h": 1080}
+    right = {"kind": "image", "kindIndex": 2, "x": 5760, "y": 0, "w": 1920, "h": 1080}
+    scrim = {"kind": "shape", "kindIndex": 0, "x": 1920, "y": -508, "w": 4897, "h": 1807, "text": ""}
+    group = _group_item(0, 4702, 15, 645, 92)
+    verse = (
+        "Matthew 18 19 Again, truly I tell you that if two of you on earth agree about "
+        "anything they ask for, it will be done for them by My Father in heaven."
+    )
+    group_children = {0: [
+        {"kind": "shape", "kindIndex": 0}, {"kind": "text", "kindIndex": 1},
+    ]}
+    return _slide(5, [photo, left, right, scrim, group]), verse, group_children
+
+
+def test_group_child_text_makes_slide_text():
+    slide, verse, group_children = _gw5_shaped_slide()
+    out = classify_slide(
+        slide, None, (7680.0, 1080.0),
+        group_child_words={0: verse}, group_children=group_children,
+    )
+    assert out.is_text
+    assert out.long_text_ids == (("groupchild", 0, 1),)
+    assert set(out.dropped_media_text) == {("image", 0)}
+    assert ("group", 0) in out.kept
+
+
+def test_group_child_text_short_caption_not_text_slide():
+    slide, _verse, group_children = _gw5_shaped_slide()
+    out = classify_slide(
+        slide, None, (7680.0, 1080.0),
+        group_child_words={0: "Matthew 18 19"}, group_children=group_children,
+    )
+    assert not out.is_text
+    assert out.long_text_ids == ()
+    assert out.dropped_media_text == ()
+    assert ("image", 0) in out.kept
+
+
+# --------------------------------------------------------------------------
 # mirror_duplicates (D1/F2) -- symmetric L/R authored pairs, survivor = lowest kindIndex.
 # --------------------------------------------------------------------------
 def _image_item(kind_index, x, y, w, h, file_name):
@@ -1136,6 +1183,8 @@ def test_wrapped_height_matches_golden_boxes():
             continue
         items_by_id = {(i["kind"], i["kindIndex"]): i for i in slides_by_number[number]["items"]}
         for item_id in cls.long_text_ids:
+            if item_id[0] == "groupchild":
+                continue  # a group's TEXT child; not a top-level item in items_by_id (D1)
             item = items_by_id[item_id]
             font, size = item.get("font"), item.get("size")
             if not font or not size:

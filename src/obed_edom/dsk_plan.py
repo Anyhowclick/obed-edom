@@ -75,15 +75,45 @@ def is_panel_backdrop(item: dict, wall: tuple[float, float], *, include_side: bo
 
 DEFAULT_TEXT_SLIDE_WORDS = 10
 
+# ("groupchild", group kindIndex, child kindIndex) -- a group's TEXT child, carried
+# alongside plain ItemId everywhere a long/stacked/text-size/run-size id is keyed
+# (Design A step 2); every ``iid[0] in ("text", "image", ...)`` filter must ignore it.
+GroupChildId = tuple[str, int, int]
 
-def _is_text_slide_kept(kept: Sequence[dict], text_slide_words: int) -> tuple[bool, tuple[ItemId, ...]]:
+
+def _word_count(text: str | None) -> int:
+    return len([w for w in (text or "").split() if w])
+
+
+def _is_text_slide_kept(
+    kept: Sequence[dict],
+    text_slide_words: int,
+    *,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
+) -> tuple[bool, tuple[ItemId, ...]]:
     """``(is_text, long_text_ids)`` -- a slide is text when some kept ``text`` item's
-    content has more than ``text_slide_words`` whitespace-separated words (F2/D1)."""
-    long_ids = [
+    content has more than ``text_slide_words`` whitespace-separated words (F2/D1), OR a
+    kept ``group``'s child text (``group_child_words``, the DFS join of every child's
+    text) does (Design A step 1, F1) -- such a group contributes its TEXT children
+    (looked up in ``group_children``) as ``GroupChildId`` long ids; its non-text
+    children (a badge shape) are left for the caller's short-row placement."""
+    long_ids: list[ItemId] = [
         (item["kind"], item["kindIndex"])
         for item in kept
-        if item.get("kind") == "text" and len([w for w in (item.get("text") or "").split() if w]) > text_slide_words
+        if item.get("kind") == "text" and _word_count(item.get("text")) > text_slide_words
     ]
+    group_child_words = group_child_words or {}
+    group_children = group_children or {}
+    for item in kept:
+        if item.get("kind") != "group":
+            continue
+        group_ki = item["kindIndex"]
+        if _word_count(group_child_words.get(group_ki)) <= text_slide_words:
+            continue
+        for child in group_children.get(group_ki, ()):
+            if child.get("kind") == "text":
+                long_ids.append(("groupchild", group_ki, child["kindIndex"]))
     return (bool(long_ids), tuple(long_ids))
 
 
@@ -94,6 +124,8 @@ def _filter_kept_items(
     *,
     include_side: bool,
     group_child_text: Mapping[int, str | None] | None = None,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
@@ -125,7 +157,9 @@ def _filter_kept_items(
         kept.extend(panel_backdrops)
         dropped_backdrop = ()
 
-    is_text, long_text_ids = _is_text_slide_kept(kept, text_slide_words)
+    is_text, long_text_ids = _is_text_slide_kept(
+        kept, text_slide_words, group_child_words=group_child_words, group_children=group_children
+    )
     dropped_media_text: tuple[ItemId, ...] = ()
     if is_text:
         media_ids = {
@@ -144,8 +178,13 @@ def _filter_kept_items(
         dropped_duplicate = tuple(duplicate_map)
         if dropped_duplicate:
             dup_set = set(dropped_duplicate)
+            dup_group_kis = {iid[1] for iid in dup_set if iid[0] == "group"}
             kept = [item for item in kept if (item["kind"], item["kindIndex"]) not in dup_set]
-            long_text_ids = tuple(iid for iid in long_text_ids if iid not in dup_set)
+            long_text_ids = tuple(
+                iid for iid in long_text_ids
+                if iid not in dup_set
+                and not (iid[0] == "groupchild" and iid[1] in dup_group_kis)
+            )
 
     return (
         kept, dropped_side, dropped_backdrop, dropped_duplicate, mirror_warnings,
@@ -346,6 +385,8 @@ def classify_slide(
     group_build_counts: dict[int, int] | None = None,
     connection_line_builds: int = 0,
     group_child_text: Mapping[int, str | None] | None = None,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
@@ -360,7 +401,8 @@ def classify_slide(
         is_text, long_text_ids, dropped_media_text,
     ) = _filter_kept_items(
         slide.get("items") or [], wall_w, wall_h, include_side=include_side,
-        group_child_text=group_child_text, text_slide_words=text_slide_words,
+        group_child_text=group_child_text, group_child_words=group_child_words,
+        group_children=group_children, text_slide_words=text_slide_words,
         no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     kept: list[ItemId] = [(item["kind"], item["kindIndex"]) for item in kept_kinds]
@@ -429,12 +471,18 @@ def classify_deck(
     no_drop_panel_backdrop: bool = False,
 ) -> list[SlideClass]:
     """Classify every slide in ``payload`` (built from ``deck_path``/``deck`` if omitted)."""
-    from obed_edom.iwa_runs import attach_group_content_signature  # noqa: PLC0415
+    from obed_edom.iwa_runs import (  # noqa: PLC0415
+        attach_group_children,
+        attach_group_child_text,
+        attach_group_content_signature,
+    )
 
     graph = deck if deck is not None else _load_deck(deck_path)
     if payload is None:
         payload = offline_wall_payload(deck_path, deck=graph)
         attach_group_content_signature(deck_path, payload, deck=graph)
+        attach_group_child_text(deck_path, payload, deck=graph)
+        attach_group_children(deck_path, payload, deck=graph)
     builds_by_number = deck_builds(deck_path, deck=graph)
     group_movie_by_number = _deck_group_movie_counts(deck_path, deck=graph)
     group_build_by_number = _deck_group_build_counts(deck_path, deck=graph)
@@ -453,6 +501,8 @@ def classify_deck(
                 group_build_counts=group_build_by_number.get(number),
                 connection_line_builds=connection_line_by_number.get(number, 0),
                 group_child_text=slide.get("groupChildSignature"),
+                group_child_words=slide.get("groupChildText"),
+                group_children=slide.get("groupChildren"),
                 text_slide_words=text_slide_words,
                 no_dedupe=no_dedupe,
                 no_drop_panel_backdrop=no_drop_panel_backdrop,
@@ -705,6 +755,8 @@ def _visibles_by_wall(
     *,
     include_side: bool,
     group_child_text: Mapping[int, str | None] | None = None,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
@@ -712,6 +764,7 @@ def _visibles_by_wall(
     wall_rect = Rect(0.0, 0.0, *LW_WALL_SIZE) if include_side else CENTRE_PANEL_RECT
     filtered_items = _filter_kept_items(
         items, wall_w, wall_h, include_side=include_side, group_child_text=group_child_text,
+        group_child_words=group_child_words, group_children=group_children,
         text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )[0]
     visibles: dict[ItemId, Rect] = {}
@@ -729,6 +782,8 @@ def visible_union(
     include_side: bool,
     wall: tuple[float, float],
     group_child_text: Mapping[int, str | None] | None = None,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
@@ -737,6 +792,7 @@ def visible_union(
     if nothing is kept/visible. Used by the DSK movie export's include_side crop rect."""
     visibles = _visibles_by_wall(
         items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text,
+        group_child_words=group_child_words, group_children=group_children,
         text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
     )
     if not visibles:
@@ -753,6 +809,8 @@ def fit_slide(
     kept: Iterable[ItemId] | None = None,
     wall: tuple[float, float] | None = None,
     group_child_text: Mapping[int, str | None] | None = None,
+    group_child_words: Mapping[int, str | None] | None = None,
+    group_children: Mapping[int, Sequence[dict]] | None = None,
     text_slide_words: int = DEFAULT_TEXT_SLIDE_WORDS,
     no_dedupe: bool = False,
     no_drop_panel_backdrop: bool = False,
@@ -766,6 +824,7 @@ def fit_slide(
     else:
         visibles = _visibles_by_wall(
             items, wall[0], wall[1], include_side=include_side, group_child_text=group_child_text,
+            group_child_words=group_child_words, group_children=group_children,
             text_slide_words=text_slide_words, no_dedupe=no_dedupe, no_drop_panel_backdrop=no_drop_panel_backdrop,
         )
 

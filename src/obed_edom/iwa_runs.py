@@ -748,3 +748,73 @@ def attach_group_children(key_path: str | Path, payload: dict, *, deck: Any = No
         kids = kids_by_index.get(slide.get("index"))
         if kids:
             slide["groupChildren"] = kids
+
+
+def _group_child_runs(group_obj: dict, objects: dict[str, dict], cache: dict) -> dict[int, dict] | None:
+    """{text-kind child kindIndex: {text, font, size, runs}} for a flat top-level group's
+    non-dual text children -- same per-kind kindIndex counters and kind-preference rule
+    (`"shape" if "shape" in assigned else kinds[0]`) as `_group_child_records`, so a text
+    child's key here matches its `groupChildren` entry. `None` for a nested group."""
+    from obed_edom.iwa_kindindex import _memberships  # noqa: PLC0415
+    from obed_edom.offline_inspect import _item_text_style  # noqa: PLC0415
+
+    counters: dict[str, int] = {}
+    out: dict[int, dict] = {}
+    for ref in group_obj.get("children") or []:
+        cid = ref.get("identifier")
+        child = objects.get(str(cid)) if cid is not None else None
+        if child is None or child.get("_pbtype") == "TSD.GroupArchive":
+            return None
+        kinds = _memberships(child)
+        if not kinds:
+            return None
+        assigned: dict[str, int] = {}
+        for kind in kinds:
+            assigned[kind] = counters.get(kind, 0)
+            counters[kind] = assigned[kind] + 1
+        kind = "shape" if "shape" in assigned else kinds[0]
+        if kind != "text" or child.get("_pbtype") != "TSWP.ShapeInfoArchive":
+            continue
+        stor_id = (child.get("ownedStorage") or {}).get("identifier")
+        storage = objects.get(str(stor_id)) if stor_id is not None else None
+        if not storage or storage.get("_pbtype") != "TSWP.StorageArchive":
+            continue
+        runs = storage_runs(storage, objects, cache)
+        if not runs:
+            continue
+        text = "".join(storage.get("text") or [])
+        font, size, _color = _item_text_style(child, objects, cache)
+        out[assigned["text"]] = {"text": text, "font": font, "size": size, "runs": runs}
+    return out or None
+
+
+def attach_group_child_runs(key_path: str | Path, payload: dict, *, deck: Any = None) -> None:
+    """Attach slide['groupChildRuns'] = {group kindIndex: {child kindIndex: {text, font,
+    size, runs}}} for top-level groups' text children. Read-only; keyed by kindIndex so
+    two identical groups on one slide (GW 50/51) keep separate entries -- never matched
+    back by text equality."""
+    from obed_edom.iwa_kindindex import derive_kind_index  # noqa: PLC0415
+
+    objects, _id_to_file, _file_ids = deck if deck is not None else _load_deck(key_path)
+    cache: dict = {}
+    runs_by_index: dict[int, dict[int, dict]] = {}
+    for idx, (slide_id, _skipped) in enumerate(slide_order(objects)):
+        slide_archive = objects.get(slide_id)
+        if slide_archive is None:
+            continue
+        groups: dict[int, dict] = {}
+        for rec in derive_kind_index(slide_archive, objects):
+            if rec.get("kind") != "group":
+                continue
+            group_obj = objects.get(str(rec["id"]))
+            if not group_obj:
+                continue
+            children = _group_child_runs(group_obj, objects, cache)
+            if children:
+                groups[int(rec["kindIndex"])] = children
+        if groups:
+            runs_by_index[idx] = groups
+    for slide in payload.get("slides") or []:
+        groups = runs_by_index.get(slide.get("index"))
+        if groups:
+            slide["groupChildRuns"] = groups

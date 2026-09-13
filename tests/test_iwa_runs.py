@@ -30,6 +30,7 @@ from obed_edom.iwa_runs import (
     _slide_group_child_text,
     _slide_grouped_text,
     attach_group_captions,
+    attach_group_child_runs,
     attach_group_child_text,
     attach_group_children,
     attach_group_content_signature,
@@ -1161,3 +1162,71 @@ def test_attach_group_children_wires_records_by_slide_index_and_int_kindindex(mo
     assert {r["kind"] for r in kids[0]} == {"shape", "text"}
     # The plain (no-autosize-child) group's slide never gets a groupChildren key at all.
     assert "groupChildren" not in payload["slides"][1]
+
+
+# --------------------------------------------------------------------------
+# attach_group_child_runs — {group kindIndex: {child kindIndex: {text, font, size,
+# runs}}}; two identical groups (GW 50/51's mirror pair shape) must keep separate
+# entries, never merged by text equality.
+# --------------------------------------------------------------------------
+def _mirror_pair_deck():
+    """Slide 250 owns two top-level groups, each a badge (shape) plus one autosize
+    text child with IDENTICAL text -- same shape as GW 50/51's L/R mirror pair."""
+
+    def storage(text, style_id):
+        return {
+            "_pbtype": "TSWP.StorageArchive",
+            "text": [text],
+            "tableCharStyle": {"entries": [{"characterIndex": 0, "object": {"identifier": style_id}}]},
+        }
+
+    objects = {
+        "150": {"_pbtype": "KN.SlideNodeArchive", "slide": {"identifier": "250"}},
+        "250": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "960"}, {"identifier": "970"}]},
+        "960": {
+            "_pbtype": "TSD.GroupArchive",
+            "children": [{"identifier": "961"}, {"identifier": "962"}],
+        },
+        "961": {  # badge: plain shape, no isTextBox -> kind "shape" only
+            "_pbtype": "TSWP.ShapeInfoArchive",
+        },
+        "962": {  # verse: autosize text-only child -> kind "text"
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "962-st"},
+        },
+        "962-st": storage("Same verse text", "400"),
+        "970": {
+            "_pbtype": "TSD.GroupArchive",
+            "children": [{"identifier": "971"}, {"identifier": "972"}],
+        },
+        "971": {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+        },
+        "972": {
+            "_pbtype": "TSWP.ShapeInfoArchive", "isTextBox": True, "ownedStorage": {"identifier": "972-st"},
+        },
+        "972-st": storage("Same verse text", "401"),
+        "400": _charstyle("StyleA", fontName="ArgentCF-Bold", fontSize=85.0),
+        "401": _charstyle("StyleB", fontName="ArgentCF-Bold", fontSize=51.8),
+        "show": {
+            "_pbtype": "KN.ShowArchive",
+            "slideTree": {"slides": [{"identifier": "150"}]},
+        },
+    }
+    return objects, {}, {}
+
+
+def test_attach_group_child_runs_keys_by_group_and_child(monkeypatch):
+    monkeypatch.setattr(iwa, "_load_deck", lambda _p: _mirror_pair_deck())
+    payload = {"slides": [{"index": 0, "items": []}]}
+    attach_group_child_runs("ignored.key", payload)
+    groups = payload["slides"][0]["groupChildRuns"]
+    assert set(groups.keys()) == {0, 1}
+    # Same text, but two separate entries -- never merged by text equality.
+    assert groups[0][0]["text"] == "Same verse text"
+    assert groups[1][0]["text"] == "Same verse text"
+    assert groups[0][0]["size"] == pytest.approx(85.0)
+    assert groups[1][0]["size"] == pytest.approx(51.8)
+    # The badge (a plain shape, no isTextBox) never contributes a text-kind entry;
+    # each group has exactly the one text child.
+    assert set(groups[0].keys()) == {0}
+    assert set(groups[1].keys()) == {0}
